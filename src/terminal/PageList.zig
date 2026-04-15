@@ -1137,6 +1137,17 @@ fn resizeCols(
         for (total..self.rows) |_| _ = try self.grow();
     }
 
+    // Reflow can unwrap enough rows that a history viewport pin lands in the
+    // active area before we do any preserved-cursor growth below. Switch back
+    // to the active viewport now so intermediate grow() integrity checks stay
+    // valid.
+    switch (self.viewport) {
+        .active, .top => {},
+        .pin => if (self.pinIsActive(self.viewport_pin.*)) {
+            self.viewport = .active;
+        },
+    }
+
     // See preserved_cursor setup for why.
     if (preserved_cursor) |c| cursor: {
         const active_pt = self.pointFromPin(

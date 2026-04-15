@@ -6626,6 +6626,86 @@ test "Screen: resize more cols with populated scrollback" {
     }
 }
 
+test "Screen: resize more cols bounded scrollback keeps viewport valid" {
+    // Regression test for issue #12298.
+    //
+    // This needs to live at the Screen layer rather than PageList because the
+    // bad state only appears once Screen forwards the active cursor into the
+    // resize path. A direct PageList resize repro does not hit the same bug.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{
+        .cols = 2,
+        .rows = 10,
+        .max_scrollback = 10_000,
+    });
+    defer s.deinit();
+
+    // Build 30 rows of scrollback on top of our 10-row viewport so we have a
+    // 40-row screen with history above the active area.
+    for (0..30) |_| _ = try s.pages.grow();
+    s.cursorReload();
+    try testing.expectEqual(@as(usize, 40), s.pages.scrollbar().total);
+
+    // Fill the entire screen with two-row wrapped runs:
+    // - even rows mark the end of a wrapped line
+    // - odd rows mark the continuation
+    //
+    // With 2 columns, each logical line occupies two rows. When we grow to 4
+    // columns with reflow enabled, those pairs unwrap back into single rows.
+    // That cuts the total row count down and is what stresses the viewport pin.
+    var it = s.pages.pageIterator(.right_down, .{ .screen = .{} }, null);
+    while (it.next()) |chunk| {
+        const page = &chunk.node.data;
+        for (chunk.start..chunk.end) |y| {
+            const rac = page.getRowAndCell(0, y);
+            if (y % 2 == 0) {
+                rac.row.wrap = true;
+            } else {
+                rac.row.wrap_continuation = true;
+            }
+
+            for (0..s.pages.cols) |x| {
+                page.getRowAndCell(x, y).cell.* = .{
+                    .content_tag = .codepoint,
+                    .content = .{ .codepoint = 'A' },
+                };
+            }
+        }
+    }
+
+    // Pin the viewport to a history row just above the active area.
+    //
+    // Before resize:
+    // - total rows = 40
+    // - active area starts at row 30
+    // - viewport is pinned at row 28
+    //
+    // After unwrap during resize:
+    // - total rows shrinks to 20
+    // - the old row 28 remaps into what is now the active area
+    //
+    // The bug was that resize/grow would temporarily keep the viewport as a
+    // history pin even after reflow had moved it into the active area, leaving
+    // fewer than `rows` visible rows beneath the pin and tripping integrity
+    // checks.
+    s.pages.scroll(.{ .pin = s.pages.pin(.{ .screen = .{ .y = 28 } }).? });
+    try testing.expect(s.pages.viewport == .pin);
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+
+    // Growing columns triggers reflow, which unwraps the synthetic wrapped
+    // rows above. This used to panic during the resize path.
+    try s.resize(.{ .cols = 4, .rows = s.pages.rows, .reflow = true });
+
+    // After the fix, the viewport is normalized back to the active area as
+    // soon as the pinned row lands there, so viewport queries remain valid.
+    try testing.expectEqual(@as(usize, 4), s.pages.cols);
+    try testing.expect(s.pages.scrollbar().total < 40);
+    try testing.expect(s.pages.viewport == .active);
+    try testing.expect(s.pages.getBottomRight(.viewport) != null);
+}
+
 test "Screen: resize more cols with reflow" {
     const testing = std.testing;
     const alloc = testing.allocator;
