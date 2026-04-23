@@ -53,9 +53,12 @@ pub fn restoreMaxFiles(lim: rlimit) void {
     posix.setrlimit(.NOFILE, lim) catch {};
 }
 
-/// Return the recommended path for temporary files.
-/// This may not actually allocate memory, use freeTmpDir to properly
-/// free the memory when applicable.
+/// Return the recommended path for temporary files. Any trailing
+/// path separator is stripped so callers can safely join with their
+/// own separator (e.g. `"{tmp}/{name}"`).
+///
+/// This may not actually allocate memory; use `freeTmpDir` to
+/// properly free the memory when applicable.
 pub fn allocTmpDir(allocator: std.mem.Allocator) ?[]const u8 {
     if (builtin.os.tag == .windows) {
         // TODO: what is a good fallback path on windows?
@@ -65,9 +68,8 @@ pub fn allocTmpDir(allocator: std.mem.Allocator) ?[]const u8 {
             return null;
         };
     }
-    if (posix.getenv("TMPDIR")) |v| return v;
-    if (posix.getenv("TMP")) |v| return v;
-    return "/tmp";
+    const tmpdir = posix.getenv("TMPDIR") orelse posix.getenv("TMP") orelse return "/tmp";
+    return std.mem.trimEnd(u8, tmpdir, &.{std.fs.path.sep});
 }
 
 /// Free a path returned by tmpDir if it allocated memory.
