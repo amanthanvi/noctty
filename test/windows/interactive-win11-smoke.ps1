@@ -123,7 +123,8 @@ try {
                 [IntPtr]::Zero
             )
 
-            if (-not $process.WaitForExit(5000)) {
+            $closeWaitMs = [Math]::Max(5, $TimeoutSeconds) * 1000
+            if (-not $process.WaitForExit($closeWaitMs)) {
                 $failureReason = 'winghostty did not exit cleanly after WM_CLOSE'
             }
             else {
