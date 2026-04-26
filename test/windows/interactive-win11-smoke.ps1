@@ -44,7 +44,8 @@ using System;
 using System.Runtime.InteropServices;
 public static class InteractiveWin11SmokeNative {
     [DllImport("user32.dll", SetLastError=true)]
-    public static extern IntPtr SendMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
 
     [DllImport("kernel32.dll", SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -102,40 +103,56 @@ try {
     }
 
     if ($smokePassed) {
-        $closeDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(5, $TimeoutSeconds))
+        $closeTimeoutSeconds = [Math]::Max(5, $TimeoutSeconds)
+        $closeTimeoutMs = $closeTimeoutSeconds * 1000
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds($closeTimeoutSeconds)
         while ([DateTime]::UtcNow -lt $closeDeadline) {
             $process.Refresh()
+            if ($process.HasExited) {
+                $failureReason = "winghostty exited before exposing a main window handle for WM_CLOSE validation (exit code $($process.ExitCode))"
+                break
+            }
             if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
                 break
             }
             Start-Sleep -Milliseconds 100
         }
 
-        if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
+        if (-not $failureReason -and $process.MainWindowHandle -eq [IntPtr]::Zero) {
             $failureReason = 'winghostty never exposed a main window handle for WM_CLOSE validation'
         }
-        else {
+        elseif (-not $failureReason) {
             $processHandle = $process.Handle
-            [void] [InteractiveWin11SmokeNative]::SendMessageW(
+            if (-not [InteractiveWin11SmokeNative]::PostMessageW(
                 $process.MainWindowHandle,
                 0x0010,
                 [UIntPtr]::Zero,
                 [IntPtr]::Zero
-            )
-
-            $closeWaitMs = [Math]::Max(5, $TimeoutSeconds) * 1000
-            if (-not $process.WaitForExit($closeWaitMs)) {
+            )) {
+                $failureReason = "winghostty could not be sent WM_CLOSE: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            elseif (-not $process.WaitForExit($closeTimeoutMs)) {
                 $failureReason = 'winghostty did not exit cleanly after WM_CLOSE'
             }
             else {
-                [uint32] $exitCode = 0
-                if (-not [InteractiveWin11SmokeNative]::GetExitCodeProcess($processHandle, [ref] $exitCode)) {
-                    $failureReason = "winghostty exited after WM_CLOSE but GetExitCodeProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                $process.Refresh()
+                $exitCode = $process.ExitCode
+
+                # In the dev-windows bootstrap shell, GUI child ExitCode can stay null after WaitForExit.
+                if ($null -eq $exitCode) {
+                    [uint32] $nativeExitCode = 0
+                    if (-not [InteractiveWin11SmokeNative]::GetExitCodeProcess($processHandle, [ref] $nativeExitCode)) {
+                        $failureReason = "winghostty exited after WM_CLOSE but exit code could not be read: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                    }
+                    else {
+                        $exitCode = [int] $nativeExitCode
+                    }
                 }
-                elseif ($exitCode -ne 0) {
+
+                if (-not $failureReason -and $exitCode -ne 0) {
                     $failureReason = "winghostty exited after WM_CLOSE with exit code $exitCode"
                 }
-                else {
+                elseif (-not $failureReason) {
                     $closePassed = $true
                 }
             }
