@@ -37,6 +37,21 @@ $layout = $harness.Layout
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
 $launchAction = Get-InteractiveWin11LaunchAction -ExePath $exePath -Rebuild:$Rebuild -BuildInputs $buildInputs
+
+if (-not ('InteractiveWin11SmokeNative' -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class InteractiveWin11SmokeNative {
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern IntPtr SendMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+}
+"@
+}
 $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
 $stdoutPath = Join-Path $layout.Logs 'interactive-win11-smoke-stdout.log'
 $stderrPath = Join-Path $layout.Logs 'interactive-win11-smoke-stderr.log'
@@ -61,6 +76,7 @@ $successPattern = 'started subcommand path='
 $failurePattern = 'error starting IO thread:'
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $smokePassed = $false
+$closePassed = $false
 $failureReason = $null
 
 try {
@@ -84,12 +100,52 @@ try {
             break
         }
     }
+
+    if ($smokePassed) {
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(5, $TimeoutSeconds))
+        while ([DateTime]::UtcNow -lt $closeDeadline) {
+            $process.Refresh()
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        if ($process.MainWindowHandle -eq [IntPtr]::Zero) {
+            $failureReason = 'winghostty never exposed a main window handle for WM_CLOSE validation'
+        }
+        else {
+            $processHandle = $process.Handle
+            [void] [InteractiveWin11SmokeNative]::SendMessageW(
+                $process.MainWindowHandle,
+                0x0010,
+                [UIntPtr]::Zero,
+                [IntPtr]::Zero
+            )
+
+            if (-not $process.WaitForExit(5000)) {
+                $failureReason = 'winghostty did not exit cleanly after WM_CLOSE'
+            }
+            else {
+                [uint32] $exitCode = 0
+                if (-not [InteractiveWin11SmokeNative]::GetExitCodeProcess($processHandle, [ref] $exitCode)) {
+                    $failureReason = "winghostty exited after WM_CLOSE but GetExitCodeProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                }
+                elseif ($exitCode -ne 0) {
+                    $failureReason = "winghostty exited after WM_CLOSE with exit code $exitCode"
+                }
+                else {
+                    $closePassed = $true
+                }
+            }
+        }
+    }
 }
 finally {
     Stop-InteractiveWin11Process -Process $process
 }
 
-if (-not $smokePassed) {
+if (-not $smokePassed -or -not $closePassed) {
     if (-not $failureReason) {
         $failureReason = "timed out after $TimeoutSeconds seconds waiting for initial shell startup"
     }
