@@ -37,6 +37,22 @@ $layout = $harness.Layout
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
 $launchAction = Get-InteractiveWin11LaunchAction -ExePath $exePath -Rebuild:$Rebuild -BuildInputs $buildInputs
+
+if (-not ('InteractiveWin11SmokeNative' -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class InteractiveWin11SmokeNative {
+    [DllImport("user32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+}
+"@
+}
 $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
 $stdoutPath = Join-Path $layout.Logs 'interactive-win11-smoke-stdout.log'
 $stderrPath = Join-Path $layout.Logs 'interactive-win11-smoke-stderr.log'
@@ -61,6 +77,7 @@ $successPattern = 'started subcommand path='
 $failurePattern = 'error starting IO thread:'
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $smokePassed = $false
+$closePassed = $false
 $failureReason = $null
 
 try {
@@ -84,12 +101,69 @@ try {
             break
         }
     }
+
+    if ($smokePassed) {
+        $closeTimeoutSeconds = [Math]::Max(5, $TimeoutSeconds)
+        $closeTimeoutMs = $closeTimeoutSeconds * 1000
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds($closeTimeoutSeconds)
+        while ([DateTime]::UtcNow -lt $closeDeadline) {
+            $process.Refresh()
+            if ($process.HasExited) {
+                $failureReason = "winghostty exited before exposing a main window handle for WM_CLOSE validation (exit code $($process.ExitCode))"
+                break
+            }
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        if (-not $failureReason -and $process.MainWindowHandle -eq [IntPtr]::Zero) {
+            $failureReason = 'winghostty never exposed a main window handle for WM_CLOSE validation'
+        }
+        elseif (-not $failureReason) {
+            $processHandle = $process.Handle
+            if (-not [InteractiveWin11SmokeNative]::PostMessageW(
+                $process.MainWindowHandle,
+                0x0010,
+                [UIntPtr]::Zero,
+                [IntPtr]::Zero
+            )) {
+                $failureReason = "winghostty could not be sent WM_CLOSE: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            elseif (-not $process.WaitForExit($closeTimeoutMs)) {
+                $failureReason = 'winghostty did not exit cleanly after WM_CLOSE'
+            }
+            else {
+                $process.Refresh()
+                $exitCode = $process.ExitCode
+
+                # In the dev-windows bootstrap shell, GUI child ExitCode can stay null after WaitForExit.
+                if ($null -eq $exitCode) {
+                    [uint32] $nativeExitCode = 0
+                    if (-not [InteractiveWin11SmokeNative]::GetExitCodeProcess($processHandle, [ref] $nativeExitCode)) {
+                        $failureReason = "winghostty exited after WM_CLOSE but exit code could not be read: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                    }
+                    else {
+                        $exitCode = [int] $nativeExitCode
+                    }
+                }
+
+                if (-not $failureReason -and $exitCode -ne 0) {
+                    $failureReason = "winghostty exited after WM_CLOSE with exit code $exitCode"
+                }
+                elseif (-not $failureReason) {
+                    $closePassed = $true
+                }
+            }
+        }
+    }
 }
 finally {
     Stop-InteractiveWin11Process -Process $process
 }
 
-if (-not $smokePassed) {
+if (-not $smokePassed -or -not $closePassed) {
     if (-not $failureReason) {
         $failureReason = "timed out after $TimeoutSeconds seconds waiting for initial shell startup"
     }

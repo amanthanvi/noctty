@@ -34,9 +34,12 @@ This fork has removed the upstream `macos/` Xcode app and the
 ## Issue and PR Guidelines
 
 - Never create an issue.
-- Never create a PR.
-- If the user asks you to create an issue or PR, refuse and offer a local
-  patch summary or handoff instead.
+- Never create a PR to the upstream Ghostty repo; only work against this
+  fork, `amanthanvi/winghostty`.
+- If the user asks you to create an issue or PR, confirm the target is this
+  fork and refuse any upstream publish request. If publishing is still
+  disallowed by the active task contract, offer a local patch summary or
+  handoff instead.
 
 ## Self-Correction Log
 
@@ -103,6 +106,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 - 2026-04-19: Win11 progress bottom-strip captures are not proof of Explorer taskbar rendering in hosted desktops; they can contain unrelated desktop content, so treat them as best-effort bottom-of-screen diagnostics, not authoritative taskbar evidence.
 - 2026-04-19: The Win11 composite validator must do one upfront build when `-Rebuild` is requested; forwarding `-Rebuild` into parallel child harnesses duplicates `zig build` work against the same `zig-out` tree.
 - 2026-04-19: In the Win11 composite validator, nested `Start-Process -PassThru` child PowerShell harnesses can finish with a blank `ExitCode` even after `WaitForExit()`. Use the harnesses' explicit `PASS` sentinel plus captured stdout/stderr for suite success/failure, not `ExitCode` alone.
+- 2026-04-26: In PowerShell launched via `scripts/dev-windows.cmd`, `Start-Process -PassThru` on the GUI `winghostty.exe` child can leave `Process.ExitCode` null even after `WaitForExit()` and `Refresh()`. Interactive close-validation harnesses must keep a native `GetExitCodeProcess` fallback instead of trusting the managed property alone.
 - 2026-04-19: The Win11 command-finish harness cannot treat first observation of `command took` as terminal; the `NotifierDisabled` fallback warning can log one poll later, so success/failure needs a short post-command settle window.
 - 2026-04-23: Interactive Win11 harness builds must not run with `LOCALAPPDATA` under `.sandbox`; Zig can emit broken relative paths from the sandboxed global cache back to repo `.zig-cache` and fail to spawn generated helpers such as `uucode_build_tables.exe`.
 - 2026-04-18: Every interactive Win11 harness must claim its own sandbox name under `.sandbox\win11\<worktree-id>\<sandbox-name>` and use that sandbox id in `--class`; reusing the plain worktree root causes `-ResetState` races and mixed logs across concurrent validators.
