@@ -365,10 +365,10 @@ fn runWindows(
 }
 
 fn autoExitAfterNsFromEnv(gpa: Allocator) ?u64 {
-    const raw = os_env.getEnvVarOwnedTrimmedNotEmpty(
+    const raw = (os_env.getEnvVarOwnedTrimmedNotEmpty(
         gpa,
         "WINGHOSTTY_BOO_AUTO_EXIT_MS",
-    ) orelse return null;
+    ) catch return null) orelse return null;
     defer gpa.free(raw);
 
     const ms = std.fmt.parseUnsigned(u64, raw, 10) catch return null;
@@ -379,7 +379,7 @@ fn traceStatePathFromEnv(gpa: Allocator) ?[]const u8 {
     return os_env.getEnvVarOwnedTrimmedNotEmpty(
         gpa,
         "WINGHOSTTY_BOO_STATE_FILE",
-    );
+    ) catch null;
 }
 
 fn elapsedSince(start: std.time.Instant) u64 {
@@ -395,7 +395,10 @@ fn writeTraceSnapshot(
     total_elapsed_ns: ?u64,
 ) void {
     const trace_path = path orelse return;
-    const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
+    const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+        std.log.warn("failed to open WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        return;
+    };
     defer file.close();
 
     var buffer: [512]u8 = undefined;
@@ -413,8 +416,14 @@ fn writeTraceSnapshot(
         .max_render_gap_ended_at_ms = @divFloor(boo.max_render_gap_ended_at_ns, std.time.ns_per_ms),
         .run_elapsed_ms = @divFloor(run_elapsed_ns, std.time.ns_per_ms),
         .total_elapsed_ms = if (total_elapsed_ns) |ns| @divFloor(ns, std.time.ns_per_ms) else null,
-    }, .{})}) catch return;
-    stream.flush() catch return;
+    }, .{})}) catch |err| {
+        std.log.warn("failed to write WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        return;
+    };
+    stream.flush() catch |err| {
+        std.log.warn("failed to flush WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        return;
+    };
 }
 
 fn renderSurfaceWithoutSynchronizedOutput(
@@ -540,12 +549,14 @@ fn decompressFrameData(gpa: Allocator) ![]const u8 {
     var decompress: std.compress.flate.Decompress = .init(&src, .raw, &.{});
 
     var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
     _ = try decompress.reader.streamRemaining(&out.writer);
     return try out.toOwnedSlice();
 }
 
 fn splitFrames(gpa: Allocator, decompressed_data: []const u8) ![]const []const u8 {
     var frame_list: std.ArrayList([]const u8) = try .initCapacity(gpa, 235);
+    errdefer frame_list.deinit(gpa);
 
     var frame_iter = std.mem.splitScalar(u8, decompressed_data, '\x01');
     while (frame_iter.next()) |frame| {

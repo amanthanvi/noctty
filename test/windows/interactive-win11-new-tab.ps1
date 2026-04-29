@@ -241,29 +241,6 @@ function Get-VisibleTabCount {
         Where-Object { $_.Id -ge 1000 -and $_.Id -lt 1900 }).Count
 }
 
-function Wait-Until {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Condition,
-        [Parameter(Mandatory)] [string] $Description,
-        [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
-    )
-
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
-}
-
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
@@ -283,7 +260,7 @@ function Invoke-CommandPaletteAction {
 
     Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901
     $script:Win11NewTabPaletteHostHwnd = $HostHwnd
-    Wait-Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
         @(Get-VisibleChildControls -Parent $script:Win11NewTabPaletteHostHwnd |
             Where-Object { $_.Id -eq 2002 }).Count -gt 0
     }
@@ -331,7 +308,7 @@ function Invoke-NewTabScenario {
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $script:Win11NewTabProcess = $process
-        Wait-Until -Deadline $deadline -Description "host window ($Name)" -Process $process -Condition {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "host window ($Name)" -Process $process -Condition {
             [IntPtr]::Zero -ne (Find-HostWindow -ProcessId $script:Win11NewTabProcess.Id)
         }
 
@@ -343,7 +320,7 @@ function Invoke-NewTabScenario {
         while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
             $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
             Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904
-            Wait-Until -Deadline $deadline -Description "seed tabs ($Name)" -Process $process -Condition {
+            Wait-InteractiveWin11Until -Deadline $deadline -Description "seed tabs ($Name)" -Process $process -Condition {
                 (Get-VisibleTabCount -Parent $hostHwnd) -ge $targetTabCount
             }
         }
@@ -351,7 +328,7 @@ function Invoke-NewTabScenario {
         $normalRectBeforeMaximize = Get-WindowRectObject -Hwnd $hostHwnd
         $normalPlacementBeforeMaximize = Get-WindowPlacementObject -Hwnd $hostHwnd
         [void] [Win11NewTabNative]::ShowWindow($hostHwnd, 3)
-        Wait-Until -Deadline $deadline -Description "maximized host ($Name)" -Process $process -Condition {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "maximized host ($Name)" -Process $process -Condition {
             [Win11NewTabNative]::IsZoomed($hostHwnd)
         }
 
@@ -363,7 +340,7 @@ function Invoke-NewTabScenario {
         $beforeRect = Get-WindowRectObject -Hwnd $hostHwnd
         & $OpenAction $hostHwnd $deadline $process
 
-        Wait-Until -Deadline $deadline -Description "next tab ($Name)" -Process $process -Condition {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "next tab ($Name)" -Process $process -Condition {
             (Get-VisibleTabCount -Parent $hostHwnd) -ge ($SeedTabs + 1)
         }
 
@@ -408,7 +385,7 @@ function Invoke-NewTabScenario {
             (New-WParam -Low 0xF120),
             [IntPtr]::Zero
         )
-        Wait-Until -Deadline $deadline -Description "restored host ($Name)" -Process $process -Condition {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "restored host ($Name)" -Process $process -Condition {
             -not [Win11NewTabNative]::IsZoomed($hostHwnd)
         }
 

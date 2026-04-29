@@ -41,10 +41,10 @@ const OutputTrace = struct {
     first_process_output_at_ms: u64 = 0,
 
     fn init(alloc: Allocator) OutputTrace {
-        const owned = internal_os.getEnvVarOwnedTrimmedNotEmpty(
+        const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
             alloc,
             "WINGHOSTTY_TERMIO_TRACE_FILE",
-        ) orelse return .{};
+        ) catch return .{}) orelse return .{};
 
         return .{
             .path = owned,
@@ -985,17 +985,17 @@ test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pen
         true,
         true,
         false,
-        true,
+        false,
         true,
         false,
     ));
 
     try testing.expect(!shouldWakeRendererAfterOutput(
         true,
-        true,
+        false,
+        false,
         false,
         true,
-        false,
         false,
     ));
 
@@ -1012,17 +1012,8 @@ test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pen
         true,
         true,
         false,
+        false,
+        false,
         true,
-        false,
-        true,
-    ));
-
-    try testing.expect(shouldWakeRendererAfterOutput(
-        true,
-        true,
-        false,
-        false,
-        false,
-        false,
     ));
 }

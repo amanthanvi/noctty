@@ -119,8 +119,12 @@ pub fn getenvNotEmpty(alloc: Allocator, key: []const u8) !?GetEnvResult {
 pub fn getEnvVarOwnedTrimmedNotEmpty(
     alloc: Allocator,
     key: []const u8,
-) ?[]const u8 {
-    const raw = std.process.getEnvVarOwned(alloc, key) catch return null;
+) Error!?[]const u8 {
+    const raw = std.process.getEnvVarOwned(alloc, key) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        error.InvalidWtf8 => return null,
+        else => |e| return e,
+    };
     errdefer alloc.free(raw);
 
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
@@ -130,10 +134,7 @@ pub fn getEnvVarOwnedTrimmedNotEmpty(
     }
 
     if (trimmed.len == raw.len) return raw;
-    const duped = alloc.dupe(u8, trimmed) catch {
-        alloc.free(raw);
-        return null;
-    };
+    const duped = try alloc.dupe(u8, trimmed);
     alloc.free(raw);
     return duped;
 }

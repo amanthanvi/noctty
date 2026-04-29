@@ -15,6 +15,7 @@ if ($TimeoutSeconds -le 0) {
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 $exePath = Join-Path $repoRoot 'zig-out\bin\winghostty.exe'
 $scratchDir = Join-Path $repoRoot 'zig-out\cli-redirected'
 $actionSlug = $Action.TrimStart('+')
@@ -28,26 +29,6 @@ if (-not (Test-Path $exePath)) {
 New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
-if (-not ('RedirectedCliTextActionNative' -as [type])) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class RedirectedCliTextActionNative {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool CloseHandle(IntPtr hObject);
-}
-"@
-}
-
 $process = Start-Process `
     -FilePath $exePath `
     -ArgumentList $Action `
@@ -56,22 +37,12 @@ $process = Start-Process `
     -WindowStyle Hidden `
     -PassThru
 
-$nativeProcessHandle = [RedirectedCliTextActionNative]::OpenProcess(0x1000, $false, [uint32] $process.Id)
-if ($nativeProcessHandle -eq [IntPtr]::Zero) {
-    throw "Unable to open redirected CLI action process handle: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-}
-
 try {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         throw "Redirected CLI action did not exit within ${TimeoutSeconds}s. A dialog or hung child likely blocked completion."
     }
 
-    [uint32] $nativeExitCode = 0
-    if (-not [RedirectedCliTextActionNative]::GetExitCodeProcess($nativeProcessHandle, [ref] $nativeExitCode)) {
-        throw "Unable to read exit code for redirected CLI action: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
-
-    $exitCode = [int] $nativeExitCode
+    $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $process.Handle
     if ($exitCode -ne 0) {
         throw "Redirected CLI action should exit with code 0, got $exitCode."
     }
@@ -90,10 +61,6 @@ try {
 finally {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force
-    }
-
-    if ($nativeProcessHandle -ne [IntPtr]::Zero) {
-        [void] [RedirectedCliTextActionNative]::CloseHandle($nativeProcessHandle)
     }
 }
 

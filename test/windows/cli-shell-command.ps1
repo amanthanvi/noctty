@@ -110,7 +110,7 @@ switch ($Shell) {
                 $cmdCommand
             ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
-            $output = & cmd /d /c $payloadPath
+            $output = & cmd /d /c $payloadPath 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
         }
         finally {
@@ -151,14 +151,23 @@ switch ($Shell) {
                     -WindowStyle Hidden `
                     -PassThru
                 $processHandle = $process.Handle
-                $process.WaitForExit()
+                if (-not $process.WaitForExit(5000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit(1000) | Out-Null
+                }
 
                 $exitCode = Get-CliShellExitCode -Process $process -ProcessHandle $processHandle
-                $output = if (Test-Path -LiteralPath $stdoutPath) {
+                $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
                     Get-Content -LiteralPath $stdoutPath -Raw
                 } else {
                     ''
                 }
+                $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                    Get-Content -LiteralPath $stderrPath -Raw
+                } else {
+                    ''
+                }
+                $output = $stdoutText + $stderrText
             }
             finally {
                 Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
@@ -174,7 +183,7 @@ if ($exitCode -ne $ExpectedExitCode) {
     throw "$Shell shell launcher should exit with code $ExpectedExitCode, got $exitCode."
 }
 
-$outputText = ($output | Out-String)
+$outputText = if ($output -is [string]) { $output } else { ($output | Out-String) }
 if (-not $outputText.Contains($ExpectedText)) {
     throw "$Shell shell launcher output did not contain expected text '$ExpectedText'."
 }
