@@ -37,8 +37,8 @@ const OutputTrace = struct {
     has_render_work_count: u64 = 0,
     max_process_output_gap_ms: u64 = 0,
     max_process_output_gap_ended_at_ms: u64 = 0,
-    last_process_output_tick_ms: u64 = 0,
-    first_process_output_at_ms: u64 = 0,
+    last_process_output_tick_ms: ?u64 = null,
+    first_process_output_at_ms: ?u64 = null,
 
     fn init(alloc: Allocator) OutputTrace {
         const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
@@ -94,14 +94,14 @@ const OutputTrace = struct {
         if (has_render_work) self.has_render_work_count += 1;
 
         const elapsed_ms = self.elapsedMs();
-        if (self.first_process_output_at_ms == 0) self.first_process_output_at_ms = elapsed_ms;
-        if (self.last_process_output_tick_ms != 0 and elapsed_ms > self.last_process_output_tick_ms) {
-            const gap_ms = elapsed_ms - self.last_process_output_tick_ms;
+        if (self.first_process_output_at_ms == null) self.first_process_output_at_ms = elapsed_ms;
+        if (self.last_process_output_tick_ms) |last_tick_ms| if (elapsed_ms > last_tick_ms) {
+            const gap_ms = elapsed_ms - last_tick_ms;
             if (gap_ms > self.max_process_output_gap_ms) {
                 self.max_process_output_gap_ms = gap_ms;
                 self.max_process_output_gap_ended_at_ms = elapsed_ms;
             }
-        }
+        };
         self.last_process_output_tick_ms = elapsed_ms;
     }
 
@@ -128,7 +128,7 @@ const OutputTrace = struct {
             .has_render_work_count = self.has_render_work_count,
             .max_process_output_gap_ms = self.max_process_output_gap_ms,
             .max_process_output_gap_ended_at_ms = self.max_process_output_gap_ended_at_ms,
-            .first_process_output_at_ms = self.first_process_output_at_ms,
+            .first_process_output_at_ms = self.first_process_output_at_ms orelse 0,
         }, .{})}) catch |err| {
             log.warn("termio output trace write failed path={s} err={}", .{ trace_path, err });
             return;
@@ -892,17 +892,15 @@ fn shouldWakeRendererAfterOutput(
     completed_synchronized_output_batch: bool,
 ) bool {
     if (queued_renderer_message) return true;
+    if (ended_synchronized_output and has_render_work) return true;
+    if (completed_synchronized_output_batch and has_render_work) return true;
+    if (synchronized_output_active) return false;
     if (!had_render_work and has_render_work) return true;
 
     // For ordinary PTY output, every batch with visible dirty state needs
     // a wake so streaming animations don't stall while the terminal stays
     // continuously dirty between renderer passes.
-    if (!synchronized_output_active and has_render_work) return true;
-
-    // If synchronized output just ended and we still have dirty visible state,
-    // force a repaint even if the dirty work started under 2026h earlier.
-    if (ended_synchronized_output and has_render_work) return true;
-    if (completed_synchronized_output_batch and has_render_work) return true;
+    if (has_render_work) return true;
 
     return false;
 }
@@ -1025,5 +1023,14 @@ test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pen
         false,
         false,
         true,
+    ));
+
+    try testing.expect(!shouldWakeRendererAfterOutput(
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
     ));
 }

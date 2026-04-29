@@ -1287,7 +1287,7 @@ fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
 
-fn shouldPresentSurfaceDuringInit(host_id: ?u32, passive_show: bool) bool {
+fn shouldActivateSurfaceDuringInit(host_id: ?u32, passive_show: bool) bool {
     return shouldShowSurfaceImmediately(host_id) and !passive_show;
 }
 
@@ -17814,6 +17814,10 @@ fn shouldDeferTextToCharMessage(
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
+fn shouldCommitDeferredCharMessage(pending_wm_char_text: bool, ime_composing: bool) bool {
+    return pending_wm_char_text and !ime_composing;
+}
+
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
@@ -18271,6 +18275,7 @@ pub const Surface = struct {
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
     draw_in_progress: bool = false,
     ime_composing: bool = false,
+    pending_wm_char_text: bool = false,
     pending_wm_char_high_surrogate: ?u16 = null,
     undo_capture_suspended: bool = false,
     render_trace: RenderTrace = .{},
@@ -18561,7 +18566,10 @@ pub const Surface = struct {
         if (activate_during_init) {
             try host.refreshChrome();
             try host.layout();
-            if (shouldPresentSurfaceDuringInit(opts.host_id, opts.passive_show)) {
+            // Passive launches were already shown with SW_SHOWNOACTIVATE when the
+            // host HWND was created. Only run the active present/focus path here
+            // for launches that should take foreground focus during init.
+            if (shouldActivateSurfaceDuringInit(opts.host_id, opts.passive_show)) {
                 self.presentWindow();
             }
             try self.requestRepaint();
@@ -21015,6 +21023,7 @@ pub const Surface = struct {
         if (!self.core_initialized) return;
 
         const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
+        self.pending_wm_char_text = event.composing and event.action != .release;
 
         _ = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
@@ -21030,6 +21039,11 @@ pub const Surface = struct {
 
     fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
+        if (!shouldCommitDeferredCharMessage(self.pending_wm_char_text, self.ime_composing)) {
+            self.pending_wm_char_text = false;
+            self.pending_wm_char_high_surrogate = null;
+            return;
+        }
 
         const code_unit: u16 = @intCast(wParam & 0xFFFF);
         if (std.unicode.utf16IsHighSurrogate(code_unit)) {
@@ -21047,6 +21061,7 @@ pub const Surface = struct {
             self.pending_wm_char_high_surrogate = null;
             break :cp code_unit;
         };
+        self.pending_wm_char_text = false;
 
         if (isControlCodepoint(codepoint)) return;
 
@@ -25095,7 +25110,7 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .digit_2,
-        .{ .ctrl = true },
+        .{ .ctrl = true, .alt = true },
         .{ .unshifted_codepoint = '2' },
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
@@ -25104,6 +25119,9 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .{},
         .{ .unshifted_codepoint = 0x0D },
     ));
+    try std.testing.expect(!shouldCommitDeferredCharMessage(false, false));
+    try std.testing.expect(!shouldCommitDeferredCharMessage(true, true));
+    try std.testing.expect(shouldCommitDeferredCharMessage(true, false));
 }
 
 test "win32 hotkeySpecForTrigger maps physical key triggers" {
@@ -25600,13 +25618,13 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
 }
 
-test "win32 shouldPresentSurfaceDuringInit skips passive new-host launches" {
+test "win32 shouldActivateSurfaceDuringInit skips passive new-host activation" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect(shouldPresentSurfaceDuringInit(null, false));
-    try std.testing.expect(!shouldPresentSurfaceDuringInit(null, true));
-    try std.testing.expect(!shouldPresentSurfaceDuringInit(7, false));
-    try std.testing.expect(!shouldPresentSurfaceDuringInit(7, true));
+    try std.testing.expect(shouldActivateSurfaceDuringInit(null, false));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(null, true));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, false));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, true));
 }
 
 test "win32 shouldPropagateSharedHostWindowState only for active shared-host surfaces" {

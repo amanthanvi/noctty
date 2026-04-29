@@ -133,21 +133,21 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     $termioTrace = Get-InteractiveWin11RequiredJsonFile -Path $termioTracePath
     $booTrace = Get-InteractiveWin11RequiredJsonFile -Path $booTracePath
 
-    if ($booTrace.rendered_byte_count -lt 200000) {
-        throw "Expected +boo to emit substantial frame output; rendered_byte_count=$($booTrace.rendered_byte_count)"
-    }
-    if ($renderTrace.paint_draw_count -lt 250) {
-        throw "Expected visible paint cadence to stay well above the prior stalled path; paint_draw_count=$($renderTrace.paint_draw_count)"
-    }
-    if ($renderTrace.max_paint_gap_ms -gt 300) {
-        throw "Expected visible paint gaps to stay below the prior choppy path; max_paint_gap_ms=$($renderTrace.max_paint_gap_ms)"
-    }
-    if ($termioTrace.process_output_count -lt 140) {
-        throw "Expected steady PTY output batches for +boo; process_output_count=$($termioTrace.process_output_count)"
-    }
-    if ($booTrace.frame_change_count -lt 140) {
-        throw "Expected +boo child animation to advance near full rate; frame_change_count=$($booTrace.frame_change_count)"
-    }
+if ($booTrace.rendered_byte_count -lt 200000) {
+    throw "Expected +boo to emit substantial frame output (expected >= 200000, got $($booTrace.rendered_byte_count))"
+}
+if ($renderTrace.paint_draw_count -lt 250) {
+    throw "Expected visible paint cadence to stay well above the prior stalled path (expected >= 250, got $($renderTrace.paint_draw_count))"
+}
+if ($renderTrace.max_paint_gap_ms -gt 300) {
+    throw "Expected visible paint gaps to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_paint_gap_ms))"
+}
+if ($termioTrace.process_output_count -lt 140) {
+    throw "Expected steady PTY output batches for +boo (expected >= 140, got $($termioTrace.process_output_count))"
+}
+if ($booTrace.frame_change_count -lt 140) {
+    throw "Expected +boo child animation to advance near full rate (expected >= 140, got $($booTrace.frame_change_count))"
+}
 
     Write-Host "interactive-win11 boo performance validation: PASS (updates=$($renderTrace.renderer_update_frame_count), paints=$($renderTrace.paint_draw_count), frames=$($booTrace.frame_change_count), bytes=$($booTrace.rendered_byte_count))"
 }
