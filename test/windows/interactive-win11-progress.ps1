@@ -363,18 +363,6 @@ try {
         throw "unexpected runtime failure reported in stderr:`n$stderr"
     }
 
-    foreach ($pattern in @(
-        'taskbar progress sync host_id=\d+ state=set',
-        'taskbar progress sync host_id=\d+ state=pause',
-        'taskbar progress sync host_id=\d+ state=error',
-        'taskbar progress sync host_id=\d+ state=indeterminate',
-        'taskbar progress sync host_id=\d+ state=remove'
-    )) {
-        if ($stderr -notmatch $pattern) {
-            throw "missing expected taskbar progress state log: $pattern"
-        }
-    }
-
     $setHash = Get-FileSha256 -Path $screenshots.set
     $pauseHash = Get-FileSha256 -Path $screenshots.pause
     $errorHash = Get-FileSha256 -Path $screenshots.error

@@ -56,8 +56,7 @@ pub fn build(b: *std.Build) !void {
     // Shared dependencies used by many artifacts.
     const deps = try SharedDeps.init(b, &config);
 
-    // All our steps which we'll hook up later. The steps are shown
-    // up here just so that they are more self-documenting.
+    // Top-level user-facing build steps.
     const run_step = b.step("run", "Run the app");
     const run_valgrind_step = b.step(
         "run-valgrind",
@@ -77,13 +76,12 @@ pub fn build(b: *std.Build) !void {
         "Update translation files",
     );
 
-    // The Windows-only fork keeps the default local exe build lean, but
-    // packaging builds opt back into install resources by also enabling
-    // emit-lib-vt. The package script depends on the installed share tree.
+    // A locally installed app build must carry the same share/ghostty tree
+    // that the runtime expects. On Windows this keeps source-built CLI
+    // actions such as +list-themes aligned with packaged behavior.
     const install_resources =
         config.emit_exe and
-        config.app_runtime != .none and
-        (config.target.result.os.tag != .windows or config.emit_lib_vt);
+        config.app_runtime != .none;
     const resources = if (install_resources) resources: {
         const GhosttyResources = @import("src/build/GhosttyResources.zig");
         break :resources try GhosttyResources.init(b, &config, &deps);

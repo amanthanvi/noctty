@@ -36,9 +36,10 @@ $installerPath = Join-Path $stageBase "winghostty-$Version-windows-x64-setup.exe
 $checksumsPath = Join-Path $stageBase "SHA256SUMS.txt"
 $releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
-$zigOutShare = Join-Path $repoRoot "zig-out/share/ghostty"
+$zigOutShare = Join-Path $repoRoot "zig-out/share"
 $exePath = Join-Path $zigOutBin "winghostty.exe"
 $runtimeFiles = @(
+    "winghostty.com",
     "winghostty.exe",
     "ghostty-vt.dll"
 )
@@ -298,7 +299,7 @@ try {
     Copy-Item -LiteralPath $releaseIconSourcePath -Destination $releaseIconPath -Force
 
     if (Test-Path -LiteralPath $zigOutShare) {
-        Copy-Tree -Source $zigOutShare -Destination (Join-Path $portableRoot "share")
+        Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
 
     if (Test-Path -LiteralPath $zipPath) {
@@ -333,6 +334,10 @@ try {
             "/DOutputDir=$stageBase" `
             "/DSourceDir=$repoRoot" `
             $innoScriptPath
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "ISCC.exe failed with exit code $LASTEXITCODE."
+        }
     }
     elseif ($RequireInstaller) {
         throw "Inno Setup compiler (ISCC.exe) was not found."

@@ -82,6 +82,9 @@ pub const StreamHandler = struct {
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
 
+    /// This is set for the duration of a parse batch when we see 2026h.
+    saw_synchronized_output_start: bool = false,
+
     pub const Stream = terminal.Stream(StreamHandler);
 
     /// True if we have tmux control mode built in.
@@ -102,6 +105,7 @@ pub const StreamHandler = struct {
     /// isn't guaranteed to happen immediately but it will happen as soon as
     /// practical.
     pub inline fn queueRender(self: *StreamHandler) !void {
+        self.renderer_state.noteRenderWakeupNotify();
         try self.renderer_wakeup.notify();
     }
 
@@ -160,6 +164,7 @@ pub const StreamHandler = struct {
         // and then try again.
         self.renderer_state.mutex.unlock();
         defer self.renderer_state.mutex.lock();
+        self.renderer_state.noteRenderWakeupNotify();
         self.renderer_wakeup.notify() catch |err| {
             // This is an EXTREMELY unlikely case. We still don't return
             // and attempt to send the message because its most likely
@@ -438,10 +443,8 @@ pub const StreamHandler = struct {
                     log.info("tmux viewer action={f}", .{action});
                     switch (action) {
                         .exit => {
-                            // We ignore this because we will fully exit when
-                            // our DCS connection ends. We may want to handle
-                            // this in the future to notify our GUI we're
-                            // disconnected though.
+                            // The tmux control session ends when the DCS stream
+                            // ends, so there is nothing else to do here.
                         },
 
                         .command => |command| {
@@ -454,7 +457,8 @@ pub const StreamHandler = struct {
                         },
 
                         .windows => {
-                            // TODO
+                            // Window-list updates are informational in the
+                            // terminal path.
                         },
                     }
                 }
@@ -740,7 +744,10 @@ pub const StreamHandler = struct {
             // We need to start a timer to prevent the emulator being hung
             // forever.
             .synchronized_output => {
-                if (enabled) self.messageWriter(.{ .start_synchronized_output = {} });
+                if (enabled) {
+                    self.saw_synchronized_output_start = true;
+                    self.messageWriter(.{ .start_synchronized_output = {} });
+                }
             },
 
             .linefeed => {

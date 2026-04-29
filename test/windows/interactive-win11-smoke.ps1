@@ -46,10 +46,6 @@ public static class InteractiveWin11SmokeNative {
     [DllImport("user32.dll", SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool PostMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
 }
 "@
 }
@@ -140,12 +136,11 @@ try {
 
                 # In the dev-windows bootstrap shell, GUI child ExitCode can stay null after WaitForExit.
                 if ($null -eq $exitCode) {
-                    [uint32] $nativeExitCode = 0
-                    if (-not [InteractiveWin11SmokeNative]::GetExitCodeProcess($processHandle, [ref] $nativeExitCode)) {
-                        $failureReason = "winghostty exited after WM_CLOSE but exit code could not be read: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                    try {
+                        $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
                     }
-                    else {
-                        $exitCode = [int] $nativeExitCode
+                    catch {
+                        $failureReason = "winghostty exited after WM_CLOSE but exit code could not be read: $($_.Exception.Message)"
                     }
                 }
 

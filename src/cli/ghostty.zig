@@ -22,37 +22,35 @@ const new_window = @import("new_window.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
+pub fn requiresTerminalUi(self: Action) bool {
+    return self == .boo;
+}
+
 /// Run the action. This returns the exit code to exit with.
 pub fn run(self: Action, alloc: Allocator) !u8 {
     return runMain(self, alloc) catch |err| switch (err) {
         // If help is requested, then we use some comptime trickery
         // to find this action in the help strings and output that.
-        Action.help_error => err: {
-            inline for (@typeInfo(Action).@"enum".fields) |field| {
-                // All action help text is emitted through this shared path.
-
-                if (std.mem.eql(u8, field.name, @tagName(self))) {
-                    var buffer: [1024]u8 = undefined;
-                    var stdout_writer = std.fs.File.stdout().writer(&buffer);
-                    const stdout = &stdout_writer.interface;
-                    const text = @field(help_strings.Action, field.name) ++ "\n";
-                    stdout.writeAll(text) catch |write_err| {
-                        std.log.warn("failed to write help text: {}\n", .{write_err});
-                        break :err 1;
-                    };
-                    stdout.flush() catch |flush_err| {
-                        std.log.warn("failed to flush help text: {}\n", .{flush_err});
-                        break :err 1;
-                    };
-
-                    break :err 0;
-                }
-            }
-
-            break :err err;
-        },
+        Action.help_error => printActionHelp(self),
         else => err,
     };
+}
+
+fn printActionHelp(self: Action) !u8 {
+    inline for (@typeInfo(Action).@"enum".fields) |field| {
+        // All action help text is emitted through this shared path.
+        if (self == @field(Action, field.name)) {
+            var buffer: [1024]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&buffer);
+            const stdout = &stdout_writer.interface;
+            const text = @field(help_strings.Action, field.name) ++ "\n";
+            stdout.writeAll(text) catch return error.ActionHelpOutputUnavailable;
+            stdout.flush() catch return error.ActionHelpOutputUnavailable;
+            return 0;
+        }
+    }
+
+    unreachable;
 }
 
 fn runMain(self: Action, alloc: Allocator) !u8 {
@@ -210,4 +208,18 @@ test "parse action plus ignores -e" {
             actionpkg.detectIter(Action, &iter),
         );
     }
+}
+
+test "terminal UI actions are classified separately" {
+    const testing = std.testing;
+
+    try testing.expect(requiresTerminalUi(.boo));
+
+    try testing.expect(!requiresTerminalUi(.@"list-keybinds"));
+    try testing.expect(!requiresTerminalUi(.@"list-themes"));
+    try testing.expect(!requiresTerminalUi(.@"list-colors"));
+    try testing.expect(!requiresTerminalUi(.help));
+    try testing.expect(!requiresTerminalUi(.version));
+    try testing.expect(!requiresTerminalUi(.@"show-config"));
+    try testing.expect(!requiresTerminalUi(.@"crash-report"));
 }
