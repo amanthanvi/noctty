@@ -48,6 +48,33 @@ function Get-CliShellExitCode {
     return [int] $nativeExitCode
 }
 
+function Format-CmdArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    return '"' + $Argument.Replace('"', '""') + '"'
+}
+
+function Format-PowerShellLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    return "'" + $Argument.Replace("'", "''") + "'"
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $binDir = if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }
 $guiExe = Join-Path $binDir 'winghostty.exe'
@@ -61,17 +88,11 @@ if (-not (Test-Path $commandExe)) {
 }
 
 $envPath = "$binDir;$env:PATH"
-$joinedArgs = [string]::Join(' ', ($Arguments | ForEach-Object {
-    if ($_ -match '[\s"]') {
-        '"' + ($_.Replace('"', '\"')) + '"'
-    } else {
-        $_
-    }
-}))
+$argsDisplay = [string]::Join(' ', $Arguments)
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & cmd /d /c "set PATH=$envPath&& where winghostty"
+        $resolved = & cmd /d /c "set ""PATH=$envPath""&& where winghostty"
         if ($LASTEXITCODE -ne 0) {
             throw "cmd could not resolve winghostty from PATH."
         }
@@ -79,8 +100,22 @@ switch ($Shell) {
             throw "cmd resolved winghostty to the wrong artifact: $($resolved | Select-Object -First 1)"
         }
 
-        $output = & cmd /d /c "set PATH=$envPath&& winghostty $joinedArgs"
-        $exitCode = $LASTEXITCODE
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        try {
+            $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            @(
+                '@echo off'
+                "set `"PATH=$envPath`""
+                $cmdCommand
+            ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
+
+            $output = & cmd /d /c $payloadPath
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue
+        }
     }
 
     'powershell' {
@@ -97,10 +132,20 @@ switch ($Shell) {
 
             $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
             $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
+                $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
+                @(
+                    '$argsList = @(' + $argLiterals + ')'
+                    '$output = & winghostty @argsList | Out-String'
+                    '$exitCode = $LASTEXITCODE'
+                    '[Console]::Out.Write($output)'
+                    'exit $exitCode'
+                ) | Set-Content -LiteralPath $payloadPath -Encoding UTF8
+
                 $process = Start-Process `
                     -FilePath powershell.exe `
-                    -ArgumentList @('-NoProfile', '-Command', "winghostty $joinedArgs") `
+                    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $payloadPath) `
                     -RedirectStandardOutput $stdoutPath `
                     -RedirectStandardError $stderrPath `
                     -WindowStyle Hidden `
@@ -116,7 +161,7 @@ switch ($Shell) {
                 }
             }
             finally {
-                Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
             }
         }
         finally {
@@ -134,4 +179,4 @@ if (-not $outputText.Contains($ExpectedText)) {
     throw "$Shell shell launcher output did not contain expected text '$ExpectedText'."
 }
 
-Write-Host "shell launcher validation: PASS (shell=$Shell, args=$joinedArgs)"
+Write-Host "shell launcher validation: PASS (shell=$Shell, args=$argsDisplay)"

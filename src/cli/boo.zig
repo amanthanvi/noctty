@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const args = @import("args.zig");
 const actionpkg = @import("action.zig");
 const Allocator = std.mem.Allocator;
+const os_env = @import("../os/env.zig");
 const vaxis = @import("vaxis");
 
 const framedata = @import("framedata").compressed;
@@ -364,33 +365,21 @@ fn runWindows(
 }
 
 fn autoExitAfterNsFromEnv(gpa: Allocator) ?u64 {
-    const raw = std.process.getEnvVarOwned(gpa, "WINGHOSTTY_BOO_AUTO_EXIT_MS") catch return null;
+    const raw = os_env.getEnvVarOwnedTrimmedNotEmpty(
+        gpa,
+        "WINGHOSTTY_BOO_AUTO_EXIT_MS",
+    ) orelse return null;
     defer gpa.free(raw);
 
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0) return null;
-
-    const ms = std.fmt.parseUnsigned(u64, trimmed, 10) catch return null;
+    const ms = std.fmt.parseUnsigned(u64, raw, 10) catch return null;
     return std.math.mul(u64, ms, std.time.ns_per_ms) catch std.math.maxInt(u64);
 }
 
 fn traceStatePathFromEnv(gpa: Allocator) ?[]const u8 {
-    const raw = std.process.getEnvVarOwned(gpa, "WINGHOSTTY_BOO_STATE_FILE") catch return null;
-    errdefer gpa.free(raw);
-
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0) {
-        gpa.free(raw);
-        return null;
-    }
-
-    if (trimmed.len == raw.len) return raw;
-    const duped = gpa.dupe(u8, trimmed) catch {
-        gpa.free(raw);
-        return null;
-    };
-    gpa.free(raw);
-    return duped;
+    return os_env.getEnvVarOwnedTrimmedNotEmpty(
+        gpa,
+        "WINGHOSTTY_BOO_STATE_FILE",
+    );
 }
 
 fn elapsedSince(start: std.time.Instant) u64 {

@@ -114,6 +114,30 @@ pub fn getenvNotEmpty(alloc: Allocator, key: []const u8) !?GetEnvResult {
     return result_;
 }
 
+/// Gets an owned environment variable value, trims ASCII whitespace, and
+/// returns null if the variable is unset or trims to empty.
+pub fn getEnvVarOwnedTrimmedNotEmpty(
+    alloc: Allocator,
+    key: []const u8,
+) ?[]const u8 {
+    const raw = std.process.getEnvVarOwned(alloc, key) catch return null;
+    errdefer alloc.free(raw);
+
+    const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+    if (trimmed.len == 0) {
+        alloc.free(raw);
+        return null;
+    }
+
+    if (trimmed.len == raw.len) return raw;
+    const duped = alloc.dupe(u8, trimmed) catch {
+        alloc.free(raw);
+        return null;
+    };
+    alloc.free(raw);
+    return duped;
+}
+
 pub fn setenv(key: [:0]const u8, value: [:0]const u8) c_int {
     return switch (builtin.os.tag) {
         .windows => c._putenv_s(key.ptr, value.ptr),

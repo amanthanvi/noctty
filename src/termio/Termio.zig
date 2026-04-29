@@ -13,6 +13,7 @@ const posix = std.posix;
 const termio = @import("../termio.zig");
 const StreamHandler = @import("stream_handler.zig").StreamHandler;
 const terminalpkg = @import("../terminal/main.zig");
+const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 const xev = @import("../global.zig").xev;
 const renderer = @import("../renderer.zig");
 const apprt = @import("../apprt.zig");
@@ -22,8 +23,6 @@ const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_exec);
-
-extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 
 const OutputTrace = struct {
     path: ?[]const u8 = null,
@@ -42,30 +41,14 @@ const OutputTrace = struct {
     first_process_output_at_ms: u64 = 0,
 
     fn init(alloc: Allocator) OutputTrace {
-        const raw = std.process.getEnvVarOwned(
+        const owned = internal_os.getEnvVarOwnedTrimmedNotEmpty(
             alloc,
             "WINGHOSTTY_TERMIO_TRACE_FILE",
-        ) catch return .{};
-        errdefer alloc.free(raw);
-
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0) {
-            alloc.free(raw);
-            return .{};
-        }
-
-        const owned = if (trimmed.len == raw.len)
-            raw
-        else
-            alloc.dupe(u8, trimmed) catch {
-                alloc.free(raw);
-                return .{};
-            };
-        if (trimmed.len != raw.len) alloc.free(raw);
+        ) orelse return .{};
 
         return .{
             .path = owned,
-            .start_tick_ms = GetTickCount64(),
+            .start_tick_ms = traceNowMs(),
         };
     }
 
@@ -104,7 +87,7 @@ const OutputTrace = struct {
         if (completed_synchronized_output_batch) self.completed_synchronized_output_batch_count += 1;
         if (has_render_work) self.has_render_work_count += 1;
 
-        const now = GetTickCount64();
+        const now = traceNowMs();
         const elapsed_ms = if (now > self.start_tick_ms) now - self.start_tick_ms else 0;
         if (self.first_process_output_at_ms == 0) self.first_process_output_at_ms = elapsed_ms;
         if (self.last_process_output_tick_ms != 0 and now > self.last_process_output_tick_ms) {
@@ -126,7 +109,7 @@ const OutputTrace = struct {
         var writer = file.writer(&buffer);
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
-            .runtime_ms = GetTickCount64() - self.start_tick_ms,
+            .runtime_ms = traceNowMs() - self.start_tick_ms,
             .process_output_count = self.process_output_count,
             .process_output_bytes = self.process_output_bytes,
             .renderer_wake_count = self.renderer_wake_count,
@@ -142,6 +125,10 @@ const OutputTrace = struct {
         stream.flush() catch return;
     }
 };
+
+fn traceNowMs() u64 {
+    return @intCast(std.time.milliTimestamp());
+}
 
 /// Mutex state argument for queueMessage.
 pub const MutexState = enum { locked, unlocked };
@@ -778,10 +765,10 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         // the lock to grab our read data.
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
-        const had_render_work = terminalNeedsRendererWake(&self.terminal);
+        const had_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const was_synchronized_output = self.terminal.modes.get(.synchronized_output);
         const processing = self.processOutputLocked(buf);
-        const has_render_work = terminalNeedsRendererWake(&self.terminal);
+        const has_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const synchronized_output_active = self.terminal.modes.get(.synchronized_output);
         const ended_synchronized_output =
             was_synchronized_output and !synchronized_output_active;
@@ -910,29 +897,6 @@ fn shouldWakeRendererAfterOutput(
     return false;
 }
 
-fn terminalNeedsRendererWake(t: *const terminalpkg.Terminal) bool {
-    const screen = t.screens.active;
-
-    if (packedStructDirty(t.flags.dirty)) return true;
-    if (packedStructDirty(screen.dirty)) return true;
-    if (screen.kitty_images.dirty) return true;
-
-    // Check the viewport bottom-up so steady-state PTY output usually
-    // hits a dirty row near the cursor without scanning the full viewport.
-    var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
-    while (row_it.next()) |pin| {
-        if (pin.isDirty()) return true;
-    }
-
-    return false;
-}
-
-fn packedStructDirty(value: anytype) bool {
-    const T = @TypeOf(value);
-    const Int = @typeInfo(T).@"struct".backing_integer.?;
-    return @as(Int, @bitCast(value)) != 0;
-}
-
 /// Sends a DSR response for the current color scheme to the pty.
 pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
     self.renderer_state.mutex.lock();
@@ -989,7 +953,7 @@ pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Ty
     return self.backend.getProcessInfo(info);
 }
 
-test "terminalNeedsRendererWake tracks visible terminal dirtiness" {
+test "shared terminal dirty helper tracks visible terminal dirtiness" {
     const testing = std.testing;
 
     var t = try terminalpkg.Terminal.init(testing.allocator, .{
@@ -998,20 +962,20 @@ test "terminalNeedsRendererWake tracks visible terminal dirtiness" {
     });
     defer t.deinit(testing.allocator);
 
-    try testing.expect(!terminalNeedsRendererWake(&t));
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&t));
 
     try t.print('x');
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.screens.active.pages.clearDirty();
-    try testing.expect(!terminalNeedsRendererWake(&t));
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty.palette = true;
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty = .{};
     t.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 }
 
 test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pending render work" {

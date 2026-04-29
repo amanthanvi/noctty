@@ -13,6 +13,7 @@ const configpkg = @import("../config.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 const terminalpkg = @import("../terminal/main.zig");
+const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -620,7 +621,7 @@ fn shouldContinueRenderFollowup(self: *Thread) bool {
 
     self.state.mutex.lock();
     defer self.state.mutex.unlock();
-    return terminalNeedsRendererWake(self.state.terminal);
+    return terminal_render_dirty.needsRendererWake(self.state.terminal);
 }
 
 fn renderOnce(self: *Thread, from_wakeup: bool) bool {
@@ -845,27 +846,6 @@ fn cursorBlinkInterval() u64 {
     return CURSOR_BLINK_INTERVAL;
 }
 
-fn terminalNeedsRendererWake(t: *const terminalpkg.Terminal) bool {
-    const screen = t.screens.active;
-
-    if (packedStructDirty(t.flags.dirty)) return true;
-    if (packedStructDirty(screen.dirty)) return true;
-    if (screen.kitty_images.dirty) return true;
-
-    var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
-    while (row_it.next()) |pin| {
-        if (pin.isDirty()) return true;
-    }
-
-    return false;
-}
-
-fn packedStructDirty(value: anytype) bool {
-    const T = @TypeOf(value);
-    const Int = @typeInfo(T).@"struct".backing_integer.?;
-    return @as(Int, @bitCast(value)) != 0;
-}
-
 test "renderer follow-up check tracks visible terminal dirtiness" {
     const testing = std.testing;
 
@@ -875,16 +855,16 @@ test "renderer follow-up check tracks visible terminal dirtiness" {
     });
     defer term.deinit(testing.allocator);
 
-    try testing.expect(!terminalNeedsRendererWake(&term));
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&term));
 
     term.flags.dirty.palette = true;
-    try testing.expect(terminalNeedsRendererWake(&term));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
     term.flags.dirty = .{};
 
     term.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminalNeedsRendererWake(&term));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
     term.screens.active.kitty_images.dirty = false;
 
     try term.printString("x");
-    try testing.expect(terminalNeedsRendererWake(&term));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
 }
