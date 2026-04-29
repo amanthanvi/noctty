@@ -95,6 +95,7 @@ stop_c: xev.Completion = .{},
 /// The timer used for rendering
 render_h: xev.Timer,
 render_c: xev.Completion = .{},
+render_followup_pending: bool = false,
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
@@ -595,7 +596,8 @@ fn drawFrame(self: *Thread, now: bool) void {
 }
 
 fn scheduleRenderFollowup(self: *Thread) void {
-    if (self.render_c.state() == .active) return;
+    if (self.render_followup_pending) return;
+    self.render_followup_pending = true;
     self.render_h.run(
         &self.loop,
         &self.render_c,
@@ -617,7 +619,7 @@ fn renderFollowupWindowActive(self: *const Thread) bool {
 }
 
 fn shouldContinueRenderFollowup(self: *Thread) bool {
-    if (apprt.runtime != apprt.win32) return false;
+    if (apprt.runtime != apprt.win32 or !self.flags.visible) return false;
 
     self.state.mutex.lock();
     defer self.state.mutex.unlock();
@@ -733,19 +735,13 @@ fn renderCallback(
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
+    t.render_followup_pending = false;
     if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
         t.surface.noteRendererFollowupCallback();
     }
 
     if (t.renderOnce(false)) {
-        t.render_h.run(
-            &t.loop,
-            &t.render_c,
-            DRAW_INTERVAL,
-            Thread,
-            t,
-            renderCallback,
-        );
+        t.scheduleRenderFollowup();
     }
 
     return .disarm;

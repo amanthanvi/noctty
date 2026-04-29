@@ -37,7 +37,6 @@ pub fn main() !MainReturn {
     if (state.action) |action| {
         std.log.info("executing winghostty CLI action={}", .{action});
         posix.exit(process_shared.runCliAction(action, alloc));
-        return;
     }
 
     // Create our app state

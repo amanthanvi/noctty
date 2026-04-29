@@ -155,7 +155,7 @@ finally {
     foreach ($entry in $savedEnv.GetEnumerator()) {
         [System.Environment]::SetEnvironmentVariable(
             [string] $entry.Key,
-            [string] $entry.Value,
+            $entry.Value,
             [System.EnvironmentVariableTarget]::Process
         )
     }

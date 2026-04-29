@@ -67,8 +67,13 @@ fn addGhosttyBinToPath(
     };
 
     var it = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
+    var is_first_entry = true;
     while (it.next()) |entry| {
-        if (pathEntryEquals(entry, exe_dir)) return;
+        if (pathEntryEquals(entry, exe_dir)) {
+            if (builtin.os.tag != .windows or is_first_entry) return;
+            break;
+        }
+        is_first_entry = false;
     }
 
     const updated_path = if (builtin.os.tag == .windows)

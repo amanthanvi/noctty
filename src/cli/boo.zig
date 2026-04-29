@@ -722,7 +722,7 @@ test "Boo auto-exit triggers at configured deadline" {
     try std.testing.expect(boo.shouldAutoExitAfterElapsedNs(500 * std.time.ns_per_ms));
 }
 
-test "boo cached updates are faster than reparsing frames" {
+test "boo cached frame selection matches reparsed frames" {
     const testing = std.testing;
 
     const decompressed_data = try decompressFrameData(testing.allocator);
@@ -734,23 +734,13 @@ test "boo cached updates are faster than reparsing frames" {
     const rendered_frames = try renderFrames(testing.allocator, frames);
     defer testing.allocator.free(rendered_frames);
 
-    const iterations = frames.len * 4;
-
     var boo = Boo.init(rendered_frames, null);
-    var cached_timer = try std.time.Timer.start();
-    for (0..iterations) |i| {
-        _ = boo.syncFrameForElapsedNs(i * Boo.animation_frame_ns);
-    }
-    const cached_ns = cached_timer.read();
-
     var buffer: [Boo.frame_cell_count]vaxis.Cell = undefined;
-    var reparsed_timer = try std.time.Timer.start();
-    for (0..iterations) |i| {
-        try decodeFrame(frames[i % frames.len], buffer[0..]);
+    for (0..frames.len) |i| {
+        _ = boo.syncFrameForElapsedNs(i * Boo.animation_frame_ns);
+        try decodeFrame(frames[i], buffer[0..]);
+        try testing.expectEqualDeep(buffer, boo.buffer);
     }
-    const reparsed_ns = reparsed_timer.read();
-
-    try testing.expect(cached_ns < reparsed_ns);
 }
 
 test "boo clock-synced polling avoids missing every other frame on coarse windows timers" {

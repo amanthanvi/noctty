@@ -882,7 +882,7 @@ fn shouldWakeRendererAfterOutput(
     completed_synchronized_output_batch: bool,
 ) bool {
     if (queued_renderer_message) return true;
-    if (!had_render_work and (has_render_work or queued_renderer_message)) return true;
+    if (!had_render_work and has_render_work) return true;
 
     // For ordinary PTY output, every batch with visible dirty state needs
     // a wake so streaming animations don't stall while the terminal stays

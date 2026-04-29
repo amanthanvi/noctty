@@ -54,6 +54,14 @@ function Assert-Contains {
     }
 }
 
+function Get-EscapedPowerShellLiteralPath {
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    return $Path.Replace("'", "''")
+}
+
 function Invoke-AppShellRun {
     param(
         [Parameter(Mandatory)] [string] $Name,
@@ -129,15 +137,17 @@ $cmdPayloadPath = Join-Path $layout.Temp 'interactive-win11-shell-command.cmd'
 $cmdStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-stdout.log'
 $cmdStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-stderr.log'
 
+Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdBooHelpPath, $cmdKeybindsPath, $cmdColorsPath, $cmdThemesPath, $cmdPayloadPath, $cmdStdoutPath, $cmdStderrPath -ErrorAction SilentlyContinue
+
 @(
     '@echo off'
-    "where winghostty > `"$cmdResolvedPath`""
-    "winghostty +help > `"$cmdHelpPath`""
-    "winghostty +version > `"$cmdVersionPath`""
-    "winghostty +boo --help > `"$cmdBooHelpPath`""
-    "winghostty +list-keybinds > `"$cmdKeybindsPath`""
-    "winghostty +list-colors > `"$cmdColorsPath`""
-    "winghostty +list-themes > `"$cmdThemesPath`""
+    "where winghostty > `"$cmdResolvedPath`" || exit /b 1"
+    "winghostty +help > `"$cmdHelpPath`" || exit /b 1"
+    "winghostty +version > `"$cmdVersionPath`" || exit /b 1"
+    "winghostty +boo --help > `"$cmdBooHelpPath`" || exit /b 1"
+    "winghostty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
+    "winghostty +list-colors > `"$cmdColorsPath`" || exit /b 1"
+    "winghostty +list-themes > `"$cmdThemesPath`" || exit /b 1"
 ) | Set-Content -LiteralPath $cmdPayloadPath -Encoding ASCII
 
 $null = Invoke-AppShellRun `
@@ -170,22 +180,37 @@ $psThemesPath = Join-Path $layout.Temp 'powershell-list-themes.txt'
 $psPayloadPath = Join-Path $layout.Temp 'interactive-win11-shell-command.ps1'
 $psStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-powershell-stdout.log'
 $psStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-powershell-stderr.log'
+$psResolvedLiteral = Get-EscapedPowerShellLiteralPath -Path $psResolvedPath
+$psHelpLiteral = Get-EscapedPowerShellLiteralPath -Path $psHelpPath
+$psVersionLiteral = Get-EscapedPowerShellLiteralPath -Path $psVersionPath
+$psBooHelpLiteral = Get-EscapedPowerShellLiteralPath -Path $psBooHelpPath
+$psKeybindsLiteral = Get-EscapedPowerShellLiteralPath -Path $psKeybindsPath
+$psColorsLiteral = Get-EscapedPowerShellLiteralPath -Path $psColorsPath
+$psThemesLiteral = Get-EscapedPowerShellLiteralPath -Path $psThemesPath
+
+Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psBooHelpPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
 
 @(
     '$resolved = (Get-Command winghostty).Source'
-    "Set-Content -LiteralPath '$psResolvedPath' -Value `$resolved -Encoding ASCII"
+    "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding ASCII"
     '$help = winghostty +help | Out-String'
-    "Set-Content -LiteralPath '$psHelpPath' -Value `$help -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psHelpLiteral' -Value `$help -Encoding UTF8"
     '$version = winghostty +version | Out-String'
-    "Set-Content -LiteralPath '$psVersionPath' -Value `$version -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psVersionLiteral' -Value `$version -Encoding UTF8"
     '$booHelp = winghostty +boo --help | Out-String'
-    "Set-Content -LiteralPath '$psBooHelpPath' -Value `$booHelp -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psBooHelpLiteral' -Value `$booHelp -Encoding UTF8"
     '$keybinds = winghostty +list-keybinds | Out-String'
-    "Set-Content -LiteralPath '$psKeybindsPath' -Value `$keybinds -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psKeybindsLiteral' -Value `$keybinds -Encoding UTF8"
     '$colors = winghostty +list-colors | Out-String'
-    "Set-Content -LiteralPath '$psColorsPath' -Value `$colors -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psColorsLiteral' -Value `$colors -Encoding UTF8"
     '$themes = winghostty +list-themes | Out-String'
-    "Set-Content -LiteralPath '$psThemesPath' -Value `$themes -Encoding UTF8"
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+    "Set-Content -LiteralPath '$psThemesLiteral' -Value `$themes -Encoding UTF8"
 ) | Set-Content -LiteralPath $psPayloadPath -Encoding UTF8
 
 $null = Invoke-AppShellRun `

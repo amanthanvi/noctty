@@ -369,12 +369,16 @@ finally {
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath '__STATE_PATH__' -Encoding ASCII
 'ready' | Set-Content -LiteralPath '__READY_PATH__' -Encoding ASCII
 '@
+    $preReadKeyStatePathLiteral = $preReadKeyStatePath.Replace("'", "''")
+    $preReadKeyTracePathLiteral = $preReadKeyTracePath.Replace("'", "''")
+    $preReadKeyReadyPathLiteral = $preReadKeyReadyPath.Replace("'", "''")
     $commandPrelude = $commandPrelude.
-        Replace('__STATE_PATH__', $preReadKeyStatePath).
-        Replace('__TRACE_PATH__', $preReadKeyTracePath).
-        Replace('__READY_PATH__', $preReadKeyReadyPath)
+        Replace('__STATE_PATH__', $preReadKeyStatePathLiteral).
+        Replace('__TRACE_PATH__', $preReadKeyTracePathLiteral).
+        Replace('__READY_PATH__', $preReadKeyReadyPathLiteral)
 }
 
+$resultPathLiteral = $resultPath.Replace("'", "''")
 @"
 $commandPrelude
 `$key = [Console]::ReadKey(`$true)
@@ -383,7 +387,7 @@ $commandPrelude
     keyChar = [string]`$key.KeyChar
     key = `$key.Key.ToString()
     modifiers = `$key.Modifiers.ToString()
-} | ConvertTo-Json -Compress | Set-Content -LiteralPath '$resultPath' -Encoding ASCII
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath '$resultPathLiteral' -Encoding ASCII
 "@ | Set-Content -LiteralPath $payloadPath -Encoding UTF8
 
 $launchArgs = @(
@@ -457,6 +461,7 @@ try {
         Start-Sleep -Milliseconds 300
     }
 
+    $sendInputError = $null
     try {
         [Microsoft.VisualBasic.Interaction]::AppActivate($process.Id) | Out-Null
         Start-Sleep -Milliseconds 300
@@ -477,6 +482,7 @@ try {
         }
     }
     catch {
+        $sendInputError = $_.Exception.Message
     }
 
     if (-not (Test-Path -LiteralPath $resultPath)) {
@@ -489,7 +495,8 @@ try {
 
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
     if ($result.keyCharCode -ne $expectedKeyCharCode -or $result.key -ne $expectedKeyName) {
-        throw "unexpected key input result (mode=$deliveryMode): $($result | ConvertTo-Json -Compress)"
+        $sendInputContext = if ($sendInputError) { ", sendinput-error=$sendInputError" } else { '' }
+        throw "unexpected key input result (mode=$deliveryMode): $($result | ConvertTo-Json -Compress)$sendInputContext"
     }
 
     $guiThreadInfo = Get-GuiThreadInfo -Hwnd $hostHwnd

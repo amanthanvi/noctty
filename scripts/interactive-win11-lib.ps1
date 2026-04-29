@@ -542,16 +542,23 @@ function Get-InteractiveWin11ProcessExitCode {
 
     Initialize-InteractiveWin11ProcessNative
 
-    $Process.Refresh()
-    $exitCode = $Process.ExitCode
-    if ($null -ne $exitCode) {
-        return [int] $exitCode
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return [int] $Process.ExitCode
+        }
+    }
+    catch {
     }
 
     [uint32] $nativeExitCode = 0
     if (-not [InteractiveWin11ProcessNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
         $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "Exit code could not be read for pid=$($Process.Id): $lastError"
+    }
+
+    if ($nativeExitCode -eq 259) {
+        throw "Process has not exited yet for pid=$($Process.Id)"
     }
 
     return [int] $nativeExitCode

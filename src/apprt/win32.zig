@@ -7069,14 +7069,26 @@ const Host = struct {
 
     fn postDeferredNewTab(self: *Host) void {
         const hwnd = self.hwnd orelse return;
-        if (PostMessageW(hwnd, WM_WINHOSTTY_HOST_NEW_TAB, 0, 0) == 0) {
-            if (self.activeSurface()) |surface| {
+        const source_surface = self.activeSurface();
+        const source_surface_id: WPARAM = if (source_surface) |surface|
+            @intCast(surface.core().id)
+        else
+            0;
+        if (PostMessageW(hwnd, WM_WINHOSTTY_HOST_NEW_TAB, source_surface_id, 0) == 0) {
+            if (source_surface) |surface| {
                 runUiActionOrLog("deferred new tab fallback failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
             }
         }
     }
 
-    fn dispatchDeferredNewTab(self: *Host) void {
+    fn dispatchDeferredNewTab(self: *Host, source_surface_id: ?u64) void {
+        if (source_surface_id) |surface_id| {
+            if (self.app.findSurfaceById(surface_id)) |surface| {
+                runUiActionOrLog("deferred new tab dispatch failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
+                return;
+            }
+        }
+
         if (self.activeSurface()) |surface| {
             runUiActionOrLog("deferred new tab dispatch failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
         }
@@ -16498,7 +16510,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
     const host = getHost(hwnd);
     switch (msg) {
         WM_WINHOSTTY_HOST_NEW_TAB => {
-            if (host) |v| v.dispatchDeferredNewTab();
+            if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
             return 0;
         },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
