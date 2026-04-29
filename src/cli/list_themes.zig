@@ -169,7 +169,7 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     }
 
     if (count == 0) {
-        try stderr.print("No themes found, check to make sure that the themes were installed correctly.", .{});
+        try stderr.print("No themes found, check to make sure that the themes were installed correctly.\n", .{});
         try stderr.flush();
         return 1;
     }
