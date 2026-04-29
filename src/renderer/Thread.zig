@@ -627,8 +627,6 @@ fn shouldContinueRenderFollowup(self: *Thread) bool {
 }
 
 fn renderOnce(self: *Thread, from_wakeup: bool) bool {
-    if (from_wakeup) self.refreshRenderFollowupDeadline();
-
     // Drain mailbox work first so message-driven state changes are reflected
     // in the same frame as terminal output wakes.
     _ = self.drainMailbox() catch |err| {
@@ -654,7 +652,7 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
     // short follow-up timer active so streaming output doesn't collapse to a
     // fraction of the intended frame rate.
     const keep_due_to_dirty = self.shouldContinueRenderFollowup();
-    if (keep_due_to_dirty) self.refreshRenderFollowupDeadline();
+    if (from_wakeup and keep_due_to_dirty) self.refreshRenderFollowupDeadline();
     return keep_due_to_dirty or self.renderFollowupWindowActive();
 }
 

@@ -1870,3 +1870,24 @@ test "addGhosttyBinToPath avoids duplicate windows entry" {
         env.get("PATH").?,
     );
 }
+
+test "addGhosttyBinToPath prepends existing windows entry when not first" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put(
+        "PATH",
+        "C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Winghostty;C:\\Windows\\System32",
+    );
+
+    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\winghostty");
+
+    try testing.expectEqualStrings("c:\\program files\\winghostty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings(
+        "c:\\program files\\winghostty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Winghostty;C:\\Windows\\System32",
+        env.get("PATH").?,
+    );
+}

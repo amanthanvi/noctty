@@ -70,7 +70,7 @@ $booTracePath = Join-Path $layout.Temp 'interactive-win11-boo-performance-boo.js
 
 @(
     '@echo off'
-    "set PATH=$exeDir;%PATH%"
+    "set `"PATH=$exeDir;%PATH%`""
     'winghostty +boo'
 ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 

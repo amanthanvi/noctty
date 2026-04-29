@@ -1272,8 +1272,8 @@ fn effectiveHostWindowStyle(
         WS_VISIBLE | WS_OVERLAPPED;
 }
 
-fn shouldApplyInheritedWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
-    return !(dst_host_id != null and src_host_id != null and dst_host_id.? == src_host_id.?);
+fn sharesHostWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
+    return dst_host_id != null and src_host_id != null and dst_host_id.? == src_host_id.?;
 }
 
 fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
@@ -18529,7 +18529,7 @@ pub const Surface = struct {
         };
 
         if (opts.clone_state_from) |source| {
-            if (!shouldApplyInheritedWindowState(self.host_id, source.host_id)) {
+            if (sharesHostWindowState(self.host_id, source.host_id)) {
                 self.copySharedWindowStateFrom(source);
             }
         }
@@ -18568,7 +18568,7 @@ pub const Surface = struct {
         }
 
         if (opts.clone_state_from) |source| {
-            if (!shouldApplyInheritedWindowState(self.host_id, source.host_id)) return;
+            if (sharesHostWindowState(self.host_id, source.host_id)) return;
             try self.inheritWindowStateFrom(source);
         }
     }
@@ -25548,13 +25548,13 @@ test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces"
     try std.testing.expect((effectiveHostWindowStyle(true, false, false) & WS_CLIPCHILDREN) == 0);
 }
 
-test "win32 shouldApplyInheritedWindowState skips same-host clones" {
+test "win32 sharesHostWindowState only for same-host clones" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect(!shouldApplyInheritedWindowState(7, 7));
-    try std.testing.expect(shouldApplyInheritedWindowState(7, 8));
-    try std.testing.expect(shouldApplyInheritedWindowState(7, null));
-    try std.testing.expect(shouldApplyInheritedWindowState(null, 7));
+    try std.testing.expect(sharesHostWindowState(7, 7));
+    try std.testing.expect(!sharesHostWindowState(7, 8));
+    try std.testing.expect(!sharesHostWindowState(7, null));
+    try std.testing.expect(!sharesHostWindowState(null, 7));
 }
 
 test "win32 copySharedWindowStateFrom clones host-scoped window fields" {

@@ -26,7 +26,7 @@ const log = std.log.scoped(.io_exec);
 
 const OutputTrace = struct {
     path: ?[]const u8 = null,
-    start_tick_ms: u64 = 0,
+    start_time: ?std.time.Instant = null,
     process_output_count: u64 = 0,
     process_output_bytes: u64 = 0,
     renderer_wake_count: u64 = 0,
@@ -48,7 +48,7 @@ const OutputTrace = struct {
 
         return .{
             .path = owned,
-            .start_tick_ms = traceNowMs(),
+            .start_time = std.time.Instant.now() catch null,
         };
     }
 
@@ -64,6 +64,12 @@ const OutputTrace = struct {
 
     fn enabled(self: *const OutputTrace) bool {
         return self.path != null;
+    }
+
+    fn elapsedMs(self: *const OutputTrace) u64 {
+        const start_time = self.start_time orelse return 0;
+        const now = std.time.Instant.now() catch return 0;
+        return @intCast(@divFloor(now.since(start_time), std.time.ns_per_ms));
     }
 
     fn noteProcessOutput(
@@ -87,17 +93,16 @@ const OutputTrace = struct {
         if (completed_synchronized_output_batch) self.completed_synchronized_output_batch_count += 1;
         if (has_render_work) self.has_render_work_count += 1;
 
-        const now = traceNowMs();
-        const elapsed_ms = if (now > self.start_tick_ms) now - self.start_tick_ms else 0;
+        const elapsed_ms = self.elapsedMs();
         if (self.first_process_output_at_ms == 0) self.first_process_output_at_ms = elapsed_ms;
-        if (self.last_process_output_tick_ms != 0 and now > self.last_process_output_tick_ms) {
-            const gap_ms = now - self.last_process_output_tick_ms;
+        if (self.last_process_output_tick_ms != 0 and elapsed_ms > self.last_process_output_tick_ms) {
+            const gap_ms = elapsed_ms - self.last_process_output_tick_ms;
             if (gap_ms > self.max_process_output_gap_ms) {
                 self.max_process_output_gap_ms = gap_ms;
                 self.max_process_output_gap_ended_at_ms = elapsed_ms;
             }
         }
-        self.last_process_output_tick_ms = now;
+        self.last_process_output_tick_ms = elapsed_ms;
     }
 
     fn writeSnapshot(self: *const OutputTrace) void {
@@ -109,7 +114,7 @@ const OutputTrace = struct {
         var writer = file.writer(&buffer);
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
-            .runtime_ms = traceNowMs() - self.start_tick_ms,
+            .runtime_ms = self.elapsedMs(),
             .process_output_count = self.process_output_count,
             .process_output_bytes = self.process_output_bytes,
             .renderer_wake_count = self.renderer_wake_count,
@@ -125,10 +130,6 @@ const OutputTrace = struct {
         stream.flush() catch return;
     }
 };
-
-fn traceNowMs() u64 {
-    return @intCast(std.time.milliTimestamp());
-}
 
 /// Mutex state argument for queueMessage.
 pub const MutexState = enum { locked, unlocked };
