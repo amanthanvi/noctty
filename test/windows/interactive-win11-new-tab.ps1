@@ -285,22 +285,25 @@ function Invoke-NewTabScenario {
     param(
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [scriptblock] $OpenAction,
+        [Parameter(Mandatory)] $Layout,
+        [Parameter(Mandatory)] [string] $ExePath,
+        [Parameter(Mandatory)] [string] $RepoRoot,
         [int] $SeedTabs = 1
     )
 
-    $stdoutPath = Join-Path $layout.Logs ("interactive-win11-new-tab-{0}-stdout.log" -f $Name)
-    $stderrPath = Join-Path $layout.Logs ("interactive-win11-new-tab-{0}-stderr.log" -f $Name)
+    $stdoutPath = Join-Path $Layout.Logs ("interactive-win11-new-tab-{0}-stdout.log" -f $Name)
+    $stderrPath = Join-Path $Layout.Logs ("interactive-win11-new-tab-{0}-stderr.log" -f $Name)
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
     $launchArgs = @(
         '--single-instance=false'
-        "--class=winghostty-new-tab-$Name-$($layout.SandboxId)"
+        "--class=winghostty-new-tab-$Name-$($Layout.SandboxId)"
     )
 
     $process = Start-Process `
-        -FilePath $exePath `
+        -FilePath $ExePath `
         -ArgumentList $launchArgs `
-        -WorkingDirectory $repoRoot `
+        -WorkingDirectory $RepoRoot `
         -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath `
         -PassThru
@@ -405,18 +408,6 @@ function Invoke-NewTabScenario {
     }
 }
 
-$harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'new-tab' -ResetState:$ResetState
-$repoRoot = $harness.RepoRoot
-$layout = $harness.Layout
-$configDir = Join-Path $layout.LocalAppData 'winghostty'
-$configPath = Join-Path $configDir 'config.ghostty'
-New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-[System.IO.File]::WriteAllText(
-    $configPath,
-    '',
-    [System.Text.UTF8Encoding]::new($false)
-)
-
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
 $launchAction = Get-InteractiveWin11LaunchAction -ExePath $exePath -Rebuild:$Rebuild -BuildInputs $buildInputs
@@ -427,14 +418,48 @@ if ($launchAction -eq 'build') {
 
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 
-$titlebarRun = Invoke-NewTabScenario -Name 'titlebar' -SeedTabs 3 -OpenAction {
+function Invoke-NewTabScenarioRun {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [scriptblock] $OpenAction
+    )
+
+    $scenarioHarness = Initialize-InteractiveWin11Sandbox `
+        -RepoRoot $repoRoot `
+        -SandboxName ("new-tab-" + $Name) `
+        -ResetState:$ResetState
+    $scenarioLayout = $scenarioHarness.Layout
+    $scenarioRepoRoot = $scenarioHarness.RepoRoot
+    $scenarioConfigDir = Join-Path $scenarioLayout.LocalAppData 'winghostty'
+    $scenarioConfigPath = Join-Path $scenarioConfigDir 'config.ghostty'
+    New-Item -ItemType Directory -Force -Path $scenarioConfigDir | Out-Null
+    [System.IO.File]::WriteAllText(
+        $scenarioConfigPath,
+        '',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
+    return Invoke-NewTabScenario `
+        -Name $Name `
+        -SeedTabs 3 `
+        -OpenAction $OpenAction `
+        -Layout $scenarioLayout `
+        -ExePath $exePath `
+        -RepoRoot $scenarioRepoRoot
+}
+
+$titlebarRun = Invoke-NewTabScenarioRun -Name 'titlebar' -OpenAction {
     param($HostHwnd, $Deadline, $Process)
     Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1904
 }
 
-$commandRun = Invoke-NewTabScenario -Name 'command-palette' -SeedTabs 3 -OpenAction {
+$commandRun = Invoke-NewTabScenarioRun -Name 'command-palette' -OpenAction {
     param($HostHwnd, $Deadline, $Process)
     Invoke-CommandPaletteAction -HostHwnd $HostHwnd -Action 'new_tab' -Deadline $Deadline -Process $Process
 }
 
-Write-Host "interactive-win11 new-tab validation: PASS (titlebar=$($titlebarRun.Stdout), command=$($commandRun.Stdout))"
+Write-Host (
+    "interactive-win11 new-tab validation: PASS " +
+    "(titlebar_stdout=$($titlebarRun.Stdout), titlebar_stderr=$($titlebarRun.Stderr), " +
+    "command_stdout=$($commandRun.Stdout), command_stderr=$($commandRun.Stderr))"
+)

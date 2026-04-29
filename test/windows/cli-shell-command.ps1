@@ -35,14 +35,22 @@ function Get-CliShellExitCode {
         [IntPtr] $ProcessHandle
     )
 
-    $Process.Refresh()
-    if ($null -ne $Process.ExitCode) {
-        return [int] $Process.ExitCode
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return [int] $Process.ExitCode
+        }
+    }
+    catch {
+        # Fall through to the native lookup.
     }
 
     [uint32] $nativeExitCode = 0
     if (-not [CliShellCommandNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
         throw "Unable to read exit code for pid=$($Process.Id): $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    if ($nativeExitCode -eq 259) {
+        throw "Process has not exited yet for pid=$($Process.Id)"
     }
 
     return [int] $nativeExitCode
@@ -58,11 +66,13 @@ function Format-CmdArgument {
     if ($Argument.Length -eq 0) {
         return '""'
     }
-    if ($Argument -notmatch '[\s"]') {
-        return $Argument
+
+    $escaped = $Argument.Replace('%', '%%').Replace('"', '""')
+    if ($escaped -match '[\s"&|<>()^!]') {
+        return '"' + $escaped + '"'
     }
 
-    return '"' + $Argument.Replace('"', '""') + '"'
+    return $escaped
 }
 
 function Format-PowerShellLiteral {
@@ -153,7 +163,9 @@ switch ($Shell) {
                 $processHandle = $process.Handle
                 if (-not $process.WaitForExit(5000)) {
                     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                    $process.WaitForExit(1000) | Out-Null
+                    if (-not $process.WaitForExit(1000)) {
+                        throw "Timed out waiting for shell launcher process to exit."
+                    }
                 }
 
                 $exitCode = Get-CliShellExitCode -Process $process -ProcessHandle $processHandle

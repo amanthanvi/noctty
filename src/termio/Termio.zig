@@ -107,7 +107,10 @@ const OutputTrace = struct {
 
     fn writeSnapshot(self: *const OutputTrace) void {
         const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
+        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+            log.warn("termio output trace create failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
         defer file.close();
 
         var buffer: [1024]u8 = undefined;
@@ -126,8 +129,14 @@ const OutputTrace = struct {
             .max_process_output_gap_ms = self.max_process_output_gap_ms,
             .max_process_output_gap_ended_at_ms = self.max_process_output_gap_ended_at_ms,
             .first_process_output_at_ms = self.first_process_output_at_ms,
-        }, .{})}) catch return;
-        stream.flush() catch return;
+        }, .{})}) catch |err| {
+            log.warn("termio output trace write failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
+        stream.flush() catch |err| {
+            log.warn("termio output trace flush failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
     }
 };
 

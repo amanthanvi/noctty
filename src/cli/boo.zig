@@ -503,18 +503,23 @@ fn tryNextWindowsEvent(
     parser: *vaxis.Parser,
     state: *vaxis.tty.WindowsTty.EventState,
 ) !?vaxis.Event {
-    std.os.windows.WaitForSingleObject(tty.stdin, 0) catch |err| switch (err) {
-        error.WaitTimeOut => return null,
-        else => return err,
-    };
+    while (true) {
+        std.os.windows.WaitForSingleObject(tty.stdin, 0) catch |err| switch (err) {
+            error.WaitTimeOut => return null,
+            else => return err,
+        };
 
-    var event_count: u32 = 0;
-    var input_record: vaxis.tty.WindowsTty.INPUT_RECORD = undefined;
-    if (vaxis.tty.WindowsTty.ReadConsoleInputW(tty.stdin, &input_record, 1, &event_count) == 0) {
-        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        var event_count: u32 = 0;
+        var input_record: vaxis.tty.WindowsTty.INPUT_RECORD = undefined;
+        if (vaxis.tty.WindowsTty.ReadConsoleInputW(tty.stdin, &input_record, 1, &event_count) == 0) {
+            return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+        }
+        if (event_count == 0) return null;
+
+        if (try tty.eventFromRecord(&input_record, state, parser, null)) |event| {
+            return event;
+        }
     }
-
-    return try tty.eventFromRecord(&input_record, state, parser, null);
 }
 
 pub const FrameCache = struct {

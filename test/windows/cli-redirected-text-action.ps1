@@ -19,6 +19,11 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $exePath = Join-Path $repoRoot 'zig-out\bin\winghostty.exe'
 $scratchDir = Join-Path $repoRoot 'zig-out\cli-redirected'
 $actionSlug = $Action.TrimStart('+')
+$actionSlug = $actionSlug -replace '[\\/:*?"<>|]', '_'
+$actionSlug = $actionSlug.TrimEnd(' ', '.')
+if ([string]::IsNullOrWhiteSpace($actionSlug)) {
+    $actionSlug = 'action'
+}
 $stdoutPath = Join-Path $scratchDir "$actionSlug.stdout.txt"
 $stderrPath = Join-Path $scratchDir "$actionSlug.stderr.txt"
 
