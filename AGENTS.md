@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-04-30: `gh pr checks --watch` can stay stale at `pending 0` on this repo even while Actions job steps are actively running; verify merge gates with `gh api repos/.../actions/jobs/...` before treating the checks as stuck.
 - 2026-04-29: Repeated Win11 harness runs can leave `zig-out\bin\winghostty.exe` and `winghostty.com` locked by external service `vgc`; confirm the Restart Manager owner before treating install-step `NTSTATUS=0xc0000043` as a code regression.
 - 2026-04-29: In `src/renderer/Thread.zig`, do not arm the Win32 render follow-up timer from both the wakeup path and the follow-up callback path; double-submitting `render_c` trips `invalid state in submission queue state=.active` and destabilizes `+boo` / streaming redraws.
 - 2026-04-29: `interactive-win11-boo-multitab.ps1` must not gate on whole-run `max_paint_gap_ms` / `max_process_output_gap_ms` before `+boo` actually starts; the seeded tab's initial prompt plus the harness `go` wait can create a false “stalled `+boo`” gap before the animation begins.
