@@ -203,6 +203,7 @@ Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -Pas
 Invoke-Harness -ScriptName 'interactive-win11-boo-performance.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-boo-multitab.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-new-tab.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
