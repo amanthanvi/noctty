@@ -104,6 +104,9 @@ public static class Win11ShellCommandLiveNative {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    public static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
@@ -237,7 +240,8 @@ function Assert-ForegroundWindow {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    if ([Win11ShellCommandLiveNative]::GetForegroundWindow() -eq $Hwnd) {
+    $foreground = [Win11ShellCommandLiveNative]::GetForegroundWindow()
+    if (($foreground -eq $Hwnd) -or [Win11ShellCommandLiveNative]::IsChild($Hwnd, $foreground)) {
         return $true
     }
 
