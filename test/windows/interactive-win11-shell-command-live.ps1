@@ -121,6 +121,18 @@ $SW_RESTORE = 9
 $SWP_NOMOVE = 0x0002
 $SWP_NOSIZE = 0x0001
 $SWP_SHOWWINDOW = 0x0040
+$VISIBLE_TAB_MIN_ID = 1000
+$VISIBLE_TAB_MAX_ID_EXCLUSIVE = 1900
+$HOST_COMMAND_NEW_TAB_ID = 1904
+$SEND_TIMEOUT_MS = 1000
+$BOO_AUTO_EXIT_MS = 1000
+$KEY_STROKE_DELAY_MS = 15
+$CAPTURE_PROMOTION_DELAY_MS = 150
+$CAPTURE_SETTLE_MS = 300
+$POST_COMMAND_CAPTURE_SETTLE_MS = 1500
+$IMAGE_DELTA_SAMPLE_STEP = 4
+$IMAGE_DELTA_CHANNEL_THRESHOLD = 24
+$MIN_CHANGED_PIXELS = 500
 $VK_CONTROL = 0x11
 $VK_MENU = 0x12
 $VK_RETURN = 0x0D
@@ -228,7 +240,7 @@ function Get-VisibleTabButtons {
     )
 
     return Get-VisibleChildControls -Parent $Parent |
-        Where-Object { $_.Id -ge 1000 -and $_.Id -lt 1900 } |
+        Where-Object { $_.Id -ge $VISIBLE_TAB_MIN_ID -and $_.Id -lt $VISIBLE_TAB_MAX_ID_EXCLUSIVE } |
         Sort-Object Id
 }
 
@@ -253,7 +265,7 @@ function Invoke-HostCommand {
         (New-WParam -Low $CommandId),
         [IntPtr]::Zero,
         [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] 1000,
+        [uint32] $SEND_TIMEOUT_MS,
         [ref] $sendResult
     )
 }
@@ -276,7 +288,7 @@ function Activate-TabIndex {
         [UIntPtr]::Zero,
         [IntPtr]::Zero,
         [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] 1000,
+        [uint32] $SEND_TIMEOUT_MS,
         [ref] $sendResult
     )
     $sendResult = [UIntPtr]::Zero
@@ -286,7 +298,7 @@ function Activate-TabIndex {
         [UIntPtr]::Zero,
         [IntPtr]::Zero,
         [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] 1000,
+        [uint32] $SEND_TIMEOUT_MS,
         [ref] $sendResult
     )
 }
@@ -342,7 +354,6 @@ function Send-KeyMessage {
     }
 
     $message = if ($KeyUp) { $WM_KEYUP } else { $WM_KEYDOWN }
-    $sendTimeoutMs = 1000
     $sendResult = [UIntPtr]::Zero
     $sendStatus = [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
         $Hwnd,
@@ -350,7 +361,7 @@ function Send-KeyMessage {
         [UIntPtr]([uint64] $VirtualKey),
         (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp:$KeyUp),
         [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $sendTimeoutMs,
+        [uint32] $SEND_TIMEOUT_MS,
         [ref] $sendResult
     )
     if ($sendStatus -eq [IntPtr]::Zero) {
@@ -366,7 +377,7 @@ function Send-KeyMessage {
             [UIntPtr]([uint64] $CharCode),
             (New-KeyLParam -ScanCode ([uint16] $scanCode)),
             [uint32] $SMTO_ABORTIFHUNG,
-            [uint32] $sendTimeoutMs,
+            [uint32] $SEND_TIMEOUT_MS,
             [ref] $sendResult
         )
         if ($sendStatus -eq [IntPtr]::Zero) {
@@ -418,7 +429,7 @@ function Send-Line {
 
     foreach ($character in $Text.ToCharArray()) {
         Send-ModifiedChar -Hwnd $Hwnd -Character $character
-        Start-Sleep -Milliseconds 15
+        Start-Sleep -Milliseconds $KEY_STROKE_DELAY_MS
     }
 
     Send-KeyMessage -Hwnd $Hwnd -VirtualKey ([uint16] $VK_RETURN) -CharCode 13
@@ -475,7 +486,7 @@ function Promote-WindowForCapture {
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
     [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
 }
 
 function Measure-ImageDelta {
@@ -493,8 +504,8 @@ function Measure-ImageDelta {
 
         $changedPixels = 0
         $sampledPixels = 0
-        for ($y = 0; $y -lt $before.Height; $y += 4) {
-            for ($x = 0; $x -lt $before.Width; $x += 4) {
+        for ($y = 0; $y -lt $before.Height; $y += $IMAGE_DELTA_SAMPLE_STEP) {
+            for ($x = 0; $x -lt $before.Width; $x += $IMAGE_DELTA_SAMPLE_STEP) {
                 $beforePixel = $before.GetPixel($x, $y)
                 $afterPixel = $after.GetPixel($x, $y)
                 $sampledPixels += 1
@@ -502,7 +513,7 @@ function Measure-ImageDelta {
                 $delta = [Math]::Abs($beforePixel.R - $afterPixel.R) +
                     [Math]::Abs($beforePixel.G - $afterPixel.G) +
                     [Math]::Abs($beforePixel.B - $afterPixel.B)
-                if ($delta -ge 24) {
+                if ($delta -ge $IMAGE_DELTA_CHANNEL_THRESHOLD) {
                     $changedPixels += 1
                 }
             }
@@ -569,7 +580,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $co
 @(
     '@echo off'
     "cd /d `"$($layout.Temp)`""
-    if ($RunBooFirst) { 'set WINGHOSTTY_BOO_AUTO_EXIT_MS=1000' }
+    if ($RunBooFirst) { "set WINGHOSTTY_BOO_AUTO_EXIT_MS=$BOO_AUTO_EXIT_MS" }
     if ($RunBooFirst) { 'winghostty +boo' }
     if ($RunBooFirst) { 'set WINGHOSTTY_BOO_AUTO_EXIT_MS=' }
     'echo READY>interactive-win11-shell-command-live-ready.txt'
@@ -610,7 +621,7 @@ try {
 
     while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
         $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
-        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904
+        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId $HOST_COMMAND_NEW_TAB_ID
         Wait-Until -Deadline $deadline -Description "seed tabs ($targetTabCount/$SeedTabs)" -Process $process -Condition {
             (Get-VisibleTabCount -Parent $hostHwnd) -ge $targetTabCount
         }
@@ -623,7 +634,7 @@ try {
     }
 
     $surfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
     Promote-WindowForCapture -Hwnd $hostHwnd
     Save-WindowCapture -Hwnd $surfaceHwnd -Path $beforeCapturePath
 
@@ -631,29 +642,34 @@ try {
     Wait-Until -Deadline $deadline -Description 'control output file' -Process $process -Condition {
         Test-Path -LiteralPath $controlPath
     }
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
 
     Send-Line -Hwnd $surfaceHwnd -Text 'where winghostty>interactive-win11-shell-command-live-resolved.txt'
     Wait-Until -Deadline $deadline -Description 'command resolution file' -Process $process -Condition {
         Test-Path -LiteralPath $resolvedPath
     }
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
 
     $resolved = @(Get-Content -LiteralPath $resolvedPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $expectedCommandPath = Join-Path (Split-Path -Parent $exePath) 'winghostty.com'
+    $expectedCommandDir = Split-Path -Parent $exePath
+    $resolvedFirstDir = if ($resolved.Count -gt 0) { Split-Path -Parent $resolved[0] } else { '' }
+    $resolvedFirstName = if ($resolved.Count -gt 0) { [System.IO.Path]::GetFileName($resolved[0]) } else { '' }
     if ($resolved.Count -lt 1) {
         throw "live shell command resolution produced no output ($resolvedPath)"
     }
-    if (-not $resolved[0].Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "live shell resolved unexpected first winghostty command: $($resolved[0])"
+    if (
+        (-not $resolvedFirstDir.Equals($expectedCommandDir, [System.StringComparison]::OrdinalIgnoreCase)) -or
+        ($resolvedFirstName -notin @('winghostty.com', 'winghostty.exe'))
+    ) {
+        throw "live shell resolved unexpected first winghostty command: $($resolved[0]) (expected same install dir as $exePath)"
     }
 
     Send-Line -Hwnd $surfaceHwnd -Text ("{0} & echo POST>interactive-win11-shell-command-live-post.txt" -f $typedCommandText)
-    Start-Sleep -Milliseconds 1500
+    Start-Sleep -Milliseconds $POST_COMMAND_CAPTURE_SETTLE_MS
     Promote-WindowForCapture -Hwnd $hostHwnd
     Save-WindowCapture -Hwnd $surfaceHwnd -Path $afterCapturePath
     $imageDelta = Measure-ImageDelta -BeforePath $beforeCapturePath -AfterPath $afterCapturePath
-    if ($imageDelta.ChangedPixels -lt 500) {
+    if ($imageDelta.ChangedPixels -lt $MIN_CHANGED_PIXELS) {
         throw "live shell command '$typedCommandText' produced too little visible change (changed=$($imageDelta.ChangedPixels), sampled=$($imageDelta.SampledPixels))"
     }
 
