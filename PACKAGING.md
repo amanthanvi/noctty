@@ -36,8 +36,11 @@ produces:
 4. A release icon asset
 5. Generated Scoop package-manager metadata
 
-Unsigned releases are allowed. SmartScreen friction is expected until code
-signing is added.
+Local unsigned packaging is still allowed for smoke validation, but the GitHub
+Release workflow currently requires signing and fails closed when signing is
+absent. SmartScreen and publisher trust should still be treated as incomplete
+until winghostty moves from internal/self-signed signing to a publicly trusted
+certificate.
 
 ## Local Packaging
 
@@ -87,6 +90,25 @@ the GitHub Release is live. Each path is explicit and configuration-gated.
 Release metadata comes from the committed `dist/windows/release-metadata.json`
 file, so the release tag, generated package-manager metadata, and GitHub release
 notes all agree on the current upstream base.
+
+### Authenticode Signing
+
+The release workflow currently reads these inputs:
+
+- Secrets: `WINDOWS_CODESIGN_PFX_BASE64`, `WINDOWS_CODESIGN_PFX_PASSWORD`
+- Optional secret: `WINDOWS_CODESIGN_TIMESTAMP_URL`
+- Optional repo/environment variable: `WINDOWS_CODESIGN_TRUST_SELF_SIGNED`
+
+For local-only or internal releases, a self-signed PFX is supported. When
+`WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, the packaging script imports the
+signing certificate's public half into `Cert:\CurrentUser\Root` and
+`Cert:\CurrentUser\TrustedPublisher` before signature validation. This keeps
+`Get-AuthenticodeSignature` green on the current machine/runner without
+weakening the release gate.
+
+This does not make the resulting installer or binaries publicly trusted. On
+machines that do not trust that self-signed certificate, Windows will still
+show an unknown publisher / SmartScreen-style trust warning.
 
 ### WinGet
 

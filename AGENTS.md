@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-04-30: Self-signed Authenticode on Windows signs successfully but `Get-AuthenticodeSignature` returns untrusted-root `UnknownError` until that cert is also trusted in `CurrentUser\Root` and `TrustedPublisher`; internal CI/release probes must either import trust first or treat self-signed validation as a distinct path.
 - 2026-04-30: `gh pr checks --watch` can stay stale at `pending 0` on this repo even while Actions job steps are actively running; verify merge gates with `gh api repos/.../actions/jobs/...` before treating the checks as stuck.
 - 2026-04-29: Repeated Win11 harness runs can leave `zig-out\bin\winghostty.exe` and `winghostty.com` locked by external service `vgc`; confirm the Restart Manager owner before treating install-step `NTSTATUS=0xc0000043` as a code regression.
 - 2026-04-29: In `src/renderer/Thread.zig`, do not arm the Win32 render follow-up timer from both the wakeup path and the follow-up callback path; double-submitting `render_c` trips `invalid state in submission queue state=.active` and destabilizes `+boo` / streaming redraws.
@@ -339,3 +340,4 @@ This fork has removed the upstream `macos/` Xcode app and the
 - 2026-04-19: Command-palette completion can also replay identical state. Even when `EM_SETSEL` still needs to run for the edit control, `overlay_completion_seed` and `overlay_completion_value` should not be freed and re-duped if they already match the same completion.
 - 2026-04-19: `appendOwnedString()` itself can cheaply no-op on exact same-value writes. Without that guard, every caller that misses a local equality check still pays alloc/free churn, so broad cache-audit work should prefer fixing the shared helper once and validating the affected slices.
 - 2026-04-18: On Windows in this repo, run `zig build*` / `zig build test*` through `scripts/dev-windows.cmd` (or an equivalent VS-dev + Zig 0.15.2 shell). The ambient Codex shell can miss the intended native toolchain setup and mislead with generic Zig/native dependency failures that disappear in the bootstrapped environment.
+- 2026-04-30: Cross-thread ChatGPT URLs can stall behind Cloudflare verify-human; use `codex exec resume <thread-id> <prompt>` for coordination, and do not discard a completed streamed answer just because Codex ends with a trailing `thread ... not found` rollout-record error.
