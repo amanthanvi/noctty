@@ -27,6 +27,7 @@ jobs:
   windows-release:
     name: Windows Release
     runs-on: windows-latest
+    environment: release
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
@@ -35,16 +36,11 @@ jobs:
       SCOOP_BUCKET_MANIFEST_PATH: ${{ vars.SCOOP_BUCKET_MANIFEST_PATH }}
       WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
       WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
-      WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+      WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.15.2
 
       - name: Resolve release metadata
         id: meta
@@ -96,6 +92,21 @@ jobs:
           "version_line=$versionLine" >> $env:GITHUB_OUTPUT
           "upstream_base_version=$upstreamBaseVersion" >> $env:GITHUB_OUTPUT
           "first_fork_patch=$firstForkPatch" >> $env:GITHUB_OUTPUT
+
+      - name: Release preflight
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+        shell: pwsh
+        run: >
+          powershell -ExecutionPolicy Bypass -File scripts/release-preflight.ps1
+          -Version ${{ steps.meta.outputs.version }}
+          -RequireSigning
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
 
       - name: Install Inno Setup
         shell: pwsh
