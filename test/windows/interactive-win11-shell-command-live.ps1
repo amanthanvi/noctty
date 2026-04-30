@@ -57,7 +57,8 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
     exit $bootstrapExitCode
 }
 
-Add-Type -TypeDefinition @'
+if (-not ('Win11ShellCommandLiveNative' -as [type])) {
+    Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -113,7 +114,11 @@ public static class Win11ShellCommandLiveNative {
     public static extern short VkKeyScanW(char ch);
 }
 '@
-Add-Type -AssemblyName System.Drawing
+}
+
+if (-not ('System.Drawing.Bitmap' -as [type])) {
+    Add-Type -AssemblyName System.Drawing
+}
 
 $MAPVK_VK_TO_VSC = 0
 $SMTO_ABORTIFHUNG = 0x0002
@@ -258,16 +263,37 @@ function Invoke-HostCommand {
         [Parameter(Mandatory)] [int] $CommandId
     )
 
+    Invoke-SendMessageTimeoutOrThrow `
+        -Hwnd $HostHwnd `
+        -Message 0x0111 `
+        -WParam (New-WParam -Low $CommandId) `
+        -LParam ([IntPtr]::Zero) `
+        -Description "host command $CommandId"
+}
+
+function Invoke-SendMessageTimeoutOrThrow {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [uint32] $Message,
+        [Parameter(Mandatory)] [UIntPtr] $WParam,
+        [Parameter(Mandatory)] [IntPtr] $LParam,
+        [Parameter(Mandatory)] [string] $Description
+    )
+
     $sendResult = [UIntPtr]::Zero
-    [void] [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-        $HostHwnd,
-        0x0111,
-        (New-WParam -Low $CommandId),
-        [IntPtr]::Zero,
+    $sendStatus = [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
+        $Hwnd,
+        $Message,
+        $WParam,
+        $LParam,
         [uint32] $SMTO_ABORTIFHUNG,
         [uint32] $SEND_TIMEOUT_MS,
         [ref] $sendResult
     )
+    if ($sendStatus -eq [IntPtr]::Zero) {
+        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "SendMessageTimeoutW failed for $Description hwnd=$Hwnd error=$lastError"
+    }
 }
 
 function Activate-TabIndex {
@@ -281,26 +307,18 @@ function Activate-TabIndex {
         throw "tab index $TabIndex was not visible"
     }
 
-    $sendResult = [UIntPtr]::Zero
-    [void] [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-        $tab.Hwnd,
-        0x0201,
-        [UIntPtr]::Zero,
-        [IntPtr]::Zero,
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $SEND_TIMEOUT_MS,
-        [ref] $sendResult
-    )
-    $sendResult = [UIntPtr]::Zero
-    [void] [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-        $tab.Hwnd,
-        0x0202,
-        [UIntPtr]::Zero,
-        [IntPtr]::Zero,
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $SEND_TIMEOUT_MS,
-        [ref] $sendResult
-    )
+    Invoke-SendMessageTimeoutOrThrow `
+        -Hwnd $tab.Hwnd `
+        -Message 0x0201 `
+        -WParam ([UIntPtr]::Zero) `
+        -LParam ([IntPtr]::Zero) `
+        -Description "activate tab index $TabIndex mouse down"
+    Invoke-SendMessageTimeoutOrThrow `
+        -Hwnd $tab.Hwnd `
+        -Message 0x0202 `
+        -WParam ([UIntPtr]::Zero) `
+        -LParam ([IntPtr]::Zero) `
+        -Description "activate tab index $TabIndex mouse up"
 }
 
 function Wait-Until {
@@ -673,7 +691,7 @@ try {
         throw "live shell command '$typedCommandText' produced too little visible change (changed=$($imageDelta.ChangedPixels), sampled=$($imageDelta.SampledPixels))"
     }
 
-    Wait-Until -Deadline $deadline -Description 'post-help output file' -Process $process -Condition {
+    Wait-Until -Deadline $deadline -Description 'post output file' -Process $process -Condition {
         Test-Path -LiteralPath $postPath
     }
 
