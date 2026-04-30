@@ -203,6 +203,12 @@ Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -Pas
 Invoke-Harness -ScriptName 'interactive-win11-boo-performance.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-boo-multitab.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
+if ($env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
+    Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
+}
+else {
+    Write-Host 'interactive-win11 shell command live validation: SKIP (set WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS=1 to require the foreground-sensitive harness in the composite suite)'
+}
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-new-tab.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
