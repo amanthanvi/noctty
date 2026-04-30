@@ -179,9 +179,16 @@ function Set-InteractiveWin11Environment {
     }
 
     if ($IncludeResourcesDir) {
+        $builtResourcesDir = Join-Path $Layout.RepoRoot 'zig-out\share\ghostty'
+        $resourcesDir = if (Test-Path -LiteralPath $builtResourcesDir -PathType Container) {
+            $builtResourcesDir
+        }
+        else {
+            Join-Path $Layout.RepoRoot 'src'
+        }
         [System.Environment]::SetEnvironmentVariable(
             'GHOSTTY_RESOURCES_DIR',
-            (Join-Path $Layout.RepoRoot 'src'),
+            $resourcesDir,
             'Process'
         )
     }
@@ -332,6 +339,89 @@ function Get-InteractiveWin11TextFileTail {
     return (Get-Content -LiteralPath $Path | Select-Object -Last $LineCount) -join [Environment]::NewLine
 }
 
+function Get-InteractiveWin11RequiredJsonFile {
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing expected trace/state file: $Path"
+    }
+
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+}
+
+function Show-InteractiveWin11Window {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [int] $ShowCode = 9,
+        [switch] $SetForeground
+    )
+
+    $nativeType = $NativeTypeName -as [type]
+    if ($null -eq $nativeType) {
+        throw "Missing native helper type: $NativeTypeName"
+    }
+
+    [void] $nativeType::ShowWindow($Hwnd, $ShowCode)
+    if ($SetForeground) {
+        [void] $nativeType::SetForegroundWindow($Hwnd)
+    }
+}
+
+function Show-InteractiveWin11ProcessMainWindow {
+    param(
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [int] $ShowCode = 9,
+        [switch] $SetForeground,
+        [int] $ReadyTimeoutSeconds = 5
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($ReadyTimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $Process.Refresh()
+        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
+            Show-InteractiveWin11Window `
+                -Hwnd $Process.MainWindowHandle `
+                -NativeTypeName $NativeTypeName `
+                -ShowCode $ShowCode `
+                -SetForeground:$SetForeground
+            return
+        }
+
+        if ($Process.HasExited) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 100
+    }
+}
+
+function Wait-InteractiveWin11Until {
+    param(
+        [Parameter(Mandatory)] [scriptblock] $Condition,
+        [Parameter(Mandatory)] [string] $Description,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
+    )
+
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        if ($null -ne $Process -and $Process.HasExited) {
+            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+        }
+
+        if (& $Condition) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 100
+    }
+
+    throw "Timed out waiting for $Description"
+}
+
 function Stop-InteractiveWin11Process {
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
@@ -427,6 +517,51 @@ function Get-InteractiveWin11LaunchAction {
     }
 
     return 'build'
+}
+
+function Initialize-InteractiveWin11ProcessNative {
+    if (-not ('InteractiveWin11ProcessNative' -as [type])) {
+        Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class InteractiveWin11ProcessNative {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+}
+"@
+    }
+}
+
+function Get-InteractiveWin11ProcessExitCode {
+    param(
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)] [IntPtr] $ProcessHandle
+    )
+
+    Initialize-InteractiveWin11ProcessNative
+
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return [int] $Process.ExitCode
+        }
+    }
+    catch {
+    }
+
+    [uint32] $nativeExitCode = 0
+    if (-not [InteractiveWin11ProcessNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
+        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "Exit code could not be read for pid=$($Process.Id): $lastError"
+    }
+
+    if ($nativeExitCode -eq 259) {
+        throw "Process has not exited yet for pid=$($Process.Id)"
+    }
+
+    return [int] $nativeExitCode
 }
 
 function Reset-InteractiveWin11Sandbox {

@@ -42,6 +42,8 @@ pub const Command = union(enum) {
         alloc: Allocator,
         input_: ?[]const u8,
     ) !void {
+        const Tag = std.meta.Tag(Self);
+
         // Input is required. Whitespace on the edges isn't needed.
         // Commands must be non-empty.
         const input = input_ orelse return error.ValueRequired;
@@ -50,13 +52,11 @@ pub const Command = union(enum) {
 
         // If we have a `:` then we MIGHT have a prefix to specify what
         // tag we should use.
-        const tag: std.meta.Tag(Self), const str: []const u8 = tag: {
+        const tag: Tag, const str: []const u8 = tag: {
             if (std.mem.indexOfScalar(u8, trimmed, ':')) |idx| {
                 const prefix = trimmed[0..idx];
-                if (std.mem.eql(u8, prefix, "direct")) {
-                    break :tag .{ .direct, trimmed[idx + 1 ..] };
-                } else if (std.mem.eql(u8, prefix, "shell")) {
-                    break :tag .{ .shell, trimmed[idx + 1 ..] };
+                if (std.meta.stringToEnum(Tag, prefix)) |prefix_tag| {
+                    break :tag .{ prefix_tag, trimmed[idx + 1 ..] };
                 }
             }
 
@@ -245,6 +245,18 @@ pub const Command = union(enum) {
         try testing.expectEqual(v.direct.len, 2);
         try testing.expectEqualStrings(v.direct[0], "echo");
         try testing.expectEqualStrings(v.direct[1], "hello");
+    }
+
+    test "Command: parseCLI unknown prefix falls back to shell" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var v: Self = undefined;
+        try v.parseCLI(alloc, "custom:echo hello");
+        try testing.expect(v == .shell);
+        try testing.expectEqualStrings(v.shell, "custom:echo hello");
     }
 
     test "Command: argIterator shell" {

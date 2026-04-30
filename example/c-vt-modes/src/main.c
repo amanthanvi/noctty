@@ -3,15 +3,14 @@
 
 //! [modes-pack-unpack]
 void modes_example() {
-  // Create a mode for DEC mode 25 (cursor visible)
-  GhosttyMode tag = ghostty_mode_new(25, false);
+  // Use the typed predefined constants instead of raw mode numbers.
+  GhosttyMode tag = GHOSTTY_MODE_CURSOR_VISIBLE;
   printf("value=%u ansi=%d packed=0x%04x\n",
       ghostty_mode_value(tag),
       ghostty_mode_ansi(tag),
       tag);
 
-  // Create a mode for ANSI mode 4 (insert mode)
-  GhosttyMode ansi_tag = ghostty_mode_new(4, true);
+  GhosttyMode ansi_tag = GHOSTTY_MODE_INSERT;
   printf("value=%u ansi=%d packed=0x%04x\n",
       ghostty_mode_value(ansi_tag),
       ghostty_mode_ansi(ansi_tag),

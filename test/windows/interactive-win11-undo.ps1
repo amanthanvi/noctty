@@ -82,6 +82,13 @@ public sealed class Win11UndoChildControl {
 }
 '@
 
+enum Win11UndoPaletteAction {
+    Undo = 0
+    Redo = 1
+    NewSplitDown = 2
+    CloseTabThis = 3
+}
+
 function Assert-Equal {
     param(
         [Parameter(Mandatory)] $Actual,
@@ -265,7 +272,7 @@ function Invoke-HostCommand {
 function Invoke-CommandPaletteAction {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [string] $Action,
+        [Parameter(Mandatory)] [Win11UndoPaletteAction] $Action,
         [Parameter(Mandatory)] [DateTime] $Deadline,
         [System.Diagnostics.Process] $Process
     )
@@ -277,7 +284,13 @@ function Invoke-CommandPaletteAction {
     }
 
     $edit = Get-VisibleChildById -Parent $script:Win11UndoPaletteHostHwnd -Id 2002
-    foreach ($ch in $Action.ToCharArray()) {
+    $actionText = switch ($Action) {
+        ([Win11UndoPaletteAction]::Undo) { 'undo' }
+        ([Win11UndoPaletteAction]::Redo) { 'redo' }
+        ([Win11UndoPaletteAction]::NewSplitDown) { 'new_split:down' }
+        ([Win11UndoPaletteAction]::CloseTabThis) { 'close_tab:this' }
+    }
+    foreach ($ch in $actionText.ToCharArray()) {
         [void] [Win11UndoNative]::SendMessageW(
             $edit.Hwnd,
             0x0102,
@@ -377,7 +390,7 @@ try {
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'initial visible surface count'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'new_split:down' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::NewSplitDown) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'split surface creation' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
@@ -386,19 +399,19 @@ try {
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'visible surface count after new_split:down'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'undo' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'undo removed split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible surface count after split undo'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'redo' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'redo restored split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'visible surface count after split redo'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'undo' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'second undo removed split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
@@ -419,19 +432,19 @@ try {
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after close_tab:this'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'undo' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'undo restored closed tab' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 2 'tab count after undo'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'redo' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'redo closed restored tab' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after redo'
 
-    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action 'close_tab:this' -Deadline $deadline -Process $process
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::CloseTabThis) -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'last tab close' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 0
     }

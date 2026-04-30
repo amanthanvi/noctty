@@ -13,6 +13,7 @@ const posix = std.posix;
 const termio = @import("../termio.zig");
 const StreamHandler = @import("stream_handler.zig").StreamHandler;
 const terminalpkg = @import("../terminal/main.zig");
+const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 const xev = @import("../global.zig").xev;
 const renderer = @import("../renderer.zig");
 const apprt = @import("../apprt.zig");
@@ -22,6 +23,122 @@ const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_exec);
+
+const OutputTrace = struct {
+    path: ?[]const u8 = null,
+    start_time: ?std.time.Instant = null,
+    process_output_count: u64 = 0,
+    process_output_bytes: u64 = 0,
+    renderer_wake_count: u64 = 0,
+    queued_renderer_message_count: u64 = 0,
+    synchronized_output_active_count: u64 = 0,
+    ended_synchronized_output_count: u64 = 0,
+    completed_synchronized_output_batch_count: u64 = 0,
+    has_render_work_count: u64 = 0,
+    max_process_output_gap_ms: u64 = 0,
+    max_process_output_gap_ended_at_ms: u64 = 0,
+    last_process_output_tick_ms: ?u64 = null,
+    first_process_output_at_ms: ?u64 = null,
+
+    fn init(alloc: Allocator) OutputTrace {
+        const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
+            alloc,
+            "WINGHOSTTY_TERMIO_TRACE_FILE",
+        ) catch return .{}) orelse return .{};
+
+        return .{
+            .path = owned,
+            .start_time = std.time.Instant.now() catch null,
+        };
+    }
+
+    fn deinit(self: *OutputTrace, alloc: Allocator) void {
+        defer {
+            if (self.path) |path| alloc.free(path);
+            self.* = .{};
+        }
+
+        if (self.path == null) return;
+        self.writeSnapshot();
+    }
+
+    fn enabled(self: *const OutputTrace) bool {
+        return self.path != null;
+    }
+
+    fn elapsedMs(self: *const OutputTrace) u64 {
+        const start_time = self.start_time orelse return 0;
+        const now = std.time.Instant.now() catch return 0;
+        return @intCast(@divFloor(now.since(start_time), std.time.ns_per_ms));
+    }
+
+    fn noteProcessOutput(
+        self: *OutputTrace,
+        buf_len: usize,
+        should_render: bool,
+        queued_renderer_message: bool,
+        synchronized_output_active: bool,
+        ended_synchronized_output: bool,
+        completed_synchronized_output_batch: bool,
+        has_render_work: bool,
+    ) void {
+        if (!self.enabled()) return;
+
+        self.process_output_count += 1;
+        self.process_output_bytes += buf_len;
+        if (should_render) self.renderer_wake_count += 1;
+        if (queued_renderer_message) self.queued_renderer_message_count += 1;
+        if (synchronized_output_active) self.synchronized_output_active_count += 1;
+        if (ended_synchronized_output) self.ended_synchronized_output_count += 1;
+        if (completed_synchronized_output_batch) self.completed_synchronized_output_batch_count += 1;
+        if (has_render_work) self.has_render_work_count += 1;
+
+        const elapsed_ms = self.elapsedMs();
+        if (self.first_process_output_at_ms == null) self.first_process_output_at_ms = elapsed_ms;
+        if (self.last_process_output_tick_ms) |last_tick_ms| if (elapsed_ms > last_tick_ms) {
+            const gap_ms = elapsed_ms - last_tick_ms;
+            if (gap_ms > self.max_process_output_gap_ms) {
+                self.max_process_output_gap_ms = gap_ms;
+                self.max_process_output_gap_ended_at_ms = elapsed_ms;
+            }
+        };
+        self.last_process_output_tick_ms = elapsed_ms;
+    }
+
+    fn writeSnapshot(self: *const OutputTrace) void {
+        const trace_path = self.path orelse return;
+        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+            log.warn("termio output trace create failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
+        defer file.close();
+
+        var buffer: [1024]u8 = undefined;
+        var writer = file.writer(&buffer);
+        const stream = &writer.interface;
+        stream.print("{f}", .{std.json.fmt(.{
+            .runtime_ms = self.elapsedMs(),
+            .process_output_count = self.process_output_count,
+            .process_output_bytes = self.process_output_bytes,
+            .renderer_wake_count = self.renderer_wake_count,
+            .queued_renderer_message_count = self.queued_renderer_message_count,
+            .synchronized_output_active_count = self.synchronized_output_active_count,
+            .ended_synchronized_output_count = self.ended_synchronized_output_count,
+            .completed_synchronized_output_batch_count = self.completed_synchronized_output_batch_count,
+            .has_render_work_count = self.has_render_work_count,
+            .max_process_output_gap_ms = self.max_process_output_gap_ms,
+            .max_process_output_gap_ended_at_ms = self.max_process_output_gap_ended_at_ms,
+            .first_process_output_at_ms = self.first_process_output_at_ms orelse 0,
+        }, .{})}) catch |err| {
+            log.warn("termio output trace write failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
+        stream.flush() catch |err| {
+            log.warn("termio output trace flush failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
+    }
+};
 
 /// Mutex state argument for queueMessage.
 pub const MutexState = enum { locked, unlocked };
@@ -66,6 +183,9 @@ terminal_stream: StreamHandler.Stream,
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
 last_cursor_reset: ?std.time.Instant = null,
+
+/// Optional PTY/output trace for debugging render wake cadence.
+output_trace: OutputTrace = .{},
 
 /// State we have for thread enter. This may be null if we don't need
 /// to keep track of any state or if its already been freed.
@@ -316,6 +436,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .backend = backend,
         .mailbox = opts.mailbox,
         .terminal_stream = .initAlloc(alloc, handler),
+        .output_trace = OutputTrace.init(alloc),
         .thread_enter_state = thread_enter_state,
     };
 }
@@ -328,6 +449,7 @@ pub fn deinit(self: *Termio) void {
 
     // Clear any StreamHandler state
     self.terminal_stream.deinit();
+    self.output_trace.deinit(self.alloc);
 
     // Clear any initial state if we have it
     if (self.thread_enter_state) |v| v.destroy();
@@ -582,12 +704,8 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
                 );
             }
 
-            // Clear all Kitty graphics state for this screen. This copies
-            // Kitty's behavior when Cmd+K deletes all Kitty graphics. I
-            // didn't spend time researching whether it only deletes Kitty
-            // graphics that are placed above the cursor or if it deletes
-            // all of them. We delete all of them for now but if this behavior
-            // isn't fully correct we should fix this later.
+            // Keep the screen clear consistent by dropping Kitty graphics
+            // state alongside the text clear.
             self.terminal.screens.active.kitty_images.delete(
                 self.terminal.screens.active.alloc,
                 &self.terminal,
@@ -599,11 +717,6 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
 
         // At a prompt, we want to first fully clear the screen, and then after
         // send a FF (0x0C) to the shell so that it can repaint the screen.
-        // Mark the current row as a not a prompt so we can properly
-        // clear the full screen in the next eraseDisplay call.
-        // TODO: fix this
-        // self.terminal.markSemanticPrompt(.command);
-        // assert(!self.terminal.cursorIsAtPrompt());
         self.terminal.eraseDisplay(.complete, false);
     }
 
@@ -657,18 +770,50 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 /// call with pty data but it is also called by the read thread when using
 /// an exec subprocess.
 pub fn processOutput(self: *Termio, buf: []const u8) void {
-    const should_render = render: {
+    const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
         self.renderer_state.mutex.lock();
         defer self.renderer_state.mutex.unlock();
-        const had_render_work = terminalNeedsRendererWake(&self.terminal);
-        const queued_renderer_message = self.processOutputLocked(buf);
-        const has_render_work = terminalNeedsRendererWake(&self.terminal);
-        break :render !had_render_work and (has_render_work or queued_renderer_message);
+        const had_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
+        const was_synchronized_output = self.terminal.modes.get(.synchronized_output);
+        const processing = self.processOutputLocked(buf);
+        const has_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
+        const synchronized_output_active = self.terminal.modes.get(.synchronized_output);
+        const ended_synchronized_output =
+            was_synchronized_output and !synchronized_output_active;
+        const completed_synchronized_output_batch =
+            processing.started_synchronized_output and
+            !synchronized_output_active;
+        const should_render = shouldWakeRendererAfterOutput(
+            had_render_work,
+            has_render_work,
+            processing.queued_renderer_message,
+            synchronized_output_active,
+            ended_synchronized_output,
+            completed_synchronized_output_batch,
+        );
+        break :render .{
+            .should_render = should_render,
+            .queued_renderer_message = processing.queued_renderer_message,
+            .synchronized_output_active = synchronized_output_active,
+            .ended_synchronized_output = ended_synchronized_output,
+            .completed_synchronized_output_batch = completed_synchronized_output_batch,
+            .has_render_work = has_render_work,
+        };
     };
 
-    if (should_render) {
+    self.output_trace.noteProcessOutput(
+        buf.len,
+        decision.should_render,
+        decision.queued_renderer_message,
+        decision.synchronized_output_active,
+        decision.ended_synchronized_output,
+        decision.completed_synchronized_output_batch,
+        decision.has_render_work,
+    );
+
+    if (decision.should_render) {
         // Wake the renderer after parsing so it doesn't contend on the
         // terminal mutex while the PTY thread is still mutating state.
         self.terminal_stream.handler.queueRender() catch unreachable;
@@ -676,8 +821,12 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
 }
 
 /// Process output from readdata but the lock is already held.
-fn processOutputLocked(self: *Termio, buf: []const u8) bool {
+fn processOutputLocked(self: *Termio, buf: []const u8) struct {
+    queued_renderer_message: bool,
+    started_synchronized_output: bool,
+} {
     var queued_renderer_message = false;
+    self.terminal_stream.handler.saw_synchronized_output_start = false;
 
     // Whenever a character is typed, we ensure the cursor is in the
     // non-blink state so it is rendered if visible. If we're under
@@ -728,30 +877,32 @@ fn processOutputLocked(self: *Termio, buf: []const u8) bool {
         self.mailbox.notify();
     }
 
-    return queued_renderer_message;
+    return .{
+        .queued_renderer_message = queued_renderer_message,
+        .started_synchronized_output = self.terminal_stream.handler.saw_synchronized_output_start,
+    };
 }
 
-fn terminalNeedsRendererWake(t: *const terminalpkg.Terminal) bool {
-    const screen = t.screens.active;
+fn shouldWakeRendererAfterOutput(
+    had_render_work: bool,
+    has_render_work: bool,
+    queued_renderer_message: bool,
+    synchronized_output_active: bool,
+    ended_synchronized_output: bool,
+    completed_synchronized_output_batch: bool,
+) bool {
+    if (queued_renderer_message) return true;
+    if (ended_synchronized_output and has_render_work) return true;
+    if (completed_synchronized_output_batch and has_render_work) return true;
+    if (synchronized_output_active) return false;
+    if (!had_render_work and has_render_work) return true;
 
-    if (packedStructDirty(t.flags.dirty)) return true;
-    if (packedStructDirty(screen.dirty)) return true;
-    if (screen.kitty_images.dirty) return true;
-
-    // Check the viewport bottom-up so steady-state PTY output usually
-    // hits a dirty row near the cursor without scanning the full viewport.
-    var row_it = screen.pages.rowIterator(.left_up, .{ .viewport = .{} }, null);
-    while (row_it.next()) |pin| {
-        if (pin.isDirty()) return true;
-    }
+    // For ordinary PTY output, every batch with visible dirty state needs
+    // a wake so streaming animations don't stall while the terminal stays
+    // continuously dirty between renderer passes.
+    if (has_render_work) return true;
 
     return false;
-}
-
-fn packedStructDirty(value: anytype) bool {
-    const T = @TypeOf(value);
-    const Int = @typeInfo(T).@"struct".backing_integer.?;
-    return @as(Int, @bitCast(value)) != 0;
 }
 
 /// Sends a DSR response for the current color scheme to the pty.
@@ -810,7 +961,7 @@ pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Ty
     return self.backend.getProcessInfo(info);
 }
 
-test "terminalNeedsRendererWake tracks visible terminal dirtiness" {
+test "shared terminal dirty helper tracks visible terminal dirtiness" {
     const testing = std.testing;
 
     var t = try terminalpkg.Terminal.init(testing.allocator, .{
@@ -819,18 +970,67 @@ test "terminalNeedsRendererWake tracks visible terminal dirtiness" {
     });
     defer t.deinit(testing.allocator);
 
-    try testing.expect(!terminalNeedsRendererWake(&t));
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&t));
 
     try t.print('x');
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.screens.active.pages.clearDirty();
-    try testing.expect(!terminalNeedsRendererWake(&t));
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty.palette = true;
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
 
     t.flags.dirty = .{};
     t.screens.active.kitty_images.dirty = true;
-    try testing.expect(terminalNeedsRendererWake(&t));
+    try testing.expect(terminal_render_dirty.needsRendererWake(&t));
+}
+
+test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pending render work" {
+    const testing = std.testing;
+
+    try testing.expect(shouldWakeRendererAfterOutput(
+        true,
+        true,
+        false,
+        false,
+        true,
+        false,
+    ));
+
+    try testing.expect(!shouldWakeRendererAfterOutput(
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+    ));
+
+    try testing.expect(shouldWakeRendererAfterOutput(
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+    ));
+
+    try testing.expect(shouldWakeRendererAfterOutput(
+        true,
+        true,
+        false,
+        false,
+        false,
+        true,
+    ));
+
+    try testing.expect(!shouldWakeRendererAfterOutput(
+        false,
+        true,
+        false,
+        true,
+        false,
+        false,
+    ));
 }

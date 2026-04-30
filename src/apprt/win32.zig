@@ -72,6 +72,258 @@ const windows = std.os.windows;
 
 pub const resourcesDir = internal_os.resourcesDir;
 
+const RenderTrace = struct {
+    path: ?[]const u8 = null,
+    start_tick_ms: u64 = 0,
+    renderer_update_frame_count: std.atomic.Value(u64) = .init(0),
+    renderer_draw_request_count: std.atomic.Value(u64) = .init(0),
+    wakeup_callback_count: std.atomic.Value(u64) = .init(0),
+    render_callback_count: std.atomic.Value(u64) = .init(0),
+    renderer_repaint_accept_count: std.atomic.Value(u64) = .init(0),
+    renderer_repaint_coalesced_count: std.atomic.Value(u64) = .init(0),
+    queue_paint_count: std.atomic.Value(u64) = .init(0),
+    queue_paint_update_now_count: std.atomic.Value(u64) = .init(0),
+    force_paint_now_count: std.atomic.Value(u64) = .init(0),
+    paint_draw_count: std.atomic.Value(u64) = .init(0),
+    paint_retry_count: std.atomic.Value(u64) = .init(0),
+    swap_buffers_count: std.atomic.Value(u64) = .init(0),
+    max_renderer_update_gap_ms: std.atomic.Value(u64) = .init(0),
+    max_paint_gap_ms: std.atomic.Value(u64) = .init(0),
+    max_swap_gap_ms: std.atomic.Value(u64) = .init(0),
+    max_renderer_update_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
+    max_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
+    max_swap_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
+    max_paint_draw_duration_ms: std.atomic.Value(u64) = .init(0),
+    max_paint_draw_duration_at_ms: std.atomic.Value(u64) = .init(0),
+    paint_draw_duration_over_20ms_count: std.atomic.Value(u64) = .init(0),
+    paint_draw_duration_over_33ms_count: std.atomic.Value(u64) = .init(0),
+    last_renderer_update_tick_ms: std.atomic.Value(u64) = .init(0),
+    last_paint_tick_ms: std.atomic.Value(u64) = .init(0),
+    last_swap_tick_ms: std.atomic.Value(u64) = .init(0),
+    first_renderer_update_at_ms: std.atomic.Value(u64) = .init(0),
+    first_paint_at_ms: std.atomic.Value(u64) = .init(0),
+    first_swap_at_ms: std.atomic.Value(u64) = .init(0),
+
+    fn init(alloc: Allocator) RenderTrace {
+        const raw = std.process.getEnvVarOwned(
+            alloc,
+            "WINGHOSTTY_RENDER_TRACE_FILE",
+        ) catch return .{};
+        errdefer alloc.free(raw);
+
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) {
+            alloc.free(raw);
+            return .{};
+        }
+
+        const owned = if (trimmed.len == raw.len)
+            raw
+        else
+            alloc.dupe(u8, trimmed) catch {
+                alloc.free(raw);
+                return .{};
+            };
+        if (trimmed.len != raw.len) alloc.free(raw);
+
+        return .{
+            .path = owned,
+            .start_tick_ms = GetTickCount64(),
+        };
+    }
+
+    fn deinit(self: *RenderTrace, alloc: Allocator) void {
+        defer {
+            if (self.path) |path| alloc.free(path);
+            self.* = .{};
+        }
+
+        if (self.path == null) return;
+        self.writeSnapshot();
+    }
+
+    fn enabled(self: *const RenderTrace) bool {
+        return self.path != null;
+    }
+
+    fn noteRendererUpdateFrame(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        self.noteTimedCounter(
+            &self.renderer_update_frame_count,
+            &self.last_renderer_update_tick_ms,
+            &self.max_renderer_update_gap_ms,
+            &self.max_renderer_update_gap_ended_at_ms,
+            &self.first_renderer_update_at_ms,
+        );
+    }
+
+    fn noteRendererDrawRequest(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.renderer_draw_request_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteRendererWakeupCallback(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.wakeup_callback_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteRendererFollowupCallback(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.render_callback_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteRendererRepaintAccepted(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.renderer_repaint_accept_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteRendererRepaintCoalesced(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.renderer_repaint_coalesced_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteQueuePaint(self: *RenderTrace, update_now: bool) void {
+        if (!self.enabled()) return;
+        _ = self.queue_paint_count.fetchAdd(1, .acq_rel);
+        if (update_now) _ = self.queue_paint_update_now_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteForcePaintNow(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.force_paint_now_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn notePaintDraw(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        self.noteTimedCounter(
+            &self.paint_draw_count,
+            &self.last_paint_tick_ms,
+            &self.max_paint_gap_ms,
+            &self.max_paint_gap_ended_at_ms,
+            &self.first_paint_at_ms,
+        );
+    }
+
+    fn notePaintDrawDuration(self: *RenderTrace, duration_ms: u64) void {
+        if (!self.enabled()) return;
+        updateMaxAtomicWithTimestamp(
+            &self.max_paint_draw_duration_ms,
+            &self.max_paint_draw_duration_at_ms,
+            duration_ms,
+            elapsedTraceMs(self.start_tick_ms, GetTickCount64()),
+        );
+        if (duration_ms > 20) _ = self.paint_draw_duration_over_20ms_count.fetchAdd(1, .acq_rel);
+        if (duration_ms > 33) _ = self.paint_draw_duration_over_33ms_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn notePaintRetry(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.paint_retry_count.fetchAdd(1, .acq_rel);
+    }
+
+    fn noteSwapBuffers(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        self.noteTimedCounter(
+            &self.swap_buffers_count,
+            &self.last_swap_tick_ms,
+            &self.max_swap_gap_ms,
+            &self.max_swap_gap_ended_at_ms,
+            &self.first_swap_at_ms,
+        );
+    }
+
+    fn noteTimedCounter(
+        self: *RenderTrace,
+        counter: *std.atomic.Value(u64),
+        last_tick_ms: *std.atomic.Value(u64),
+        max_gap_ms: *std.atomic.Value(u64),
+        max_gap_ended_at_ms: *std.atomic.Value(u64),
+        first_at_ms: *std.atomic.Value(u64),
+    ) void {
+        const now = GetTickCount64();
+        const elapsed_ms = elapsedTraceMs(self.start_tick_ms, now);
+        _ = counter.fetchAdd(1, .acq_rel);
+        _ = first_at_ms.cmpxchgStrong(0, elapsed_ms, .acq_rel, .acquire);
+        const prev = last_tick_ms.swap(now, .acq_rel);
+        if (prev == 0 or now <= prev) return;
+        updateMaxAtomicWithTimestamp(
+            max_gap_ms,
+            max_gap_ended_at_ms,
+            now - prev,
+            elapsed_ms,
+        );
+    }
+
+    fn writeSnapshot(self: *const RenderTrace) void {
+        const trace_path = self.path orelse return;
+        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
+        defer file.close();
+
+        var buffer: [1024]u8 = undefined;
+        var writer = file.writer(&buffer);
+        const stream = &writer.interface;
+        stream.print("{f}", .{std.json.fmt(.{
+            .runtime_ms = GetTickCount64() - self.start_tick_ms,
+            .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
+            .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
+            .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
+            .render_callback_count = self.render_callback_count.load(.acquire),
+            .renderer_repaint_accept_count = self.renderer_repaint_accept_count.load(.acquire),
+            .renderer_repaint_coalesced_count = self.renderer_repaint_coalesced_count.load(.acquire),
+            .queue_paint_count = self.queue_paint_count.load(.acquire),
+            .queue_paint_update_now_count = self.queue_paint_update_now_count.load(.acquire),
+            .force_paint_now_count = self.force_paint_now_count.load(.acquire),
+            .paint_draw_count = self.paint_draw_count.load(.acquire),
+            .paint_retry_count = self.paint_retry_count.load(.acquire),
+            .swap_buffers_count = self.swap_buffers_count.load(.acquire),
+            .max_renderer_update_gap_ms = self.max_renderer_update_gap_ms.load(.acquire),
+            .max_paint_gap_ms = self.max_paint_gap_ms.load(.acquire),
+            .max_swap_gap_ms = self.max_swap_gap_ms.load(.acquire),
+            .max_renderer_update_gap_ended_at_ms = self.max_renderer_update_gap_ended_at_ms.load(.acquire),
+            .max_paint_gap_ended_at_ms = self.max_paint_gap_ended_at_ms.load(.acquire),
+            .max_swap_gap_ended_at_ms = self.max_swap_gap_ended_at_ms.load(.acquire),
+            .max_paint_draw_duration_ms = self.max_paint_draw_duration_ms.load(.acquire),
+            .max_paint_draw_duration_at_ms = self.max_paint_draw_duration_at_ms.load(.acquire),
+            .paint_draw_duration_over_20ms_count = self.paint_draw_duration_over_20ms_count.load(.acquire),
+            .paint_draw_duration_over_33ms_count = self.paint_draw_duration_over_33ms_count.load(.acquire),
+            .first_renderer_update_at_ms = self.first_renderer_update_at_ms.load(.acquire),
+            .first_paint_at_ms = self.first_paint_at_ms.load(.acquire),
+            .first_swap_at_ms = self.first_swap_at_ms.load(.acquire),
+        }, .{})}) catch return;
+        stream.flush() catch return;
+    }
+};
+
+fn elapsedTraceMs(start_tick_ms: u64, now_tick_ms: u64) u64 {
+    if (now_tick_ms <= start_tick_ms) return 0;
+    return now_tick_ms - start_tick_ms;
+}
+
+fn updateMaxAtomic(value: *std.atomic.Value(u64), candidate: u64) void {
+    var current = value.load(.acquire);
+    while (candidate > current) {
+        current = value.cmpxchgWeak(current, candidate, .acq_rel, .acquire) orelse return;
+    }
+}
+
+fn updateMaxAtomicWithTimestamp(
+    value: *std.atomic.Value(u64),
+    at_ms: *std.atomic.Value(u64),
+    candidate: u64,
+    candidate_at_ms: u64,
+) void {
+    var current = value.load(.acquire);
+    while (candidate > current) {
+        const observed = value.cmpxchgWeak(current, candidate, .acq_rel, .acquire);
+        if (observed) |next| {
+            current = next;
+            continue;
+        }
+        at_ms.store(candidate_at_ms, .release);
+        return;
+    }
+}
+
 const ATOM = win32_types.ATOM;
 const LPCWSTR = win32_types.LPCWSTR;
 const HBRUSH = win32_types.HBRUSH;
@@ -205,6 +457,7 @@ const WM_SYSKEYUP = 0x0105;
 const WM_WINHOSTTY_WAKE = WM_APP + 1;
 const WM_WINHOSTTY_UPDATE = WM_APP + 2;
 const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
+const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
 const PM_NOREMOVE: UINT = 0x0000;
 const WS_OVERLAPPED = 0x00000000;
 const WS_CHILD = 0x40000000;
@@ -505,7 +758,6 @@ const ipc_ack_failure: u8 = 1;
 
 const POINT = win32_types.POINT;
 const RECT = win32_types.RECT;
-
 const PIXELFORMATDESCRIPTOR = extern struct {
     nSize: WORD,
     nVersion: WORD,
@@ -666,6 +918,7 @@ extern "user32" fn GetWindowTextLengthW(hWnd: HWND) callconv(.winapi) i32;
 extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: [*]u16, nMaxCount: i32) callconv(.winapi) i32;
 extern "user32" fn IsWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsWindowVisible(hWnd: HWND) callconv(.winapi) BOOL;
+extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsZoomed(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: u32) callconv(.winapi) ?*anyopaque;
 extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
@@ -1019,19 +1272,67 @@ fn effectiveHostWindowStyle(
         WS_VISIBLE | WS_OVERLAPPED;
 }
 
-fn shouldApplyInheritedWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
-    return !(dst_host_id != null and src_host_id != null and dst_host_id.? == src_host_id.?);
+fn sharesHostWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
+    return dst_host_id != null and src_host_id != null and dst_host_id.? == src_host_id.?;
+}
+
+fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
+    return a.min_width == b.min_width and
+        a.min_height == b.min_height and
+        a.max_width == b.max_width and
+        a.max_height == b.max_height;
 }
 
 fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
 }
 
+fn shouldActivateSurfaceDuringInit(host_id: ?u32, passive_show: bool) bool {
+    return shouldShowSurfaceImmediately(host_id) and !passive_show;
+}
+
 fn shouldResizeHostForInitialSize(host_surface_count: usize) bool {
     return host_surface_count == 1;
 }
 
-fn hostPresentShowCommand(is_zoomed: bool) i32 {
+fn sharedHostWindowFrameStateEquals(a: *const Surface, b: *const Surface) bool {
+    return effectiveHostWindowStyle(
+        a.decorations_visible,
+        a.fullscreen,
+        true,
+    ) == effectiveHostWindowStyle(
+        b.decorations_visible,
+        b.fullscreen,
+        true,
+    ) and sizeLimitEquals(a.size_limit, b.size_limit);
+}
+
+fn sharedHostWindowTopmostEquals(a: *const Surface, b: *const Surface) bool {
+    return a.topmost == b.topmost;
+}
+
+fn sharedHostWindowOpacityEquals(a: *const Surface, b: *const Surface) bool {
+    return alphaByteForOpacity(effectiveBackgroundOpacity(
+        a.background_opacity_default,
+        a.background_opacity_force_opaque,
+    )) == alphaByteForOpacity(effectiveBackgroundOpacity(
+        b.background_opacity_default,
+        b.background_opacity_force_opaque,
+    ));
+}
+
+fn shouldPropagateSharedHostWindowState(source: *const Surface) bool {
+    const host = source.host orelse return true;
+    return host.activeSurface() == source;
+}
+
+fn hostPresentShowCommand(
+    is_visible: bool,
+    is_iconic: bool,
+    is_zoomed: bool,
+) ?i32 {
+    if (is_iconic) return SW_RESTORE;
+    if (is_visible) return null;
     return if (is_zoomed) SW_MAXIMIZE else SW_SHOW;
 }
 
@@ -2955,11 +3256,13 @@ pub const App = struct {
             .render => {
                 return switch (target) {
                     .app => blk: {
-                        for (self.windows.items) |surface| try surface.requestRepaint();
+                        for (self.windows.items) |surface| {
+                            try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                        }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
-                        try surface.requestRepaint();
+                        try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
                         break :blk true;
                     } else false,
                 };
@@ -3909,7 +4212,9 @@ pub const App = struct {
     fn showHostSurface(self: *App, surface: *Surface, focus: bool) void {
         const host = surface.host orelse return;
         const tab_info = self.findTabForSurface(surface) orelse return;
+        const previous_surface = host.activeSurface();
         host.active_tab = tab_info.index;
+        surface.syncSharedHostWindowState(previous_surface);
         host.prepareActiveTabVisibility(tab_info.index);
         var active_it = tab_info.tab.tree.iterator();
         while (active_it.next()) |entry| entry.view.setVisible(true);
@@ -4063,6 +4368,7 @@ pub const App = struct {
     }
 
     fn syncHostWindowState(self: *App, source: *Surface) !void {
+        if (!shouldPropagateSharedHostWindowState(source)) return;
         var host_surfaces = try self.collectHostSurfaces(self.core_app.alloc, source.host_id);
         defer host_surfaces.deinit(self.core_app.alloc);
         for (host_surfaces.items) |candidate| {
@@ -6752,9 +7058,40 @@ const Host = struct {
             std.log.warn("palette MRU push failed err={}", .{err});
         };
         self.hideOverlay();
-        self.layout() catch {};
+        runUiActionOrLog("palette layout refresh failed", self.layout());
+        if (action == .new_tab) {
+            self.postDeferredNewTab();
+            return;
+        }
         _ = try surface.core_surface.performBindingAction(action);
         // Do NOT touch `self` after dispatch — the host may be freed.
+    }
+
+    fn postDeferredNewTab(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        const source_surface = self.activeSurface();
+        const source_surface_id: WPARAM = if (source_surface) |surface|
+            @intCast(surface.core().id)
+        else
+            0;
+        if (PostMessageW(hwnd, WM_WINHOSTTY_HOST_NEW_TAB, source_surface_id, 0) == 0) {
+            if (source_surface) |surface| {
+                runUiActionOrLog("deferred new tab fallback failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
+            }
+        }
+    }
+
+    fn dispatchDeferredNewTab(self: *Host, source_surface_id: ?u64) void {
+        if (source_surface_id) |surface_id| {
+            if (self.app.findSurfaceById(surface_id)) |surface| {
+                runUiActionOrLog("deferred new tab dispatch failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
+                return;
+            }
+        }
+
+        if (self.activeSurface()) |surface| {
+            runUiActionOrLog("deferred new tab dispatch failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
+        }
     }
 
     /// Scroll the visible window by `delta` wheel units (120 = one line).
@@ -7356,7 +7693,7 @@ const Host = struct {
         if (self.openSelectedProfile(open_target)) return true;
         const surface = self.activeSurface() orelse return false;
         switch (open_target) {
-            .tab => _ = self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}) catch return false,
+            .tab => self.postDeferredNewTab(),
             .window => _ = self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}) catch return false,
             .split => _ = self.app.performAction(.{ .surface = surface.core() }, .new_split, .right) catch return false,
         }
@@ -7639,7 +7976,13 @@ const Host = struct {
 
     fn present(self: *Host) void {
         const hwnd = self.hwnd orelse return;
-        _ = ShowWindow(hwnd, hostPresentShowCommand(IsZoomed(hwnd) != 0));
+        if (hostPresentShowCommand(
+            IsWindowVisible(hwnd) != 0,
+            IsIconic(hwnd) != 0,
+            IsZoomed(hwnd) != 0,
+        )) |show_cmd| {
+            _ = ShowWindow(hwnd, show_cmd);
+        }
         _ = SetForegroundWindow(hwnd);
         _ = SetFocus(hwnd);
     }
@@ -8560,37 +8903,37 @@ const Host = struct {
 
         switch (@as(usize, @intCast(cmd))) {
             CTX_COPY => {
-                _ = surface.core_surface.performBindingAction(.{ .copy_to_clipboard = .mixed }) catch {};
+                runUiActionOrLog("context menu copy failed", surface.core_surface.performBindingAction(.{ .copy_to_clipboard = .mixed }));
             },
             CTX_PASTE => {
-                _ = surface.core_surface.performBindingAction(.{ .paste_from_clipboard = {} }) catch {};
+                runUiActionOrLog("context menu paste failed", surface.core_surface.performBindingAction(.{ .paste_from_clipboard = {} }));
             },
             CTX_SELECT_ALL => {
-                _ = surface.core_surface.performBindingAction(.{ .select_all = {} }) catch {};
+                runUiActionOrLog("context menu select all failed", surface.core_surface.performBindingAction(.{ .select_all = {} }));
             },
             CTX_FIND => {
-                surface.showSearchOverlay("") catch {};
+                runUiActionOrLog("context menu find failed", surface.showSearchOverlay(""));
             },
             CTX_COMMAND_PALETTE => {
-                _ = surface.toggleCommandPalette() catch {};
+                runUiActionOrLog("context menu command palette failed", surface.toggleCommandPalette());
             },
             CTX_NEW_TAB => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}) catch {};
+                self.postDeferredNewTab();
             },
             CTX_SPLIT_RIGHT => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_split, .right) catch {};
+                runUiActionOrLog("context menu split right failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .right));
             },
             CTX_SPLIT_DOWN => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_split, .down) catch {};
+                runUiActionOrLog("context menu split down failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .down));
             },
             CTX_SPLIT_LEFT => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_split, .left) catch {};
+                runUiActionOrLog("context menu split left failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .left));
             },
             CTX_SPLIT_UP => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_split, .up) catch {};
+                runUiActionOrLog("context menu split up failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .up));
             },
             CTX_NEW_WINDOW => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}) catch {};
+                runUiActionOrLog("context menu new window failed", self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}));
             },
             else => {}, // 0 = cancel, ignore
         }
@@ -8626,7 +8969,7 @@ const Host = struct {
 
         switch (@as(usize, @intCast(cmd))) {
             CTX_TAB_RENAME => {
-                surface.promptTitle(.tab) catch {};
+                runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
             },
             CTX_TAB_CLOSE => {
                 _ = self.app.closeTab(.{ .surface = surface.core() }, .this) catch |err| {
@@ -8639,10 +8982,10 @@ const Host = struct {
                 };
             },
             CTX_TAB_MOVE_LEFT => {
-                _ = self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }) catch {};
+                runUiActionOrLog("tab context move left failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }));
             },
             CTX_TAB_MOVE_RIGHT => {
-                _ = self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }) catch {};
+                runUiActionOrLog("tab context move right failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }));
             },
             else => {},
         }
@@ -8718,19 +9061,19 @@ const Host = struct {
 
         switch (cmd_id) {
             CTX_COMMAND_PALETTE => {
-                _ = surface.toggleCommandPalette() catch {};
+                runUiActionOrLog("overflow command palette failed", surface.toggleCommandPalette());
             },
             CTX_FIND => {
-                surface.showSearchOverlay("") catch {};
+                runUiActionOrLog("overflow find failed", surface.showSearchOverlay(""));
             },
             CTX_NEW_TAB => {
-                _ = self.openSelectedProfileOrFallback(.tab);
+                self.postDeferredNewTab();
             },
             CTX_NEW_WINDOW => {
-                _ = self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}) catch {};
+                runUiActionOrLog("overflow new window failed", self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}));
             },
             CTX_INSPECTOR => {
-                _ = self.app.toggleInspectorForSurface(surface) catch {};
+                runUiActionOrLog("overflow inspector toggle failed", self.app.toggleInspectorForSurface(surface));
             },
             else => {},
         }
@@ -9538,6 +9881,10 @@ const Host = struct {
                 };
                 self.hideOverlay();
                 self.layout() catch {};
+                if (action == .new_tab) {
+                    self.postDeferredNewTab();
+                    return true;
+                }
                 _ = try surface.core_surface.performBindingAction(action);
                 return true;
             },
@@ -12264,6 +12611,10 @@ fn surfaceRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
     if (h.is_live_resize.load(.acquire)) return .defer_until_flush;
     if (h.resize_settle_timer_active) return .update_now;
     return .queue;
+}
+
+fn rendererRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
+    return surfaceRepaintRequestMode(host);
 }
 
 fn surfaceSizeChangeRepaintMode(host: ?*const Host) SurfaceRepaintRequestMode {
@@ -15457,10 +15808,8 @@ fn commandPaletteMatchCount(snap: PaletteSnapshot, input_text: []const u8) usize
     return win32_palette.matchCount(snap, input_text);
 }
 
-/// Returns the top-ranked match for the query, or null if no entry
-/// matches. Renamed-by-semantic — this used to mean "exactly one
-/// prefix match"; with fuzzy ranking the right submit-on-Enter
-/// semantic is "the best match".
+/// Returns the top-ranked match used for Enter-to-run, or null if no entry
+/// matches.
 fn commandPaletteUniqueMatch(snap: PaletteSnapshot, input_text: []const u8) ?[]const u8 {
     if (input_text.len == 0) return null;
     var buf: [palette_max_tokens][]const u8 = undefined;
@@ -15655,6 +16004,10 @@ fn refocusActiveSurface(host: *Host) void {
 
 fn logUiActionError(comptime context: []const u8, err: anyerror) void {
     log.warn(context ++ " err={}", .{err});
+}
+
+fn runUiActionOrLog(comptime context: []const u8, action: anytype) void {
+    _ = action catch |err| logUiActionError(context, err);
 }
 
 fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -15888,7 +16241,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             .move_previous => {
                                 if (v.activateTabIndex(index)) {
                                     if (v.activeSurface()) |surface| {
-                                        _ = v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }) catch {};
+                                        runUiActionOrLog("tab key move previous failed", v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }));
                                         return 0;
                                     }
                                 }
@@ -15896,7 +16249,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             .move_next => {
                                 if (v.activateTabIndex(index)) {
                                     if (v.activeSurface()) |surface| {
-                                        _ = v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }) catch {};
+                                        runUiActionOrLog("tab key move next failed", v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }));
                                         return 0;
                                     }
                                 }
@@ -15906,7 +16259,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                                     if (v.activeSurface()) |surface| {
                                         const amount = moveTabAmountToEdge(v.tabs.items.len, index, true);
                                         if (amount != 0) {
-                                            _ = v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = amount }) catch {};
+                                            runUiActionOrLog("tab key move first failed", v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = amount }));
                                         }
                                         return 0;
                                     }
@@ -15917,7 +16270,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                                     if (v.activeSurface()) |surface| {
                                         const amount = moveTabAmountToEdge(v.tabs.items.len, index, false);
                                         if (amount != 0) {
-                                            _ = v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = amount }) catch {};
+                                            runUiActionOrLog("tab key move last failed", v.app.moveTab(.{ .surface = surface.core() }, .{ .amount = amount }));
                                         }
                                         return 0;
                                     }
@@ -15926,7 +16279,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             .rename => {
                                 if (v.activateTabIndex(index)) {
                                     if (v.activeSurface()) |surface| {
-                                        surface.promptTitle(.tab) catch {};
+                                        runUiActionOrLog("tab key rename failed", surface.promptTitle(.tab));
                                         return 0;
                                     }
                                 }
@@ -15944,7 +16297,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             .overview => {
                                 if (v.activateTabIndex(index)) {
                                     if (v.activeSurface()) |surface| {
-                                        _ = surface.toggleTabOverview() catch {};
+                                        runUiActionOrLog("tab key overview failed", surface.toggleTabOverview());
                                         return 0;
                                     }
                                 }
@@ -15965,7 +16318,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                 WM_LBUTTONDBLCLK => {
                     if (v.activateTabIndex(index)) {
                         if (v.activeSurface()) |surface| {
-                            surface.promptTitle(.tab) catch {};
+                            runUiActionOrLog("tab double-click rename failed", surface.promptTitle(.tab));
                             return 0;
                         }
                     }
@@ -16062,9 +16415,8 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         WM_KEYDOWN, WM_SYSKEYDOWN => {
             if (v.overlay_mode == .command_palette) {
                 if (wParam == VK_UP or wParam == VK_DOWN) {
-                    // Up/Down drive list selection, not EDIT text
-                    // completion — the live list shows the full candidate
-                    // set now, so Tab-cycling-in-EDIT is obsolete UX.
+                    // Up/Down move through the live result list instead of
+                    // editing the query text.
                     if (v.moveListSelection(wParam == VK_UP)) return 0;
                 }
                 if (wParam == VK_TAB) {
@@ -16157,6 +16509,10 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
     const host = getHost(hwnd);
     switch (msg) {
+        WM_WINHOSTTY_HOST_NEW_TAB => {
+            if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
+            return 0;
+        },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
         // animation is active; stops as soon as the scheduler empties.
         // Separate from the App-level quit timer, which uses
@@ -16437,13 +16793,13 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             return 0;
                         }
                         if (v.overlay_mode == .profile) {
-                            _ = v.submitProfileOverlay(resolveProfileOpenTarget(
+                            runUiActionOrLog("profile overlay submit failed", v.submitProfileOverlay(resolveProfileOpenTarget(
                                 v.app.launcher_profile_target,
                                 keyPressed(VK_SHIFT),
                                 keyPressed(VK_CONTROL),
-                            )) catch {};
+                            )));
                         } else {
-                            _ = v.submitOverlay() catch {};
+                            runUiActionOrLog("overlay submit failed", v.submitOverlay());
                         }
                         return 0;
                     },
@@ -16460,7 +16816,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             return 0;
                         }
                         v.hideOverlay();
-                        v.layout() catch {};
+                        runUiActionOrLog("overlay dismiss layout refresh failed", v.layout());
                         refocusActiveSurface(v);
                         return 0;
                     },
@@ -16518,7 +16874,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     },
                     1901 => {
                         if (v.activeSurface()) |surface| {
-                            _ = surface.toggleCommandPalette() catch {};
+                            runUiActionOrLog("toolbar command palette failed", surface.toggleCommandPalette());
                         }
                         return 0;
                     },
@@ -16550,12 +16906,12 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     },
                     1903 => {
                         if (v.activeSurface()) |surface| {
-                            _ = v.app.toggleInspectorForSurface(surface) catch {};
+                            runUiActionOrLog("toolbar inspector toggle failed", v.app.toggleInspectorForSurface(surface));
                         }
                         return 0;
                     },
                     1904 => {
-                        _ = v.openSelectedProfileOrFallback(.tab);
+                        v.postDeferredNewTab();
                         return 0;
                     },
                     1911 => {
@@ -17434,6 +17790,34 @@ const KeyText = struct {
     unshifted_codepoint: u21 = 0,
 };
 
+fn isControlCodepoint(codepoint: u21) bool {
+    return codepoint < 0x20 or codepoint == 0x7F;
+}
+
+fn shouldDeferTextToCharMessage(
+    action: input.Action,
+    key: input.Key,
+    mods: input.Mods,
+    translated: KeyText,
+) bool {
+    if (action == .release) return false;
+    if (mods.ctrl or mods.alt or mods.super) return false;
+    if (key.modifier()) return false;
+
+    switch (key) {
+        .enter, .backspace, .tab, .escape => return false,
+        else => {},
+    }
+
+    if (translated.len > 0) return true;
+    if (translated.unshifted_codepoint == 0) return false;
+    return !isControlCodepoint(translated.unshifted_codepoint);
+}
+
+fn shouldCommitDeferredCharMessage(pending_wm_char_text: bool, ime_composing: bool) bool {
+    return pending_wm_char_text and !ime_composing;
+}
+
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
@@ -17502,6 +17886,14 @@ fn keyEventFromWin32Message(
         event.consumed_mods = translated.consumed_mods;
         if (translated.unshifted_codepoint != 0) {
             event.unshifted_codepoint = translated.unshifted_codepoint;
+        }
+        if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
+            // Keep the physical-key event visible to bindings/modifier state
+            // but defer text emission to WM_CHAR so plain typing doesn't rely
+            // on ToUnicode/GetKeyboardState timing.
+            event.utf8 = "";
+            event.consumed_mods = .{};
+            event.composing = true;
         }
     }
 
@@ -17609,6 +18001,9 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         },
 
         WM_CHAR => {
+            if (surface) |v| {
+                v.handleCharMessage(wParam, lParam);
+            }
             return 0;
         },
 
@@ -17758,11 +18153,20 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 const draw_content = v.shouldDrawRendererPaintContent();
                 v.paint_pending = false;
                 if (draw_content) {
+                    const paint_start_ms = if (v.render_trace.enabled()) GetTickCount64() else 0;
+                    v.render_trace.notePaintDraw();
                     defer v.finishRendererRepaintRequest();
+                    defer if (paint_start_ms != 0) {
+                        const paint_end_ms = GetTickCount64();
+                        if (paint_end_ms > paint_start_ms) {
+                            v.render_trace.notePaintDrawDuration(paint_end_ms - paint_start_ms);
+                        }
+                    };
                     v.redraw() catch |err| {
                         log.err("win32 paint redraw failed err={}", .{err});
                     };
                 } else {
+                    v.render_trace.notePaintRetry();
                     v.requestRendererFrameNow();
                 }
             }
@@ -17871,7 +18275,10 @@ pub const Surface = struct {
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
     draw_in_progress: bool = false,
     ime_composing: bool = false,
+    pending_wm_char_text: bool = false,
+    pending_wm_char_high_surrogate: ?u16 = null,
     undo_capture_suspended: bool = false,
+    render_trace: RenderTrace = .{},
     /// Per-surface bounded undo stack for terminal-local replayable
     /// actions (`clear_screen`, `reset`). Structural history that
     /// retains live tabs/surfaces lives on `Host` because it crosses
@@ -17994,6 +18401,7 @@ pub const Surface = struct {
             .host_active = true,
             .window_visible = false,
             .scrollbar_config = config.scrollbar,
+            .render_trace = RenderTrace.init(app.core_app.alloc),
             .undo_stack = win32_undo.UndoStack.init(app.core_app.alloc),
             .search_bar = win32_search_bar.SearchBar.init(app.core_app.alloc),
             .drop_target = win32_surface_drop_target.DropTarget.init(
@@ -18105,7 +18513,6 @@ pub const Surface = struct {
         } else {
             const tab_id = host.nextTabId();
             try host.tabs.append(app.core_app.alloc, try Tab.init(app.core_app.alloc, tab_id, self));
-            host.active_tab = host.tabs.items.len - 1;
         }
         // Rollback the tab entry if core_surface.init or later init steps fail.
         // Without this, a zombie tab with a dangling surface pointer would remain
@@ -18125,6 +18532,12 @@ pub const Surface = struct {
             .x = @as(f32, @floatFromInt(host.current_dpi)) / 96.0,
             .y = @as(f32, @floatFromInt(host.current_dpi)) / 96.0,
         };
+
+        if (opts.clone_state_from) |source| {
+            if (sharesHostWindowState(self.host_id, source.host_id)) {
+                self.copySharedWindowStateFrom(source);
+            }
+        }
 
         try self.core_surface.init(
             app.core_app.alloc,
@@ -18153,11 +18566,17 @@ pub const Surface = struct {
         if (activate_during_init) {
             try host.refreshChrome();
             try host.layout();
+            // Passive launches were already shown with SW_SHOWNOACTIVATE when the
+            // host HWND was created. Only run the active present/focus path here
+            // for launches that should take foreground focus during init.
+            if (shouldActivateSurfaceDuringInit(opts.host_id, opts.passive_show)) {
+                self.presentWindow();
+            }
             try self.requestRepaint();
         }
 
         if (opts.clone_state_from) |source| {
-            if (!shouldApplyInheritedWindowState(self.host_id, source.host_id)) return;
+            if (sharesHostWindowState(self.host_id, source.host_id)) return;
             try self.inheritWindowStateFrom(source);
         }
     }
@@ -18529,11 +18948,8 @@ pub const Surface = struct {
     ) !bool {
         if (clipboard_type != .standard) return false;
 
-        // `str` is always owned by `core_app.alloc` — either taken
-        // from `readClipboardText` (which returns `[:0]u8`) or a
-        // fresh `dupeZ("")` fallback for the osc_52_read empty-clipboard
-        // case. Single-owner + single defer ensures the fallback
-        // allocation is freed too.
+        // `str` is always owned by `core_app.alloc`, so one defer covers both
+        // clipboard reads and the synthesized empty-string fallback.
         const str: [:0]u8 = (try self.readClipboardText()) orelse switch (state) {
             .paste => return false,
             .osc_52_read => try self.app.core_app.alloc.dupeZ(u8, ""),
@@ -18646,7 +19062,11 @@ pub const Surface = struct {
     }
 
     pub fn beginRendererRepaintRequest(self: *Surface) bool {
-        if (!self.renderer_repaint_requested.swap(true, .acq_rel)) return true;
+        if (!self.renderer_repaint_requested.swap(true, .acq_rel)) {
+            self.render_trace.noteRendererRepaintAccepted();
+            return true;
+        }
+        self.render_trace.noteRendererRepaintCoalesced();
         self.renderer_repaint_retry_pending.store(true, .release);
         return false;
     }
@@ -18686,6 +19106,7 @@ pub const Surface = struct {
 
     fn queuePaintRequest(self: *Surface, update_now: bool) !void {
         const hwnd = self.hwnd orelse return error.NoWindow;
+        self.render_trace.noteQueuePaint(update_now);
         if (self.paint_pending) {
             if (update_now) {
                 self.requestRendererFrameNow();
@@ -18705,6 +19126,7 @@ pub const Surface = struct {
 
     fn forcePaintRequestNow(self: *Surface) !void {
         const hwnd = self.hwnd orelse return error.NoWindow;
+        self.render_trace.noteForcePaintNow();
         self.paint_pending = false;
         const flags: UINT = RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_UPDATENOW;
         if (RedrawWindow(hwnd, null, null, flags) == 0) {
@@ -18781,6 +19203,22 @@ pub const Surface = struct {
         try self.core_surface.draw();
     }
 
+    pub fn noteRendererDrawRequest(self: *Surface) void {
+        self.render_trace.noteRendererDrawRequest();
+    }
+
+    pub fn noteRendererWakeupCallback(self: *Surface) void {
+        self.render_trace.noteRendererWakeupCallback();
+    }
+
+    pub fn noteRendererFollowupCallback(self: *Surface) void {
+        self.render_trace.noteRendererFollowupCallback();
+    }
+
+    pub fn noteRendererUpdateFrame(self: *Surface) void {
+        self.render_trace.noteRendererUpdateFrame();
+    }
+
     pub fn makeGLContextCurrent(self: *Surface) !void {
         const hdc = self.hdc orelse return error.NoDeviceContext;
         const hglrc = self.hglrc orelse return error.NoOpenGLContext;
@@ -18812,6 +19250,7 @@ pub const Surface = struct {
         if (SwapBuffers(hdc) == 0) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
         }
+        self.render_trace.noteSwapBuffers();
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
@@ -20218,7 +20657,12 @@ pub const Surface = struct {
     }
 
     fn setSizeLimit(self: *Surface, limit: apprt.action.SizeLimit) void {
+        if (sizeLimitEquals(self.size_limit, limit)) return;
         self.size_limit = limit;
+        if (self.host != null) {
+            self.refreshSharedWindowFrame();
+            return;
+        }
         const hwnd = self.windowHwnd() orelse return;
         _ = SetWindowPos(
             hwnd,
@@ -20334,17 +20778,68 @@ pub const Surface = struct {
         }
     }
 
-    fn inheritWindowStateFrom(self: *Surface, source: *const Surface) !void {
+    fn copySharedWindowStateFrom(self: *Surface, source: *const Surface) void {
         self.decorations_visible = source.decorations_visible;
-        self.topmost = source.topmost;
         self.fullscreen = source.fullscreen;
+        self.topmost = source.topmost;
         self.restore_rect = source.restore_rect;
         self.restore_maximized = source.restore_maximized;
+        self.default_client_size = source.default_client_size;
+        self.cell_size_pixels = source.cell_size_pixels;
         self.background_opacity_default = source.background_opacity_default;
         self.background_opacity_force_opaque = source.background_opacity_force_opaque;
-        self.default_client_size = source.default_client_size;
         self.size_limit = source.size_limit;
-        self.cell_size_pixels = source.cell_size_pixels;
+    }
+
+    fn activeSharedHostWindowHwnd(self: *const Surface) ?HWND {
+        const host = self.host orelse return self.hwnd;
+        if (host.activeSurface() != self) return null;
+        return host.hwnd;
+    }
+
+    fn syncSharedHostWindowState(self: *Surface, previous_surface: ?*const Surface) void {
+        const host = self.host orelse return;
+        if (host.activeSurface() != self) return;
+
+        if (previous_surface == null or
+            !sharedHostWindowFrameStateEquals(previous_surface.?, self))
+        {
+            self.refreshSharedWindowFrame();
+        }
+        if (previous_surface == null or
+            !sharedHostWindowTopmostEquals(previous_surface.?, self))
+        {
+            self.applyTopmost() catch |err| {
+                log.warn("win32 shared host topmost sync failed err={}", .{err});
+            };
+        }
+        if (previous_surface == null or
+            !sharedHostWindowOpacityEquals(previous_surface.?, self))
+        {
+            self.applyBackgroundOpacity() catch |err| {
+                log.warn("win32 shared host opacity sync failed err={}", .{err});
+            };
+        }
+    }
+
+    fn refreshSharedWindowFrame(self: *Surface) void {
+        const hwnd = self.windowHwnd() orelse return;
+        const host = self.host orelse return;
+        if (host.activeSurface() != self) return;
+
+        _ = SetWindowPos(
+            hwnd,
+            null,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+
+    fn inheritWindowStateFrom(self: *Surface, source: *const Surface) !void {
+        self.copySharedWindowStateFrom(source);
 
         try self.applyWindowStyle();
         try self.applyTopmost();
@@ -20408,7 +20903,7 @@ pub const Surface = struct {
     }
 
     fn applyWindowStyle(self: *Surface) !void {
-        const hwnd = self.windowHwnd() orelse return;
+        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
         const style = effectiveHostWindowStyle(
             self.decorations_visible,
             self.fullscreen,
@@ -20430,7 +20925,7 @@ pub const Surface = struct {
     }
 
     fn applyBackgroundOpacity(self: *Surface) !void {
-        const hwnd = self.windowHwnd() orelse return;
+        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
         const opacity = effectiveBackgroundOpacity(
             self.background_opacity_default,
             self.background_opacity_force_opaque,
@@ -20466,7 +20961,7 @@ pub const Surface = struct {
     }
 
     fn applyTopmost(self: *Surface) !void {
-        const hwnd = self.windowHwnd() orelse return;
+        const hwnd = self.activeSharedHostWindowHwnd() orelse return;
         if (SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
@@ -20528,6 +21023,7 @@ pub const Surface = struct {
         if (!self.core_initialized) return;
 
         const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
+        self.pending_wm_char_text = event.composing and event.action != .release;
 
         _ = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
@@ -20538,6 +21034,49 @@ pub const Surface = struct {
                 event.mods,
             });
             return;
+        };
+    }
+
+    fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
+        if (!self.core_initialized) return;
+        if (!shouldCommitDeferredCharMessage(self.pending_wm_char_text, self.ime_composing)) {
+            self.pending_wm_char_text = false;
+            self.pending_wm_char_high_surrogate = null;
+            return;
+        }
+
+        const code_unit: u16 = @intCast(wParam & 0xFFFF);
+        if (std.unicode.utf16IsHighSurrogate(code_unit)) {
+            self.pending_wm_char_high_surrogate = code_unit;
+            return;
+        }
+
+        const codepoint: u21 = cp: {
+            if (std.unicode.utf16IsLowSurrogate(code_unit)) {
+                const high = self.pending_wm_char_high_surrogate orelse return;
+                self.pending_wm_char_high_surrogate = null;
+                break :cp std.unicode.utf16DecodeSurrogatePair(&.{ high, code_unit }) catch return;
+            }
+
+            self.pending_wm_char_high_surrogate = null;
+            break :cp code_unit;
+        };
+        self.pending_wm_char_text = false;
+
+        if (isControlCodepoint(codepoint)) return;
+
+        var utf8_buf: [8]u8 = undefined;
+        const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch return;
+
+        var event: input.KeyEvent = .{
+            .action = if (isRepeatedKey(lParam)) .repeat else .press,
+            .key = .unidentified,
+            .mods = .{},
+            .unshifted_codepoint = codepoint,
+        };
+        event.utf8 = utf8_buf[0..utf8_len];
+        _ = self.core_surface.keyCallback(event) catch |err| {
+            log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
         };
     }
 
@@ -20852,6 +21391,7 @@ pub const Surface = struct {
         // pending doesn't leak the duplicated payload bytes.
         if (self.pending_clipboard_op) |*op| op.deinit(self.app.core_app.alloc);
         self.pending_clipboard_op = null;
+        self.render_trace.deinit(alloc);
 
         self.destroyGL();
 
@@ -24552,6 +25092,38 @@ test "win32 keyFromVirtualKey maps core keys" {
     try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(VK_OEM_7, 0));
 }
 
+test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .key_a,
+        .{},
+        .{ .len = 1, .unshifted_codepoint = 'a' },
+    ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .repeat,
+        .space,
+        .{},
+        .{ .len = 1, .unshifted_codepoint = ' ' },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .digit_2,
+        .{ .ctrl = true, .alt = true },
+        .{ .unshifted_codepoint = '2' },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .enter,
+        .{},
+        .{ .unshifted_codepoint = 0x0D },
+    ));
+    try std.testing.expect(!shouldCommitDeferredCharMessage(false, false));
+    try std.testing.expect(!shouldCommitDeferredCharMessage(true, true));
+    try std.testing.expect(shouldCommitDeferredCharMessage(true, false));
+}
+
 test "win32 hotkeySpecForTrigger maps physical key triggers" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -24994,13 +25566,48 @@ test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces"
     try std.testing.expect((effectiveHostWindowStyle(true, false, false) & WS_CLIPCHILDREN) == 0);
 }
 
-test "win32 shouldApplyInheritedWindowState skips same-host clones" {
+test "win32 sharesHostWindowState only for same-host clones" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect(!shouldApplyInheritedWindowState(7, 7));
-    try std.testing.expect(shouldApplyInheritedWindowState(7, 8));
-    try std.testing.expect(shouldApplyInheritedWindowState(7, null));
-    try std.testing.expect(shouldApplyInheritedWindowState(null, 7));
+    try std.testing.expect(sharesHostWindowState(7, 7));
+    try std.testing.expect(!sharesHostWindowState(7, 8));
+    try std.testing.expect(!sharesHostWindowState(7, null));
+    try std.testing.expect(!sharesHostWindowState(null, 7));
+}
+
+test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var source: Surface = undefined;
+    source.decorations_visible = false;
+    source.fullscreen = true;
+    source.topmost = true;
+    source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
+    source.restore_maximized = true;
+    source.default_client_size = .{ .width = 123, .height = 456 };
+    source.cell_size_pixels = .{ .width = 9, .height = 21 };
+    source.background_opacity_default = 0.75;
+    source.background_opacity_force_opaque = true;
+    source.size_limit = .{
+        .min_width = 111,
+        .min_height = 222,
+        .max_width = 333,
+        .max_height = 444,
+    };
+    var dest: Surface = undefined;
+
+    dest.copySharedWindowStateFrom(&source);
+
+    try std.testing.expectEqual(source.decorations_visible, dest.decorations_visible);
+    try std.testing.expectEqual(source.fullscreen, dest.fullscreen);
+    try std.testing.expectEqual(source.topmost, dest.topmost);
+    try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
+    try std.testing.expectEqual(source.restore_maximized, dest.restore_maximized);
+    try std.testing.expectEqualDeep(source.default_client_size, dest.default_client_size);
+    try std.testing.expectEqualDeep(source.cell_size_pixels, dest.cell_size_pixels);
+    try std.testing.expectEqual(source.background_opacity_default, dest.background_opacity_default);
+    try std.testing.expectEqual(source.background_opacity_force_opaque, dest.background_opacity_force_opaque);
+    try std.testing.expect(sizeLimitEquals(source.size_limit, dest.size_limit));
 }
 
 test "win32 shouldShowSurfaceImmediately only for new hosts" {
@@ -25009,6 +25616,46 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(shouldShowSurfaceImmediately(null));
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
+}
+
+test "win32 shouldActivateSurfaceDuringInit skips passive new-host activation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(shouldActivateSurfaceDuringInit(null, false));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(null, true));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, false));
+    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, true));
+}
+
+test "win32 shouldPropagateSharedHostWindowState only for active shared-host surfaces" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var standalone: Surface = undefined;
+    standalone.host = null;
+    try std.testing.expect(shouldPropagateSharedHostWindowState(&standalone));
+
+    var host: Host = undefined;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var active_surface: Surface = undefined;
+    active_surface.host = &host;
+    var inactive_surface: Surface = undefined;
+    inactive_surface.host = &host;
+
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &active_surface));
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &inactive_surface));
+
+    try std.testing.expect(shouldPropagateSharedHostWindowState(&active_surface));
+    try std.testing.expect(!shouldPropagateSharedHostWindowState(&inactive_surface));
+
+    host.active_tab = 1;
+    try std.testing.expect(!shouldPropagateSharedHostWindowState(&active_surface));
+    try std.testing.expect(shouldPropagateSharedHostWindowState(&inactive_surface));
 }
 
 test "win32 shouldResizeHostForInitialSize only for single-surface hosts" {
@@ -25020,11 +25667,44 @@ test "win32 shouldResizeHostForInitialSize only for single-surface hosts" {
     try std.testing.expect(!shouldResizeHostForInitialSize(8));
 }
 
-test "win32 hostPresentShowCommand preserves maximized state" {
+test "win32 sharedHostWindowFrameStateEquals ignores non-frame host state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(SW_SHOW, hostPresentShowCommand(false));
-    try std.testing.expectEqual(SW_MAXIMIZE, hostPresentShowCommand(true));
+    var a: Surface = undefined;
+    a.decorations_visible = true;
+    a.fullscreen = false;
+    a.topmost = false;
+    a.background_opacity_default = 1.0;
+    a.background_opacity_force_opaque = false;
+    a.size_limit = .{
+        .min_width = 0,
+        .min_height = 0,
+        .max_width = 0,
+        .max_height = 0,
+    };
+
+    var b: Surface = a;
+    b.topmost = true;
+    b.background_opacity_default = 0.6;
+    b.background_opacity_force_opaque = true;
+
+    try std.testing.expect(sharedHostWindowFrameStateEquals(&a, &b));
+
+    b.decorations_visible = false;
+    try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
+    b.decorations_visible = a.decorations_visible;
+
+    b.size_limit = .{ .min_width = 123, .min_height = 0, .max_width = 0, .max_height = 0 };
+    try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
+}
+
+test "win32 hostPresentShowCommand skips redundant maximize for visible hosts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?i32, SW_SHOW), hostPresentShowCommand(false, false, false));
+    try std.testing.expectEqual(@as(?i32, SW_MAXIMIZE), hostPresentShowCommand(false, false, true));
+    try std.testing.expectEqual(@as(?i32, SW_RESTORE), hostPresentShowCommand(true, true, false));
+    try std.testing.expectEqual(@as(?i32, null), hostPresentShowCommand(true, false, true));
 }
 
 test "win32 forwardedActivationExtraArgCount counts args bundled with activation" {
@@ -26734,6 +27414,23 @@ test "win32 surfaceRepaintRequestMode flushes renderer paints during resize sett
 
     host.is_live_resize = .init(true);
     try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, surfaceRepaintRequestMode(&host));
+}
+
+test "win32 rendererRepaintRequestMode prefers synchronous paints outside live resize" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(null));
+
+    var host: Host = undefined;
+    host.is_live_resize = .init(false);
+    host.resize_settle_timer_active = false;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.queue, rendererRepaintRequestMode(&host));
+
+    host.resize_settle_timer_active = true;
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.update_now, rendererRepaintRequestMode(&host));
+
+    host.is_live_resize = .init(true);
+    try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host));
 }
 
 test "win32 resize settle presents pending renderer frames before waking renderer" {

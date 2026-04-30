@@ -125,9 +125,11 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     const stderr = &stderr_writer.interface;
 
     const resources_dir = global_state.resources_dir.app();
-    if (resources_dir == null)
+    if (resources_dir == null) {
         try stderr.print("Could not find the winghostty resources directory. Please ensure " ++
             "that winghostty is installed correctly.\n", .{});
+        try stderr.flush();
+    }
 
     var count: usize = 0;
 
@@ -167,7 +169,8 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     }
 
     if (count == 0) {
-        try stderr.print("No themes found, check to make sure that the themes were installed correctly.", .{});
+        try stderr.print("No themes found, check to make sure that the themes were installed correctly.\n", .{});
+        try stderr.flush();
         return 1;
     }
 

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const geometry = @import("win32_geometry.zig");
+const win32_types = @import("win32_types.zig");
 
 // -- Public types -----------------------------------------------------------
 
@@ -54,25 +55,28 @@ pub const Kind = enum {
 
 const POINT = geometry.Point;
 
-const HDC = *anyopaque;
+const HBRUSH = win32_types.HBRUSH;
+const HDC = win32_types.HDC;
+const HGDIOBJ = win32_types.HGDIOBJ;
+const HPEN = win32_types.HPEN;
 
 const PS_SOLID: i32 = 0;
 const PS_NULL: i32 = 5;
 const TRANSPARENT: i32 = 1;
 const NULL_BRUSH_INDEX: i32 = 5;
 
-extern "gdi32" fn CreatePen(style: i32, width: i32, color: u32) callconv(.winapi) ?*anyopaque;
-extern "gdi32" fn SelectObject(hdc: HDC, obj: *anyopaque) callconv(.winapi) ?*anyopaque;
-extern "gdi32" fn DeleteObject(obj: *anyopaque) callconv(.winapi) i32;
+extern "gdi32" fn CreatePen(style: i32, width: i32, color: u32) callconv(.winapi) HPEN;
+extern "gdi32" fn SelectObject(hdc: HDC, obj: HGDIOBJ) callconv(.winapi) HGDIOBJ;
+extern "gdi32" fn DeleteObject(obj: HGDIOBJ) callconv(.winapi) i32;
 extern "gdi32" fn MoveToEx(hdc: HDC, x: i32, y: i32, lp: ?*POINT) callconv(.winapi) i32;
 extern "gdi32" fn LineTo(hdc: HDC, x: i32, y: i32) callconv(.winapi) i32;
 extern "gdi32" fn Ellipse(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
 extern "gdi32" fn Rectangle(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
 extern "gdi32" fn Polygon(hdc: HDC, points: [*]const POINT, count: i32) callconv(.winapi) i32;
 extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.winapi) i32;
-extern "gdi32" fn CreateSolidBrush(color: u32) callconv(.winapi) ?*anyopaque;
+extern "gdi32" fn CreateSolidBrush(color: u32) callconv(.winapi) HBRUSH;
 extern "gdi32" fn SetTextColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn GetStockObject(index: i32) callconv(.winapi) ?*anyopaque;
+extern "gdi32" fn GetStockObject(index: i32) callconv(.winapi) HGDIOBJ;
 
 // -- Geometry helpers (pure -- no GDI) --------------------------------------
 
@@ -130,10 +134,10 @@ pub fn isDrawable(r: Rect, min: i32) bool {
 /// Select a pen + brush pair appropriate for normal / HC mode, returning
 /// the previous pen and brush so the caller can restore + delete.
 const GdiState = struct {
-    pen: *anyopaque,
-    brush: *anyopaque,
-    old_pen: *anyopaque,
-    old_brush: *anyopaque,
+    pen: HPEN,
+    brush: HGDIOBJ,
+    old_pen: HGDIOBJ,
+    old_brush: HGDIOBJ,
 };
 
 fn setupGdi(hdc: HDC, color: u32, is_hc: bool) ?GdiState {

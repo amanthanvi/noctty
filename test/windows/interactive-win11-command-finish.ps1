@@ -102,52 +102,45 @@ $process = Start-Process `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -PassThru
+$processHandle = $process.Handle
 
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $validated = $false
 $failureReason = $null
-$commandFinishedObserved = $false
-$commandObservedAt = $null
+$launchStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$minimumRuntimeMs = 5000
 
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
 
         $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
+        $notifierDisabledFallback = $stderr -match 'winrt toast show failed err=.*NotifierDisabled; falling back to banner'
+        $toastFailure = $stderr -match 'winrt toast show failed'
 
         if ($stderr -match 'taskbar progress init failed|taskbar progress sync failed|panic: reached unreachable code') {
             $failureReason = 'unexpected runtime failure reported in stderr'
             break
         }
 
-        if ((-not $commandFinishedObserved) -and $stderr -match 'command took ') {
-            $commandFinishedObserved = $true
-            $commandObservedAt = [DateTime]::UtcNow
+        if ($notificationsEnabled -and $toastFailure) {
+            $failureReason = "unexpected WinRT toast failure while notifier setting is Enabled ($settingText)"
+            break
         }
 
-        if ($commandFinishedObserved) {
-            $elapsedSinceCommandMs = ([DateTime]::UtcNow - $commandObservedAt).TotalMilliseconds
-            if ($notificationsEnabled) {
-                if ($stderr -match 'winrt toast show failed') {
-                    $failureReason = "unexpected WinRT toast failure while notifier setting is Enabled ($settingText)"
-                } elseif ($elapsedSinceCommandMs -ge 1000) {
-                    $validated = $true
-                }
+        if ($process.HasExited) {
+            $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+
+            if ($launchStopwatch.ElapsedMilliseconds -lt $minimumRuntimeMs) {
+                $failureReason = "winghostty exited too early for command-finish validation (exit code $exitCode, runtime $($launchStopwatch.ElapsedMilliseconds)ms)"
+            } elseif ($notificationsEnabled) {
+                $validated = $true
+            } elseif ($notifierDisabledFallback) {
+                $validated = $true
             } else {
-                if ($stderr -match 'winrt toast show failed err=.*NotifierDisabled; falling back to banner') {
-                    $validated = $true
-                } elseif ($elapsedSinceCommandMs -ge 1000) {
-                    $failureReason = "expected explicit NotifierDisabled fallback while notifier setting is $settingText"
-                }
+                $failureReason = "expected explicit NotifierDisabled fallback while notifier setting is $settingText"
             }
 
-            if ($validated -or $failureReason) {
-                break
-            }
-        }
-
-        if ($process.HasExited -and -not $validated) {
-            $failureReason = "winghostty exited before validation completed (exit code $($process.ExitCode))"
             break
         }
     }

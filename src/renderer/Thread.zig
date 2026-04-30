@@ -12,6 +12,8 @@ const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
+const terminalpkg = @import("../terminal/main.zig");
+const terminal_render_dirty = @import("../terminal/render_dirty.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -56,6 +58,7 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
 
 const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
+const RENDER_FOLLOWUP_BURST_MS = 128;
 
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
@@ -92,6 +95,7 @@ stop_c: xev.Completion = .{},
 /// The timer used for rendering
 render_h: xev.Timer,
 render_c: xev.Completion = .{},
+render_followup_pending: bool = false,
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
@@ -382,7 +386,7 @@ fn syncDrawTimer(self: *Thread) void {
 }
 
 /// Drain the mailbox.
-fn drainMailbox(self: *Thread) !void {
+fn drainMailbox(self: *Thread) !bool {
     // There's probably a more elegant way to do this...
     //
     // This is effectively an @autoreleasepool{} block, which we need in
@@ -390,7 +394,9 @@ fn drainMailbox(self: *Thread) !void {
     const pool = darwin.beginAutoreleasePool();
     defer darwin.endAutoreleasePool(pool);
 
+    var handled_any = false;
     while (self.mailbox.pop()) |message| {
+        handled_any = true;
         log.debug("mailbox message={}", .{message});
         switch (message) {
             .crash => @panic("crash request, crashing intentionally"),
@@ -545,6 +551,8 @@ fn drainMailbox(self: *Thread) !void {
             },
         }
     }
+
+    return handled_any;
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
@@ -566,6 +574,9 @@ fn drawFrame(self: *Thread, now: bool) void {
     if (!now and self.renderer.hasVsync()) return;
 
     if (must_draw_from_app_thread) {
+        if (comptime @hasDecl(apprt.Surface, "noteRendererDrawRequest")) {
+            self.surface.noteRendererDrawRequest();
+        }
         if (comptime @hasDecl(apprt.Surface, "beginRendererRepaintRequest")) {
             if (!self.surface.beginRendererRepaintRequest()) return;
         }
@@ -584,6 +595,67 @@ fn drawFrame(self: *Thread, now: bool) void {
     }
 }
 
+fn scheduleRenderFollowup(self: *Thread) void {
+    if (self.render_followup_pending) return;
+    self.render_followup_pending = true;
+    self.render_h.run(
+        &self.loop,
+        &self.render_c,
+        DRAW_INTERVAL,
+        Thread,
+        self,
+        renderCallback,
+    );
+}
+
+fn refreshRenderFollowupDeadline(self: *Thread) void {
+    if (apprt.runtime != apprt.win32 or !self.flags.visible) return;
+    self.state.noteRenderWakeupNotify();
+}
+
+fn renderFollowupWindowActive(self: *const Thread) bool {
+    if (apprt.runtime != apprt.win32 or !self.flags.visible) return false;
+    return self.state.renderWakeupNotifiedRecently(RENDER_FOLLOWUP_BURST_MS);
+}
+
+fn shouldContinueRenderFollowup(self: *Thread) bool {
+    if (apprt.runtime != apprt.win32 or !self.flags.visible) return false;
+
+    self.state.mutex.lock();
+    defer self.state.mutex.unlock();
+    return terminal_render_dirty.needsRendererWake(self.state.terminal);
+}
+
+fn renderOnce(self: *Thread, from_wakeup: bool) bool {
+    // Drain mailbox work first so message-driven state changes are reflected
+    // in the same frame as terminal output wakes.
+    _ = self.drainMailbox() catch |err| {
+        log.err("error draining mailbox err={}", .{err});
+        return false;
+    };
+
+    // Update our frame data.
+    if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
+        self.surface.noteRendererUpdateFrame();
+    }
+    self.renderer.updateFrame(
+        self.state,
+        self.flags.cursor_blink_visible,
+    ) catch |err|
+        log.warn("error rendering err={}", .{err});
+
+    // Draw.
+    self.drawFrame(false);
+
+    // On Win32, xev async wakes can coalesce while a render pass is still
+    // in flight. If terminal dirtiness reappeared during the pass, keep a
+    // short follow-up timer active so streaming output doesn't collapse to a
+    // fraction of the intended frame rate.
+    const keep_due_to_dirty = self.shouldContinueRenderFollowup();
+    if (from_wakeup and keep_due_to_dirty) self.refreshRenderFollowupDeadline();
+    return keep_due_to_dirty or self.renderFollowupWindowActive();
+}
+
 fn wakeupCallback(
     self_: ?*Thread,
     _: *xev.Loop,
@@ -596,17 +668,13 @@ fn wakeupCallback(
     };
 
     const t = self_.?;
+    if (comptime @hasDecl(apprt.Surface, "noteRendererWakeupCallback")) {
+        t.surface.noteRendererWakeupCallback();
+    }
 
-    // When we wake up, we check the mailbox. Mailbox producers should
-    // wake up our thread after publishing.
-    t.drainMailbox() catch |err|
-        log.err("error draining mailbox err={}", .{err});
-
-    // Render immediately. Coalescing of paint requests happens downstream
-    // via Surface.renderer_repaint_requested + paint_pending on Win32
-    // (see src/apprt/win32.zig:beginRendererRepaintRequest) — there is no
-    // need for a thread-side delay timer here.
-    _ = renderCallback(t, undefined, undefined, {});
+    if (t.renderOnce(true)) {
+        t.scheduleRenderFollowup();
+    }
 
     return .rearm;
 }
@@ -665,16 +733,14 @@ fn renderCallback(
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
+    t.render_followup_pending = false;
+    if (comptime @hasDecl(apprt.Surface, "noteRendererFollowupCallback")) {
+        t.surface.noteRendererFollowupCallback();
+    }
 
-    // Update our frame data
-    t.renderer.updateFrame(
-        t.state,
-        t.flags.cursor_blink_visible,
-    ) catch |err|
-        log.warn("error rendering err={}", .{err});
-
-    // Draw
-    t.drawFrame(false);
+    if (t.renderOnce(false)) {
+        t.scheduleRenderFollowup();
+    }
 
     return .disarm;
 }
@@ -772,4 +838,27 @@ fn cursorBlinkInterval() u64 {
     }
 
     return CURSOR_BLINK_INTERVAL;
+}
+
+test "renderer follow-up check tracks visible terminal dirtiness" {
+    const testing = std.testing;
+
+    var term = try terminalpkg.Terminal.init(testing.allocator, .{
+        .cols = 4,
+        .rows = 3,
+    });
+    defer term.deinit(testing.allocator);
+
+    try testing.expect(!terminal_render_dirty.needsRendererWake(&term));
+
+    term.flags.dirty.palette = true;
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+    term.flags.dirty = .{};
+
+    term.screens.active.kitty_images.dirty = true;
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+    term.screens.active.kitty_images.dirty = false;
+
+    try term.printString("x");
+    try testing.expect(terminal_render_dirty.needsRendererWake(&term));
 }

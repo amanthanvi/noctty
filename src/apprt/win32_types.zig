@@ -26,11 +26,16 @@ pub const COLORREF = u32;
 pub const HBRUSH = ?*anyopaque;
 pub const HCURSOR = ?*anyopaque;
 pub const HDC = ?*anyopaque;
+pub const HFONT = ?*anyopaque;
 pub const HGDIOBJ = ?*anyopaque;
 pub const HGLRC = ?*anyopaque;
+pub const HGLOBAL = ?*anyopaque;
 pub const HICON = ?*anyopaque;
+pub const HMONITOR = ?*anyopaque;
 pub const HMENU = ?*anyopaque;
 pub const HMODULE = ?*anyopaque;
+pub const HPEN = ?*anyopaque;
+pub const HRGN = ?*anyopaque;
 pub const INTRESOURCE = ?*const anyopaque;
 
 pub const POINT = geometry.Point;

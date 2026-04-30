@@ -45,6 +45,49 @@ const TERMIOS_POLL_MS = 200;
 const WRITE_BUF_SIZE = 4 * 1024;
 const WINDOWS_READ_BUF_SIZE = 16 * 1024;
 
+fn pathEntryEquals(a: []const u8, b: []const u8) bool {
+    return if (builtin.os.tag == .windows)
+        std.ascii.eqlIgnoreCase(a, b)
+    else
+        std.mem.eql(u8, a, b);
+}
+
+fn addGhosttyBinToPath(
+    alloc: Allocator,
+    env: *EnvMap,
+    exe_dir: []const u8,
+) !void {
+    // Always export the resolved binary directory so shell integrations can
+    // recover it even if they later replace PATH entirely.
+    try env.put("GHOSTTY_BIN_DIR", exe_dir);
+
+    const path = env.get("PATH") orelse {
+        try env.put("PATH", exe_dir);
+        return;
+    };
+
+    var it = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
+    var is_first_entry = true;
+    while (it.next()) |entry| {
+        if (pathEntryEquals(entry, exe_dir)) {
+            if (builtin.os.tag != .windows or is_first_entry) return;
+            break;
+        }
+        is_first_entry = false;
+    }
+
+    const updated_path = if (builtin.os.tag == .windows)
+        // Windows shells resolve bare `winghostty` from PATH/PATHEXT.
+        // Put the current install first so an older shim/exe earlier on
+        // PATH doesn't shadow our local `winghostty.com`.
+        try internal_os.prependEnv(alloc, path, exe_dir)
+    else
+        try internal_os.appendEnv(alloc, path, exe_dir);
+    defer alloc.free(updated_path);
+
+    try env.put("PATH", updated_path);
+}
+
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!flatpak_support) struct {
@@ -683,30 +726,11 @@ const Subprocess = struct {
                 break :ghostty_path;
             };
             const exe_dir = std.fs.path.dirname(exe_bin_path) orelse break :ghostty_path;
-            log.debug("appending ghostty bin to path dir={s}", .{exe_dir});
-
-            // We always set this so that if the shell overwrites the path
-            // scripts still have a way to find the Ghostty binary when
-            // running in Ghostty.
-            try env.put("GHOSTTY_BIN_DIR", exe_dir);
-
-            // Append if we have a path. We want to append so that ghostty is
-            // the last priority in the path. If we don't have a path set
-            // then we just set it to the directory of the binary.
-            if (env.get("PATH")) |path| {
-                // Verify that our path doesn't already contain this entry
-                var it = std.mem.tokenizeScalar(u8, path, std.fs.path.delimiter);
-                while (it.next()) |entry| {
-                    if (std.mem.eql(u8, entry, exe_dir)) break :ghostty_path;
-                }
-
-                try env.put(
-                    "PATH",
-                    try internal_os.appendEnv(alloc, path, exe_dir),
-                );
-            } else {
-                try env.put("PATH", exe_dir);
-            }
+            log.debug(
+                "{s} ghostty bin on path dir={s}",
+                .{ if (builtin.os.tag == .windows) "prepending" else "appending", exe_dir },
+            );
+            try addGhosttyBinToPath(alloc, &env, exe_dir);
         }
 
         // On macOS, export additional data directories from our
@@ -1809,4 +1833,61 @@ test "execCommand: direct command, config freed" {
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings(result[0], "foo");
     try testing.expectEqualStrings(result[1], "bar baz");
+}
+
+test "addGhosttyBinToPath prepends on windows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put("PATH", "C:\\Users\\amant\\scoop\\shims;C:\\Windows\\System32");
+
+    try addGhosttyBinToPath(testing.allocator, &env, "C:\\Program Files\\winghostty");
+
+    try testing.expectEqualStrings("C:\\Program Files\\winghostty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings(
+        "C:\\Program Files\\winghostty;C:\\Users\\amant\\scoop\\shims;C:\\Windows\\System32",
+        env.get("PATH").?,
+    );
+}
+
+test "addGhosttyBinToPath avoids duplicate windows entry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put("PATH", "C:\\Program Files\\Winghostty;C:\\Windows\\System32");
+
+    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\winghostty");
+
+    try testing.expectEqualStrings("c:\\program files\\winghostty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings(
+        "C:\\Program Files\\Winghostty;C:\\Windows\\System32",
+        env.get("PATH").?,
+    );
+}
+
+test "addGhosttyBinToPath prepends existing windows entry when not first" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var env: EnvMap = .init(testing.allocator);
+    defer env.deinit();
+
+    try env.put(
+        "PATH",
+        "C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Winghostty;C:\\Windows\\System32",
+    );
+
+    try addGhosttyBinToPath(testing.allocator, &env, "c:\\program files\\winghostty");
+
+    try testing.expectEqualStrings("c:\\program files\\winghostty", env.get("GHOSTTY_BIN_DIR").?);
+    try testing.expectEqualStrings(
+        "c:\\program files\\winghostty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Winghostty;C:\\Windows\\System32",
+        env.get("PATH").?,
+    );
 }

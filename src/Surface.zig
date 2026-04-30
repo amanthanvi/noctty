@@ -2581,6 +2581,7 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 /// isn't guaranteed to happen immediately but it will happen as soon as
 /// practical.
 fn queueRender(self: *Surface) !void {
+    self.renderer_state.noteRenderWakeupNotify();
     try self.renderer_thread.wakeup.notify();
 }
 

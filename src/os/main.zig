@@ -77,6 +77,7 @@ pub const appendEnv = env.appendEnv;
 pub const appendEnvAlways = env.appendEnvAlways;
 pub const prependEnv = env.prependEnv;
 pub const getenv = env.getenv;
+pub const getEnvVarOwnedTrimmedNotEmpty = env.getEnvVarOwnedTrimmedNotEmpty;
 pub const setenv = env.setenv;
 pub const unsetenv = env.unsetenv;
 pub const launchedFromDesktop = desktop.launchedFromDesktop;

@@ -28,6 +28,11 @@ const win32_types = @import("win32_types.zig");
 /// dependency without duplicating layout-sensitive declarations.
 const HWND = win32_types.HWND;
 const HINSTANCE = win32_types.HINSTANCE;
+const HBRUSH = win32_types.HBRUSH;
+const HCURSOR = win32_types.HCURSOR;
+const HDC = win32_types.HDC;
+const HGDIOBJ = win32_types.HGDIOBJ;
+const HMENU = win32_types.HMENU;
 const LPCWSTR = win32_types.LPCWSTR;
 const UINT = win32_types.UINT;
 const LRESULT = win32_types.LRESULT;
@@ -175,7 +180,7 @@ extern "user32" fn CreateWindowExW(
     nWidth: i32,
     nHeight: i32,
     hWndParent: ?HWND,
-    hMenu: ?*anyopaque,
+    hMenu: HMENU,
     hInstance: HINSTANCE,
     lpParam: ?*anyopaque,
 ) callconv(.winapi) ?HWND;
@@ -184,22 +189,22 @@ extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
 extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: LPCWSTR) callconv(.winapi) ?*anyopaque;
+extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: LPCWSTR) callconv(.winapi) HCURSOR;
 extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) callconv(.winapi) LONG_PTR;
 extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
-extern "user32" fn BeginPaint(hWnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.winapi) ?*anyopaque;
+extern "user32" fn BeginPaint(hWnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.winapi) HDC;
 extern "user32" fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) callconv(.winapi) BOOL;
 extern "user32" fn IsWindow(hWnd: ?HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn InvalidateRect(hWnd: HWND, lpRect: ?*const RECT, bErase: BOOL) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: [*]u16, nMaxCount: i32) callconv(.winapi) i32;
 extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "gdi32" fn FillRect(hdc: ?*anyopaque, lprc: *const RECT, hbr: ?*anyopaque) callconv(.winapi) i32;
-extern "gdi32" fn GetStockObject(i: i32) callconv(.winapi) ?*anyopaque;
-extern "gdi32" fn SetDCBrushColor(hdc: ?*anyopaque, color: COLORREF) callconv(.winapi) COLORREF;
-extern "gdi32" fn SetTextColor(hdc: ?*anyopaque, color: COLORREF) callconv(.winapi) COLORREF;
-extern "gdi32" fn SetBkMode(hdc: ?*anyopaque, mode: i32) callconv(.winapi) i32;
-extern "user32" fn DrawTextW(hDC: ?*anyopaque, lpchText: LPCWSTR, cchText: i32, lprc: *RECT, format: UINT) callconv(.winapi) i32;
+extern "gdi32" fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
+extern "gdi32" fn GetStockObject(i: i32) callconv(.winapi) HGDIOBJ;
+extern "gdi32" fn SetDCBrushColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
+extern "gdi32" fn SetTextColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
+extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.winapi) i32;
+extern "user32" fn DrawTextW(hDC: HDC, lpchText: LPCWSTR, cchText: i32, lprc: *RECT, format: UINT) callconv(.winapi) i32;
 
 const DC_BRUSH: i32 = 18;
 const TRANSPARENT: i32 = 1;

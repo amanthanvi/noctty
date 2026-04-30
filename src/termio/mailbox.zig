@@ -1,9 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const xev = @import("../global.zig").xev;
-const renderer = @import("../renderer.zig");
-const termio = @import("../termio.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
+const Message = @import("message.zig").Message;
 
 const log = std.log.scoped(.io_writer);
 
@@ -11,7 +10,7 @@ const log = std.log.scoped(.io_writer);
 /// Typically used by a multi-threaded application. The capacity is
 /// hardcoded to a value that empirically has made sense for Ghostty usage
 /// but I'm open to changing it with good arguments.
-const Queue = BlockingQueue(termio.Message, 64);
+const Queue = BlockingQueue(Message, 64);
 
 /// The location to where write-related messages are sent.
 pub const Mailbox = union(enum) {
@@ -49,7 +48,7 @@ pub const Mailbox = union(enum) {
     /// This may not apply to all writer types.
     pub fn send(
         self: *Mailbox,
-        msg: termio.Message,
+        msg: Message,
         mutex: ?*std.Thread.Mutex,
     ) void {
         switch (self.*) {

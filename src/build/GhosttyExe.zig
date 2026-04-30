@@ -10,6 +10,10 @@ exe: *std.Build.Step.Compile,
 /// The install step for the executable.
 install_step: *std.Build.Step.InstallArtifact,
 
+/// Console launcher that shells resolve before winghostty.exe.
+command_exe: ?*std.Build.Step.Compile = null,
+command_install_step: ?*std.Build.Step.InstallFile = null,
+
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty {
     const exe: *std.Build.Step.Compile = b.addExecutable(.{
         .name = "winghostty",
@@ -25,6 +29,8 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         .use_llvm = true,
     });
     const install_step = b.addInstallArtifact(exe, .{});
+    var command_exe: ?*std.Build.Step.Compile = null;
+    var command_install_step: ?*std.Build.Step.InstallFile = null;
 
     // Set PIE if requested
     if (cfg.pie) exe.pie = true;
@@ -32,20 +38,6 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     // The app executable always needs the shared dependency wiring,
     // including build_options and generated imports.
     _ = try deps.add(exe);
-
-    // Windows-only fork: app builds no longer carry Nix/Linux-specific
-    // launch guidance or rpath mutation behavior.
-    try checkNixShell(exe, cfg);
-
-    // Patch our rpath if that option is specified.
-    if (cfg.patch_rpath) |rpath| {
-        if (rpath.len > 0) {
-            const run = std.Build.Step.Run.create(b, "patchelf rpath");
-            run.addArgs(&.{ "patchelf", "--set-rpath", rpath });
-            run.addArtifactArg(exe);
-            install_step.step.dependOn(&run.step);
-        }
-    }
 
     // OS-specific
     switch (cfg.target.result.os.tag) {
@@ -55,6 +47,23 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
                 .file = b.path("dist/windows/winghostty.rc"),
                 .flags = &.{try win32IconResourceStamp(b)},
             });
+
+            const command = b.addExecutable(.{
+                .name = "winghostty-command",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/main_winghostty_command.zig"),
+                    .target = cfg.target,
+                    .optimize = cfg.optimize,
+                    .strip = cfg.strip,
+                    .omit_frame_pointer = cfg.strip,
+                    .unwind_tables = if (cfg.strip) .none else .sync,
+                }),
+                .use_llvm = true,
+            });
+            command.subsystem = .Console;
+            _ = try deps.add(command);
+            command_exe = command;
+            command_install_step = b.addInstallBinFile(command.getEmittedBin(), "winghostty.com");
         },
 
         else => {},
@@ -63,6 +72,8 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     return .{
         .exe = exe,
         .install_step = install_step,
+        .command_exe = command_exe,
+        .command_install_step = command_install_step,
     };
 }
 
@@ -70,11 +81,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
 pub fn install(self: *const Ghostty) void {
     const b = self.install_step.step.owner;
     b.getInstallStep().dependOn(&self.install_step.step);
-}
-
-fn checkNixShell(exe: *std.Build.Step.Compile, cfg: *const Config) !void {
-    _ = exe;
-    _ = cfg;
+    if (self.command_install_step) |step| b.getInstallStep().dependOn(&step.step);
 }
 
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {

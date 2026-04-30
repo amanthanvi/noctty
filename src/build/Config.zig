@@ -34,7 +34,6 @@ version: std.SemanticVersion = .{ .major = 0, .minor = 0, .patch = 0 },
 /// Binary properties
 pie: bool = false,
 strip: bool = false,
-patch_rpath: ?[]const u8 = null,
 
 /// Artifacts
 emit_bench: bool = false,
@@ -195,13 +194,6 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
 
     //---------------------------------------------------------------
     // Binary Properties
-
-    _ = b.option(
-        []const u8,
-        "patch-rpath",
-        "Deprecated in the Windows-only fork. Retained as a disabled compatibility flag.",
-    );
-    config.patch_rpath = null;
 
     config.pie = b.option(
         bool,

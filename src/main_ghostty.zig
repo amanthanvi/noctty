@@ -2,12 +2,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Allocator = std.mem.Allocator;
 const posix = std.posix;
 const build_config = @import("build_config.zig");
-const cli = @import("cli.zig");
-const renderer = @import("renderer.zig");
 const apprt = @import("apprt.zig");
+const process_shared = @import("process_shared.zig");
 
 const App = @import("App.zig");
 const state = &@import("global.zig").state;
@@ -23,28 +21,8 @@ const MainReturn = switch (build_config.artifact) {
 pub fn main() !MainReturn {
     // We first start by initializing our global process state.
     state.init() catch |err| {
-        var buffer: [1024]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&buffer);
-        const stderr = &stderr_writer.interface;
         defer posix.exit(1);
-        const ErrSet = @TypeOf(err) || error{Unknown};
-        switch (@as(ErrSet, @errorCast(err))) {
-            error.MultipleActions => try stderr.print(
-                "Error: multiple CLI actions specified. You must specify only one\n" ++
-                    "action starting with the `+` character.\n",
-                .{},
-            ),
-
-            error.InvalidAction => try stderr.print(
-                "Error: unknown CLI action specified. CLI actions are specified with\n" ++
-                    "the '+' character.\n\n" ++
-                    "All valid CLI actions can be listed with `winghostty +help`\n",
-                .{},
-            ),
-
-            else => try stderr.print("invalid CLI invocation err={}\n", .{err}),
-        }
-        try stderr.flush();
+        try process_shared.reportStateInitError(err);
     };
     defer state.deinit();
     const alloc = state.alloc;
@@ -58,11 +36,7 @@ pub fn main() !MainReturn {
     // Execute our action if we have one
     if (state.action) |action| {
         std.log.info("executing winghostty CLI action={}", .{action});
-        posix.exit(cli.ghostty.run(action, alloc) catch |err| err: {
-            std.log.err("CLI action failed error={}", .{err});
-            break :err 1;
-        });
-        return;
+        posix.exit(process_shared.runCliAction(action, alloc));
     }
 
     // Create our app state
@@ -95,46 +69,7 @@ pub export fn WinMain(
     return 0;
 }
 
-// The function std.log will call.
-fn logFn(
-    comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    stderr: {
-        // don't log debug messages to stderr unless we are a debug build
-        if (comptime builtin.mode != .Debug and level == .debug) break :stderr;
-
-        // skip if we are not logging to stderr
-        if (!state.logging.stderr) break :stderr;
-
-        // Lock so we are thread-safe
-        var buf: [64]u8 = undefined;
-        const stderr = std.debug.lockStderrWriter(&buf);
-        defer std.debug.unlockStderrWriter();
-
-        const level_txt = comptime level.asText();
-        const prefix = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
-        nosuspend stderr.print(level_txt ++ prefix ++ format ++ "\n", args) catch break :stderr;
-        nosuspend stderr.flush() catch break :stderr;
-    }
-}
-
-pub const std_options: std.Options = .{
-    // Our log level is always at least info in every build mode.
-    //
-    // Note, we don't lower this to debug even with conditional logging
-    // via GHOSTTY_LOG because our debug logs are very expensive to
-    // calculate and we want to make sure they're optimized out in
-    // builds.
-    .log_level = switch (builtin.mode) {
-        .Debug => .debug,
-        else => .info,
-    },
-
-    .logFn = logFn,
-};
+pub const std_options: std.Options = process_shared.std_options;
 
 test {
     _ = @import("pty.zig");

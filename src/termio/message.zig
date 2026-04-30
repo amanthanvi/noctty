@@ -1,8 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const renderer = @import("../renderer.zig");
+const renderer_size = @import("../renderer/size.zig");
 const terminal = @import("../terminal/main.zig");
-const termio = @import("../termio.zig");
+const termiopkg = @import("Termio.zig");
 const MessageData = @import("../datastruct/main.zig").MessageData;
 
 /// The messages that can be sent to an IO thread.
@@ -30,14 +30,14 @@ pub const Message = union(enum) {
     /// is allocated via the allocator and is expected to be freed when done.
     change_config: struct {
         alloc: Allocator,
-        ptr: *termio.Termio.DerivedConfig,
+        ptr: *termiopkg.DerivedConfig,
     },
 
     /// Activate or deactivate the inspector.
     inspector: bool,
 
     /// Resize the window.
-    resize: renderer.Size,
+    resize: renderer_size.Size,
 
     /// Request a size report is sent to the pty ([in-band
     /// size report, mode 2048](https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83) and
