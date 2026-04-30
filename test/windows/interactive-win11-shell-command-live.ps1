@@ -101,6 +101,9 @@ public static class Win11ShellCommandLiveNative {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
@@ -204,16 +207,41 @@ function Find-SurfaceWindow {
     $callback = [Win11ShellCommandLiveNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32') {
-            $script:Win11ShellCommandLiveSurface = $hwnd
-            return $false
+        if ((Get-WindowClassName -Hwnd $hwnd) -ne 'winghostty.win32') {
+            return $true
         }
 
-        return $true
+        if (-not [Win11ShellCommandLiveNative]::IsWindowVisible($hwnd)) {
+            return $true
+        }
+
+        $rect = [Win11ShellCommandLiveNative+RECT]::new()
+        if (-not [Win11ShellCommandLiveNative]::GetWindowRect($hwnd, [ref] $rect)) {
+            return $true
+        }
+
+        if (($rect.Right -le $rect.Left) -or ($rect.Bottom -le $rect.Top)) {
+            return $true
+        }
+
+        $script:Win11ShellCommandLiveSurface = $hwnd
+        return $false
     }
 
     [void] [Win11ShellCommandLiveNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:Win11ShellCommandLiveSurface
+}
+
+function Assert-ForegroundWindow {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd
+    )
+
+    if ([Win11ShellCommandLiveNative]::GetForegroundWindow() -eq $Hwnd) {
+        return $true
+    }
+
+    return $false
 }
 
 function Get-VisibleChildControls {
@@ -504,7 +532,19 @@ function Promote-WindowForCapture {
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
     [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
-    Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
+
+    $captureDeadline = (Get-Date).AddMilliseconds($CAPTURE_PROMOTION_DELAY_MS * 4)
+    while ((Get-Date) -lt $captureDeadline) {
+        if (Assert-ForegroundWindow -Hwnd $Hwnd) {
+            Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
+            return
+        }
+
+        Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
+        [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
+    }
+
+    throw "Failed to foreground capture target hwnd=$Hwnd before screenshot sampling"
 }
 
 function Measure-ImageDelta {
