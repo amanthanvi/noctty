@@ -36,8 +36,11 @@ produces:
 4. A release icon asset
 5. Generated Scoop package-manager metadata
 
-Local packaging can run unsigned. The GitHub `Release` workflow passes
-`-RequireSigning` and fails closed if Authenticode signing is unavailable.
+Local unsigned packaging is still allowed for smoke validation, but the GitHub
+Release workflow currently requires signing and fails closed when signing is
+absent. SmartScreen and publisher trust should still be treated as incomplete
+until winghostty moves from internal/self-signed signing to a publicly trusted
+certificate.
 
 ## Local Packaging
 
@@ -70,6 +73,7 @@ To exercise the local signing path, export these environment variables first:
 ```powershell
 $env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\winghostty-signing.pfx"
 $env:WINDOWS_CODESIGN_PFX_PASSWORD = "<pfx-password>"
+$env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true" # only for internal/self-signed PFXs
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 `
   -Version 1.3.100 `
   -RequireInstaller `
@@ -115,6 +119,8 @@ Optional:
 
 - Environment or repo variable: `WINDOWS_CODESIGN_TIMESTAMP_URL`
   Default: `http://timestamp.digicert.com`
+- Environment or repo variable: `WINDOWS_CODESIGN_TRUST_SELF_SIGNED`
+  Default: unset / false
 
 Recommended setup:
 
@@ -134,11 +140,18 @@ $pfxBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfxPath))
 $pfxBase64 | gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
 gh secret set WINDOWS_CODESIGN_PFX_PASSWORD --repo $repo --env release --body "<pfx-password>"
 gh variable set WINDOWS_CODESIGN_TIMESTAMP_URL --repo $repo --env release --body "http://timestamp.digicert.com"
+gh variable set WINDOWS_CODESIGN_TRUST_SELF_SIGNED --repo $repo --env release --body "true"
 ```
 
 If you prefer a different RFC 3161/Authenticode timestamp service, set
 `WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script will default
 to DigiCert when the variable is absent.
+
+When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, the packaging script imports
+the certificate's public half into `Cert:\CurrentUser\Root` and
+`Cert:\CurrentUser\TrustedPublisher` before `Get-AuthenticodeSignature`
+validation. This keeps internal/self-signed release probes green on the
+current runner. It does not create public publisher trust on other machines.
 
 ### Release Runbook
 

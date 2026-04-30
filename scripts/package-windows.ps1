@@ -79,6 +79,11 @@ $signingUrl = if ($env:WINDOWS_CODESIGN_URL) {
 } else {
     "https://github.com/amanthanvi/winghostty"
 }
+$trustSelfSignedSigningCert = if ($env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED) {
+    $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED
+} else {
+    $null
+}
 $preferredSignToolPath = if ($env:WINDOWS_CODESIGN_SIGNTOOL_PATH) {
     $env:WINDOWS_CODESIGN_SIGNTOOL_PATH
 } else {
@@ -158,6 +163,28 @@ function Find-SignTool {
     return $null
 }
 
+function ConvertTo-Boolean {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    switch ($Value.Trim().ToLowerInvariant()) {
+        "1" { return $true }
+        "true" { return $true }
+        "yes" { return $true }
+        "on" { return $true }
+        "0" { return $false }
+        "false" { return $false }
+        "no" { return $false }
+        "off" { return $false }
+        default {
+            throw "Expected WINDOWS_CODESIGN_TRUST_SELF_SIGNED to be one of: true, false, 1, 0, yes, no, on, off."
+        }
+    }
+}
+
 function New-TemporaryPfxFile {
     param([string]$Base64Value)
 
@@ -171,6 +198,43 @@ function New-TemporaryPfxFile {
     $path = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
     [System.IO.File]::WriteAllBytes($path, $bytes)
     return $path
+}
+
+function Test-CertificatePresent {
+    param(
+        [string]$StorePath,
+        [string]$Thumbprint
+    )
+
+    return $null -ne (Get-ChildItem -LiteralPath $StorePath -ErrorAction SilentlyContinue | Where-Object Thumbprint -eq $Thumbprint | Select-Object -First 1)
+}
+
+function Ensure-SigningCertificateTrusted {
+    param([hashtable]$SigningConfig)
+
+    if (-not $SigningConfig.TrustSelfSigned) {
+        return
+    }
+
+    $tempCertPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".cer")
+    try {
+        [System.IO.File]::WriteAllBytes($tempCertPath, $SigningConfig.PublicCertificateBytes)
+        foreach ($storePath in @(
+            "Cert:\CurrentUser\Root",
+            "Cert:\CurrentUser\TrustedPublisher"
+        )) {
+            if (Test-CertificatePresent -StorePath $storePath -Thumbprint $SigningConfig.CertificateThumbprint) {
+                continue
+            }
+
+            Import-Certificate -FilePath $tempCertPath -CertStoreLocation $storePath | Out-Null
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempCertPath) {
+            Remove-Item -LiteralPath $tempCertPath -Force
+        }
+    }
 }
 
 function Get-SigningConfig {
@@ -208,6 +272,18 @@ function Get-SigningConfig {
         throw "Configured code-signing certificate was not found: $resolvedPfxPath"
     }
 
+    $trustSelfSigned = ConvertTo-Boolean -Value $trustSelfSignedSigningCert
+    $signingCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $resolvedPfxPath,
+        $signingPfxPassword,
+        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+    )
+    $isSelfSigned = $signingCert.Subject -eq $signingCert.Issuer
+
+    if ($trustSelfSigned -and -not $isSelfSigned) {
+        throw "WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true is only supported for a self-signed PFX."
+    }
+
     return @{
         SignToolPath = $signToolPath
         PfxPath = $resolvedPfxPath
@@ -216,6 +292,10 @@ function Get-SigningConfig {
         Description = $signingDescription
         Url = $signingUrl
         TemporaryPfxPath = if ($hasBase64) { $resolvedPfxPath } else { $null }
+        CertificateThumbprint = $signingCert.Thumbprint
+        PublicCertificateBytes = $signingCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+        IsSelfSigned = $isSelfSigned
+        TrustSelfSigned = $trustSelfSigned
     }
 }
 
@@ -254,8 +334,12 @@ $temporarySigningPfxPath = $null
 try {
     $signingConfig = Get-SigningConfig
     if ($signingConfig) {
+        Ensure-SigningCertificateTrusted -SigningConfig $signingConfig
         $temporarySigningPfxPath = $signingConfig.TemporaryPfxPath
         Write-Host "Code signing : enabled"
+        if ($signingConfig.TrustSelfSigned) {
+            Write-Host "Signing trust: self-signed cert imported into CurrentUser Root + TrustedPublisher for local validation"
+        }
     } else {
         Write-Host "Code signing : disabled"
     }
