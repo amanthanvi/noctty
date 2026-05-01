@@ -1644,16 +1644,33 @@ fn readIpcDataResponse(
     alloc: Allocator,
     pipe: windows.HANDLE,
 ) ![]u8 {
-    var header: [9]u8 = undefined;
+    var header: [5]u8 = undefined;
     try readExactHandle(pipe, &header);
     if (readU32(header[0..4]) != ipc_wire_version) return error.InvalidIpcResponse;
-    switch (header[4]) {
-        ipc_ack_success => {},
-        ipc_ack_failure => return error.IPCFailed,
+
+    const success = switch (header[4]) {
+        ipc_ack_success => true,
+        ipc_ack_failure => false,
         else => return error.InvalidIpcResponse,
+    };
+
+    var len_buf: [4]u8 = undefined;
+    readExactHandle(pipe, &len_buf) catch |err| switch (err) {
+        // Older instances only return the legacy 5-byte ack. Treat their
+        // unsupported-request failure as a normal IPC failure instead of
+        // bubbling a raw transport EOF up through the CLI.
+        error.EndOfStream => {
+            if (!success) return error.IPCFailed;
+            return error.InvalidIpcResponse;
+        },
+        else => return err,
+    };
+
+    if (!success) {
+        return error.IPCFailed;
     }
 
-    const len = readU32(header[5..9]);
+    const len = readU32(&len_buf);
     const body = try alloc.alloc(u8, len);
     errdefer alloc.free(body);
     if (len > 0) try readExactHandle(pipe, body);
@@ -3739,19 +3756,29 @@ pub const App = struct {
         self: *App,
         alloc: Allocator,
     ) !apprt.ipc.AutomationWindowList {
-        const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.hosts.items.len);
+        const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.automationWindowCount());
         var built: usize = 0;
         errdefer {
             for (window_entries[0..built]) |*window| window.deinit(alloc);
             alloc.free(window_entries);
         }
 
-        for (self.hosts.items, 0..) |host, i| {
-            window_entries[i] = try buildAutomationWindow(alloc, host);
+        for (self.hosts.items) |host| {
+            if (host.tabs.items.len == 0) continue;
+            window_entries[built] = try buildAutomationWindow(alloc, host);
             built += 1;
         }
 
         return .{ .windows = window_entries };
+    }
+
+    fn automationWindowCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.hosts.items) |host| {
+            if (host.tabs.items.len == 0) continue;
+            count += 1;
+        }
+        return count;
     }
 
     fn buildAutomationWindow(
@@ -26023,6 +26050,78 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     try std.testing.expectEqualStrings(
         "{\"schema\":\"winghostty.windows.v1\",\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"panes\":[{\"surface_id\":701,\"focused\":true}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"panes\":[{\"surface_id\":703,\"focused\":false},{\"surface_id\":702,\"focused\":true}]}]}]}",
         json,
+    );
+}
+
+test "automation-window-list win32 json skips empty undo hosts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var app: App = undefined;
+    app.windows = .empty;
+    app.hosts = .empty;
+    defer app.windows.deinit(std.testing.allocator);
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var empty_host: Host = undefined;
+    empty_host.id = 16;
+    empty_host.tabs = .empty;
+    empty_host.active_tab = 0;
+    defer {
+        for (empty_host.tabs.items) |*tab| tab.deinit();
+        empty_host.tabs.deinit(std.testing.allocator);
+    }
+
+    var live_host: Host = undefined;
+    live_host.id = 17;
+    live_host.tabs = .empty;
+    live_host.active_tab = 0;
+    defer {
+        for (live_host.tabs.items) |*tab| tab.deinit();
+        live_host.tabs.deinit(std.testing.allocator);
+    }
+
+    var surface: Surface = undefined;
+    surface.core_surface = undefined;
+    surface.core_surface.id = 801;
+    surface.host = &live_host;
+    surface.host_id = live_host.id;
+    surface.window_focused = true;
+
+    try live_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 5, &surface));
+    try app.hosts.append(std.testing.allocator, &empty_host);
+    try app.hosts.append(std.testing.allocator, &live_host);
+    try app.windows.append(std.testing.allocator, &surface);
+
+    const json = try app.buildAutomationWindowListJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"winghostty.windows.v1\",\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"panes\":[{\"surface_id\":801,\"focused\":true}]}]}]}",
+        json,
+    );
+}
+
+test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-response.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var header: [5]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
+    header[4] = ipc_ack_failure;
+    try file.writeAll(&header);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.IPCFailed,
+        readIpcDataResponse(std.testing.allocator, file.handle),
     );
 }
 
