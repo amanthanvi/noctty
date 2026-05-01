@@ -45,6 +45,7 @@ pub const Set = struct {
     ) !Set {
         var links: std.ArrayList(Link) = .empty;
         defer links.deinit(alloc);
+        errdefer for (links.items) |*link| link.regex.deinit();
 
         try links.ensureTotalCapacity(alloc, config.len + @intFromBool(link_url));
 

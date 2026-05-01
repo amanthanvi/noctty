@@ -434,6 +434,7 @@ const DerivedConfig = struct {
     fn buildLinks(alloc: Allocator, config: *const configpkg.Config) ![]DerivedConfig.Link {
         var links: std.ArrayList(DerivedConfig.Link) = .empty;
         defer links.deinit(alloc);
+        errdefer for (links.items) |*link| link.regex.deinit();
 
         try links.ensureTotalCapacity(alloc, config.link.links.items.len + @intFromBool(config.@"link-url"));
 

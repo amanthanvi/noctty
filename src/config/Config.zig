@@ -1404,10 +1404,9 @@ input: RepeatableReadableIO = .{},
 ///     a scrollbar.
 scrollbar: Scrollbar = .system,
 
-/// Match a regular expression against the terminal text and associate clicking
-/// it with an action. This can be used to match URLs, file paths, etc. Actions
-/// can be opening using the system opener (e.g. `open` or `xdg-open`) or
-/// executing any arbitrary binding action.
+/// Match a regular expression against the terminal text and open the matched
+/// text with the system opener. This can be used to match URLs, file paths,
+/// etc.
 ///
 /// Links that are configured earlier take precedence over links that are
 /// configured later.
@@ -1415,9 +1414,11 @@ scrollbar: Scrollbar = .system,
 /// A default link that matches a URL and opens it in the system opener always
 /// exists. This can be disabled using `link-url`.
 ///
-/// Each configured value is a regular expression. When it matches terminal
-/// text, the matched text opens with the system opener using the same hover
-/// modifier behavior as `link-url`.
+/// Each configured value is a regular expression. Bare values are used as-is.
+/// Quoted values are parsed using Zig string literal syntax, so backslashes,
+/// quotes, and commas must be escaped the same way they are in Zig source.
+/// When it matches terminal text, the matched text opens with the system
+/// opener using the same hover modifier behavior as `link-url`.
 ///
 /// Specify this multiple times to configure multiple link matchers.
 link: RepeatableLink = .{},
@@ -7892,7 +7893,11 @@ pub const RepeatableLink = struct {
     links: std.ArrayListUnmanaged(inputpkg.Link) = .{},
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
-        const input = std.mem.trim(u8, input_ orelse "", &std.ascii.whitespace);
+        const input = std.mem.trim(
+            u8,
+            input_ orelse return error.ValueRequired,
+            &std.ascii.whitespace,
+        );
 
         // Empty input clears custom links. The built-in URL matcher is
         // appended later during surface derived-config construction.
@@ -7960,7 +7965,11 @@ pub const RepeatableLink = struct {
     }
 
     fn parseRegexValue(alloc: Allocator, input: []const u8) ![]const u8 {
-        if (input.len >= 2 and input[0] == '"' and input[input.len - 1] == '"') {
+        if (input.len > 0 and (input[0] == '"' or input[input.len - 1] == '"')) {
+            if (input.len < 2 or input[0] != '"' or input[input.len - 1] != '"') {
+                return error.InvalidValue;
+            }
+
             var buf: std.Io.Writer.Allocating = .init(alloc);
             defer buf.deinit();
 
@@ -7992,6 +8001,26 @@ pub const RepeatableLink = struct {
 
         try links.parseCLI(alloc, "");
         try testing.expectEqual(@as(usize, 0), links.links.items.len);
+    }
+
+    test "RepeatableLink parseCLI missing value returns ValueRequired" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var links: Self = .{};
+        try testing.expectError(error.ValueRequired, links.parseCLI(arena.allocator(), null));
+    }
+
+    test "RepeatableLink parseCLI rejects unmatched quoted regex values" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var links: Self = .{};
+        try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "\"^foo"));
+        try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "^foo\""));
     }
 
     test "RepeatableLink formatEntry quotes regex values" {
