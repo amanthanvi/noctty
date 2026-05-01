@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const oni = @import("oniguruma");
+const config_url = @import("../config/url.zig");
 const inputpkg = @import("../input.zig");
 const terminal = @import("../terminal/main.zig");
 const point = terminal.point;
@@ -34,8 +35,18 @@ pub const Set = struct {
         alloc: Allocator,
         config: []const inputpkg.Link,
     ) !Set {
+        return try fromConfigWithUrl(alloc, config, false);
+    }
+
+    pub fn fromConfigWithUrl(
+        alloc: Allocator,
+        config: []const inputpkg.Link,
+        link_url: bool,
+    ) !Set {
         var links: std.ArrayList(Link) = .empty;
         defer links.deinit(alloc);
+
+        try links.ensureTotalCapacity(alloc, config.len + @intFromBool(link_url));
 
         for (config) |link| {
             var regex = try link.oniRegex();
@@ -43,6 +54,21 @@ pub const Set = struct {
             try links.append(alloc, .{
                 .regex = regex,
                 .highlight = link.highlight,
+            });
+        }
+
+        if (link_url) {
+            var regex = try oni.Regex.init(
+                config_url.regex,
+                .{},
+                oni.Encoding.utf8,
+                oni.Syntax.default,
+                null,
+            );
+            errdefer regex.deinit();
+            try links.append(alloc, .{
+                .regex = regex,
+                .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
             });
         }
 
@@ -319,4 +345,59 @@ test "renderCellMap mods no match" {
     try testing.expect(!result.contains(.{ .x = 3, .y = 0 }));
     try testing.expect(!result.contains(.{ .x = 1, .y = 1 }));
     try testing.expect(!result.contains(.{ .x = 1, .y = 2 }));
+}
+
+test "fromConfigWithUrl adds builtin URL matcher only when enabled" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(alloc, .{
+        .cols = 28,
+        .rows = 1,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("go https://example.com now");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    const mouse_point: point.Coordinate = .{ .x = 6, .y = 0 };
+    const hover_mods = inputpkg.ctrlOrSuper(.{});
+
+    {
+        var set = try Set.fromConfigWithUrl(alloc, &.{}, false);
+        defer set.deinit(alloc);
+
+        var result: terminal.RenderState.CellSet = .empty;
+        defer result.deinit(alloc);
+        try set.renderCellMap(
+            alloc,
+            &result,
+            &state,
+            mouse_point,
+            hover_mods,
+        );
+        try testing.expect(!result.contains(.{ .x = 3, .y = 0 }));
+    }
+
+    {
+        var set = try Set.fromConfigWithUrl(alloc, &.{}, true);
+        defer set.deinit(alloc);
+
+        var result: terminal.RenderState.CellSet = .empty;
+        defer result.deinit(alloc);
+        try set.renderCellMap(
+            alloc,
+            &result,
+            &state,
+            mouse_point,
+            hover_mods,
+        );
+        try testing.expect(result.contains(.{ .x = 3, .y = 0 }));
+        try testing.expect(result.contains(.{ .x = 6, .y = 0 }));
+    }
 }
