@@ -12853,7 +12853,8 @@ fn resolveTheme(config: *const configpkg.Config) ThemeColors {
 }
 
 fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
-    return config.@"background-opacity" < 1.0 and config.@"background-blur".enabled();
+    return config.@"background-opacity" < 1.0 and
+        config.@"background-blur".win32SystemBackdropEnabled();
 }
 
 fn configuredHostWindowPosition(config: *const configpkg.Config) ?struct { x: i32, y: i32 } {

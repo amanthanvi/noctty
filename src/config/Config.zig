@@ -8941,12 +8941,27 @@ pub const BackgroundBlur = union(enum) {
         };
     }
 
+    /// Windows currently exposes background blur as a system-backdrop
+    /// toggle, so any positive radius behaves the same as `true`.
+    pub fn win32SystemBackdropEnabled(self: BackgroundBlur) bool {
+        return self.enabled();
+    }
+
     pub fn cval(self: BackgroundBlur) i16 {
         return switch (self) {
             .false => 0,
             .true => 20,
             .radius => |v| v,
         };
+    }
+
+    test "BackgroundBlur win32SystemBackdropEnabled" {
+        const testing = std.testing;
+
+        try testing.expect(!(@as(BackgroundBlur, .false)).win32SystemBackdropEnabled());
+        try testing.expect((@as(BackgroundBlur, .true)).win32SystemBackdropEnabled());
+        try testing.expect(!(BackgroundBlur{ .radius = 0 }).win32SystemBackdropEnabled());
+        try testing.expect((BackgroundBlur{ .radius = 42 }).win32SystemBackdropEnabled());
     }
 
     pub fn formatEntry(
