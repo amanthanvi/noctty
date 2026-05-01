@@ -280,6 +280,33 @@ jobs:
           $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
           $metadataPath = Join-Path $artifactDir "package-managers/metadata.json"
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $packageIdSegments = $env:WINGET_PACKAGE_IDENTIFIER.Split('.')
+          $manifestPath = "manifests/{0}/{1}" -f `
+            $packageIdSegments[0].Substring(0, 1).ToLowerInvariant(), `
+            ($packageIdSegments -join '/')
+          $manifestApiUrl = "https://api.github.com/repos/microsoft/winget-pkgs/contents/$manifestPath"
+
+          try {
+            Invoke-WebRequest `
+              -Uri $manifestApiUrl `
+              -Headers @{ "User-Agent" = "winghostty-release-workflow" } `
+              -ErrorAction Stop | Out-Null
+          }
+          catch {
+            $statusCode = if ($_.Exception.Response) {
+              [int]$_.Exception.Response.StatusCode
+            } else {
+              $null
+            }
+
+            if ($statusCode -eq 404) {
+              Write-Host "Skipping WinGet submit: $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs ($manifestPath)."
+              return
+            }
+
+            throw
+          }
+
           $vcLibsPath = Join-Path $env:TEMP "Microsoft.VCLibs.x64.14.00.Desktop.appx"
           $bundlePath = Join-Path $env:TEMP "wingetcreate.msixbundle"
           Import-Module Appx -UseWindowsPowerShell -ErrorAction Stop
