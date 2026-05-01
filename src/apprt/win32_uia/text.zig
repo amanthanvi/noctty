@@ -6,9 +6,6 @@
 
 const std = @import("std");
 const terminal = @import("../../terminal/main.zig");
-const terminal_c = @import("../../terminal/c/terminal.zig");
-const terminal_lib = @import("../../terminal/lib.zig");
-const Result = @import("../../terminal/c/result.zig").Result;
 
 pub const OffsetRange = struct {
     start: usize,
@@ -146,23 +143,18 @@ fn buildUtf16OffsetMap(
 }
 
 test "snapshotTerminalPlainText captures terminal rows" {
-    var t: terminal_c.Terminal = null;
-    try std.testing.expectEqual(Result.success, terminal_c.new(
-        &terminal_lib.alloc.test_allocator,
-        &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
-    ));
-    defer terminal_c.free(t);
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10_000,
+    });
+    defer t.deinit(std.testing.allocator);
 
-    terminal_c.vt_write(t, "Hello\r\nWorld", 12);
+    try t.printString("Hello\nWorld");
 
     var snapshot = try snapshotTerminalPlainText(
         std.testing.allocator,
-        (t orelse unreachable).terminal,
+        &t,
     );
     defer snapshot.deinit();
 
@@ -185,23 +177,18 @@ test "snapshotTerminalPlainText captures terminal rows" {
 }
 
 test "snapshotTerminalPlainText includes scrollback rows" {
-    var t: terminal_c.Terminal = null;
-    try std.testing.expectEqual(Result.success, terminal_c.new(
-        &terminal_lib.alloc.test_allocator,
-        &t,
-        .{
-            .cols = 80,
-            .rows = 3,
-            .max_scrollback = 10_000,
-        },
-    ));
-    defer terminal_c.free(t);
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 3,
+        .max_scrollback = 10_000,
+    });
+    defer t.deinit(std.testing.allocator);
 
-    terminal_c.vt_write(t, "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n", 35);
+    try t.printString("line1\nline2\nline3\nline4\nline5\n");
 
     var snapshot = try snapshotTerminalPlainText(
         std.testing.allocator,
-        (t orelse unreachable).terminal,
+        &t,
     );
     defer snapshot.deinit();
 
@@ -217,23 +204,18 @@ test "snapshotTerminalPlainText includes scrollback rows" {
 }
 
 test "snapshotTerminalPlainText preserves blank rows in line map" {
-    var t: terminal_c.Terminal = null;
-    try std.testing.expectEqual(Result.success, terminal_c.new(
-        &terminal_lib.alloc.test_allocator,
-        &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
-    ));
-    defer terminal_c.free(t);
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10_000,
+    });
+    defer t.deinit(std.testing.allocator);
 
-    terminal_c.vt_write(t, "top\r\n\r\nbottom", 13);
+    try t.printString("top\n\nbottom");
 
     var snapshot = try snapshotTerminalPlainText(
         std.testing.allocator,
-        (t orelse unreachable).terminal,
+        &t,
     );
     defer snapshot.deinit();
 
@@ -277,23 +259,18 @@ test "snapshotTerminalPlainText line map ignores trailing newline terminator" {
 }
 
 test "snapshotTerminalPlainText tracks multibyte text for UIA offsets" {
-    var t: terminal_c.Terminal = null;
-    try std.testing.expectEqual(Result.success, terminal_c.new(
-        &terminal_lib.alloc.test_allocator,
-        &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
-    ));
-    defer terminal_c.free(t);
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10_000,
+    });
+    defer t.deinit(std.testing.allocator);
 
-    terminal_c.vt_write(t, "A\xf0\x9f\x94\xa5B", 6);
+    try t.printString("A\xf0\x9f\x94\xa5B");
 
     var snapshot = try snapshotTerminalPlainText(
         std.testing.allocator,
-        (t orelse unreachable).terminal,
+        &t,
     );
     defer snapshot.deinit();
 
