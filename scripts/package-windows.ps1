@@ -288,7 +288,7 @@ function Get-SigningConfig {
         SignToolPath = $signToolPath
         PfxPath = $resolvedPfxPath
         PfxPassword = $signingPfxPassword
-        TimestampUrl = $signingTimestampUrl
+        TimestampUrl = if ($trustSelfSigned) { $null } else { $signingTimestampUrl }
         Description = $signingDescription
         Url = $signingUrl
         TemporaryPfxPath = if ($hasBase64) { $resolvedPfxPath } else { $null }
@@ -305,14 +305,24 @@ function Invoke-SignFile {
         [string]$PathToSign
     )
 
-    & $SigningConfig.SignToolPath sign `
-        /fd SHA256 `
-        /f $SigningConfig.PfxPath `
-        /p $SigningConfig.PfxPassword `
-        /t $SigningConfig.TimestampUrl `
-        /d $SigningConfig.Description `
-        /du $SigningConfig.Url `
+    $signArgs = @(
+        "sign",
+        "/fd", "SHA256",
+        "/f", $SigningConfig.PfxPath,
+        "/p", $SigningConfig.PfxPassword
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($SigningConfig.TimestampUrl)) {
+        $signArgs += @("/t", $SigningConfig.TimestampUrl)
+    }
+
+    $signArgs += @(
+        "/d", $SigningConfig.Description,
+        "/du", $SigningConfig.Url,
         $PathToSign
+    )
+
+    & $SigningConfig.SignToolPath @signArgs
 
     if ($LASTEXITCODE -ne 0) {
         throw "signtool.exe failed for $PathToSign with exit code $LASTEXITCODE."
@@ -339,6 +349,7 @@ try {
         Write-Host "Code signing : enabled"
         if ($signingConfig.TrustSelfSigned) {
             Write-Host "Signing trust: self-signed cert imported into CurrentUser Root + TrustedPublisher for local validation"
+            Write-Host "Timestamping : disabled for self-signed signing"
         }
     } else {
         Write-Host "Code signing : disabled"

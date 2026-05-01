@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-04-30: In self-signed Windows release-signing mode, skip Authenticode timestamping. Public timestamping buys nothing for internal certs and can wedge the GitHub Actions `Package Windows artifacts` step for hours while the local no-timestamp path still signs and verifies quickly.
 - 2026-04-30: Self-signed Authenticode on Windows signs successfully but `Get-AuthenticodeSignature` returns untrusted-root `UnknownError` until that cert is also trusted in `CurrentUser\Root` and `TrustedPublisher`; internal CI/release probes must either import trust first or treat self-signed validation as a distinct path.
 - 2026-04-30: `gh pr checks --watch` can stay stale at `pending 0` on this repo even while Actions job steps are actively running; verify merge gates with `gh api repos/.../actions/jobs/...` before treating the checks as stuck.
 - 2026-04-29: Repeated Win11 harness runs can leave `zig-out\bin\winghostty.exe` and `winghostty.com` locked by external service `vgc`; confirm the Restart Manager owner before treating install-step `NTSTATUS=0xc0000043` as a code regression.
