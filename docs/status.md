@@ -85,7 +85,7 @@ planned.
 
 ### Win32 runtime extraction
 
-The Win32 application runtime is currently a single ~13.7k LOC file at
+The Win32 application runtime is still centered on a single large file at
 `src/apprt/win32.zig`. Extraction into focused modules is in progress:
 commit `a759eb6 refactor(win32): extract theme module from monolithic
 win32.zig` moved theme helpers to `src/apprt/win32_theme.zig`. Further

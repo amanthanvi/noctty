@@ -64,8 +64,9 @@ First public releases: 2026-04-16.
 - **Coexistence:** winghostty runs as its own top-level app window. It does
   not register as a Windows Terminal profile provider; installing it
   alongside Windows Terminal, WezTerm, or Alacritty is fine.
-- **Accessibility:** screen reader / UI Automation support is planned and
-  is not yet shipping.
+- **Accessibility:** partial UI Automation support ships today, but
+  terminal scrollback and broader screen reader coverage are still
+  incomplete.
 
 ## What works today
 
@@ -90,16 +91,16 @@ official Ghostty docs, see
 ## Install
 
 Latest stable release:
-**[winghostty 1.3.106](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.106)**,
-published 2026-04-24.
+**[winghostty 1.3.109](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.109)**,
+published 2026-05-01.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.106-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.106/winghostty-1.3.106-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
-| [`winghostty-1.3.106-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.106/winghostty-1.3.106-windows-x64-portable.zip) | You want to run without installing. |
-| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.106/SHA256SUMS.txt) | Verifying downloads. |
+| [`winghostty-1.3.109-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.109/winghostty-1.3.109-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
+| [`winghostty-1.3.109-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.109/winghostty-1.3.109-windows-x64-portable.zip) | You want to run without installing. |
+| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.109/SHA256SUMS.txt) | Verifying downloads. |
 
 Scoop users can install from the fork-owned bucket:
 
