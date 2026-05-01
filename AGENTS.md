@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-01: In GitHub Windows self-signed release packaging, do not block first-step diagnostics behind runner trust-store import; emit phase markers before signing setup, validate self-signed Authenticode by expected signer thumbprint, and run release scripts directly under `pwsh` instead of nesting `powershell.exe`.
 - 2026-05-01: In GitHub Actions PowerShell steps, pass dotted Zig semver build args like `-Dversion-string=1.3.108` as one quoted token (`"-Dversion-string=..."`); unquoted inline semver can be split into `1` plus `.3.108` and trips `std.SemanticVersion.parse` with `InvalidVersion`.
 - 2026-05-01: In the GitHub Windows release workflow, do not hide a full release `zig build` inside the opaque `Package Windows artifacts` step. Build explicitly first, then run `scripts/package-windows.ps1 -SkipBuild`, and put timeouts on both steps so a stuck rebuild/sign/package path fails fast instead of burning hours with no live logs.
 - 2026-04-30: In self-signed Windows release-signing mode, skip Authenticode timestamping. Public timestamping buys nothing for internal certs and can wedge the GitHub Actions `Package Windows artifacts` step for hours while the local no-timestamp path still signs and verifies quickly.

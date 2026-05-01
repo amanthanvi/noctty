@@ -200,43 +200,6 @@ function New-TemporaryPfxFile {
     return $path
 }
 
-function Test-CertificatePresent {
-    param(
-        [string]$StorePath,
-        [string]$Thumbprint
-    )
-
-    return $null -ne (Get-ChildItem -LiteralPath $StorePath -ErrorAction SilentlyContinue | Where-Object Thumbprint -eq $Thumbprint | Select-Object -First 1)
-}
-
-function Ensure-SigningCertificateTrusted {
-    param([hashtable]$SigningConfig)
-
-    if (-not $SigningConfig.TrustSelfSigned) {
-        return
-    }
-
-    $tempCertPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".cer")
-    try {
-        [System.IO.File]::WriteAllBytes($tempCertPath, $SigningConfig.PublicCertificateBytes)
-        foreach ($storePath in @(
-            "Cert:\CurrentUser\Root",
-            "Cert:\CurrentUser\TrustedPublisher"
-        )) {
-            if (Test-CertificatePresent -StorePath $storePath -Thumbprint $SigningConfig.CertificateThumbprint) {
-                continue
-            }
-
-            Import-Certificate -FilePath $tempCertPath -CertStoreLocation $storePath | Out-Null
-        }
-    }
-    finally {
-        if (Test-Path -LiteralPath $tempCertPath) {
-            Remove-Item -LiteralPath $tempCertPath -Force
-        }
-    }
-}
-
 function Get-SigningConfig {
     $hasPath = -not [string]::IsNullOrWhiteSpace($signingPfxPath)
     $hasBase64 = -not [string]::IsNullOrWhiteSpace($signingPfxBase64)
@@ -293,7 +256,6 @@ function Get-SigningConfig {
         Url = $signingUrl
         TemporaryPfxPath = if ($hasBase64) { $resolvedPfxPath } else { $null }
         CertificateThumbprint = $signingCert.Thumbprint
-        PublicCertificateBytes = $signingCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
         IsSelfSigned = $isSelfSigned
         TrustSelfSigned = $trustSelfSigned
     }
@@ -330,9 +292,34 @@ function Invoke-SignFile {
 }
 
 function Assert-ValidSignature {
-    param([string]$PathToCheck)
+    param(
+        [string]$PathToCheck,
+        [hashtable]$SigningConfig
+    )
 
     $signature = Get-AuthenticodeSignature -LiteralPath $PathToCheck
+    if ($SigningConfig -and $SigningConfig.TrustSelfSigned) {
+        if (-not $signature.SignerCertificate) {
+            throw "Expected a self-signed Authenticode signature on $PathToCheck, but no signer certificate was present."
+        }
+
+        if ($signature.SignerCertificate.Thumbprint -ne $SigningConfig.CertificateThumbprint) {
+            throw "Expected signer thumbprint $($SigningConfig.CertificateThumbprint) on $PathToCheck, but got $($signature.SignerCertificate.Thumbprint)."
+        }
+
+        $acceptableStatuses = @(
+            [System.Management.Automation.SignatureStatus]::Valid,
+            [System.Management.Automation.SignatureStatus]::UnknownError,
+            [System.Management.Automation.SignatureStatus]::NotTrusted
+        )
+
+        if ($acceptableStatuses -notcontains $signature.Status) {
+            throw "Expected a self-signed Authenticode signature on $PathToCheck, but got $($signature.Status): $($signature.StatusMessage)"
+        }
+
+        return
+    }
+
     if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
         throw "Expected a valid Authenticode signature on $PathToCheck, but got $($signature.Status): $($signature.StatusMessage)"
     }
@@ -342,13 +329,14 @@ $signingConfig = $null
 $temporarySigningPfxPath = $null
 
 try {
+    Write-Host "Signing config: loading"
     $signingConfig = Get-SigningConfig
+    Write-Host "Signing config: loaded"
     if ($signingConfig) {
-        Ensure-SigningCertificateTrusted -SigningConfig $signingConfig
         $temporarySigningPfxPath = $signingConfig.TemporaryPfxPath
         Write-Host "Code signing : enabled"
         if ($signingConfig.TrustSelfSigned) {
-            Write-Host "Signing trust: self-signed cert imported into CurrentUser Root + TrustedPublisher for local validation"
+            Write-Host "Signing trust: validating self-signed signatures by expected signer thumbprint"
             Write-Host "Timestamping : disabled for self-signed signing"
         }
     } else {
@@ -369,6 +357,7 @@ try {
         throw "Expected build output was not found: $exePath"
     }
 
+    Write-Host "Packaging phase: stage portable tree"
     Remove-TreeIfPresent -PathToRemove $stageBase
     New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
 
@@ -383,7 +372,7 @@ try {
 
         if ($signingConfig -and @(".exe", ".dll") -contains [System.IO.Path]::GetExtension($destinationPath)) {
             Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath
-            Assert-ValidSignature -PathToCheck $destinationPath
+            Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig
         }
     }
 
@@ -397,6 +386,7 @@ try {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
     }
 
+    Write-Host "Packaging phase: create portable zip"
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }
@@ -407,6 +397,7 @@ try {
         $true
     )
 
+    Write-Host "Packaging phase: build installer"
     $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
     if (-not $iscc) {
         $candidates = @(
@@ -443,12 +434,13 @@ try {
 
     if ($signingConfig -and (Test-Path -LiteralPath $installerPath)) {
         Invoke-SignFile -SigningConfig $signingConfig -PathToSign $installerPath
-        Assert-ValidSignature -PathToCheck $installerPath
+        Assert-ValidSignature -PathToCheck $installerPath -SigningConfig $signingConfig
     }
     elseif ($signingConfig -and $RequireInstaller) {
         throw "Signing was enabled, but the installer artifact was not produced."
     }
 
+    Write-Host "Packaging phase: write checksums"
     $hashTargets = @(
         @{
             Name = [System.IO.Path]::GetFileName($zipPath)
