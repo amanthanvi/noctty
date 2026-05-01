@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-01: In this repo's worktrees, plain `gh repo` / `gh pr` commands can resolve to upstream `ghostty-org/ghostty` despite `origin=amanthanvi/winghostty`; pin review ops with `--repo amanthanvi/winghostty`.
 - 2026-05-01: Direct `zig test src/apprt.zig` bypasses the repo build graph and fails on missing generated `build_options`; verify `apprt` package changes with `zig build test -Dtest-filter=...` instead.
 - 2026-05-01: The Windows release workflow's explicit `zig build` and `scripts/package-windows.ps1` fallback build must both pass `-Doptimize=ReleaseFast`; otherwise a successful release can publish `.Debug` binaries even though tests and packaging pass.
 - 2026-05-01: A stale queued GitHub Actions run can get stuck in a backend state where `gh run cancel` returns HTTP 500 and `DELETE /actions/runs/{id}` returns HTTP 403; clean failed/cancelled runs normally, but treat that survivor as GitHub-side cleanup debt rather than a script bug.

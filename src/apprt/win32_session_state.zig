@@ -24,6 +24,15 @@ pub const ValidationError = error{
 
 pub const ValidateError = ValidationError || Allocator.Error;
 
+const VersionHeader = struct {
+    schema_version: u32 = current_schema_version,
+};
+
+const VisitFrame = struct {
+    index: usize,
+    expanded: bool,
+};
+
 pub const SessionState = struct {
     schema_version: u32 = current_schema_version,
     windows: []const Window = &.{},
@@ -83,6 +92,15 @@ pub fn encodeAlloc(alloc: Allocator, state: SessionState) ![]u8 {
 }
 
 pub fn parseAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionState) {
+    var header = try std.json.parseFromSlice(VersionHeader, alloc, raw, .{
+        .ignore_unknown_fields = true,
+    });
+    defer header.deinit();
+
+    if (header.value.schema_version != current_schema_version) {
+        return error.UnsupportedVersion;
+    }
+
     var parsed = try std.json.parseFromSlice(SessionState, alloc, raw, .{
         .ignore_unknown_fields = false,
     });
@@ -118,7 +136,52 @@ fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize 
     defer alloc.free(visited);
     @memset(visited, 0);
 
-    const leaf_count = try visitNode(layout.nodes, visited, root_index);
+    const stack = try alloc.alloc(VisitFrame, layout.nodes.len);
+    defer alloc.free(stack);
+
+    stack[0] = .{ .index = root_index, .expanded = false };
+
+    var stack_len: usize = 1;
+    var leaf_count: usize = 0;
+
+    while (stack_len > 0) {
+        var frame = &stack[stack_len - 1];
+
+        if (visited[frame.index] != 0) {
+            if (!frame.expanded or visited[frame.index] != 1) return error.InvalidTreeShape;
+            visited[frame.index] = 2;
+            stack_len -= 1;
+            continue;
+        }
+
+        visited[frame.index] = 1;
+        frame.expanded = true;
+
+        switch (layout.nodes[frame.index]) {
+            .pane => {
+                visited[frame.index] = 2;
+                leaf_count += 1;
+                stack_len -= 1;
+            },
+            .split => |split| {
+                if (!std.math.isFinite(split.ratio) or split.ratio < 0 or split.ratio > 1) {
+                    return error.InvalidSplitRatio;
+                }
+
+                const first_index: usize = split.first;
+                const second_index: usize = split.second;
+                if (first_index >= layout.nodes.len or second_index >= layout.nodes.len) {
+                    return error.InvalidNodeIndex;
+                }
+
+                stack[stack_len] = .{ .index = second_index, .expanded = false };
+                stack_len += 1;
+                stack[stack_len] = .{ .index = first_index, .expanded = false };
+                stack_len += 1;
+            },
+        }
+    }
+
     if (leaf_count == 0) return error.EmptyLayout;
 
     for (visited) |seen| {
@@ -126,32 +189,6 @@ fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize 
     }
 
     return leaf_count;
-}
-
-fn visitNode(nodes: []const Node, visited: []u8, index: usize) ValidationError!usize {
-    if (index >= nodes.len) return error.InvalidNodeIndex;
-    if (visited[index] != 0) return error.InvalidTreeShape;
-
-    visited[index] = 1;
-
-    return switch (nodes[index]) {
-        .pane => 1,
-        .split => |split| blk: {
-            if (!std.math.isFinite(split.ratio) or split.ratio < 0 or split.ratio > 1) {
-                break :blk error.InvalidSplitRatio;
-            }
-
-            const first_index: usize = split.first;
-            const second_index: usize = split.second;
-            if (first_index >= nodes.len or second_index >= nodes.len) {
-                break :blk error.InvalidNodeIndex;
-            }
-
-            const first_count = try visitNode(nodes, visited, first_index);
-            const second_count = try visitNode(nodes, visited, second_index);
-            break :blk first_count + second_count;
-        },
-    };
 }
 
 fn expectSessionStateEqual(expected: SessionState, actual: SessionState) !void {
@@ -305,6 +342,30 @@ test "win32 session state parse rejects unsupported schema version" {
     );
 }
 
+test "win32 session state parse rejects newer schema before unknown field errors" {
+    const raw =
+        \\{"schema_version":2,"windows":[],"future":{"layout_generation":1}}
+    ;
+
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
+test "win32 session state parse keeps current schema strict about unknown fields" {
+    const raw =
+        \\{"schema_version":1,"windows":[],"future":{"layout_generation":1}}
+    ;
+
+    if (parseAlloc(std.testing.allocator, raw)) |parsed| {
+        parsed.deinit();
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try std.testing.expect(err != error.UnsupportedVersion);
+    }
+}
+
 test "win32 session state encode rejects invalid split child index" {
     const nodes = [_]Node{
         .{ .split = .{
@@ -338,4 +399,54 @@ test "win32 session state encode rejects invalid split child index" {
         error.InvalidNodeIndex,
         encodeAlloc(std.testing.allocator, state),
     );
+}
+
+test "win32 session state validates deep split layout without recursion" {
+    const split_count: usize = 4096;
+    const total_nodes = split_count * 2 + 1;
+
+    const nodes = try std.testing.allocator.alloc(Node, total_nodes);
+    defer std.testing.allocator.free(nodes);
+
+    for (0..split_count) |i| {
+        const split: Split = if (i + 1 < split_count)
+            .{
+                .axis = .horizontal,
+                .ratio = 0.5,
+                .first = @intCast(i + 1),
+                .second = @intCast(split_count + i),
+            }
+        else
+            .{
+                .axis = .horizontal,
+                .ratio = 0.5,
+                .first = @intCast(split_count + i),
+                .second = @intCast(split_count + i + 1),
+            };
+        nodes[i] = .{ .split = split };
+    }
+
+    for (split_count..total_nodes) |i| {
+        nodes[i] = .{ .pane = .{ .cwd = "C:\\src\\winghostty" } };
+    }
+
+    const tabs = [_]Tab{
+        .{
+            .selected_leaf = split_count,
+            .layout = .{
+                .root = 0,
+                .nodes = nodes,
+            },
+        },
+    };
+    const windows = [_]Window{
+        .{
+            .selected_tab = 0,
+            .tabs = &tabs,
+        },
+    };
+
+    try validateAlloc(std.testing.allocator, .{
+        .windows = &windows,
+    });
 }
