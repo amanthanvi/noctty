@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
@@ -61,11 +60,32 @@ fn runArgs(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !u8 {
+    return runArgsWithQuery(
+        alloc,
+        args_iter,
+        stdout,
+        stderr,
+        queryAutomationWindowList,
+    );
+}
+
+const QueryAutomationWindowListFn = *const fn (
+    alloc: Allocator,
+    target: apprt.ipc.Target,
+) anyerror!?[]u8;
+
+fn runArgsWithQuery(
+    alloc: Allocator,
+    args_iter: anytype,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+    queryAutomationWindowListFn: QueryAutomationWindowListFn,
+) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
     try args.parse(Options, alloc, &opts, args_iter);
 
-    const payload = queryAutomationWindowList(
+    const payload = queryAutomationWindowListFn(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
     ) catch |err| switch (err) {
@@ -87,22 +107,10 @@ fn runArgs(
     return 0;
 }
 
-const QueryAutomationWindowListFn = *const fn (
-    alloc: Allocator,
-    target: apprt.ipc.Target,
-) anyerror!?[]u8;
-
-var test_query_automation_window_list: ?QueryAutomationWindowListFn = null;
-
 fn queryAutomationWindowList(
     alloc: Allocator,
     target: apprt.ipc.Target,
 ) !?[]u8 {
-    if (builtin.is_test) {
-        const func = test_query_automation_window_list orelse unreachable;
-        return try func(alloc, target);
-    }
-
     return try apprt.App.queryAutomationWindowList(alloc, target);
 }
 
@@ -113,14 +121,14 @@ test "automation-window-list cli prints json payload" {
         var seen_class: ?[]u8 = null;
 
         fn query(alloc: Allocator, target: apprt.ipc.Target) !?[]u8 {
-            seen_class = try testing.allocator.dupe(u8, target.class);
+            seen_class = switch (target) {
+                .class => |class| try testing.allocator.dupe(u8, class),
+                .detect => return error.UnexpectedTarget,
+            };
             return try alloc.dupe(u8, "{\"schema\":\"winghostty.windows.v1\",\"windows\":[]}");
         }
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
-
-    test_query_automation_window_list = &Hook.query;
-    defer test_query_automation_window_list = null;
 
     var iter = try std.process.ArgIteratorGeneral(.{}).init(
         testing.allocator,
@@ -134,11 +142,12 @@ test "automation-window-list cli prints json payload" {
     var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
     defer stderr_buf.deinit();
 
-    const exit_code = try runArgs(
+    const exit_code = try runArgsWithQuery(
         testing.allocator,
         &iter,
         &stdout_buf.writer,
         &stderr_buf.writer,
+        &Hook.query,
     );
 
     try testing.expectEqual(@as(u8, 0), exit_code);
@@ -151,18 +160,14 @@ test "automation-window-list cli prints json payload" {
     try testing.expectEqualStrings("lane9", Hook.seen_class.?);
 }
 
-test "automation-window-list cli reports missing instance" {
+test "automation-window-list cli reports ipc failure" {
     const testing = std.testing;
 
     const Hook = struct {
-        fn query(_: Allocator, target: apprt.ipc.Target) !?[]u8 {
-            try testing.expectEqual(apprt.ipc.Target.detect, target);
-            return null;
+        fn query(_: Allocator, _: apprt.ipc.Target) !?[]u8 {
+            return error.IPCFailed;
         }
     };
-
-    test_query_automation_window_list = &Hook.query;
-    defer test_query_automation_window_list = null;
 
     var iter = try std.process.ArgIteratorGeneral(.{}).init(
         testing.allocator,
@@ -176,11 +181,50 @@ test "automation-window-list cli reports missing instance" {
     var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
     defer stderr_buf.deinit();
 
-    const exit_code = try runArgs(
+    const exit_code = try runArgsWithQuery(
         testing.allocator,
         &iter,
         &stdout_buf.writer,
         &stderr_buf.writer,
+        &Hook.query,
+    );
+
+    try testing.expectEqual(@as(u8, 1), exit_code);
+    try testing.expectEqualStrings("", stdout_buf.written());
+    try testing.expectEqualStrings(
+        "Listing automation windows via IPC failed.\n",
+        stderr_buf.written(),
+    );
+}
+
+test "automation-window-list cli reports missing instance" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        fn query(_: Allocator, target: apprt.ipc.Target) !?[]u8 {
+            try testing.expectEqual(apprt.ipc.Target.detect, target);
+            return null;
+        }
+    };
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "",
+    );
+    defer iter.deinit();
+
+    var stdout_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stdout_buf.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    const exit_code = try runArgsWithQuery(
+        testing.allocator,
+        &iter,
+        &stdout_buf.writer,
+        &stderr_buf.writer,
+        &Hook.query,
     );
 
     try testing.expectEqual(@as(u8, 1), exit_code);

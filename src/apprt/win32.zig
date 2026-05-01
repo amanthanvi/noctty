@@ -755,6 +755,7 @@ const ipc_pipe_prefix = "\\\\.\\pipe\\winghostty.";
 const ipc_wire_version: u32 = 1;
 const ipc_ack_success: u8 = 0;
 const ipc_ack_failure: u8 = 1;
+const ipc_max_data_response_len: u32 = 16 * 1024 * 1024;
 
 const IpcRequestKind = enum(u8) {
     new_window = 1,
@@ -1671,6 +1672,7 @@ fn readIpcDataResponse(
     }
 
     const len = readU32(&len_buf);
+    if (len > ipc_max_data_response_len) return error.InvalidIpcResponse;
     const body = try alloc.alloc(u8, len);
     errdefer alloc.free(body);
     if (len > 0) try readExactHandle(pipe, body);
@@ -26121,6 +26123,31 @@ test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
 
     try std.testing.expectError(
         error.IPCFailed,
+        readIpcDataResponse(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 readIpcDataResponse rejects oversized body length" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-response-too-large.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var header: [9]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
+    header[4] = ipc_ack_success;
+    std.mem.writeInt(u32, header[5..9], ipc_max_data_response_len + 1, .little);
+    try file.writeAll(&header);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidIpcResponse,
         readIpcDataResponse(std.testing.allocator, file.handle),
     );
 }
