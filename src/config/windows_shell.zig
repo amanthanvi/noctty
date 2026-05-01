@@ -117,9 +117,8 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .summary = "Windows PowerShell profile with automatic shell integration",
         },
         .git_bash => .{
-            .support = .manual,
-            .summary = "Git Bash profile; manual shell integration setup required",
-            .next_step = "Source the shipped bash integration script from your Git Bash startup files.",
+            .support = .automatic,
+            .summary = "Git Bash profile with automatic shell integration",
         },
         .cmd => .{
             .support = .unavailable,
@@ -1466,7 +1465,7 @@ test "shellIntegrationDiagnostic reports automatic PowerShell support" {
     );
 }
 
-test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd posture" {
+test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd support" {
     const testing = std.testing;
 
     const wsl = shellIntegrationDiagnostic(.wsl_distro);
@@ -1478,13 +1477,12 @@ test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd posture" {
     try testing.expect(wsl.next_step != null);
 
     const git_bash = shellIntegrationDiagnostic(.git_bash);
-    try testing.expectEqual(ShellIntegrationSupport.manual, git_bash.support);
+    try testing.expectEqual(ShellIntegrationSupport.automatic, git_bash.support);
     try testing.expectEqualStrings(
-        "Git Bash profile; manual shell integration setup required",
+        "Git Bash profile with automatic shell integration",
         git_bash.summary,
     );
-    try testing.expect(git_bash.next_step != null);
-    try testing.expect(std.mem.indexOf(u8, git_bash.next_step.?, "Source") != null);
+    try testing.expectEqual(@as(?[]const u8, null), git_bash.next_step);
 
     const cmd = shellIntegrationDiagnostic(.cmd);
     try testing.expectEqual(ShellIntegrationSupport.unavailable, cmd.support);

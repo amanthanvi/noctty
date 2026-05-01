@@ -26798,7 +26798,7 @@ test "win32 buildProfileDetailText reflects selected launcher state" {
     try std.testing.expect(std.mem.indexOf(u8, idle, "Default profile: PWSH >> PowerShell") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Run pwsh.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Pinned slot 1.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "PowerShell profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, idle, "New hosts inherit this PowerShell profile with automatic shell integration.") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "opens a new window") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+1-3 launches visible slots") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+Shift+1-3 pins the current profile") != null);
@@ -27288,7 +27288,7 @@ test "win32 profileKindDetail exposes shell integration posture" {
         profileKindDetail(.wsl_distro),
     );
     try std.testing.expectEqualStrings(
-        "Git Bash profile; manual shell integration setup required",
+        "Git Bash profile with automatic shell integration",
         profileKindDetail(.git_bash),
     );
     try std.testing.expectEqualStrings(
