@@ -346,7 +346,7 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dversion-string=$Version"
         }
         finally {
             Pop-Location

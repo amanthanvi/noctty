@@ -127,6 +127,7 @@ jobs:
           zig build
           -Demit-exe=true
           -Demit-lib-vt=true
+          -Doptimize=ReleaseFast
           "-Dversion-string=${{ steps.meta.outputs.version }}"
 
       - name: Package Windows artifacts

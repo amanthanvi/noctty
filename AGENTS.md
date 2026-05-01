@@ -43,6 +43,8 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-01: The Windows release workflow's explicit `zig build` and `scripts/package-windows.ps1` fallback build must both pass `-Doptimize=ReleaseFast`; otherwise a successful release can publish `.Debug` binaries even though tests and packaging pass.
+- 2026-05-01: A stale queued GitHub Actions run can get stuck in a backend state where `gh run cancel` returns HTTP 500 and `DELETE /actions/runs/{id}` returns HTTP 403; clean failed/cancelled runs normally, but treat that survivor as GitHub-side cleanup debt rather than a script bug.
 - 2026-05-01: WinGet release CI must skip `wingetcreate update --submit` when `WINGET_PACKAGE_IDENTIFIER` is not yet bootstrapped in `microsoft/winget-pkgs`; a greenfield fork with no existing manifest path will otherwise fail deployments after release, Scoop, and packaging already succeeded.
 - 2026-05-01: In the Windows release WinGet submit path, `Add-AppxPackage` for VCLibs / `wingetcreate` must treat HRESULT `0x80073D06` (“higher version already installed”) as success on hosted runners; otherwise WinGet bootstrap fails after the release and Scoop paths already succeeded.
 - 2026-05-01: In GitHub Actions release publish steps, `gh repo clone` of another repo is not enough for a later plain `git push`; wire Git auth explicitly (for example tokenized `origin` URL or `gh auth setup-git`) or the push dies with non-interactive username prompt errors.
