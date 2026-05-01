@@ -1569,6 +1569,10 @@ fn encodeListWindowsIpcRequest(alloc: Allocator) ![]u8 {
 
     try appendU32(&encoded, alloc, ipc_wire_version);
     try encoded.append(alloc, @intFromEnum(IpcRequestKind.list_windows));
+    // Keep the legacy zero-argc trailer so older servers that still decode
+    // through the new-window payload path fail with a bounded ack instead of
+    // blocking on a missing payload length.
+    try appendU32(&encoded, alloc, 0);
 
     return try encoded.toOwnedSlice(alloc);
 }
@@ -1929,7 +1933,10 @@ fn ipcServerMain(app: *App) void {
 }
 
 fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const kind = try decodeIpcRequestKind(pipe);
+    const kind = decodeIpcRequestKind(pipe) catch |err| {
+        writeIpcAck(pipe, false) catch {};
+        return err;
+    };
 
     switch (kind) {
         .new_window => handleNewWindowIpcClient(app, pipe) catch |err| {
@@ -26055,7 +26062,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     );
 }
 
-test "automation-window-list win32 json skips empty undo hosts" {
+test "automation-window-list win32 json skips empty hosts kept alive for undo history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var app: App = undefined;
@@ -26103,6 +26110,18 @@ test "automation-window-list win32 json skips empty undo hosts" {
     );
 }
 
+test "win32 encodeListWindowsIpcRequest preserves legacy zero-argc trailer" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const request = try encodeListWindowsIpcRequest(std.testing.allocator);
+    defer std.testing.allocator.free(request);
+
+    try std.testing.expectEqual(@as(usize, 9), request.len);
+    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
+    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.list_windows), request[4]);
+    try std.testing.expectEqual(@as(u32, 0), readU32(request[5..9]));
+}
+
 test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -26148,6 +26167,33 @@ test "win32 readIpcDataResponse rejects oversized body length" {
 
     try std.testing.expectError(
         error.InvalidIpcResponse,
+        readIpcDataResponse(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 handleIpcClient bounds truncated request failures with an ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-request-truncated.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var request: [4]u8 = undefined;
+    std.mem.writeInt(u32, request[0..4], ipc_wire_version, .little);
+    try file.writeAll(&request);
+    try file.seekTo(0);
+
+    var app: App = undefined;
+    try std.testing.expectError(error.EndOfStream, handleIpcClient(&app, file.handle));
+
+    try file.seekTo(request.len);
+    try std.testing.expectError(
+        error.IPCFailed,
         readIpcDataResponse(std.testing.allocator, file.handle),
     );
 }
