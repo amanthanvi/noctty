@@ -122,7 +122,7 @@ jobs:
         shell: pwsh
         timeout-minutes: 15
         run: >
-          powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+          ./scripts/package-windows.ps1
           -Version ${{ steps.meta.outputs.version }}
           -SkipBuild
           -RequireInstaller
@@ -131,7 +131,7 @@ jobs:
       - name: Generate package manager metadata
         shell: pwsh
         run: >
-          powershell -ExecutionPolicy Bypass -File scripts/package-package-managers.ps1
+          ./scripts/package-package-managers.ps1
           -Version ${{ steps.meta.outputs.version }}
           -Tag ${{ steps.meta.outputs.tag }}
           -Repo ${{ github.repository }}
