@@ -10,6 +10,8 @@ const windows = std.os.windows;
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
 var wsl_probe_mutex: std.Thread.Mutex = .{};
 var wsl_probe_cache: ?bool = null;
+const wsl_shell_integration_next_step =
+    "Enable shell integration inside the selected WSL shell startup.";
 
 pub const DefaultShell = enum {
     wsl,
@@ -98,15 +100,14 @@ pub fn deinitProfiles(alloc: Allocator, profiles: []Profile) void {
 
 pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic {
     return switch (kind) {
-        .wsl_default => .{
+        .wsl_default, .wsl_distro => .{
             .support = .shell_managed,
-            .summary = "WSL default profile; shell integration depends on the Linux shell",
-            .next_step = "Enable shell integration inside the selected WSL shell startup.",
-        },
-        .wsl_distro => .{
-            .support = .shell_managed,
-            .summary = "WSL distro profile; shell integration depends on the Linux shell",
-            .next_step = "Enable shell integration inside the selected WSL shell startup.",
+            .summary = switch (kind) {
+                .wsl_default => "WSL default profile; shell integration depends on the Linux shell",
+                .wsl_distro => "WSL distro profile; shell integration depends on the Linux shell",
+                else => unreachable,
+            },
+            .next_step = wsl_shell_integration_next_step,
         },
         .pwsh => .{
             .support = .automatic,
@@ -1468,13 +1469,24 @@ test "shellIntegrationDiagnostic reports automatic PowerShell support" {
 test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd support" {
     const testing = std.testing;
 
+    const wsl_default = shellIntegrationDiagnostic(.wsl_default);
+    try testing.expectEqual(ShellIntegrationSupport.shell_managed, wsl_default.support);
+    try testing.expectEqualStrings(
+        "WSL default profile; shell integration depends on the Linux shell",
+        wsl_default.summary,
+    );
+    try testing.expectEqualStrings(
+        wsl_shell_integration_next_step,
+        wsl_default.next_step.?,
+    );
+
     const wsl = shellIntegrationDiagnostic(.wsl_distro);
     try testing.expectEqual(ShellIntegrationSupport.shell_managed, wsl.support);
     try testing.expectEqualStrings(
         "WSL distro profile; shell integration depends on the Linux shell",
         wsl.summary,
     );
-    try testing.expect(wsl.next_step != null);
+    try testing.expectEqualStrings(wsl_shell_integration_next_step, wsl.next_step.?);
 
     const git_bash = shellIntegrationDiagnostic(.git_bash);
     try testing.expectEqual(ShellIntegrationSupport.automatic, git_bash.support);

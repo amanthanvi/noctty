@@ -201,8 +201,13 @@ test detectShell {
     try testing.expect(try detectShell(alloc, .{ .shell = "sh" }) == null);
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "bash" }));
     try testing.expectEqual(.bash, try detectShell(alloc, .{
-        .direct = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" },
+        .direct = &.{ "bash.exe", "--login", "-i" },
     }));
+    if (builtin.target.os.tag == .windows) {
+        try testing.expectEqual(.bash, try detectShell(alloc, .{
+            .direct = &.{ "C:\\Program Files\\Git\\bin\\bash.exe", "--login", "-i" },
+        }));
+    }
     try testing.expectEqual(.elvish, try detectShell(alloc, .{ .shell = "elvish" }));
     try testing.expectEqual(.fish, try detectShell(alloc, .{ .shell = "fish" }));
     try testing.expectEqual(.nushell, try detectShell(alloc, .{ .shell = "nu" }));
