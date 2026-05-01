@@ -123,7 +123,8 @@ extractions will land as they stabilize.
 
 No formal roadmap. Indicative next areas:
 
-- Initial UI Automation / screen reader support
+- Broader UI Automation / screen reader coverage, including terminal text
+  exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
 - Code signing for Windows releases
