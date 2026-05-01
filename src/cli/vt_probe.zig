@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const actionpkg = @import("action.zig");
 const args = @import("args.zig");
+const ghostty_terminfo = @import("../terminfo/ghostty.zig").ghostty;
 
 pub const Category = enum {
     terminfo,
@@ -32,10 +33,11 @@ pub const Report = struct {
     capabilities: []const Capability,
 };
 
-const default_term = "xterm-ghostty";
+const default_term = ghostty_terminfo.names[0];
+const terminfo_capability_id = "terminfo-" ++ default_term;
 const capabilities = [_]Capability{
     .{
-        .id = "terminfo-xterm-ghostty",
+        .id = terminfo_capability_id,
         .category = .terminfo,
         .direction = .advertise,
         .status = .supported,
@@ -166,16 +168,24 @@ test "vt-probe report includes core capabilities" {
     if (comptime @hasDecl(@This(), "report")) {
         const probe = @field(@This(), "report")();
         try testing.expectEqualStrings("static", probe.source);
-        try testing.expectEqualStrings("xterm-ghostty", probe.term);
+        try testing.expectEqualStrings(default_term, probe.term);
         try testing.expectEqual(@as(usize, 6), probe.capabilities.len);
 
-        try testing.expectEqualStrings("terminfo-xterm-ghostty", probe.capabilities[0].id);
+        try testing.expectEqualStrings(terminfo_capability_id, probe.capabilities[0].id);
         try testing.expectEqualStrings("osc-8-hyperlink", probe.capabilities[1].id);
         try testing.expectEqualStrings("osc-4-palette", probe.capabilities[2].id);
         try testing.expectEqualStrings("osc-10-11-colors", probe.capabilities[3].id);
         try testing.expectEqualStrings("osc-21-kitty-color-stack", probe.capabilities[4].id);
         try testing.expectEqualStrings("csi-2026-synchronized-output", probe.capabilities[5].id);
     }
+}
+
+test "vt-probe terminfo claim tracks compiled terminfo" {
+    const testing = std.testing;
+    const probe = report();
+
+    try testing.expectEqualStrings(ghostty_terminfo.names[0], probe.term);
+    try testing.expectEqualStrings(terminfo_capability_id, probe.capabilities[0].id);
 }
 
 test "vt-probe plain output is deterministic" {
