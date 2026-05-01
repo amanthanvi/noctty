@@ -65,7 +65,7 @@ pub extern "kernel32" fn CreateJobObjectW(
 pub extern "kernel32" fn SetInformationJobObject(
     hJob: HANDLE,
     JobObjectInfoClass: JOBOBJECTINFOCLASS,
-    lpJobObjectInfo: ?*anyopaque,
+    lpJobObjectInfo: *const anyopaque,
     cbJobObjectInfoLength: DWORD,
 ) callconv(.winapi) BOOL;
 
@@ -96,21 +96,17 @@ pub const Plan = struct {
     active_process_limit: ?DWORD = null,
     job_memory_limit_bytes: ?SIZE_T = null,
 
-    // First slice safety rule: never opt into close-time child termination.
-    terminate_on_job_close: bool = false,
-
     pub fn wantsJobObject(self: Plan) bool {
         return self.mode != .never;
     }
 
     pub fn hasLimits(self: Plan) bool {
         return self.active_process_limit != null or
-            self.job_memory_limit_bytes != null or
-            self.terminate_on_job_close;
+            self.job_memory_limit_bytes != null;
     }
 
     pub fn extendedLimitInformation(self: Plan) ?JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        if (!self.hasLimits()) return null;
+        if (!self.wantsJobObject() or !self.hasLimits()) return null;
 
         var info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = .{};
 
@@ -122,10 +118,6 @@ pub const Plan = struct {
         if (self.job_memory_limit_bytes) |limit| {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
             info.JobMemoryLimit = limit;
-        }
-
-        if (self.terminate_on_job_close) {
-            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         }
 
         return info;
@@ -161,6 +153,7 @@ pub fn configPlan(config: *const configpkg.Config) ConfigPlanError!Plan {
 
 test "win32 job object ABI declarations match expected Win32 values" {
     const create_fn = @typeInfo(@TypeOf(CreateJobObjectW)).@"fn";
+    const set_info_fn = @typeInfo(@TypeOf(SetInformationJobObject)).@"fn";
 
     try std.testing.expectEqual(@as(i32, 9), @intFromEnum(JOBOBJECTINFOCLASS.extended_limit_information));
     try std.testing.expectEqual(@as(DWORD, 0x00000008), JOB_OBJECT_LIMIT_ACTIVE_PROCESS);
@@ -169,6 +162,7 @@ test "win32 job object ABI declarations match expected Win32 values" {
     try std.testing.expect(create_fn.params[0].type.? == ?*SECURITY_ATTRIBUTES);
     try std.testing.expect(create_fn.params[1].type.? == ?LPCWSTR);
     try std.testing.expect(create_fn.return_type.? == ?HANDLE);
+    try std.testing.expect(set_info_fn.params[2].type.? == *const anyopaque);
 }
 
 test "win32 job object ABI layouts stay compatible on x64" {
@@ -193,7 +187,6 @@ test "win32 job object plan stays disabled for default config" {
     try std.testing.expectEqual(AttachPolicy.best_effort, plan.attach_policy);
     try std.testing.expect(!plan.wantsJobObject());
     try std.testing.expect(!plan.hasLimits());
-    try std.testing.expect(!plan.terminate_on_job_close);
     try std.testing.expect(plan.extendedLimitInformation() == null);
 }
 
@@ -210,7 +203,6 @@ test "win32 job object plan maps compatibility limits without kill-on-close" {
     try std.testing.expectEqual(AttachPolicy.best_effort, plan.attach_policy);
     try std.testing.expect(plan.wantsJobObject());
     try std.testing.expect(plan.hasLimits());
-    try std.testing.expect(!plan.terminate_on_job_close);
     try std.testing.expectEqual(
         JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY,
         limits.BasicLimitInformation.LimitFlags,
@@ -231,6 +223,17 @@ test "win32 job object plan ignores compatibility limits when mode is never" {
     try std.testing.expectEqual(AttachPolicy.best_effort, plan.attach_policy);
     try std.testing.expect(!plan.wantsJobObject());
     try std.testing.expect(!plan.hasLimits());
+    try std.testing.expect(plan.extendedLimitInformation() == null);
+}
+
+test "win32 job object never plan cannot synthesize limit blob" {
+    const plan: Plan = .{
+        .mode = .never,
+        .active_process_limit = 1,
+        .job_memory_limit_bytes = 1024,
+    };
+
+    try std.testing.expect(plan.hasLimits());
     try std.testing.expect(plan.extendedLimitInformation() == null);
 }
 
