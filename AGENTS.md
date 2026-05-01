@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-01: On Win32 x64, `JOBOBJECT_BASIC_LIMIT_INFORMATION` is 64 bytes, not 56; `SIZE_T`/`Affinity` padding also shifts `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` to 144 bytes with `JobMemoryLimit` at offset 120. Keep ABI tests on real offsets before wiring Job Object FFI.
 - 2026-05-01: The Windows release workflow's explicit `zig build` and `scripts/package-windows.ps1` fallback build must both pass `-Doptimize=ReleaseFast`; otherwise a successful release can publish `.Debug` binaries even though tests and packaging pass.
 - 2026-05-01: A stale queued GitHub Actions run can get stuck in a backend state where `gh run cancel` returns HTTP 500 and `DELETE /actions/runs/{id}` returns HTTP 403; clean failed/cancelled runs normally, but treat that survivor as GitHub-side cleanup debt rather than a script bug.
 - 2026-05-01: WinGet release CI must skip `wingetcreate update --submit` when `WINGET_PACKAGE_IDENTIFIER` is not yet bootstrapped in `microsoft/winget-pkgs`; a greenfield fork with no existing manifest path will otherwise fail deployments after release, Scoop, and packaging already succeeded.

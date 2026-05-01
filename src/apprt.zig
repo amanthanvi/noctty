@@ -15,6 +15,7 @@ pub const action = @import("apprt/action.zig");
 pub const ipc = @import("apprt/ipc.zig");
 pub const none = @import("apprt/none.zig");
 pub const win32 = @import("apprt/win32.zig");
+pub const win32_job_object = @import("apprt/win32_job_object.zig");
 pub const browser = @import("apprt/browser.zig");
 pub const embedded = none;
 pub const surface = @import("apprt/surface.zig");
@@ -55,4 +56,5 @@ test {
     _ = runtime;
     _ = action;
     _ = structs;
+    _ = win32_job_object;
 }
