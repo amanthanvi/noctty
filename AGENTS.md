@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-01: In GitHub Actions release publish steps, `gh repo clone` of another repo is not enough for a later plain `git push`; wire Git auth explicitly (for example tokenized `origin` URL or `gh auth setup-git`) or the push dies with non-interactive username prompt errors.
 - 2026-05-01: In GitHub Windows self-signed release packaging, do not block first-step diagnostics behind runner trust-store import; emit phase markers before signing setup, validate self-signed Authenticode by expected signer thumbprint, and run release scripts directly under `pwsh` instead of nesting `powershell.exe`.
 - 2026-05-01: In GitHub Actions PowerShell steps, pass dotted Zig semver build args like `-Dversion-string=1.3.108` as one quoted token (`"-Dversion-string=..."`); unquoted inline semver can be split into `1` plus `.3.108` and trips `std.SemanticVersion.parse` with `InvalidVersion`.
 - 2026-05-01: In the GitHub Windows release workflow, do not hide a full release `zig build` inside the opaque `Package Windows artifacts` step. Build explicitly first, then run `scripts/package-windows.ps1 -SkipBuild`, and put timeouts on both steps so a stuck rebuild/sign/package path fails fast instead of burning hours with no live logs.

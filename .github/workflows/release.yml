@@ -230,6 +230,11 @@ jobs:
 
           Push-Location $bucketDir
           try {
+            & git remote set-url origin "https://x-access-token:$env:GH_TOKEN@github.com/$($env:SCOOP_BUCKET_REPO).git"
+            if ($LASTEXITCODE -ne 0) {
+              throw "git remote set-url failed with exit code $LASTEXITCODE"
+            }
+
             & git config user.name "github-actions[bot]"
             & git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             & git add -- $manifestRelPath
