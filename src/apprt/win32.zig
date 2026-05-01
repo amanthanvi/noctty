@@ -15307,14 +15307,7 @@ fn buildProfileChromeBadgeText(alloc: Allocator, kind: windows_shell.ProfileKind
 }
 
 fn profileKindDetail(kind: windows_shell.ProfileKind) []const u8 {
-    return switch (kind) {
-        .wsl_default => "WSL default profile",
-        .wsl_distro => "WSL distro profile",
-        .pwsh => "PowerShell profile",
-        .powershell => "Windows PowerShell profile",
-        .git_bash => "Git Bash profile",
-        .cmd => "Command Prompt profile",
-    };
+    return windows_shell.shellIntegrationDiagnostic(kind).summary;
 }
 
 fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
@@ -27281,6 +27274,27 @@ test "win32 buildProfileChromeBadgeText adds profile glyph treatment" {
     const wsl = try buildProfileChromeBadgeText(std.testing.allocator, .wsl_distro);
     defer std.testing.allocator.free(wsl);
     try std.testing.expectEqualStrings("WSL <>", wsl);
+}
+
+test "win32 profileKindDetail exposes shell integration posture" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "PowerShell profile with automatic shell integration",
+        profileKindDetail(.pwsh),
+    );
+    try std.testing.expectEqualStrings(
+        "WSL distro profile; shell integration depends on the Linux shell",
+        profileKindDetail(.wsl_distro),
+    );
+    try std.testing.expectEqualStrings(
+        "Git Bash profile; manual shell integration setup required",
+        profileKindDetail(.git_bash),
+    );
+    try std.testing.expectEqualStrings(
+        "Command Prompt profile; shell integration unavailable",
+        profileKindDetail(.cmd),
+    );
 }
 
 test "win32 startupProfilePickerEnabled parses launcher env values" {

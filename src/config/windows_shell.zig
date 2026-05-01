@@ -20,6 +20,19 @@ pub const DefaultShell = enum {
 
 pub const ProfileKind = windows_shell_types.ProfileKind;
 
+pub const ShellIntegrationSupport = enum {
+    automatic,
+    shell_managed,
+    manual,
+    unavailable,
+};
+
+pub const ShellIntegrationDiagnostic = struct {
+    support: ShellIntegrationSupport,
+    summary: []const u8,
+    next_step: ?[]const u8 = null,
+};
+
 pub const Profile = struct {
     kind: ProfileKind,
     key: []const u8,
@@ -81,6 +94,39 @@ pub fn profileOrderHint(alloc: Allocator) ?[:0]const u8 {
 pub fn deinitProfiles(alloc: Allocator, profiles: []Profile) void {
     for (profiles) |*profile| profile.deinit(alloc);
     alloc.free(profiles);
+}
+
+pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic {
+    return switch (kind) {
+        .wsl_default => .{
+            .support = .shell_managed,
+            .summary = "WSL default profile; shell integration depends on the Linux shell",
+            .next_step = "Enable shell integration inside the selected WSL shell startup.",
+        },
+        .wsl_distro => .{
+            .support = .shell_managed,
+            .summary = "WSL distro profile; shell integration depends on the Linux shell",
+            .next_step = "Enable shell integration inside the selected WSL shell startup.",
+        },
+        .pwsh => .{
+            .support = .automatic,
+            .summary = "PowerShell profile with automatic shell integration",
+        },
+        .powershell => .{
+            .support = .automatic,
+            .summary = "Windows PowerShell profile with automatic shell integration",
+        },
+        .git_bash => .{
+            .support = .manual,
+            .summary = "Git Bash profile; manual shell integration setup required",
+            .next_step = "Source the shipped bash integration script from your Git Bash startup files.",
+        },
+        .cmd => .{
+            .support = .unavailable,
+            .summary = "Command Prompt profile; shell integration unavailable",
+            .next_step = "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+        },
+    };
 }
 
 /// Prepare a command for Windows spawning. Today this only special-cases WSL
@@ -1399,4 +1445,52 @@ test "spawnCwd uses home for non-absolute cwd" {
     if (builtin.os.tag == .windows) {
         try testing.expect(result != null);
     }
+}
+
+test "shellIntegrationDiagnostic reports automatic PowerShell support" {
+    const testing = std.testing;
+
+    const pwsh = shellIntegrationDiagnostic(.pwsh);
+    try testing.expectEqual(ShellIntegrationSupport.automatic, pwsh.support);
+    try testing.expectEqualStrings(
+        "PowerShell profile with automatic shell integration",
+        pwsh.summary,
+    );
+    try testing.expectEqual(@as(?[]const u8, null), pwsh.next_step);
+
+    const powershell = shellIntegrationDiagnostic(.powershell);
+    try testing.expectEqual(ShellIntegrationSupport.automatic, powershell.support);
+    try testing.expectEqualStrings(
+        "Windows PowerShell profile with automatic shell integration",
+        powershell.summary,
+    );
+}
+
+test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd posture" {
+    const testing = std.testing;
+
+    const wsl = shellIntegrationDiagnostic(.wsl_distro);
+    try testing.expectEqual(ShellIntegrationSupport.shell_managed, wsl.support);
+    try testing.expectEqualStrings(
+        "WSL distro profile; shell integration depends on the Linux shell",
+        wsl.summary,
+    );
+    try testing.expect(wsl.next_step != null);
+
+    const git_bash = shellIntegrationDiagnostic(.git_bash);
+    try testing.expectEqual(ShellIntegrationSupport.manual, git_bash.support);
+    try testing.expectEqualStrings(
+        "Git Bash profile; manual shell integration setup required",
+        git_bash.summary,
+    );
+    try testing.expect(git_bash.next_step != null);
+    try testing.expect(std.mem.indexOf(u8, git_bash.next_step.?, "Source") != null);
+
+    const cmd = shellIntegrationDiagnostic(.cmd);
+    try testing.expectEqual(ShellIntegrationSupport.unavailable, cmd.support);
+    try testing.expectEqualStrings(
+        "Command Prompt profile; shell integration unavailable",
+        cmd.summary,
+    );
+    try testing.expect(cmd.next_step != null);
 }
