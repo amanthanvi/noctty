@@ -1414,7 +1414,11 @@ scrollbar: Scrollbar = .system,
 /// A default link that matches a URL and opens it in the system opener always
 /// exists. This can be disabled using `link-url`.
 ///
-/// TODO: This can't currently be set!
+/// Each configured value is a regular expression. When it matches terminal
+/// text, the matched text opens with the system opener using the same hover
+/// modifier behavior as `link-url`.
+///
+/// Specify this multiple times to configure multiple link matchers.
 link: RepeatableLink = .{},
 
 /// Enable URL matching. URLs are matched on hover with control (Linux) or
@@ -3291,13 +3295,6 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
     // Add our default command palette entries
     try result.@"command-palette-entry".init(alloc);
 
-    // Add our default link for URL detection
-    try result.link.links.append(alloc, .{
-        .regex = url.regex,
-        .action = .{ .open = {} },
-        .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
-    });
-
     return result;
 }
 
@@ -4056,10 +4053,6 @@ pub fn finalize(self: *Config) !void {
     // Minimum window size
     if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
     if (self.@"window-height" > 0) self.@"window-height" = @max(4, self.@"window-height");
-
-    // If URLs are disabled, cut off the first link. The first link is
-    // always the URL matcher.
-    if (!self.@"link-url") self.link.links.items = self.link.links.items[1..];
 
     // We warn when the quit-after-last-window-closed-delay is set to a very
     // short value because it can cause Ghostty to quit before the first
@@ -7898,10 +7891,21 @@ pub const RepeatableLink = struct {
     links: std.ArrayListUnmanaged(inputpkg.Link) = .{},
 
     pub fn parseCLI(self: *Self, alloc: Allocator, input_: ?[]const u8) !void {
-        _ = self;
-        _ = alloc;
-        _ = input_;
-        return error.NotImplemented;
+        const input = std.mem.trim(u8, input_ orelse "", &std.ascii.whitespace);
+
+        // Empty input clears custom links. The built-in URL matcher is
+        // appended later during surface derived-config construction.
+        if (input.len == 0) {
+            self.links.clearRetainingCapacity();
+            return;
+        }
+
+        const regex = try parseRegexValue(alloc, input);
+        try self.links.append(alloc, .{
+            .regex = regex,
+            .action = .{ .open = {} },
+            .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+        });
     }
 
     /// Deep copy of the struct. Required by Config.
@@ -7936,9 +7940,69 @@ pub const RepeatableLink = struct {
 
     /// Used by Formatter
     pub fn formatEntry(self: Self, formatter: formatterpkg.EntryFormatter) !void {
-        // This currently can't be set so we don't format anything.
-        _ = self;
-        _ = formatter;
+        if (self.links.items.len == 0) {
+            try formatter.formatEntry(void, {});
+            return;
+        }
+
+        for (self.links.items) |item| {
+            var buf: [4096]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buf);
+            writer.print("\"{f}\"", .{std.zig.fmtString(item.regex)}) catch {
+                return error.OutOfMemory;
+            };
+            try formatter.formatEntry([]const u8, writer.buffered());
+        }
+    }
+
+    fn parseRegexValue(alloc: Allocator, input: []const u8) ![]const u8 {
+        if (input.len >= 2 and input[0] == '"' and input[input.len - 1] == '"') {
+            var buf: std.Io.Writer.Allocating = .init(alloc);
+            defer buf.deinit();
+
+            const parsed = try std.zig.string_literal.parseWrite(&buf.writer, input);
+            if (parsed == .failure) return error.InvalidValue;
+
+            return try alloc.dupe(u8, buf.written());
+        }
+
+        return try alloc.dupe(u8, input);
+    }
+
+    test "RepeatableLink parseCLI bare regex uses system opener defaults" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var links: Self = .{};
+        try links.parseCLI(alloc, "^foo://bar$");
+
+        try testing.expectEqual(@as(usize, 1), links.links.items.len);
+        try testing.expectEqualStrings("^foo://bar$", links.links.items[0].regex);
+        try testing.expectEqual(inputpkg.Link.Action{ .open = {} }, links.links.items[0].action);
+        try testing.expectEqualDeep(
+            inputpkg.Link.Highlight{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
+            links.links.items[0].highlight,
+        );
+
+        try links.parseCLI(alloc, "");
+        try testing.expectEqual(@as(usize, 0), links.links.items.len);
+    }
+
+    test "RepeatableLink formatEntry quotes regex values" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var links: Self = .{};
+        try links.parseCLI(alloc, "^foo,bar$");
+        try links.formatEntry(formatterpkg.entryFormatter("link", &buf.writer));
+        try testing.expectEqualSlices(u8, "link = \"^foo,bar$\"\n", buf.written());
     }
 };
 
