@@ -283,10 +283,30 @@ jobs:
           $vcLibsPath = Join-Path $env:TEMP "Microsoft.VCLibs.x64.14.00.Desktop.appx"
           $bundlePath = Join-Path $env:TEMP "wingetcreate.msixbundle"
           Import-Module Appx -UseWindowsPowerShell -ErrorAction Stop
+          function Install-AppxPackageIfNeeded {
+            param(
+              [string]$Path,
+              [string]$Label
+            )
+
+            try {
+              Add-AppxPackage -Path $Path -ErrorAction Stop
+            }
+            catch {
+              $message = $_.Exception.Message
+              if ($message -match "0x80073D06" -or $message -match "higher version of this package is already installed") {
+                Write-Host "$Label already satisfied on this runner; skipping package install."
+                return
+              }
+
+              throw
+            }
+          }
+
           Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -OutFile $vcLibsPath -ErrorAction Stop
-          Add-AppxPackage -Path $vcLibsPath -ErrorAction Stop
+          Install-AppxPackageIfNeeded -Path $vcLibsPath -Label "Microsoft.VCLibs.x64.14.00.Desktop"
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/msixbundle" -OutFile $bundlePath -ErrorAction Stop
-          Add-AppxPackage -Path $bundlePath -ErrorAction Stop
+          Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
 
           & wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER `
             --version $version `
