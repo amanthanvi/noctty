@@ -756,6 +756,11 @@ const ipc_wire_version: u32 = 1;
 const ipc_ack_success: u8 = 0;
 const ipc_ack_failure: u8 = 1;
 
+const IpcRequestKind = enum(u8) {
+    new_window = 1,
+    list_windows = 2,
+};
+
 const POINT = win32_types.POINT;
 const RECT = win32_types.RECT;
 const PIXELFORMATDESCRIPTOR = extern struct {
@@ -1542,7 +1547,7 @@ fn encodeNewWindowIpcRequest(
     errdefer encoded.deinit(alloc);
 
     try appendU32(&encoded, alloc, ipc_wire_version);
-    try encoded.append(alloc, 1);
+    try encoded.append(alloc, @intFromEnum(IpcRequestKind.new_window));
 
     const argc: u32 = if (arguments) |argv| @intCast(argv.len) else 0;
     try appendU32(&encoded, alloc, argc);
@@ -1557,17 +1562,34 @@ fn encodeNewWindowIpcRequest(
     return try encoded.toOwnedSlice(alloc);
 }
 
-fn decodeNewWindowIpcRequest(
-    alloc: Allocator,
+fn encodeListWindowsIpcRequest(alloc: Allocator) ![]u8 {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+
+    try appendU32(&encoded, alloc, ipc_wire_version);
+    try encoded.append(alloc, @intFromEnum(IpcRequestKind.list_windows));
+
+    return try encoded.toOwnedSlice(alloc);
+}
+
+fn decodeIpcRequestKind(
     pipe: windows.HANDLE,
-) !?[]const [:0]const u8 {
-    var header: [9]u8 = undefined;
+) !IpcRequestKind {
+    var header: [5]u8 = undefined;
     try readExactHandle(pipe, &header);
 
     if (readU32(header[0..4]) != ipc_wire_version) return error.InvalidIpcRequest;
-    if (header[4] != 1) return error.InvalidIpcRequest;
+    return std.meta.intToEnum(IpcRequestKind, header[4]) catch error.InvalidIpcRequest;
+}
 
-    const argc = readU32(header[5..9]);
+fn decodeNewWindowIpcPayload(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !?[]const [:0]const u8 {
+    var argc_buf: [4]u8 = undefined;
+    try readExactHandle(pipe, &argc_buf);
+
+    const argc = readU32(&argc_buf);
     if (argc == 0) return null;
 
     const argv = try alloc.alloc([:0]const u8, argc);
@@ -1603,6 +1625,39 @@ fn readIpcAck(pipe: windows.HANDLE) !bool {
         ipc_ack_failure => error.IPCFailed,
         else => error.InvalidIpcResponse,
     };
+}
+
+fn writeIpcDataResponse(
+    pipe: windows.HANDLE,
+    success: bool,
+    body: []const u8,
+) !void {
+    var header: [9]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
+    header[4] = if (success) ipc_ack_success else ipc_ack_failure;
+    std.mem.writeInt(u32, header[5..9], @intCast(body.len), .little);
+    try writeAllHandle(pipe, &header);
+    if (body.len > 0) try writeAllHandle(pipe, body);
+}
+
+fn readIpcDataResponse(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) ![]u8 {
+    var header: [9]u8 = undefined;
+    try readExactHandle(pipe, &header);
+    if (readU32(header[0..4]) != ipc_wire_version) return error.InvalidIpcResponse;
+    switch (header[4]) {
+        ipc_ack_success => {},
+        ipc_ack_failure => return error.IPCFailed,
+        else => return error.InvalidIpcResponse,
+    }
+
+    const len = readU32(header[5..9]);
+    const body = try alloc.alloc(u8, len);
+    errdefer alloc.free(body);
+    if (len > 0) try readExactHandle(pipe, body);
+    return body;
 }
 
 fn historyEntrySortsAfter(
@@ -1699,6 +1754,24 @@ fn sendNewWindowIpc(
 
     try writeAllHandle(pipe, request);
     return try readIpcAck(pipe);
+}
+
+fn sendListWindowsIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+) !?[]u8 {
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        error.PipeBusy => return error.IPCFailed,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    const request = try encodeListWindowsIpcRequest(alloc);
+    defer alloc.free(request);
+
+    try writeAllHandle(pipe, request);
+    return try readIpcDataResponse(alloc, pipe);
 }
 
 fn applyNewWindowArguments(
@@ -1828,7 +1901,6 @@ fn ipcServerMain(app: *App) void {
 
         handleIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 IPC client err={}", .{err});
-            writeIpcAck(pipe, false) catch {};
         };
 
         _ = FlushFileBuffers(pipe);
@@ -1838,7 +1910,22 @@ fn ipcServerMain(app: *App) void {
 }
 
 fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const arguments = try decodeNewWindowIpcRequest(app.core_app.alloc, pipe);
+    const kind = try decodeIpcRequestKind(pipe);
+
+    switch (kind) {
+        .new_window => handleNewWindowIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 new-window IPC request err={}", .{err});
+            try writeIpcAck(pipe, false);
+        },
+        .list_windows => handleListWindowsIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation list IPC request err={}", .{err});
+            try writeIpcDataResponse(pipe, false, "");
+        },
+    }
+}
+
+fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const arguments = try decodeNewWindowIpcPayload(app.core_app.alloc, pipe);
     errdefer freeOwnedArguments(app.core_app.alloc, arguments);
 
     const mailbox: CoreApp.Mailbox = .{
@@ -1850,6 +1937,29 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
     } }, .forever);
 
     try writeIpcAck(pipe, true);
+}
+
+fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const json = try requestAutomationWindowListJson(app, app.core_app.alloc);
+    defer app.core_app.alloc.free(json);
+    try writeIpcDataResponse(pipe, true, json);
+}
+
+fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
+    var request: CoreApp.Message.AutomationWindowListRequest = .{
+        .alloc = alloc,
+    };
+    const mailbox: CoreApp.Mailbox = .{
+        .rt_app = app,
+        .mailbox = &app.core_app.mailbox,
+    };
+    if (mailbox.push(.{ .automation_window_list = &request }, .{ .forever = {} }) == 0) {
+        return error.IPCFailed;
+    }
+
+    request.done.wait();
+    if (request.err) |err| return err;
+    return request.result orelse error.IPCFailed;
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -3601,6 +3711,99 @@ pub const App = struct {
                 return try spawnWindowProcess(alloc, target, value);
             },
         }
+    }
+
+    pub fn queryAutomationWindowList(
+        alloc: Allocator,
+        target: apprt.ipc.Target,
+    ) !?[]u8 {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
+        defer alloc.free(pipe_name);
+        return try sendListWindowsIpc(alloc, pipe_name);
+    }
+
+    pub fn buildAutomationWindowListJson(
+        self: *App,
+        alloc: Allocator,
+    ) ![]u8 {
+        var snapshot = try self.buildAutomationWindowList(alloc);
+        defer snapshot.deinit(alloc);
+
+        var buf: std.Io.Writer.Allocating = .init(alloc);
+        errdefer buf.deinit();
+        try buf.writer.print("{f}", .{std.json.fmt(snapshot, .{})});
+        return try buf.toOwnedSlice();
+    }
+
+    fn buildAutomationWindowList(
+        self: *App,
+        alloc: Allocator,
+    ) !apprt.ipc.AutomationWindowList {
+        const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.hosts.items.len);
+        var built: usize = 0;
+        errdefer {
+            for (window_entries[0..built]) |*window| window.deinit(alloc);
+            alloc.free(window_entries);
+        }
+
+        for (self.hosts.items, 0..) |host, i| {
+            window_entries[i] = try buildAutomationWindow(alloc, host);
+            built += 1;
+        }
+
+        return .{ .windows = window_entries };
+    }
+
+    fn buildAutomationWindow(
+        alloc: Allocator,
+        host: *Host,
+    ) !apprt.ipc.AutomationWindow {
+        const tabs = try alloc.alloc(apprt.ipc.AutomationTab, host.tabs.items.len);
+        var built: usize = 0;
+        errdefer {
+            for (tabs[0..built]) |*tab| tab.deinit(alloc);
+            alloc.free(tabs);
+        }
+
+        var active_tab_id: ?u32 = null;
+        for (host.tabs.items, 0..) |*tab, i| {
+            const active = i == host.active_tab;
+            tabs[i] = try buildAutomationTab(alloc, tab, active);
+            if (active) active_tab_id = tab.id;
+            built += 1;
+        }
+
+        return .{
+            .window_id = host.id,
+            .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
+            .active_tab_id = active_tab_id,
+            .tabs = tabs,
+        };
+    }
+
+    fn buildAutomationTab(
+        alloc: Allocator,
+        tab: *const Tab,
+        active: bool,
+    ) !apprt.ipc.AutomationTab {
+        var panes: std.ArrayList(apprt.ipc.AutomationPane) = .empty;
+        defer panes.deinit(alloc);
+
+        const focused_surface = tab.focusedSurface();
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| {
+            try panes.append(alloc, .{
+                .surface_id = entry.view.core().id,
+                .focused = if (focused_surface) |surface| surface == entry.view else false,
+            });
+        }
+
+        return .{
+            .tab_id = tab.id,
+            .active = active,
+            .focused_surface_id = if (focused_surface) |surface| surface.core().id else null,
+            .panes = try panes.toOwnedSlice(alloc),
+        };
     }
 
     fn spawnWindowProcess(
@@ -25751,6 +25954,76 @@ test "win32 hostSurfaceCount tracks surfaces attached to one host" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &second));
     try std.testing.expectEqual(@as(usize, 2), first.hostSurfaceCount());
     try std.testing.expect(!shouldResizeHostForInitialSize(first.hostSurfaceCount()));
+}
+
+test "automation-window-list win32 json includes host tab and pane ids" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var app: App = undefined;
+    app.windows = .empty;
+    app.hosts = .empty;
+    defer app.windows.deinit(std.testing.allocator);
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var host: Host = undefined;
+    host.id = 17;
+    host.tabs = .empty;
+    host.active_tab = 1;
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var tab0_surface: Surface = undefined;
+    tab0_surface.core_surface = undefined;
+    tab0_surface.core_surface.id = 701;
+    tab0_surface.host = &host;
+    tab0_surface.host_id = host.id;
+
+    var tab1_primary: Surface = undefined;
+    tab1_primary.core_surface = undefined;
+    tab1_primary.core_surface.id = 702;
+    tab1_primary.host = &host;
+    tab1_primary.host_id = host.id;
+    tab1_primary.window_focused = true;
+
+    var tab1_split: Surface = undefined;
+    tab1_split.core_surface = undefined;
+    tab1_split.core_surface.id = 703;
+    tab1_split.host = &host;
+    tab1_split.host_id = host.id;
+
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &tab0_surface));
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 4, &tab1_primary));
+
+    const inserted = try SplitTreeSurface.init(std.testing.allocator, &tab1_split);
+    defer {
+        var cleanup = inserted;
+        cleanup.deinit();
+    }
+    var prev_tree = host.tabs.items[1].tree;
+    const next_tree = try prev_tree.split(
+        std.testing.allocator,
+        host.tabs.items[1].focused,
+        .right,
+        0.5,
+        &inserted,
+    );
+    host.tabs.items[1].tree = next_tree;
+    host.tabs.items[1].focused = host.tabs.items[1].findHandle(&tab1_primary) orelse host.tabs.items[1].focused;
+    prev_tree.deinit();
+
+    try app.hosts.append(std.testing.allocator, &host);
+    try app.windows.append(std.testing.allocator, &tab0_surface);
+    try app.windows.append(std.testing.allocator, &tab1_primary);
+
+    const json = try app.buildAutomationWindowListJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expectEqualStrings(
+        "{\"schema\":\"winghostty.windows.v1\",\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"panes\":[{\"surface_id\":701,\"focused\":true}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"panes\":[{\"surface_id\":703,\"focused\":false},{\"surface_id\":702,\"focused\":true}]}]}]}",
+        json,
+    );
 }
 
 test "win32 shouldDispatchOcclusion dispatches initial hidden state" {
