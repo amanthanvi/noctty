@@ -14,16 +14,19 @@ const std = @import("std");
 const com = @import("com.zig");
 const constants = @import("constants.zig");
 const root = @import("root.zig");
+const text = @import("text.zig");
 pub const events = @import("events.zig");
 pub const widgets = @import("widgets.zig");
 
 pub const RootProvider = root.RootProvider;
+pub const TerminalTextSnapshot = text.TerminalTextSnapshot;
 pub const PaletteListProvider = widgets.PaletteListProvider;
 pub const PaletteListState = widgets.PaletteListState;
 pub const handlePaletteListGetObject = widgets.handlePaletteListGetObject;
 pub const HRESULT = com.HRESULT;
 pub const UiaRootObjectId = com.UiaRootObjectId;
 pub const IRawElementProviderSimple = com.IRawElementProviderSimple;
+pub const snapshotTerminalPlainText = text.snapshotTerminalPlainText;
 
 /// Handle `WM_GETOBJECT` for the main host HWND. Returns `null` if the
 /// caller should fall through to `DefWindowProcW`; otherwise returns
@@ -62,6 +65,7 @@ test {
     std.testing.refAllDecls(com);
     std.testing.refAllDecls(constants);
     std.testing.refAllDecls(root);
+    std.testing.refAllDecls(text);
     std.testing.refAllDecls(events);
     std.testing.refAllDecls(widgets);
 }
