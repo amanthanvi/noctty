@@ -18,6 +18,8 @@
   ·
   <a href="docs/status.md">Status</a>
   ·
+  <a href="docs/windows-capability-matrix.md">Windows capability matrix</a>
+  ·
   <a href="HACKING.md">Hacking</a>
   ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -81,7 +83,9 @@ First public releases: 2026-04-16.
 - `libghostty-vt` as a retained Zig / C library deliverable.
 
 A precise list, including what is experimental and what is out of scope,
-is in **[docs/status.md](docs/status.md)**.
+is in **[docs/status.md](docs/status.md)**. For a row-by-row mapping against
+official Ghostty docs, see
+**[docs/windows-capability-matrix.md](docs/windows-capability-matrix.md)**.
 
 ## Install
 
