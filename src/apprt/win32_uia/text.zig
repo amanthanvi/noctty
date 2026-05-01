@@ -19,7 +19,8 @@ pub const TerminalTextSnapshot = struct {
     alloc: std.mem.Allocator,
     /// UTF-8 plain text with `\n` separators for hard and soft line breaks.
     text: []u8,
-    /// Source terminal cell for each byte in `text`.
+    /// Terminal pin for each byte in `text`; `\n` bytes reuse the pin from
+    /// the row they terminate rather than naming a distinct source cell.
     pin_map: []terminal.Pin,
     /// UTF-16 code-unit offset for each byte in `text`, plus a sentinel for
     /// `text.len`. Multibyte scalars therefore repeat the same start offset.
@@ -133,6 +134,7 @@ fn buildUtf16OffsetMap(
     var utf16_offset: usize = 0;
     while (byte_index < text.len) {
         const utf8_len = try std.unicode.utf8ByteSequenceLength(text[byte_index]);
+        if (byte_index + utf8_len > text.len) return error.TruncatedUtf8;
         const codepoint = try std.unicode.utf8Decode(text[byte_index .. byte_index + utf8_len]);
         @memset(utf16_offset_for_byte[byte_index .. byte_index + utf8_len], utf16_offset);
         byte_index += utf8_len;
@@ -310,5 +312,14 @@ test "snapshotTerminalPlainText tracks multibyte text for UIA offsets" {
     try std.testing.expectEqual(
         OffsetRange{ .start = 0, .end = 4 },
         snapshot.lineUtf16Range(0).?,
+    );
+}
+
+test "snapshotTerminalPlainText utf16 map rejects truncated utf8" {
+    const alloc = std.testing.allocator;
+
+    try std.testing.expectError(
+        error.TruncatedUtf8,
+        buildUtf16OffsetMap(alloc, &.{ 0xF0, 0x9F }),
     );
 }

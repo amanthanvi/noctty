@@ -19,6 +19,7 @@ pub const events = @import("events.zig");
 pub const widgets = @import("widgets.zig");
 
 pub const RootProvider = root.RootProvider;
+pub const OffsetRange = text.OffsetRange;
 pub const TerminalTextSnapshot = text.TerminalTextSnapshot;
 pub const PaletteListProvider = widgets.PaletteListProvider;
 pub const PaletteListState = widgets.PaletteListState;
