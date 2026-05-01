@@ -109,11 +109,22 @@ jobs:
           zig build test -Dtest-filter=scroll
           zig build test -Dtest-filter=keybind
 
+      - name: Build release binaries
+        shell: pwsh
+        timeout-minutes: 20
+        run: >
+          zig build
+          -Demit-exe=true
+          -Demit-lib-vt=true
+          -Dversion-string=${{ steps.meta.outputs.version }}
+
       - name: Package Windows artifacts
         shell: pwsh
+        timeout-minutes: 15
         run: >
           powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
           -Version ${{ steps.meta.outputs.version }}
+          -SkipBuild
           -RequireInstaller
           -RequireSigning
 
