@@ -16,6 +16,7 @@ const build_config = @import("../build_config.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const allocpkg = @import("../lib/allocator.zig");
 const deepEqual = @import("../datastruct/comparison.zig").deepEqual;
 const FontCodepointMap = @import("../font/CodepointMap.zig");
 const FontMetrics = @import("../font/Metrics.zig");
@@ -7945,13 +7946,16 @@ pub const RepeatableLink = struct {
             return;
         }
 
+        const alloc = allocpkg.default(null);
         for (self.links.items) |item| {
-            var buf: [4096]u8 = undefined;
-            var writer: std.Io.Writer = .fixed(&buf);
-            writer.print("\"{f}\"", .{std.zig.fmtString(item.regex)}) catch {
-                return error.OutOfMemory;
-            };
-            try formatter.formatEntry([]const u8, writer.buffered());
+            const value = try std.fmt.allocPrint(
+                alloc,
+                "\"{f}\"",
+                .{std.zig.fmtString(item.regex)},
+            );
+            defer alloc.free(value);
+
+            try formatter.formatEntry([]const u8, value);
         }
     }
 
@@ -8003,6 +8007,26 @@ pub const RepeatableLink = struct {
         try links.parseCLI(alloc, "^foo,bar$");
         try links.formatEntry(formatterpkg.entryFormatter("link", &buf.writer));
         try testing.expectEqualSlices(u8, "link = \"^foo,bar$\"\n", buf.written());
+    }
+
+    test "RepeatableLink formatEntry supports long regex values" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const regex = try alloc.alloc(u8, 5000);
+        @memset(regex, 'a');
+
+        var links: Self = .{};
+        try links.parseCLI(alloc, regex);
+        try links.formatEntry(formatterpkg.entryFormatter("link", &buf.writer));
+
+        const expected = try std.fmt.allocPrint(alloc, "link = \"{s}\"\n", .{regex});
+        try testing.expectEqualStrings(expected, buf.written());
     }
 };
 
