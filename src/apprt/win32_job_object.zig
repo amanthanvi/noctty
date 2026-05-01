@@ -18,7 +18,6 @@ pub const SECURITY_ATTRIBUTES = windows.SECURITY_ATTRIBUTES;
 pub const LPCWSTR = win32_types.LPCWSTR;
 
 pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: DWORD = 0x00000008;
-pub const JOB_OBJECT_LIMIT_PROCESS_MEMORY: DWORD = 0x00000100;
 pub const JOB_OBJECT_LIMIT_JOB_MEMORY: DWORD = 0x00000200;
 pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 
@@ -255,4 +254,14 @@ test "win32 job object plan rejects process limits that exceed DWORD" {
     config.@"linux-cgroup-processes-limit" = @as(u64, std.math.maxInt(u32)) + 1;
 
     try std.testing.expectError(error.ProcessLimitOverflow, configPlan(&config));
+}
+
+test "win32 job object plan rejects memory limits that exceed SIZE_T" {
+    if (@sizeOf(SIZE_T) >= @sizeOf(u64)) return error.SkipZigTest;
+
+    var config: configpkg.Config = .{};
+    config.@"linux-cgroup" = .always;
+    config.@"linux-cgroup-memory-limit" = @as(u64, std.math.maxInt(SIZE_T)) + 1;
+
+    try std.testing.expectError(error.JobMemoryLimitOverflow, configPlan(&config));
 }
