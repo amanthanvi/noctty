@@ -46,8 +46,11 @@ pub const TerminalTextSnapshot = struct {
         const start = self.line_start_byte_offsets[line_index];
         const end = if (line_index + 1 < self.line_start_byte_offsets.len)
             self.line_start_byte_offsets[line_index + 1] - 1
-        else
-            self.text.len;
+        else blk: {
+            var line_end = self.text.len;
+            if (line_end > start and self.text[line_end - 1] == '\n') line_end -= 1;
+            break :blk line_end;
+        };
         return .{ .start = start, .end = end };
     }
 
@@ -89,20 +92,34 @@ pub fn snapshotTerminalPlainText(
     const utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text);
     errdefer alloc.free(utf16_offset_for_byte);
 
-    var line_start_byte_offsets: std.ArrayList(usize) = .empty;
-    defer line_start_byte_offsets.deinit(alloc);
-    try line_start_byte_offsets.append(alloc, 0);
-    for (text, 0..) |c, i| {
-        if (c == '\n') try line_start_byte_offsets.append(alloc, i + 1);
-    }
+    const line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text);
+    errdefer alloc.free(line_start_byte_offsets);
 
     return .{
         .alloc = alloc,
         .text = text,
         .pin_map = owned_pin_map,
         .utf16_offset_for_byte = utf16_offset_for_byte,
-        .line_start_byte_offsets = try line_start_byte_offsets.toOwnedSlice(alloc),
+        .line_start_byte_offsets = line_start_byte_offsets,
     };
+}
+
+fn buildLineStartByteOffsets(
+    alloc: std.mem.Allocator,
+    text: []const u8,
+) ![]usize {
+    var line_start_byte_offsets: std.ArrayList(usize) = .empty;
+    defer line_start_byte_offsets.deinit(alloc);
+
+    try line_start_byte_offsets.append(alloc, 0);
+
+    // Preserve interior blank lines, but treat a terminal trailing '\n' as the
+    // last line terminator instead of the start of a phantom empty line.
+    for (text, 0..) |c, i| {
+        if (c == '\n' and i + 1 < text.len) try line_start_byte_offsets.append(alloc, i + 1);
+    }
+
+    return try line_start_byte_offsets.toOwnedSlice(alloc);
 }
 
 fn buildUtf16OffsetMap(
@@ -227,6 +244,34 @@ test "snapshotTerminalPlainText preserves blank rows in line map" {
         OffsetRange{ .start = 4, .end = 4 },
         snapshot.lineUtf16Range(1).?,
     );
+}
+
+test "snapshotTerminalPlainText line map ignores trailing newline terminator" {
+    const alloc = std.testing.allocator;
+    const text = "top\n\n";
+
+    var snapshot = TerminalTextSnapshot{
+        .alloc = alloc,
+        .text = try alloc.dupe(u8, text),
+        .pin_map = try alloc.alloc(terminal.Pin, text.len),
+        .utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text),
+        .line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text),
+    };
+    defer snapshot.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), snapshot.lineCount());
+    try std.testing.expectEqualSlices(usize, &.{ 0, 4 }, snapshot.line_start_byte_offsets);
+
+    const first = snapshot.lineByteRange(0).?;
+    try std.testing.expectEqualStrings("top", snapshot.text[first.start..first.end]);
+
+    const second = snapshot.lineByteRange(1).?;
+    try std.testing.expectEqual(@as(usize, second.start), second.end);
+    try std.testing.expectEqual(
+        OffsetRange{ .start = 4, .end = 4 },
+        snapshot.lineUtf16Range(1).?,
+    );
+    try std.testing.expect(snapshot.lineByteRange(2) == null);
 }
 
 test "snapshotTerminalPlainText tracks multibyte text for UIA offsets" {
