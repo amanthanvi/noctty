@@ -173,6 +173,9 @@ fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize 
                 if (first_index >= layout.nodes.len or second_index >= layout.nodes.len) {
                     return error.InvalidNodeIndex;
                 }
+                if (stack_len + 2 > stack.len) {
+                    return error.InvalidTreeShape;
+                }
 
                 stack[stack_len] = .{ .index = second_index, .expanded = false };
                 stack_len += 1;
@@ -358,12 +361,10 @@ test "win32 session state parse keeps current schema strict about unknown fields
         \\{"schema_version":1,"windows":[],"future":{"layout_generation":1}}
     ;
 
-    if (parseAlloc(std.testing.allocator, raw)) |parsed| {
-        parsed.deinit();
-        return error.TestUnexpectedResult;
-    } else |err| {
-        try std.testing.expect(err != error.UnsupportedVersion);
-    }
+    try std.testing.expectError(
+        error.UnknownField,
+        parseAlloc(std.testing.allocator, raw),
+    );
 }
 
 test "win32 session state encode rejects invalid split child index" {
@@ -449,4 +450,15 @@ test "win32 session state validates deep split layout without recursion" {
     try validateAlloc(std.testing.allocator, .{
         .windows = &windows,
     });
+}
+
+test "win32 session state parse rejects shared-node layout before DFS stack overflow" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2}},{"split":{"axis":"vertical","ratio":0.5,"first":2,"second":3}},{"pane":{"cwd":"C:\\src\\winghostty"}},{"pane":{"cwd":"C:\\logs"}}]}}]}]}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidTreeShape,
+        parseAlloc(std.testing.allocator, raw),
+    );
 }
