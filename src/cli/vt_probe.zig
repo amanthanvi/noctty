@@ -16,15 +16,10 @@ pub const Direction = enum {
     parse_emit,
 };
 
-pub const Status = enum {
-    supported,
-};
-
 pub const Capability = struct {
     id: []const u8,
     category: Category,
     direction: Direction,
-    status: Status,
 };
 
 pub const Report = struct {
@@ -40,37 +35,31 @@ const capabilities = [_]Capability{
         .id = terminfo_capability_id,
         .category = .terminfo,
         .direction = .advertise,
-        .status = .supported,
     },
     .{
         .id = "osc-8-hyperlink",
         .category = .osc,
         .direction = .parse_emit,
-        .status = .supported,
     },
     .{
         .id = "osc-4-palette",
         .category = .osc,
         .direction = .parse_emit,
-        .status = .supported,
     },
     .{
         .id = "osc-10-11-colors",
         .category = .osc,
         .direction = .parse_emit,
-        .status = .supported,
     },
     .{
         .id = "osc-21-kitty-color-stack",
         .category = .osc,
         .direction = .parse,
-        .status = .supported,
     },
     .{
         .id = "csi-2026-synchronized-output",
         .category = .csi,
         .direction = .parse,
-        .status = .supported,
     },
 };
 
@@ -125,12 +114,11 @@ pub fn writePlain(writer: *std.Io.Writer, probe: Report) std.Io.Writer.Error!voi
 
     for (probe.capabilities) |capability| {
         try writer.print(
-            "capability={s} category={s} direction={s} status={s}\n",
+            "capability={s} category={s} direction={s}\n",
             .{
                 capability.id,
                 categoryString(capability.category),
                 directionString(capability.direction),
-                statusString(capability.status),
             },
         );
     }
@@ -152,32 +140,20 @@ fn directionString(value: Direction) []const u8 {
     };
 }
 
-fn statusString(value: Status) []const u8 {
-    return switch (value) {
-        .supported => "supported",
-    };
-}
-
 test "vt-probe report includes core capabilities" {
     const testing = std.testing;
+    const probe = report();
 
-    try testing.expect(@hasDecl(@This(), "Capability"));
-    try testing.expect(@hasDecl(@This(), "Report"));
-    try testing.expect(@hasDecl(@This(), "report"));
+    try testing.expectEqualStrings("static", probe.source);
+    try testing.expectEqualStrings(default_term, probe.term);
+    try testing.expectEqual(@as(usize, 6), probe.capabilities.len);
 
-    if (comptime @hasDecl(@This(), "report")) {
-        const probe = @field(@This(), "report")();
-        try testing.expectEqualStrings("static", probe.source);
-        try testing.expectEqualStrings(default_term, probe.term);
-        try testing.expectEqual(@as(usize, 6), probe.capabilities.len);
-
-        try testing.expectEqualStrings(terminfo_capability_id, probe.capabilities[0].id);
-        try testing.expectEqualStrings("osc-8-hyperlink", probe.capabilities[1].id);
-        try testing.expectEqualStrings("osc-4-palette", probe.capabilities[2].id);
-        try testing.expectEqualStrings("osc-10-11-colors", probe.capabilities[3].id);
-        try testing.expectEqualStrings("osc-21-kitty-color-stack", probe.capabilities[4].id);
-        try testing.expectEqualStrings("csi-2026-synchronized-output", probe.capabilities[5].id);
-    }
+    try testing.expectEqualStrings(terminfo_capability_id, probe.capabilities[0].id);
+    try testing.expectEqualStrings("osc-8-hyperlink", probe.capabilities[1].id);
+    try testing.expectEqualStrings("osc-4-palette", probe.capabilities[2].id);
+    try testing.expectEqualStrings("osc-10-11-colors", probe.capabilities[3].id);
+    try testing.expectEqualStrings("osc-21-kitty-color-stack", probe.capabilities[4].id);
+    try testing.expectEqualStrings("csi-2026-synchronized-output", probe.capabilities[5].id);
 }
 
 test "vt-probe terminfo claim tracks compiled terminfo" {
@@ -190,27 +166,21 @@ test "vt-probe terminfo claim tracks compiled terminfo" {
 
 test "vt-probe plain output is deterministic" {
     const testing = std.testing;
+    var buf: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writePlain(&writer, report());
 
-    try testing.expect(@hasDecl(@This(), "report"));
-    try testing.expect(@hasDecl(@This(), "writePlain"));
-
-    if (comptime @hasDecl(@This(), "report") and @hasDecl(@This(), "writePlain")) {
-        var buf: [1024]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buf);
-        try @field(@This(), "writePlain")(&writer, @field(@This(), "report")());
-
-        try testing.expectEqualStrings(
-            \\probe=static
-            \\term=xterm-ghostty
-            \\capability=terminfo-xterm-ghostty category=terminfo direction=advertise status=supported
-            \\capability=osc-8-hyperlink category=osc direction=parse+emit status=supported
-            \\capability=osc-4-palette category=osc direction=parse+emit status=supported
-            \\capability=osc-10-11-colors category=osc direction=parse+emit status=supported
-            \\capability=osc-21-kitty-color-stack category=osc direction=parse status=supported
-            \\capability=csi-2026-synchronized-output category=csi direction=parse status=supported
-            \\
-        ,
-            writer.buffered(),
-        );
-    }
+    try testing.expectEqualStrings(
+        \\probe=static
+        \\term=xterm-ghostty
+        \\capability=terminfo-xterm-ghostty category=terminfo direction=advertise
+        \\capability=osc-8-hyperlink category=osc direction=parse+emit
+        \\capability=osc-4-palette category=osc direction=parse+emit
+        \\capability=osc-10-11-colors category=osc direction=parse+emit
+        \\capability=osc-21-kitty-color-stack category=osc direction=parse
+        \\capability=csi-2026-synchronized-output category=csi direction=parse
+        \\
+    ,
+        writer.buffered(),
+    );
 }
