@@ -16,6 +16,8 @@ pub const BOOL = windows.BOOL;
 pub const SIZE_T = windows.SIZE_T;
 pub const SECURITY_ATTRIBUTES = windows.SECURITY_ATTRIBUTES;
 pub const LPCWSTR = win32_types.LPCWSTR;
+pub const ULONG_PTR = win32_types.UINT_PTR;
+pub const KAFFINITY = ULONG_PTR;
 
 pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: DWORD = 0x00000008;
 pub const JOB_OBJECT_LIMIT_JOB_MEMORY: DWORD = 0x00000200;
@@ -43,7 +45,7 @@ pub const JOBOBJECT_BASIC_LIMIT_INFORMATION = extern struct {
     MinimumWorkingSetSize: SIZE_T = 0,
     MaximumWorkingSetSize: SIZE_T = 0,
     ActiveProcessLimit: DWORD = 0,
-    Affinity: usize = 0,
+    Affinity: KAFFINITY = 0,
     PriorityClass: DWORD = 0,
     SchedulingClass: DWORD = 0,
 };
