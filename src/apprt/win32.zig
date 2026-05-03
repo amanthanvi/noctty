@@ -20862,7 +20862,9 @@ pub const Surface = struct {
     }
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
-        try self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration"));
+        self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration")) catch |err| {
+            log.warn("win32 decoration update failed during config reload err={}", .{err});
+        };
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
         self.scrollbar_config = config.scrollbar;
         if (self.background_opacity_default >= 0.999) {
