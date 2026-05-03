@@ -27,6 +27,9 @@ pub const Action = enum {
     /// List keybind actions
     @"list-actions",
 
+    /// Print a deterministic VT capability summary for diagnostics
+    @"vt-probe",
+
     /// Manage SSH terminfo cache for automatic remote host setup
     @"ssh-cache",
 

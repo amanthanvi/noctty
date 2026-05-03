@@ -10,6 +10,7 @@ const list_keybinds = @import("list_keybinds.zig");
 const list_themes = @import("list_themes.zig");
 const list_colors = @import("list_colors.zig");
 const list_actions = @import("list_actions.zig");
+const vt_probe = @import("vt_probe.zig");
 const ssh_cache = @import("ssh_cache.zig");
 const edit_config = @import("edit_config.zig");
 const show_config = @import("show_config.zig");
@@ -63,6 +64,7 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"list-themes" => try list_themes.run(alloc),
         .@"list-colors" => try list_colors.run(alloc),
         .@"list-actions" => try list_actions.run(alloc),
+        .@"vt-probe" => try vt_probe.run(alloc),
         .@"ssh-cache" => try ssh_cache.run(alloc),
         .@"edit-config" => try edit_config.run(alloc),
         .@"show-config" => try show_config.run(alloc),
@@ -89,6 +91,7 @@ pub fn options(comptime self: Action) type {
             .@"list-themes" => list_themes.Options,
             .@"list-colors" => list_colors.Options,
             .@"list-actions" => list_actions.Options,
+            .@"vt-probe" => vt_probe.options,
             .@"ssh-cache" => ssh_cache.Options,
             .@"edit-config" => edit_config.Options,
             .@"show-config" => show_config.Options,
@@ -225,4 +228,24 @@ test "terminal UI actions are classified separately" {
     try testing.expect(!requiresTerminalUi(.version));
     try testing.expect(!requiresTerminalUi(.@"show-config"));
     try testing.expect(!requiresTerminalUi(.@"crash-report"));
+}
+
+test "vt-probe action is registered" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const probe = std.meta.stringToEnum(Action, "vt-probe");
+    try testing.expect(probe != null);
+    try testing.expect(@hasDecl(help_strings.Action, "vt-probe"));
+
+    if (probe) |expected| {
+        var iter = try std.process.ArgIteratorGeneral(.{}).init(
+            alloc,
+            "+vt-probe",
+        );
+        defer iter.deinit();
+        const action = try actionpkg.detectIter(Action, &iter);
+        try testing.expect(action != null);
+        try testing.expectEqual(expected, action.?);
+    }
 }

@@ -43,6 +43,7 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 ## Self-Correction Log
 
+- 2026-05-02: Lowercasing Zig type aliases to satisfy naming review can collide with same-named declarations or locals in Zig's shared declaration namespace; check for helper/local name conflicts before committing mechanical renames.
 - 2026-05-01: In this fork, with both `origin` and `upstream` remotes configured, bare `gh pr view <n>` can resolve the upstream Ghostty PR number; use `-R amanthanvi/winghostty` for fork-local PR review/checks.
 - 2026-05-01: When invoking `scripts/dev-windows.cmd zig build test -Dtest-filter=...`, keep the filter value to one token (quote it or use a no-space substring) or `zig build` treats trailing words as step names.
 - 2026-05-01: In Zig Win32 FFI, `std.os.windows.HANDLE` is non-null; APIs like `CreateJobObjectW` that signal failure with `NULL` must use `?HANDLE` in extern declarations or future callers cannot model failure correctly.
