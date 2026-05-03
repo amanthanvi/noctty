@@ -158,7 +158,7 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     const arg0 = arg_iter.next() orelse return null;
     const exe = std.fs.path.basename(arg0);
 
-    if (std.mem.eql(u8, "bash", exe) or std.ascii.eqlIgnoreCase(exe, "bash.exe")) {
+    if (std.ascii.eqlIgnoreCase(exe, "bash") or std.ascii.eqlIgnoreCase(exe, "bash.exe")) {
         // Apple distributes their own patched version of Bash 3.2
         // on macOS that disables the ENV-based POSIX startup path.
         // This means we're unable to perform our automatic shell
@@ -200,6 +200,7 @@ test detectShell {
 
     try testing.expect(try detectShell(alloc, .{ .shell = "sh" }) == null);
     try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "bash" }));
+    try testing.expectEqual(.bash, try detectShell(alloc, .{ .shell = "BASH" }));
     try testing.expectEqual(.bash, try detectShell(alloc, .{
         .direct = &.{ "bash.exe", "--login", "-i" },
     }));
