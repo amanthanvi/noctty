@@ -723,7 +723,7 @@ pub const Action = union(enum) {
     ///
     /// Terminal windows always start as normal (not float-on-top) windows.
     ///
-    /// Implemented on Win32 in this fork and on macOS.
+    /// Only implemented on macOS.
     toggle_window_float_on_top,
 
     /// Toggle secure input mode.
@@ -734,8 +734,7 @@ pub const Action = union(enum) {
     /// This applies to the entire application, not just the focused terminal.
     /// You must manually untoggle it or quit winghostty entirely to disable it.
     ///
-    /// Implemented on Win32 in this fork and on macOS. On macOS, this uses
-    /// a built-in system API.
+    /// Only implemented on macOS, as this uses a built-in system API.
     toggle_secure_input,
 
     /// Toggle mouse reporting on or off.
