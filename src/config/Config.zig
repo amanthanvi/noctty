@@ -7907,11 +7907,12 @@ pub const RepeatableLink = struct {
         }
 
         const regex = try parseRegexValue(alloc, input);
-        errdefer alloc.free(regex);
         if (regex.len == 0) {
+            alloc.free(regex);
             self.links.clearRetainingCapacity();
             return;
         }
+        errdefer alloc.free(regex);
         try self.links.append(alloc, .{
             .regex = regex,
             .action = .{ .open = {} },
