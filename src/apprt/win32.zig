@@ -1248,6 +1248,14 @@ fn hostWindowStyle() u32 {
     return WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
 }
 
+fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
+    return value != .none;
+}
+
+fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
+    return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, WS_VISIBLE);
+}
+
 fn surfaceWindowStyle() u32 {
     // Keep the terminal child surface hidden until GL + core init complete,
     // then show it explicitly from Surface.init.
@@ -1331,6 +1339,14 @@ fn sharedHostWindowOpacityEquals(a: *const Surface, b: *const Surface) bool {
 fn shouldPropagateSharedHostWindowState(source: *const Surface) bool {
     const host = source.host orelse return true;
     return host.activeSurface() == source;
+}
+
+fn usesIntegratedTitlebar(
+    enabled: bool,
+    tab_bar_visible: bool,
+    decorations_visible: bool,
+) bool {
+    return enabled and tab_bar_visible and decorations_visible;
 }
 
 fn hostPresentShowCommand(
@@ -4181,12 +4197,17 @@ pub const App = struct {
         }
 
         const position = configuredHostWindowPosition(&self.config);
+        const startup_decorations_visible = if (clone_state_from) |source|
+            source.decorations_visible
+        else
+            decorationsVisibleForConfig(self.config.@"window-decoration");
+        const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
 
         const hwnd = CreateWindowExW(
             0,
             host_class_name,
             title,
-            hostWindowStyle(),
+            startupHostWindowStyle(startup_decorations_visible, startup_fullscreen),
             if (position) |v| v.x else CW_USEDEFAULT,
             if (position) |v| v.y else CW_USEDEFAULT,
             1280,
@@ -8006,7 +8027,7 @@ const Host = struct {
     }
 
     fn titlebarActionButtonRole(self: *Host, child: HWND) TitlebarButtonRole {
-        if (!self.app.use_integrated_titlebar) return .none;
+        if (!self.usingIntegratedTitlebar()) return .none;
         if (self.new_tab_hwnd != null and child == self.new_tab_hwnd.?) return .new_tab;
         if (self.overflow_hwnd != null and child == self.overflow_hwnd.?) return .dropdown;
         return .none;
@@ -10189,12 +10210,21 @@ const Host = struct {
         };
     }
 
+    fn decorationVisibilityForChrome(self: *const Host) bool {
+        if (self.activeSurface()) |surface| return surface.decorations_visible;
+        return decorationsVisibleForConfig(self.app.config.@"window-decoration");
+    }
+
     /// Host-local view of the integrated-titlebar state. The app
     /// carries the build/config floor, but host-side non-client
     /// handling must also respect whether this host is actually
     /// reserving a visible caption/tab row.
     fn usingIntegratedTitlebar(self: *const Host) bool {
-        return self.app.use_integrated_titlebar and self.shouldShowTabBar();
+        return usesIntegratedTitlebar(
+            self.app.use_integrated_titlebar,
+            self.shouldShowTabBar(),
+            self.decorationVisibilityForChrome(),
+        );
     }
 
     fn tabBarHeight(self: *Host) i32 {
@@ -10212,7 +10242,7 @@ const Host = struct {
     }
 
     fn rightButtonsWidth(self: *const Host) i32 {
-        if (self.app.use_integrated_titlebar) {
+        if (self.usingIntegratedTitlebar()) {
             return self.scaled(host_titlebar_action_button_size) * 2 + self.scaled(12);
         }
         return self.scaled(host_tab_small_button_width) + // new tab (+)
@@ -10922,7 +10952,7 @@ const Host = struct {
         // Right-side cluster: [+][▾] — new tab and dropdown chevron.
         // Shift left by the caption-buttons reservation (0 on Win10)
         // so the chevron doesn't land under the close button.
-        const titlebar_actions = self.app.use_integrated_titlebar;
+        const titlebar_actions = self.usingIntegratedTitlebar();
         const action_size = self.scaled(host_titlebar_action_button_size);
         const action_y = @max(0, @divTrunc(self.tabBarHeight() - action_size, 2));
         var button_x = width - self.scaled(if (titlebar_actions) 4 else 8) - caption_buttons_w;
@@ -11455,7 +11485,7 @@ const Host = struct {
                 else
                     adjustColor(theme.accent, 18, 18, 18),
             );
-            if (!self.app.use_integrated_titlebar) {
+            if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
                 const cluster_rect = RECT{
                     .left = cluster_left,
@@ -20824,6 +20854,7 @@ pub const Surface = struct {
     }
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
+        try self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration"));
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
         self.scrollbar_config = config.scrollbar;
         if (self.background_opacity_default >= 0.999) {
@@ -20867,8 +20898,7 @@ pub const Surface = struct {
     }
 
     fn toggleDecorations(self: *Surface) !void {
-        self.decorations_visible = !self.decorations_visible;
-        try self.applyWindowStyle();
+        try self.setDecorationsVisible(!self.decorations_visible);
     }
 
     fn setInitialSize(self: *Surface, size: apprt.action.InitialSize) !void {
@@ -20984,6 +21014,32 @@ pub const Surface = struct {
         self.restore_maximized = IsZoomed(hwnd) != 0;
         if (GetWindowRect(hwnd, &self.restore_rect) == 0) {
             self.restore_rect = .{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
+        }
+    }
+
+    fn setDecorationsVisible(self: *Surface, visible: bool) !void {
+        if (self.decorations_visible == visible) return;
+
+        const host = self.host;
+        const should_refresh_host = shouldPropagateSharedHostWindowState(self);
+        const used_integrated_titlebar_before = if (should_refresh_host and host != null)
+            host.?.usingIntegratedTitlebar()
+        else
+            false;
+
+        self.decorations_visible = visible;
+
+        if (!should_refresh_host) return;
+        try self.applyWindowStyle();
+
+        if (host) |value| {
+            if (used_integrated_titlebar_before != value.usingIntegratedTitlebar()) {
+                // Switching between stock and app-owned caption chrome can
+                // strand hover state until the next NC leave.
+                value.handleNcMouseLeave();
+            }
+            try value.layout();
+            try value.refreshChrome();
         }
     }
 
@@ -25777,6 +25833,41 @@ test "win32 hostWindowStyle clips child repaints" {
     const style = hostWindowStyle();
     try std.testing.expect((style & WS_CLIPCHILDREN) != 0);
     try std.testing.expect((style & WS_VISIBLE) == 0);
+}
+
+test "win32 decorationsVisibleForConfig only hides none" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(decorationsVisibleForConfig(.auto));
+    try std.testing.expect(decorationsVisibleForConfig(.client));
+    try std.testing.expect(decorationsVisibleForConfig(.server));
+    try std.testing.expect(!decorationsVisibleForConfig(.none));
+}
+
+test "win32 startupHostWindowStyle respects decoration and fullscreen frame state" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(true, false, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(true, false),
+    );
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(false, false, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(false, false),
+    );
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(false, true, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(false, true),
+    );
+}
+
+test "win32 usesIntegratedTitlebar requires visible decorations" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(usesIntegratedTitlebar(true, true, true));
+    try std.testing.expect(!usesIntegratedTitlebar(false, true, true));
+    try std.testing.expect(!usesIntegratedTitlebar(true, false, true));
+    try std.testing.expect(!usesIntegratedTitlebar(true, true, false));
 }
 
 test "win32 surfaceWindowStyle clips sibling repaints" {
