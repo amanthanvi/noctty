@@ -1246,6 +1246,10 @@ fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
     return value != .none;
 }
 
+fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
+    return active_surface_visible orelse cached_visible;
+}
+
 fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
     return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, WS_VISIBLE);
 }
@@ -10207,8 +10211,10 @@ const Host = struct {
     }
 
     fn decorationVisibilityForChrome(self: *const Host) bool {
-        if (self.activeSurface()) |surface| return surface.decorations_visible;
-        return self.cached_decorations_visible;
+        return decorationVisibilityForChromeValue(
+            if (self.activeSurface()) |surface| surface.decorations_visible else null,
+            self.cached_decorations_visible,
+        );
     }
 
     /// Host-local view of the integrated-titlebar state. The app
@@ -25935,25 +25941,10 @@ test "win32 initialDecorationsVisible follows startup source" {
 test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var host: Host = undefined;
-    host.tabs = .empty;
-    host.active_tab = 0;
-    host.cached_decorations_visible = false;
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    try std.testing.expect(!host.decorationVisibilityForChrome());
-
-    host.cached_decorations_visible = true;
-    try std.testing.expect(host.decorationVisibilityForChrome());
-
-    var surface: Surface = undefined;
-    surface.decorations_visible = false;
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-
-    try std.testing.expect(!host.decorationVisibilityForChrome());
+    try std.testing.expect(!decorationVisibilityForChromeValue(null, false));
+    try std.testing.expect(decorationVisibilityForChromeValue(null, true));
+    try std.testing.expect(!decorationVisibilityForChromeValue(false, true));
+    try std.testing.expect(decorationVisibilityForChromeValue(true, false));
 }
 
 test "win32 usesIntegratedTitlebar requires visible decorations" {
