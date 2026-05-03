@@ -1242,12 +1242,6 @@ const RegisteredGlobalHotkey = struct {
     binding: *const input.Binding.Set.Value,
 };
 
-fn hostWindowStyle() u32 {
-    // Keep the host hidden until child controls and initial layout are ready,
-    // then show it explicitly from createHost.
-    return WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
-}
-
 fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
     return value != .none;
 }
@@ -18651,6 +18645,12 @@ pub const Surface = struct {
         return self.search_bar_button_prev_procs[@intFromEnum(role)];
     }
 
+    fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
+        if (opts.clone_state_from) |source| return source.decorations_visible;
+        if (opts.host_id == null) return decorationsVisibleForConfig(config.@"window-decoration");
+        return true;
+    }
+
     pub fn init(
         self: *Surface,
         app: *App,
@@ -18670,6 +18670,7 @@ pub const Surface = struct {
             .host_id = host.id,
             .host_active = true,
             .window_visible = false,
+            .decorations_visible = initialDecorationsVisible(config, opts),
             .scrollbar_config = config.scrollbar,
             .render_trace = RenderTrace.init(app.core_app.alloc),
             .undo_stack = win32_undo.UndoStack.init(app.core_app.alloc),
@@ -21020,6 +21021,7 @@ pub const Surface = struct {
     fn setDecorationsVisible(self: *Surface, visible: bool) !void {
         if (self.decorations_visible == visible) return;
 
+        const previous_visible = self.decorations_visible;
         const host = self.host;
         const should_refresh_host = shouldPropagateSharedHostWindowState(self);
         const used_integrated_titlebar_before = if (should_refresh_host and host != null)
@@ -21030,7 +21032,10 @@ pub const Surface = struct {
         self.decorations_visible = visible;
 
         if (!should_refresh_host) return;
-        try self.applyWindowStyle();
+        self.applyWindowStyle() catch |err| {
+            self.rollbackDecorationsVisible(previous_visible, host);
+            return err;
+        };
 
         if (host) |value| {
             if (used_integrated_titlebar_before != value.usingIntegratedTitlebar()) {
@@ -21038,8 +21043,30 @@ pub const Surface = struct {
                 // strand hover state until the next NC leave.
                 value.handleNcMouseLeave();
             }
-            try value.layout();
-            try value.refreshChrome();
+            value.layout() catch |err| {
+                self.rollbackDecorationsVisible(previous_visible, host);
+                return err;
+            };
+            value.refreshChrome() catch |err| {
+                self.rollbackDecorationsVisible(previous_visible, host);
+                return err;
+            };
+        }
+    }
+
+    fn rollbackDecorationsVisible(self: *Surface, previous_visible: bool, host: ?*Host) void {
+        self.decorations_visible = previous_visible;
+        self.applyWindowStyle() catch |err| {
+            log.warn("win32 decoration rollback style update failed err={}", .{err});
+        };
+
+        if (host) |value| {
+            value.layout() catch |err| {
+                log.warn("win32 decoration rollback layout failed err={}", .{err});
+            };
+            value.refreshChrome() catch |err| {
+                log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
+            };
         }
     }
 
@@ -25827,14 +25854,6 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
     try std.testing.expectEqualStrings("--title=Inbox", other);
 }
 
-test "win32 hostWindowStyle clips child repaints" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const style = hostWindowStyle();
-    try std.testing.expect((style & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((style & WS_VISIBLE) == 0);
-}
-
 test "win32 decorationsVisibleForConfig only hides none" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -25859,6 +25878,42 @@ test "win32 startupHostWindowStyle respects decoration and fullscreen frame stat
         effectiveHostWindowStyle(false, true, true) & ~@as(u32, WS_VISIBLE),
         startupHostWindowStyle(false, true),
     );
+    try std.testing.expect((startupHostWindowStyle(true, false) & WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((startupHostWindowStyle(true, false) & WS_VISIBLE) == 0);
+}
+
+test "win32 initialDecorationsVisible follows startup source" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var config: configpkg.Config = .{};
+
+    config.@"window-decoration" = .none;
+    try std.testing.expect(!Surface.initialDecorationsVisible(&config, .{}));
+
+    config.@"window-decoration" = .auto;
+    try std.testing.expect(Surface.initialDecorationsVisible(&config, .{}));
+
+    var source: Surface = undefined;
+    source.decorations_visible = false;
+    try std.testing.expect(!Surface.initialDecorationsVisible(
+        &config,
+        .{ .clone_state_from = &source },
+    ));
+
+    source.decorations_visible = true;
+    try std.testing.expect(Surface.initialDecorationsVisible(
+        &config,
+        .{
+            .host_id = 7,
+            .clone_state_from = &source,
+        },
+    ));
+
+    config.@"window-decoration" = .none;
+    try std.testing.expect(Surface.initialDecorationsVisible(
+        &config,
+        .{ .host_id = 7 },
+    ));
 }
 
 test "win32 usesIntegratedTitlebar requires visible decorations" {
