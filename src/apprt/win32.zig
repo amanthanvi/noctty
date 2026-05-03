@@ -23233,6 +23233,146 @@ test "win32 profile tab open appends when window-new-tab-position is end" {
     try std.testing.expectEqualStrings("pwsh", created.launch_profile_key.?);
 }
 
+test "win32 profile tab open inserts after active tab when window-new-tab-position is current" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    try core_app.init(std.testing.allocator);
+    defer core_app.deinit();
+
+    var app: App = .{
+        .core_app = &core_app,
+        .config = try configpkg.Config.default(std.testing.allocator),
+        .hinstance = GetModuleHandleW(null),
+    };
+    defer {
+        app.config.deinit();
+        app.hosts.deinit(std.testing.allocator);
+        app.windows.deinit(std.testing.allocator);
+    }
+    // default is .current — explicitly set for clarity
+    app.config.@"window-new-tab-position" = .current;
+
+    var host: Host = .{
+        .app = &app,
+        .id = 1,
+        .tabs = .empty,
+        .structural_undo_entries = .empty,
+        .structural_redo_entries = .empty,
+    };
+    defer {
+        host.clearStructuralHistory(.normal);
+        host.structural_undo_entries.deinit(std.testing.allocator);
+        host.structural_redo_entries.deinit(std.testing.allocator);
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var source: Surface = undefined;
+    source.app = &app;
+    source.host = &host;
+    source.host_id = host.id;
+    source.hwnd = null;
+    source.core_initialized = false;
+    source.window_visible = true;
+    source.host_active = true;
+    source.launch_profile_key = null;
+    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
+    defer source.undo_stack.deinit();
+
+    var other: Surface = undefined;
+    other.app = &app;
+    other.host = &host;
+    other.host_id = host.id;
+    other.hwnd = null;
+    other.core_initialized = false;
+    other.window_visible = true;
+    other.host_active = true;
+    other.launch_profile_key = null;
+    other.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
+    defer other.undo_stack.deinit();
+
+    var created: Surface = undefined;
+    created.app = &app;
+    created.host = &host;
+    created.host_id = host.id;
+    created.hwnd = null;
+    created.core_initialized = false;
+    created.window_visible = false;
+    created.host_active = false;
+    created.launch_profile_key = null;
+    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
+    defer {
+        if (created.launch_profile_key) |value| std.testing.allocator.free(value);
+        created.undo_stack.deinit();
+    }
+
+    // active_tab = 0; new tab should be inserted at index 1 (between tab1 and tab2)
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &other));
+    host.active_tab = 0;
+    host.next_tab_id = 3;
+
+    try app.hosts.append(std.testing.allocator, &host);
+    try app.windows.append(std.testing.allocator, &source);
+    try app.windows.append(std.testing.allocator, &other);
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_ref: *Surface = undefined;
+        var captured_host_id: ?u32 = null;
+        var captured_tab_insert_index: ?usize = 999;
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            title: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            _ = config;
+            _ = title;
+            captured_host_id = opts.host_id;
+            captured_tab_insert_index = opts.tab_insert_index;
+
+            created_ref.app = hook_app;
+            created_ref.host = host_ref;
+            created_ref.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            const tab_id = host_ref.nextTabId();
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index.?,
+                try Tab.init(hook_app.core_app.alloc, tab_id, created_ref),
+            );
+            return created_ref;
+        }
+    };
+
+    Hook.host_ref = &host;
+    Hook.created_ref = &created;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    const profile: windows_shell.Profile = .{
+        .kind = .pwsh,
+        .key = "pwsh",
+        .label = "PowerShell",
+        .command = .{ .direct = &.{"pwsh.exe"} },
+    };
+
+    const surface = try app.createProfileSurface(.app, &profile, .tab);
+    try std.testing.expect(surface == &created);
+    try std.testing.expectEqual(@as(?u32, host.id), Hook.captured_host_id);
+    // .current: insert after active_tab (0), so index = 1
+    try std.testing.expectEqual(@as(?usize, 1), Hook.captured_tab_insert_index);
+    try std.testing.expectEqual(@as(usize, 3), host.tabs.items.len);
+    // tab order: [source(1), created(3), other(2)]
+    try std.testing.expectEqual(@as(u32, 1), host.tabs.items[0].id);
+    try std.testing.expectEqual(@as(u32, 3), host.tabs.items[1].id);
+    try std.testing.expectEqual(@as(u32, 2), host.tabs.items[2].id);
+    try std.testing.expect(host.tabs.items[1].focusedSurface() == &created);
+    try std.testing.expectEqualStrings("pwsh", created.launch_profile_key.?);
+}
+
 test "win32 moveTab invalidates current tab redo and structural history before reordering tabs" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
