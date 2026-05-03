@@ -50,24 +50,22 @@ pub const Set = struct {
         try links.ensureTotalCapacity(alloc, config.len + @intFromBool(link_url));
 
         for (config) |link| {
-            var regex = try link.oniRegex();
-            errdefer regex.deinit();
-            try links.append(alloc, .{
+            const regex = try link.oniRegex();
+            links.appendAssumeCapacity(.{
                 .regex = regex,
                 .highlight = link.highlight,
             });
         }
 
         if (link_url) {
-            var regex = try oni.Regex.init(
+            const regex = try oni.Regex.init(
                 configUrl.regex,
                 .{},
                 oni.Encoding.utf8,
                 oni.Syntax.default,
                 null,
             );
-            errdefer regex.deinit();
-            try links.append(alloc, .{
+            links.appendAssumeCapacity(.{
                 .regex = regex,
                 .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
             });

@@ -439,9 +439,8 @@ const DerivedConfig = struct {
         try links.ensureTotalCapacity(alloc, config.link.links.items.len + @intFromBool(config.@"link-url"));
 
         for (config.link.links.items) |link| {
-            var regex = try link.oniRegex();
-            errdefer regex.deinit();
-            try links.append(alloc, .{
+            const regex = try link.oniRegex();
+            links.appendAssumeCapacity(.{
                 .regex = regex,
                 .action = link.action,
                 .highlight = link.highlight,
@@ -449,15 +448,14 @@ const DerivedConfig = struct {
         }
 
         if (config.@"link-url") {
-            var regex = try oni.Regex.init(
+            const regex = try oni.Regex.init(
                 configUrl.regex,
                 .{},
                 oni.Encoding.utf8,
                 oni.Syntax.default,
                 null,
             );
-            errdefer regex.deinit();
-            try links.append(alloc, .{
+            links.appendAssumeCapacity(.{
                 .regex = regex,
                 .action = .{ .open = {} },
                 .highlight = .{ .hover_mods = input.ctrlOrSuper(.{}) },
