@@ -21034,35 +21034,43 @@ pub const Surface = struct {
 
         if (!should_refresh_host) return;
         self.applyWindowStyle() catch |err| {
-            self.rollbackDecorationsVisible(previous_visible, host);
+            self.rollbackDecorationsVisible(previous_visible, host, false);
             return err;
         };
 
         if (host) |value| {
-            if (used_integrated_titlebar_before != value.usingIntegratedTitlebar()) {
+            const integrated_titlebar_changed = used_integrated_titlebar_before != value.usingIntegratedTitlebar();
+            if (integrated_titlebar_changed) {
                 // Switching between stock and app-owned caption chrome can
                 // strand hover state until the next NC leave.
                 value.handleNcMouseLeave();
             }
             value.layout() catch |err| {
-                self.rollbackDecorationsVisible(previous_visible, host);
+                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
                 return err;
             };
             value.refreshChrome() catch |err| {
-                self.rollbackDecorationsVisible(previous_visible, host);
+                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
                 return err;
             };
+            value.cached_decorations_visible = visible;
         }
     }
 
-    fn rollbackDecorationsVisible(self: *Surface, previous_visible: bool, host: ?*Host) void {
+    fn rollbackDecorationsVisible(
+        self: *Surface,
+        previous_visible: bool,
+        host: ?*Host,
+        integrated_titlebar_changed: bool,
+    ) void {
         self.decorations_visible = previous_visible;
         self.applyWindowStyle() catch |err| {
             log.warn("win32 decoration rollback style update failed err={}", .{err});
         };
 
         if (host) |value| {
-            value.handleNcMouseLeave();
+            value.cached_decorations_visible = previous_visible;
+            if (integrated_titlebar_changed) value.handleNcMouseLeave();
             value.layout() catch |err| {
                 log.warn("win32 decoration rollback layout failed err={}", .{err});
             };
