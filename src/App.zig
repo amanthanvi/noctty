@@ -250,6 +250,13 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 defer msg.deinit(self.alloc);
                 try self.newWindow(rt_app, msg);
             },
+            .automation_window_list => |request| {
+                defer request.done.set();
+                request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
+                    request.err = err;
+                    break :blk null;
+                };
+            },
             .close => |surface| self.closeSurface(surface),
             .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
             .redraw_surface => |surface| try self.redrawSurface(rt_app, surface),
@@ -556,6 +563,9 @@ pub const Message = union(enum) {
     /// Create a new terminal window.
     new_window: NewWindow,
 
+    /// Produce a read-only automation window snapshot on the app thread.
+    automation_window_list: *AutomationWindowListRequest,
+
     /// Close a surface. This notifies the runtime that a surface
     /// should close.
     close: *Surface,
@@ -574,6 +584,13 @@ pub const Message = union(enum) {
     /// wake up the renderer thread. The renderer thread will send this
     /// message if it needs to.
     redraw_surface: *apprt.Surface,
+
+    pub const AutomationWindowListRequest = struct {
+        alloc: Allocator,
+        done: std.Thread.ResetEvent = .{},
+        result: ?[]u8 = null,
+        err: ?anyerror = null,
+    };
 
     const NewWindow = struct {
         /// The parent surface

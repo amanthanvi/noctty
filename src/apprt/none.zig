@@ -15,5 +15,19 @@ pub const App = struct {
     ) !bool {
         return false;
     }
+
+    pub fn queryAutomationWindowList(
+        _: Allocator,
+        _: apprt.ipc.Target,
+    ) !?[]u8 {
+        return null;
+    }
+
+    pub fn buildAutomationWindowListJson(
+        _: *App,
+        _: Allocator,
+    ) ![]u8 {
+        return error.Unsupported;
+    }
 };
 pub const Surface = struct {};

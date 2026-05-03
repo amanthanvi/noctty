@@ -54,6 +54,9 @@ pub const Action = enum {
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
 
+    // List read-only automation state for the running winghostty instance.
+    @"list-windows",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables

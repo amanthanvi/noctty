@@ -595,9 +595,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 font_styles.set(.bold_italic, config.@"font-style-bold-italic" != .false);
 
                 // Our link configs
-                const links = try link.Set.fromConfig(
+                const links = try link.Set.fromConfigWithUrl(
                     alloc,
                     config.link.links.items,
+                    config.@"link-url",
                 );
 
                 return .{

@@ -3,7 +3,10 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-04-16, against `main` HEAD.
+Last updated: 2026-05-01, against current fork HEAD.
+
+For a row-by-row mapping against official Ghostty docs, see
+[windows-capability-matrix.md](windows-capability-matrix.md).
 
 ## Supported platform
 
@@ -73,14 +76,16 @@ Last updated: 2026-04-16, against `main` HEAD.
 
 ### Windows UI Automation (accessibility)
 
-Screen reader / UI Automation support is **planned near-term work and not
-yet shipping**. The Win32 runtime does not yet expose per-widget UIA
-providers; Narrator and NVDA coverage is part of the upcoming phase. See
-the roadmap below.
+UI Automation is **partial, not complete**. The Win32 host answers
+`WM_GETOBJECT` with a root provider, caption buttons still chain through the
+system host provider, and the command palette exposes a list provider so
+Narrator/NVDA can announce selection changes. Terminal scrollback is not yet
+exposed through `ITextProvider`, and broader per-widget coverage remains
+planned.
 
 ### Win32 runtime extraction
 
-The Win32 application runtime is currently a single ~13.7k LOC file at
+The Win32 application runtime is still centered on a single large file at
 `src/apprt/win32.zig`. Extraction into focused modules is in progress:
 commit `a759eb6 refactor(win32): extract theme module from monolithic
 win32.zig` moved theme helpers to `src/apprt/win32_theme.zig`. Further
@@ -118,7 +123,8 @@ extractions will land as they stabilize.
 
 No formal roadmap. Indicative next areas:
 
-- Initial UI Automation / screen reader support
+- Broader UI Automation / screen reader coverage, including terminal text
+  exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
 - Code signing for Windows releases
