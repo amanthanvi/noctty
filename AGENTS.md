@@ -45,6 +45,8 @@ This fork has removed the upstream `macos/` Xcode app and the
 
 - 2026-05-01: In Zig Win32 FFI, `std.os.windows.HANDLE` is non-null; APIs like `CreateJobObjectW` that signal failure with `NULL` must use `?HANDLE` in extern declarations or future callers cannot model failure correctly.
 - 2026-05-01: On Win32 x64, `JOBOBJECT_BASIC_LIMIT_INFORMATION` is 64 bytes, not 56; `SIZE_T`/`Affinity` padding also shifts `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` to 144 bytes with `JobMemoryLimit` at offset 120. Keep ABI tests on real offsets before wiring Job Object FFI.
+- 2026-05-01: In this repo's worktrees, plain `gh repo` / `gh pr` commands can resolve to upstream `ghostty-org/ghostty` despite `origin=amanthanvi/winghostty`; pin review ops with `--repo amanthanvi/winghostty`.
+- 2026-05-01: Direct `zig test src/apprt.zig` bypasses the repo build graph and fails on missing generated `build_options`; verify `apprt` package changes with `zig build test -Dtest-filter=...` instead.
 - 2026-05-01: In this fork, plain `gh pr view <n>` can resolve the upstream Ghostty repo instead of `amanthanvi/winghostty`; pass `--repo amanthanvi/winghostty` or verify the target before trusting PR metadata.
 - 2026-05-01: In Zig `union(enum)` tests, `Type.tag` names the tag enum, not a union value; cast to `Type` before calling union methods in assertions.
 - 2026-05-01: The Windows release workflow's explicit `zig build` and `scripts/package-windows.ps1` fallback build must both pass `-Doptimize=ReleaseFast`; otherwise a successful release can publish `.Debug` binaries even though tests and packaging pass.
