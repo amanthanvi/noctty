@@ -8660,9 +8660,9 @@ const Host = struct {
         if (payload_ud != ud) return;
         // `hideOverlay` deinits the payload (frees owned string
         // bytes and clears `confirm_payload = null`) without
-        // invoking on_accept/on_cancel. The Host itself stays live.
+        // invoking on_accept/on_cancel. layout/repaint/refocus are
+        // handled inside hideOverlay for the confirm case.
         self.hideOverlay();
-        self.layout() catch {};
     }
 
     fn overlayInitialText(self: *Host, mode: HostOverlayMode) ?[]const u8 {
