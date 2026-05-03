@@ -4195,6 +4195,7 @@ pub const App = struct {
             source.decorations_visible
         else
             decorationsVisibleForConfig(self.config.@"window-decoration");
+        host.cached_decorations_visible = startup_decorations_visible;
         const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
 
         const hwnd = CreateWindowExW(
@@ -6258,6 +6259,7 @@ const Host = struct {
     app: *App,
     id: u32,
     hwnd: ?HWND = null,
+    cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
     next_tab_id: u32 = 1,
@@ -10206,7 +10208,7 @@ const Host = struct {
 
     fn decorationVisibilityForChrome(self: *const Host) bool {
         if (self.activeSurface()) |surface| return surface.decorations_visible;
-        return decorationsVisibleForConfig(self.app.config.@"window-decoration");
+        return self.cached_decorations_visible;
     }
 
     /// Host-local view of the integrated-titlebar state. The app
@@ -18647,8 +18649,7 @@ pub const Surface = struct {
 
     fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
         if (opts.clone_state_from) |source| return source.decorations_visible;
-        if (opts.host_id == null) return decorationsVisibleForConfig(config.@"window-decoration");
-        return true;
+        return decorationsVisibleForConfig(config.@"window-decoration");
     }
 
     pub fn init(
@@ -21061,6 +21062,7 @@ pub const Surface = struct {
         };
 
         if (host) |value| {
+            value.handleNcMouseLeave();
             value.layout() catch |err| {
                 log.warn("win32 decoration rollback layout failed err={}", .{err});
             };
@@ -25910,10 +25912,40 @@ test "win32 initialDecorationsVisible follows startup source" {
     ));
 
     config.@"window-decoration" = .none;
+    try std.testing.expect(!Surface.initialDecorationsVisible(
+        &config,
+        .{ .host_id = 7 },
+    ));
+
+    config.@"window-decoration" = .auto;
     try std.testing.expect(Surface.initialDecorationsVisible(
         &config,
         .{ .host_id = 7 },
     ));
+}
+
+test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var host: Host = undefined;
+    host.tabs = .empty;
+    host.active_tab = 0;
+    host.cached_decorations_visible = false;
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expect(!host.decorationVisibilityForChrome());
+
+    host.cached_decorations_visible = true;
+    try std.testing.expect(host.decorationVisibilityForChrome());
+
+    var surface: Surface = undefined;
+    surface.decorations_visible = false;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+
+    try std.testing.expect(!host.decorationVisibilityForChrome());
 }
 
 test "win32 usesIntegratedTitlebar requires visible decorations" {
