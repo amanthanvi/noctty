@@ -28,7 +28,8 @@ const help_prelude =
     \\
     \\Discover configuration from the CLI:
     \\  `winghostty +show-config --default --docs` lists every config key and its docs.
-    \\  `winghostty +explain-config <option>` or `--keybind=<action>` explains one item.
+    \\  `winghostty +explain-config <option>` explains one config key.
+    \\  `winghostty +explain-config --keybind=<action>` explains one keybind action.
     \\
     \\A special command line argument `-e <command>` can be used to run
     \\the specific command inside the terminal emulator. For example,
@@ -93,6 +94,7 @@ test "help prelude is Windows-only" {
 test "help prelude points to CLI discovery commands" {
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+show-config --default --docs") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+explain-config") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+explain-config --keybind=<action>") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-actions --docs") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --default") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --docs") != null);

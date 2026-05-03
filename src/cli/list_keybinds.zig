@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const args = @import("args.zig");
 const actionpkg = @import("action.zig");
-const help_strings = @import("help_strings");
 const Arena = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const configpkg = @import("../config.zig");
@@ -444,6 +443,8 @@ test "list-keybinds docs mode disables pretty printing" {
 }
 
 test "list-keybinds action help describes docs mode truthfully" {
+    const help_strings = @import("help_strings");
+
     try std.testing.expect(std.mem.indexOf(u8, help_strings.Action.@"list-keybinds", "currently does nothing") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_strings.Action.@"list-keybinds", "On a TTY this also forces plain text output.") != null);
 }

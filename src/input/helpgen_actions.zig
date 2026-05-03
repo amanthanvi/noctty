@@ -3,7 +3,6 @@
 //! markdown for website) while maintaining consistent content.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const KeybindAction = @import("Binding.zig").Action;
 const help_strings = @import("help_strings");
 
@@ -113,6 +112,8 @@ pub fn generate(
 }
 
 test "windows action docs reflect fork platform truth" {
+    const builtin = @import("builtin");
+
     if (builtin.os.tag != .windows) return;
 
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_command_palette, "implemented by the native Win32 host") != null);
