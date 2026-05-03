@@ -93,6 +93,10 @@ fn runArgsWithQuery(
             try stderr.print("Listing automation windows via IPC failed.\n", .{});
             return 1;
         },
+        error.InvalidIpcResponse => {
+            try stderr.print("Listing automation windows via IPC failed: invalid response from the target instance.\n", .{});
+            return 1;
+        },
         else => return err,
     };
     defer if (payload) |bytes| alloc.free(bytes);
@@ -193,6 +197,43 @@ test "automation-window-list cli reports ipc failure" {
     try testing.expectEqualStrings("", stdout_buf.written());
     try testing.expectEqualStrings(
         "Listing automation windows via IPC failed.\n",
+        stderr_buf.written(),
+    );
+}
+
+test "automation-window-list cli reports invalid ipc response" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        fn query(_: Allocator, _: apprt.ipc.Target) !?[]u8 {
+            return error.InvalidIpcResponse;
+        }
+    };
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "",
+    );
+    defer iter.deinit();
+
+    var stdout_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stdout_buf.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    const exit_code = try runArgsWithQuery(
+        testing.allocator,
+        &iter,
+        &stdout_buf.writer,
+        &stderr_buf.writer,
+        &Hook.query,
+    );
+
+    try testing.expectEqual(@as(u8, 1), exit_code);
+    try testing.expectEqualStrings("", stdout_buf.written());
+    try testing.expectEqualStrings(
+        "Listing automation windows via IPC failed: invalid response from the target instance.\n",
         stderr_buf.written(),
     );
 }

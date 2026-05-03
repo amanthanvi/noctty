@@ -756,6 +756,7 @@ const ipc_wire_version: u32 = 1;
 const ipc_ack_success: u8 = 0;
 const ipc_ack_failure: u8 = 1;
 const ipc_max_data_response_len: u32 = 16 * 1024 * 1024;
+const ipc_max_new_window_argc: u32 = 4096;
 
 const IpcRequestKind = enum(u8) {
     new_window = 1,
@@ -1596,6 +1597,7 @@ fn decodeNewWindowIpcPayload(
 
     const argc = readU32(&argc_buf);
     if (argc == 0) return null;
+    if (argc > ipc_max_new_window_argc) return error.InvalidIpcRequest;
 
     const argv = try alloc.alloc([:0]const u8, argc);
     errdefer freeOwnedArguments(alloc, argv);
@@ -1637,6 +1639,8 @@ fn writeIpcDataResponse(
     success: bool,
     body: []const u8,
 ) !void {
+    if (body.len > ipc_max_data_response_len) return error.InvalidIpcResponse;
+
     var header: [9]u8 = undefined;
     std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
     header[4] = if (success) ipc_ack_success else ipc_ack_failure;
@@ -26168,6 +26172,50 @@ test "win32 readIpcDataResponse rejects oversized body length" {
     try std.testing.expectError(
         error.InvalidIpcResponse,
         readIpcDataResponse(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 decodeNewWindowIpcPayload rejects oversized argc" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-request-too-many-args.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var argc_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &argc_buf, ipc_max_new_window_argc + 1, .little);
+    try file.writeAll(&argc_buf);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidIpcRequest,
+        decodeNewWindowIpcPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 writeIpcDataResponse rejects oversized body" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-response-write-too-large.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    const body = try std.testing.allocator.alloc(u8, ipc_max_data_response_len + 1);
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expectError(
+        error.InvalidIpcResponse,
+        writeIpcDataResponse(file.handle, true, body),
     );
 }
 
