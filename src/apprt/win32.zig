@@ -8591,6 +8591,7 @@ const Host = struct {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
             self.layout() catch {};
+            refocusActiveSurface(self);
             return;
         };
         const cb = captured.on_accept;
@@ -8601,6 +8602,8 @@ const Host = struct {
         // callback might also reach.
         self.hideOverlay();
         self.layout() catch {};
+        self.forceVisibleSurfaceRepaintsNow();
+        refocusActiveSurface(self);
         cb(userdata);
     }
 
@@ -8608,12 +8611,15 @@ const Host = struct {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
             self.layout() catch {};
+            refocusActiveSurface(self);
             return;
         };
         const cb = captured.on_cancel;
         const userdata = captured.userdata;
         self.hideOverlay();
         self.layout() catch {};
+        self.forceVisibleSurfaceRepaintsNow();
+        refocusActiveSurface(self);
         if (cb) |f| f(userdata);
     }
 
