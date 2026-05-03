@@ -8,6 +8,8 @@ pub const repo_owner = "amanthanvi";
 pub const repo_name = "winghostty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
+pub const windows_checksums_asset_name = "SHA256SUMS.txt";
+pub const windows_checksums_signature_asset_name = "SHA256SUMS.txt.sig";
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
 
@@ -26,10 +28,27 @@ pub const State = struct {
 pub const Release = struct {
     version_text: []u8,
     release_url: []u8,
+    windows_install: ?WindowsInstallCandidate = null,
 
     pub fn deinit(self: *Release, alloc: Allocator) void {
+        if (self.windows_install) |*candidate| candidate.deinit(alloc);
         alloc.free(self.version_text);
         alloc.free(self.release_url);
+        self.* = undefined;
+    }
+};
+
+pub const WindowsInstallCandidate = struct {
+    installer_name: []u8,
+    installer_url: []u8,
+    checksums_url: []u8,
+    checksums_signature_url: []u8,
+
+    pub fn deinit(self: *WindowsInstallCandidate, alloc: Allocator) void {
+        alloc.free(self.installer_name);
+        alloc.free(self.installer_url);
+        alloc.free(self.checksums_url);
+        alloc.free(self.checksums_signature_url);
         self.* = undefined;
     }
 };
@@ -227,6 +246,8 @@ fn cachedAvailableRelease(
         }
     }
 
+    // Cached state only persists the version string, so throttled responses
+    // cannot reconstruct asset-scoped installer metadata.
     return .{
         .version_text = try alloc.dupe(u8, last_seen),
         .release_url = try releaseUrlForVersion(alloc, last_seen),
@@ -255,6 +276,10 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
     const body = try response_buf.toOwnedSlice();
     defer alloc.free(body);
 
+    return parseLatestStableReleaseResponse(alloc, body);
+}
+
+fn parseLatestStableReleaseResponse(alloc: Allocator, body: []const u8) !Release {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer parsed.deinit();
 
@@ -275,10 +300,83 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
     const version_text = try canonicalVersionText(alloc, tag_name);
     errdefer alloc.free(version_text);
     _ = try parseVersionText(version_text);
+    const release_url = try alloc.dupe(u8, html_url);
+    errdefer alloc.free(release_url);
 
     return .{
         .version_text = version_text,
-        .release_url = try alloc.dupe(u8, html_url),
+        .release_url = release_url,
+        .windows_install = try parseWindowsInstallCandidate(alloc, root, version_text),
+    };
+}
+
+fn parseWindowsInstallCandidate(
+    alloc: Allocator,
+    root: anytype,
+    version_text: []const u8,
+) !?WindowsInstallCandidate {
+    const assets_value = root.get("assets") orelse return null;
+    const assets = switch (assets_value) {
+        .array => |value| value,
+        else => return null,
+    };
+
+    const expected_installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-{s}-windows-x64-setup.exe",
+        .{version_text},
+    );
+    errdefer alloc.free(expected_installer_name);
+
+    var installer_url: ?[]const u8 = null;
+    var checksums_url: ?[]const u8 = null;
+    var checksums_signature_url: ?[]const u8 = null;
+
+    for (assets.items) |asset_value| {
+        const asset = switch (asset_value) {
+            .object => |value| value,
+            else => continue,
+        };
+
+        const name = switch (asset.get("name") orelse continue) {
+            .string => |value| value,
+            else => continue,
+        };
+        const browser_download_url = switch (asset.get("browser_download_url") orelse continue) {
+            .string => |value| value,
+            else => continue,
+        };
+
+        if (std.mem.eql(u8, name, expected_installer_name)) {
+            installer_url = browser_download_url;
+            continue;
+        }
+        if (std.mem.eql(u8, name, windows_checksums_asset_name)) {
+            checksums_url = browser_download_url;
+            continue;
+        }
+        if (std.mem.eql(u8, name, windows_checksums_signature_asset_name)) {
+            checksums_signature_url = browser_download_url;
+        }
+    }
+
+    if (installer_url == null or checksums_url == null or checksums_signature_url == null) {
+        alloc.free(expected_installer_name);
+        return null;
+    }
+
+    const owned_installer_url = try alloc.dupe(u8, installer_url.?);
+    errdefer alloc.free(owned_installer_url);
+    const owned_checksums_url = try alloc.dupe(u8, checksums_url.?);
+    errdefer alloc.free(owned_checksums_url);
+    const owned_checksums_signature_url = try alloc.dupe(u8, checksums_signature_url.?);
+    errdefer alloc.free(owned_checksums_signature_url);
+
+    return .{
+        .installer_name = expected_installer_name,
+        .installer_url = owned_installer_url,
+        .checksums_url = owned_checksums_url,
+        .checksums_signature_url = owned_checksums_signature_url,
     };
 }
 
@@ -311,4 +409,124 @@ test "cached update respects dismissal" {
 
     const current = try std.SemanticVersion.parse("1.2.2");
     try std.testing.expect((try cachedAvailableRelease(alloc, &state, current, true)) == null);
+}
+
+test "release parser requires signed checksum metadata for windows install candidate" {
+    const alloc = std.testing.allocator;
+    const body =
+        \\{
+        \\  "tag_name": "v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "assets": [
+        \\    {
+        \\      "name": "winghostty-1.3.100-windows-x64-setup.exe",
+        \\      "browser_download_url": "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"
+        \\    },
+        \\    {
+        \\      "name": "SHA256SUMS.txt",
+        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var release = try parseLatestStableReleaseResponse(alloc, body);
+    defer release.deinit(alloc);
+
+    try std.testing.expect(release.windows_install == null);
+}
+
+test "release parser selects windows install candidate when signed checksum metadata is present" {
+    const alloc = std.testing.allocator;
+    const body =
+        \\{
+        \\  "tag_name": "v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "assets": [
+        \\    {
+        \\      "name": "winghostty-1.3.100-windows-x64-setup.exe",
+        \\      "browser_download_url": "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"
+        \\    },
+        \\    {
+        \\      "name": "SHA256SUMS.txt",
+        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
+        \\    },
+        \\    {
+        \\      "name": "SHA256SUMS.txt.sig",
+        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt.sig"
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var release = try parseLatestStableReleaseResponse(alloc, body);
+    defer release.deinit(alloc);
+
+    try std.testing.expect(release.windows_install != null);
+    const windows_install = release.windows_install.?;
+    try std.testing.expectEqualStrings(
+        "winghostty-1.3.100-windows-x64-setup.exe",
+        windows_install.installer_name,
+    );
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe",
+        windows_install.installer_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/SHA256SUMS.txt",
+        windows_install.checksums_url,
+    );
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/SHA256SUMS.txt.sig",
+        windows_install.checksums_signature_url,
+    );
+}
+
+test "release parser accepts long semver tags for windows install candidate" {
+    const alloc = std.testing.allocator;
+
+    var version_text_buf: std.ArrayList(u8) = .empty;
+    defer version_text_buf.deinit(alloc);
+    try version_text_buf.appendSlice(alloc, "1.3.100-");
+    try version_text_buf.appendNTimes(alloc, 'a', 128);
+    const version_text = try version_text_buf.toOwnedSlice(alloc);
+    defer alloc.free(version_text);
+
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-{s}-windows-x64-setup.exe",
+        .{version_text},
+    );
+    defer alloc.free(installer_name);
+
+    const body = try std.fmt.allocPrint(
+        alloc,
+        \\{{
+        \\  "tag_name": "v{s}",
+        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v{s}",
+        \\  "assets": [
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "SHA256SUMS.txt",
+        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
+        \\    }},
+        \\    {{
+        \\      "name": "SHA256SUMS.txt.sig",
+        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt.sig"
+        \\    }}
+        \\  ]
+        \\}}
+    ,
+        .{ version_text, version_text, installer_name, installer_name },
+    );
+    defer alloc.free(body);
+
+    var release = try parseLatestStableReleaseResponse(alloc, body);
+    defer release.deinit(alloc);
+
+    try std.testing.expect(release.windows_install != null);
+    try std.testing.expectEqualStrings(installer_name, release.windows_install.?.installer_name);
 }
