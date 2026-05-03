@@ -1344,6 +1344,10 @@ fn shouldPropagateSharedHostWindowState(source: *const Surface) bool {
     return host.activeSurface() == source;
 }
 
+fn shouldApplyConfigDecorations(decorations_visible_overridden: bool) bool {
+    return !decorations_visible_overridden;
+}
+
 fn usesIntegratedTitlebar(
     enabled: bool,
     tab_bar_visible: bool,
@@ -8518,14 +8522,15 @@ const Host = struct {
     }
 
     fn hideOverlay(self: *Host) void {
+        const was_confirm = self.overlay_mode == .confirm;
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
         self.setBanner(.none, null) catch {};
         // Drop any active confirm payload. Both accept and cancel
         // paths route through hideOverlay, so this is the one place
-        // the owned byte slices get freed. Callbacks were already
-        // dispatched in invokeConfirm{Accept,Cancel} before reaching
-        // this point.
+        // the owned byte slices get freed. Accept/cancel callbacks
+        // snapshot their callback data before reaching this point and
+        // dispatch only after hideOverlay returns.
         if (self.confirm_payload) |*p| {
             p.deinit(self.app.core_app.alloc);
             self.confirm_payload = null;
@@ -8540,6 +8545,11 @@ const Host = struct {
         self.palette_list_scroll = 0;
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
+        if (was_confirm) {
+            self.layout() catch {};
+            self.forceVisibleSurfaceRepaintsNow();
+            refocusActiveSurface(self);
+        }
     }
 
     fn invalidateOverlayTransitionPlacementCache(self: *Host) void {
@@ -8613,36 +8623,27 @@ const Host = struct {
     fn invokeConfirmAccept(self: *Host) void {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
-            self.layout() catch {};
-            refocusActiveSurface(self);
             return;
         };
         const cb = captured.on_accept;
         const userdata = captured.userdata;
         // hideOverlay deinits the payload (frees the owned byte
         // slices) and clears `confirm_payload = null`. After this
-        // point, no Host-mutating call may touch fields the
-        // callback might also reach.
+        // point, do not touch Host state before the callback: confirm
+        // teardown repaint/focus restoration happens inside
+        // hideOverlay while the Host is still owned by this path.
         self.hideOverlay();
-        self.layout() catch {};
-        self.forceVisibleSurfaceRepaintsNow();
-        refocusActiveSurface(self);
         cb(userdata);
     }
 
     fn invokeConfirmCancel(self: *Host) void {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
-            self.layout() catch {};
-            refocusActiveSurface(self);
             return;
         };
         const cb = captured.on_cancel;
         const userdata = captured.userdata;
         self.hideOverlay();
-        self.layout() catch {};
-        self.forceVisibleSurfaceRepaintsNow();
-        refocusActiveSurface(self);
         if (cb) |f| f(userdata);
     }
 
@@ -18508,6 +18509,7 @@ pub const Surface = struct {
     window_focused: bool = false,
     quick_terminal: bool = false,
     decorations_visible: bool = true,
+    decorations_visible_overridden: bool = false,
     fullscreen: bool = false,
     topmost: bool = false,
     restore_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -20869,9 +20871,11 @@ pub const Surface = struct {
     }
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
-        self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration")) catch |err| {
-            log.warn("win32 decoration update failed during config reload err={}", .{err});
-        };
+        if (shouldApplyConfigDecorations(self.decorations_visible_overridden)) {
+            self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration")) catch |err| {
+                log.warn("win32 decoration update failed during config reload err={}", .{err});
+            };
+        }
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
         self.scrollbar_config = config.scrollbar;
         if (self.background_opacity_default >= 0.999) {
@@ -20916,6 +20920,7 @@ pub const Surface = struct {
 
     fn toggleDecorations(self: *Surface) !void {
         try self.setDecorationsVisible(!self.decorations_visible);
+        self.decorations_visible_overridden = true;
     }
 
     fn setInitialSize(self: *Surface, size: apprt.action.InitialSize) !void {
@@ -21128,6 +21133,7 @@ pub const Surface = struct {
 
     fn copySharedWindowStateFrom(self: *Surface, source: *const Surface) void {
         self.decorations_visible = source.decorations_visible;
+        self.decorations_visible_overridden = source.decorations_visible_overridden;
         if (self.host) |host| {
             if (host.activeSurface() == self) {
                 host.cached_decorations_visible = self.decorations_visible;
@@ -26012,6 +26018,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
 
     var source: Surface = undefined;
     source.decorations_visible = false;
+    source.decorations_visible_overridden = true;
     source.fullscreen = true;
     source.topmost = true;
     source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
@@ -26032,6 +26039,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
     dest.copySharedWindowStateFrom(&source);
 
     try std.testing.expectEqual(source.decorations_visible, dest.decorations_visible);
+    try std.testing.expectEqual(source.decorations_visible_overridden, dest.decorations_visible_overridden);
     try std.testing.expectEqual(source.fullscreen, dest.fullscreen);
     try std.testing.expectEqual(source.topmost, dest.topmost);
     try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
@@ -26089,6 +26097,13 @@ test "win32 shouldPropagateSharedHostWindowState only for active shared-host sur
     host.active_tab = 1;
     try std.testing.expect(!shouldPropagateSharedHostWindowState(&active_surface));
     try std.testing.expect(shouldPropagateSharedHostWindowState(&inactive_surface));
+}
+
+test "win32 config decoration reload respects runtime override" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(shouldApplyConfigDecorations(false));
+    try std.testing.expect(!shouldApplyConfigDecorations(true));
 }
 
 test "win32 shouldResizeHostForInitialSize only for single-surface hosts" {
