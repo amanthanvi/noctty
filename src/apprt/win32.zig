@@ -1246,6 +1246,11 @@ fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
     return value != .none;
 }
 
+fn initialDecorationsVisibleForSource(config: *const configpkg.Config, clone_state_from: ?*const Surface) bool {
+    if (clone_state_from) |source| return source.decorations_visible;
+    return decorationsVisibleForConfig(config.@"window-decoration");
+}
+
 fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
     return active_surface_visible orelse cached_visible;
 }
@@ -4195,10 +4200,7 @@ pub const App = struct {
         }
 
         const position = configuredHostWindowPosition(&self.config);
-        const startup_decorations_visible = if (clone_state_from) |source|
-            source.decorations_visible
-        else
-            decorationsVisibleForConfig(self.config.@"window-decoration");
+        const startup_decorations_visible = initialDecorationsVisibleForSource(&self.config, clone_state_from);
         host.cached_decorations_visible = startup_decorations_visible;
         const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
 
@@ -18654,8 +18656,7 @@ pub const Surface = struct {
     }
 
     fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
-        if (opts.clone_state_from) |source| return source.decorations_visible;
-        return decorationsVisibleForConfig(config.@"window-decoration");
+        return initialDecorationsVisibleForSource(config, opts.clone_state_from);
     }
 
     pub fn init(
@@ -21121,6 +21122,11 @@ pub const Surface = struct {
 
     fn copySharedWindowStateFrom(self: *Surface, source: *const Surface) void {
         self.decorations_visible = source.decorations_visible;
+        if (self.host) |host| {
+            if (host.activeSurface() == self) {
+                host.cached_decorations_visible = self.decorations_visible;
+            }
+        }
         self.fullscreen = source.fullscreen;
         self.topmost = source.topmost;
         self.restore_rect = source.restore_rect;
@@ -25912,6 +25918,7 @@ test "win32 initialDecorationsVisible follows startup source" {
     try std.testing.expect(Surface.initialDecorationsVisible(&config, .{}));
 
     var source: Surface = undefined;
+    source.host = null;
     source.decorations_visible = false;
     try std.testing.expect(!Surface.initialDecorationsVisible(
         &config,
@@ -26014,6 +26021,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
         .max_height = 444,
     };
     var dest: Surface = undefined;
+    dest.host = null;
 
     dest.copySharedWindowStateFrom(&source);
 
