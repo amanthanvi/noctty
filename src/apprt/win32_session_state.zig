@@ -39,17 +39,17 @@ pub const SessionState = struct {
 };
 
 pub const Window = struct {
-    selected_tab: usize = 0,
+    selected_tab: usize,
     tabs: []const Tab = &.{},
 };
 
 pub const Tab = struct {
-    selected_leaf: usize = 0,
+    selected_leaf: usize,
     layout: LayoutTree,
 };
 
 pub const LayoutTree = struct {
-    root: u16 = 0,
+    root: u16,
     nodes: []const Node = &.{},
 };
 
@@ -348,6 +348,39 @@ test "win32 session state parse rejects unsupported schema version" {
 test "win32 session state parse requires explicit schema version" {
     const raw =
         \\{"windows":[]}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
+test "win32 session state parse requires explicit selected_tab" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\winghostty"}}]}}]}]}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
+test "win32 session state parse requires explicit selected_leaf" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\winghostty"}}]}}]}]}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
+test "win32 session state parse requires explicit layout root" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"nodes":[{"pane":{"cwd":"C:\\src\\winghostty"}}]}}]}]}
     ;
 
     try std.testing.expectError(
