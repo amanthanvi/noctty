@@ -3,6 +3,7 @@
 //! markdown for website) while maintaining consistent content.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const KeybindAction = @import("Binding.zig").Action;
 const help_strings = @import("help_strings");
 
@@ -109,4 +110,16 @@ pub fn generate(
     if (stream.written().len > 0) {
         try writer.writeAll(stream.written());
     }
+}
+
+test "windows action docs reflect fork platform truth" {
+    if (builtin.os.tag != .windows) return;
+
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_command_palette, "implemented by the native Win32 host") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:ctrl+backquote=toggle_quick_terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:cmd+backquote=toggle_quick_terminal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_decorations, "Implemented on Win32 in this fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_decorations, "Only implemented on Linux.") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_visibility, "Implemented on Win32 in this fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_background_opacity, "Implemented on Win32 in this fork") != null);
 }

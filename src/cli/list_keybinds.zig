@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const args = @import("args.zig");
 const actionpkg = @import("action.zig");
+const help_strings = @import("help_strings");
 const Arena = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const configpkg = @import("../config.zig");
@@ -46,8 +47,8 @@ pub const Options = struct {
 ///
 ///   * `--default`: will print out all the default keybinds
 ///
-///   * `--docs`: currently does nothing, intended to print out documentation
-///     about the action associated with the keybinds
+///   * `--docs`: will print out documentation about the action associated
+///     with the keybinds. On a TTY this also forces plain text output.
 ///
 ///   * `--plain`: will disable formatting and make the output more
 ///     friendly for Unix tooling. This is default when not printing to a tty.
@@ -69,7 +70,7 @@ pub fn run(alloc: Allocator) !u8 {
     var stdout_writer = stdout.writer(&buffer);
     const writer = &stdout_writer.interface;
 
-    if (tui.can_pretty_print and !opts.plain and stdout.isTty()) {
+    if (shouldPrettyPrint(opts, stdout.isTty())) {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         return prettyPrint(arena.allocator(), config.keybind);
@@ -83,6 +84,10 @@ pub fn run(alloc: Allocator) !u8 {
     // Don't forget to flush!
     try writer.flush();
     return 0;
+}
+
+fn shouldPrettyPrint(opts: Options, stdout_is_tty: bool) bool {
+    return tui.can_pretty_print and stdout_is_tty and !opts.plain and !opts.docs;
 }
 
 const TriggerNode = struct {
@@ -432,4 +437,13 @@ fn iterateBindings(
     }
 
     return .{ try bindings.toOwnedSlice(alloc), widest_chord };
+}
+
+test "list-keybinds docs mode disables pretty printing" {
+    try std.testing.expect(!shouldPrettyPrint(.{ .docs = true }, true));
+}
+
+test "list-keybinds action help describes docs mode truthfully" {
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.Action.@"list-keybinds", "currently does nothing") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.Action.@"list-keybinds", "On a TTY this also forces plain text output.") != null);
 }
