@@ -715,7 +715,7 @@ pub const SettingsWindow = struct {
     fn displayBgBlurInCheckbox(self: *SettingsWindow) void {
         const chk = self.chk_bg_blur orelse return;
         const p = self.pending orelse return;
-        const enabled = p.@"background-blur".enabled();
+        const enabled = p.@"background-blur".win32SystemBackdropEnabled();
         self.suppress_edit_events = true;
         _ = SendMessageW(
             chk,
