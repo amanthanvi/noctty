@@ -53,6 +53,49 @@ pub const Target = union(Key) {
     }
 };
 
+pub const automation_window_list_schema = "winghostty.windows.v1";
+
+pub const AutomationWindowList = struct {
+    schema: []const u8 = automation_window_list_schema,
+    windows: []AutomationWindow,
+
+    pub fn deinit(self: *AutomationWindowList, alloc: Allocator) void {
+        for (self.windows) |*window| window.deinit(alloc);
+        alloc.free(self.windows);
+        self.* = undefined;
+    }
+};
+
+pub const AutomationWindow = struct {
+    window_id: u32,
+    focused: bool,
+    active_tab_id: ?u32,
+    tabs: []AutomationTab,
+
+    pub fn deinit(self: *AutomationWindow, alloc: Allocator) void {
+        for (self.tabs) |*tab| tab.deinit(alloc);
+        alloc.free(self.tabs);
+        self.* = undefined;
+    }
+};
+
+pub const AutomationTab = struct {
+    tab_id: u32,
+    active: bool,
+    focused_surface_id: ?u64,
+    panes: []AutomationPane,
+
+    pub fn deinit(self: *AutomationTab, alloc: Allocator) void {
+        alloc.free(self.panes);
+        self.* = undefined;
+    }
+};
+
+pub const AutomationPane = struct {
+    surface_id: u64,
+    focused: bool,
+};
+
 pub const Action = union(enum) {
     // A GUIDE TO ADDING NEW ACTIONS:
     //

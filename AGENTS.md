@@ -44,6 +44,8 @@ This fork has removed the upstream `macos/` Xcode app and the
 ## Self-Correction Log
 
 - 2026-05-02: Lowercasing Zig type aliases to satisfy naming review can collide with same-named declarations or locals in Zig's shared declaration namespace; check for helper/local name conflicts before committing mechanical renames.
+- 2026-05-01: In this fork, plain `gh pr view <n>` can resolve the upstream Ghostty repo instead of `amanthanvi/winghostty`; pass `--repo amanthanvi/winghostty` or verify the target before trusting PR metadata.
+- 2026-05-01: In Zig `union(enum)` tests, `Type.tag` names the tag enum, not a union value; cast to `Type` before calling union methods in assertions.
 - 2026-05-01: The Windows release workflow's explicit `zig build` and `scripts/package-windows.ps1` fallback build must both pass `-Doptimize=ReleaseFast`; otherwise a successful release can publish `.Debug` binaries even though tests and packaging pass.
 - 2026-05-01: A stale queued GitHub Actions run can get stuck in a backend state where `gh run cancel` returns HTTP 500 and `DELETE /actions/runs/{id}` returns HTTP 403; clean failed/cancelled runs normally, but treat that survivor as GitHub-side cleanup debt rather than a script bug.
 - 2026-05-01: WinGet release CI must skip `wingetcreate update --submit` when `WINGET_PACKAGE_IDENTIFIER` is not yet bootstrapped in `microsoft/winget-pkgs`; a greenfield fork with no existing manifest path will otherwise fail deployments after release, Scoop, and packaging already succeeded.
