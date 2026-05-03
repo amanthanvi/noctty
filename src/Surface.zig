@@ -30,6 +30,7 @@ const font = @import("font/main.zig");
 const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
+const configUrl = @import("config/url.zig");
 const Duration = configpkg.Config.Duration;
 const input = @import("input.zig");
 const App = @import("App.zig");
@@ -367,22 +368,7 @@ const DerivedConfig = struct {
         errdefer arena.deinit();
         const alloc = arena.allocator();
 
-        // Build all of our links
-        const links = links: {
-            var links: std.ArrayList(DerivedConfig.Link) = .empty;
-            defer links.deinit(alloc);
-            for (config.link.links.items) |link| {
-                var regex = try link.oniRegex();
-                errdefer regex.deinit();
-                try links.append(alloc, .{
-                    .regex = regex,
-                    .action = link.action,
-                    .highlight = link.highlight,
-                });
-            }
-
-            break :links try links.toOwnedSlice(alloc);
-        };
+        const links = try buildLinks(alloc, config);
         errdefer {
             for (links) |*link| link.regex.deinit();
             alloc.free(links);
@@ -443,6 +429,65 @@ const DerivedConfig = struct {
     pub fn deinit(self: *DerivedConfig) void {
         for (self.links) |*link| link.regex.deinit();
         self.arena.deinit();
+    }
+
+    fn buildLinks(alloc: Allocator, config: *const configpkg.Config) ![]DerivedConfig.Link {
+        var links: std.ArrayList(DerivedConfig.Link) = .empty;
+        defer links.deinit(alloc);
+        errdefer for (links.items) |*link| link.regex.deinit();
+
+        try links.ensureTotalCapacity(alloc, config.link.links.items.len + @intFromBool(config.@"link-url"));
+
+        for (config.link.links.items) |link| {
+            const regex = try link.oniRegex();
+            links.appendAssumeCapacity(.{
+                .regex = regex,
+                .action = link.action,
+                .highlight = link.highlight,
+            });
+        }
+
+        if (config.@"link-url") {
+            const regex = try oni.Regex.init(
+                configUrl.regex,
+                .{},
+                oni.Encoding.utf8,
+                oni.Syntax.default,
+                null,
+            );
+            links.appendAssumeCapacity(.{
+                .regex = regex,
+                .action = .{ .open = {} },
+                .highlight = .{ .hover_mods = input.ctrlOrSuper(.{}) },
+            });
+        }
+
+        return try links.toOwnedSlice(alloc);
+    }
+
+    test "DerivedConfig init keeps custom links ahead of builtin URL matcher" {
+        const testing = std.testing;
+
+        var config = try configpkg.Config.default(testing.allocator);
+        defer config.deinit();
+        config.@"link-url" = true;
+
+        const alloc = config._arena.?.allocator();
+        try config.link.links.append(alloc, .{
+            .regex = try alloc.dupe(u8, "^foo://bar$"),
+            .action = .{ .open = {} },
+            .highlight = .hover,
+        });
+
+        var derived = try DerivedConfig.init(testing.allocator, &config);
+        defer derived.deinit();
+
+        try testing.expectEqual(@as(usize, 2), derived.links.len);
+        try testing.expectEqual(input.Link.Highlight.hover, derived.links[0].highlight);
+        try testing.expectEqualDeep(
+            input.Link.Highlight{ .hover_mods = input.ctrlOrSuper(.{}) },
+            derived.links[1].highlight,
+        );
     }
 
     fn scaledPadding(self: *const DerivedConfig, x_dpi: f32, y_dpi: f32) rendererpkg.Padding {
