@@ -26,13 +26,19 @@ const help_prelude =
     \\where key and value are the same format you'd put into a configuration
     \\file. For example, `--font-size=12` or `--font-family="Fira Code"`.
     \\
-    \\To see a list of all available configuration options, please see
-    \\the `src/config/Config.zig` file. A future update will allow seeing
-    \\the list of configuration options from the command line.
+    \\Discover configuration from the CLI:
+    \\  `winghostty +show-config --default --docs` lists every config key and its docs.
+    \\  `winghostty +explain-config <option>` explains one config key.
+    \\  `winghostty +explain-config --keybind=<action>` explains one keybind action.
     \\
     \\A special command line argument `-e <command>` can be used to run
     \\the specific command inside the terminal emulator. For example,
     \\`winghostty -e top` will run the `top` command inside the terminal.
+    \\
+    \\Discover actions and keybindings:
+    \\  `winghostty +list-actions --docs` lists bindable actions with docs.
+    \\  `winghostty +list-keybinds --default` shows the shipped default bindings.
+    \\  `winghostty +list-keybinds --docs` annotates bindings with action docs.
     \\
     \\Useful Windows actions:
     \\  `winghostty +new-window` forwards into the running instance when possible.
@@ -83,4 +89,15 @@ test "help prelude is Windows-only" {
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "winghostty.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Ghostty.app") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "open -na") == null);
+}
+
+test "help prelude points to CLI discovery commands" {
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+show-config --default --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+explain-config") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+explain-config --keybind=<action>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-actions --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --default") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "src/config/Config.zig") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "future update") == null);
 }

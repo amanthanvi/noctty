@@ -8495,14 +8495,15 @@ const Host = struct {
     }
 
     fn hideOverlay(self: *Host) void {
+        const was_confirm = self.overlay_mode == .confirm;
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
         self.setBanner(.none, null) catch {};
         // Drop any active confirm payload. Both accept and cancel
         // paths route through hideOverlay, so this is the one place
-        // the owned byte slices get freed. Callbacks were already
-        // dispatched in invokeConfirm{Accept,Cancel} before reaching
-        // this point.
+        // the owned byte slices get freed. Accept/cancel callbacks
+        // snapshot their callback data before reaching this point and
+        // dispatch only after hideOverlay returns.
         if (self.confirm_payload) |*p| {
             p.deinit(self.app.core_app.alloc);
             self.confirm_payload = null;
@@ -8517,6 +8518,11 @@ const Host = struct {
         self.palette_list_scroll = 0;
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
+        if (was_confirm) {
+            self.layout() catch {};
+            self.forceVisibleSurfaceRepaintsNow();
+            refocusActiveSurface(self);
+        }
     }
 
     fn invalidateOverlayTransitionPlacementCache(self: *Host) void {
@@ -8590,30 +8596,27 @@ const Host = struct {
     fn invokeConfirmAccept(self: *Host) void {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
-            self.layout() catch {};
             return;
         };
         const cb = captured.on_accept;
         const userdata = captured.userdata;
         // hideOverlay deinits the payload (frees the owned byte
         // slices) and clears `confirm_payload = null`. After this
-        // point, no Host-mutating call may touch fields the
-        // callback might also reach.
+        // point, do not touch Host state before the callback: confirm
+        // teardown repaint/focus restoration happens inside
+        // hideOverlay while the Host is still owned by this path.
         self.hideOverlay();
-        self.layout() catch {};
         cb(userdata);
     }
 
     fn invokeConfirmCancel(self: *Host) void {
         const captured = self.confirm_payload orelse {
             self.hideOverlay();
-            self.layout() catch {};
             return;
         };
         const cb = captured.on_cancel;
         const userdata = captured.userdata;
         self.hideOverlay();
-        self.layout() catch {};
         if (cb) |f| f(userdata);
     }
 

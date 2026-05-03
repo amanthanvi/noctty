@@ -110,3 +110,15 @@ pub fn generate(
         try writer.writeAll(stream.written());
     }
 }
+
+test "action docs reflect fork platform truth" {
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_command_palette, "implemented by the native Win32 host") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:ctrl+backquote=toggle_quick_terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:cmd+backquote=toggle_quick_terminal") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_decorations, "Implemented on Win32 in this fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_decorations, "Only implemented on Linux.") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_visibility, "Implemented on Win32 in this fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_background_opacity, "Implemented on Win32 in this fork") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_float_on_top, "Implemented on Win32 in this fork") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_secure_input, "Implemented on Win32 in this fork") == null);
+}

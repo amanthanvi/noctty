@@ -6744,23 +6744,7 @@ pub const Keybinds = struct {
         while (iter.next()) |next| {
             const k = next.key_ptr.*;
             const v = next.value_ptr.*;
-            if (docs) {
-                try formatter.writer.writeAll("\n");
-                const name = @tagName(v);
-                inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
-                    if (std.mem.eql(u8, decl.name, name)) {
-                        const help = @field(help_strings.KeybindAction, decl.name);
-                        try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
-                        var lines = std.mem.splitScalar(u8, help, '\n');
-                        while (lines.next()) |line| {
-                            try formatter.writer.writeAll("#   ");
-                            try formatter.writer.writeAll(line);
-                            try formatter.writer.writeAll("\n");
-                        }
-                        break;
-                    }
-                }
-            }
+            if (docs) try formatActionDocsForValue(formatter, v);
 
             var writer: std.Io.Writer = .fixed(&buf);
             writer.print("{f}", .{k}) catch return error.OutOfMemory;
@@ -6777,10 +6761,47 @@ pub const Keybinds = struct {
             while (binding_iter.next()) |next| {
                 const k = next.key_ptr.*;
                 const v = next.value_ptr.*;
+                if (docs) try formatActionDocsForValue(formatter, v);
 
                 var writer: std.Io.Writer = .fixed(&buf);
                 writer.print("{s}/{f}", .{ table_name, k }) catch return error.OutOfMemory;
                 try v.formatEntries(&writer, formatter);
+            }
+        }
+    }
+
+    fn formatActionDocsForValue(
+        formatter: formatterpkg.EntryFormatter,
+        value: inputpkg.Binding.Set.Value,
+    ) !void {
+        switch (value) {
+            .leader => {},
+            .leaf => |leaf| try formatActionDocs(formatter, leaf.action),
+            .leaf_chained => |leaf| {
+                for (leaf.actions.items) |action| {
+                    try formatActionDocs(formatter, action);
+                }
+            },
+        }
+    }
+
+    fn formatActionDocs(
+        formatter: formatterpkg.EntryFormatter,
+        action: inputpkg.Binding.Action,
+    ) !void {
+        try formatter.writer.writeAll("\n");
+        const name = @tagName(action);
+        inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
+            if (std.mem.eql(u8, decl.name, name)) {
+                const help = @field(help_strings.KeybindAction, decl.name);
+                try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
+                var lines = std.mem.splitScalar(u8, help, '\n');
+                while (lines.next()) |line| {
+                    try formatter.writer.writeAll("#   ");
+                    try formatter.writer.writeAll(line);
+                    try formatter.writer.writeAll("\n");
+                }
+                break;
             }
         }
     }
@@ -7253,6 +7274,27 @@ pub const Keybinds = struct {
         const output = buf.written();
         try testing.expect(std.mem.indexOf(u8, output, "keybind = shift+b=csi:world\n") != null);
         try testing.expect(std.mem.indexOf(u8, output, "keybind = foo/shift+a=csi:hello\n") != null);
+    }
+
+    test "formatEntryDocs includes docs for root and table bindings" {
+        const testing = std.testing;
+        var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer buf.deinit();
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var keybinds: Keybinds = .{};
+        try keybinds.parseCLI(alloc, "shift+a=copy_to_clipboard");
+        try keybinds.parseCLI(alloc, "foo/shift+b=paste_from_clipboard");
+        try keybinds.formatEntryDocs(formatterpkg.entryFormatter("keybind", &buf.writer), true);
+
+        const output = buf.written();
+        try testing.expect(std.mem.indexOf(u8, output, "# copy_to_clipboard\n") != null);
+        try testing.expect(std.mem.indexOf(u8, output, "# paste_from_clipboard\n") != null);
+        try testing.expect(std.mem.count(u8, output, "keybind = ") >= 2);
+        try testing.expect(std.mem.indexOf(u8, output, "keybind = foo/") != null);
     }
 
     test "parseCLI clear clears tables" {

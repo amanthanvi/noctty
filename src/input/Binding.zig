@@ -640,7 +640,7 @@ pub const Action = union(enum) {
     /// size that a new window would be created with. This has no effect
     /// if the window is fullscreen.
     ///
-    /// Only implemented on macOS.
+    /// Implemented on Win32 in this fork.
     reset_window_size,
 
     /// Control the visibility of the terminal inspector.
@@ -656,10 +656,10 @@ pub const Action = union(enum) {
 
     /// Show the on-screen keyboard if one is present.
     ///
-    /// Only implemented on Linux (GTK). On GNOME, the "Screen Keyboard"
-    /// accessibility feature must be turned on, which can be found under
-    /// Settings > Accessibility > Typing. Other platforms are as of now
-    /// untested.
+    /// Implemented on Win32 in this fork by opening the system on-screen
+    /// keyboard. On Linux (GTK), the "Screen Keyboard" accessibility
+    /// feature must be turned on, which can be found under
+    /// Settings > Accessibility > Typing.
     show_on_screen_keyboard,
 
     /// Open the configuration file in the default OS editor.
@@ -715,7 +715,7 @@ pub const Action = union(enum) {
 
     /// Toggle window decorations (titlebar, buttons, etc.) for the current window.
     ///
-    /// Only implemented on Linux.
+    /// Implemented on Win32 in this fork and on Linux.
     toggle_window_decorations,
 
     /// Toggle whether the terminal window should always float on top of other
@@ -754,8 +754,9 @@ pub const Action = union(enum) {
     /// you can perform, their associated keybindings (if any), a search bar
     /// to filter the actions, and the ability to then execute the action.
     ///
-    /// This requires libadwaita 1.5 or newer on Linux. The current libadwaita
-    /// version can be found by running `winghostty +version`.
+    /// In the Windows-only fork, this is implemented by the native Win32 host.
+    /// On Linux, this requires libadwaita 1.5 or newer. The current
+    /// libadwaita version can be found by running `winghostty +version`.
     toggle_command_palette,
 
     /// Toggle the quick terminal.
@@ -771,12 +772,16 @@ pub const Action = union(enum) {
     ///
     /// As quick terminals are often useful when other windows are currently
     /// focused, they are best used with *global* keybinds. For example, one
-    /// can define the following key bind to toggle the quick terminal from
-    /// anywhere within the system by pressing `` Cmd+` ``:
+    /// can define a system-wide chord such as the following to toggle the
+    /// quick terminal from anywhere within the system:
     ///
     /// ```ini
-    /// keybind = global:cmd+backquote=toggle_quick_terminal
+    /// keybind = global:ctrl+backquote=toggle_quick_terminal
     /// ```
+    ///
+    /// In the Windows-only fork, this is implemented by the native Win32 host.
+    /// The macOS/Linux notes below are upstream context and do not gate the
+    /// Win32 implementation.
     ///
     /// The quick terminal has some limitations:
     ///
@@ -816,7 +821,7 @@ pub const Action = union(enum) {
     ///
     /// Note: When the focused surface is fullscreen, this method does nothing.
     ///
-    /// Only implemented on macOS.
+    /// Implemented on Win32 in this fork and on macOS.
     toggle_visibility,
 
     /// Toggle the window background opacity between transparent and opaque.
@@ -826,7 +831,7 @@ pub const Action = union(enum) {
     /// When `background-opacity` is less than 1, this action will either make
     /// the window transparent or not depending on its current transparency state.
     ///
-    /// Only implemented on macOS.
+    /// Implemented on Win32 in this fork and on macOS.
     toggle_background_opacity,
 
     /// Check for updates.
