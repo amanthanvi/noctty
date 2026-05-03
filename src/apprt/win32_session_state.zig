@@ -25,7 +25,7 @@ pub const ValidationError = error{
 pub const ValidateError = ValidationError || Allocator.Error;
 
 const VersionHeader = struct {
-    schema_version: u32 = current_schema_version,
+    schema_version: u32,
 };
 
 const VisitFrame = struct {
@@ -345,6 +345,17 @@ test "win32 session state parse rejects unsupported schema version" {
     );
 }
 
+test "win32 session state parse requires explicit schema version" {
+    const raw =
+        \\{"windows":[]}
+    ;
+
+    try std.testing.expectError(
+        error.MissingField,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
 test "win32 session state parse rejects newer schema before unknown field errors" {
     const raw =
         \\{"schema_version":2,"windows":[],"future":{"layout_generation":1}}
@@ -455,6 +466,17 @@ test "win32 session state validates deep split layout without recursion" {
 test "win32 session state parse rejects shared-node layout before DFS stack overflow" {
     const raw =
         \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":1,"second":2}},{"split":{"axis":"vertical","ratio":0.5,"first":2,"second":3}},{"pane":{"cwd":"C:\\src\\winghostty"}},{"pane":{"cwd":"C:\\logs"}}]}}]}]}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidTreeShape,
+        parseAlloc(std.testing.allocator, raw),
+    );
+}
+
+test "win32 session state parse rejects self-referential layout before DFS stack overflow" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"split":{"axis":"horizontal","ratio":0.5,"first":0,"second":1}},{"pane":{"cwd":"C:\\src\\winghostty"}}]}}]}]}
     ;
 
     try std.testing.expectError(
