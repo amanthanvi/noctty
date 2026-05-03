@@ -49,8 +49,8 @@ pub fn run(alloc: Allocator) !u8 {
     const stderr = &stderr_writer.interface;
 
     const result = runArgs(alloc, &iter, stdout, stderr);
-    stdout.flush() catch {};
-    stderr.flush() catch {};
+    try stdout.flush();
+    try stderr.flush();
     return result;
 }
 
