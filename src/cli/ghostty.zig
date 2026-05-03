@@ -89,7 +89,7 @@ pub fn options(comptime self: Action) type {
             .@"list-themes" => list_themes.Options,
             .@"list-colors" => list_colors.Options,
             .@"list-actions" => list_actions.Options,
-            .@"vt-probe" => vt_probe.Options,
+            .@"vt-probe" => vt_probe.options,
             .@"ssh-cache" => ssh_cache.Options,
             .@"edit-config" => edit_config.Options,
             .@"show-config" => show_config.Options,
