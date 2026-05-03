@@ -1242,10 +1242,21 @@ const RegisteredGlobalHotkey = struct {
     binding: *const input.Binding.Set.Value,
 };
 
-fn hostWindowStyle() u32 {
-    // Keep the host hidden until child controls and initial layout are ready,
-    // then show it explicitly from createHost.
-    return WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
+    return value != .none;
+}
+
+fn initialDecorationsVisibleForSource(config: *const configpkg.Config, clone_state_from: ?*const Surface) bool {
+    if (clone_state_from) |source| return source.decorations_visible;
+    return decorationsVisibleForConfig(config.@"window-decoration");
+}
+
+fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visible: bool) bool {
+    return active_surface_visible orelse cached_visible;
+}
+
+fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
+    return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, WS_VISIBLE);
 }
 
 fn surfaceWindowStyle() u32 {
@@ -1331,6 +1342,18 @@ fn sharedHostWindowOpacityEquals(a: *const Surface, b: *const Surface) bool {
 fn shouldPropagateSharedHostWindowState(source: *const Surface) bool {
     const host = source.host orelse return true;
     return host.activeSurface() == source;
+}
+
+fn shouldApplyConfigDecorations(decorations_visible_overridden: bool) bool {
+    return !decorations_visible_overridden;
+}
+
+fn usesIntegratedTitlebar(
+    enabled: bool,
+    tab_bar_visible: bool,
+    decorations_visible: bool,
+) bool {
+    return enabled and tab_bar_visible and decorations_visible;
 }
 
 fn hostPresentShowCommand(
@@ -4181,12 +4204,15 @@ pub const App = struct {
         }
 
         const position = configuredHostWindowPosition(&self.config);
+        const startup_decorations_visible = initialDecorationsVisibleForSource(&self.config, clone_state_from);
+        host.cached_decorations_visible = startup_decorations_visible;
+        const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
 
         const hwnd = CreateWindowExW(
             0,
             host_class_name,
             title,
-            hostWindowStyle(),
+            startupHostWindowStyle(startup_decorations_visible, startup_fullscreen),
             if (position) |v| v.x else CW_USEDEFAULT,
             if (position) |v| v.y else CW_USEDEFAULT,
             1280,
@@ -6243,6 +6269,7 @@ const Host = struct {
     app: *App,
     id: u32,
     hwnd: ?HWND = null,
+    cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
     next_tab_id: u32 = 1,
@@ -8006,7 +8033,7 @@ const Host = struct {
     }
 
     fn titlebarActionButtonRole(self: *Host, child: HWND) TitlebarButtonRole {
-        if (!self.app.use_integrated_titlebar) return .none;
+        if (!self.usingIntegratedTitlebar()) return .none;
         if (self.new_tab_hwnd != null and child == self.new_tab_hwnd.?) return .new_tab;
         if (self.overflow_hwnd != null and child == self.overflow_hwnd.?) return .dropdown;
         return .none;
@@ -8633,9 +8660,9 @@ const Host = struct {
         if (payload_ud != ud) return;
         // `hideOverlay` deinits the payload (frees owned string
         // bytes and clears `confirm_payload = null`) without
-        // invoking on_accept/on_cancel. The Host itself stays live.
+        // invoking on_accept/on_cancel. layout/repaint/refocus are
+        // handled inside hideOverlay for the confirm case.
         self.hideOverlay();
-        self.layout() catch {};
     }
 
     fn overlayInitialText(self: *Host, mode: HostOverlayMode) ?[]const u8 {
@@ -10192,12 +10219,23 @@ const Host = struct {
         };
     }
 
+    fn decorationVisibilityForChrome(self: *const Host) bool {
+        return decorationVisibilityForChromeValue(
+            if (self.activeSurface()) |surface| surface.decorations_visible else null,
+            self.cached_decorations_visible,
+        );
+    }
+
     /// Host-local view of the integrated-titlebar state. The app
     /// carries the build/config floor, but host-side non-client
     /// handling must also respect whether this host is actually
     /// reserving a visible caption/tab row.
     fn usingIntegratedTitlebar(self: *const Host) bool {
-        return self.app.use_integrated_titlebar and self.shouldShowTabBar();
+        return usesIntegratedTitlebar(
+            self.app.use_integrated_titlebar,
+            self.shouldShowTabBar(),
+            self.decorationVisibilityForChrome(),
+        );
     }
 
     fn tabBarHeight(self: *Host) i32 {
@@ -10215,7 +10253,7 @@ const Host = struct {
     }
 
     fn rightButtonsWidth(self: *const Host) i32 {
-        if (self.app.use_integrated_titlebar) {
+        if (self.usingIntegratedTitlebar()) {
             return self.scaled(host_titlebar_action_button_size) * 2 + self.scaled(12);
         }
         return self.scaled(host_tab_small_button_width) + // new tab (+)
@@ -10925,7 +10963,7 @@ const Host = struct {
         // Right-side cluster: [+][▾] — new tab and dropdown chevron.
         // Shift left by the caption-buttons reservation (0 on Win10)
         // so the chevron doesn't land under the close button.
-        const titlebar_actions = self.app.use_integrated_titlebar;
+        const titlebar_actions = self.usingIntegratedTitlebar();
         const action_size = self.scaled(host_titlebar_action_button_size);
         const action_y = @max(0, @divTrunc(self.tabBarHeight() - action_size, 2));
         var button_x = width - self.scaled(if (titlebar_actions) 4 else 8) - caption_buttons_w;
@@ -11458,7 +11496,7 @@ const Host = struct {
                 else
                     adjustColor(theme.accent, 18, 18, 18),
             );
-            if (!self.app.use_integrated_titlebar) {
+            if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
                 const cluster_rect = RECT{
                     .left = cluster_left,
@@ -18471,6 +18509,7 @@ pub const Surface = struct {
     window_focused: bool = false,
     quick_terminal: bool = false,
     decorations_visible: bool = true,
+    decorations_visible_overridden: bool = false,
     fullscreen: bool = false,
     topmost: bool = false,
     restore_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -18624,6 +18663,10 @@ pub const Surface = struct {
         return self.search_bar_button_prev_procs[@intFromEnum(role)];
     }
 
+    fn initialDecorationsVisible(config: *const configpkg.Config, opts: SurfaceInitOptions) bool {
+        return initialDecorationsVisibleForSource(config, opts.clone_state_from);
+    }
+
     pub fn init(
         self: *Surface,
         app: *App,
@@ -18643,6 +18686,7 @@ pub const Surface = struct {
             .host_id = host.id,
             .host_active = true,
             .window_visible = false,
+            .decorations_visible = initialDecorationsVisible(config, opts),
             .scrollbar_config = config.scrollbar,
             .render_trace = RenderTrace.init(app.core_app.alloc),
             .undo_stack = win32_undo.UndoStack.init(app.core_app.alloc),
@@ -20827,6 +20871,11 @@ pub const Surface = struct {
     }
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
+        if (shouldApplyConfigDecorations(self.decorations_visible_overridden)) {
+            self.setDecorationsVisible(decorationsVisibleForConfig(config.@"window-decoration")) catch |err| {
+                log.warn("win32 decoration update failed during config reload err={}", .{err});
+            };
+        }
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
         self.scrollbar_config = config.scrollbar;
         if (self.background_opacity_default >= 0.999) {
@@ -20870,8 +20919,8 @@ pub const Surface = struct {
     }
 
     fn toggleDecorations(self: *Surface) !void {
-        self.decorations_visible = !self.decorations_visible;
-        try self.applyWindowStyle();
+        try self.setDecorationsVisible(!self.decorations_visible);
+        self.decorations_visible_overridden = true;
     }
 
     fn setInitialSize(self: *Surface, size: apprt.action.InitialSize) !void {
@@ -20990,6 +21039,67 @@ pub const Surface = struct {
         }
     }
 
+    fn setDecorationsVisible(self: *Surface, visible: bool) !void {
+        if (self.decorations_visible == visible) return;
+
+        const previous_visible = self.decorations_visible;
+        const host = self.host;
+        const should_refresh_host = shouldPropagateSharedHostWindowState(self);
+        const used_integrated_titlebar_before = if (should_refresh_host and host != null)
+            host.?.usingIntegratedTitlebar()
+        else
+            false;
+
+        self.decorations_visible = visible;
+
+        if (!should_refresh_host) return;
+        self.applyWindowStyle() catch |err| {
+            self.rollbackDecorationsVisible(previous_visible, host, false);
+            return err;
+        };
+
+        if (host) |value| {
+            const integrated_titlebar_changed = used_integrated_titlebar_before != value.usingIntegratedTitlebar();
+            if (integrated_titlebar_changed) {
+                // Switching between stock and app-owned caption chrome can
+                // strand hover state until the next NC leave.
+                value.handleNcMouseLeave();
+            }
+            value.layout() catch |err| {
+                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
+                return err;
+            };
+            value.refreshChrome() catch |err| {
+                self.rollbackDecorationsVisible(previous_visible, host, integrated_titlebar_changed);
+                return err;
+            };
+            value.cached_decorations_visible = visible;
+        }
+    }
+
+    fn rollbackDecorationsVisible(
+        self: *Surface,
+        previous_visible: bool,
+        host: ?*Host,
+        integrated_titlebar_changed: bool,
+    ) void {
+        self.decorations_visible = previous_visible;
+        self.applyWindowStyle() catch |err| {
+            log.warn("win32 decoration rollback style update failed err={}", .{err});
+        };
+
+        if (host) |value| {
+            value.cached_decorations_visible = previous_visible;
+            if (integrated_titlebar_changed) value.handleNcMouseLeave();
+            value.layout() catch |err| {
+                log.warn("win32 decoration rollback layout failed err={}", .{err});
+            };
+            value.refreshChrome() catch |err| {
+                log.warn("win32 decoration rollback chrome refresh failed err={}", .{err});
+            };
+        }
+    }
+
     fn resizeClientArea(self: *Surface, client_width: u32, client_height: u32) !void {
         const hwnd = self.windowHwnd() orelse return;
         var client_rect: RECT = undefined;
@@ -21023,6 +21133,12 @@ pub const Surface = struct {
 
     fn copySharedWindowStateFrom(self: *Surface, source: *const Surface) void {
         self.decorations_visible = source.decorations_visible;
+        self.decorations_visible_overridden = source.decorations_visible_overridden;
+        if (self.host) |host| {
+            if (host.activeSurface() == self) {
+                host.cached_decorations_visible = self.decorations_visible;
+            }
+        }
         self.fullscreen = source.fullscreen;
         self.topmost = source.topmost;
         self.restore_rect = source.restore_rect;
@@ -25774,12 +25890,91 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
     try std.testing.expectEqualStrings("--title=Inbox", other);
 }
 
-test "win32 hostWindowStyle clips child repaints" {
+test "win32 decorationsVisibleForConfig only hides none" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const style = hostWindowStyle();
-    try std.testing.expect((style & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((style & WS_VISIBLE) == 0);
+    try std.testing.expect(decorationsVisibleForConfig(.auto));
+    try std.testing.expect(decorationsVisibleForConfig(.client));
+    try std.testing.expect(decorationsVisibleForConfig(.server));
+    try std.testing.expect(!decorationsVisibleForConfig(.none));
+}
+
+test "win32 startupHostWindowStyle respects decoration and fullscreen frame state" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(true, false, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(true, false),
+    );
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(false, false, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(false, false),
+    );
+    try std.testing.expectEqual(
+        effectiveHostWindowStyle(false, true, true) & ~@as(u32, WS_VISIBLE),
+        startupHostWindowStyle(false, true),
+    );
+    try std.testing.expect((startupHostWindowStyle(true, false) & WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((startupHostWindowStyle(true, false) & WS_VISIBLE) == 0);
+}
+
+test "win32 initialDecorationsVisible follows startup source" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var config: configpkg.Config = .{};
+
+    config.@"window-decoration" = .none;
+    try std.testing.expect(!Surface.initialDecorationsVisible(&config, .{}));
+
+    config.@"window-decoration" = .auto;
+    try std.testing.expect(Surface.initialDecorationsVisible(&config, .{}));
+
+    var source: Surface = undefined;
+    source.host = null;
+    source.decorations_visible = false;
+    try std.testing.expect(!Surface.initialDecorationsVisible(
+        &config,
+        .{ .clone_state_from = &source },
+    ));
+
+    source.decorations_visible = true;
+    try std.testing.expect(Surface.initialDecorationsVisible(
+        &config,
+        .{
+            .host_id = 7,
+            .clone_state_from = &source,
+        },
+    ));
+
+    config.@"window-decoration" = .none;
+    try std.testing.expect(!Surface.initialDecorationsVisible(
+        &config,
+        .{ .host_id = 7 },
+    ));
+
+    config.@"window-decoration" = .auto;
+    try std.testing.expect(Surface.initialDecorationsVisible(
+        &config,
+        .{ .host_id = 7 },
+    ));
+}
+
+test "win32 decorationVisibilityForChrome uses cached fallback until active surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(!decorationVisibilityForChromeValue(null, false));
+    try std.testing.expect(decorationVisibilityForChromeValue(null, true));
+    try std.testing.expect(!decorationVisibilityForChromeValue(false, true));
+    try std.testing.expect(decorationVisibilityForChromeValue(true, false));
+}
+
+test "win32 usesIntegratedTitlebar requires visible decorations" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(usesIntegratedTitlebar(true, true, true));
+    try std.testing.expect(!usesIntegratedTitlebar(false, true, true));
+    try std.testing.expect(!usesIntegratedTitlebar(true, false, true));
+    try std.testing.expect(!usesIntegratedTitlebar(true, true, false));
 }
 
 test "win32 surfaceWindowStyle clips sibling repaints" {
@@ -25823,6 +26018,7 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
 
     var source: Surface = undefined;
     source.decorations_visible = false;
+    source.decorations_visible_overridden = true;
     source.fullscreen = true;
     source.topmost = true;
     source.restore_rect = .{ .left = 10, .top = 20, .right = 30, .bottom = 40 };
@@ -25838,10 +26034,12 @@ test "win32 copySharedWindowStateFrom clones host-scoped window fields" {
         .max_height = 444,
     };
     var dest: Surface = undefined;
+    dest.host = null;
 
     dest.copySharedWindowStateFrom(&source);
 
     try std.testing.expectEqual(source.decorations_visible, dest.decorations_visible);
+    try std.testing.expectEqual(source.decorations_visible_overridden, dest.decorations_visible_overridden);
     try std.testing.expectEqual(source.fullscreen, dest.fullscreen);
     try std.testing.expectEqual(source.topmost, dest.topmost);
     try std.testing.expectEqualDeep(source.restore_rect, dest.restore_rect);
@@ -25899,6 +26097,13 @@ test "win32 shouldPropagateSharedHostWindowState only for active shared-host sur
     host.active_tab = 1;
     try std.testing.expect(!shouldPropagateSharedHostWindowState(&active_surface));
     try std.testing.expect(shouldPropagateSharedHostWindowState(&inactive_surface));
+}
+
+test "win32 config decoration reload respects runtime override" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(shouldApplyConfigDecorations(false));
+    try std.testing.expect(!shouldApplyConfigDecorations(true));
 }
 
 test "win32 shouldResizeHostForInitialSize only for single-surface hosts" {
