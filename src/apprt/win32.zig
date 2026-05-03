@@ -18785,11 +18785,11 @@ pub const Surface = struct {
         } else {
             const tab_id = host.nextTabId();
             inserted_tab_index = requestedTabInsertIndex(opts.tab_insert_index, host.tabs.items.len);
-            try host.tabs.insert(
-                app.core_app.alloc,
-                inserted_tab_index.?,
-                try Tab.init(app.core_app.alloc, tab_id, self),
-            );
+            {
+                var tab = try Tab.init(app.core_app.alloc, tab_id, self);
+                errdefer tab.deinit();
+                try host.tabs.insert(app.core_app.alloc, inserted_tab_index.?, tab);
+            }
         }
         // Rollback the tab entry if core_surface.init or later init steps fail.
         // Without this, a zombie tab with a dangling surface pointer would remain
@@ -22935,10 +22935,9 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
             created_ref.host_id = host_ref.id;
             try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
-            const insert_index = requestedTabInsertIndex(opts.tab_insert_index, host_ref.tabs.items.len);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
-                insert_index,
+                opts.tab_insert_index.?,
                 try Tab.init(hook_app.core_app.alloc, tab_id, created_ref),
             );
             return created_ref;
@@ -23069,10 +23068,9 @@ test "win32 new_tab action appends when window-new-tab-position is end" {
             created_ref.host_id = host_ref.id;
             try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
-            const insert_index = requestedTabInsertIndex(opts.tab_insert_index, host_ref.tabs.items.len);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
-                insert_index,
+                opts.tab_insert_index.?,
                 try Tab.init(hook_app.core_app.alloc, tab_id, created_ref),
             );
             return created_ref;
@@ -23197,10 +23195,9 @@ test "win32 profile tab open appends when window-new-tab-position is end" {
             created_ref.host_id = host_ref.id;
             try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
             const tab_id = host_ref.nextTabId();
-            const insert_index = requestedTabInsertIndex(opts.tab_insert_index, host_ref.tabs.items.len);
             try host_ref.tabs.insert(
                 hook_app.core_app.alloc,
-                insert_index,
+                opts.tab_insert_index.?,
                 try Tab.init(hook_app.core_app.alloc, tab_id, created_ref),
             );
             return created_ref;
