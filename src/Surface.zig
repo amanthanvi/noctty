@@ -30,7 +30,7 @@ const font = @import("font/main.zig");
 const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
-const config_url = @import("config/url.zig");
+const configUrl = @import("config/url.zig");
 const Duration = configpkg.Config.Duration;
 const input = @import("input.zig");
 const App = @import("App.zig");
@@ -450,7 +450,7 @@ const DerivedConfig = struct {
 
         if (config.@"link-url") {
             var regex = try oni.Regex.init(
-                config_url.regex,
+                configUrl.regex,
                 .{},
                 oni.Encoding.utf8,
                 oni.Syntax.default,
@@ -472,6 +472,7 @@ const DerivedConfig = struct {
 
         var config = try configpkg.Config.default(testing.allocator);
         defer config.deinit();
+        config.@"link-url" = true;
 
         const alloc = config._arena.?.allocator();
         try config.link.links.append(alloc, .{

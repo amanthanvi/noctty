@@ -7907,6 +7907,11 @@ pub const RepeatableLink = struct {
         }
 
         const regex = try parseRegexValue(alloc, input);
+        errdefer alloc.free(regex);
+        if (regex.len == 0) {
+            self.links.clearRetainingCapacity();
+            return;
+        }
         try self.links.append(alloc, .{
             .regex = regex,
             .action = .{ .open = {} },
@@ -7965,11 +7970,7 @@ pub const RepeatableLink = struct {
     }
 
     fn parseRegexValue(alloc: Allocator, input: []const u8) ![]const u8 {
-        if (input.len > 0 and (input[0] == '"' or input[input.len - 1] == '"')) {
-            if (input.len < 2 or input[0] != '"' or input[input.len - 1] != '"') {
-                return error.InvalidValue;
-            }
-
+        if (input.len >= 2 and input[0] == '"' and input[input.len - 1] == '"') {
             var buf: std.Io.Writer.Allocating = .init(alloc);
             defer buf.deinit();
 
@@ -7999,6 +8000,9 @@ pub const RepeatableLink = struct {
             links.links.items[0].highlight,
         );
 
+        try links.parseCLI(alloc, "\"\"");
+        try testing.expectEqual(@as(usize, 0), links.links.items.len);
+
         try links.parseCLI(alloc, "");
         try testing.expectEqual(@as(usize, 0), links.links.items.len);
     }
@@ -8012,15 +8016,19 @@ pub const RepeatableLink = struct {
         try testing.expectError(error.ValueRequired, links.parseCLI(arena.allocator(), null));
     }
 
-    test "RepeatableLink parseCLI rejects unmatched quoted regex values" {
+    test "RepeatableLink parseCLI treats partially quoted regex values as bare input" {
         const testing = std.testing;
         var arena = ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
 
         var links: Self = .{};
-        try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "\"^foo"));
-        try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "^foo\""));
+        try links.parseCLI(alloc, "\"^foo");
+        try links.parseCLI(alloc, "^foo\"");
+
+        try testing.expectEqual(@as(usize, 2), links.links.items.len);
+        try testing.expectEqualStrings("\"^foo", links.links.items[0].regex);
+        try testing.expectEqualStrings("^foo\"", links.links.items[1].regex);
     }
 
     test "RepeatableLink parseCLI quoted regex uses Zig string literal escaping" {

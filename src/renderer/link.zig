@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const oni = @import("oniguruma");
-const config_url = @import("../config/url.zig");
+const configUrl = @import("../config/url.zig");
 const inputpkg = @import("../input.zig");
 const terminal = @import("../terminal/main.zig");
 const point = terminal.point;
@@ -60,7 +60,7 @@ pub const Set = struct {
 
         if (link_url) {
             var regex = try oni.Regex.init(
-                config_url.regex,
+                configUrl.regex,
                 .{},
                 oni.Encoding.utf8,
                 oni.Syntax.default,
@@ -366,8 +366,8 @@ test "fromConfigWithUrl adds builtin URL matcher only when enabled" {
     defer state.deinit(alloc);
     try state.update(alloc, &t);
 
-    const mouse_point: point.Coordinate = .{ .x = 6, .y = 0 };
-    const hover_mods = inputpkg.ctrlOrSuper(.{});
+    const mousePoint: point.Coordinate = .{ .x = 6, .y = 0 };
+    const hoverMods = inputpkg.ctrlOrSuper(.{});
 
     {
         var set = try Set.fromConfigWithUrl(alloc, &.{}, false);
@@ -379,8 +379,8 @@ test "fromConfigWithUrl adds builtin URL matcher only when enabled" {
             alloc,
             &result,
             &state,
-            mouse_point,
-            hover_mods,
+            mousePoint,
+            hoverMods,
         );
         try testing.expect(!result.contains(.{ .x = 3, .y = 0 }));
     }
@@ -395,8 +395,8 @@ test "fromConfigWithUrl adds builtin URL matcher only when enabled" {
             alloc,
             &result,
             &state,
-            mouse_point,
-            hover_mods,
+            mousePoint,
+            hoverMods,
         );
         try testing.expect(result.contains(.{ .x = 3, .y = 0 }));
         try testing.expect(result.contains(.{ .x = 6, .y = 0 }));
