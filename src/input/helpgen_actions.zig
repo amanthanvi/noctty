@@ -111,11 +111,7 @@ pub fn generate(
     }
 }
 
-test "windows action docs reflect fork platform truth" {
-    const builtin = @import("builtin");
-
-    if (builtin.os.tag != .windows) return;
-
+test "action docs reflect fork platform truth" {
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_command_palette, "implemented by the native Win32 host") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:ctrl+backquote=toggle_quick_terminal") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_quick_terminal, "global:cmd+backquote=toggle_quick_terminal") == null);
