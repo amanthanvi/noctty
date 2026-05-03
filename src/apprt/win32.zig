@@ -15550,15 +15550,8 @@ fn buildProfileChromeBadgeText(alloc: Allocator, kind: windows_shell.ProfileKind
     });
 }
 
-fn profileKindDetail(kind: windows_shell.ProfileKind) []const u8 {
-    return switch (kind) {
-        .wsl_default => "WSL default profile",
-        .wsl_distro => "WSL distro profile",
-        .pwsh => "PowerShell profile",
-        .powershell => "Windows PowerShell profile",
-        .git_bash => "Git Bash profile",
-        .cmd => "Command Prompt profile",
-    };
+fn profileKindDetail(kind: windows_shell.ProfileKind) windows_shell.ShellIntegrationDiagnostic {
+    return windows_shell.shellIntegrationDiagnostic(kind);
 }
 
 fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
@@ -15999,6 +15992,7 @@ fn buildProfileDetailText(
     defer alloc.free(overlay_suffix);
     const idle_suffix = try std.fmt.allocPrint(alloc, "{s}{s}", .{ quick_suffix, order_suffix });
     defer alloc.free(idle_suffix);
+    const detail = profileKindDetail(profile.kind);
     return if (overlay_open)
         std.fmt.allocPrint(
             alloc,
@@ -16015,13 +16009,15 @@ fn buildProfileDetailText(
     else
         std.fmt.allocPrint(
             alloc,
-            "Default profile: {s} {s}. Run {s}.{s} New hosts inherit this {s}. + opens a {s}, middle-click + splits here, and right-click + opens a new window. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
+            "Default profile: {s} {s}. Run {s}.{s} New hosts inherit this {s}.{s}{s} + opens a {s}, middle-click + splits here, and right-click + opens a new window. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
             .{
                 badge,
                 profile.label,
                 preview,
                 pinned_slot,
-                profileKindDetail(profile.kind),
+                detail.summary,
+                if (detail.next_step != null) " " else "",
+                detail.next_step orelse "",
                 profileOpenTargetActionText(default_target),
                 idle_suffix,
             },
@@ -27299,7 +27295,7 @@ test "win32 buildProfileDetailText reflects selected launcher state" {
     try std.testing.expect(std.mem.indexOf(u8, idle, "Default profile: PWSH >> PowerShell") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Run pwsh.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Pinned slot 1.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "PowerShell profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, idle, "New hosts inherit this PowerShell profile with automatic shell integration.") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "opens a new window") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+1-3 launches visible slots") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+Shift+1-3 pins the current profile") != null);
@@ -27307,6 +27303,40 @@ test "win32 buildProfileDetailText reflects selected launcher state" {
     try std.testing.expect(std.mem.indexOf(u8, idle, "Top slots: 1 PWSH >>") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "2 GIT $> Git Bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, idle, "Order: git > pwsh > Ubuntu > cmd.") != null);
+}
+
+test "win32 buildProfileDetailText appends shell integration guidance when present" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const profile: windows_shell.Profile = .{
+        .kind = .cmd,
+        .key = "cmd.exe",
+        .label = "Command Prompt",
+        .command = .{ .direct = &.{"cmd.exe"} },
+    };
+
+    const detail = try buildProfileDetailText(
+        std.testing.allocator,
+        &profile,
+        &.{profile},
+        false,
+        .tab,
+        null,
+        .{ null, null, null },
+    );
+    defer std.testing.allocator.free(detail);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        detail,
+        "New hosts inherit this Command Prompt profile; shell integration unavailable.",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        detail,
+        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "+ opens a new tab") != null);
 }
 
 test "win32 buildProfileCommandPreviewText compacts shell command preview" {
@@ -27775,6 +27805,44 @@ test "win32 buildProfileChromeBadgeText adds profile glyph treatment" {
     const wsl = try buildProfileChromeBadgeText(std.testing.allocator, .wsl_distro);
     defer std.testing.allocator.free(wsl);
     try std.testing.expectEqualStrings("WSL <>", wsl);
+}
+
+test "win32 profileKindDetail exposes shell integration posture" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pwsh = profileKindDetail(.pwsh);
+    try std.testing.expectEqualStrings(
+        "PowerShell profile with automatic shell integration",
+        pwsh.summary,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), pwsh.next_step);
+
+    const wsl = profileKindDetail(.wsl_distro);
+    try std.testing.expectEqualStrings(
+        "WSL distro profile; shell integration depends on the Linux shell",
+        wsl.summary,
+    );
+    try std.testing.expectEqualStrings(
+        "Enable shell integration inside the selected WSL shell startup.",
+        wsl.next_step.?,
+    );
+
+    const git_bash = profileKindDetail(.git_bash);
+    try std.testing.expectEqualStrings(
+        "Git Bash profile with automatic shell integration",
+        git_bash.summary,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), git_bash.next_step);
+
+    const cmd = profileKindDetail(.cmd);
+    try std.testing.expectEqualStrings(
+        "Command Prompt profile; shell integration unavailable",
+        cmd.summary,
+    );
+    try std.testing.expectEqualStrings(
+        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+        cmd.next_step.?,
+    );
 }
 
 test "win32 startupProfilePickerEnabled parses launcher env values" {
