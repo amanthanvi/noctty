@@ -7976,7 +7976,7 @@ pub const RepeatableLink = struct {
             const parsed = try std.zig.string_literal.parseWrite(&buf.writer, input);
             if (parsed == .failure) return error.InvalidValue;
 
-            return try alloc.dupe(u8, buf.written());
+            return try buf.toOwnedSlice();
         }
 
         return try alloc.dupe(u8, input);
@@ -8021,6 +8021,19 @@ pub const RepeatableLink = struct {
         var links: Self = .{};
         try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "\"^foo"));
         try testing.expectError(error.InvalidValue, links.parseCLI(alloc, "^foo\""));
+    }
+
+    test "RepeatableLink parseCLI quoted regex uses Zig string literal escaping" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var links: Self = .{};
+        try links.parseCLI(alloc, "\"^foo,\\\\d+$\"");
+
+        try testing.expectEqual(@as(usize, 1), links.links.items.len);
+        try testing.expectEqualStrings("^foo,\\d+$", links.links.items[0].regex);
     }
 
     test "RepeatableLink formatEntry quotes regex values" {
