@@ -6746,18 +6746,24 @@ pub const Keybinds = struct {
             const v = next.value_ptr.*;
             if (docs) {
                 try formatter.writer.writeAll("\n");
-                const name = @tagName(v);
-                inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
-                    if (std.mem.eql(u8, decl.name, name)) {
-                        const help = @field(help_strings.KeybindAction, decl.name);
-                        try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
-                        var lines = std.mem.splitScalar(u8, help, '\n');
-                        while (lines.next()) |line| {
-                            try formatter.writer.writeAll("#   ");
-                            try formatter.writer.writeAll(line);
-                            try formatter.writer.writeAll("\n");
+                const name: []const u8 = switch (v) {
+                    .leaf => |leaf| @tagName(leaf.action),
+                    .leaf_chained => |leaf| if (leaf.actions.items.len > 0) @tagName(leaf.actions.items[0]) else "",
+                    .leader => "",
+                };
+                if (name.len > 0) {
+                    inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
+                        if (std.mem.eql(u8, decl.name, name)) {
+                            const help = @field(help_strings.KeybindAction, decl.name);
+                            try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
+                            var lines = std.mem.splitScalar(u8, help, '\n');
+                            while (lines.next()) |line| {
+                                try formatter.writer.writeAll("#   ");
+                                try formatter.writer.writeAll(line);
+                                try formatter.writer.writeAll("\n");
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
@@ -6777,6 +6783,30 @@ pub const Keybinds = struct {
             while (binding_iter.next()) |next| {
                 const k = next.key_ptr.*;
                 const v = next.value_ptr.*;
+
+                if (docs) {
+                    try formatter.writer.writeAll("\n");
+                    const name: []const u8 = switch (v) {
+                        .leaf => |leaf| @tagName(leaf.action),
+                        .leaf_chained => |leaf| if (leaf.actions.items.len > 0) @tagName(leaf.actions.items[0]) else "",
+                        .leader => "",
+                    };
+                    if (name.len > 0) {
+                        inline for (@typeInfo(help_strings.KeybindAction).@"struct".decls) |decl| {
+                            if (std.mem.eql(u8, decl.name, name)) {
+                                const help = @field(help_strings.KeybindAction, decl.name);
+                                try formatter.writer.writeAll("# " ++ decl.name ++ "\n");
+                                var lines = std.mem.splitScalar(u8, help, '\n');
+                                while (lines.next()) |line| {
+                                    try formatter.writer.writeAll("#   ");
+                                    try formatter.writer.writeAll(line);
+                                    try formatter.writer.writeAll("\n");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 var writer: std.Io.Writer = .fixed(&buf);
                 writer.print("{s}/{f}", .{ table_name, k }) catch return error.OutOfMemory;
