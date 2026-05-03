@@ -3040,29 +3040,34 @@ keybind: Keybinds = .{},
 
 /// Retained compatibility settings from Linux-specific runtime features.
 ///
-/// These keys continue to parse so existing configs remain loadable, but they
-/// have no effect in the Windows-only fork unless a field explicitly documents
-/// otherwise.
+/// These keys continue to parse so existing configs remain loadable.
+///
+/// In the Windows-only fork they are compatibility-only inputs to the inert
+/// Win32 Job Object planning layer. They do not attach processes to a job or
+/// enforce limits unless future runtime wiring explicitly opts in.
 ///
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// This continues to parse so existing configs remain loadable, but it has no
-/// effect in the Windows-only fork.
+/// Selects whether the inert Win32 Job Object planning layer should synthesize
+/// a compatibility plan. `.never` preserves current Windows behavior.
 @"linux-cgroup": LinuxCgroup = .never,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// This has no effect in the Windows-only fork.
+/// Compatibility-only input for inert Win32 Job Object planning. No live
+/// memory limit is enforced in the current Windows runtime.
 @"linux-cgroup-memory-limit": ?u64 = null,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// This has no effect in the Windows-only fork.
+/// Compatibility-only input for inert Win32 Job Object planning. No live
+/// process-count limit is enforced in the current Windows runtime.
 @"linux-cgroup-processes-limit": ?u64 = null,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// This has no effect in the Windows-only fork.
+/// Compatibility-only input for inert Win32 Job Object planning. No current
+/// runtime attach path hard-fails based on this setting.
 @"linux-cgroup-hard-fail": bool = false,
 
 /// Retained compatibility settings from the removed GTK runtime.
