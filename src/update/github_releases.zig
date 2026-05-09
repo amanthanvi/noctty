@@ -417,6 +417,7 @@ fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.St
 }
 
 fn parseExpectedSha256(checksums: []const u8, installer_name: []const u8) ![Sha256.digest_length]u8 {
+    var matched: ?[Sha256.digest_length]u8 = null;
     var lines = std.mem.splitScalar(u8, checksums, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
@@ -431,10 +432,11 @@ fn parseExpectedSha256(checksums: []const u8, installer_name: []const u8) ![Sha2
             filename_raw;
 
         if (!std.mem.eql(u8, filename, installer_name)) continue;
-        return parseSha256Hex(hex);
+        if (matched != null) return error.InstallerChecksumDuplicate;
+        matched = try parseSha256Hex(hex);
     }
 
-    return error.InstallerChecksumMissing;
+    return matched orelse error.InstallerChecksumMissing;
 }
 
 fn parseSha256Hex(hex: []const u8) ![Sha256.digest_length]u8 {
@@ -803,6 +805,18 @@ test "checksum parser rejects missing installer entry" {
         error.InstallerChecksumMissing,
         parseExpectedSha256(
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *other.exe",
+            "winghostty-1.3.100-windows-x64-setup.exe",
+        ),
+    );
+}
+
+test "checksum parser rejects duplicate installer entries" {
+    try std.testing.expectError(
+        error.InstallerChecksumDuplicate,
+        parseExpectedSha256(
+            \\00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *winghostty-1.3.100-windows-x64-setup.exe
+            \\ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100 *winghostty-1.3.100-windows-x64-setup.exe
+        ,
             "winghostty-1.3.100-windows-x64-setup.exe",
         ),
     );
