@@ -2699,8 +2699,11 @@ pub const App = struct {
         var tab_surface: ?*Surface = null;
         var created: usize = 0;
         var selected_surface: ?*Surface = null;
+        const node_surfaces = try self.core_app.alloc.alloc(?*Surface, saved_tab.layout.nodes.len);
+        defer self.core_app.alloc.free(node_surfaces);
+        @memset(node_surfaces, null);
 
-        for (saved_tab.layout.nodes) |node| {
+        for (saved_tab.layout.nodes, 0..) |node, node_index| {
             const pane = switch (node) {
                 .pane => |value| value,
                 .split => continue,
@@ -2712,6 +2715,7 @@ pub const App = struct {
                 tab_index,
                 preferredSplitDirection(saved_tab.layout),
             );
+            node_surfaces[node_index] = surface;
             if (tab_surface == null) tab_surface = surface;
             if (created == saved_tab.selected_leaf) selected_surface = surface;
             created += 1;
@@ -2720,7 +2724,17 @@ pub const App = struct {
         const first = tab_surface orelse return error.EmptyLayout;
         const selected = selected_surface orelse first;
         if (self.findTabForSurface(selected)) |found| {
+            var restored_tree = try buildRestoredSessionSplitTree(
+                self.core_app.alloc,
+                saved_tab.layout,
+                node_surfaces,
+            );
+            errdefer restored_tree.deinit();
+
+            found.tab.tree.deinit();
+            found.tab.tree = restored_tree;
             if (found.tab.findHandle(selected)) |handle| found.tab.focused = handle;
+            try found.host.layout();
         }
         return selected;
     }
@@ -2810,7 +2824,10 @@ pub const App = struct {
             log.warn("win32 session save: snapshot failed err={}", .{err});
             return;
         };
-        if (state.windows.len == 0) return;
+        if (state.windows.len == 0) {
+            deleteSessionStateFile(path);
+            return;
+        }
 
         const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
             log.warn("win32 session save: encode failed err={}", .{err});
@@ -2953,6 +2970,92 @@ pub const App = struct {
             }
         }
         return .right;
+    }
+
+    fn buildRestoredSessionSplitTree(
+        alloc: Allocator,
+        layout: win32_session_state.LayoutTree,
+        node_surfaces: []const ?*Surface,
+    ) (Allocator.Error || error{InvalidTreeShape})!SplitTreeSurface {
+        if (layout.nodes.len == 0 or layout.nodes.len != node_surfaces.len) {
+            return error.InvalidTreeShape;
+        }
+        if (layout.root >= layout.nodes.len) return error.InvalidTreeShape;
+        if (layout.nodes.len > std.math.maxInt(SplitTreeSurface.Node.Handle.Backing)) {
+            return error.OutOfMemory;
+        }
+
+        const invalid_index = std.math.maxInt(usize);
+        const remap = try alloc.alloc(usize, layout.nodes.len);
+        defer alloc.free(remap);
+        @memset(remap, invalid_index);
+
+        if (layout.root == 0) {
+            for (remap, 0..) |*slot, i| slot.* = i;
+        } else {
+            const stack = try alloc.alloc(usize, layout.nodes.len);
+            defer alloc.free(stack);
+
+            remap[layout.root] = 0;
+            stack[0] = layout.root;
+            var stack_len: usize = 1;
+            var next_index: usize = 1;
+            while (stack_len > 0) {
+                stack_len -= 1;
+                const saved_index = stack[stack_len];
+                switch (layout.nodes[saved_index]) {
+                    .pane => {},
+                    .split => |split| {
+                        const children = [_]u16{ split.first, split.second };
+                        for (children) |child| {
+                            const child_index: usize = child;
+                            if (child_index >= layout.nodes.len) return error.InvalidTreeShape;
+                            if (remap[child_index] == invalid_index) {
+                                remap[child_index] = next_index;
+                                next_index += 1;
+                                stack[stack_len] = child_index;
+                                stack_len += 1;
+                            }
+                        }
+                    },
+                }
+            }
+            if (next_index != layout.nodes.len) return error.InvalidTreeShape;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        const tree_nodes = try arena.allocator().alloc(SplitTreeSurface.Node, layout.nodes.len);
+
+        for (layout.nodes, 0..) |node, saved_index| {
+            const restored_index = remap[saved_index];
+            if (restored_index == invalid_index) return error.InvalidTreeShape;
+            tree_nodes[restored_index] = switch (node) {
+                .pane => .{ .leaf = node_surfaces[saved_index] orelse return error.InvalidTreeShape },
+                .split => |split| .{ .split = .{
+                    .layout = switch (split.axis) {
+                        .horizontal => .horizontal,
+                        .vertical => .vertical,
+                    },
+                    .ratio = @floatCast(split.ratio),
+                    .left = @enumFromInt(remap[split.first]),
+                    .right = @enumFromInt(remap[split.second]),
+                } },
+            };
+        }
+
+        return .{
+            .arena = arena,
+            .nodes = tree_nodes,
+            .zoomed = null,
+        };
+    }
+
+    fn deleteSessionStateFile(path: []const u8) void {
+        std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err }),
+        };
     }
 
     fn sessionWindowRect(host: *Host) ?RECT {
@@ -27534,6 +27637,96 @@ test "win32 splitDirectionFromAction preserves requested split direction" {
     try std.testing.expectEqual(SplitTreeSurface.Split.Direction.right, splitDirectionFromAction(.right));
     try std.testing.expectEqual(SplitTreeSurface.Split.Direction.up, splitDirectionFromAction(.up));
     try std.testing.expectEqual(SplitTreeSurface.Split.Direction.down, splitDirectionFromAction(.down));
+}
+
+test "win32 session save deletes stale state file for empty snapshot" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "session-state.json",
+        .data = "stale",
+    });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    defer std.testing.allocator.free(path);
+
+    App.deleteSessionStateFile(path);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json", .{}));
+
+    App.deleteSessionStateFile(path);
+}
+
+test "win32 session restore rebuilds saved split tree shape" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+
+    const layout_nodes = [_]win32_session_state.Node{
+        .{ .split = .{
+            .axis = .horizontal,
+            .ratio = 0.25,
+            .first = 1,
+            .second = 2,
+        } },
+        .{ .pane = .{ .cwd = "C:\\left" } },
+        .{ .split = .{
+            .axis = .vertical,
+            .ratio = 0.75,
+            .first = 3,
+            .second = 4,
+        } },
+        .{ .pane = .{ .cwd = "C:\\top-right" } },
+        .{ .pane = .{ .cwd = "C:\\bottom-right" } },
+    };
+    const node_surfaces = [_]?*Surface{
+        null,
+        &surface_a,
+        null,
+        &surface_b,
+        &surface_c,
+    };
+
+    var tree = try App.buildRestoredSessionSplitTree(
+        std.testing.allocator,
+        .{ .root = 0, .nodes = &layout_nodes },
+        &node_surfaces,
+    );
+    defer tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.horizontal, tree.nodes[0].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.25), tree.nodes[0].split.ratio);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(1)), tree.nodes[0].split.left);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(2)), tree.nodes[0].split.right);
+    try std.testing.expectEqual(&surface_a, tree.nodes[1].leaf);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.vertical, tree.nodes[2].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(3)), tree.nodes[2].split.left);
+    try std.testing.expectEqual(@as(SplitTreeSurface.Node.Handle, @enumFromInt(4)), tree.nodes[2].split.right);
+    try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
+    try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
+}
+
+test "win32 session restore rejects split tree with missing pane surface" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const layout_nodes = [_]win32_session_state.Node{
+        .{ .pane = .{ .cwd = "C:\\left" } },
+    };
+    const node_surfaces = [_]?*Surface{null};
+
+    try std.testing.expectError(
+        error.InvalidTreeShape,
+        App.buildRestoredSessionSplitTree(
+            std.testing.allocator,
+            .{ .root = 0, .nodes = &layout_nodes },
+            &node_surfaces,
+        ),
+    );
 }
 
 test "win32 nextInspectorVisible follows requested mode" {
