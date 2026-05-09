@@ -603,10 +603,10 @@ language: ?[:0]const u8 = null,
 /// To see a list of available themes, run `winghostty +list-themes`.
 ///
 /// A theme file is simply another winghostty configuration file. They share
-/// the same syntax and same configuration options. A theme can set any valid
-/// configuration option so please do not use a theme file from an untrusted
-/// source. The built-in themes are audited to only set safe configuration
-/// options.
+/// the same syntax and same configuration options. A theme is not limited to
+/// colors and can set any valid configuration option, so only use theme files
+/// from sources you trust. The built-in themes are audited to only set safe
+/// configuration options.
 ///
 /// Some options cannot be set within theme files. The reason these are not
 /// supported should be self-evident. A theme file cannot set `theme` or

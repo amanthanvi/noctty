@@ -1921,7 +1921,7 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
             const labels = [_][]const u8{
                 "Font family fallbacks (comma-separated)",
                 "Font size (pt)",
-                "Terminal theme name or light/dark pair",
+                "Terminal theme name, trusted path, or light/dark pair",
                 "Background opacity (0.0 .. 1.0)",
                 "Window theme",
                 "Cursor style",

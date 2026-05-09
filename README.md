@@ -138,6 +138,7 @@ A minimal config:
 font-family = JetBrains Mono
 font-size   = 12
 # Pick a theme from: winghostty +list-themes
+# Theme files are config files; only use themes from sources you trust.
 theme       = Dracula
 ```
 
