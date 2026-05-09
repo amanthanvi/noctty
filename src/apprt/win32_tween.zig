@@ -215,6 +215,31 @@ test "scheduler: add, tick, expire" {
     try std.testing.expect(sched.value(id, 200) == null);
 }
 
+test "scheduler: cancel removes only the requested tween" {
+    var sched: Scheduler = .{};
+    sched.init(std.testing.allocator);
+    defer sched.deinit();
+
+    const first = try sched.add(0, .{
+        .from = 0.0,
+        .to = 1.0,
+        .duration_ms = 100,
+        .easing = .{ 0.33, 0.0, 0.67, 1.0 },
+    });
+    const second = try sched.add(0, .{
+        .from = 0.0,
+        .to = 1.0,
+        .duration_ms = 100,
+        .easing = .{ 0.33, 0.0, 0.67, 1.0 },
+    });
+
+    sched.cancel(first);
+
+    try std.testing.expect(sched.value(first, 50) == null);
+    try std.testing.expect(sched.value(second, 50) != null);
+    try std.testing.expect(!sched.isEmpty());
+}
+
 test "bezier: matches motion tokens shape" {
     // The ThemeMotion default curves must produce sensible values.
     const motion: win32_theme.ThemeMotion = .{};

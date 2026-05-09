@@ -2129,6 +2129,7 @@ pub const App = struct {
     next_undo_sequence: u64 = 1,
     running: bool = false,
     windows_hidden: bool = false,
+    quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_check_running: std.atomic.Value(bool) = .init(false),
     update_notice: ?UpdateNotice = null,
     update_auto_check_started: bool = false,
@@ -4937,7 +4938,7 @@ pub const App = struct {
     fn hideQuickTerminalSurface(self: *App, surface: *Surface) void {
         _ = self;
         const top_level = surface.windowHwnd() orelse return;
-        if (surface.host) |host| host.quick_terminal_animation = null;
+        if (surface.host) |host| host.cancelQuickTerminalAnimation();
         surface.setVisible(false);
         _ = ShowWindow(top_level, SW_HIDE);
     }
@@ -4963,7 +4964,10 @@ pub const App = struct {
         // the config.
         const focus_policy = self.quickTerminalFocusPolicy();
         const want_focus = focus_policy.activate_window;
-        if (focus_policy.diagnostic == .exclusive_keyboard_grab_unsupported) {
+        if (focus_policy.diagnostic == .exclusive_keyboard_grab_unsupported and
+            !self.quick_terminal_keyboard_diagnostic_logged)
+        {
+            self.quick_terminal_keyboard_diagnostic_logged = true;
             std.log.warn("quick-terminal-keyboard-interactivity=exclusive maps to focused input on Win32; global keyboard capture is unsupported", .{});
         }
 
@@ -5119,7 +5123,7 @@ pub const App = struct {
         const duration_ms = win32_quick_terminal.animationDurationMs(qt_cfg.animation_duration_s);
         const flags = SWP_NOACTIVATE;
         if (!animate or duration_ms == 0 or rectEqual(start, end)) {
-            if (getHost(hwnd)) |host| host.quick_terminal_animation = null;
+            if (getHost(hwnd)) |host| host.cancelQuickTerminalAnimation();
             _ = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -5145,6 +5149,22 @@ pub const App = struct {
             return;
         };
 
+        const effective_duration_ms = host.effectiveTweenDuration(duration_ms);
+        if (effective_duration_ms == 0) {
+            host.cancelQuickTerminalAnimation();
+            _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                end.left,
+                end.top,
+                end.right - end.left,
+                end.bottom - end.top,
+                flags,
+            );
+            return;
+        }
+
+        host.cancelQuickTerminalAnimation();
         _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -5157,7 +5177,7 @@ pub const App = struct {
         if (host.addTween(
             0.0,
             1.0,
-            duration_ms,
+            effective_duration_ms,
             (win32_theme.ThemeMotion{}).easing_decelerate,
         )) |id| {
             host.quick_terminal_animation = .{
@@ -5166,7 +5186,7 @@ pub const App = struct {
                 .end = end,
             };
         } else {
-            host.quick_terminal_animation = null;
+            host.cancelQuickTerminalAnimation();
             _ = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -6969,6 +6989,19 @@ const Host = struct {
         return enabled != 0;
     }
 
+    fn effectiveTweenDuration(self: *Host, duration_ms: u16) u16 {
+        _ = self;
+        return if (!clientAnimationsEnabled() or isHighContrastActive()) 0 else duration_ms;
+    }
+
+    fn cancelQuickTerminalAnimation(self: *Host) void {
+        if (self.quick_terminal_animation) |anim| {
+            self.tween_sched.cancel(anim.id);
+            self.quick_terminal_animation = null;
+            if (self.tween_sched.isEmpty()) self.killTweenTimer();
+        }
+    }
+
     /// Reduced-motion and HC collapse `duration_ms` to 0 (snap).
     fn addTween(
         self: *Host,
@@ -6978,8 +7011,7 @@ const Host = struct {
         easing: [4]f32,
     ) ?win32_tween.TweenId {
         const now = GetTickCount64();
-        const reduced = !clientAnimationsEnabled() or isHighContrastActive();
-        const effective_duration: u16 = if (reduced) 0 else duration_ms;
+        const effective_duration = self.effectiveTweenDuration(duration_ms);
 
         const id = self.tween_sched.add(now, .{
             .from = from,
@@ -17002,7 +17034,12 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 if (host) |v| {
                     if (v.app.config.@"quick-terminal-autohide") {
                         if (v.app.quickTerminalSurfaceForHost(v)) |surface| {
-                            v.app.hideQuickTerminalSurface(surface);
+                            if (surface.window_visible) {
+                                const top_level = surface.windowHwnd() orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+                                if (IsWindowVisible(top_level) != 0) {
+                                    v.app.hideQuickTerminalSurface(surface);
+                                }
+                            }
                         }
                     }
                 }
