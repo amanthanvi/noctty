@@ -93,6 +93,8 @@ pub const TerminalTextSnapshot = struct {
 /// are preserved, and a trailing newline terminates the last line instead of
 /// creating a phantom empty line.
 pub fn terminalTextMetadata(text: []const u8) !TerminalTextMetadata {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+
     var line_count: usize = 1;
     for (text, 0..) |c, i| {
         if (c == '\n' and i + 1 < text.len) line_count += 1;
@@ -100,7 +102,7 @@ pub fn terminalTextMetadata(text: []const u8) !TerminalTextMetadata {
 
     return .{
         .byte_len = text.len,
-        .utf16_len = try countUtf16CodeUnits(text),
+        .utf16_len = try std.unicode.calcUtf16LeLen(text),
         .line_count = line_count,
     };
 }
@@ -183,19 +185,6 @@ fn buildUtf16OffsetMap(
     utf16_offset_for_byte[text.len] = utf16_offset;
 
     return utf16_offset_for_byte;
-}
-
-fn countUtf16CodeUnits(text: []const u8) !usize {
-    var byte_index: usize = 0;
-    var utf16_len: usize = 0;
-    while (byte_index < text.len) {
-        const utf8_len = try std.unicode.utf8ByteSequenceLength(text[byte_index]);
-        if (byte_index + utf8_len > text.len) return error.TruncatedUtf8;
-        const codepoint = try std.unicode.utf8Decode(text[byte_index .. byte_index + utf8_len]);
-        byte_index += utf8_len;
-        utf16_len += if (codepoint <= 0xFFFF) 1 else 2;
-    }
-    return utf16_len;
 }
 
 test "snapshotTerminalPlainText captures terminal rows" {
@@ -394,7 +383,7 @@ test "snapshotTerminalPlainText utf16 map rejects truncated utf8" {
     );
 
     try std.testing.expectError(
-        error.TruncatedUtf8,
+        error.InvalidUtf8,
         terminalTextMetadata(&.{ 0xF0, 0x9F }),
     );
 }
