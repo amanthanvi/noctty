@@ -19,7 +19,9 @@ pub const ValidationError = error{
     InvalidNodeIndex,
     InvalidTreeShape,
     InvalidSplitRatio,
+    InvalidWindowRect,
     UnreachableNode,
+    TooManySessionLayoutNodes,
 };
 
 pub const ValidateError = ValidationError || Allocator.Error;
@@ -39,8 +41,18 @@ pub const SessionState = struct {
 };
 
 pub const Window = struct {
+    x: ?i32 = null,
+    y: ?i32 = null,
+    width: ?i32 = null,
+    height: ?i32 = null,
+    state: ?WindowState = null,
     selected_tab: usize,
     tabs: []const Tab = &.{},
+};
+
+pub const WindowState = enum {
+    normal,
+    maximized,
 };
 
 pub const Tab = struct {
@@ -116,6 +128,7 @@ pub fn validateAlloc(alloc: Allocator, state: SessionState) ValidateError!void {
     }
 
     for (state.windows) |window| {
+        try validateWindowRect(window);
         if (window.tabs.len == 0) return error.EmptyTabs;
         if (window.selected_tab >= window.tabs.len) return error.InvalidSelectedTab;
 
@@ -126,8 +139,24 @@ pub fn validateAlloc(alloc: Allocator, state: SessionState) ValidateError!void {
     }
 }
 
+fn validateWindowRect(window: Window) ValidationError!void {
+    const present_count =
+        @as(usize, @intFromBool(window.x != null)) +
+        @as(usize, @intFromBool(window.y != null)) +
+        @as(usize, @intFromBool(window.width != null)) +
+        @as(usize, @intFromBool(window.height != null));
+    if (present_count != 0 and present_count != 4) return error.InvalidWindowRect;
+    if (window.width) |width| {
+        if (width <= 0) return error.InvalidWindowRect;
+    }
+    if (window.height) |height| {
+        if (height <= 0) return error.InvalidWindowRect;
+    }
+}
+
 fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize {
     if (layout.nodes.len == 0) return error.EmptyLayout;
+    if (layout.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
 
     const root_index: usize = layout.root;
     if (root_index >= layout.nodes.len) return error.InvalidRootNode;
@@ -199,6 +228,11 @@ fn expectSessionStateEqual(expected: SessionState, actual: SessionState) !void {
     try std.testing.expectEqual(expected.windows.len, actual.windows.len);
 
     for (expected.windows, actual.windows) |expected_window, actual_window| {
+        try std.testing.expectEqual(expected_window.x, actual_window.x);
+        try std.testing.expectEqual(expected_window.y, actual_window.y);
+        try std.testing.expectEqual(expected_window.width, actual_window.width);
+        try std.testing.expectEqual(expected_window.height, actual_window.height);
+        try std.testing.expectEqual(expected_window.state, actual_window.state);
         try std.testing.expectEqual(expected_window.selected_tab, actual_window.selected_tab);
         try std.testing.expectEqual(expected_window.tabs.len, actual_window.tabs.len);
 
@@ -332,6 +366,64 @@ test "win32 session state omits unset optional pane metadata" {
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"scrollback\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "\"contents\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, encoded, "null") == null);
+}
+
+test "win32 session state round-trips window geometry" {
+    const nodes = [_]Node{
+        .{ .pane = .{} },
+    };
+    const tabs = [_]Tab{
+        .{
+            .selected_leaf = 0,
+            .layout = .{
+                .root = 0,
+                .nodes = &nodes,
+            },
+        },
+    };
+    const windows = [_]Window{
+        .{
+            .x = 10,
+            .y = 20,
+            .width = 1280,
+            .height = 720,
+            .state = .maximized,
+            .selected_tab = 0,
+            .tabs = &tabs,
+        },
+    };
+    const state: SessionState = .{
+        .windows = &windows,
+    };
+
+    const encoded = try encodeAlloc(std.testing.allocator, state);
+    defer std.testing.allocator.free(encoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"schema_version\":1,\"windows\":[{\"x\":10,\"y\":20,\"width\":1280,\"height\":720,\"state\":\"maximized\",\"selected_tab\":0,\"tabs\":[{\"selected_leaf\":0,\"layout\":{\"root\":0,\"nodes\":[{\"pane\":{}}]}}]}]}",
+        encoded,
+    );
+
+    var parsed = try parseAlloc(std.testing.allocator, encoded);
+    defer parsed.deinit();
+
+    try expectSessionStateEqual(state, parsed.value);
+}
+
+test "win32 session state rejects incomplete window geometry" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"x":10,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+    ;
+
+    try std.testing.expectError(error.InvalidWindowRect, parseAlloc(std.testing.allocator, raw));
+}
+
+test "win32 session state rejects non-positive window geometry" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"x":10,"y":20,"width":0,"height":720,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+    ;
+
+    try std.testing.expectError(error.InvalidWindowRect, parseAlloc(std.testing.allocator, raw));
 }
 
 test "win32 session state parse rejects unsupported schema version" {
@@ -494,6 +586,32 @@ test "win32 session state validates deep split layout without recursion" {
     try validateAlloc(std.testing.allocator, .{
         .windows = &windows,
     });
+}
+
+test "win32 session state rejects layout node count above handle range" {
+    const nodes = try std.testing.allocator.alloc(Node, std.math.maxInt(u16) + 1);
+    defer std.testing.allocator.free(nodes);
+    @memset(nodes, .{ .pane = .{} });
+
+    const tabs = [_]Tab{
+        .{
+            .selected_leaf = 0,
+            .layout = .{
+                .root = 0,
+                .nodes = nodes,
+            },
+        },
+    };
+    const windows = [_]Window{
+        .{
+            .selected_tab = 0,
+            .tabs = &tabs,
+        },
+    };
+
+    try std.testing.expectError(error.TooManySessionLayoutNodes, validateAlloc(std.testing.allocator, .{
+        .windows = &windows,
+    }));
 }
 
 test "win32 session state parse rejects shared-node layout before DFS stack overflow" {

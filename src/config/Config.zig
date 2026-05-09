@@ -2166,8 +2166,10 @@ keybind: Keybinds = .{},
 ///
 /// The default value is `default`.
 ///
-/// This is retained as a compatibility setting in the Windows-only fork and
-/// currently has no effect.
+/// On Windows this persists the practical window/session shape on app exit:
+/// host window rectangle/state plus tab, split, profile, working-directory,
+/// and explicit title metadata. Terminal contents and child process state are
+/// not restored.
 @"window-save-state": WindowSaveState = .default,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
