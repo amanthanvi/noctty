@@ -12,6 +12,14 @@ const log = std.log.scoped(.crash_minidump);
 
 const EXCEPTION_EXECUTE_HANDLER: c_long = 1;
 const MiniDumpNormal: u32 = 0x00000000;
+const MiniDumpWithDataSegs: u32 = 0x00000001;
+const MiniDumpWithHandleData: u32 = 0x00000004;
+const MiniDumpWithUnloadedModules: u32 = 0x00000020;
+const MiniDumpType =
+    MiniDumpNormal |
+    MiniDumpWithDataSegs |
+    MiniDumpWithHandleData |
+    MiniDumpWithUnloadedModules;
 
 const MINIDUMP_EXCEPTION_INFORMATION = extern struct {
     ThreadId: windows.DWORD,
@@ -110,7 +118,7 @@ fn writeMinidump(info: *windows.EXCEPTION_POINTERS) !void {
         windows.GetCurrentProcess(),
         windows.GetCurrentProcessId(),
         file.handle,
-        MiniDumpNormal,
+        MiniDumpType,
         &exception_info,
         null,
         null,
