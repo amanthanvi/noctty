@@ -167,7 +167,7 @@ pub const Section = enum(u32) {
     fn placeholderText(self: Section) []const u8 {
         return switch (self) {
             .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
-            .terminal => "Scrollback, copy-on-select, OSC 52 clipboard policy, link opening, and notifications.",
+            .terminal => "Scrollback, close confirmation, copy behavior, OSC 52 clipboard policy, link opening, and notifications.",
             .shell => "Default shell command and shell integration detection mode.",
             .keybindings => "Open the config file for keybind edits; list defaults, actions, and docs from the CLI.",
             .advanced => "Updater defaults plus the text editor escape hatch for config keys that do not yet have native controls.",
@@ -198,6 +198,52 @@ fn keybindingsHelpText() []const u8 {
         "  keybind = ctrl+shift+c=copy_to_clipboard\n" ++
         "  keybind = ctrl+a>n=new_window\n" ++
         "  keybind = chain=goto_split:left";
+}
+
+fn clipboardAccessFromComboIndex(idx: LRESULT) ?Config.ClipboardAccess {
+    return switch (idx) {
+        0 => .ask,
+        1 => .allow,
+        2 => .deny,
+        else => null,
+    };
+}
+
+fn comboIndexFromClipboardAccess(value: Config.ClipboardAccess) usize {
+    return switch (value) {
+        .ask => 0,
+        .allow => 1,
+        .deny => 2,
+    };
+}
+
+fn linkUrlFromComboIndex(idx: LRESULT) ?bool {
+    return switch (idx) {
+        0 => true,
+        1 => false,
+        else => null,
+    };
+}
+
+fn comboIndexFromLinkUrl(value: bool) usize {
+    return if (value) 0 else 1;
+}
+
+fn linkPreviewsFromComboIndex(idx: LRESULT) ?Config.LinkPreviews {
+    return switch (idx) {
+        0 => .true,
+        1 => .osc8,
+        2 => .false,
+        else => null,
+    };
+}
+
+fn comboIndexFromLinkPreviews(value: Config.LinkPreviews) usize {
+    return switch (value) {
+        .true => 0,
+        .osc8 => 1,
+        .false => 2,
+    };
 }
 
 extern "user32" fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) callconv(.winapi) ATOM;
@@ -866,22 +912,13 @@ pub const SettingsWindow = struct {
         const combo = combo_opt orelse return;
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
-        @field(p.*, field_name) = switch (idx) {
-            0 => .ask,
-            1 => .allow,
-            2 => .deny,
-            else => return,
-        };
+        @field(p.*, field_name) = clipboardAccessFromComboIndex(idx) orelse return;
     }
 
     fn displayClipboardAccessInCombo(self: *SettingsWindow, comptime field_name: []const u8, combo_opt: ?HWND) void {
         const combo = combo_opt orelse return;
         const p = self.pending orelse return;
-        const idx: usize = switch (@field(p, field_name)) {
-            .ask => 0,
-            .allow => 1,
-            .deny => 2,
-        };
+        const idx = comboIndexFromClipboardAccess(@field(p, field_name));
         self.suppress_edit_events = true;
         _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
@@ -893,17 +930,13 @@ pub const SettingsWindow = struct {
         const combo = self.combo_link_url orelse return;
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
-        p.*.@"link-url" = switch (idx) {
-            0 => true,
-            1 => false,
-            else => return,
-        };
+        p.*.@"link-url" = linkUrlFromComboIndex(idx) orelse return;
     }
 
     fn displayLinkUrlInCombo(self: *SettingsWindow) void {
         const combo = self.combo_link_url orelse return;
         const p = self.pending orelse return;
-        const idx: usize = if (p.@"link-url") 0 else 1;
+        const idx = comboIndexFromLinkUrl(p.@"link-url");
         self.suppress_edit_events = true;
         _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
@@ -915,22 +948,13 @@ pub const SettingsWindow = struct {
         const combo = self.combo_link_previews orelse return;
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
-        p.*.@"link-previews" = switch (idx) {
-            0 => .true,
-            1 => .osc8,
-            2 => .false,
-            else => return,
-        };
+        p.*.@"link-previews" = linkPreviewsFromComboIndex(idx) orelse return;
     }
 
     fn displayLinkPreviewsInCombo(self: *SettingsWindow) void {
         const combo = self.combo_link_previews orelse return;
         const p = self.pending orelse return;
-        const idx: usize = switch (p.@"link-previews") {
-            .true => 0,
-            .osc8 => 1,
-            .false => 2,
-        };
+        const idx = comboIndexFromLinkPreviews(p.@"link-previews");
         self.suppress_edit_events = true;
         _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
@@ -2254,6 +2278,30 @@ test "settings background blur checkbox can disable any variant" {
         .false,
         backgroundBlurFromCheckbox(.{ .radius = 42 }, false),
     );
+}
+
+test "settings policy combo mappings round trip" {
+    try std.testing.expectEqual(Config.ClipboardAccess.ask, clipboardAccessFromComboIndex(0).?);
+    try std.testing.expectEqual(Config.ClipboardAccess.allow, clipboardAccessFromComboIndex(1).?);
+    try std.testing.expectEqual(Config.ClipboardAccess.deny, clipboardAccessFromComboIndex(2).?);
+    try std.testing.expectEqual(@as(?Config.ClipboardAccess, null), clipboardAccessFromComboIndex(3));
+    try std.testing.expectEqual(@as(usize, 0), comboIndexFromClipboardAccess(.ask));
+    try std.testing.expectEqual(@as(usize, 1), comboIndexFromClipboardAccess(.allow));
+    try std.testing.expectEqual(@as(usize, 2), comboIndexFromClipboardAccess(.deny));
+
+    try std.testing.expectEqual(true, linkUrlFromComboIndex(0).?);
+    try std.testing.expectEqual(false, linkUrlFromComboIndex(1).?);
+    try std.testing.expectEqual(@as(?bool, null), linkUrlFromComboIndex(2));
+    try std.testing.expectEqual(@as(usize, 0), comboIndexFromLinkUrl(true));
+    try std.testing.expectEqual(@as(usize, 1), comboIndexFromLinkUrl(false));
+
+    try std.testing.expectEqual(Config.LinkPreviews.true, linkPreviewsFromComboIndex(0).?);
+    try std.testing.expectEqual(Config.LinkPreviews.osc8, linkPreviewsFromComboIndex(1).?);
+    try std.testing.expectEqual(Config.LinkPreviews.false, linkPreviewsFromComboIndex(2).?);
+    try std.testing.expectEqual(@as(?Config.LinkPreviews, null), linkPreviewsFromComboIndex(3));
+    try std.testing.expectEqual(@as(usize, 0), comboIndexFromLinkPreviews(.true));
+    try std.testing.expectEqual(@as(usize, 1), comboIndexFromLinkPreviews(.osc8));
+    try std.testing.expectEqual(@as(usize, 2), comboIndexFromLinkPreviews(.false));
 }
 
 test "win32_settings: font-family edit text builds repeatable list" {
