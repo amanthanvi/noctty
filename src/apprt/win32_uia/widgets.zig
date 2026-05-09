@@ -38,6 +38,8 @@ pub const PaletteListState = struct {
 
 pub const TerminalState = struct {
     ctx: *anyopaque,
+    retain: ?*const fn (ctx: *anyopaque) void = null,
+    release: ?*const fn (ctx: *anyopaque) void = null,
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
     value: *const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8,
     focused: *const fn (ctx: *anyopaque) bool,
@@ -215,6 +217,7 @@ pub const TerminalProvider = struct {
         state: TerminalState,
     ) !*TerminalProvider {
         const self = try alloc.create(TerminalProvider);
+        if (state.retain) |retain| retain(state.ctx);
         self.* = .{
             .base = .{ .vtbl = &simple_vtbl },
             .value_iface = .{ .vtbl = &value_vtbl },
@@ -296,6 +299,7 @@ pub const TerminalProvider = struct {
     fn release(self: *TerminalProvider) u32 {
         const prev = self.refcount.fetchSub(1, .acq_rel);
         if (prev == 1) {
+            if (self.state.release) |release_state| release_state(self.state.ctx);
             self.alloc.destroy(self);
             return 0;
         }
@@ -514,8 +518,8 @@ test "PaletteListProvider QueryInterface accepts IUnknown" {
 }
 
 test "TerminalProvider QueryInterface accepts ValueProvider" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -528,8 +532,8 @@ test "TerminalProvider QueryInterface accepts ValueProvider" {
 }
 
 test "TerminalProvider exposes Value pattern provider" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -541,9 +545,31 @@ test "TerminalProvider exposes Value pattern provider" {
     _ = TerminalProvider.ValueRelease(@ptrCast(@alignCast(out.?)));
 }
 
+test "TerminalProvider refcount and state retain balance across value provider refs" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    try std.testing.expectEqual(@as(u32, 1), state_data.retains);
+    try std.testing.expectEqual(@as(u32, 0), state_data.releases);
+
+    var out: ?*com.IUnknown = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetPatternProvider(&p.base, constants.UIA_ValuePatternId, &out),
+    );
+    try std.testing.expect(out != null);
+    try std.testing.expectEqual(@as(u32, 3), TerminalProvider.AddRef(&p.base));
+    try std.testing.expectEqual(@as(u32, 2), TerminalProvider.Release(&p.base));
+    try std.testing.expectEqual(@as(u32, 1), TerminalProvider.ValueRelease(@ptrCast(@alignCast(out.?))));
+    try std.testing.expectEqual(@as(u32, 0), TerminalProvider.Release(&p.base));
+    try std.testing.expectEqual(@as(u32, 1), state_data.retains);
+    try std.testing.expectEqual(@as(u32, 1), state_data.releases);
+}
+
 test "TerminalProvider reports document control type" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -555,8 +581,8 @@ test "TerminalProvider reports document control type" {
 }
 
 test "TerminalProvider get_Value returns non-null BSTR" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -567,11 +593,14 @@ test "TerminalProvider get_Value returns non-null BSTR" {
 
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(out != null);
+    try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(out));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), out.?[0..11]);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
 }
 
 test "TerminalProvider ValueValueProperty returns non-null BSTR" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -583,11 +612,14 @@ test "TerminalProvider ValueValueProperty returns non-null BSTR" {
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expectEqual(com.VT_BSTR, value.vt);
     try std.testing.expect(value.value.bstr != null);
+    try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(value.value.bstr));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), value.value.bstr.?[0..11]);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
 }
 
 test "TerminalProvider value allocation failure returns E_OUTOFMEMORY" {
-    var counter: u32 = 0;
-    const state = testTerminalState(&counter);
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
 
     var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
     defer _ = TerminalProvider.Release(&p.base);
@@ -617,16 +649,34 @@ test "TerminalProvider value allocation failure returns E_OUTOFMEMORY" {
     }
 }
 
-fn testTerminalState(counter: *u32) TerminalState {
+const TestTerminalStateData = struct {
+    name_calls: u32 = 0,
+    value_calls: u32 = 0,
+    retains: u32 = 0,
+    releases: u32 = 0,
+};
+
+fn testTerminalState(data: *TestTerminalStateData) TerminalState {
     const callbacks = struct {
+        fn retain(ctx: *anyopaque) void {
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.retains += 1;
+        }
+
+        fn release(ctx: *anyopaque) void {
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.releases += 1;
+        }
+
         fn name(ctx: *anyopaque, buf: []u8) []const u8 {
-            const c: *u32 = @ptrCast(@alignCast(ctx));
-            c.* += 1;
-            return std.fmt.bufPrint(buf, "terminal {d}", .{c.*}) catch "";
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.name_calls += 1;
+            return std.fmt.bufPrint(buf, "terminal {d}", .{d.name_calls}) catch "";
         }
 
         fn value(ctx: *anyopaque, alloc: std.mem.Allocator) ![]u8 {
-            _ = ctx;
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.value_calls += 1;
             return try alloc.dupe(u8, "hello\nworld");
         }
 
@@ -636,7 +686,9 @@ fn testTerminalState(counter: *u32) TerminalState {
         }
     };
     return .{
-        .ctx = @ptrCast(counter),
+        .ctx = @ptrCast(data),
+        .retain = callbacks.retain,
+        .release = callbacks.release,
         .name = callbacks.name,
         .value = callbacks.value,
         .focused = callbacks.focused,

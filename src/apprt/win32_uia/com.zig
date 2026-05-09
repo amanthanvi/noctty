@@ -205,6 +205,7 @@ pub extern "uiautomationcore" fn UiaClientsAreListening() callconv(.winapi) BOOL
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
 pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
 pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
+pub extern "oleaut32" fn SysStringLen(bstr: ?[*:0]const u16) callconv(.winapi) u32;
 
 /// Live HWND text query. Used by the UIA Name provider so screen
 /// readers see the current window title after a rename.

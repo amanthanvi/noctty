@@ -18242,12 +18242,16 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_GETOBJECT => {
             if (surface) |v| {
+                const state = v.terminalUiaState() catch |err| {
+                    log.warn("uia: terminal state init failed err={}", .{err});
+                    return DefWindowProcW(hwnd, msg, wParam, lParam);
+                };
                 if (win32_uia.handleTerminalGetObject(
                     v.app.core_app.alloc,
                     hwnd,
                     wParam,
                     lParam,
-                    v.terminalUiaState(),
+                    state,
                 )) |lr| return lr;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -18526,6 +18530,90 @@ fn getSurface(hwnd: HWND) ?*Surface {
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
 
+const TerminalUiaContext = struct {
+    alloc: Allocator,
+    refcount: std.atomic.Value(u32),
+    mutex: std.Thread.Mutex = .{},
+    surface: ?*Surface,
+
+    fn create(alloc: Allocator, surface: *Surface) !*TerminalUiaContext {
+        const self = try alloc.create(TerminalUiaContext);
+        self.* = .{
+            .alloc = alloc,
+            .refcount = std.atomic.Value(u32).init(1),
+            .surface = surface,
+        };
+        return self;
+    }
+
+    fn retain(ctx: *anyopaque) void {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        _ = self.refcount.fetchAdd(1, .monotonic);
+    }
+
+    fn release(ctx: *anyopaque) void {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        const prev = self.refcount.fetchSub(1, .acq_rel);
+        if (prev == 1) self.alloc.destroy(self);
+    }
+
+    fn detachSurface(self: *TerminalUiaContext) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.surface = null;
+    }
+
+    fn state(self: *TerminalUiaContext) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(self),
+            .retain = retain,
+            .release = release,
+            .name = terminalUiaName,
+            .value = terminalUiaValue,
+            .focused = terminalUiaFocused,
+        };
+    }
+
+    fn terminalUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return std.fmt.bufPrint(buf, "Terminal", .{}) catch "Terminal";
+        const title = surface.effectiveTitle() orelse "Terminal";
+        return std.fmt.bufPrint(buf, "Terminal: {s}", .{title}) catch "Terminal";
+    }
+
+    fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return try alloc.dupe(u8, "");
+        if (!surface.core_initialized) return try alloc.dupe(u8, "");
+
+        surface.core_surface.renderer_state.mutex.lock();
+        defer surface.core_surface.renderer_state.mutex.unlock();
+
+        var snapshot = try win32_uia.snapshotTerminalPlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer snapshot.deinit();
+
+        return snapshot.takeText();
+    }
+
+    fn terminalUiaFocused(ctx: *anyopaque) bool {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return false;
+        return surface.app.isSurfaceFocused(surface);
+    }
+};
+
 pub const Surface = struct {
     app: *App,
     host: ?*Host = null,
@@ -18655,6 +18743,7 @@ pub const Surface = struct {
     /// and by `Surface.destroyWindow` so a close-while-pending doesn't
     /// leak.
     pending_clipboard_op: ?PendingClipboardOp = null,
+    terminal_uia_context: ?*TerminalUiaContext = null,
 
     fn searchBarButtonHwnd(self: *const Surface, role: SearchBarButtonRole) ?HWND {
         return switch (role) {
@@ -19254,37 +19343,11 @@ pub const Surface = struct {
         return self.effectiveTitle();
     }
 
-    fn terminalUiaState(self: *Surface) win32_uia.TerminalState {
-        return .{
-            .ctx = @ptrCast(self),
-            .name = terminalUiaName,
-            .value = terminalUiaValue,
-            .focused = terminalUiaFocused,
-        };
-    }
-
-    fn terminalUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
-        const self: *Surface = @ptrCast(@alignCast(ctx));
-        const title = self.effectiveTitle() orelse "Terminal";
-        return std.fmt.bufPrint(buf, "Terminal: {s}", .{title}) catch "Terminal";
-    }
-
-    fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
-        const self: *Surface = @ptrCast(@alignCast(ctx));
-        if (!self.core_initialized) return try alloc.dupe(u8, "");
-
-        var snapshot = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            &self.core_surface.io.terminal,
-        );
-        defer snapshot.deinit();
-
-        return snapshot.takeText();
-    }
-
-    fn terminalUiaFocused(ctx: *anyopaque) bool {
-        const self: *Surface = @ptrCast(@alignCast(ctx));
-        return self.app.isSurfaceFocused(self);
+    fn terminalUiaState(self: *Surface) !win32_uia.TerminalState {
+        if (self.terminal_uia_context == null) {
+            self.terminal_uia_context = try TerminalUiaContext.create(self.app.core_app.alloc, self);
+        }
+        return self.terminal_uia_context.?.state();
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -21795,6 +21858,12 @@ pub const Surface = struct {
     fn destroy(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
+
+        if (self.terminal_uia_context) |ctx| {
+            ctx.detachSurface();
+            TerminalUiaContext.release(@ptrCast(ctx));
+            self.terminal_uia_context = null;
+        }
 
         // Revoke the drop target BEFORE destroying the HWND — Ole
         // would otherwise hold a dangling HWND reference until the
