@@ -836,12 +836,13 @@ const Preview = struct {
                 child.fill(.{ .style = self.ui_standard() });
 
                 const save_instructions = [_][]const u8{
+                    "Theme files are config files; only use themes from sources you trust.",
+                    "",
                     "To apply this theme, add the following line to your winghostty configuration:",
                     "",
                     try std.fmt.allocPrint(alloc, "theme = {s}", .{theme.theme}),
                     "",
                     "Save the configuration file and then reload it to apply the new theme.",
-                    "Theme files are config files; only use themes from sources you trust.",
                     "",
                     "Or press 'w' to write an auto theme file to your system's preferred default config path.",
                     "Then add the following line to your winghostty configuration and reload:",
