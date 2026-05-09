@@ -68,6 +68,16 @@ pub const QuickTerminalConfig = struct {
     keyboard_interactivity: KeyboardInteractivity = .on_demand,
 };
 
+pub const FocusPolicy = struct {
+    activate_window: bool,
+    diagnostic: Diagnostic = .none,
+
+    pub const Diagnostic = enum {
+        none,
+        exclusive_keyboard_grab_unsupported,
+    };
+};
+
 pub const Rect = geometry.Rect;
 
 pub const MonitorInfo = struct {
@@ -198,6 +208,24 @@ pub fn lerpRect(start: Rect, end: Rect, t: f64) Rect {
         .top = lerpI32(start.top, end.top, tc),
         .right = lerpI32(start.right, end.right, tc),
         .bottom = lerpI32(start.bottom, end.bottom, tc),
+    };
+}
+
+pub fn animationDurationMs(duration_s: f64) u16 {
+    if (!std.math.isFinite(duration_s) or duration_s <= 0) return 0;
+    const raw_ms = duration_s * std.time.ms_per_s;
+    const clamped = @min(raw_ms, @as(f64, @floatFromInt(std.math.maxInt(u16))));
+    return @intFromFloat(@round(clamped));
+}
+
+pub fn focusPolicy(interactivity: KeyboardInteractivity) FocusPolicy {
+    return switch (interactivity) {
+        .on_demand => .{ .activate_window = true },
+        .always => .{
+            .activate_window = true,
+            .diagnostic = .exclusive_keyboard_grab_unsupported,
+        },
+        .never => .{ .activate_window = false },
     };
 }
 
@@ -344,6 +372,24 @@ test "lerpRect clamps t" {
     try testing.expectEqual(@as(i32, 0), under.left);
     const over = lerpRect(a, b, 2.0);
     try testing.expectEqual(@as(i32, 200), over.left);
+}
+
+test "animationDurationMs clamps invalid and large durations" {
+    try testing.expectEqual(@as(u16, 0), animationDurationMs(-1));
+    try testing.expectEqual(@as(u16, 0), animationDurationMs(std.math.nan(f64)));
+    try testing.expectEqual(@as(u16, 200), animationDurationMs(0.2));
+    try testing.expectEqual(std.math.maxInt(u16), animationDurationMs(90));
+}
+
+test "focusPolicy maps keyboard interactivity to Win32 activation behavior" {
+    try testing.expectEqual(true, focusPolicy(.on_demand).activate_window);
+    try testing.expectEqual(.none, focusPolicy(.on_demand).diagnostic);
+
+    const always = focusPolicy(.always);
+    try testing.expectEqual(true, always.activate_window);
+    try testing.expectEqual(.exclusive_keyboard_grab_unsupported, always.diagnostic);
+
+    try testing.expectEqual(false, focusPolicy(.never).activate_window);
 }
 
 test "unionMonitors spans two side-by-side monitors" {
