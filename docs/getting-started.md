@@ -142,7 +142,34 @@ what is there with:
 winghostty +crash-report
 ```
 
-## 10. Uninstall
+## 10. Local automation
+
+winghostty exposes a local Windows automation surface over the same
+single-instance IPC path used by `+new-window`.
+
+List windows, tabs, and panes:
+
+```powershell
+winghostty +list-windows
+```
+
+Invoke a keybinding action on the focused surface:
+
+```powershell
+winghostty +perform-action new_tab
+```
+
+Invoke an action on a specific pane from `+list-windows`:
+
+```powershell
+winghostty +perform-action --surface-id=<surface_id> toggle_fullscreen
+```
+
+Actions use the same names as `keybind` values. Terminal-input and arbitrary
+file helper actions such as `text`, `csi`, `esc`, `paste_from_clipboard`,
+`write_screen_file`, and `crash` are rejected by the running instance.
+
+## 11. Uninstall
 
 - **Installer builds:** *Settings → Apps → Installed apps → winghostty →
   Uninstall*.
@@ -156,6 +183,8 @@ slate.
 
 - [docs/status.md](status.md) — what works, what's experimental, known
   caveats
+- [docs/windows-capability-matrix.md](windows-capability-matrix.md) —
+  Windows-specific behavior and docs truth
 - [HACKING.md](../HACKING.md) — build, test, runtime notes (for
   developers)
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — how to submit changes

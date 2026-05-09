@@ -42,6 +42,8 @@ const help_prelude =
     \\
     \\Useful Windows actions:
     \\  `winghostty +new-window` forwards into the running instance when possible.
+    \\  `winghostty +list-windows` prints local automation window IDs as JSON.
+    \\  `winghostty +perform-action new_tab` forwards a safe UI action.
     \\  `winghostty +edit-config` opens the config file in your default editor.
     \\
     \\Available actions:

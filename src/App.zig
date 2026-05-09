@@ -224,6 +224,15 @@ pub fn focusedSurface(self: *const App) ?*Surface {
     return surface;
 }
 
+test "automation-action safety rejects terminal input and crash actions" {
+    try std.testing.expect(isSafeAutomationAction(.new_tab));
+    try std.testing.expect(!isSafeAutomationAction(.{ .text = "hello" }));
+    try std.testing.expect(!isSafeAutomationAction(.{ .csi = "0m" }));
+    try std.testing.expect(!isSafeAutomationAction(.paste_from_clipboard));
+    try std.testing.expect(!isSafeAutomationAction(.{ .write_screen_file = .copy }));
+    try std.testing.expect(!isSafeAutomationAction(.{ .crash = .main }));
+}
+
 /// Returns true if confirmation is needed to quit the app. It is up to
 /// the apprt to call this.
 pub fn needsConfirmQuit(self: *const App) bool {
@@ -255,6 +264,16 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
                     request.err = err;
                     break :blk null;
+                };
+            },
+            .automation_action => |request| {
+                defer request.done.set();
+                self.performAutomationAction(
+                    rt_app,
+                    request.target,
+                    request.action_text,
+                ) catch |err| {
+                    request.err = err;
                 };
             },
             .close => |surface| self.closeSurface(surface),
@@ -513,6 +532,48 @@ pub fn performAllAction(
     }
 }
 
+fn performAutomationAction(
+    self: *App,
+    rt_app: *apprt.App,
+    target: apprt.ipc.AutomationActionTarget,
+    action_text: []const u8,
+) !void {
+    const action = input.Binding.Action.parse(action_text) catch |err| switch (err) {
+        error.InvalidAction, error.InvalidFormat => return error.InvalidAutomationAction,
+        else => return err,
+    };
+    if (!isSafeAutomationAction(action)) return error.UnsafeAutomationAction;
+
+    switch (target) {
+        .focused => {
+            if (action.scope() == .app) return try self.performAllAction(rt_app, action);
+            const surface = self.focusedSurface() orelse return error.NoAutomationTarget;
+            _ = try surface.performBindingAction(action);
+        },
+        .surface_id => |id| {
+            const surface = self.findSurfaceByID(id) orelse return error.NoAutomationTarget;
+            _ = try surface.performBindingAction(action);
+        },
+    }
+}
+
+fn isSafeAutomationAction(action: input.Binding.Action) bool {
+    return switch (action) {
+        .csi,
+        .esc,
+        .text,
+        .cursor_key,
+        .paste_from_clipboard,
+        .paste_from_selection,
+        .write_scrollback_file,
+        .write_screen_file,
+        .write_selection_file,
+        .crash,
+        => false,
+        else => true,
+    };
+}
+
 /// Handle a window message
 fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !void {
     // We want to ensure our window is still active. Window messages
@@ -566,6 +627,9 @@ pub const Message = union(enum) {
     /// Produce a read-only automation window snapshot on the app thread.
     automation_window_list: *AutomationWindowListRequest,
 
+    /// Perform a safe parsed keybinding action on the app thread.
+    automation_action: *AutomationActionRequest,
+
     /// Close a surface. This notifies the runtime that a surface
     /// should close.
     close: *Surface,
@@ -589,6 +653,13 @@ pub const Message = union(enum) {
         alloc: Allocator,
         done: std.Thread.ResetEvent = .{},
         result: ?[]u8 = null,
+        err: ?anyerror = null,
+    };
+
+    pub const AutomationActionRequest = struct {
+        target: apprt.ipc.AutomationActionTarget,
+        action_text: []const u8,
+        done: std.Thread.ResetEvent = .{},
         err: ?anyerror = null,
     };
 

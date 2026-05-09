@@ -761,6 +761,7 @@ const ipc_max_new_window_argc: u32 = 4096;
 const IpcRequestKind = enum(u8) {
     new_window = 1,
     list_windows = 2,
+    perform_action = 3,
 };
 
 const POINT = win32_types.POINT;
@@ -1553,8 +1554,18 @@ fn appendU32(dst: *std.ArrayList(u8), alloc: Allocator, value: u32) !void {
     try dst.appendSlice(alloc, &buf);
 }
 
+fn appendU64(dst: *std.ArrayList(u8), alloc: Allocator, value: u64) !void {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, value, .little);
+    try dst.appendSlice(alloc, &buf);
+}
+
 fn readU32(src: []const u8) u32 {
     return std.mem.readInt(u32, src[0..4], .little);
+}
+
+fn readU64(src: []const u8) u64 {
+    return std.mem.readInt(u64, src[0..8], .little);
 }
 
 fn freeOwnedArguments(alloc: Allocator, arguments: ?[]const [:0]const u8) void {
@@ -1601,6 +1612,30 @@ fn encodeListWindowsIpcRequest(alloc: Allocator) ![]u8 {
     return try encoded.toOwnedSlice(alloc);
 }
 
+fn encodePerformActionIpcRequest(
+    alloc: Allocator,
+    target: apprt.ipc.AutomationActionTarget,
+    action_text: []const u8,
+) ![]u8 {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+
+    try appendU32(&encoded, alloc, ipc_wire_version);
+    try encoded.append(alloc, @intFromEnum(IpcRequestKind.perform_action));
+    try encoded.append(alloc, switch (target) {
+        .focused => 0,
+        .surface_id => 1,
+    });
+    try appendU64(&encoded, alloc, switch (target) {
+        .focused => 0,
+        .surface_id => |id| id,
+    });
+    try appendU32(&encoded, alloc, @intCast(action_text.len));
+    try encoded.appendSlice(alloc, action_text);
+
+    return try encoded.toOwnedSlice(alloc);
+}
+
 fn decodeIpcRequestKind(
     pipe: windows.HANDLE,
 ) !IpcRequestKind {
@@ -1637,6 +1672,33 @@ fn decodeNewWindowIpcPayload(
     }
 
     return argv;
+}
+
+fn decodePerformActionIpcPayload(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !struct {
+    target: apprt.ipc.AutomationActionTarget,
+    action_text: []u8,
+} {
+    var header: [13]u8 = undefined;
+    try readExactHandle(pipe, &header);
+
+    const target: apprt.ipc.AutomationActionTarget = switch (header[0]) {
+        0 => .focused,
+        1 => .{ .surface_id = readU64(header[1..9]) },
+        else => return error.InvalidIpcRequest,
+    };
+    const len = readU32(header[9..13]);
+    if (len == 0 or len > ipc_max_data_response_len) return error.InvalidIpcRequest;
+
+    const action_text = try alloc.alloc(u8, len);
+    errdefer alloc.free(action_text);
+    try readExactHandle(pipe, action_text);
+    return .{
+        .target = target,
+        .action_text = action_text,
+    };
 }
 
 fn writeIpcAck(pipe: windows.HANDLE, success: bool) !void {
@@ -1824,6 +1886,26 @@ fn sendListWindowsIpc(
     return try readIpcDataResponse(alloc, pipe);
 }
 
+fn sendPerformActionIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationActionTarget,
+    action_text: []const u8,
+) !bool {
+    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        error.PipeBusy => return error.IPCFailed,
+        else => return err,
+    };
+    defer _ = windows.CloseHandle(pipe);
+
+    const request = try encodePerformActionIpcRequest(alloc, target, action_text);
+    defer alloc.free(request);
+
+    try writeAllHandle(pipe, request);
+    return try readIpcAck(pipe);
+}
+
 fn applyNewWindowArguments(
     alloc_gpa: Allocator,
     config: *configpkg.Config,
@@ -1974,6 +2056,10 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
             log.warn("failed to process win32 automation list IPC request err={}", .{err});
             try writeIpcDataResponse(pipe, false, "");
         },
+        .perform_action => handlePerformActionIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation action IPC request err={}", .{err});
+            try writeIpcAck(pipe, false);
+        },
     }
 }
 
@@ -1998,6 +2084,14 @@ fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
     try writeIpcDataResponse(pipe, true, json);
 }
 
+fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    const payload = try decodePerformActionIpcPayload(app.core_app.alloc, pipe);
+    defer app.core_app.alloc.free(payload.action_text);
+
+    try requestAutomationAction(app, payload.target, payload.action_text);
+    try writeIpcAck(pipe, true);
+}
+
 fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
     var request: CoreApp.Message.AutomationWindowListRequest = .{
         .alloc = alloc,
@@ -2013,6 +2107,27 @@ fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
     request.done.wait();
     if (request.err) |err| return err;
     return request.result orelse error.IPCFailed;
+}
+
+fn requestAutomationAction(
+    app: *App,
+    target: apprt.ipc.AutomationActionTarget,
+    action_text: []const u8,
+) !void {
+    var request: CoreApp.Message.AutomationActionRequest = .{
+        .target = target,
+        .action_text = action_text,
+    };
+    const mailbox: CoreApp.Mailbox = .{
+        .rt_app = app,
+        .mailbox = &app.core_app.mailbox,
+    };
+    if (mailbox.push(.{ .automation_action = &request }, .{ .forever = {} }) == 0) {
+        return error.IPCFailed;
+    }
+
+    request.done.wait();
+    if (request.err) |err| return err;
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -3777,6 +3892,17 @@ pub const App = struct {
         const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
         defer alloc.free(pipe_name);
         return try sendListWindowsIpc(alloc, pipe_name);
+    }
+
+    pub fn performAutomationAction(
+        alloc: Allocator,
+        target: apprt.ipc.Target,
+        action_target: apprt.ipc.AutomationActionTarget,
+        action_text: []const u8,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
+        defer alloc.free(pipe_name);
+        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text);
     }
 
     pub fn buildAutomationWindowListJson(
@@ -26773,6 +26899,42 @@ test "win32 encodeListWindowsIpcRequest preserves legacy zero-argc trailer" {
     try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
     try std.testing.expectEqual(@intFromEnum(IpcRequestKind.list_windows), request[4]);
     try std.testing.expectEqual(@as(u32, 0), readU32(request[5..9]));
+}
+
+test "automation-action win32 ipc encodes focused action request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const request = try encodePerformActionIpcRequest(
+        std.testing.allocator,
+        .focused,
+        "new_tab",
+    );
+    defer std.testing.allocator.free(request);
+
+    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
+    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(@as(u8, 0), request[5]);
+    try std.testing.expectEqual(@as(u64, 0), readU64(request[6..14]));
+    try std.testing.expectEqual(@as(u32, 7), readU32(request[14..18]));
+    try std.testing.expectEqualStrings("new_tab", request[18..]);
+}
+
+test "automation-action win32 ipc encodes surface action request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const request = try encodePerformActionIpcRequest(
+        std.testing.allocator,
+        .{ .surface_id = 42 },
+        "toggle_fullscreen",
+    );
+    defer std.testing.allocator.free(request);
+
+    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
+    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(@as(u8, 1), request[5]);
+    try std.testing.expectEqual(@as(u64, 42), readU64(request[6..14]));
+    try std.testing.expectEqual(@as(u32, 17), readU32(request[14..18]));
+    try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
 }
 
 test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
