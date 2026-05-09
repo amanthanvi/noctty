@@ -11,12 +11,10 @@ const dir = @import("dir.zig");
 const log = std.log.scoped(.crash_minidump);
 
 const EXCEPTION_EXECUTE_HANDLER: c_long = 1;
-const MiniDumpNormal: u32 = 0x00000000;
 const MiniDumpWithDataSegs: u32 = 0x00000001;
 const MiniDumpWithHandleData: u32 = 0x00000004;
 const MiniDumpWithUnloadedModules: u32 = 0x00000020;
 const MiniDumpType =
-    MiniDumpNormal |
     MiniDumpWithDataSegs |
     MiniDumpWithHandleData |
     MiniDumpWithUnloadedModules;
@@ -50,6 +48,7 @@ var crash_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 var crash_dir: []const u8 = "";
 
 pub fn init(alloc: std.mem.Allocator) !void {
+    // Preserve the original exception filter across repeated crash init calls.
     if (installed) return;
 
     const crash = try dir.defaultDir(alloc);
@@ -78,8 +77,7 @@ pub fn deinit() void {
 
 fn unhandledExceptionFilter(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
     if (writing.swap(true, .seq_cst)) {
-        if (previous_filter) |filter| return filter(info);
-        return EXCEPTION_EXECUTE_HANDLER;
+        return callPreviousFilter(info);
     }
     defer writing.store(false, .seq_cst);
 
@@ -87,6 +85,10 @@ fn unhandledExceptionFilter(info: *windows.EXCEPTION_POINTERS) callconv(.winapi)
         log.warn("failed to write windows minidump err={}", .{err});
     };
 
+    return callPreviousFilter(info);
+}
+
+fn callPreviousFilter(info: *windows.EXCEPTION_POINTERS) c_long {
     if (previous_filter) |filter| return filter(info);
     return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -106,6 +108,9 @@ fn writeMinidump(info: *windows.EXCEPTION_POINTERS) !void {
         .read = false,
         .truncate = true,
     });
+    errdefer std.fs.deleteFileAbsolute(path) catch |err| {
+        log.warn("failed to delete incomplete windows minidump path={s} err={}", .{ path, err });
+    };
     defer file.close();
 
     var exception_info: MINIDUMP_EXCEPTION_INFORMATION = .{
