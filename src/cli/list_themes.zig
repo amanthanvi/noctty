@@ -836,6 +836,8 @@ const Preview = struct {
                 child.fill(.{ .style = self.ui_standard() });
 
                 const save_instructions = [_][]const u8{
+                    "Theme files are config files; only use themes from sources you trust.",
+                    "",
                     "To apply this theme, add the following line to your winghostty configuration:",
                     "",
                     try std.fmt.allocPrint(alloc, "theme = {s}", .{theme.theme}),
