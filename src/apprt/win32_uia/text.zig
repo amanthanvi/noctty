@@ -88,6 +88,10 @@ pub const TerminalTextSnapshot = struct {
     }
 };
 
+/// Return metadata using the same line-start semantics as
+/// `TerminalTextSnapshot`: empty text counts as one line, interior blank lines
+/// are preserved, and a trailing newline terminates the last line instead of
+/// creating a phantom empty line.
 pub fn terminalTextMetadata(text: []const u8) !TerminalTextMetadata {
     var line_count: usize = 1;
     for (text, 0..) |c, i| {
