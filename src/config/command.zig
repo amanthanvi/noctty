@@ -84,6 +84,7 @@ pub const Command = union(enum) {
                     const copy = try alloc.dupeZ(u8, arg);
                     try builder.append(alloc, copy);
                 }
+                if (builder.items.len == 0) return error.ValueRequired;
 
                 self.* = .{ .direct = try builder.toOwnedSlice(alloc) };
             },
@@ -244,6 +245,8 @@ pub const Command = union(enum) {
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, null));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, ""));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, " "));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "direct:"));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "direct:   "));
     }
 
     test "Command: parseCLI shell expanded" {
