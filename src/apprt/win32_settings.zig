@@ -2130,6 +2130,8 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
 test "win32_settings: keybinding help points to discoverability commands" {
     const text = keybindingsHelpText();
 
+    try std.testing.expect(text.len < 1024);
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, 0) == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+list-keybinds --default") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+list-keybinds --docs") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+list-actions --docs") != null);
