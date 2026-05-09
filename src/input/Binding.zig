@@ -789,7 +789,7 @@ pub const Action = union(enum) {
     ///
     ///   - Unlike normal terminal windows, the quick terminal will not be
     ///     restored when the application is restarted on systems that support
-    ///     window restoration like macOS.
+    ///     window restoration like macOS and Win32 in this fork.
     ///
     ///   - On Linux, the quick terminal is only supported on Wayland and not
     ///     X11, and only on Wayland compositors that support the `wlr-layer-shell-v1`
