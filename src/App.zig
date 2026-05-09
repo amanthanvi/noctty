@@ -233,6 +233,23 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(!isSafeAutomationAction(.{ .crash = .main }));
 }
 
+test "automation-action surface id targets reject app scoped actions" {
+    const action = try input.Binding.Action.parse("quit");
+    try std.testing.expectEqual(input.Binding.Action.Scope.app, action.scope());
+    try std.testing.expectEqual(
+        error.InvalidAutomationTarget,
+        automationActionTargetError(.{ .surface_id = 42 }, action).?,
+    );
+    try std.testing.expectEqual(
+        null,
+        automationActionTargetError(.focused, action),
+    );
+    try std.testing.expectEqual(
+        null,
+        automationActionTargetError(.{ .surface_id = 42 }, .new_tab),
+    );
+}
+
 /// Returns true if confirmation is needed to quit the app. It is up to
 /// the apprt to call this.
 pub fn needsConfirmQuit(self: *const App) bool {
@@ -543,6 +560,7 @@ fn performAutomationAction(
         else => return err,
     };
     if (!isSafeAutomationAction(action)) return error.UnsafeAutomationAction;
+    if (automationActionTargetError(target, action)) |err| return err;
 
     switch (target) {
         .focused => {
@@ -555,6 +573,16 @@ fn performAutomationAction(
             _ = try surface.performBindingAction(action);
         },
     }
+}
+
+fn automationActionTargetError(
+    target: apprt.ipc.AutomationActionTarget,
+    action: input.Binding.Action,
+) ?anyerror {
+    return switch (target) {
+        .focused => null,
+        .surface_id => if (action.scope() == .app) error.InvalidAutomationTarget else null,
+    };
 }
 
 fn isSafeAutomationAction(action: input.Binding.Action) bool {

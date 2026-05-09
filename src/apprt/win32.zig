@@ -755,6 +755,10 @@ const ipc_pipe_prefix = "\\\\.\\pipe\\winghostty.";
 const ipc_wire_version: u32 = 1;
 const ipc_ack_success: u8 = 0;
 const ipc_ack_failure: u8 = 1;
+const ipc_ack_invalid_automation_action: u8 = 2;
+const ipc_ack_unsafe_automation_action: u8 = 3;
+const ipc_ack_invalid_automation_target: u8 = 4;
+const ipc_ack_no_automation_target: u8 = 5;
 const ipc_max_data_response_len: u32 = 16 * 1024 * 1024;
 const ipc_max_new_window_argc: u32 = 4096;
 
@@ -1702,9 +1706,16 @@ fn decodePerformActionIpcPayload(
 }
 
 fn writeIpcAck(pipe: windows.HANDLE, success: bool) !void {
+    return writeIpcAckStatus(
+        pipe,
+        if (success) ipc_ack_success else ipc_ack_failure,
+    );
+}
+
+fn writeIpcAckStatus(pipe: windows.HANDLE, status: u8) !void {
     var response: [5]u8 = undefined;
     std.mem.writeInt(u32, response[0..4], ipc_wire_version, .little);
-    response[4] = if (success) ipc_ack_success else ipc_ack_failure;
+    response[4] = status;
     try writeAllHandle(pipe, &response);
 }
 
@@ -1715,6 +1726,10 @@ fn readIpcAck(pipe: windows.HANDLE) !bool {
     return switch (response[4]) {
         ipc_ack_success => true,
         ipc_ack_failure => error.IPCFailed,
+        ipc_ack_invalid_automation_action => error.InvalidAutomationAction,
+        ipc_ack_unsafe_automation_action => error.UnsafeAutomationAction,
+        ipc_ack_invalid_automation_target => error.InvalidAutomationTarget,
+        ipc_ack_no_automation_target => error.NoAutomationTarget,
         else => error.InvalidIpcResponse,
     };
 }
@@ -2088,7 +2103,17 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
     const payload = try decodePerformActionIpcPayload(app.core_app.alloc, pipe);
     defer app.core_app.alloc.free(payload.action_text);
 
-    try requestAutomationAction(app, payload.target, payload.action_text);
+    requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
+        const status: u8 = switch (err) {
+            error.InvalidAutomationAction => ipc_ack_invalid_automation_action,
+            error.UnsafeAutomationAction => ipc_ack_unsafe_automation_action,
+            error.InvalidAutomationTarget => ipc_ack_invalid_automation_target,
+            error.NoAutomationTarget => ipc_ack_no_automation_target,
+            else => return err,
+        };
+        try writeIpcAckStatus(pipe, status);
+        return;
+    };
     try writeIpcAck(pipe, true);
 }
 
@@ -26935,6 +26960,27 @@ test "automation-action win32 ipc encodes surface action request" {
     try std.testing.expectEqual(@as(u64, 42), readU64(request[6..14]));
     try std.testing.expectEqual(@as(u32, 17), readU32(request[14..18]));
     try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
+}
+
+test "automation-action win32 ipc maps specific failure ack" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-action-ack.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    try writeIpcAckStatus(file.handle, ipc_ack_invalid_automation_target);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        readIpcAck(file.handle),
+    );
 }
 
 test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {

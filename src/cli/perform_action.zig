@@ -41,7 +41,7 @@ pub const Options = struct {
 ///
 /// The default target is the focused surface for surface-scoped actions and the
 /// app for app-scoped actions. `--surface-id` accepts pane IDs from
-/// `winghostty +list-windows`.
+/// `winghostty +list-windows` and is only valid for surface-scoped actions.
 ///
 /// To keep this automation surface bounded, terminal-input and arbitrary file
 /// helper actions such as `text`, `csi`, `esc`, `paste_from_clipboard`,
@@ -127,7 +127,7 @@ fn runArgsWithPerform(
         return 1;
     };
 
-    _ = input.Binding.Action.parse(action) catch |err| switch (err) {
+    const parsed_action = input.Binding.Action.parse(action) catch |err| switch (err) {
         error.InvalidAction, error.InvalidFormat => {
             try stderr.print("Invalid action for +perform-action: {s}\n", .{action});
             return 1;
@@ -135,12 +135,36 @@ fn runArgsWithPerform(
         else => return err,
     };
 
+    if (opts.@"surface-id" != null and parsed_action.scope() == .app) {
+        try stderr.print(
+            "--surface-id is only valid for surface-scoped actions; '{s}' is app-scoped.\n",
+            .{action},
+        );
+        return 1;
+    }
+
     const ok = performAutomationActionFn(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
         if (opts.@"surface-id") |id| .{ .surface_id = id } else .focused,
         action,
     ) catch |err| switch (err) {
+        error.InvalidAutomationTarget => {
+            try stderr.print("Invalid automation target for action: {s}\n", .{action});
+            return 1;
+        },
+        error.NoAutomationTarget => {
+            try stderr.print("No matching automation target for action: {s}\n", .{action});
+            return 1;
+        },
+        error.InvalidAutomationAction => {
+            try stderr.print("Invalid action for +perform-action: {s}\n", .{action});
+            return 1;
+        },
+        error.UnsafeAutomationAction => {
+            try stderr.print("Unsafe action rejected for +perform-action: {s}\n", .{action});
+            return 1;
+        },
         error.IPCFailed => {
             try stderr.print("Performing automation action via IPC failed.\n", .{});
             return 1;
@@ -253,6 +277,43 @@ test "automation-action cli rejects invalid action before ipc" {
     try testing.expectEqual(@as(u8, 1), exit_code);
     try testing.expectEqualStrings(
         "Invalid action for +perform-action: definitely_not_an_action\n",
+        stderr_buf.written(),
+    );
+}
+
+test "automation-action cli rejects app action with surface id before ipc" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        fn perform(
+            _: Allocator,
+            _: apprt.ipc.Target,
+            _: apprt.ipc.AutomationActionTarget,
+            _: []const u8,
+        ) !bool {
+            return error.UnexpectedIpc;
+        }
+    };
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "--surface-id=42 quit",
+    );
+    defer iter.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    const exit_code = try runArgsWithPerform(
+        testing.allocator,
+        &iter,
+        &stderr_buf.writer,
+        &Hook.perform,
+    );
+
+    try testing.expectEqual(@as(u8, 1), exit_code);
+    try testing.expectEqualStrings(
+        "--surface-id is only valid for surface-scoped actions; 'quit' is app-scoped.\n",
         stderr_buf.written(),
     );
 }
