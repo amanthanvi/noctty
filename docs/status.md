@@ -98,7 +98,7 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **Unsigned installer.** Windows SmartScreen warns on first install.
+- **Unsigned installer.** Windows SmartScreen may warn on first install.
   Click *More info* → *Run anyway*. Code signing is a planned packaging
   step; no ETA.
 - **Issues disabled for usage questions.** GitHub Issues on this repo

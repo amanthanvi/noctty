@@ -55,6 +55,8 @@ First public releases: 2026-04-16.
 - **Supported platform:** Windows 10 and Windows 11 on x64.
 - **Releases:** unsigned installer + portable ZIP. Windows SmartScreen may
   warn on first run; that is expected until code signing lands.
+  Unsigned installers are not eligible for `auto-update = download` staging
+  because staging requires a valid Authenticode signature.
 - **Feedback:** use
   [Discussions](https://github.com/amanthanvi/winghostty/discussions) for
   questions. GitHub Issues are reserved for reproducible bugs.
@@ -193,7 +195,8 @@ at most once every 24 hours. `auto-update = check` opens the release page if a
 newer stable version exists and never replaces binaries silently.
 `auto-update = download` downloads only eligible stable Windows installer
 releases, verifies `SHA256SUMS.txt` plus Authenticode, and stages the installer
-locally. Applying the staged installer is still manual.
+locally. Unsigned installers fail that verification and are not staged.
+Applying the staged installer is still manual.
 
 ## Crash reports
 
