@@ -353,6 +353,11 @@ pub const TerminalProvider = struct {
                 const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
                 out.* = com.VARIANT.fromBstr(com.SysAllocString(literal));
             },
+            constants.UIA_HelpTextPropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("Read-only terminal text");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
             constants.UIA_ValueValuePropertyId => {
                 const bstr = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
@@ -615,6 +620,29 @@ test "TerminalProvider ValueValueProperty returns non-null BSTR" {
     try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(value.value.bstr));
     try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), value.value.bstr.?[0..11]);
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+}
+
+test "TerminalProvider HelpTextProperty reports user-facing terminal help" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var value = com.VARIANT.empty();
+    const hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_HelpTextPropertyId, &value);
+    defer com.SysFreeString(value.value.bstr);
+
+    const expected = std.unicode.utf8ToUtf16LeStringLiteral(
+        "Read-only terminal text",
+    );
+
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expectEqual(com.VT_BSTR, value.vt);
+    try std.testing.expect(value.value.bstr != null);
+    try std.testing.expectEqual(@as(u32, expected.len), com.SysStringLen(value.value.bstr));
+    try std.testing.expectEqualSlices(u16, expected, value.value.bstr.?[0..expected.len]);
+    try std.testing.expectEqual(@as(u32, 0), state_data.value_calls);
 }
 
 test "TerminalProvider value allocation failure returns E_OUTOFMEMORY" {

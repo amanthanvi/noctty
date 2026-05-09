@@ -12,6 +12,12 @@ pub const OffsetRange = struct {
     end: usize,
 };
 
+pub const TerminalTextMetadata = struct {
+    byte_len: usize,
+    utf16_len: usize,
+    line_count: usize,
+};
+
 pub const TerminalTextSnapshot = struct {
     alloc: std.mem.Allocator,
     /// UTF-8 plain text with `\n` separators for hard and soft line breaks.
@@ -45,6 +51,18 @@ pub const TerminalTextSnapshot = struct {
         return self.line_start_byte_offsets.len;
     }
 
+    pub fn utf16Len(self: *const TerminalTextSnapshot) usize {
+        return self.utf16_offset_for_byte[self.text.len];
+    }
+
+    pub fn metadata(self: *const TerminalTextSnapshot) TerminalTextMetadata {
+        return .{
+            .byte_len = self.text.len,
+            .utf16_len = self.utf16Len(),
+            .line_count = self.lineCount(),
+        };
+    }
+
     /// Return a half-open UTF-8 byte range for the requested line.
     pub fn lineByteRange(self: *const TerminalTextSnapshot, line_index: usize) ?OffsetRange {
         if (line_index >= self.line_start_byte_offsets.len) return null;
@@ -69,6 +87,25 @@ pub const TerminalTextSnapshot = struct {
         };
     }
 };
+
+/// Return metadata using the same line-start semantics as
+/// `TerminalTextSnapshot`: empty text counts as one line, interior blank lines
+/// are preserved, and a trailing newline terminates the last line instead of
+/// creating a phantom empty line.
+pub fn terminalTextMetadata(text: []const u8) !TerminalTextMetadata {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+
+    var line_count: usize = 1;
+    for (text, 0..) |c, i| {
+        if (c == '\n' and i + 1 < text.len) line_count += 1;
+    }
+
+    return .{
+        .byte_len = text.len,
+        .utf16_len = try std.unicode.calcUtf16LeLen(text),
+        .line_count = line_count,
+    };
+}
 
 pub fn snapshotTerminalPlainText(
     alloc: std.mem.Allocator,
@@ -181,6 +218,15 @@ test "snapshotTerminalPlainText captures terminal rows" {
     try std.testing.expectEqual(
         OffsetRange{ .start = 6, .end = 11 },
         snapshot.lineUtf16Range(1).?,
+    );
+
+    try std.testing.expectEqual(
+        TerminalTextMetadata{
+            .byte_len = 11,
+            .utf16_len = 11,
+            .line_count = 2,
+        },
+        snapshot.metadata(),
     );
 }
 
@@ -317,6 +363,15 @@ test "snapshotTerminalPlainText tracks multibyte text for UIA offsets" {
         OffsetRange{ .start = 0, .end = 4 },
         snapshot.lineUtf16Range(0).?,
     );
+
+    try std.testing.expectEqual(
+        TerminalTextMetadata{
+            .byte_len = 6,
+            .utf16_len = 4,
+            .line_count = 1,
+        },
+        try terminalTextMetadata(snapshot.text),
+    );
 }
 
 test "snapshotTerminalPlainText utf16 map rejects truncated utf8" {
@@ -325,5 +380,10 @@ test "snapshotTerminalPlainText utf16 map rejects truncated utf8" {
     try std.testing.expectError(
         error.TruncatedUtf8,
         buildUtf16OffsetMap(alloc, &.{ 0xF0, 0x9F }),
+    );
+
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        terminalTextMetadata(&.{ 0xF0, 0x9F }),
     );
 }
