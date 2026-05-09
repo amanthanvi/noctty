@@ -760,6 +760,7 @@ const ipc_ack_unsafe_automation_action: u8 = 3;
 const ipc_ack_invalid_automation_target: u8 = 4;
 const ipc_ack_no_automation_target: u8 = 5;
 const ipc_max_data_response_len: u32 = 16 * 1024 * 1024;
+const ipc_max_action_text_len: u32 = 16 * 1024;
 const ipc_max_new_window_argc: u32 = 4096;
 
 const IpcRequestKind = enum(u8) {
@@ -1621,6 +1622,10 @@ fn encodePerformActionIpcRequest(
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
 ) ![]u8 {
+    if (action_text.len == 0 or action_text.len > ipc_max_action_text_len) {
+        return error.InvalidAutomationAction;
+    }
+
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(alloc);
 
@@ -1694,7 +1699,9 @@ fn decodePerformActionIpcPayload(
         else => return error.InvalidIpcRequest,
     };
     const len = readU32(header[9..13]);
-    if (len == 0 or len > ipc_max_data_response_len) return error.InvalidIpcRequest;
+    if (len == 0 or len > ipc_max_action_text_len) {
+        return error.InvalidAutomationAction;
+    }
 
     const action_text = try alloc.alloc(u8, len);
     errdefer alloc.free(action_text);
@@ -2100,7 +2107,13 @@ fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
 }
 
 fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = try decodePerformActionIpcPayload(app.core_app.alloc, pipe);
+    const payload = decodePerformActionIpcPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+        error.InvalidAutomationAction => {
+            try writeIpcAckStatus(pipe, ipc_ack_invalid_automation_action);
+            return;
+        },
+        else => return err,
+    };
     defer app.core_app.alloc.free(payload.action_text);
 
     requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
@@ -2139,6 +2152,10 @@ fn requestAutomationAction(
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
 ) !void {
+    if (action_text.len == 0 or action_text.len > ipc_max_action_text_len) {
+        return error.InvalidAutomationAction;
+    }
+
     var request: CoreApp.Message.AutomationActionRequest = .{
         .target = target,
         .action_text = action_text,
@@ -26960,6 +26977,44 @@ test "automation-action win32 ipc encodes surface action request" {
     try std.testing.expectEqual(@as(u64, 42), readU64(request[6..14]));
     try std.testing.expectEqual(@as(u32, 17), readU32(request[14..18]));
     try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
+}
+
+test "automation-action win32 ipc rejects oversized action before encode" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const action_text = try std.testing.allocator.alloc(u8, ipc_max_action_text_len + 1);
+    defer std.testing.allocator.free(action_text);
+    @memset(action_text, 'x');
+
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        encodePerformActionIpcRequest(std.testing.allocator, .focused, action_text),
+    );
+}
+
+test "automation-action win32 ipc rejects oversized decoded action" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-action-too-large.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var header: [13]u8 = undefined;
+    header[0] = 0;
+    std.mem.writeInt(u64, header[1..9], 0, .little);
+    std.mem.writeInt(u32, header[9..13], ipc_max_action_text_len + 1, .little);
+    try file.writeAll(&header);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        decodePerformActionIpcPayload(std.testing.allocator, file.handle),
+    );
 }
 
 test "automation-action win32 ipc maps specific failure ack" {

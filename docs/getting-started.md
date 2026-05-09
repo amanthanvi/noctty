@@ -169,7 +169,8 @@ Actions use the same names as `keybind` values. `--surface-id` is only valid
 for surface-scoped actions; app-scoped actions such as `quit` always target the
 app. Terminal-input and arbitrary file helper actions such as `text`, `csi`,
 `esc`, `paste_from_clipboard`, `write_screen_file`, and `crash` are rejected by
-the running instance.
+the running instance. New keybinding action variants are not automation-enabled
+until explicitly reviewed and added to the allowlist.
 
 ## 11. Uninstall
 

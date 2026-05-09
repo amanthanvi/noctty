@@ -226,6 +226,8 @@ pub fn focusedSurface(self: *const App) ?*Surface {
 
 test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(isSafeAutomationAction(.new_tab));
+    try std.testing.expect(isSafeAutomationAction(.toggle_fullscreen));
+    try std.testing.expect(isSafeAutomationAction(.quit));
     try std.testing.expect(!isSafeAutomationAction(.{ .text = "hello" }));
     try std.testing.expect(!isSafeAutomationAction(.{ .csi = "0m" }));
     try std.testing.expect(!isSafeAutomationAction(.paste_from_clipboard));
@@ -564,9 +566,12 @@ fn performAutomationAction(
 
     switch (target) {
         .focused => {
-            if (action.scope() == .app) return try self.performAllAction(rt_app, action);
-            const surface = self.focusedSurface() orelse return error.NoAutomationTarget;
-            _ = try surface.performBindingAction(action);
+            if (self.focusedSurface()) |surface| {
+                _ = try surface.performBindingAction(action);
+            } else {
+                if (action.scope() != .app) return error.NoAutomationTarget;
+                try self.performAction(rt_app, action.scoped(.app).?);
+            }
         },
         .surface_id => |id| {
             const surface = self.findSurfaceByID(id) orelse return error.NoAutomationTarget;
@@ -587,18 +592,84 @@ fn automationActionTargetError(
 
 fn isSafeAutomationAction(action: input.Binding.Action) bool {
     return switch (action) {
-        .csi,
-        .esc,
-        .text,
-        .cursor_key,
-        .paste_from_clipboard,
-        .paste_from_selection,
-        .write_scrollback_file,
-        .write_screen_file,
-        .write_selection_file,
-        .crash,
-        => false,
-        else => true,
+        .ignore,
+        .unbind,
+        .search,
+        .navigate_search,
+        .search_selection,
+        .start_search,
+        .end_search,
+        .reset,
+        .copy_to_clipboard,
+        .copy_url_to_clipboard,
+        .copy_title_to_clipboard,
+        .increase_font_size,
+        .decrease_font_size,
+        .reset_font_size,
+        .set_font_size,
+        .prompt_surface_title,
+        .prompt_tab_title,
+        .set_surface_title,
+        .set_tab_title,
+        .clear_screen,
+        .select_all,
+        .scroll_to_top,
+        .scroll_to_bottom,
+        .scroll_to_selection,
+        .scroll_to_row,
+        .scroll_page_up,
+        .scroll_page_down,
+        .scroll_page_fractional,
+        .scroll_page_lines,
+        .adjust_selection,
+        .jump_to_prompt,
+        .new_window,
+        .new_tab,
+        .previous_tab,
+        .next_tab,
+        .last_tab,
+        .goto_tab,
+        .move_tab,
+        .toggle_tab_overview,
+        .new_split,
+        .goto_split,
+        .goto_window,
+        .toggle_split_zoom,
+        .toggle_readonly,
+        .resize_split,
+        .equalize_splits,
+        .reset_window_size,
+        .inspector,
+        .show_gtk_inspector,
+        .show_on_screen_keyboard,
+        .open_config,
+        .reload_config,
+        .close_surface,
+        .close_tab,
+        .close_window,
+        .close_all_windows,
+        .toggle_maximize,
+        .toggle_fullscreen,
+        .toggle_window_decorations,
+        .toggle_window_float_on_top,
+        .toggle_secure_input,
+        .toggle_mouse_reporting,
+        .toggle_command_palette,
+        .toggle_quick_terminal,
+        .toggle_visibility,
+        .toggle_background_opacity,
+        .check_for_updates,
+        .undo,
+        .redo,
+        .end_key_sequence,
+        .activate_key_table,
+        .activate_key_table_once,
+        .deactivate_key_table,
+        .deactivate_all_key_tables,
+        .quit,
+        => true,
+
+        else => false,
     };
 }
 

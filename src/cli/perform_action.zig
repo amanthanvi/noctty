@@ -45,7 +45,9 @@ pub const Options = struct {
 ///
 /// To keep this automation surface bounded, terminal-input and arbitrary file
 /// helper actions such as `text`, `csi`, `esc`, `paste_from_clipboard`,
-/// `write_screen_file`, and `crash` are rejected by the running instance.
+/// `write_screen_file`, and `crash` are rejected by the running instance. New
+/// action variants are denied until explicitly added to the automation
+/// allowlist.
 pub fn run(alloc: Allocator) !u8 {
     var iter = try args.argsIterator(alloc);
     defer iter.deinit();
@@ -167,6 +169,10 @@ fn runArgsWithPerform(
         },
         error.IPCFailed => {
             try stderr.print("Performing automation action via IPC failed.\n", .{});
+            return 1;
+        },
+        error.InvalidIpcResponse => {
+            try stderr.print("Performing automation action via IPC failed: invalid response from the target instance.\n", .{});
             return 1;
         },
         else => return err,
@@ -314,6 +320,43 @@ test "automation-action cli rejects app action with surface id before ipc" {
     try testing.expectEqual(@as(u8, 1), exit_code);
     try testing.expectEqualStrings(
         "--surface-id is only valid for surface-scoped actions; 'quit' is app-scoped.\n",
+        stderr_buf.written(),
+    );
+}
+
+test "automation-action cli reports invalid ipc response" {
+    const testing = std.testing;
+
+    const Hook = struct {
+        fn perform(
+            _: Allocator,
+            _: apprt.ipc.Target,
+            _: apprt.ipc.AutomationActionTarget,
+            _: []const u8,
+        ) !bool {
+            return error.InvalidIpcResponse;
+        }
+    };
+
+    var iter = try std.process.ArgIteratorGeneral(.{}).init(
+        testing.allocator,
+        "new_tab",
+    );
+    defer iter.deinit();
+
+    var stderr_buf = std.Io.Writer.Allocating.init(testing.allocator);
+    defer stderr_buf.deinit();
+
+    const exit_code = try runArgsWithPerform(
+        testing.allocator,
+        &iter,
+        &stderr_buf.writer,
+        &Hook.perform,
+    );
+
+    try testing.expectEqual(@as(u8, 1), exit_code);
+    try testing.expectEqualStrings(
+        "Performing automation action via IPC failed: invalid response from the target instance.\n",
         stderr_buf.written(),
     );
 }
