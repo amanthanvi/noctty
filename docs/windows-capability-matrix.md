@@ -4,7 +4,7 @@ Maps current official Ghostty docs surfaces to winghostty behavior on
 Windows. Keep this short. Update rows when Windows behavior changes or when
 upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-05-01.
+Last reviewed: 2026-05-09.
 
 ## Status legend
 
@@ -34,6 +34,7 @@ Last reviewed: 2026-05-01.
 | [Shell integration](https://ghostty.org/docs/features/shell-integration) | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`. PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish status, and PSReadLine command metadata when available. `cmd.exe` remains a plain fallback shell without automatic shell integration. |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference) | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`. |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
+| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference) | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
 
 ## No-op Compatibility
