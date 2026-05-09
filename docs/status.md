@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-01, against current fork HEAD.
+Last updated: 2026-05-09, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
@@ -47,6 +47,10 @@ For a row-by-row mapping against official Ghostty docs, see
 - IME for CJK and other composed input (`ImmGetContext`)
 - Drag-and-drop of files into the terminal (`WM_DROPFILES` +
   `DragAcceptFiles`)
+- Window/session shape restore via `window-save-state`: host windows, tabs,
+  splits, selected profiles, working directories, and explicit titles are
+  persisted under `%LOCALAPPDATA%\winghostty\session-state.json`. Terminal
+  contents and child process state are not restored.
 - Windows-convention default keybindings (see
   `src/config/Config.zig` for the full set)
 
@@ -94,7 +98,7 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **Unsigned installer.** Windows SmartScreen warns on first install.
+- **Unsigned installer.** Windows SmartScreen may warn on first install.
   Click *More info* → *Run anyway*. Code signing is a planned packaging
   step; no ETA.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
