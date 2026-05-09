@@ -21,6 +21,7 @@ pub const ValidationError = error{
     InvalidSplitRatio,
     InvalidWindowRect,
     UnreachableNode,
+    TooManySessionLayoutNodes,
 };
 
 pub const ValidateError = ValidationError || Allocator.Error;
@@ -155,6 +156,7 @@ fn validateWindowRect(window: Window) ValidationError!void {
 
 fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize {
     if (layout.nodes.len == 0) return error.EmptyLayout;
+    if (layout.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
 
     const root_index: usize = layout.root;
     if (root_index >= layout.nodes.len) return error.InvalidRootNode;
@@ -416,6 +418,14 @@ test "win32 session state rejects incomplete window geometry" {
     try std.testing.expectError(error.InvalidWindowRect, parseAlloc(std.testing.allocator, raw));
 }
 
+test "win32 session state rejects non-positive window geometry" {
+    const raw =
+        \\{"schema_version":1,"windows":[{"x":10,"y":20,"width":0,"height":720,"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{}}]}}]}]}
+    ;
+
+    try std.testing.expectError(error.InvalidWindowRect, parseAlloc(std.testing.allocator, raw));
+}
+
 test "win32 session state parse rejects unsupported schema version" {
     const raw =
         \\{"schema_version":9,"windows":[]}
@@ -576,6 +586,32 @@ test "win32 session state validates deep split layout without recursion" {
     try validateAlloc(std.testing.allocator, .{
         .windows = &windows,
     });
+}
+
+test "win32 session state rejects layout node count above handle range" {
+    const nodes = try std.testing.allocator.alloc(Node, std.math.maxInt(u16) + 1);
+    defer std.testing.allocator.free(nodes);
+    @memset(nodes, .{ .pane = .{} });
+
+    const tabs = [_]Tab{
+        .{
+            .selected_leaf = 0,
+            .layout = .{
+                .root = 0,
+                .nodes = nodes,
+            },
+        },
+    };
+    const windows = [_]Window{
+        .{
+            .selected_tab = 0,
+            .tabs = &tabs,
+        },
+    };
+
+    try std.testing.expectError(error.TooManySessionLayoutNodes, validateAlloc(std.testing.allocator, .{
+        .windows = &windows,
+    }));
 }
 
 test "win32 session state parse rejects shared-node layout before DFS stack overflow" {

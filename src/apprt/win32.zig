@@ -2514,10 +2514,10 @@ pub const App = struct {
         }
     }
 
-    /// Resolve `%LOCALAPPDATA%\winghostty\palette-mru.txt`. Caller frees
-    /// with `core_app.alloc`. Returns null if `LOCALAPPDATA` is
-    /// unreadable or allocation fails.
-    fn paletteMruPath(self: *const App) ?[]u8 {
+    /// Resolve `%LOCALAPPDATA%\winghostty\<name>`. Caller frees with
+    /// `core_app.alloc`. Returns null if `LOCALAPPDATA` is unreadable
+    /// or allocation fails.
+    fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
         const local = std.process.getEnvVarOwned(
             self.core_app.alloc,
             "LOCALAPPDATA",
@@ -2528,29 +2528,19 @@ pub const App = struct {
             "winghostty",
         }) catch return null;
         defer self.core_app.alloc.free(dir);
-        return std.fs.path.join(self.core_app.alloc, &.{
-            dir,
-            "palette-mru.txt",
-        }) catch null;
+        return std.fs.path.join(self.core_app.alloc, &.{ dir, name }) catch null;
+    }
+
+    /// Resolve `%LOCALAPPDATA%\winghostty\palette-mru.txt`. Caller frees
+    /// with `core_app.alloc`.
+    fn paletteMruPath(self: *const App) ?[]u8 {
+        return self.localAppDataPath("palette-mru.txt");
     }
 
     /// Resolve `%LOCALAPPDATA%\winghostty\session-state.json`. Caller
     /// frees with `core_app.alloc`.
     fn sessionStatePath(self: *const App) ?[]u8 {
-        const local = std.process.getEnvVarOwned(
-            self.core_app.alloc,
-            "LOCALAPPDATA",
-        ) catch return null;
-        defer self.core_app.alloc.free(local);
-        const dir = std.fs.path.join(self.core_app.alloc, &.{
-            local,
-            "winghostty",
-        }) catch return null;
-        defer self.core_app.alloc.free(dir);
-        return std.fs.path.join(self.core_app.alloc, &.{
-            dir,
-            "session-state.json",
-        }) catch null;
+        return self.localAppDataPath("session-state.json");
     }
 
     fn sessionStateEnabled(self: *const App) bool {
@@ -2757,13 +2747,7 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
         defer config.deinit();
 
-        if (pane.profile) |key| {
-            if (host) |existing| {
-                if ((try existing.profileForKey(key))) |profile| {
-                    try applyProfileSurfaceConfig(&config, profile);
-                }
-            }
-        }
+        if (pane.profile) |key| try self.applyRestoredProfileConfig(&config, host, key);
         if (pane.cwd) |cwd| {
             const alloc = config._arena.?.allocator();
             config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
@@ -2788,6 +2772,24 @@ pub const App = struct {
         return surface;
     }
 
+    fn applyRestoredProfileConfig(
+        self: *App,
+        config: *configpkg.Config,
+        host: ?*Host,
+        key: []const u8,
+    ) !void {
+        if (host) |existing| {
+            if ((try existing.profileForKey(key))) |profile| {
+                try applyProfileSurfaceConfig(config, profile);
+            }
+            return;
+        }
+
+        const profiles = try windows_shell.listProfiles(self.core_app.alloc);
+        defer windows_shell.deinitProfiles(self.core_app.alloc, profiles);
+        try applyProfileConfigByKey(config, profiles, key);
+    }
+
     fn applyRestoredWindowPlacement(
         self: *App,
         host: *Host,
@@ -2795,14 +2797,14 @@ pub const App = struct {
     ) !void {
         _ = self;
         const hwnd = host.hwnd orelse return;
-        if (window.x != null) {
+        if (try sessionStateWindowRect(window)) |rect| {
             if (SetWindowPos(
                 hwnd,
                 null,
-                window.x.?,
-                window.y.?,
-                window.width.?,
-                window.height.?,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
         }
@@ -2835,29 +2837,8 @@ pub const App = struct {
         };
         defer self.core_app.alloc.free(encoded);
 
-        if (std.fs.path.dirname(path)) |dir| {
-            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => {
-                    log.warn("win32 session save: mkdir failed path={s} err={}", .{ dir, err });
-                    return;
-                },
-            };
-        }
-
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
-            log.warn("win32 session save: create failed path={s} err={}", .{ path, err });
-            return;
-        };
-        defer file.close();
-        var buf: [4096]u8 = undefined;
-        var writer = file.writer(&buf);
-        writer.interface.writeAll(encoded) catch |err| {
+        writeSessionStateFile(self.core_app.alloc, path, encoded) catch |err| {
             log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
-            return;
-        };
-        writer.interface.flush() catch |err| {
-            log.warn("win32 session save: flush failed path={s} err={}", .{ path, err });
         };
     }
 
@@ -2933,7 +2914,7 @@ pub const App = struct {
         alloc: Allocator,
         tab: *const Tab,
     ) !win32_session_state.LayoutTree {
-        if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.OutOfMemory;
+        if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
         for (tab.tree.nodes, 0..) |node, i| {
             nodes[i] = switch (node) {
@@ -2976,13 +2957,13 @@ pub const App = struct {
         alloc: Allocator,
         layout: win32_session_state.LayoutTree,
         node_surfaces: []const ?*Surface,
-    ) (Allocator.Error || error{InvalidTreeShape})!SplitTreeSurface {
+    ) (Allocator.Error || error{ InvalidTreeShape, TooManySessionLayoutNodes })!SplitTreeSurface {
         if (layout.nodes.len == 0 or layout.nodes.len != node_surfaces.len) {
             return error.InvalidTreeShape;
         }
         if (layout.root >= layout.nodes.len) return error.InvalidTreeShape;
         if (layout.nodes.len > std.math.maxInt(SplitTreeSurface.Node.Handle.Backing)) {
-            return error.OutOfMemory;
+            return error.TooManySessionLayoutNodes;
         }
 
         const invalid_index = std.math.maxInt(usize);
@@ -3049,6 +3030,59 @@ pub const App = struct {
             .nodes = tree_nodes,
             .zoomed = null,
         };
+    }
+
+    fn sessionStateWindowRect(window: win32_session_state.Window) !?RECT {
+        const x = window.x orelse {
+            if (window.y == null and window.width == null and window.height == null) return null;
+            return error.InvalidWindowRect;
+        };
+        const y = window.y orelse return error.InvalidWindowRect;
+        const width = window.width orelse return error.InvalidWindowRect;
+        const height = window.height orelse return error.InvalidWindowRect;
+        if (width <= 0 or height <= 0) return error.InvalidWindowRect;
+        const right = std.math.add(i32, x, width) catch return error.InvalidWindowRect;
+        const bottom = std.math.add(i32, y, height) catch return error.InvalidWindowRect;
+        return .{
+            .left = x,
+            .top = y,
+            .right = right,
+            .bottom = bottom,
+        };
+    }
+
+    fn writeSessionStateFile(alloc: Allocator, path: []const u8, data: []const u8) !void {
+        if (std.fs.path.dirname(path)) |dir| {
+            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+
+        const tmp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{path});
+        defer alloc.free(tmp_path);
+        errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
+
+        {
+            const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
+            defer file.close();
+            var buf: [4096]u8 = undefined;
+            var writer = file.writer(&buf);
+            try writer.interface.writeAll(data);
+            try writer.interface.flush();
+            try file.sync();
+        }
+
+        const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+        defer alloc.free(path_w);
+        const tmp_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, tmp_path);
+        defer alloc.free(tmp_w);
+
+        if (ReplaceFileW(path_w, tmp_w, null, 0, null, null) == 0) {
+            if (MoveFileExW(tmp_w, path_w, MOVEFILE_REPLACE_EXISTING) == 0) {
+                return windows.unexpectedError(windows.kernel32.GetLastError());
+            }
+        }
     }
 
     fn deleteSessionStateFile(path: []const u8) void {
@@ -15057,6 +15091,15 @@ fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u8) ?
         if (std.ascii.eqlIgnoreCase(profile.key, key)) return index;
     }
     return null;
+}
+
+fn applyProfileConfigByKey(
+    config: *configpkg.Config,
+    profiles: []const windows_shell.Profile,
+    key: []const u8,
+) !void {
+    const index = profileIndexByKey(profiles, key) orelse return;
+    try applyProfileSurfaceConfig(config, &profiles[index]);
 }
 
 fn preferredProfileIndex(
@@ -27459,6 +27502,32 @@ test "win32 applyProfileCommandConfig preserves inherited working directory" {
     try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path);
 }
 
+test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var base = try configpkg.Config.default(std.testing.allocator);
+    defer base.deinit();
+    const base_alloc = base._arena.?.allocator();
+    base.command = .{ .shell = try base_alloc.dupeZ(u8, "pwsh.exe") };
+
+    var clone = base.shallowClone(std.testing.allocator);
+    defer clone.deinit();
+
+    var profile: windows_shell.Profile = .{
+        .kind = .cmd,
+        .key = try std.testing.allocator.dupe(u8, "cmd.exe"),
+        .label = try std.testing.allocator.dupe(u8, "Command Prompt"),
+        .command = .{ .shell = try std.testing.allocator.dupeZ(u8, "cmd.exe") },
+    };
+    defer profile.deinit(std.testing.allocator);
+    const profiles = [_]windows_shell.Profile{profile};
+
+    try applyProfileConfigByKey(&clone, &profiles, "cmd.exe");
+
+    try std.testing.expect(clone.command != null);
+    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
+}
+
 test "win32 splitWorkingDirectoryCandidate prefers live cwd over cached wrapper cwd" {
     try std.testing.expectEqualStrings(
         "/home/user/live",
@@ -27656,6 +27725,54 @@ test "win32 session save deletes stale state file for empty snapshot" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json", .{}));
 
     App.deleteSessionStateFile(path);
+}
+
+test "win32 session state window rect requires complete geometry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(?RECT, null), try App.sessionStateWindowRect(.{
+        .selected_tab = 0,
+        .tabs = &.{},
+    }));
+    try std.testing.expectError(error.InvalidWindowRect, App.sessionStateWindowRect(.{
+        .x = 10,
+        .selected_tab = 0,
+        .tabs = &.{},
+    }));
+
+    const rect = (try App.sessionStateWindowRect(.{
+        .x = 10,
+        .y = 20,
+        .width = 300,
+        .height = 200,
+        .selected_tab = 0,
+        .tabs = &.{},
+    })).?;
+    try std.testing.expectEqual(@as(i32, 10), rect.left);
+    try std.testing.expectEqual(@as(i32, 20), rect.top);
+    try std.testing.expectEqual(@as(i32, 310), rect.right);
+    try std.testing.expectEqual(@as(i32, 220), rect.bottom);
+}
+
+test "win32 session state file write replaces through temp file" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "session-state.json",
+        .data = "old",
+    });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    defer std.testing.allocator.free(path);
+
+    try App.writeSessionStateFile(std.testing.allocator, path, "new");
+
+    const contents = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 1024);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("new", contents);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json.tmp", .{}));
 }
 
 test "win32 session restore rebuilds saved split tree shape" {
