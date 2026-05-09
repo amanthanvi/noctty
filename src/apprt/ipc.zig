@@ -96,6 +96,11 @@ pub const AutomationPane = struct {
     focused: bool,
 };
 
+pub const AutomationActionTarget = union(enum) {
+    focused,
+    surface_id: u64,
+};
+
 pub const Action = union(enum) {
     // A GUIDE TO ADDING NEW ACTIONS:
     //

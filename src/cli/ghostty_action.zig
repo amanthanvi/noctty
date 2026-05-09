@@ -60,6 +60,9 @@ pub const Action = enum {
     // List read-only automation state for the running winghostty instance.
     @"list-windows",
 
+    // Forward a safe keybinding action to the running winghostty instance.
+    @"perform-action",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables

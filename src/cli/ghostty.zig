@@ -21,6 +21,7 @@ const show_face = @import("show_face.zig");
 const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
 const list_windows = @import("list_windows.zig");
+const perform_action = @import("perform_action.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -75,6 +76,7 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .boo => try boo.run(alloc),
         .@"new-window" => try new_window.run(alloc),
         .@"list-windows" => try list_windows.run(alloc),
+        .@"perform-action" => try perform_action.run(alloc),
     };
 }
 
@@ -102,6 +104,7 @@ pub fn options(comptime self: Action) type {
             .boo => boo.Options,
             .@"new-window" => new_window.Options,
             .@"list-windows" => list_windows.Options,
+            .@"perform-action" => perform_action.Options,
         };
     }
 }

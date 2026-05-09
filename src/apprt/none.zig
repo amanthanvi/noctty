@@ -23,6 +23,15 @@ pub const App = struct {
         return null;
     }
 
+    pub fn performAutomationAction(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationActionTarget,
+        _: []const u8,
+    ) !bool {
+        return false;
+    }
+
     pub fn buildAutomationWindowListJson(
         _: *App,
         _: Allocator,
