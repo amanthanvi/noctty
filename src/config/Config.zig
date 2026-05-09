@@ -2617,7 +2617,7 @@ keybind: Keybinds = .{},
 ///
 ///  * `mouse` - The screen that the mouse is currently hovered over.
 ///
-///  * `all` - The full virtual desktop spanning all connected screens.
+///  * `all` - The combined work area spanning all connected screens.
 ///
 /// The default value is `main`.
 @"quick-terminal-screen": QuickTerminalScreen = .main,
@@ -9933,6 +9933,7 @@ test "quick-terminal-screen accepts all" {
         "--quick-terminal-screen=all",
     } };
     try cfg.loadIter(alloc, &it);
+    try cfg.finalize();
 
     try testing.expectEqual(QuickTerminalScreen.all, cfg.@"quick-terminal-screen");
 }

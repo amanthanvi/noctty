@@ -14577,8 +14577,14 @@ fn primaryMonitor() ?*anyopaque {
 
 const AllMonitorsSearch = struct {
     found: bool = false,
+    failed: bool = false,
     info: win32_quick_terminal.MonitorInfo = undefined,
 };
+
+fn isVisibleMonitorInfo(info: win32_quick_terminal.MonitorInfo) bool {
+    return info.full_rect.width() > 0 and info.full_rect.height() > 0 and
+        info.work_area.width() > 0 and info.work_area.height() > 0;
+}
 
 fn allMonitorsEnumProc(
     monitor: ?*anyopaque,
@@ -14587,7 +14593,11 @@ fn allMonitorsEnumProc(
     data: LPARAM,
 ) callconv(.winapi) BOOL {
     const search: *AllMonitorsSearch = @ptrFromInt(@as(usize, @bitCast(data)));
-    const info = monitorInfo(monitor) orelse return 1;
+    const info = monitorInfo(monitor) orelse {
+        search.failed = true;
+        return 0;
+    };
+    if (!isVisibleMonitorInfo(info)) return 1;
     if (!search.found) {
         search.info = info;
         search.found = true;
@@ -14606,6 +14616,7 @@ fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
         allMonitorsEnumProc,
         @as(LPARAM, @bitCast(@intFromPtr(&search))),
     ) == 0) return null;
+    if (search.failed) return null;
     if (!search.found) return null;
     return search.info;
 }
