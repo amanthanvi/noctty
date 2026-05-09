@@ -14594,6 +14594,7 @@ fn allMonitorsEnumProc(
 ) callconv(.winapi) BOOL {
     const search: *AllMonitorsSearch = @ptrFromInt(@as(usize, @bitCast(data)));
     const info = monitorInfo(monitor) orelse {
+        log.warn("quick-terminal-screen=all: failed to query monitor info", .{});
         search.failed = true;
         return 0;
     };
