@@ -171,7 +171,10 @@ pub const TaskbarProgress = struct {
                 value.completed,
                 value.total,
             );
-            if (value_hr < 0) return error.SetProgressValueFailed;
+            if (value_hr < 0) {
+                _ = self.taskbar.setProgressState(hwnd, TBPF_NOPROGRESS);
+                return error.SetProgressValueFailed;
+            }
         }
     }
 };
@@ -221,4 +224,91 @@ test "taskbar progress treats missing set progress as indeterminate and clamps o
         ProgressMapping{ .flags = TBPF_NORMAL, .value = .{ .completed = 100, .total = 100 } },
         mapProgressReport(.{ .state = .set, .progress = 255 }),
     );
+}
+
+test "taskbar progress clears visible state when value update fails" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+
+    const Call = union(enum) {
+        state: TBPFLAG,
+        value: ProgressValue,
+    };
+
+    const FakeTaskbar = struct {
+        iface: ITaskbarList3,
+        calls: [4]Call = undefined,
+        call_count: usize = 0,
+
+        const E_FAIL: HRESULT = @bitCast(@as(u32, 0x80004005));
+
+        fn fromRaw(raw: *anyopaque) *@This() {
+            const iface = ITaskbarList3.fromRaw(raw);
+            return @fieldParentPtr("iface", iface);
+        }
+
+        fn queryInterface(_: *anyopaque, _: *const GUID, _: *?*anyopaque) callconv(.winapi) HRESULT {
+            return E_FAIL;
+        }
+
+        fn addRef(_: *anyopaque) callconv(.winapi) u32 {
+            return 1;
+        }
+
+        fn release(_: *anyopaque) callconv(.winapi) u32 {
+            return 1;
+        }
+
+        fn hrInit(_: *anyopaque) callconv(.winapi) HRESULT {
+            return 0;
+        }
+
+        fn tab(_: *anyopaque, _: HWND) callconv(.winapi) HRESULT {
+            return 0;
+        }
+
+        fn markFullscreenWindow(_: *anyopaque, _: HWND, _: BOOL) callconv(.winapi) HRESULT {
+            return 0;
+        }
+
+        fn setProgressValue(raw: *anyopaque, _: HWND, completed: ULONGLONG, total: ULONGLONG) callconv(.winapi) HRESULT {
+            const self = fromRaw(raw);
+            self.calls[self.call_count] = .{ .value = .{ .completed = completed, .total = total } };
+            self.call_count += 1;
+            return E_FAIL;
+        }
+
+        fn setProgressState(raw: *anyopaque, _: HWND, flags: DWORD) callconv(.winapi) HRESULT {
+            const self = fromRaw(raw);
+            self.calls[self.call_count] = .{ .state = @enumFromInt(flags) };
+            self.call_count += 1;
+            return 0;
+        }
+
+        const vtbl: ITaskbarList3Vtbl = .{
+            .QueryInterface = queryInterface,
+            .AddRef = addRef,
+            .Release = release,
+            .HrInit = hrInit,
+            .AddTab = tab,
+            .DeleteTab = tab,
+            .ActivateTab = tab,
+            .SetActiveAlt = tab,
+            .MarkFullscreenWindow = markFullscreenWindow,
+            .SetProgressValue = setProgressValue,
+            .SetProgressState = setProgressState,
+        };
+    };
+
+    var fake = FakeTaskbar{ .iface = .{ .vtbl = &FakeTaskbar.vtbl } };
+    var taskbar = TaskbarProgress{ .taskbar = &fake.iface };
+
+    try std.testing.expectError(
+        error.SetProgressValueFailed,
+        taskbar.apply(@ptrFromInt(1), .{ .state = .set, .progress = 42 }),
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), fake.call_count);
+    try std.testing.expectEqual(TBPF_NORMAL, fake.calls[0].state);
+    try std.testing.expectEqual(ProgressValue{ .completed = 42, .total = 100 }, fake.calls[1].value);
+    try std.testing.expectEqual(TBPF_NOPROGRESS, fake.calls[2].state);
 }
