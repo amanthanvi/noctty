@@ -3021,12 +3021,14 @@ pub const App = struct {
     ) !win32_session_state.SessionState {
         var count: usize = 0;
         for (self.hosts.items) |host| {
+            if (hostContainsQuickTerminal(host)) continue;
             if (host.tabs.items.len > 0) count += 1;
         }
 
         const windows_state = try alloc.alloc(win32_session_state.Window, count);
         var built: usize = 0;
         for (self.hosts.items) |host| {
+            if (hostContainsQuickTerminal(host)) continue;
             if (host.tabs.items.len == 0) continue;
             windows_state[built] = try self.buildSessionWindow(alloc, host);
             built += 1;
@@ -3109,6 +3111,16 @@ pub const App = struct {
             };
         }
         return .{ .root = 0, .nodes = nodes };
+    }
+
+    fn hostContainsQuickTerminal(host: *const Host) bool {
+        for (host.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                if (entry.view.quick_terminal) return true;
+            }
+        }
+        return false;
     }
 
     fn preferredSplitDirection(
@@ -28396,6 +28408,33 @@ test "win32 session save deletes stale state file for empty snapshot" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json", .{}));
 
     App.deleteSessionStateFile(path);
+}
+
+test "win32 session save skips quick terminal hosts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var app: App = undefined;
+    app.hosts = .empty;
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var host: Host = .{
+        .app = &app,
+        .id = 1,
+    };
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var surface: Surface = undefined;
+    surface.quick_terminal = true;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+    try app.hosts.append(std.testing.allocator, &host);
+
+    const state = try app.buildSessionState(std.testing.allocator);
+    defer std.testing.allocator.free(state.windows);
+    try std.testing.expectEqual(@as(usize, 0), state.windows.len);
+    try std.testing.expect(App.hostContainsQuickTerminal(&host));
 }
 
 test "win32 session state window rect requires complete geometry" {
