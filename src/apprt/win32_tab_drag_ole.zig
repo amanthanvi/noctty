@@ -55,6 +55,7 @@ const TYMED_HGLOBAL: DWORD = 1;
 
 // DVASPECT.
 const DVASPECT_CONTENT: DWORD = 1;
+const DVASPECT_THUMBNAIL: DWORD = 2;
 
 // DATADIR.
 const DATADIR_GET: DWORD = 1;
@@ -201,6 +202,7 @@ fn iidEqual(a: *const GUID, b: *const GUID) bool {
 
 fn formatEtcMatches(fmt: *const FORMATETC, cf_id: WORD) bool {
     return fmt.cfFormat == cf_id and
+        fmt.ptd == null and
         fmt.dwAspect == DVASPECT_CONTENT and
         fmt.lindex == -1 and
         fmt.tymed & TYMED_HGLOBAL != 0;
@@ -723,11 +725,21 @@ test "QueryGetData returns S_OK for matching format, DV_E_FORMATETC otherwise" {
     var fmt_bad_aspect = FORMATETC{
         .cfFormat = TEST_CF,
         .ptd = null,
-        .dwAspect = 2,
+        .dwAspect = DVASPECT_THUMBNAIL,
         .lindex = -1,
         .tymed = TYMED_HGLOBAL,
     };
     try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_aspect));
+
+    var target_device: u8 = 0;
+    var fmt_bad_target_device = FORMATETC{
+        .cfFormat = TEST_CF,
+        .ptd = &target_device,
+        .dwAspect = DVASPECT_CONTENT,
+        .lindex = -1,
+        .tymed = TYMED_HGLOBAL,
+    };
+    try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_target_device));
 
     // Indexed requests are unsupported; this object offers exactly one
     // process-local tab metadata blob.
@@ -780,7 +792,7 @@ test "GetData rejects unsupported FORMATETC variants before allocating" {
     var fmt_bad_aspect = FORMATETC{
         .cfFormat = TEST_CF,
         .ptd = null,
-        .dwAspect = 2,
+        .dwAspect = DVASPECT_THUMBNAIL,
         .lindex = -1,
         .tymed = TYMED_HGLOBAL,
     };
@@ -788,6 +800,17 @@ test "GetData rejects unsupported FORMATETC variants before allocating" {
 
     const hr = DataObject.GetData(&dobj.obj, &fmt_bad_aspect, &stg);
     try testing.expectEqual(DV_E_FORMATETC, hr);
+    try testing.expectEqual(@as(DWORD, 0), stg.tymed);
+    try testing.expect(stg.u.raw == null);
+    try testing.expect(stg.pUnkForRelease == null);
+
+    var fmt_bad_lindex = fmt_bad_aspect;
+    fmt_bad_lindex.dwAspect = DVASPECT_CONTENT;
+    fmt_bad_lindex.lindex = 0;
+    stg = undefined;
+
+    const lindex_hr = DataObject.GetData(&dobj.obj, &fmt_bad_lindex, &stg);
+    try testing.expectEqual(DV_E_FORMATETC, lindex_hr);
     try testing.expectEqual(@as(DWORD, 0), stg.tymed);
     try testing.expect(stg.u.raw == null);
     try testing.expect(stg.pUnkForRelease == null);
