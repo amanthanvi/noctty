@@ -123,8 +123,12 @@ auto-update = check
 
 The updater hits GitHub's public releases API at most once every 24 hours,
 opens the release page if a newer stable version is available, and never
-replaces binaries silently. `auto-update = download` currently behaves the
-same as `check`. No telemetry or analytics are sent.
+replaces binaries silently. `auto-update = download` downloads only stable
+Windows installer releases that include `SHA256SUMS.txt` and
+`SHA256SUMS.txt.sig`, verifies the installer SHA-256, requires a valid
+Windows Authenticode signature, and stages the installer under the local
+winghostty state directory. Installing the staged update is still manual. No
+telemetry or analytics are sent.
 
 ## 9. Crash reports
 

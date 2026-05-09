@@ -58,11 +58,11 @@ For a row-by-row mapping against official Ghostty docs, see
 ### Updater
 
 - Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
-- **Notify-only**: never replaces the binary silently
+- **Manual install**: never replaces the binary silently
 - Gated to at most one check every 24 hours
-- `auto-update = download` currently behaves the same as `check` (see
-  the `auto-update` docstring in `src/config/Config.zig`), pending signed
-  background installs
+- `auto-update = download` stages only Windows installer releases that include
+  checksum metadata and pass SHA-256 plus Authenticode verification. Apply is
+  not automatic.
 
 ### Crash reports
 

@@ -3202,8 +3202,9 @@ term: []const u8 = "xterm-ghostty",
 
 /// Control the auto-update functionality of winghostty.
 ///
-/// The Windows runtime currently supports notify-only stable update checks
-/// backed by GitHub Releases.
+/// The Windows runtime supports stable update checks backed by GitHub
+/// Releases. Downloads are staged only after checksum verification and a
+/// valid Windows Authenticode signature check on the installer.
 ///
 /// Valid values are:
 ///
@@ -3212,7 +3213,8 @@ term: []const u8 = "xterm-ghostty",
 ///    available, but do not automatically install the update.
 ///  * `download` - Check for updates, automatically download the update,
 ///    notify the user, but do not automatically install the update.
-///    In v1 of the Windows updater this behaves the same as `check`.
+///    Windows stages only signed, checksum-matching installer releases and
+///    still requires the user to install manually.
 @"auto-update": ?AutoUpdate = null,
 
 /// The release channel to use for auto-updates.
@@ -3231,8 +3233,8 @@ term: []const u8 = "xterm-ghostty",
 ///    beta testing by thousands of people. It is generally stable but
 ///    will likely have more bugs than the stable channel.
 ///
-/// The v1 Windows updater only checks the `stable` channel. `tip` remains a
-/// manual prerelease channel until signed download/install support exists.
+/// The Windows updater only checks the `stable` channel. `tip` remains a
+/// manual prerelease channel.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
 /// This is set by the CLI parser for deinit.
