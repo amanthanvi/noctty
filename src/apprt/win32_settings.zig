@@ -21,6 +21,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
+const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -187,10 +188,8 @@ const AppNotificationField = enum { clipboard, config };
 
 fn keybindingsHelpText() []const u8 {
     return "Useful commands:\n" ++
-        "  winghostty +list-keybinds --default\n" ++
-        "  winghostty +list-keybinds --docs\n" ++
-        "  winghostty +list-actions --docs\n" ++
-        "  winghostty +explain-config --keybind=<action>\n\n" ++
+        cli_help.keybinding_discovery_hint ++
+        "\n" ++
         "Config syntax:\n" ++
         "  keybind = ctrl+shift+c=copy_to_clipboard\n" ++
         "  keybind = ctrl+a>n=new_window\n" ++
@@ -1839,6 +1838,7 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
 const DT_LEFT: UINT = 0x0;
 const DT_WORDBREAK: UINT = 0x10;
 const DT_TOP: UINT = 0x0;
+const DT_CALCRECT: UINT = 0x400;
 
 fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     var ps: PAINTSTRUCT = undefined;
@@ -1978,9 +1978,11 @@ fn drawLabel(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) voi
 }
 
 fn drawHelpBlock(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) void {
-    var buf: [512]u16 = undefined;
+    var buf: [1024]u16 = undefined;
     const w = utf8ToW(&buf, text);
-    var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y + 220 };
+    const flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX;
+    var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y };
+    _ = DrawTextW(hdc, w, -1, &rect, flags | DT_CALCRECT);
     _ = DrawTextW(hdc, w, -1, &rect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
