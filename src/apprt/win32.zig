@@ -5132,6 +5132,19 @@ pub const App = struct {
             return;
         }
 
+        const host = getHost(hwnd) orelse {
+            _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                end.left,
+                end.top,
+                end.right - end.left,
+                end.bottom - end.top,
+                flags,
+            );
+            return;
+        };
+
         _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -5141,29 +5154,28 @@ pub const App = struct {
             start.bottom - start.top,
             flags,
         );
-        if (getHost(hwnd)) |host| {
-            if (host.addTween(
-                0.0,
-                1.0,
-                duration_ms,
-                (win32_theme.ThemeMotion{}).easing_decelerate,
-            )) |id| {
-                host.quick_terminal_animation = .{
-                    .id = id,
-                    .start = start,
-                    .end = end,
-                };
-            } else {
-                _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    end.left,
-                    end.top,
-                    end.right - end.left,
-                    end.bottom - end.top,
-                    flags,
-                );
-            }
+        if (host.addTween(
+            0.0,
+            1.0,
+            duration_ms,
+            (win32_theme.ThemeMotion{}).easing_decelerate,
+        )) |id| {
+            host.quick_terminal_animation = .{
+                .id = id,
+                .start = start,
+                .end = end,
+            };
+        } else {
+            host.quick_terminal_animation = null;
+            _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                end.left,
+                end.top,
+                end.right - end.left,
+                end.bottom - end.top,
+                flags,
+            );
         }
     }
 
@@ -7003,6 +7015,7 @@ const Host = struct {
 
     fn tickTweens(self: *Host) void {
         const now = GetTickCount64();
+        var quick_terminal_finished = false;
         if (self.quick_terminal_animation) |anim| {
             if (self.tween_sched.value(anim.id, now)) |value| {
                 const rect = win32_quick_terminal.lerpRect(anim.start, anim.end, value);
@@ -7017,11 +7030,14 @@ const Host = struct {
                         SWP_NOACTIVATE,
                     );
                 }
+                quick_terminal_finished = value >= 1.0;
+            } else {
+                quick_terminal_finished = true;
             }
         }
         const still_alive = self.tween_sched.tick(now);
-        if (self.quick_terminal_animation) |anim| {
-            if (self.tween_sched.value(anim.id, now) == null) {
+        if (quick_terminal_finished) {
+            if (self.quick_terminal_animation) |anim| {
                 if (self.hwnd) |hwnd| {
                     _ = SetWindowPos(
                         hwnd,
