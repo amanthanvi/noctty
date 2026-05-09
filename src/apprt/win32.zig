@@ -388,6 +388,8 @@ const SW_RESTORE = 9;
 const SW_MAXIMIZE = 3;
 const SW_HIDE = 0;
 const WM_APP = 0x8000;
+const WM_ACTIVATE = 0x0006;
+const WA_INACTIVE = 0;
 const WM_COMMAND = 0x0111;
 const WM_CAPTURECHANGED = 0x0215;
 const WM_CLOSE = 0x0010;
@@ -491,6 +493,7 @@ const RDW_UPDATENOW: UINT = 0x0100;
 const RDW_FRAME: UINT = 0x0400;
 const MONITOR_DEFAULTTONEAREST = 0x00000002;
 const MONITOR_DEFAULTTOPRIMARY = 0x00000001;
+const MONITORINFOF_PRIMARY = 0x00000001;
 const COLOR_WINDOW = 5;
 const CF_UNICODETEXT = 13;
 /// CF_HTML: registered clipboard format name is the literal string
@@ -928,6 +931,7 @@ extern "user32" fn IsWindowVisible(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsZoomed(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: u32) callconv(.winapi) ?*anyopaque;
+extern "user32" fn EnumDisplayMonitors(hdc: HDC, lprcClip: ?*const RECT, lpfnEnum: *const fn (?*anyopaque, HDC, *RECT, LPARAM) callconv(.winapi) BOOL, dwData: LPARAM) callconv(.winapi) BOOL;
 extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
 extern "user32" fn TrackMouseEvent(lpEventTrack: *TRACKMOUSEEVENT) callconv(.winapi) BOOL;
@@ -4923,6 +4927,29 @@ pub const App = struct {
         return null;
     }
 
+    fn quickTerminalSurfaceForHost(self: *App, host: *Host) ?*Surface {
+        for (self.windows.items) |surface| {
+            if (surface.quick_terminal and surface.host == host) return surface;
+        }
+        return null;
+    }
+
+    fn hideQuickTerminalSurface(self: *App, surface: *Surface) void {
+        _ = self;
+        const top_level = surface.windowHwnd() orelse return;
+        if (surface.host) |host| host.quick_terminal_animation = null;
+        surface.setVisible(false);
+        _ = ShowWindow(top_level, SW_HIDE);
+    }
+
+    fn quickTerminalFocusPolicy(self: *App) win32_quick_terminal.FocusPolicy {
+        return win32_quick_terminal.focusPolicy(switch (self.config.@"quick-terminal-keyboard-interactivity") {
+            .@"on-demand" => .on_demand,
+            .exclusive => .always,
+            .none => .never,
+        });
+    }
+
     fn toggleQuickTerminal(self: *App) !void {
         // `quick-terminal-keyboard-interactivity`:
         //   * on-demand → show + focus (our `.present()` path)
@@ -4934,10 +4961,11 @@ pub const App = struct {
         // The snapshot + branch below centralises the focus-or-not
         // decision so both the reuse path and the create path honour
         // the config.
-        const want_focus = switch (self.config.@"quick-terminal-keyboard-interactivity") {
-            .@"on-demand", .exclusive => true,
-            .none => false,
-        };
+        const focus_policy = self.quickTerminalFocusPolicy();
+        const want_focus = focus_policy.activate_window;
+        if (focus_policy.diagnostic == .exclusive_keyboard_grab_unsupported) {
+            std.log.warn("quick-terminal-keyboard-interactivity=exclusive maps to focused input on Win32; global keyboard capture is unsupported", .{});
+        }
 
         if (self.quickTerminalSurface()) |surface| {
             // The quick terminal is a child surface inside a real
@@ -4950,21 +4978,10 @@ pub const App = struct {
             const top_level = surface.windowHwnd() orelse return;
             const visible = IsWindowVisible(top_level) != 0;
             if (visible) {
-                // Raw `ShowWindow(SW_HIDE)` on the top-level HWND
-                // is not enough — the child Surface still tracks
-                // `window_visible = true` and keeps the renderer
-                // thread waking, and `core_surface.occlusionCallback`
-                // never fires. Per AGENTS.md 2026-04-14, that can
-                // crash the WGL/NVIDIA present path. Route through
-                // `setVisible` which: updates `window_visible`,
-                // hides via `applyChildVisibility`, and calls
-                // `occlusionCallback(false)`. The outer top-level
-                // HWND is separately hidden below.
-                surface.setVisible(false);
-                _ = ShowWindow(top_level, SW_HIDE);
+                self.hideQuickTerminalSurface(surface);
             } else {
                 self.windows_hidden = false;
-                self.applyQuickTerminalGeometry(top_level) catch |err| {
+                self.applyQuickTerminalGeometry(top_level, true) catch |err| {
                     std.log.warn("QT geometry failed err={}", .{err});
                 };
                 _ = ShowWindow(
@@ -4998,7 +5015,7 @@ pub const App = struct {
         });
         try surface.setFloatWindow(.on);
         if (surface.windowHwnd()) |top_level| {
-            self.applyQuickTerminalGeometry(top_level) catch |err| {
+            self.applyQuickTerminalGeometry(top_level, true) catch |err| {
                 std.log.warn("QT geometry failed err={}", .{err});
             };
         }
@@ -5008,8 +5025,8 @@ pub const App = struct {
     /// Resolve the 7 `quick-terminal-*` config fields into a concrete
     /// end rect via `win32_quick_terminal` and apply it immediately
     /// with `SetWindowPos`.
-    fn applyQuickTerminalGeometry(self: *App, hwnd: HWND) !void {
-        const qt_cfg = win32_quick_terminal.QuickTerminalConfig{
+    fn applyQuickTerminalGeometry(self: *App, hwnd: HWND, animate: bool) !void {
+        var qt_cfg = win32_quick_terminal.QuickTerminalConfig{
             .position = switch (self.config.@"quick-terminal-position") {
                 .top => .top,
                 .bottom => .bottom,
@@ -5017,8 +5034,6 @@ pub const App = struct {
                 .right => .right,
                 .center => .center,
             },
-            .size = sizeFromConfig(self.config.@"quick-terminal-size"),
-            .size_secondary = sizeSecondaryFromConfig(self.config.@"quick-terminal-size"),
             .screen = switch (self.config.@"quick-terminal-screen") {
                 .main => .main,
                 // `mouse` config value → our module's `.focused` semantic:
@@ -5043,14 +5058,8 @@ pub const App = struct {
 
         // Resolve monitor per the config's documented semantic:
         //   * `.main`   → the OS PRIMARY monitor, regardless of
-        //                 where this window last was. Uses
-        //                 `MonitorFromPoint({0,0}, MONITOR_DEFAULTTOPRIMARY)`;
-        //                 the primary monitor's work-area always
-        //                 contains origin. `MonitorFromWindow(hwnd)`
-        //                 would return the window's current
-        //                 monitor, which re-selects whatever
-        //                 display the QT last landed on — wrong
-        //                 semantic.
+        //                 where this window last was or where the
+        //                 virtual-desktop origin lives.
         //   * `.focused` (config's `mouse`) → the monitor under
         //                 the cursor via `GetCursorPos` +
         //                 `MonitorFromPoint(MONITOR_DEFAULTTONEAREST)`.
@@ -5066,7 +5075,7 @@ pub const App = struct {
                 break :blk MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) orelse
                     return error.MonitorLookupFailed;
             },
-            .main => MonitorFromPoint(.{ .x = 0, .y = 0 }, MONITOR_DEFAULTTOPRIMARY) orelse
+            .main => primaryMonitor() orelse
                 return error.MonitorLookupFailed,
             .all => MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
                 return error.MonitorLookupFailed,
@@ -5093,17 +5102,69 @@ pub const App = struct {
                 .bottom = info.rcMonitor.bottom,
             },
         };
+        const dims: configpkg.Config.QuickTerminalSize.Dimensions = .{
+            .width = @intCast(@max(1, mi.work_area.width())),
+            .height = @intCast(@max(1, mi.work_area.height())),
+        };
+        const resolved_size = quickTerminalSizeForGeometry(
+            self.config.@"quick-terminal-size",
+            self.config.@"quick-terminal-position",
+            dims,
+        );
+        qt_cfg.size = resolved_size.primary;
+        qt_cfg.size_secondary = resolved_size.secondary;
 
         const end = win32_quick_terminal.computeEndRect(qt_cfg, mi);
+        const start = win32_quick_terminal.computeStartRect(qt_cfg, mi);
+        const duration_ms = win32_quick_terminal.animationDurationMs(qt_cfg.animation_duration_s);
+        const flags = SWP_NOACTIVATE;
+        if (!animate or duration_ms == 0 or rectEqual(start, end)) {
+            if (getHost(hwnd)) |host| host.quick_terminal_animation = null;
+            _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                end.left,
+                end.top,
+                end.right - end.left,
+                end.bottom - end.top,
+                flags,
+            );
+            return;
+        }
+
         _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
-            end.left,
-            end.top,
-            end.right - end.left,
-            end.bottom - end.top,
-            SWP_NOACTIVATE,
+            start.left,
+            start.top,
+            start.right - start.left,
+            start.bottom - start.top,
+            flags,
         );
+        if (getHost(hwnd)) |host| {
+            if (host.addTween(
+                0.0,
+                1.0,
+                duration_ms,
+                (win32_theme.ThemeMotion{}).easing_decelerate,
+            )) |id| {
+                host.quick_terminal_animation = .{
+                    .id = id,
+                    .start = start,
+                    .end = end,
+                };
+            } else {
+                _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    end.left,
+                    end.top,
+                    end.right - end.left,
+                    end.bottom - end.top,
+                    flags,
+                );
+            }
+        }
     }
 
     fn showOnScreenKeyboard(self: *App) !void {
@@ -6273,6 +6334,12 @@ const ChromeRepaintMask = packed struct(u8) {
     }
 };
 
+const QuickTerminalAnimation = struct {
+    id: win32_tween.TweenId,
+    start: RECT,
+    end: RECT,
+};
+
 const Host = struct {
     app: *App,
     id: u32,
@@ -6428,6 +6495,7 @@ const Host = struct {
     // Single SetTimer-driven tween scheduler; see Tween scheduler block
     // in the method section. Matches Win32's main-thread-paint model.
     tween_sched: win32_tween.Scheduler = .{},
+    quick_terminal_animation: ?QuickTerminalAnimation = null,
     tween_timer_active: bool = false,
     search_timer_active: bool = false,
     scrollbar_timer_active: bool = false,
@@ -6935,7 +7003,39 @@ const Host = struct {
 
     fn tickTweens(self: *Host) void {
         const now = GetTickCount64();
+        if (self.quick_terminal_animation) |anim| {
+            if (self.tween_sched.value(anim.id, now)) |value| {
+                const rect = win32_quick_terminal.lerpRect(anim.start, anim.end, value);
+                if (self.hwnd) |hwnd| {
+                    _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOACTIVATE,
+                    );
+                }
+            }
+        }
         const still_alive = self.tween_sched.tick(now);
+        if (self.quick_terminal_animation) |anim| {
+            if (self.tween_sched.value(anim.id, now) == null) {
+                if (self.hwnd) |hwnd| {
+                    _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        anim.end.left,
+                        anim.end.top,
+                        anim.end.right - anim.end.left,
+                        anim.end.bottom - anim.end.top,
+                        SWP_NOACTIVATE,
+                    );
+                }
+                self.quick_terminal_animation = null;
+            }
+        }
         // Current host-level tweens only animate tab-strip chrome
         // (underline slide + close-button fade), so invalidating the
         // full host every 16 ms is avoidable overpaint.
@@ -13567,20 +13667,35 @@ fn surfaceDropPayloadCallback(ctx: *anyopaque, payload: []const u8) void {
     };
 }
 
-/// Translate the core's `QuickTerminalSize` (primary + secondary,
-/// each optional, percent or pixels) into our geometry-module's
-/// single-dimension `SizePercent`. Picks the primary axis value;
-/// secondary defaults fall to 25% when unset. If primary is unset,
-/// defaults to 25% — matches the old hard-coded behaviour while
-/// the geometry module awaits an expanded two-axis API.
-fn sizeFromConfig(qts: configpkg.Config.QuickTerminalSize) win32_quick_terminal.SizePercent {
-    const primary = qts.primary orelse return .{ .percent = 25 };
-    return sizeToGeometry(primary);
-}
+const QuickTerminalGeometrySize = struct {
+    primary: win32_quick_terminal.SizePercent,
+    secondary: ?win32_quick_terminal.SizePercent,
+};
 
-fn sizeSecondaryFromConfig(qts: configpkg.Config.QuickTerminalSize) ?win32_quick_terminal.SizePercent {
-    const secondary = qts.secondary orelse return null;
-    return sizeToGeometry(secondary);
+fn quickTerminalSizeForGeometry(
+    qts: configpkg.Config.QuickTerminalSize,
+    position: configpkg.Config.QuickTerminalPosition,
+    dims: configpkg.Config.QuickTerminalSize.Dimensions,
+) QuickTerminalGeometrySize {
+    if (position == .center and dims.width < dims.height) {
+        return .{
+            .primary = if (qts.secondary) |value| sizeToGeometry(value) else .{ .pixels = 400 },
+            .secondary = if (qts.primary) |value| sizeToGeometry(value) else .{ .pixels = 800 },
+        };
+    }
+
+    return .{
+        .primary = if (qts.primary) |value|
+            sizeToGeometry(value)
+        else
+            .{ .pixels = if (position == .center) 800 else 400 },
+        .secondary = if (qts.secondary) |value|
+            sizeToGeometry(value)
+        else if (position == .center)
+            .{ .pixels = 400 }
+        else
+            null,
+    };
 }
 
 fn sizeToGeometry(sz: configpkg.Config.QuickTerminalSize.Size) win32_quick_terminal.SizePercent {
@@ -13588,6 +13703,47 @@ fn sizeToGeometry(sz: configpkg.Config.QuickTerminalSize.Size) win32_quick_termi
         .percentage => |v| .{ .percent = v },
         .pixels => |v| .{ .pixels = v },
     };
+}
+
+fn rectEqual(a: RECT, b: RECT) bool {
+    return a.left == b.left and
+        a.top == b.top and
+        a.right == b.right and
+        a.bottom == b.bottom;
+}
+
+const PrimaryMonitorSearch = struct {
+    found: ?*anyopaque = null,
+};
+
+fn primaryMonitorEnumProc(
+    monitor: ?*anyopaque,
+    _: HDC,
+    _: *RECT,
+    data: LPARAM,
+) callconv(.winapi) BOOL {
+    const search: *PrimaryMonitorSearch = @ptrFromInt(@as(usize, @bitCast(data)));
+    var info: MONITORINFO = .{
+        .cbSize = @sizeOf(MONITORINFO),
+        .rcMonitor = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        .dwFlags = 0,
+    };
+    if (GetMonitorInfoW(monitor, &info) == 0) return 1;
+    if ((info.dwFlags & MONITORINFOF_PRIMARY) == 0) return 1;
+    search.found = monitor;
+    return 0;
+}
+
+fn primaryMonitor() ?*anyopaque {
+    var search: PrimaryMonitorSearch = .{};
+    _ = EnumDisplayMonitors(
+        null,
+        null,
+        primaryMonitorEnumProc,
+        @as(LPARAM, @bitCast(@intFromPtr(&search))),
+    );
+    return search.found orelse MonitorFromPoint(.{ .x = 0, .y = 0 }, MONITOR_DEFAULTTOPRIMARY);
 }
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
@@ -16824,6 +16980,18 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         WM_WINHOSTTY_HOST_NEW_TAB => {
             if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
             return 0;
+        },
+        WM_ACTIVATE => {
+            if ((wParam & 0xFFFF) == WA_INACTIVE) {
+                if (host) |v| {
+                    if (v.app.config.@"quick-terminal-autohide") {
+                        if (v.app.quickTerminalSurfaceForHost(v)) |surface| {
+                            v.app.hideQuickTerminalSurface(surface);
+                        }
+                    }
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
         // animation is active; stops as soon as the scheduler empties.
@@ -29998,6 +30166,47 @@ test "win32 titlebar visual helper returns native idle hover and high contrast s
     const hc_close = titlebarButtonVisual(&theme, .close, theme.chrome_bg, 1.0, false, true);
     try std.testing.expectEqual(theme.button_active_bg, hc_close.bg.?);
     try std.testing.expectEqual(theme.button_active_fg, hc_close.glyph);
+}
+
+test "win32 quick terminal size adapter preserves primary and secondary axes" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const size: configpkg.Config.QuickTerminalSize = .{
+        .primary = .{ .percentage = 50 },
+        .secondary = .{ .pixels = 640 },
+    };
+    const resolved = quickTerminalSizeForGeometry(
+        size,
+        .center,
+        .{ .width = 1920, .height = 1080 },
+    );
+    try std.testing.expectEqual(
+        win32_quick_terminal.SizePercent{ .percent = 50 },
+        resolved.primary,
+    );
+    try std.testing.expectEqual(
+        win32_quick_terminal.SizePercent{ .pixels = 640 },
+        resolved.secondary.?,
+    );
+}
+
+test "win32 quick terminal default size matches core fixed-pixel defaults" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const top = quickTerminalSizeForGeometry(.{}, .top, .{ .width = 1920, .height = 1080 });
+    try std.testing.expectEqual(
+        win32_quick_terminal.SizePercent{ .pixels = 400 },
+        top.primary,
+    );
+    try std.testing.expectEqual(@as(?win32_quick_terminal.SizePercent, null), top.secondary);
+
+    const landscape = quickTerminalSizeForGeometry(.{}, .center, .{ .width = 1920, .height = 1080 });
+    try std.testing.expectEqual(win32_quick_terminal.SizePercent{ .pixels = 800 }, landscape.primary);
+    try std.testing.expectEqual(win32_quick_terminal.SizePercent{ .pixels = 400 }, landscape.secondary.?);
+
+    const portrait = quickTerminalSizeForGeometry(.{}, .center, .{ .width = 1080, .height = 1920 });
+    try std.testing.expectEqual(win32_quick_terminal.SizePercent{ .pixels = 400 }, portrait.primary);
+    try std.testing.expectEqual(win32_quick_terminal.SizePercent{ .pixels = 800 }, portrait.secondary.?);
 }
 
 test "win32 desiredMoveIndex wraps tab order" {
