@@ -2205,16 +2205,25 @@ const UpdateNotice = struct {
     version_text: ?[]u8 = null,
     release_url: ?[]u8 = null,
     message_text: ?[]u8 = null,
+    staged: bool = false,
 
-    fn init(alloc: Allocator, version_text: []const u8, release_url: []const u8) !UpdateNotice {
+    fn init(alloc: Allocator, version_text: []const u8, release_url: []const u8, staged: bool) !UpdateNotice {
         return .{
             .version_text = try alloc.dupe(u8, version_text),
             .release_url = try alloc.dupe(u8, release_url),
-            .message_text = try std.fmt.allocPrint(
-                alloc,
-                "Update available: winghostty {s} is ready on GitHub Releases.",
-                .{version_text},
-            ),
+            .message_text = if (staged)
+                try std.fmt.allocPrint(
+                    alloc,
+                    "Update downloaded and verified: winghostty {s} is staged. Open Release to install.",
+                    .{version_text},
+                )
+            else
+                try std.fmt.allocPrint(
+                    alloc,
+                    "Update available: winghostty {s} is ready on GitHub Releases.",
+                    .{version_text},
+                ),
+            .staged = staged,
         };
     }
 
@@ -2235,6 +2244,7 @@ const UpdateCheckRequest = struct {
     force: bool,
     manual: bool,
     respect_dismissal: bool,
+    download: bool,
 
     fn deinit(self: *UpdateCheckRequest) void {
         self.alloc.free(self.state_path);
@@ -2247,6 +2257,7 @@ const UpdateCheckCompletion = struct {
     alloc: Allocator,
     release: ?updatepkg.Release = null,
     manual_message: ?[]u8 = null,
+    staged: bool = false,
 
     fn deinit(self: *UpdateCheckCompletion) void {
         if (self.release) |*value| value.deinit(self.alloc);
@@ -3500,6 +3511,7 @@ pub const App = struct {
             .force = opts.force,
             .manual = opts.manual,
             .respect_dismissal = opts.respect_dismissal,
+            .download = self.config.@"auto-update" == .download,
         };
 
         const thread = try std.Thread.spawn(.{}, updateCheckThreadMain, .{request});
@@ -3510,10 +3522,14 @@ pub const App = struct {
         self.update_check_running.store(false, .release);
 
         if (completion.release) |release| {
-            self.setUpdateNotice(release.version_text, release.release_url) catch |err| {
+            self.setUpdateNotice(release.version_text, release.release_url, completion.staged) catch |err| {
                 log.warn("failed to surface update notice err={}", .{err});
             };
-            if (completion.manual_message) |_| {}
+            if (completion.manual_message) |message| {
+                self.showUpdateInfo(message) catch |err| {
+                    log.warn("failed to show updater status message err={}", .{err});
+                };
+            }
             return;
         }
 
@@ -3524,10 +3540,11 @@ pub const App = struct {
         }
     }
 
-    fn setUpdateNotice(self: *App, version_text: []const u8, release_url: []const u8) !void {
+    fn setUpdateNotice(self: *App, version_text: []const u8, release_url: []const u8, staged: bool) !void {
         if (self.update_notice) |*notice| {
             if (ownedBytesEquals(notice.version_text, version_text) and
-                ownedBytesEquals(notice.release_url, release_url))
+                ownedBytesEquals(notice.release_url, release_url) and
+                notice.staged == staged)
             {
                 return;
             }
@@ -3535,7 +3552,7 @@ pub const App = struct {
             self.update_notice = null;
         }
 
-        self.update_notice = try UpdateNotice.init(self.core_app.alloc, version_text, release_url);
+        self.update_notice = try UpdateNotice.init(self.core_app.alloc, version_text, release_url, staged);
         for (self.hosts.items) |host| host.invalidateBannerText();
     }
 
@@ -6585,6 +6602,27 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
 
     switch (result) {
         .update_available => |release| {
+            stage_download: {
+                if (request.download) {
+                    var staged = updatepkg.stageWindowsInstall(alloc, request.state_path, &release) catch |err| {
+                        log.warn("failed to stage verified updater download err={}", .{err});
+                        if (request.manual) {
+                            completion.manual_message = updateStageFailureMessage(alloc, err) catch null;
+                        }
+                        break :stage_download;
+                    };
+                    staged.deinit(alloc);
+                    completion.staged = true;
+                    if (request.manual) {
+                        completion.manual_message = std.fmt.allocPrint(
+                            alloc,
+                            "winghostty {s} was downloaded, verified, and staged.",
+                            .{release.version_text},
+                        ) catch null;
+                    }
+                }
+            }
+
             const version_text = tryOrNull(alloc, release.version_text);
             const release_url = tryOrNull(alloc, release.release_url);
             if (version_text != null and release_url != null) {
@@ -6621,6 +6659,40 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
 
 fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
     return alloc.dupe(u8, text) catch null;
+}
+
+fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
+    const detail = switch (err) {
+        error.WindowsInstallNotEligible => "the release is missing a Windows installer or SHA256SUMS.txt",
+        error.InstallerChecksumMissing => "SHA256SUMS.txt does not include the Windows installer",
+        error.InvalidChecksum => "SHA256SUMS.txt contains an invalid checksum",
+        error.InstallerChecksumMismatch => "the downloaded installer did not match SHA256SUMS.txt",
+        error.InvalidAuthenticodeSignature => "the installer Authenticode signature could not be trusted",
+        error.AuthenticodeRequiresWindows => "Authenticode verification is only available on Windows",
+        error.SignatureVerifierUnavailable => "Windows signature verification is unavailable",
+        error.InvalidStatePath => "the updater state directory could not be resolved",
+        error.InvalidDownloadPath => "the staging download path was invalid",
+        error.UpdateHttpUnauthorized => "GitHub rejected the download request as unauthorized",
+        error.UpdateHttpForbidden => "GitHub blocked the download request",
+        error.UpdateHttpNotFound => "a required release asset was not found",
+        error.UpdateHttpRateLimited => "GitHub rate limited the update download",
+        error.UnexpectedHttpStatus => "GitHub returned an unexpected HTTP status",
+        else => null,
+    };
+
+    if (detail) |text| {
+        return std.fmt.allocPrint(
+            alloc,
+            "Update found, but it could not be verified or staged: {s} ({s}).",
+            .{ text, @errorName(err) },
+        );
+    }
+
+    return std.fmt.allocPrint(
+        alloc,
+        "Update found, but it could not be verified or staged ({s}).",
+        .{@errorName(err)},
+    );
 }
 
 fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckCompletion) void {

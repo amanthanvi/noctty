@@ -33,14 +33,14 @@ Last reviewed: 2026-05-01.
 | --- | --- |
 | [Shell integration](https://ghostty.org/docs/features/shell-integration) | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`, which upstream docs do not cover. |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference) | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`. |
-| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and notify-only update prompts backed by GitHub Releases. Background download/install behavior is not implemented. |
+| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
 
 ## No-op Compatibility
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Accepted on Windows, but today behaves the same as `auto-update = check`; no background download or install path runs. |
+| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
 
 ## Windows-Specific
 
