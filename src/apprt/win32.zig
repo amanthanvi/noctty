@@ -27792,6 +27792,32 @@ test "win32 sharedHostWindowFrameStateEquals ignores non-frame host state" {
     try std.testing.expect(!sharedHostWindowFrameStateEquals(&a, &b));
 }
 
+test "win32 shared host topmost and opacity equality track separate window state" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var a: Surface = undefined;
+    a.topmost = false;
+    a.background_opacity_default = 0.5;
+    a.background_opacity_force_opaque = false;
+
+    var b: Surface = a;
+    try std.testing.expect(sharedHostWindowTopmostEquals(&a, &b));
+    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
+
+    b.topmost = true;
+    try std.testing.expect(!sharedHostWindowTopmostEquals(&a, &b));
+    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
+
+    b.topmost = a.topmost;
+    b.background_opacity_force_opaque = true;
+    try std.testing.expect(sharedHostWindowTopmostEquals(&a, &b));
+    try std.testing.expect(!sharedHostWindowOpacityEquals(&a, &b));
+
+    b.background_opacity_force_opaque = false;
+    b.background_opacity_default = 0.5001;
+    try std.testing.expect(sharedHostWindowOpacityEquals(&a, &b));
+}
+
 test "win32 hostPresentShowCommand skips redundant maximize for visible hosts" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
