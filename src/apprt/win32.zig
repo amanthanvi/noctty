@@ -5810,13 +5810,9 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             stage_download: {
                 if (request.download) {
                     var staged = updatepkg.stageWindowsInstall(alloc, request.state_path, &release) catch |err| {
-                        log.warn("failed to stage signed updater download err={}", .{err});
+                        log.warn("failed to stage verified updater download err={}", .{err});
                         if (request.manual) {
-                            completion.manual_message = std.fmt.allocPrint(
-                                alloc,
-                                "Update found, but the signed download could not be staged ({s}).",
-                                .{@errorName(err)},
-                            ) catch null;
+                            completion.manual_message = updateStageFailureMessage(alloc, err) catch null;
                         }
                         break :stage_download;
                     };
@@ -5868,6 +5864,40 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
 
 fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
     return alloc.dupe(u8, text) catch null;
+}
+
+fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
+    const detail = switch (err) {
+        error.WindowsInstallNotEligible => "the release is missing a Windows installer or SHA256SUMS.txt",
+        error.InstallerChecksumMissing => "SHA256SUMS.txt does not include the Windows installer",
+        error.InvalidChecksum => "SHA256SUMS.txt contains an invalid checksum",
+        error.InstallerChecksumMismatch => "the downloaded installer did not match SHA256SUMS.txt",
+        error.InvalidAuthenticodeSignature => "the installer Authenticode signature could not be trusted",
+        error.AuthenticodeRequiresWindows => "Authenticode verification is only available on Windows",
+        error.SignatureVerifierUnavailable => "Windows signature verification is unavailable",
+        error.InvalidStatePath => "the updater state directory could not be resolved",
+        error.InvalidDownloadPath => "the staging download path was invalid",
+        error.UpdateHttpUnauthorized => "GitHub rejected the download request as unauthorized",
+        error.UpdateHttpForbidden => "GitHub blocked the download request",
+        error.UpdateHttpNotFound => "a required release asset was not found",
+        error.UpdateHttpRateLimited => "GitHub rate limited the update download",
+        error.UnexpectedHttpStatus => "GitHub returned an unexpected HTTP status",
+        else => null,
+    };
+
+    if (detail) |text| {
+        return std.fmt.allocPrint(
+            alloc,
+            "Update found, but it could not be verified or staged: {s} ({s}).",
+            .{ text, @errorName(err) },
+        );
+    }
+
+    return std.fmt.allocPrint(
+        alloc,
+        "Update found, but it could not be verified or staged ({s}).",
+        .{@errorName(err)},
+    );
 }
 
 fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckCompletion) void {

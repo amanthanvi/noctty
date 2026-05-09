@@ -40,7 +40,7 @@ Last reviewed: 2026-05-01.
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, `SHA256SUMS.txt.sig`, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
+| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
 
 ## Windows-Specific
 

@@ -12,7 +12,6 @@ pub const repo_name = "winghostty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
 pub const windows_checksums_asset_name = "SHA256SUMS.txt";
-pub const windows_checksums_signature_asset_name = "SHA256SUMS.txt.sig";
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
 
@@ -52,13 +51,11 @@ pub const WindowsInstallCandidate = struct {
     installer_name: []u8,
     installer_url: []u8,
     checksums_url: []u8,
-    checksums_signature_url: []u8,
 
     pub fn deinit(self: *WindowsInstallCandidate, alloc: Allocator) void {
         alloc.free(self.installer_name);
         alloc.free(self.installer_url);
         alloc.free(self.checksums_url);
-        alloc.free(self.checksums_signature_url);
         self.* = undefined;
     }
 };
@@ -286,11 +283,8 @@ pub fn stageWindowsInstall(
     errdefer alloc.free(installer_path);
     const checksums_path = try std.fs.path.join(alloc, &.{ stage_dir, windows_checksums_asset_name });
     defer alloc.free(checksums_path);
-    const signature_path = try std.fs.path.join(alloc, &.{ stage_dir, windows_checksums_signature_asset_name });
-    defer alloc.free(signature_path);
 
     try downloadUrlToFile(alloc, candidate.checksums_url, checksums_path);
-    try downloadUrlToFile(alloc, candidate.checksums_signature_url, signature_path);
     try downloadUrlToFile(alloc, candidate.installer_url, installer_path);
 
     const checksums = try std.fs.cwd().readFileAlloc(alloc, checksums_path, 1024 * 1024);
@@ -336,6 +330,9 @@ fn writeOptionalJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
                 '\n' => try writer.writeAll("\\n"),
                 '\r' => try writer.writeAll("\\r"),
                 '\t' => try writer.writeAll("\\t"),
+                0x08 => try writer.writeAll("\\b"),
+                0x0C => try writer.writeAll("\\f"),
+                0x00...0x07, 0x0B, 0x0E...0x1F => try writer.print("\\u{x:0>4}", .{c}),
                 else => try writer.writeByte(c),
             }
         }
@@ -415,10 +412,7 @@ fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.St
         .forbidden => error.UpdateHttpForbidden,
         .not_found => error.UpdateHttpNotFound,
         .too_many_requests => error.UpdateHttpRateLimited,
-        else => switch (status.class()) {
-            .server_error => error.BadGateway,
-            else => error.UnexpectedHttpStatus,
-        },
+        else => error.UnexpectedHttpStatus,
     };
 }
 
@@ -504,7 +498,7 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
         .pPolicyCallbackData = null,
         .pSIPClientData = null,
         .dwUIChoice = WTD_UI_NONE,
-        .fdwRevocationChecks = WTD_REVOKE_NONE,
+        .fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN,
         .dwUnionChoice = WTD_CHOICE_FILE,
         .pFile = &file_info,
         .dwStateAction = WTD_STATEACTION_VERIFY,
@@ -515,17 +509,15 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
         .pSignatureSettings = null,
     };
     defer {
-        if (data.hWVTStateData != null) {
-            data.dwStateAction = WTD_STATEACTION_CLOSE;
-            _ = winVerifyTrust(null, &action, &data);
-        }
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        _ = winVerifyTrust(null, &action, &data);
     }
 
     if (winVerifyTrust(null, &action, &data) != 0) return error.InvalidAuthenticodeSignature;
 }
 
 const WTD_UI_NONE: u32 = 2;
-const WTD_REVOKE_NONE: u32 = 0;
+const WTD_REVOKE_WHOLECHAIN: u32 = 1;
 const WTD_CHOICE_FILE: u32 = 1;
 const WTD_STATEACTION_VERIFY: u32 = 1;
 const WTD_STATEACTION_CLOSE: u32 = 2;
@@ -658,7 +650,6 @@ fn parseWindowsInstallCandidate(
 
     var installer_url: ?[]const u8 = null;
     var checksums_url: ?[]const u8 = null;
-    var checksums_signature_url: ?[]const u8 = null;
 
     for (assets.items) |asset_value| {
         const asset = switch (asset_value) {
@@ -683,12 +674,9 @@ fn parseWindowsInstallCandidate(
             checksums_url = browser_download_url;
             continue;
         }
-        if (std.mem.eql(u8, name, windows_checksums_signature_asset_name)) {
-            checksums_signature_url = browser_download_url;
-        }
     }
 
-    if (installer_url == null or checksums_url == null or checksums_signature_url == null) {
+    if (installer_url == null or checksums_url == null) {
         alloc.free(expected_installer_name);
         return null;
     }
@@ -697,14 +685,11 @@ fn parseWindowsInstallCandidate(
     errdefer alloc.free(owned_installer_url);
     const owned_checksums_url = try alloc.dupe(u8, checksums_url.?);
     errdefer alloc.free(owned_checksums_url);
-    const owned_checksums_signature_url = try alloc.dupe(u8, checksums_signature_url.?);
-    errdefer alloc.free(owned_checksums_signature_url);
 
     return .{
         .installer_name = expected_installer_name,
         .installer_url = owned_installer_url,
         .checksums_url = owned_checksums_url,
-        .checksums_signature_url = owned_checksums_signature_url,
     };
 }
 
@@ -770,6 +755,36 @@ test "state persists staged windows install metadata with escaped path" {
     try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
 }
 
+test "state JSON writer escapes ASCII control characters" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    defer alloc.free(state_path);
+
+    var state: State = .{
+        .last_seen_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_installer_path = try alloc.dupe(u8, "a\x00b\x08c\x0Bd\x0Ce\x1Ff"),
+    };
+    defer state.deinit(alloc);
+
+    try saveState(state_path, &state);
+    const contents = try std.fs.cwd().readFileAlloc(alloc, state_path, 16 * 1024);
+    defer alloc.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\u0000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\u000b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\\u001f") != null);
+
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqualStrings(state.staged_installer_path.?, loaded.staged_installer_path.?);
+}
+
 test "checksum parser accepts sha256 star filename lines" {
     const digest = try parseExpectedSha256(
         \\d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d *winghostty-1.3.100-windows-x64-setup.exe
@@ -812,7 +827,7 @@ test "http status mapping distinguishes update response failures" {
         requireOkHttpStatus("test", "https://example.invalid/rate-limit", .too_many_requests),
     );
     try std.testing.expectError(
-        error.BadGateway,
+        error.UnexpectedHttpStatus,
         requireOkHttpStatus("test", "https://example.invalid/server-error", .service_unavailable),
     );
     try std.testing.expectError(
@@ -830,7 +845,6 @@ test "windows install staging rejects relative state path before download" {
             .installer_name = try alloc.dupe(u8, "winghostty-1.3.100-windows-x64-setup.exe"),
             .installer_url = try alloc.dupe(u8, "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"),
             .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
-            .checksums_signature_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt.sig"),
         },
     };
     defer release.deinit(alloc);
@@ -841,7 +855,7 @@ test "windows install staging rejects relative state path before download" {
     );
 }
 
-test "release parser requires signed checksum metadata for windows install candidate" {
+test "release parser accepts checksum metadata without detached signature" {
     const alloc = std.testing.allocator;
     const body =
         \\{
@@ -863,10 +877,10 @@ test "release parser requires signed checksum metadata for windows install candi
     var release = try parseLatestStableReleaseResponse(alloc, body);
     defer release.deinit(alloc);
 
-    try std.testing.expect(release.windows_install == null);
+    try std.testing.expect(release.windows_install != null);
 }
 
-test "release parser selects windows install candidate when signed checksum metadata is present" {
+test "release parser selects windows install candidate when checksum metadata is present" {
     const alloc = std.testing.allocator;
     const body =
         \\{
@@ -880,10 +894,6 @@ test "release parser selects windows install candidate when signed checksum meta
         \\    {
         \\      "name": "SHA256SUMS.txt",
         \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
-        \\    },
-        \\    {
-        \\      "name": "SHA256SUMS.txt.sig",
-        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt.sig"
         \\    }
         \\  ]
         \\}
@@ -905,10 +915,6 @@ test "release parser selects windows install candidate when signed checksum meta
     try std.testing.expectEqualStrings(
         "https://example.invalid/SHA256SUMS.txt",
         windows_install.checksums_url,
-    );
-    try std.testing.expectEqualStrings(
-        "https://example.invalid/SHA256SUMS.txt.sig",
-        windows_install.checksums_signature_url,
     );
 }
 
@@ -942,10 +948,6 @@ test "release parser accepts long semver tags for windows install candidate" {
         \\    {{
         \\      "name": "SHA256SUMS.txt",
         \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
-        \\    }},
-        \\    {{
-        \\      "name": "SHA256SUMS.txt.sig",
-        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt.sig"
         \\    }}
         \\  ]
         \\}}

@@ -37,8 +37,8 @@ The design intentionally extends current repo behavior instead of replacing it:
 - `src/update/github_releases.zig`
   - Owns update throttling, persisted dismissal state, release discovery, and
     GitHub API parsing.
-  - Already parses a signed Windows install candidate:
-    `setup.exe` + `SHA256SUMS.txt` + `SHA256SUMS.txt.sig`.
+  - Parses a Windows install candidate:
+    `setup.exe` + `SHA256SUMS.txt`.
   - Cached throttled state only preserves `last_seen_version`, so asset-scoped
     metadata is dropped between runs.
 - `src/apprt/win32.zig`
@@ -57,8 +57,7 @@ The design intentionally extends current repo behavior instead of replacing it:
   - Builds both the portable ZIP and the Inno Setup installer.
   - Can Authenticode-sign staged `.exe`/`.dll` artifacts and the final
     installer when secrets are present.
-  - Writes `SHA256SUMS.txt`, but does not currently emit
-    `SHA256SUMS.txt.sig`.
+  - Writes `SHA256SUMS.txt`.
 - `dist/windows/winghostty.iss`
   - Defines the current installer identity, default install root, shortcut
     AUMID wiring, and post-install launch behavior.
@@ -68,7 +67,6 @@ The design intentionally extends current repo behavior instead of replacing it:
     - `winghostty-<version>-windows-x64-portable.zip`
     - `SHA256SUMS.txt`
     - `winghostty-icon.svg`
-  - Does not currently publish `SHA256SUMS.txt.sig`.
 - `docs/getting-started.md`, `docs/status.md`, and
   `docs/windows-capability-matrix.md`
   - All currently describe the updater as notify-only and describe
@@ -141,7 +139,6 @@ For a release to be eligible for `auto-update = download`, it must publish:
 - `winghostty-<version>-windows-x64-setup.exe`
 - `winghostty-<version>-windows-x64-portable.zip`
 - `SHA256SUMS.txt`
-- `SHA256SUMS.txt.sig`
 
 The current filename conventions in `scripts/package-windows.ps1` and
 `src/update/github_releases.zig` stay authoritative.
@@ -151,30 +148,15 @@ The current filename conventions in `scripts/package-windows.ps1` and
 - `winghostty-<version>-windows-x64-setup.exe`
 - `winghostty-<version>-windows-x64-portable.zip`
 
-### Signature format
-
-Use a detached Minisign signature for `SHA256SUMS.txt`:
-
-- Release pipeline signs the raw bytes of `SHA256SUMS.txt`.
-- The Win32 updater embeds the trusted Minisign public key.
-- Verification of the checksum file is the primary authenticity gate for both
-  installer and portable assets.
-
-Rationale:
-
-- The repo already expects a detached `.sig` sidecar.
-- ZIP files do not have a native Windows trust story equivalent to
-  Authenticode.
-- A signed checksum manifest gives one trust anchor for both install modes.
-
 ### Authenticode requirements
 
-Detached checksum signing is necessary but not sufficient for auto-apply.
+The installer trust model is `SHA256SUMS.txt` for release-asset integrity plus
+Windows Authenticode for publisher and signing-chain trust.
 
 - Installer mode requires a valid Authenticode signature on the staged
   `setup.exe`.
 - Portable mode should verify:
-  - ZIP hash against the signed checksum manifest.
+  - ZIP hash against the checksum manifest.
   - Basic extracted-tree shape after unzip.
   - Valid Authenticode signatures on shipped PE files where present
     (`winghostty.exe`, `ghostty-vt.dll`, and any future dedicated update
@@ -188,7 +170,7 @@ allowances are harness-only behavior, not production behavior.
 - Reject versions `<= current_version` for automatic staging/apply.
 - Reject releases whose filename version, tag version, and parsed semantic
   version disagree.
-- If the signed checksum manifest omits the expected asset, treat that release
+- If the checksum manifest omits the expected asset, treat that release
   as ineligible for `download`.
 
 ## Install Mode Detection
@@ -239,7 +221,6 @@ Suggested layout:
   updates\
     1.3.110\
       SHA256SUMS.txt
-      SHA256SUMS.txt.sig
       asset\
         winghostty-1.3.110-windows-x64-setup.exe
         winghostty-1.3.110-windows-x64-portable.zip
@@ -309,7 +290,7 @@ Selection rules:
 
 - Stable channel:
   - prefer the newest semver-greater candidate from `releases/latest`
-  - require checksum file + checksum signature + install-mode-matching asset
+  - require checksum file + install-mode-matching asset
 - Tip channel, future:
   - newest prerelease semver-greater candidate with the same trust contract
 
@@ -317,7 +298,6 @@ Candidate rejection reasons must be explicit in logs:
 
 - missing asset
 - missing checksum line
-- missing checksum signature
 - unsupported channel
 - version not newer
 - install mode unknown
@@ -328,26 +308,23 @@ For `auto-update = download`, verification happens in this order:
 
 1. Resolve release candidate from GitHub API.
 2. Download `SHA256SUMS.txt`.
-3. Download `SHA256SUMS.txt.sig`.
-4. Verify the detached signature against the pinned Minisign public key.
-5. Parse the checksum line for the selected asset.
-6. Download the selected asset to `*.partial` inside the stage dir.
-7. Stream SHA-256 while downloading.
-8. Compare the final hash to the signed checksum line.
-9. Rename `*.partial` -> final asset name only after hash match.
-10. Perform mode-specific verification:
+3. Parse the checksum line for the selected asset.
+4. Download the selected asset to `*.partial` inside the stage dir.
+5. Stream SHA-256 while downloading.
+6. Compare the final hash to the checksum line.
+7. Rename `*.partial` -> final asset name only after hash match.
+8. Perform mode-specific verification:
     - installer mode:
       - verify Authenticode on the staged `setup.exe`
     - portable mode:
       - unzip into `extracted\`
       - verify expected packaged tree shape
       - verify Authenticode on extracted PE files where present
-11. Mark the stage `ready`.
+9. Mark the stage `ready`.
 
 Re-verify immediately before apply:
 
-- Re-hash the staged asset against the saved signed checksum.
-- Re-check detached checksum signature bytes if the sidecar or manifest changed.
+- Re-hash the staged asset against the saved checksum.
 - Re-run Authenticode verification before execute/swap.
 
 This avoids a stale "verified once, trusted forever" assumption.
@@ -553,10 +530,8 @@ On app startup:
 
 Required future changes:
 
-- emit `SHA256SUMS.txt.sig`
 - sign every production PE that will be auto-applied or executed
 - continue writing `SHA256SUMS.txt`
-- fail closed if checksum signing is required but unavailable
 
 ### `dist/windows/winghostty.iss`
 
@@ -571,8 +546,6 @@ Required review points for silent updater compatibility:
 
 Required future changes:
 
-- publish `SHA256SUMS.txt.sig`
-- verify the detached signature before release upload
 - fail the release if any required asset is missing
 - keep publishing both installer and portable assets
 
@@ -580,25 +553,23 @@ Required future changes:
 
 Required future changes:
 
-- include signature asset metadata in generated `metadata.json`
-- keep installer and portable hashes aligned with the signed checksum manifest
+- keep installer and portable hashes aligned with the checksum manifest
 
 ### `scripts/release-preflight.ps1`
 
 Required future changes:
 
-- validate the presence of checksum-signing secrets/config
-- validate that release signing and checksum signing are both configured when
-  `download` mode is intended to be trustworthy in production
+- validate that release signing is configured when `download` mode is intended
+  to be trustworthy in production
 
 ## Security And Threat Model
 
 ### Threats addressed
 
 - GitHub API or release-page tampering in transit
-  - mitigated by TLS plus detached checksum signature verification
+  - mitigated by TLS plus Authenticode verification on the installer
 - Corrupt or replaced downloaded artifact
-  - mitigated by signed checksum validation and re-hash before apply
+  - mitigated by checksum validation and re-hash before apply
 - Unsigned or differently signed installer
   - mitigated by Authenticode verification before execute
 - Stale or replayed older release
@@ -610,13 +581,11 @@ Required future changes:
 
 - Full compromise of the local user account
 - Malicious code already running with the same user rights
-- Offline theft of the updater signing private key
+- Offline theft of the Authenticode signing private key
 - Session continuity or user-shell command replay after restart
 
 ### Operational trust assumptions
 
-- The detached checksum-signing key is protected more tightly than normal repo
-  content edits.
 - The Authenticode certificate used for production releases is stable and
   valid.
 - Release workflow environment protections are enforced before public release.
@@ -641,20 +610,15 @@ Win32 updater modules for:
 Add test fixtures for:
 
 - valid `SHA256SUMS.txt`
-- valid detached `.sig`
 - hash mismatch
 - missing asset line
-- invalid signature
-
-The signature fixtures should be deterministic and repo-local so targeted tests
-do not require live keys.
+- invalid Authenticode signature
 
 ### Packaging script validation
 
 Add narrow script-level checks that validate:
 
-- `scripts/package-windows.ps1` emits `SHA256SUMS.txt` and `.sig`
-- release metadata includes the signature asset
+- `scripts/package-windows.ps1` emits `SHA256SUMS.txt`
 - missing signing inputs fail closed
 
 ### Interactive/manual Win11 harness
@@ -675,7 +639,6 @@ Before publishing a release, CI should verify:
 - setup exe present
 - portable ZIP present
 - `SHA256SUMS.txt` present
-- `SHA256SUMS.txt.sig` present
 - Authenticode valid where required
 - hashes in the checksum file match the uploaded assets exactly
 
@@ -690,9 +653,8 @@ Before publishing a release, CI should verify:
 
 ### Milestone 2: Trust pipeline and release packaging
 
-- Make `scripts/package-windows.ps1` emit `SHA256SUMS.txt.sig`.
-- Publish the signature asset from `.github/workflows/release.yml`.
-- Add runtime checksum-signature verification.
+- Keep `scripts/package-windows.ps1` emitting `SHA256SUMS.txt`.
+- Verify runtime checksum and Authenticode checks.
 - Keep apply disabled; stage only in test/dev harnesses.
 
 ### Milestone 3: Installer-mode download and ready-to-apply UX
