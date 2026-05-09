@@ -75,6 +75,7 @@ const BTN_SECTION_SHELL: usize = 203;
 const BTN_SECTION_KEYBINDINGS: usize = 204;
 const BTN_SECTION_ADVANCED: usize = 205;
 const BTN_SAVE: usize = 301;
+const BTN_KEYBINDINGS_EDITOR: usize = 302;
 const EDIT_SCROLLBACK: usize = 401;
 const EDIT_FONT_SIZE: usize = 402;
 const COMBO_CONFIRM_CLOSE: usize = 403;
@@ -86,6 +87,16 @@ const EDIT_BG_OPACITY: usize = 408;
 const COMBO_CURSOR_STYLE: usize = 409;
 const CHK_BG_BLUR: usize = 410;
 const COMBO_PAD_BALANCE: usize = 411;
+const EDIT_FONT_FAMILY: usize = 412;
+const EDIT_THEME: usize = 413;
+const EDIT_COMMAND: usize = 414;
+const EDIT_PAD_X: usize = 415;
+const EDIT_PAD_Y: usize = 416;
+const CHK_DESKTOP_NOTIFICATIONS: usize = 417;
+const CHK_APP_NOTIFY_CLIPBOARD: usize = 418;
+const CHK_APP_NOTIFY_CONFIG: usize = 419;
+const COMBO_AUTO_UPDATE: usize = 420;
+const COMBO_AUTO_UPDATE_CHANNEL: usize = 421;
 const ES_NUMBER: u32 = 0x2000;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const EN_CHANGE: u16 = 0x0300;
@@ -148,11 +159,11 @@ pub const Section = enum(u32) {
 
     fn placeholderText(self: Section) []const u8 {
         return switch (self) {
-            .appearance => "Font size, background opacity, window theme, cursor style, padding balance, background blur.",
-            .terminal => "Scrollback, copy-on-select, clipboard trimming, close confirmation.",
-            .shell => "Shell integration detection mode.",
-            .keybindings => "Keybindings view lands with the chord recorder.",
-            .advanced => "Use the text editor escape hatch for config keys that don't yet have native controls (keybinds, window-padding-x/y, font-family, command, custom shaders, RepeatableString lists, etc).",
+            .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
+            .terminal => "Scrollback, copy-on-select, clipboard trimming, close confirmation, and notifications.",
+            .shell => "Default shell command and shell integration detection mode.",
+            .keybindings => "Open the config file for keybind edits; action names are available from winghostty +list-actions.",
+            .advanced => "Updater defaults plus the text editor escape hatch for config keys that do not yet have native controls.",
         };
     }
 };
@@ -299,17 +310,28 @@ pub const SettingsWindow = struct {
     btn_section_keybindings: ?HWND = null,
     btn_section_advanced: ?HWND = null,
     btn_save: ?HWND = null,
+    btn_keybindings_editor: ?HWND = null,
     edit_scrollback: ?HWND = null,
+    edit_font_family: ?HWND = null,
     edit_font_size: ?HWND = null,
+    edit_theme: ?HWND = null,
     edit_bg_opacity: ?HWND = null,
+    edit_command: ?HWND = null,
+    edit_pad_x: ?HWND = null,
+    edit_pad_y: ?HWND = null,
     combo_confirm_close: ?HWND = null,
     combo_copy_on_select: ?HWND = null,
     combo_window_theme: ?HWND = null,
     combo_shell_integ: ?HWND = null,
     chk_trim_trail: ?HWND = null,
+    chk_desktop_notifications: ?HWND = null,
+    chk_app_notify_clipboard: ?HWND = null,
+    chk_app_notify_config: ?HWND = null,
     combo_cursor_style: ?HWND = null,
     chk_bg_blur: ?HWND = null,
     combo_pad_balance: ?HWND = null,
+    combo_auto_update: ?HWND = null,
+    combo_auto_update_channel: ?HWND = null,
     active_section: Section = .appearance,
     /// Class atom lazily registered the first time `open` runs.
     class_atom: ATOM = 0,
@@ -346,17 +368,28 @@ pub const SettingsWindow = struct {
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.btn_save = null;
+        self.btn_keybindings_editor = null;
         self.edit_scrollback = null;
+        self.edit_font_family = null;
         self.edit_font_size = null;
+        self.edit_theme = null;
         self.edit_bg_opacity = null;
+        self.edit_command = null;
+        self.edit_pad_x = null;
+        self.edit_pad_y = null;
         self.combo_confirm_close = null;
         self.combo_copy_on_select = null;
         self.combo_window_theme = null;
         self.combo_shell_integ = null;
         self.chk_trim_trail = null;
+        self.chk_desktop_notifications = null;
+        self.chk_app_notify_clipboard = null;
+        self.chk_app_notify_config = null;
         self.combo_cursor_style = null;
         self.chk_bg_blur = null;
         self.combo_pad_balance = null;
+        self.combo_auto_update = null;
+        self.combo_auto_update_channel = null;
         self.clearPending();
     }
 
@@ -383,17 +416,28 @@ pub const SettingsWindow = struct {
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.btn_save = null;
+        self.btn_keybindings_editor = null;
         self.edit_scrollback = null;
+        self.edit_font_family = null;
         self.edit_font_size = null;
+        self.edit_theme = null;
         self.edit_bg_opacity = null;
+        self.edit_command = null;
+        self.edit_pad_x = null;
+        self.edit_pad_y = null;
         self.combo_confirm_close = null;
         self.combo_copy_on_select = null;
         self.combo_window_theme = null;
         self.combo_shell_integ = null;
         self.chk_trim_trail = null;
+        self.chk_desktop_notifications = null;
+        self.chk_app_notify_clipboard = null;
+        self.chk_app_notify_config = null;
         self.combo_cursor_style = null;
         self.chk_bg_blur = null;
         self.combo_pad_balance = null;
+        self.combo_auto_update = null;
+        self.combo_auto_update_channel = null;
         self.clearPending();
     }
 
@@ -419,19 +463,31 @@ pub const SettingsWindow = struct {
         const show_terminal: i32 = if (self.active_section == .terminal) SW_SHOWNORMAL else SW_HIDE;
         const show_appearance: i32 = if (self.active_section == .appearance) SW_SHOWNORMAL else SW_HIDE;
         const show_shell: i32 = if (self.active_section == .shell) SW_SHOWNORMAL else SW_HIDE;
+        const show_keybindings: i32 = if (self.active_section == .keybindings) SW_SHOWNORMAL else SW_HIDE;
 
         if (self.btn_open_editor) |btn| _ = ShowWindow(btn, show_advanced);
+        if (self.btn_keybindings_editor) |btn| _ = ShowWindow(btn, show_keybindings);
         if (self.edit_scrollback) |e| _ = ShowWindow(e, show_terminal);
         if (self.combo_confirm_close) |e| _ = ShowWindow(e, show_terminal);
         if (self.combo_copy_on_select) |e| _ = ShowWindow(e, show_terminal);
         if (self.chk_trim_trail) |e| _ = ShowWindow(e, show_terminal);
+        if (self.chk_desktop_notifications) |e| _ = ShowWindow(e, show_terminal);
+        if (self.chk_app_notify_clipboard) |e| _ = ShowWindow(e, show_terminal);
+        if (self.chk_app_notify_config) |e| _ = ShowWindow(e, show_terminal);
+        if (self.edit_font_family) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_font_size) |e| _ = ShowWindow(e, show_appearance);
+        if (self.edit_theme) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_bg_opacity) |e| _ = ShowWindow(e, show_appearance);
         if (self.combo_window_theme) |e| _ = ShowWindow(e, show_appearance);
         if (self.combo_cursor_style) |e| _ = ShowWindow(e, show_appearance);
+        if (self.edit_pad_x) |e| _ = ShowWindow(e, show_appearance);
+        if (self.edit_pad_y) |e| _ = ShowWindow(e, show_appearance);
         if (self.chk_bg_blur) |e| _ = ShowWindow(e, show_appearance);
         if (self.combo_pad_balance) |e| _ = ShowWindow(e, show_appearance);
+        if (self.edit_command) |e| _ = ShowWindow(e, show_shell);
         if (self.combo_shell_integ) |e| _ = ShowWindow(e, show_shell);
+        if (self.combo_auto_update) |e| _ = ShowWindow(e, show_advanced);
+        if (self.combo_auto_update_channel) |e| _ = ShowWindow(e, show_advanced);
     }
 
     /// Read the current EDIT text and write the parsed integer into
@@ -467,6 +523,37 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
+    fn syncFontFamilyFromEdit(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const arena = p.*._arena.?.allocator();
+        const edit = self.edit_font_family orelse return;
+        var text_buf: [512]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        p.*.@"font-family".list.clearRetainingCapacity();
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (trimmed.len == 0) return;
+
+        var parts = std.mem.splitScalar(u8, trimmed, ',');
+        while (parts.next()) |part| {
+            const family = std.mem.trim(u8, part, " \t");
+            if (family.len == 0) continue;
+            p.*.@"font-family".parseCLI(arena, family) catch return;
+        }
+    }
+
+    fn displayFontFamilyInEdit(self: *SettingsWindow) void {
+        const edit = self.edit_font_family orelse return;
+        const p = self.pending orelse return;
+        var buf: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        for (p.@"font-family".list.items, 0..) |family, i| {
+            if (i != 0) writer.writeAll(", ") catch break;
+            writer.writeAll(family) catch break;
+        }
+        setEditText(edit, writer.buffered(), &self.suppress_edit_events);
+    }
+
     fn syncFontSizeFromEdit(self: *SettingsWindow) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
@@ -497,6 +584,38 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
+    fn syncThemeFromEdit(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const arena = p.*._arena.?.allocator();
+        const edit = self.edit_theme orelse return;
+        var text_buf: [512]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (trimmed.len == 0) {
+            p.*.theme = null;
+            return;
+        }
+        var theme: Config.Theme = undefined;
+        theme.parseCLI(arena, trimmed) catch return;
+        p.*.theme = theme;
+    }
+
+    fn displayThemeInEdit(self: *SettingsWindow) void {
+        const edit = self.edit_theme orelse return;
+        const p = self.pending orelse return;
+        var buf: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        if (p.theme) |theme| {
+            if (std.mem.eql(u8, theme.light, theme.dark)) {
+                writer.writeAll(theme.light) catch {};
+            } else {
+                writer.print("light:{s},dark:{s}", .{ theme.light, theme.dark }) catch {};
+            }
+        }
+        setEditText(edit, writer.buffered(), &self.suppress_edit_events);
+    }
+
     fn syncBgOpacityFromEdit(self: *SettingsWindow) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
@@ -525,6 +644,75 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
+    fn syncCommandFromEdit(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const arena = p.*._arena.?.allocator();
+        const edit = self.edit_command orelse return;
+        var text_buf: [1024]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        const trimmed = std.mem.trim(u8, text, " \t");
+        if (trimmed.len == 0) {
+            p.*.command = null;
+            return;
+        }
+        var command: Config.Command = undefined;
+        command.parseCLI(arena, trimmed) catch return;
+        p.*.command = command;
+    }
+
+    fn displayCommandInEdit(self: *SettingsWindow) void {
+        const edit = self.edit_command orelse return;
+        const p = self.pending orelse return;
+        var buf: [1024]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        if (p.command) |command| switch (command) {
+            .shell => |v| writer.writeAll(v) catch {},
+            .direct => |v| {
+                writer.writeAll("direct:") catch {};
+                for (v, 0..) |arg, i| {
+                    if (i != 0) writer.writeByte(' ') catch {};
+                    writer.writeAll(arg) catch {};
+                }
+            },
+        };
+        setEditText(edit, writer.buffered(), &self.suppress_edit_events);
+    }
+
+    fn syncPaddingFromEdit(self: *SettingsWindow, axis: enum { x, y }) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const edit = switch (axis) {
+            .x => self.edit_pad_x,
+            .y => self.edit_pad_y,
+        } orelse return;
+        var text_buf: [64]u8 = undefined;
+        const text = readEditUtf8(edit, &text_buf) orelse return;
+        const parsed = Config.WindowPadding.parseCLI(std.mem.trim(u8, text, " \t")) catch return;
+        switch (axis) {
+            .x => p.*.@"window-padding-x" = parsed,
+            .y => p.*.@"window-padding-y" = parsed,
+        }
+    }
+
+    fn displayPaddingInEdit(self: *SettingsWindow, axis: enum { x, y }) void {
+        const edit = switch (axis) {
+            .x => self.edit_pad_x,
+            .y => self.edit_pad_y,
+        } orelse return;
+        const p = self.pending orelse return;
+        const padding = switch (axis) {
+            .x => p.@"window-padding-x",
+            .y => p.@"window-padding-y",
+        };
+        var buf: [64]u8 = undefined;
+        const text = if (padding.top_left == padding.bottom_right)
+            std.fmt.bufPrint(&buf, "{d}", .{padding.top_left}) catch return
+        else
+            std.fmt.bufPrint(&buf, "{d},{d}", .{ padding.top_left, padding.bottom_right }) catch return;
+        setEditText(edit, text, &self.suppress_edit_events);
+    }
+
     fn syncTrimTrailFromCheckbox(self: *SettingsWindow) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
@@ -543,6 +731,55 @@ pub const SettingsWindow = struct {
             if (p.@"clipboard-trim-trailing-spaces") BST_CHECKED else BST_UNCHECKED,
             0,
         );
+        self.suppress_edit_events = false;
+    }
+
+    fn syncDesktopNotificationsFromCheckbox(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const chk = self.chk_desktop_notifications orelse return;
+        p.*.@"desktop-notifications" = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+
+    fn displayDesktopNotificationsInCheckbox(self: *SettingsWindow) void {
+        const chk = self.chk_desktop_notifications orelse return;
+        const p = self.pending orelse return;
+        self.suppress_edit_events = true;
+        _ = SendMessageW(
+            chk,
+            BM_SETCHECK,
+            if (p.@"desktop-notifications") BST_CHECKED else BST_UNCHECKED,
+            0,
+        );
+        self.suppress_edit_events = false;
+    }
+
+    fn syncAppNotificationsFromCheckbox(self: *SettingsWindow, field: enum { clipboard, config }) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const chk = switch (field) {
+            .clipboard => self.chk_app_notify_clipboard,
+            .config => self.chk_app_notify_config,
+        } orelse return;
+        const enabled = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        switch (field) {
+            .clipboard => p.*.@"app-notifications".@"clipboard-copy" = enabled,
+            .config => p.*.@"app-notifications".@"config-reload" = enabled,
+        }
+    }
+
+    fn displayAppNotificationsInCheckbox(self: *SettingsWindow, field: enum { clipboard, config }) void {
+        const chk = switch (field) {
+            .clipboard => self.chk_app_notify_clipboard,
+            .config => self.chk_app_notify_config,
+        } orelse return;
+        const p = self.pending orelse return;
+        const enabled = switch (field) {
+            .clipboard => p.@"app-notifications".@"clipboard-copy",
+            .config => p.@"app-notifications".@"config-reload",
+        };
+        self.suppress_edit_events = true;
+        _ = SendMessageW(chk, BM_SETCHECK, if (enabled) BST_CHECKED else BST_UNCHECKED, 0);
         self.suppress_edit_events = false;
     }
 
@@ -753,13 +990,75 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
+    fn syncAutoUpdateFromCombo(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = self.combo_auto_update orelse return;
+        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (idx < 0) return;
+        p.*.@"auto-update" = switch (idx) {
+            0 => null,
+            1 => .off,
+            2 => .check,
+            3 => .download,
+            else => return,
+        };
+    }
+
+    fn displayAutoUpdateInCombo(self: *SettingsWindow) void {
+        const combo = self.combo_auto_update orelse return;
+        const p = self.pending orelse return;
+        const idx: usize = if (p.@"auto-update") |value| switch (value) {
+            .off => 1,
+            .check => 2,
+            .download => 3,
+        } else 0;
+        self.suppress_edit_events = true;
+        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        self.suppress_edit_events = false;
+    }
+
+    fn syncAutoUpdateChannelFromCombo(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = self.combo_auto_update_channel orelse return;
+        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (idx < 0) return;
+        p.*.@"auto-update-channel" = switch (idx) {
+            0 => null,
+            1 => .stable,
+            2 => .tip,
+            else => return,
+        };
+    }
+
+    fn displayAutoUpdateChannelInCombo(self: *SettingsWindow) void {
+        const combo = self.combo_auto_update_channel orelse return;
+        const p = self.pending orelse return;
+        const idx: usize = if (p.@"auto-update-channel") |value| switch (value) {
+            .stable => 1,
+            .tip => 2,
+        } else 0;
+        self.suppress_edit_events = true;
+        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        self.suppress_edit_events = false;
+    }
+
     /// Refresh every control from the pending draft. Called after
     /// `adoptCurrentConfig` and after a successful save.
     fn refreshAllControls(self: *SettingsWindow) void {
         self.displayScrollbackInEdit();
+        self.displayFontFamilyInEdit();
         self.displayFontSizeInEdit();
+        self.displayThemeInEdit();
         self.displayBgOpacityInEdit();
+        self.displayCommandInEdit();
+        self.displayPaddingInEdit(.x);
+        self.displayPaddingInEdit(.y);
         self.displayTrimTrailInCheckbox();
+        self.displayDesktopNotificationsInCheckbox();
+        self.displayAppNotificationsInCheckbox(.clipboard);
+        self.displayAppNotificationsInCheckbox(.config);
         self.displayConfirmCloseInCombo();
         self.displayCopyOnSelectInCombo();
         self.displayWindowThemeInCombo();
@@ -767,6 +1066,8 @@ pub const SettingsWindow = struct {
         self.displayCursorStyleInCombo();
         self.displayBgBlurInCheckbox();
         self.displayPadBalanceInCombo();
+        self.displayAutoUpdateInCombo();
+        self.displayAutoUpdateChannelInCombo();
     }
 
     fn save(self: *SettingsWindow) void {
@@ -926,6 +1227,22 @@ pub const SettingsWindow = struct {
             null,
         );
 
+        const btn_keybind_label = std.unicode.utf8ToUtf16LeStringLiteral("Open config for keybinds");
+        self.btn_keybindings_editor = CreateWindowExW(
+            0,
+            btn_class,
+            btn_keybind_label,
+            WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+            0,
+            0,
+            220,
+            32,
+            hwnd,
+            @ptrFromInt(BTN_KEYBINDINGS_EDITOR),
+            self.handle.hinstance,
+            null,
+        );
+
         // Scrollback limit EDIT. Lives in the Terminal section. Digit-
         // only input via ES_NUMBER; EN_CHANGE syncs into `pending`.
         const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
@@ -940,6 +1257,22 @@ pub const SettingsWindow = struct {
             28,
             hwnd,
             @ptrFromInt(EDIT_SCROLLBACK),
+            self.handle.hinstance,
+            null,
+        );
+
+        // font-family EDIT. Comma-separated fallback families.
+        self.edit_font_family = CreateWindowExW(
+            0,
+            edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            300,
+            28,
+            hwnd,
+            @ptrFromInt(EDIT_FONT_FAMILY),
             self.handle.hinstance,
             null,
         );
@@ -962,6 +1295,22 @@ pub const SettingsWindow = struct {
             null,
         );
 
+        // theme EDIT. Accepts a built-in/custom name or light/dark pair.
+        self.edit_theme = CreateWindowExW(
+            0,
+            edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            300,
+            28,
+            hwnd,
+            @ptrFromInt(EDIT_THEME),
+            self.handle.hinstance,
+            null,
+        );
+
         // background-opacity EDIT. Appearance section. 0.0..1.0.
         self.edit_bg_opacity = CreateWindowExW(
             0,
@@ -978,6 +1327,51 @@ pub const SettingsWindow = struct {
             null,
         );
 
+        self.edit_command = CreateWindowExW(
+            0,
+            edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            360,
+            28,
+            hwnd,
+            @ptrFromInt(EDIT_COMMAND),
+            self.handle.hinstance,
+            null,
+        );
+
+        self.edit_pad_x = CreateWindowExW(
+            0,
+            edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            160,
+            28,
+            hwnd,
+            @ptrFromInt(EDIT_PAD_X),
+            self.handle.hinstance,
+            null,
+        );
+
+        self.edit_pad_y = CreateWindowExW(
+            0,
+            edit_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            0,
+            0,
+            160,
+            28,
+            hwnd,
+            @ptrFromInt(EDIT_PAD_Y),
+            self.handle.hinstance,
+            null,
+        );
+
         // clipboard-trim-trailing-spaces checkbox. Terminal section.
         self.chk_trim_trail = CreateWindowExW(
             0,
@@ -990,6 +1384,51 @@ pub const SettingsWindow = struct {
             24,
             hwnd,
             @ptrFromInt(CHK_TRIM_TRAIL),
+            self.handle.hinstance,
+            null,
+        );
+
+        self.chk_desktop_notifications = CreateWindowExW(
+            0,
+            btn_class,
+            std.unicode.utf8ToUtf16LeStringLiteral("Allow terminal desktop notifications"),
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0,
+            0,
+            320,
+            24,
+            hwnd,
+            @ptrFromInt(CHK_DESKTOP_NOTIFICATIONS),
+            self.handle.hinstance,
+            null,
+        );
+
+        self.chk_app_notify_clipboard = CreateWindowExW(
+            0,
+            btn_class,
+            std.unicode.utf8ToUtf16LeStringLiteral("Notify when clipboard copy completes"),
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0,
+            0,
+            320,
+            24,
+            hwnd,
+            @ptrFromInt(CHK_APP_NOTIFY_CLIPBOARD),
+            self.handle.hinstance,
+            null,
+        );
+
+        self.chk_app_notify_config = CreateWindowExW(
+            0,
+            btn_class,
+            std.unicode.utf8ToUtf16LeStringLiteral("Notify after config reload"),
+            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+            0,
+            0,
+            320,
+            24,
+            hwnd,
+            @ptrFromInt(CHK_APP_NOTIFY_CONFIG),
             self.handle.hinstance,
             null,
         );
@@ -1114,6 +1553,38 @@ pub const SettingsWindow = struct {
         );
         populateCombo(self.combo_pad_balance, &.{ "false", "true", "equal" });
 
+        self.combo_auto_update = CreateWindowExW(
+            0,
+            combo_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            0,
+            0,
+            200,
+            160,
+            hwnd,
+            @ptrFromInt(COMBO_AUTO_UPDATE),
+            self.handle.hinstance,
+            null,
+        );
+        populateCombo(self.combo_auto_update, &.{ "default", "off", "check", "download" });
+
+        self.combo_auto_update_channel = CreateWindowExW(
+            0,
+            combo_class,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+            0,
+            0,
+            200,
+            140,
+            hwnd,
+            @ptrFromInt(COMBO_AUTO_UPDATE_CHANNEL),
+            self.handle.hinstance,
+            null,
+        );
+        populateCombo(self.combo_auto_update_channel, &.{ "default", "stable", "tip" });
+
         self.refreshAllControls();
 
         self.applySectionVisibility();
@@ -1214,14 +1685,34 @@ fn layoutChildren(self: *SettingsWindow) void {
         }
         if (self.chk_trim_trail) |e| {
             _ = MoveWindow(e, pane_left, ty, 260, 24, 1);
+            ty += row_gap;
+        }
+        if (self.chk_desktop_notifications) |e| {
+            _ = MoveWindow(e, pane_left, ty, 320, 24, 1);
+            ty += row_gap;
+        }
+        if (self.chk_app_notify_clipboard) |e| {
+            _ = MoveWindow(e, pane_left, ty, 320, 24, 1);
+            ty += row_gap;
+        }
+        if (self.chk_app_notify_config) |e| {
+            _ = MoveWindow(e, pane_left, ty, 320, 24, 1);
         }
     }
 
     // Appearance section stack.
     {
         var ty: i32 = pane_top + 72;
+        if (self.edit_font_family) |e| {
+            _ = MoveWindow(e, pane_left, ty, 300, 28, 1);
+            ty += row_gap;
+        }
         if (self.edit_font_size) |e| {
             _ = MoveWindow(e, pane_left, ty, 160, 28, 1);
+            ty += row_gap;
+        }
+        if (self.edit_theme) |e| {
+            _ = MoveWindow(e, pane_left, ty, 300, 28, 1);
             ty += row_gap;
         }
         if (self.edit_bg_opacity) |e| {
@@ -1236,6 +1727,14 @@ fn layoutChildren(self: *SettingsWindow) void {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
         }
+        if (self.edit_pad_x) |e| {
+            _ = MoveWindow(e, pane_left, ty, 160, 28, 1);
+            ty += row_gap;
+        }
+        if (self.edit_pad_y) |e| {
+            _ = MoveWindow(e, pane_left, ty, 160, 28, 1);
+            ty += row_gap;
+        }
         if (self.combo_pad_balance) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
@@ -1246,23 +1745,45 @@ fn layoutChildren(self: *SettingsWindow) void {
     }
 
     // Shell section.
-    if (self.combo_shell_integ) |e| {
-        _ = MoveWindow(e, pane_left, pane_top + 72, 200, 200, 1);
+    {
+        var ty: i32 = pane_top + 72;
+        if (self.edit_command) |e| {
+            _ = MoveWindow(e, pane_left, ty, 360, 28, 1);
+            ty += row_gap;
+        }
+        if (self.combo_shell_integ) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 200, 1);
+        }
+    }
+
+    if (self.btn_keybindings_editor) |btn| {
+        _ = MoveWindow(btn, pane_left, pane_top + 72, 220, 32, 1);
     }
 
     // Advanced-section "Open in default editor" button — anchored
     // under the content-pane header.
-    if (self.btn_open_editor) |btn| {
-        const w: i32 = 220;
-        const h: i32 = 32;
-        _ = MoveWindow(
-            btn,
-            pane_left,
-            pane_top + 72,
-            w,
-            h,
-            1,
-        );
+    {
+        var ty: i32 = pane_top + 72;
+        if (self.combo_auto_update) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
+            ty += row_gap;
+        }
+        if (self.combo_auto_update_channel) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 140, 1);
+            ty += row_gap;
+        }
+        if (self.btn_open_editor) |btn| {
+            const w: i32 = 220;
+            const h: i32 = 32;
+            _ = MoveWindow(
+                btn,
+                pane_left,
+                ty,
+                w,
+                h,
+                1,
+            );
+        }
     }
 
     // Save button — always-visible, bottom-right of window.
@@ -1315,6 +1836,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
                 return 0;
             }
+            if (id == BTN_KEYBINDINGS_EDITOR) {
+                if (owner) |o| o.handle.openInEditor(o.handle.ctx);
+                return 0;
+            }
             if (id == BTN_SAVE) {
                 if (owner) |o| o.save();
                 return 0;
@@ -1323,16 +1848,48 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncScrollbackFromEdit();
                 return 0;
             }
+            if (id == EDIT_FONT_FAMILY and notify == EN_CHANGE) {
+                if (owner) |o| o.syncFontFamilyFromEdit();
+                return 0;
+            }
             if (id == EDIT_FONT_SIZE and notify == EN_CHANGE) {
                 if (owner) |o| o.syncFontSizeFromEdit();
+                return 0;
+            }
+            if (id == EDIT_THEME and notify == EN_CHANGE) {
+                if (owner) |o| o.syncThemeFromEdit();
                 return 0;
             }
             if (id == EDIT_BG_OPACITY and notify == EN_CHANGE) {
                 if (owner) |o| o.syncBgOpacityFromEdit();
                 return 0;
             }
+            if (id == EDIT_COMMAND and notify == EN_CHANGE) {
+                if (owner) |o| o.syncCommandFromEdit();
+                return 0;
+            }
+            if (id == EDIT_PAD_X and notify == EN_CHANGE) {
+                if (owner) |o| o.syncPaddingFromEdit(.x);
+                return 0;
+            }
+            if (id == EDIT_PAD_Y and notify == EN_CHANGE) {
+                if (owner) |o| o.syncPaddingFromEdit(.y);
+                return 0;
+            }
             if (id == CHK_TRIM_TRAIL and notify == BN_CLICKED) {
                 if (owner) |o| o.syncTrimTrailFromCheckbox();
+                return 0;
+            }
+            if (id == CHK_DESKTOP_NOTIFICATIONS and notify == BN_CLICKED) {
+                if (owner) |o| o.syncDesktopNotificationsFromCheckbox();
+                return 0;
+            }
+            if (id == CHK_APP_NOTIFY_CLIPBOARD and notify == BN_CLICKED) {
+                if (owner) |o| o.syncAppNotificationsFromCheckbox(.clipboard);
+                return 0;
+            }
+            if (id == CHK_APP_NOTIFY_CONFIG and notify == BN_CLICKED) {
+                if (owner) |o| o.syncAppNotificationsFromCheckbox(.config);
                 return 0;
             }
             if (id == COMBO_CONFIRM_CLOSE and notify == CBN_SELCHANGE) {
@@ -1361,6 +1918,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             }
             if (id == COMBO_PAD_BALANCE and notify == CBN_SELCHANGE) {
                 if (owner) |o| o.syncPadBalanceFromCombo();
+                return 0;
+            }
+            if (id == COMBO_AUTO_UPDATE and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncAutoUpdateFromCombo();
+                return 0;
+            }
+            if (id == COMBO_AUTO_UPDATE_CHANNEL and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncAutoUpdateChannelFromCombo();
                 return 0;
             }
             if (Section.fromButtonId(id)) |section| {
@@ -1485,6 +2050,10 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
                 "Scrollback limit (rows, 0 = unlimited)",
                 "Close confirmation",
                 "Copy on select",
+                "Clipboard trimming",
+                "Terminal notifications",
+                "Clipboard-copy notification",
+                "Config-reload notification",
             };
             var ly: i32 = pane_top + 72;
             for (labels) |lbl| {
@@ -1494,11 +2063,16 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
         },
         .appearance => {
             const labels = [_][]const u8{
+                "Font family fallbacks (comma-separated)",
                 "Font size (pt)",
+                "Terminal theme name or light/dark pair",
                 "Background opacity (0.0 .. 1.0)",
                 "Window theme",
                 "Cursor style",
+                "Window padding X (left/right or single value)",
+                "Window padding Y (top/bottom or single value)",
                 "Window padding balance",
+                "Background blur",
             };
             var ly: i32 = pane_top + 72;
             for (labels) |lbl| {
@@ -1507,9 +2081,17 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
             }
         },
         .shell => {
-            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Shell integration");
+            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Default command (blank = auto-detect)");
+            drawLabel(hdc, pane_left, pane_top + 72 + row_gap - label_pad, pane_right, "Shell integration");
         },
-        else => {},
+        .keybindings => {
+            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Keybind configuration");
+        },
+        .advanced => {
+            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Auto-update mode");
+            drawLabel(hdc, pane_left, pane_top + 72 + row_gap - label_pad, pane_right, "Auto-update channel");
+            drawLabel(hdc, pane_left, pane_top + 72 + row_gap * 2 - label_pad, pane_right, "Full config editor");
+        },
     }
 }
 
@@ -1518,6 +2100,22 @@ fn drawLabel(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) voi
     const w = utf8ToW(&buf, text);
     var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y + 16 };
     _ = DrawTextW(hdc, w, -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
+    var buf_w: [1024]u16 = undefined;
+    const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
+    if (n < 0) return null;
+    const written = std.unicode.utf16LeToUtf8(buf, buf_w[0..@intCast(n)]) catch return null;
+    return buf[0..written];
+}
+
+fn setEditText(edit: HWND, text: []const u8, suppress: *bool) void {
+    var buf_w: [1024]u16 = undefined;
+    const w = utf8ToW(&buf_w, text);
+    suppress.* = true;
+    _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
+    suppress.* = false;
 }
 
 fn utf8ToW(buf: []u16, text: []const u8) [*:0]const u16 {
