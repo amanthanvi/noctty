@@ -33,6 +33,14 @@ pub const TerminalTextSnapshot = struct {
         self.* = undefined;
     }
 
+    /// Transfer ownership of the plain-text buffer to the caller. `deinit`
+    /// still releases the snapshot side tables after this call.
+    pub fn takeText(self: *TerminalTextSnapshot) []u8 {
+        const text = self.text;
+        self.text = text[0..0];
+        return text;
+    }
+
     pub fn lineCount(self: *const TerminalTextSnapshot) usize {
         return self.line_start_byte_offsets.len;
     }
@@ -174,6 +182,25 @@ test "snapshotTerminalPlainText captures terminal rows" {
         OffsetRange{ .start = 6, .end = 11 },
         snapshot.lineUtf16Range(1).?,
     );
+}
+
+test "TerminalTextSnapshot takeText transfers text ownership" {
+    const alloc = std.testing.allocator;
+    const text = try alloc.dupe(u8, "owned text");
+    var snapshot = TerminalTextSnapshot{
+        .alloc = alloc,
+        .text = text,
+        .pin_map = try alloc.alloc(terminal.Pin, text.len),
+        .utf16_offset_for_byte = try buildUtf16OffsetMap(alloc, text),
+        .line_start_byte_offsets = try buildLineStartByteOffsets(alloc, text),
+    };
+
+    const taken = snapshot.takeText();
+    defer alloc.free(taken);
+
+    try std.testing.expectEqualSlices(u8, text, taken);
+    try std.testing.expectEqual(@as(usize, 0), snapshot.text.len);
+    snapshot.deinit();
 }
 
 test "snapshotTerminalPlainText includes scrollback rows" {

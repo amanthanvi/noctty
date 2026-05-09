@@ -19,6 +19,7 @@ pub const S_FALSE: HRESULT = 1;
 pub const E_NOTIMPL: HRESULT = @bitCast(@as(u32, 0x80004001));
 pub const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
+pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
@@ -218,6 +219,7 @@ test "HRESULT error constants" {
     try std.testing.expect(E_NOTIMPL != S_OK);
     try std.testing.expect(E_POINTER != S_OK);
     try std.testing.expect(E_NOINTERFACE != S_OK);
+    try std.testing.expect(E_OUTOFMEMORY != S_OK);
 }
 
 test "VARIANT empty has zero vt" {

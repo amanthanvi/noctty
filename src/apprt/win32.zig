@@ -19279,7 +19279,7 @@ pub const Surface = struct {
         );
         defer snapshot.deinit();
 
-        return try alloc.dupe(u8, snapshot.text);
+        return snapshot.takeText();
     }
 
     fn terminalUiaFocused(ctx: *anyopaque) bool {

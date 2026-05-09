@@ -350,7 +350,8 @@ pub const TerminalProvider = struct {
                 out.* = com.VARIANT.fromBstr(com.SysAllocString(literal));
             },
             constants.UIA_ValueValuePropertyId => {
-                out.* = com.VARIANT.fromBstr(self.allocValueBstr());
+                const bstr = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_ValueIsReadOnlyPropertyId => {
                 out.* = com.VARIANT.fromBool(true);
@@ -388,7 +389,7 @@ pub const TerminalProvider = struct {
         out: *?[*:0]u16,
     ) callconv(.winapi) com.HRESULT {
         const self = fromValue(self_value);
-        out.* = self.allocValueBstr();
+        out.* = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
         return com.S_OK;
     }
 
@@ -468,7 +469,7 @@ fn allocBstrFromUtf8(alloc: std.mem.Allocator, text: []const u8) ?[*:0]u16 {
     const buf = alloc.allocSentinel(u16, utf16_len, 0) catch return null;
     defer alloc.free(buf);
     const written = std.unicode.utf8ToUtf16Le(buf, text) catch return null;
-    buf[written] = 0;
+    std.debug.assert(written == utf16_len);
     return com.SysAllocString(@ptrCast(buf.ptr));
 }
 
@@ -551,6 +552,69 @@ test "TerminalProvider reports document control type" {
     const hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_ControlTypePropertyId, &value);
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expectEqual(constants.UIA_DocumentControlTypeId, value.value.i4);
+}
+
+test "TerminalProvider get_Value returns non-null BSTR" {
+    var counter: u32 = 0;
+    const state = testTerminalState(&counter);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var out: ?[*:0]u16 = null;
+    const hr = TerminalProvider.get_Value(&p.value_iface, &out);
+    defer com.SysFreeString(out);
+
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expect(out != null);
+}
+
+test "TerminalProvider ValueValueProperty returns non-null BSTR" {
+    var counter: u32 = 0;
+    const state = testTerminalState(&counter);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var value = com.VARIANT.empty();
+    const hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_ValueValuePropertyId, &value);
+    defer com.SysFreeString(value.value.bstr);
+
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expectEqual(com.VT_BSTR, value.vt);
+    try std.testing.expect(value.value.bstr != null);
+}
+
+test "TerminalProvider value allocation failure returns E_OUTOFMEMORY" {
+    var counter: u32 = 0;
+    const state = testTerminalState(&counter);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var out: ?[*:0]u16 = null;
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+        const original_alloc = p.alloc;
+        p.alloc = failing.allocator();
+        defer p.alloc = original_alloc;
+
+        const get_value_hr = TerminalProvider.get_Value(&p.value_iface, &out);
+        try std.testing.expectEqual(com.E_OUTOFMEMORY, get_value_hr);
+        try std.testing.expect(out == null);
+    }
+
+    var value = com.VARIANT.empty();
+    {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+        const original_alloc = p.alloc;
+        p.alloc = failing.allocator();
+        defer p.alloc = original_alloc;
+
+        const prop_hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_ValueValuePropertyId, &value);
+        try std.testing.expectEqual(com.E_OUTOFMEMORY, prop_hr);
+        try std.testing.expectEqual(com.VT_EMPTY, value.vt);
+    }
 }
 
 fn testTerminalState(counter: *u32) TerminalState {
