@@ -100,9 +100,11 @@ const COMBO_AUTO_UPDATE_CHANNEL: usize = 421;
 const ES_NUMBER: u32 = 0x2000;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const EN_CHANGE: u16 = 0x0300;
+const EN_KILLFOCUS: u16 = 0x0200;
 const CBN_SELCHANGE: u16 = 0x0001;
 const BN_CLICKED: u16 = 0x0000;
 const WM_SETTEXT: UINT = 0x000C;
+const EM_LIMITTEXT: UINT = 0x00C5;
 const BS_AUTOCHECKBOX: u32 = 0x3;
 const BM_SETCHECK: UINT = 0x00F1;
 const BM_GETCHECK: UINT = 0x00F0;
@@ -232,6 +234,8 @@ const CREATESTRUCTW = win32_types.CREATESTRUCTW;
 const WNDCLASSEXW = win32_types.WNDCLASSEXW;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.settings");
+const edit_text_max_code_units: usize = 4096;
+const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
 /// Error set returned from `AppHandle.saveAndReload`. The settings
 /// window surfaces these inline so users can re-try without losing
@@ -531,24 +535,15 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_font_family orelse return;
-        var text_buf: [512]u8 = undefined;
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse return;
-        p.*.@"font-family".list.clearRetainingCapacity();
-        const trimmed = std.mem.trim(u8, text, " \t");
-        if (trimmed.len == 0) return;
-
-        var parts = std.mem.splitScalar(u8, trimmed, ',');
-        while (parts.next()) |part| {
-            const family = std.mem.trim(u8, part, " \t");
-            if (family.len == 0) continue;
-            p.*.@"font-family".parseCLI(arena, family) catch return;
-        }
+        p.*.@"font-family" = parseFontFamilyEditText(arena, text) catch return;
     }
 
     fn displayFontFamilyInEdit(self: *SettingsWindow) void {
         const edit = self.edit_font_family orelse return;
         const p = self.pending orelse return;
-        var buf: [512]u8 = undefined;
+        var buf: [edit_text_max_utf8]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         for (p.@"font-family".list.items, 0..) |family, i| {
             if (i != 0) writer.writeAll(", ") catch break;
@@ -592,7 +587,7 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_theme orelse return;
-        var text_buf: [512]u8 = undefined;
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse return;
         const trimmed = std.mem.trim(u8, text, " \t");
         if (trimmed.len == 0) {
@@ -607,7 +602,7 @@ pub const SettingsWindow = struct {
     fn displayThemeInEdit(self: *SettingsWindow) void {
         const edit = self.edit_theme orelse return;
         const p = self.pending orelse return;
-        var buf: [512]u8 = undefined;
+        var buf: [edit_text_max_utf8]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         if (p.theme) |theme| {
             if (std.mem.eql(u8, theme.light, theme.dark)) {
@@ -652,7 +647,7 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const arena = p.*._arena.?.allocator();
         const edit = self.edit_command orelse return;
-        var text_buf: [1024]u8 = undefined;
+        var text_buf: [edit_text_max_utf8]u8 = undefined;
         const text = readEditUtf8(edit, &text_buf) orelse return;
         const trimmed = std.mem.trim(u8, text, " \t");
         if (trimmed.len == 0) {
@@ -667,18 +662,9 @@ pub const SettingsWindow = struct {
     fn displayCommandInEdit(self: *SettingsWindow) void {
         const edit = self.edit_command orelse return;
         const p = self.pending orelse return;
-        var buf: [1024]u8 = undefined;
+        var buf: [edit_text_max_utf8]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        if (p.command) |command| switch (command) {
-            .shell => |v| writer.writeAll(v) catch {},
-            .direct => |v| {
-                writer.writeAll("direct:") catch {};
-                for (v, 0..) |arg, i| {
-                    if (i != 0) writer.writeByte(' ') catch {};
-                    writer.writeAll(arg) catch {};
-                }
-            },
-        };
+        if (p.command) |command| writeCommandForEdit(&writer, command) catch {};
         setEditText(edit, writer.buffered(), &self.suppress_edit_events);
     }
 
@@ -1074,6 +1060,7 @@ pub const SettingsWindow = struct {
     }
 
     fn save(self: *SettingsWindow) void {
+        self.syncCommandFromEdit();
         const p = self.pending orelse return;
         const o = self.original orelse return;
         const result = self.handle.saveAndReload(self.handle.ctx, &p, &o);
@@ -1403,7 +1390,7 @@ fn makeEdit(
     extra_style: u32,
 ) ?HWND {
     const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
-    return CreateWindowExW(
+    const edit = CreateWindowExW(
         0,
         edit_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
@@ -1417,6 +1404,8 @@ fn makeEdit(
         hinstance,
         null,
     );
+    if (edit) |e| _ = SendMessageW(e, EM_LIMITTEXT, edit_text_max_code_units - 1, 0);
+    return edit;
 }
 
 fn makeCheckbox(
@@ -1729,7 +1718,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncBgOpacityFromEdit();
                 return 0;
             }
-            if (id == EDIT_COMMAND and notify == EN_CHANGE) {
+            if (id == EDIT_COMMAND and notify == EN_KILLFOCUS) {
                 if (owner) |o| o.syncCommandFromEdit();
                 return 0;
             }
@@ -1968,19 +1957,45 @@ fn drawLabel(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) voi
 }
 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
-    var buf_w: [1024]u16 = undefined;
+    var buf_w: [edit_text_max_code_units]u16 = undefined;
     const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
-    if (n < 0) return null;
     const written = std.unicode.utf16LeToUtf8(buf, buf_w[0..@intCast(n)]) catch return null;
     return buf[0..written];
 }
 
 fn setEditText(edit: HWND, text: []const u8, suppress: *bool) void {
-    var buf_w: [1024]u16 = undefined;
+    var buf_w: [edit_text_max_code_units]u16 = undefined;
     const w = utf8ToW(&buf_w, text);
     suppress.* = true;
     _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
     suppress.* = false;
+}
+
+fn parseFontFamilyEditText(alloc: std.mem.Allocator, text: []const u8) !Config.RepeatableString {
+    const trimmed = std.mem.trim(u8, text, " \t");
+    if (trimmed.len == 0) return .{};
+
+    var next: Config.RepeatableString = .{};
+    var parts = std.mem.splitScalar(u8, trimmed, ',');
+    while (parts.next()) |part| {
+        const family = std.mem.trim(u8, part, " \t");
+        if (family.len == 0) continue;
+        try next.parseCLI(alloc, family);
+    }
+    return next;
+}
+
+fn writeCommandForEdit(writer: *std.Io.Writer, value: Config.Command) !void {
+    switch (value) {
+        .shell => |v| try writer.writeAll(v),
+        .direct => |v| {
+            try writer.writeAll("direct:");
+            for (v, 0..) |arg, i| {
+                if (i != 0) try writer.writeByte(' ');
+                try Config.Command.writeDirectArg(writer, arg);
+            }
+        },
+    }
 }
 
 fn utf8ToW(buf: []u16, text: []const u8) [*:0]const u16 {
@@ -2041,4 +2056,43 @@ test "settings background blur checkbox can disable any variant" {
         .false,
         backgroundBlurFromCheckbox(.{ .radius = 42 }, false),
     );
+}
+
+test "win32_settings: font-family edit text builds repeatable list" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const parsed = try parseFontFamilyEditText(
+        arena.allocator(),
+        " JetBrains Mono, Cascadia Code , , Symbols Nerd Font ",
+    );
+    try testing.expectEqual(@as(usize, 3), parsed.list.items.len);
+    try testing.expectEqualStrings("JetBrains Mono", parsed.list.items[0]);
+    try testing.expectEqualStrings("Cascadia Code", parsed.list.items[1]);
+    try testing.expectEqualStrings("Symbols Nerd Font", parsed.list.items[2]);
+}
+
+test "win32_settings: direct command edit text quotes argv boundaries" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var source: Config.Command = undefined;
+    try source.parseCLI(arena.allocator(), "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"");
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try writeCommandForEdit(&writer, source);
+    try testing.expectEqualStrings(
+        "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"",
+        writer.buffered(),
+    );
+
+    var round_trip: Config.Command = undefined;
+    try round_trip.parseCLI(arena.allocator(), writer.buffered());
+    try testing.expect(round_trip == .direct);
+    try testing.expectEqual(@as(usize, 4), round_trip.direct.len);
+    try testing.expectEqualStrings("echo hello", round_trip.direct[2]);
+    try testing.expectEqualStrings("C:\\Program Files\\winghostty", round_trip.direct[3]);
 }
