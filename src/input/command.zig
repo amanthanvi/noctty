@@ -549,7 +549,11 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Toggle the inspector.",
         }},
 
-        .show_gtk_inspector => comptime &.{},
+        .show_gtk_inspector => comptime &.{.{
+            .action = .show_gtk_inspector,
+            .title = "Show Native Inspector",
+            .description = "Open the native Win32 terminal inspector.",
+        }},
 
         .show_on_screen_keyboard => comptime &.{.{
             .action = .show_on_screen_keyboard,
@@ -732,4 +736,14 @@ test "command defaults" {
     const testing = std.testing;
     try testing.expect(defaults.len > 0);
     try testing.expectEqual(defaults.len, defaultsC.len);
+}
+
+test "command defaults expose Win32 inspector alias" {
+    for (defaults) |cmd| {
+        if (cmd.action == .show_gtk_inspector) {
+            try std.testing.expectEqualStrings("Show Native Inspector", cmd.title);
+            return;
+        }
+    }
+    return error.MissingWin32InspectorCommand;
 }
