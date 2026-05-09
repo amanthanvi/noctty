@@ -2169,9 +2169,9 @@ keybind: Keybinds = .{},
 /// On Windows this persists the practical window/session shape on app exit:
 /// host window rectangle/state plus tab, split, profile, working-directory,
 /// and explicit title metadata. Terminal contents and child process state are
-/// not restored. Quick-terminal hosts are also not saved; the quick terminal is
-/// recreated from current quick-terminal configuration the next time it is
-/// toggled.
+/// not restored. Quick-terminal tabs/splits are also not saved; the quick
+/// terminal is recreated from current quick-terminal configuration the next
+/// time it is toggled.
 @"window-save-state": WindowSaveState = .default,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
