@@ -128,6 +128,7 @@ pub const InitError = error{
 pub const ApplyError = error{
     SetProgressStateFailed,
     SetProgressValueFailed,
+    ResetProgressStateFailed,
 };
 
 pub const TaskbarProgress = struct {
@@ -172,7 +173,8 @@ pub const TaskbarProgress = struct {
                 value.total,
             );
             if (value_hr < 0) {
-                _ = self.taskbar.setProgressState(hwnd, TBPF_NOPROGRESS);
+                const reset_hr = self.taskbar.setProgressState(hwnd, TBPF_NOPROGRESS);
+                if (reset_hr < 0) return error.ResetProgressStateFailed;
                 return error.SetProgressValueFailed;
             }
         }
@@ -227,8 +229,6 @@ test "taskbar progress treats missing set progress as indeterminate and clamps o
 }
 
 test "taskbar progress clears visible state when value update fails" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-
     const Call = union(enum) {
         state: TBPFLAG,
         value: ProgressValue,
