@@ -206,9 +206,10 @@ winghostty does not upload crash reports. The app keeps a local directory:
 %LOCALAPPDATA%\winghostty\crash
 ```
 
-On Windows the Sentry initialization path is a no-op today, so some builds
-may produce nothing in this directory in practice. The `+crash-report` CLI
-reads anything that is there:
+On Windows the Sentry initialization path is a no-op, but winghostty installs a
+local unhandled-exception filter that writes `.dmp` minidumps for process-level
+crash exceptions. Some hard-abort paths may still terminate before Windows can
+produce a dump. The `+crash-report` CLI reads anything that is there:
 
 ```powershell
 winghostty +crash-report
