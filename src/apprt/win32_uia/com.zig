@@ -19,10 +19,12 @@ pub const S_FALSE: HRESULT = 1;
 pub const E_NOTIMPL: HRESULT = @bitCast(@as(u32, 0x80004001));
 pub const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
+pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
 pub const IID_IRawElementProviderSimple = GUID.parse("{D6DD68D1-86FD-4332-8666-9ABEDEA2D24C}");
+pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 
 /// UIA object IDs passed as WM_GETOBJECT.lParam by the system / client.
 /// These are negative in the Windows headers; cast to LPARAM via bitcast.
@@ -121,6 +123,24 @@ pub const IRawElementProviderSimple = extern struct {
     vtbl: *const IRawElementProviderSimpleVtbl,
 };
 
+// ── IValueProvider ─────────────────────────────────────────────────────
+
+pub const IValueProviderVtbl = extern struct {
+    // IUnknown
+    QueryInterface: *const fn (*IValueProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IValueProvider) callconv(.winapi) u32,
+    Release: *const fn (*IValueProvider) callconv(.winapi) u32,
+
+    // IValueProvider
+    SetValue: *const fn (*IValueProvider, [*:0]const u16) callconv(.winapi) HRESULT,
+    get_Value: *const fn (*IValueProvider, *?[*:0]u16) callconv(.winapi) HRESULT,
+    get_IsReadOnly: *const fn (*IValueProvider, *BOOL) callconv(.winapi) HRESULT,
+};
+
+pub const IValueProvider = extern struct {
+    vtbl: *const IValueProviderVtbl,
+};
+
 // ── StructureChangeType ─────────────────────────────────────────────────
 // Values for UiaRaiseStructureChangedEvent's second parameter. From
 // uiautomationcore.h.
@@ -185,6 +205,7 @@ pub extern "uiautomationcore" fn UiaClientsAreListening() callconv(.winapi) BOOL
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
 pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
 pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
+pub extern "oleaut32" fn SysStringLen(bstr: ?[*:0]const u16) callconv(.winapi) u32;
 
 /// Live HWND text query. Used by the UIA Name provider so screen
 /// readers see the current window title after a rename.
@@ -199,6 +220,7 @@ test "HRESULT error constants" {
     try std.testing.expect(E_NOTIMPL != S_OK);
     try std.testing.expect(E_POINTER != S_OK);
     try std.testing.expect(E_NOINTERFACE != S_OK);
+    try std.testing.expect(E_OUTOFMEMORY != S_OK);
 }
 
 test "VARIANT empty has zero vt" {
