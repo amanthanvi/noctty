@@ -180,6 +180,9 @@ fn backgroundBlurFromCheckbox(
     };
 }
 
+const PaddingAxis = enum { x, y };
+const AppNotificationField = enum { clipboard, config };
+
 extern "user32" fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) callconv(.winapi) ATOM;
 extern "user32" fn CreateWindowExW(
     dwExStyle: u32,
@@ -679,7 +682,7 @@ pub const SettingsWindow = struct {
         setEditText(edit, writer.buffered(), &self.suppress_edit_events);
     }
 
-    fn syncPaddingFromEdit(self: *SettingsWindow, axis: enum { x, y }) void {
+    fn syncPaddingFromEdit(self: *SettingsWindow, axis: PaddingAxis) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const edit = switch (axis) {
@@ -695,7 +698,7 @@ pub const SettingsWindow = struct {
         }
     }
 
-    fn displayPaddingInEdit(self: *SettingsWindow, axis: enum { x, y }) void {
+    fn displayPaddingInEdit(self: *SettingsWindow, axis: PaddingAxis) void {
         const edit = switch (axis) {
             .x => self.edit_pad_x,
             .y => self.edit_pad_y,
@@ -754,7 +757,7 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
-    fn syncAppNotificationsFromCheckbox(self: *SettingsWindow, field: enum { clipboard, config }) void {
+    fn syncAppNotificationsFromCheckbox(self: *SettingsWindow, field: AppNotificationField) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const chk = switch (field) {
@@ -768,7 +771,7 @@ pub const SettingsWindow = struct {
         }
     }
 
-    fn displayAppNotificationsInCheckbox(self: *SettingsWindow, field: enum { clipboard, config }) void {
+    fn displayAppNotificationsInCheckbox(self: *SettingsWindow, field: AppNotificationField) void {
         const chk = switch (field) {
             .clipboard => self.chk_app_notify_clipboard,
             .config => self.chk_app_notify_config,
@@ -1245,345 +1248,133 @@ pub const SettingsWindow = struct {
 
         // Scrollback limit EDIT. Lives in the Terminal section. Digit-
         // only input via ES_NUMBER; EN_CHANGE syncs into `pending`.
-        const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
-        self.edit_scrollback = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
-            0,
-            0,
-            200,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_SCROLLBACK),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_scrollback = makeEdit(hwnd, self.handle.hinstance, EDIT_SCROLLBACK, 200, ES_NUMBER);
 
         // font-family EDIT. Comma-separated fallback families.
-        self.edit_font_family = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            300,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_FONT_FAMILY),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_font_family = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_FAMILY, 300, 0);
 
         // font-size EDIT. Appearance section. We accept floats via a
         // plain EDIT (not ES_NUMBER — which rejects '.') and validate
         // on EN_CHANGE.
-        self.edit_font_size = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            160,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_FONT_SIZE),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_font_size = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_SIZE, 160, 0);
 
         // theme EDIT. Accepts a built-in/custom name or light/dark pair.
-        self.edit_theme = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            300,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_THEME),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_theme = makeEdit(hwnd, self.handle.hinstance, EDIT_THEME, 300, 0);
 
         // background-opacity EDIT. Appearance section. 0.0..1.0.
-        self.edit_bg_opacity = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            160,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_BG_OPACITY),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_bg_opacity = makeEdit(hwnd, self.handle.hinstance, EDIT_BG_OPACITY, 160, 0);
 
-        self.edit_command = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            360,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_COMMAND),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_command = makeEdit(hwnd, self.handle.hinstance, EDIT_COMMAND, 360, 0);
 
-        self.edit_pad_x = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            160,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_PAD_X),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_pad_x = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_X, 160, 0);
 
-        self.edit_pad_y = CreateWindowExW(
-            0,
-            edit_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
-            0,
-            0,
-            160,
-            28,
-            hwnd,
-            @ptrFromInt(EDIT_PAD_Y),
-            self.handle.hinstance,
-            null,
-        );
+        self.edit_pad_y = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_Y, 160, 0);
 
         // clipboard-trim-trailing-spaces checkbox. Terminal section.
-        self.chk_trim_trail = CreateWindowExW(
-            0,
-            btn_class,
+        self.chk_trim_trail = makeCheckbox(
+            hwnd,
+            self.handle.hinstance,
+            CHK_TRIM_TRAIL,
             std.unicode.utf8ToUtf16LeStringLiteral("Trim trailing spaces on copy"),
-            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            0,
-            0,
             260,
-            24,
-            hwnd,
-            @ptrFromInt(CHK_TRIM_TRAIL),
-            self.handle.hinstance,
-            null,
         );
 
-        self.chk_desktop_notifications = CreateWindowExW(
-            0,
-            btn_class,
+        self.chk_desktop_notifications = makeCheckbox(
+            hwnd,
+            self.handle.hinstance,
+            CHK_DESKTOP_NOTIFICATIONS,
             std.unicode.utf8ToUtf16LeStringLiteral("Allow terminal desktop notifications"),
-            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            0,
-            0,
             320,
-            24,
-            hwnd,
-            @ptrFromInt(CHK_DESKTOP_NOTIFICATIONS),
-            self.handle.hinstance,
-            null,
         );
 
-        self.chk_app_notify_clipboard = CreateWindowExW(
-            0,
-            btn_class,
+        self.chk_app_notify_clipboard = makeCheckbox(
+            hwnd,
+            self.handle.hinstance,
+            CHK_APP_NOTIFY_CLIPBOARD,
             std.unicode.utf8ToUtf16LeStringLiteral("Notify when clipboard copy completes"),
-            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            0,
-            0,
             320,
-            24,
-            hwnd,
-            @ptrFromInt(CHK_APP_NOTIFY_CLIPBOARD),
-            self.handle.hinstance,
-            null,
         );
 
-        self.chk_app_notify_config = CreateWindowExW(
-            0,
-            btn_class,
-            std.unicode.utf8ToUtf16LeStringLiteral("Notify after config reload"),
-            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            0,
-            0,
-            320,
-            24,
+        self.chk_app_notify_config = makeCheckbox(
             hwnd,
-            @ptrFromInt(CHK_APP_NOTIFY_CONFIG),
             self.handle.hinstance,
-            null,
+            CHK_APP_NOTIFY_CONFIG,
+            std.unicode.utf8ToUtf16LeStringLiteral("Notify after config reload"),
+            320,
         );
 
         // Comboboxes for enum fields.
-        const combo_class = std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX");
-
-        self.combo_confirm_close = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
-            160,
+        self.combo_confirm_close = makeCombo(
             hwnd,
-            @ptrFromInt(COMBO_CONFIRM_CLOSE),
             self.handle.hinstance,
-            null,
-        );
-        populateCombo(self.combo_confirm_close, &.{ "false", "true", "always" });
-
-        self.combo_copy_on_select = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
+            COMBO_CONFIRM_CLOSE,
             160,
-            hwnd,
-            @ptrFromInt(COMBO_COPY_ON_SELECT),
-            self.handle.hinstance,
-            null,
+            &.{ "false", "true", "always" },
         );
-        populateCombo(self.combo_copy_on_select, &.{ "false", "true", "clipboard" });
 
-        self.combo_window_theme = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
+        self.combo_copy_on_select = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_COPY_ON_SELECT,
+            160,
+            &.{ "false", "true", "clipboard" },
+        );
+
+        self.combo_window_theme = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_WINDOW_THEME,
             180,
-            hwnd,
-            @ptrFromInt(COMBO_WINDOW_THEME),
-            self.handle.hinstance,
-            null,
+            &.{ "auto", "system", "light", "dark", "ghostty" },
         );
-        populateCombo(self.combo_window_theme, &.{ "auto", "system", "light", "dark", "ghostty" });
 
-        self.combo_shell_integ = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
-            200,
+        self.combo_shell_integ = makeCombo(
             hwnd,
-            @ptrFromInt(COMBO_SHELL_INTEG),
             self.handle.hinstance,
-            null,
-        );
-        populateCombo(
-            self.combo_shell_integ,
+            COMBO_SHELL_INTEG,
+            200,
             &.{ "none", "detect", "bash", "elvish", "fish", "nushell", "zsh" },
         );
 
-        self.combo_cursor_style = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
-            160,
+        self.combo_cursor_style = makeCombo(
             hwnd,
-            @ptrFromInt(COMBO_CURSOR_STYLE),
             self.handle.hinstance,
-            null,
-        );
-        populateCombo(
-            self.combo_cursor_style,
+            COMBO_CURSOR_STYLE,
+            160,
             &.{ "bar", "block", "underline", "block_hollow" },
         );
 
-        self.chk_bg_blur = CreateWindowExW(
-            0,
-            btn_class,
+        self.chk_bg_blur = makeCheckbox(
+            hwnd,
+            self.handle.hinstance,
+            CHK_BG_BLUR,
             std.unicode.utf8ToUtf16LeStringLiteral("Enable background blur"),
-            WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
-            0,
-            0,
             260,
-            24,
-            hwnd,
-            @ptrFromInt(CHK_BG_BLUR),
-            self.handle.hinstance,
-            null,
         );
 
-        self.combo_pad_balance = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
+        self.combo_pad_balance = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_PAD_BALANCE,
             160,
-            hwnd,
-            @ptrFromInt(COMBO_PAD_BALANCE),
-            self.handle.hinstance,
-            null,
+            &.{ "false", "true", "equal" },
         );
-        populateCombo(self.combo_pad_balance, &.{ "false", "true", "equal" });
 
-        self.combo_auto_update = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
+        self.combo_auto_update = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_AUTO_UPDATE,
             160,
-            hwnd,
-            @ptrFromInt(COMBO_AUTO_UPDATE),
-            self.handle.hinstance,
-            null,
+            &.{ "default", "off", "check", "download" },
         );
-        populateCombo(self.combo_auto_update, &.{ "default", "off", "check", "download" });
 
-        self.combo_auto_update_channel = CreateWindowExW(
-            0,
-            combo_class,
-            std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
-            0,
-            0,
-            200,
+        self.combo_auto_update_channel = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_AUTO_UPDATE_CHANNEL,
             140,
-            hwnd,
-            @ptrFromInt(COMBO_AUTO_UPDATE_CHANNEL),
-            self.handle.hinstance,
-            null,
+            &.{ "default", "stable", "tip" },
         );
-        populateCombo(self.combo_auto_update_channel, &.{ "default", "stable", "tip" });
 
         self.refreshAllControls();
 
@@ -1602,6 +1393,80 @@ fn populateCombo(combo_opt: ?HWND, items: []const []const u8) void {
         const w = utf8ToW(&buf_w, item);
         _ = SendMessageW(combo, CB_ADDSTRING, 0, @bitCast(@intFromPtr(w)));
     }
+}
+
+fn makeEdit(
+    parent: HWND,
+    hinstance: HINSTANCE,
+    id: usize,
+    width: i32,
+    extra_style: u32,
+) ?HWND {
+    const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
+    return CreateWindowExW(
+        0,
+        edit_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | extra_style,
+        0,
+        0,
+        width,
+        28,
+        parent,
+        @ptrFromInt(id),
+        hinstance,
+        null,
+    );
+}
+
+fn makeCheckbox(
+    parent: HWND,
+    hinstance: HINSTANCE,
+    id: usize,
+    label: LPCWSTR,
+    width: i32,
+) ?HWND {
+    const btn_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+    return CreateWindowExW(
+        0,
+        btn_class,
+        label,
+        WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+        0,
+        0,
+        width,
+        24,
+        parent,
+        @ptrFromInt(id),
+        hinstance,
+        null,
+    );
+}
+
+fn makeCombo(
+    parent: HWND,
+    hinstance: HINSTANCE,
+    id: usize,
+    height: i32,
+    items: []const []const u8,
+) ?HWND {
+    const combo_class = std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX");
+    const combo = CreateWindowExW(
+        0,
+        combo_class,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
+        0,
+        0,
+        200,
+        height,
+        parent,
+        @ptrFromInt(id),
+        hinstance,
+        null,
+    );
+    populateCombo(combo, items);
+    return combo;
 }
 
 fn makeSectionButton(
