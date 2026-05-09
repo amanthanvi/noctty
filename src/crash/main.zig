@@ -2,6 +2,7 @@
 //! whether that's setting up the system to catch crashes (Sentry client),
 //! introspecting crash reports, writing crash reports to disk, etc.
 
+const std = @import("std");
 const dir = @import("dir.zig");
 const sentry_envelope = @import("sentry_envelope.zig");
 const builtin = @import("builtin");
@@ -19,9 +20,12 @@ pub const ReportIterator = dir.ReportIterator;
 pub const Report = dir.Report;
 
 // The main init/deinit functions for global state.
-pub fn init(alloc: anytype) !void {
+pub fn init(alloc: std.mem.Allocator) !void {
     try minidump_windows.init(alloc);
-    try sentry.init(alloc);
+    sentry.init(alloc) catch |err| {
+        minidump_windows.deinit();
+        return err;
+    };
 }
 
 pub fn deinit() void {

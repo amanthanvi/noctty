@@ -42,6 +42,8 @@ var crash_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
 var crash_dir: []const u8 = "";
 
 pub fn init(alloc: std.mem.Allocator) !void {
+    if (installed) return;
+
     const crash = try dir.defaultDir(alloc);
     defer alloc.free(crash.path);
 
@@ -67,7 +69,12 @@ pub fn deinit() void {
 }
 
 fn unhandledExceptionFilter(info: *windows.EXCEPTION_POINTERS) callconv(.winapi) c_long {
-    if (writing.swap(true, .seq_cst)) return EXCEPTION_EXECUTE_HANDLER;
+    if (writing.swap(true, .seq_cst)) {
+        if (previous_filter) |filter| return filter(info);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+    defer writing.store(false, .seq_cst);
+
     writeMinidump(info) catch |err| {
         log.warn("failed to write windows minidump err={}", .{err});
     };
