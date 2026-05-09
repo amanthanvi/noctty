@@ -44,6 +44,7 @@ const win32_status_bar = @import("win32_status_bar.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
+const win32_session_state = @import("win32_session_state.zig");
 
 // Re-export types from theme module
 const ThemeColors = win32_theme.ThemeColors;
@@ -835,6 +836,15 @@ const WINDOWPOS = extern struct {
     flags: UINT,
 };
 
+const WINDOWPLACEMENT = extern struct {
+    length: UINT,
+    flags: UINT,
+    showCmd: UINT,
+    ptMinPosition: POINT,
+    ptMaxPosition: POINT,
+    rcNormalPosition: RECT,
+};
+
 const NCCALCSIZE_PARAMS = extern struct {
     rgrc: [3]RECT,
     lppos: *WINDOWPOS,
@@ -921,6 +931,7 @@ extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
 extern "user32" fn GetMonitorInfoW(hMonitor: ?*anyopaque, lpmi: *MONITORINFO) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
+extern "user32" fn GetWindowPlacement(hWnd: HWND, lpwndpl: *WINDOWPLACEMENT) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowTextLengthW(hWnd: HWND) callconv(.winapi) i32;
 extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: [*]u16, nMaxCount: i32) callconv(.winapi) i32;
 extern "user32" fn IsWindow(hWnd: HWND) callconv(.winapi) BOOL;
@@ -2347,11 +2358,14 @@ pub const App = struct {
         try self.startIpcServer();
 
         if (self.config.@"initial-window") {
-            try self.createWindow(default_title);
-            if (self.startup_profile_picker) {
+            const restored = try self.restoreSessionState();
+            if (!restored) try self.createWindow(default_title);
+            if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
+                self.startup_profile_picker = false;
+            } else if (restored) {
                 self.startup_profile_picker = false;
             }
         } else {
@@ -2460,6 +2474,7 @@ pub const App = struct {
         }
         self.unregisterGlobalHotkeys();
         self.stopIpcServer();
+        self.saveSessionState();
         self.destroyAllWindows();
         self.hosts.deinit(self.core_app.alloc);
         self.windows.deinit(self.core_app.alloc);
@@ -2517,6 +2532,29 @@ pub const App = struct {
             dir,
             "palette-mru.txt",
         }) catch null;
+    }
+
+    /// Resolve `%LOCALAPPDATA%\winghostty\session-state.json`. Caller
+    /// frees with `core_app.alloc`.
+    fn sessionStatePath(self: *const App) ?[]u8 {
+        const local = std.process.getEnvVarOwned(
+            self.core_app.alloc,
+            "LOCALAPPDATA",
+        ) catch return null;
+        defer self.core_app.alloc.free(local);
+        const dir = std.fs.path.join(self.core_app.alloc, &.{
+            local,
+            "winghostty",
+        }) catch return null;
+        defer self.core_app.alloc.free(dir);
+        return std.fs.path.join(self.core_app.alloc, &.{
+            dir,
+            "session-state.json",
+        }) catch null;
+    }
+
+    fn sessionStateEnabled(self: *const App) bool {
+        return self.config.@"window-save-state" != .never;
     }
 
     /// Populate `palette_mru` from the on-disk file, one action per line
@@ -2581,6 +2619,365 @@ pub const App = struct {
             }
         }
         fw.interface.flush() catch {};
+    }
+
+    fn loadSessionState(self: *App) !?std.json.Parsed(win32_session_state.SessionState) {
+        if (!self.sessionStateEnabled()) return null;
+        const path = self.sessionStatePath() orelse return null;
+        defer self.core_app.alloc.free(path);
+
+        const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer file.close();
+
+        const raw = try file.readToEndAlloc(self.core_app.alloc, 1024 * 1024);
+        defer self.core_app.alloc.free(raw);
+        return try win32_session_state.parseAlloc(self.core_app.alloc, raw);
+    }
+
+    fn restoreSessionState(self: *App) !bool {
+        var parsed = self.loadSessionState() catch |err| {
+            log.warn("win32 session restore: ignored unreadable session state err={}", .{err});
+            return false;
+        } orelse return false;
+        defer parsed.deinit();
+
+        var restored = false;
+        for (parsed.value.windows) |window| {
+            if (self.restoreSessionWindow(window)) |surface| {
+                restored = true;
+                self.activateSurface(surface);
+            } else |err| {
+                log.warn("win32 session restore: skipped window err={}", .{err});
+            }
+        }
+
+        return restored;
+    }
+
+    fn restoreSessionWindow(
+        self: *App,
+        window: win32_session_state.Window,
+    ) !*Surface {
+        var host: ?*Host = null;
+        var window_surface: ?*Surface = null;
+
+        for (window.tabs, 0..) |saved_tab, tab_index| {
+            const tab_surface = try self.restoreSessionTab(
+                saved_tab,
+                host,
+                tab_index,
+            );
+            if (host == null) {
+                host = tab_surface.host;
+                if (host) |created_host| {
+                    self.applyRestoredWindowPlacement(created_host, window) catch |err| {
+                        log.warn("win32 session restore: window placement failed err={}", .{err});
+                    };
+                }
+            }
+            if (window_surface == null or tab_index == window.selected_tab) {
+                window_surface = tab_surface;
+            }
+        }
+
+        const restored_host = host orelse return error.EmptyTabs;
+        if (restored_host.tabs.items.len == 0) return error.EmptyTabs;
+        restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
+        const active_tab = &restored_host.tabs.items[restored_host.active_tab];
+        return active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+    }
+
+    fn restoreSessionTab(
+        self: *App,
+        saved_tab: win32_session_state.Tab,
+        existing_host: ?*Host,
+        tab_index: usize,
+    ) !*Surface {
+        var tab_surface: ?*Surface = null;
+        var created: usize = 0;
+        var selected_surface: ?*Surface = null;
+
+        for (saved_tab.layout.nodes) |node| {
+            const pane = switch (node) {
+                .pane => |value| value,
+                .split => continue,
+            };
+            const surface = try self.restoreSessionPane(
+                pane,
+                existing_host,
+                tab_surface,
+                tab_index,
+                preferredSplitDirection(saved_tab.layout),
+            );
+            if (tab_surface == null) tab_surface = surface;
+            if (created == saved_tab.selected_leaf) selected_surface = surface;
+            created += 1;
+        }
+
+        const first = tab_surface orelse return error.EmptyLayout;
+        const selected = selected_surface orelse first;
+        if (self.findTabForSurface(selected)) |found| {
+            if (found.tab.findHandle(selected)) |handle| found.tab.focused = handle;
+        }
+        return selected;
+    }
+
+    fn restoreSessionPane(
+        self: *App,
+        pane: win32_session_state.Pane,
+        existing_host: ?*Host,
+        tab_surface: ?*Surface,
+        tab_index: usize,
+        split_direction: SplitTreeSurface.Split.Direction,
+    ) !*Surface {
+        const host = existing_host orelse if (tab_surface) |source| source.host else null;
+        const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
+            .window
+        else if (tab_surface == null)
+            .tab
+        else
+            .split;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
+        defer config.deinit();
+
+        if (pane.profile) |key| {
+            if (host) |existing| {
+                if ((try existing.profileForKey(key))) |profile| {
+                    try applyProfileSurfaceConfig(&config, profile);
+                }
+            }
+        }
+        if (pane.cwd) |cwd| {
+            const alloc = config._arena.?.allocator();
+            config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
+        }
+
+        const tab_id = if (tab_surface) |source|
+            (self.findTabForSurface(source) orelse return error.NoActiveSurface).tab.id
+        else
+            null;
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = if (host) |existing| existing.id else null,
+            .tab_id = tab_id,
+            .tab_insert_index = if (host != null and tab_surface == null) tab_index else null,
+            .clone_state_from = tab_surface,
+            .split_direction = split_direction,
+        });
+
+        if (pane.profile) |key| try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
+        if (pane.title_override) |title| try surface.setTitleOverride(title);
+        if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
+        if (pane.cwd) |cwd| try surface.setPwd(cwd);
+        return surface;
+    }
+
+    fn applyRestoredWindowPlacement(
+        self: *App,
+        host: *Host,
+        window: win32_session_state.Window,
+    ) !void {
+        _ = self;
+        const hwnd = host.hwnd orelse return;
+        if (window.x != null) {
+            if (SetWindowPos(
+                hwnd,
+                null,
+                window.x.?,
+                window.y.?,
+                window.width.?,
+                window.height.?,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        if ((window.state orelse .normal) == .maximized) {
+            _ = ShowWindow(hwnd, SW_MAXIMIZE);
+        }
+    }
+
+    fn saveSessionState(self: *const App) void {
+        if (!self.sessionStateEnabled()) return;
+        const path = self.sessionStatePath() orelse return;
+        defer self.core_app.alloc.free(path);
+
+        var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const state = self.buildSessionState(alloc) catch |err| {
+            log.warn("win32 session save: snapshot failed err={}", .{err});
+            return;
+        };
+        if (state.windows.len == 0) return;
+
+        const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
+            log.warn("win32 session save: encode failed err={}", .{err});
+            return;
+        };
+        defer self.core_app.alloc.free(encoded);
+
+        if (std.fs.path.dirname(path)) |dir| {
+            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => {
+                    log.warn("win32 session save: mkdir failed path={s} err={}", .{ dir, err });
+                    return;
+                },
+            };
+        }
+
+        const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch |err| {
+            log.warn("win32 session save: create failed path={s} err={}", .{ path, err });
+            return;
+        };
+        defer file.close();
+        var buf: [4096]u8 = undefined;
+        var writer = file.writer(&buf);
+        writer.interface.writeAll(encoded) catch |err| {
+            log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
+            return;
+        };
+        writer.interface.flush() catch |err| {
+            log.warn("win32 session save: flush failed path={s} err={}", .{ path, err });
+        };
+    }
+
+    fn buildSessionState(
+        self: *const App,
+        alloc: Allocator,
+    ) !win32_session_state.SessionState {
+        var count: usize = 0;
+        for (self.hosts.items) |host| {
+            if (host.tabs.items.len > 0) count += 1;
+        }
+
+        const windows_state = try alloc.alloc(win32_session_state.Window, count);
+        var built: usize = 0;
+        for (self.hosts.items) |host| {
+            if (host.tabs.items.len == 0) continue;
+            windows_state[built] = try self.buildSessionWindow(alloc, host);
+            built += 1;
+        }
+
+        return .{ .windows = windows_state };
+    }
+
+    fn buildSessionWindow(
+        self: *const App,
+        alloc: Allocator,
+        host: *Host,
+    ) !win32_session_state.Window {
+        const tabs = try alloc.alloc(win32_session_state.Tab, host.tabs.items.len);
+        for (host.tabs.items, 0..) |*tab, i| {
+            tabs[i] = try buildSessionTab(alloc, tab);
+        }
+
+        var window: win32_session_state.Window = .{
+            .selected_tab = @min(host.active_tab, if (host.tabs.items.len > 0) host.tabs.items.len - 1 else 0),
+            .tabs = tabs,
+        };
+        if (sessionWindowRect(host)) |rect| {
+            window.x = rect.left;
+            window.y = rect.top;
+            window.width = rect.right - rect.left;
+            window.height = rect.bottom - rect.top;
+        }
+        if (host.hwnd) |hwnd| {
+            window.state = if (IsZoomed(hwnd) != 0) .maximized else .normal;
+        }
+        _ = self;
+        return window;
+    }
+
+    fn buildSessionTab(
+        alloc: Allocator,
+        tab: *const Tab,
+    ) !win32_session_state.Tab {
+        var selected_leaf: usize = 0;
+        var leaf_index: usize = 0;
+        for (tab.tree.nodes, 0..) |node, node_index| {
+            switch (node) {
+                .leaf => {},
+                .split => continue,
+            }
+            if (tab.focused.idx() == node_index) selected_leaf = leaf_index;
+            leaf_index += 1;
+        }
+
+        return .{
+            .selected_leaf = selected_leaf,
+            .layout = try buildSessionLayout(alloc, tab),
+        };
+    }
+
+    fn buildSessionLayout(
+        alloc: Allocator,
+        tab: *const Tab,
+    ) !win32_session_state.LayoutTree {
+        if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.OutOfMemory;
+        const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
+        for (tab.tree.nodes, 0..) |node, i| {
+            nodes[i] = switch (node) {
+                .leaf => |surface| .{ .pane = .{
+                    .cwd = surface.pwd,
+                    .profile = surface.launch_profile_key,
+                    .title_override = surface.title_override,
+                    .tab_title_override = surface.tab_title_override,
+                } },
+                .split => |split| .{ .split = .{
+                    .axis = switch (split.layout) {
+                        .horizontal => .horizontal,
+                        .vertical => .vertical,
+                    },
+                    .ratio = @floatCast(split.ratio),
+                    .first = @intFromEnum(split.left),
+                    .second = @intFromEnum(split.right),
+                } },
+            };
+        }
+        return .{ .root = 0, .nodes = nodes };
+    }
+
+    fn preferredSplitDirection(
+        layout: win32_session_state.LayoutTree,
+    ) SplitTreeSurface.Split.Direction {
+        if (layout.root < layout.nodes.len) {
+            switch (layout.nodes[layout.root]) {
+                .split => |split| return switch (split.axis) {
+                    .horizontal => .right,
+                    .vertical => .down,
+                },
+                .pane => {},
+            }
+        }
+        return .right;
+    }
+
+    fn sessionWindowRect(host: *Host) ?RECT {
+        const hwnd = host.hwnd orelse return null;
+        var rect: RECT = undefined;
+        if (IsZoomed(hwnd) != 0 or IsIconic(hwnd) != 0) {
+            var placement: WINDOWPLACEMENT = .{
+                .length = @sizeOf(WINDOWPLACEMENT),
+                .flags = 0,
+                .showCmd = 0,
+                .ptMinPosition = .{ .x = 0, .y = 0 },
+                .ptMaxPosition = .{ .x = 0, .y = 0 },
+                .rcNormalPosition = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+            };
+            if (GetWindowPlacement(hwnd, &placement) != 0) {
+                rect = placement.rcNormalPosition;
+            } else if (GetWindowRect(hwnd, &rect) == 0) {
+                return null;
+            }
+        } else if (GetWindowRect(hwnd, &rect) == 0) {
+            return null;
+        }
+
+        if (rect.right <= rect.left or rect.bottom <= rect.top) return null;
+        return rect;
     }
 
     /// Push an action string onto the palette MRU list, dedup'd by
