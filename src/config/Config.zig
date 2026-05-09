@@ -2617,17 +2617,14 @@ keybind: Keybinds = .{},
 ///
 ///  * `mouse` - The screen that the mouse is currently hovered over.
 ///
+///  * `all` - The full virtual desktop spanning all connected screens.
+///
 /// The default value is `main`.
 @"quick-terminal-screen": QuickTerminalScreen = .main,
 
 /// Duration (in seconds) of the quick terminal enter and exit animation.
 /// Set it to 0 to disable animation completely. This can be changed at
 /// runtime.
-///
-/// Retained compatibility setting from platform-specific quick terminal
-/// behavior.
-///
-/// This currently has no effect in the Windows-only fork.
 @"quick-terminal-animation-duration": f64 = 0.2,
 
 /// Automatically hide the quick terminal when focus shifts to another window.
@@ -2682,7 +2679,9 @@ keybind: Keybinds = .{},
 /// Retained compatibility setting from platform-specific quick terminal
 /// behavior.
 ///
-/// This currently has no effect in the Windows-only fork.
+/// On Windows, `none` shows the quick terminal without activating it,
+/// `on-demand` activates it, and `exclusive` falls back to activated
+/// focused input because global keyboard capture is unsupported.
 @"quick-terminal-keyboard-interactivity": QuickTerminalKeyboardInteractivity = .@"on-demand",
 
 /// Whether to enable shell integration auto-injection or not. Shell integration
@@ -8998,6 +8997,7 @@ pub const QuickTerminalSize = struct {
 pub const QuickTerminalScreen = enum {
     main,
     mouse,
+    all,
 };
 
 // See quick-terminal-space-behavior
@@ -9921,6 +9921,20 @@ test "clone preserves conditional set" {
     defer clone1.deinit();
 
     try testing.expect(clone1._conditional_set.contains(.theme));
+}
+
+test "quick-terminal-screen accepts all" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    var it: TestIterator = .{ .data = &.{
+        "--quick-terminal-screen=all",
+    } };
+    try cfg.loadIter(alloc, &it);
+
+    try testing.expectEqual(QuickTerminalScreen.all, cfg.@"quick-terminal-screen");
 }
 
 test "working-directory expands tilde" {
