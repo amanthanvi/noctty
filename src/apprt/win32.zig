@@ -5763,6 +5763,7 @@ pub const App = struct {
                 // pick the monitor containing the current input focus /
                 // cursor. Matches the documented config intent.
                 .mouse => .focused,
+                .all => .all,
             },
             .animation_duration_s = self.config.@"quick-terminal-animation-duration",
             .autohide = self.config.@"quick-terminal-autohide",
@@ -5786,44 +5787,25 @@ pub const App = struct {
         //   * `.focused` (config's `mouse`) → the monitor under
         //                 the cursor via `GetCursorPos` +
         //                 `MonitorFromPoint(MONITOR_DEFAULTTONEAREST)`.
-        //   * `.all`    → caller's current monitor; the current path
-        //                 does not span the virtual desktop.
-        const monitor = switch (qt_cfg.screen) {
+        //   * `.all`    → the union of all connected monitors' work
+        //                 areas, matching the full virtual desktop.
+        const mi = switch (qt_cfg.screen) {
             .focused => blk: {
                 var pt: POINT = .{ .x = 0, .y = 0 };
                 if (GetCursorPos(&pt) == 0) {
-                    break :blk MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
+                    const monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
                         return error.MonitorLookupFailed;
+                    break :blk monitorInfo(monitor) orelse return error.MonitorInfoFailed;
                 }
-                break :blk MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) orelse
+                const monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) orelse
                     return error.MonitorLookupFailed;
+                break :blk monitorInfo(monitor) orelse return error.MonitorInfoFailed;
             },
-            .main => primaryMonitor() orelse
-                return error.MonitorLookupFailed,
-            .all => MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
-                return error.MonitorLookupFailed,
-        };
-        var info: MONITORINFO = .{
-            .cbSize = @sizeOf(MONITORINFO),
-            .rcMonitor = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-            .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-            .dwFlags = 0,
-        };
-        if (GetMonitorInfoW(monitor, &info) == 0) return error.MonitorInfoFailed;
-
-        const mi = win32_quick_terminal.MonitorInfo{
-            .work_area = .{
-                .left = info.rcWork.left,
-                .top = info.rcWork.top,
-                .right = info.rcWork.right,
-                .bottom = info.rcWork.bottom,
+            .main => blk: {
+                const monitor = primaryMonitor() orelse return error.MonitorLookupFailed;
+                break :blk monitorInfo(monitor) orelse return error.MonitorInfoFailed;
             },
-            .full_rect = .{
-                .left = info.rcMonitor.left,
-                .top = info.rcMonitor.top,
-                .right = info.rcMonitor.right,
-                .bottom = info.rcMonitor.bottom,
-            },
+            .all => allMonitorsInfo() orelse return error.MonitorLookupFailed,
         };
         const dims: configpkg.Config.QuickTerminalSize.Dimensions = .{
             .width = @intCast(@max(1, mi.work_area.width())),
@@ -14534,6 +14516,31 @@ fn rectEqual(a: RECT, b: RECT) bool {
         a.bottom == b.bottom;
 }
 
+fn monitorInfo(monitor: ?*anyopaque) ?win32_quick_terminal.MonitorInfo {
+    var info: MONITORINFO = .{
+        .cbSize = @sizeOf(MONITORINFO),
+        .rcMonitor = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        .dwFlags = 0,
+    };
+    if (GetMonitorInfoW(monitor, &info) == 0) return null;
+
+    return .{
+        .work_area = .{
+            .left = info.rcWork.left,
+            .top = info.rcWork.top,
+            .right = info.rcWork.right,
+            .bottom = info.rcWork.bottom,
+        },
+        .full_rect = .{
+            .left = info.rcMonitor.left,
+            .top = info.rcMonitor.top,
+            .right = info.rcMonitor.right,
+            .bottom = info.rcMonitor.bottom,
+        },
+    };
+}
+
 const PrimaryMonitorSearch = struct {
     found: ?*anyopaque = null,
 };
@@ -14566,6 +14573,53 @@ fn primaryMonitor() ?*anyopaque {
         @as(LPARAM, @bitCast(@intFromPtr(&search))),
     );
     return search.found orelse MonitorFromPoint(.{ .x = 0, .y = 0 }, MONITOR_DEFAULTTOPRIMARY);
+}
+
+const AllMonitorsSearch = struct {
+    found: bool = false,
+    failed: bool = false,
+    info: win32_quick_terminal.MonitorInfo = undefined,
+};
+
+fn isVisibleMonitorInfo(info: win32_quick_terminal.MonitorInfo) bool {
+    return info.full_rect.width() > 0 and info.full_rect.height() > 0 and
+        info.work_area.width() > 0 and info.work_area.height() > 0;
+}
+
+fn allMonitorsEnumProc(
+    monitor: ?*anyopaque,
+    _: HDC,
+    _: *RECT,
+    data: LPARAM,
+) callconv(.winapi) BOOL {
+    const search: *AllMonitorsSearch = @ptrFromInt(@as(usize, @bitCast(data)));
+    const info = monitorInfo(monitor) orelse {
+        log.warn("quick-terminal-screen=all: failed to query monitor info", .{});
+        search.failed = true;
+        return 0;
+    };
+    if (!isVisibleMonitorInfo(info)) return 1;
+    if (!search.found) {
+        search.info = info;
+        search.found = true;
+        return 1;
+    }
+    const monitors = [_]win32_quick_terminal.MonitorInfo{ search.info, info };
+    search.info = win32_quick_terminal.unionMonitors(&monitors);
+    return 1;
+}
+
+fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
+    var search: AllMonitorsSearch = .{};
+    if (EnumDisplayMonitors(
+        null,
+        null,
+        allMonitorsEnumProc,
+        @as(LPARAM, @bitCast(@intFromPtr(&search))),
+    ) == 0) return null;
+    if (search.failed) return null;
+    if (!search.found) return null;
+    return search.info;
 }
 
 // Keep helper modules reachable from the exe's module graph. Zig prunes
