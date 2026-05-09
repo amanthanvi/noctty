@@ -18240,6 +18240,19 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
+        WM_GETOBJECT => {
+            if (surface) |v| {
+                if (win32_uia.handleTerminalGetObject(
+                    v.app.core_app.alloc,
+                    hwnd,
+                    wParam,
+                    lParam,
+                    v.terminalUiaState(),
+                )) |lr| return lr;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
         WM_GETMINMAXINFO => {
             if (surface) |v| {
                 v.updateMinMaxInfo(lParam);
@@ -19239,6 +19252,39 @@ pub const Surface = struct {
 
     pub fn getTitle(self: *Surface) ?[:0]const u8 {
         return self.effectiveTitle();
+    }
+
+    fn terminalUiaState(self: *Surface) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(self),
+            .name = terminalUiaName,
+            .value = terminalUiaValue,
+            .focused = terminalUiaFocused,
+        };
+    }
+
+    fn terminalUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        const title = self.effectiveTitle() orelse "Terminal";
+        return std.fmt.bufPrint(buf, "Terminal: {s}", .{title}) catch "Terminal";
+    }
+
+    fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        if (!self.core_initialized) return try alloc.dupe(u8, "");
+
+        var snapshot = try win32_uia.snapshotTerminalPlainText(
+            alloc,
+            &self.core_surface.io.terminal,
+        );
+        defer snapshot.deinit();
+
+        return try alloc.dupe(u8, snapshot.text);
+    }
+
+    fn terminalUiaFocused(ctx: *anyopaque) bool {
+        const self: *Surface = @ptrCast(@alignCast(ctx));
+        return self.app.isSurfaceFocused(self);
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {

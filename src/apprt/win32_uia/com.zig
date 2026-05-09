@@ -23,6 +23,7 @@ pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
 pub const IID_IRawElementProviderSimple = GUID.parse("{D6DD68D1-86FD-4332-8666-9ABEDEA2D24C}");
+pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 
 /// UIA object IDs passed as WM_GETOBJECT.lParam by the system / client.
 /// These are negative in the Windows headers; cast to LPARAM via bitcast.
@@ -119,6 +120,24 @@ pub const IRawElementProviderSimpleVtbl = extern struct {
 
 pub const IRawElementProviderSimple = extern struct {
     vtbl: *const IRawElementProviderSimpleVtbl,
+};
+
+// ── IValueProvider ─────────────────────────────────────────────────────
+
+pub const IValueProviderVtbl = extern struct {
+    // IUnknown
+    QueryInterface: *const fn (*IValueProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IValueProvider) callconv(.winapi) u32,
+    Release: *const fn (*IValueProvider) callconv(.winapi) u32,
+
+    // IValueProvider
+    SetValue: *const fn (*IValueProvider, [*:0]const u16) callconv(.winapi) HRESULT,
+    get_Value: *const fn (*IValueProvider, *?[*:0]u16) callconv(.winapi) HRESULT,
+    get_IsReadOnly: *const fn (*IValueProvider, *BOOL) callconv(.winapi) HRESULT,
+};
+
+pub const IValueProvider = extern struct {
+    vtbl: *const IValueProviderVtbl,
 };
 
 // ── StructureChangeType ─────────────────────────────────────────────────
