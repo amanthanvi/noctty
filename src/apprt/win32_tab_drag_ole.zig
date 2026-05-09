@@ -2,8 +2,10 @@
 //!
 //! Implements `IDataObject`, `IDropSource`, and `IEnumFORMATETC` as minimal
 //! COM objects that ferry a `CF_WINGHOSTTY_TAB` payload through the system
-//! `DoDragDrop` loop. Each struct is one-shot: allocate, call `doDragDrop`,
-//! release.
+//! `DoDragDrop` loop. The payload is intentionally process-local metadata
+//! (PID + opaque pointer), not a serialised terminal/session image; drop
+//! targets must reject it when the PID differs. Each struct is one-shot:
+//! allocate, call `doDragDrop`, release.
 //!
 //! Thread safety: `doDragDrop` and all COM callbacks run on the STA-
 //! initialised UI thread. The apprt arranges `CoInitializeEx(STA)` in
@@ -53,6 +55,7 @@ const TYMED_HGLOBAL: DWORD = 1;
 
 // DVASPECT.
 const DVASPECT_CONTENT: DWORD = 1;
+const DVASPECT_THUMBNAIL: DWORD = 2;
 
 // DATADIR.
 const DATADIR_GET: DWORD = 1;
@@ -195,6 +198,14 @@ fn loadUser32() ?User32Fns {
 
 fn iidEqual(a: *const GUID, b: *const GUID) bool {
     return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
+}
+
+fn formatEtcMatches(fmt: *const FORMATETC, cf_id: WORD) bool {
+    return fmt.cfFormat == cf_id and
+        fmt.ptd == null and
+        fmt.dwAspect == DVASPECT_CONTENT and
+        fmt.lindex == -1 and
+        fmt.tymed & TYMED_HGLOBAL != 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -508,8 +519,7 @@ pub const DataObject = struct {
         const self = fromObj(self_obj);
         pmedium.* = std.mem.zeroes(STGMEDIUM);
 
-        if (pformatetc.cfFormat != self.cf_id) return DV_E_FORMATETC;
-        if (pformatetc.tymed & TYMED_HGLOBAL == 0) return DV_E_FORMATETC;
+        if (!formatEtcMatches(pformatetc, self.cf_id)) return DV_E_FORMATETC;
 
         const k32 = loadKernel32() orelse return E_OUTOFMEMORY;
         const size = @sizeOf(Payload);
@@ -542,7 +552,7 @@ pub const DataObject = struct {
         pformatetc: *const FORMATETC,
     ) callconv(.winapi) HRESULT {
         const self = fromObj(self_obj);
-        if (pformatetc.cfFormat == self.cf_id and pformatetc.tymed & TYMED_HGLOBAL != 0) {
+        if (formatEtcMatches(pformatetc, self.cf_id)) {
             return S_OK;
         }
         return DV_E_FORMATETC;
@@ -709,6 +719,38 @@ test "QueryGetData returns S_OK for matching format, DV_E_FORMATETC otherwise" {
         .tymed = 0, // not TYMED_HGLOBAL
     };
     try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_tymed));
+
+    // Wrong aspect -> DV_E_FORMATETC. The tab payload is only meaningful
+    // as ordinary content, not thumbnail/icon/alternate render data.
+    var fmt_bad_aspect = FORMATETC{
+        .cfFormat = TEST_CF,
+        .ptd = null,
+        .dwAspect = DVASPECT_THUMBNAIL,
+        .lindex = -1,
+        .tymed = TYMED_HGLOBAL,
+    };
+    try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_aspect));
+
+    var target_device: u8 = 0;
+    var fmt_bad_target_device = FORMATETC{
+        .cfFormat = TEST_CF,
+        .ptd = &target_device,
+        .dwAspect = DVASPECT_CONTENT,
+        .lindex = -1,
+        .tymed = TYMED_HGLOBAL,
+    };
+    try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_target_device));
+
+    // Indexed requests are unsupported; this object offers exactly one
+    // process-local tab metadata blob.
+    var fmt_bad_lindex = FORMATETC{
+        .cfFormat = TEST_CF,
+        .ptd = null,
+        .dwAspect = DVASPECT_CONTENT,
+        .lindex = 0,
+        .tymed = TYMED_HGLOBAL,
+    };
+    try testing.expectEqual(DV_E_FORMATETC, DataObject.QueryGetData(&dobj.obj, &fmt_bad_lindex));
 }
 
 test "GetData allocates HGLOBAL with correct payload bytes" {
@@ -741,6 +783,37 @@ test "GetData allocates HGLOBAL with correct payload bytes" {
 
     // Clean up.
     _ = k32.GlobalFree(stg.u.hGlobal);
+}
+
+test "GetData rejects unsupported FORMATETC variants before allocating" {
+    const payload = makeTestPayload();
+    var dobj = DataObject.initWithFormat(testing.allocator, payload, TEST_CF);
+
+    var fmt_bad_aspect = FORMATETC{
+        .cfFormat = TEST_CF,
+        .ptd = null,
+        .dwAspect = DVASPECT_THUMBNAIL,
+        .lindex = -1,
+        .tymed = TYMED_HGLOBAL,
+    };
+    var stg: STGMEDIUM = undefined;
+
+    const hr = DataObject.GetData(&dobj.obj, &fmt_bad_aspect, &stg);
+    try testing.expectEqual(DV_E_FORMATETC, hr);
+    try testing.expectEqual(@as(DWORD, 0), stg.tymed);
+    try testing.expect(stg.u.raw == null);
+    try testing.expect(stg.pUnkForRelease == null);
+
+    var fmt_bad_lindex = fmt_bad_aspect;
+    fmt_bad_lindex.dwAspect = DVASPECT_CONTENT;
+    fmt_bad_lindex.lindex = 0;
+    stg = undefined;
+
+    const lindex_hr = DataObject.GetData(&dobj.obj, &fmt_bad_lindex, &stg);
+    try testing.expectEqual(DV_E_FORMATETC, lindex_hr);
+    try testing.expectEqual(@as(DWORD, 0), stg.tymed);
+    try testing.expect(stg.u.raw == null);
+    try testing.expect(stg.pUnkForRelease == null);
 }
 
 test "FormatEnumerator.Next returns one format then S_FALSE" {
