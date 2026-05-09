@@ -116,6 +116,16 @@ fi
 
 # SSH Integration
 if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
+  function __ghostty_ssh_cache {
+    if [[ -n "$GHOSTTY_BIN_DIR" && -x "$GHOSTTY_BIN_DIR/winghostty" ]]; then
+      builtin command "$GHOSTTY_BIN_DIR/winghostty" +ssh-cache "$@"
+    elif builtin command -v winghostty >/dev/null 2>&1; then
+      builtin command winghostty +ssh-cache "$@"
+    else
+      return 127
+    fi
+  }
+
   function ssh() {
     builtin local ssh_term ssh_opts
     ssh_term="xterm-256color"
@@ -139,10 +149,11 @@ if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
       done < <(builtin command ssh -G "$@" 2>/dev/null)
 
       if [[ -n "$ssh_hostname" ]]; then
-        builtin local ssh_target="${ssh_user}@${ssh_hostname}"
+        builtin local ssh_target="$ssh_hostname"
+        [[ -n "$ssh_user" ]] && ssh_target="${ssh_user}@${ssh_hostname}"
 
         # Check if terminfo is already cached
-        if "$GHOSTTY_BIN_DIR/winghostty" +ssh-cache --host="$ssh_target" >/dev/null 2>&1; then
+        if __ghostty_ssh_cache --host="$ssh_target" >/dev/null 2>&1; then
           ssh_term="xterm-ghostty"
         elif builtin command -v infocmp >/dev/null 2>&1; then
           builtin local ssh_terminfo ssh_cpath_dir ssh_cpath
@@ -165,7 +176,7 @@ if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
               ssh_opts+=(-o "ControlPath=$ssh_cpath")
 
               # Cache successful installation
-              "$GHOSTTY_BIN_DIR/winghostty" +ssh-cache --add="$ssh_target" >/dev/null 2>&1 || true
+              __ghostty_ssh_cache --add="$ssh_target" >/dev/null 2>&1 || true
             else
               builtin echo "Warning: Failed to install terminfo." >&2
             fi
@@ -173,7 +184,7 @@ if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
             builtin echo "Warning: Could not generate terminfo data." >&2
           fi
         else
-          builtin echo "Warning: ghostty command not available for cache management." >&2
+          builtin echo "Warning: infocmp is not available; cannot generate terminfo data." >&2
         fi
       fi
     fi
