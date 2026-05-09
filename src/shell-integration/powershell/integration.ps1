@@ -5,12 +5,31 @@ $ESC = [char]27
 $BEL = [char]7
 
 # ── Idempotent guard: save original prompt once ──────────────────────────
+if ($null -eq $Global:__ghostty_aid) {
+    $Global:__ghostty_aid = [string]$PID
+}
+
 if ($null -eq $Global:__ghostty_original_prompt) {
     $Global:__ghostty_original_prompt = $function:global:prompt
     # Previous-prompt snapshot of $LASTEXITCODE. We compare against this
     # each prompt tick so a stale native exit code from an earlier
     # pipeline can't masquerade as the current command's exit status.
     $Global:__ghostty_prev_exitcode = $LASTEXITCODE
+}
+
+function __ghostty_write_osc {
+    param([string]$Sequence)
+    try {
+        [Console]::Write($Sequence)
+    } catch {
+        Write-Host -NoNewline $Sequence
+    }
+}
+
+function __ghostty_encode_osc133_value {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return "" }
+    return [uri]::EscapeDataString($Value)
 }
 
 # ── Helper: build full file:// URI for OSC 7 ────────────────────────────
@@ -37,9 +56,13 @@ function __ghostty_encode_cwd_uri {
         # rest goes in the path.
         $rest = $path.Substring(2) -replace '\\', '/'
         $segments = $rest -split '/'
-        if ($segments.Length -ge 1) {
+        if ($segments.Length -eq 1) {
             $server = [uri]::EscapeDataString($segments[0])
-            $tail = ($segments[1..($segments.Length-1)] | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+            return "file://$server/"
+        } elseif ($segments.Length -gt 1) {
+            $server = [uri]::EscapeDataString($segments[0])
+            $tail_segments = $segments[1..($segments.Length-1)]
+            $tail = ($tail_segments | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
             return "file://$server/$tail"
         }
         return "file://"
@@ -79,14 +102,14 @@ function global:prompt {
     } else { 0 }
 
     # OSC 133 D — report previous command's exit code
-    Write-Host -NoNewline "${ESC}]133;D;${code}${BEL}"
+    __ghostty_write_osc "${ESC}]133;D;${code};aid=${Global:__ghostty_aid}${BEL}"
 
     # OSC 7 — current working directory (full file:// URI)
     $cwd_uri = __ghostty_encode_cwd_uri
-    Write-Host -NoNewline "${ESC}]7;${cwd_uri}${BEL}"
+    __ghostty_write_osc "${ESC}]7;${cwd_uri}${BEL}"
 
     # OSC 133 A — mark prompt start (jump-to-prompt anchor)
-    Write-Host -NoNewline "${ESC}]133;A${BEL}"
+    __ghostty_write_osc "${ESC}]133;A;cl=line;aid=${Global:__ghostty_aid}${BEL}"
 
     # Delegate to original prompt. This can internally run native
     # helpers (git-aware prompts are the common case) which overwrite
@@ -103,7 +126,7 @@ function global:prompt {
     $Global:__ghostty_prev_exitcode = $LASTEXITCODE
 
     # OSC 133 B — mark end of prompt / start of user input
-    Write-Host -NoNewline "${ESC}]133;B${BEL}"
+    __ghostty_write_osc "${ESC}]133;B${BEL}"
 
     return $out
 }
@@ -115,8 +138,11 @@ try {
     if (Get-Module -Name PSReadLine -ErrorAction SilentlyContinue) {
         Set-PSReadLineOption -CommandValidationHandler {
             param([string]$line)
-            # OSC 133 C — mark start of command output
-            [Console]::Write("${ESC}]133;C${BEL}")
+            # OSC 133 C — mark start of command output. Include the
+            # PSReadLine buffer as URL-encoded metadata so command-finished
+            # notifications can show a useful command label when supported.
+            $cmdline = __ghostty_encode_osc133_value $line
+            __ghostty_write_osc "${ESC}]133;C;aid=${Global:__ghostty_aid};cmdline_url=${cmdline}${BEL}"
             # Return $true to let the command proceed
             return $true
         }

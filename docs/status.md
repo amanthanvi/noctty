@@ -27,7 +27,8 @@ For a row-by-row mapping against official Ghostty docs, see
 - Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52
 - Bidi, combining marks, grapheme cluster rendering
 - Kitty graphics protocol and inline image display
-- Shell integration for bash, zsh, fish, PowerShell
+- Shell integration for bash, zsh, fish, PowerShell; `cmd.exe` is a plain
+  fallback shell without prompt/cwd/command-finish integration
 - Live config reload via keybind (`Ctrl+Shift+,`)
 - `libghostty-vt` retained for Zig and C consumers
 

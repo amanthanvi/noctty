@@ -76,7 +76,8 @@ First public releases: 2026-04-16.
 - OpenGL 4.3 renderer via WGL.
 - Shared Ghostty terminal core: VT parsing, scrollback, bracketed paste,
   mouse tracking, OSC 8 hyperlinks, Kitty graphics protocol, shell
-  integration for bash / zsh / fish / PowerShell.
+  integration for bash / zsh / fish / PowerShell. Command Prompt is
+  available as a plain fallback shell without automatic shell integration.
 - Windows-aware shell selection: PowerShell, `cmd`, Git Bash, opt-in WSL.
 - In-app profile picker that auto-detects installed shells.
 - GitHub Releases updater, notify-only, gated to one check per 24 hours.

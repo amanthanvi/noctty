@@ -134,3 +134,22 @@ For the manual fallback, the Win32 runtime also installs a copy of
 `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`
 so users can source it from `$PROFILE` if automatic injection is
 disabled or the command shape is unsupported.
+
+The PowerShell script emits OSC 7 as a full `file://` URI with each path
+segment percent-encoded. It also emits OSC 133 prompt marks with a stable
+`aid=$PID` and, when PSReadLine exposes the accepted buffer, URL-encoded
+`cmdline_url` metadata on the command-start mark.
+
+`cmd.exe` is intentionally not auto-integrated. Command Prompt has no reliable
+prompt/pre-exec hook equivalent, so the Windows profile picker surfaces it as a
+plain fallback shell without OSC 7 cwd tracking, prompt marks, or command-finish
+notifications.
+
+### SSH terminfo cache
+
+When `shell-integration-features` includes `ssh-terminfo`, the Bash integration
+wraps `ssh` to install the `xterm-ghostty` terminfo entry on remote hosts using
+local `infocmp` plus remote `tic`. Successful installs are cached through
+`winghostty +ssh-cache`, preferring `$GHOSTTY_BIN_DIR/winghostty` and falling
+back to a `winghostty` found on `PATH`. If the cache helper is unavailable, SSH
+still attempts installation but may repeat it on later connections.
