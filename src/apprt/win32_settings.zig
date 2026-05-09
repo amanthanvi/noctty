@@ -1702,7 +1702,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncScrollbackFromEdit();
                 return 0;
             }
-            if (id == EDIT_FONT_FAMILY and notify == EN_CHANGE) {
+            if (id == EDIT_FONT_FAMILY and notify == EN_KILLFOCUS) {
                 if (owner) |o| o.syncFontFamilyFromEdit();
                 return 0;
             }
@@ -1710,7 +1710,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncFontSizeFromEdit();
                 return 0;
             }
-            if (id == EDIT_THEME and notify == EN_CHANGE) {
+            if (id == EDIT_THEME and notify == EN_KILLFOCUS) {
                 if (owner) |o| o.syncThemeFromEdit();
                 return 0;
             }
