@@ -1702,6 +1702,8 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncScrollbackFromEdit();
                 return 0;
             }
+            // These parse into pending._arena; defer from EN_CHANGE to
+            // EN_KILLFOCUS so we don't accumulate per-keystroke allocations.
             if (id == EDIT_FONT_FAMILY and notify == EN_KILLFOCUS) {
                 if (owner) |o| o.syncFontFamilyFromEdit();
                 return 0;
