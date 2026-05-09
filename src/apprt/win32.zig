@@ -3021,13 +3021,13 @@ pub const App = struct {
     ) !win32_session_state.SessionState {
         var count: usize = 0;
         for (self.hosts.items) |host| {
-            if (host.tabs.items.len > 0) count += 1;
+            if (hostSessionTabCount(host) > 0) count += 1;
         }
 
         const windows_state = try alloc.alloc(win32_session_state.Window, count);
         var built: usize = 0;
         for (self.hosts.items) |host| {
-            if (host.tabs.items.len == 0) continue;
+            if (hostSessionTabCount(host) == 0) continue;
             windows_state[built] = try self.buildSessionWindow(alloc, host);
             built += 1;
         }
@@ -3040,13 +3040,19 @@ pub const App = struct {
         alloc: Allocator,
         host: *Host,
     ) !win32_session_state.Window {
-        const tabs = try alloc.alloc(win32_session_state.Tab, host.tabs.items.len);
+        const tab_count = hostSessionTabCount(host);
+        const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
+        var selected_tab: usize = 0;
+        var built: usize = 0;
         for (host.tabs.items, 0..) |*tab, i| {
-            tabs[i] = try buildSessionTab(alloc, tab);
+            if (tabContainsQuickTerminal(tab)) continue;
+            if (i <= host.active_tab) selected_tab = built;
+            tabs[built] = try buildSessionTab(alloc, tab);
+            built += 1;
         }
 
         var window: win32_session_state.Window = .{
-            .selected_tab = @min(host.active_tab, if (host.tabs.items.len > 0) host.tabs.items.len - 1 else 0),
+            .selected_tab = selected_tab,
             .tabs = tabs,
         };
         if (sessionWindowRect(host)) |rect| {
@@ -3109,6 +3115,29 @@ pub const App = struct {
             };
         }
         return .{ .root = 0, .nodes = nodes };
+    }
+
+    fn hostContainsQuickTerminal(host: *const Host) bool {
+        for (host.tabs.items) |*tab| {
+            if (tabContainsQuickTerminal(tab)) return true;
+        }
+        return false;
+    }
+
+    fn hostSessionTabCount(host: *const Host) usize {
+        var count: usize = 0;
+        for (host.tabs.items) |*tab| {
+            if (!tabContainsQuickTerminal(tab)) count += 1;
+        }
+        return count;
+    }
+
+    fn tabContainsQuickTerminal(tab: *const Tab) bool {
+        var it = tab.tree.iterator();
+        while (it.next()) |entry| {
+            if (entry.view.quick_terminal) return true;
+        }
+        return false;
     }
 
     fn preferredSplitDirection(
@@ -28450,6 +28479,54 @@ test "win32 session save deletes stale state file for empty snapshot" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json", .{}));
 
     App.deleteSessionStateFile(path);
+}
+
+test "win32 session save skips quick terminal tabs" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var app: App = undefined;
+    app.hosts = .empty;
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var host: Host = .{
+        .app = &app,
+        .id = 1,
+    };
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+
+    var surface: Surface = undefined;
+    surface.quick_terminal = true;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+    try app.hosts.append(std.testing.allocator, &host);
+
+    const state = try app.buildSessionState(std.testing.allocator);
+    defer std.testing.allocator.free(state.windows);
+    try std.testing.expectEqual(@as(usize, 0), state.windows.len);
+    try std.testing.expect(App.hostContainsQuickTerminal(&host));
+
+    var normal_surface: Surface = undefined;
+    normal_surface.quick_terminal = false;
+    normal_surface.pwd = null;
+    normal_surface.launch_profile_key = null;
+    normal_surface.title_override = null;
+    normal_surface.tab_title_override = null;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &normal_surface));
+    host.active_tab = 1;
+
+    const mixed_state = try app.buildSessionState(std.testing.allocator);
+    defer {
+        for (mixed_state.windows) |window| {
+            for (window.tabs) |tab| std.testing.allocator.free(tab.layout.nodes);
+            std.testing.allocator.free(window.tabs);
+        }
+        std.testing.allocator.free(mixed_state.windows);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mixed_state.windows.len);
+    try std.testing.expectEqual(@as(usize, 1), mixed_state.windows[0].tabs.len);
+    try std.testing.expectEqual(@as(usize, 0), mixed_state.windows[0].selected_tab);
 }
 
 test "win32 session state window rect requires complete geometry" {
