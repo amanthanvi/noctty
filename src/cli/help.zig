@@ -15,6 +15,13 @@ pub const Options = struct {
     }
 };
 
+pub const keybinding_discovery_hint =
+    \\  `winghostty +explain-config --keybind=<action>` explains one keybind action.
+    \\  `winghostty +list-actions --docs` lists bindable actions with docs.
+    \\  `winghostty +list-keybinds --default` shows the shipped default bindings.
+    \\  `winghostty +list-keybinds --docs` annotates bindings with action docs.
+;
+
 const help_prelude =
     \\Usage: winghostty [+action] [options]
     \\
@@ -29,16 +36,14 @@ const help_prelude =
     \\Discover configuration from the CLI:
     \\  `winghostty +show-config --default --docs` lists every config key and its docs.
     \\  `winghostty +explain-config <option>` explains one config key.
-    \\  `winghostty +explain-config --keybind=<action>` explains one keybind action.
     \\
     \\A special command line argument `-e <command>` can be used to run
     \\the specific command inside the terminal emulator. For example,
     \\`winghostty -e top` will run the `top` command inside the terminal.
     \\
     \\Discover actions and keybindings:
-    \\  `winghostty +list-actions --docs` lists bindable actions with docs.
-    \\  `winghostty +list-keybinds --default` shows the shipped default bindings.
-    \\  `winghostty +list-keybinds --docs` annotates bindings with action docs.
+    \\
+++ keybinding_discovery_hint ++
     \\
     \\Useful Windows actions:
     \\  `winghostty +new-window` forwards into the running instance when possible.

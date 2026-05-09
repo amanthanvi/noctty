@@ -21,6 +21,7 @@
 const std = @import("std");
 const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
+const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -164,7 +165,7 @@ pub const Section = enum(u32) {
             .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
             .terminal => "Scrollback, copy-on-select, clipboard trimming, close confirmation, and notifications.",
             .shell => "Default shell command and shell integration detection mode.",
-            .keybindings => "Open the config file for keybind edits; action names are available from winghostty +list-actions.",
+            .keybindings => "Open the config file for keybind edits; list defaults, actions, and docs from the CLI.",
             .advanced => "Updater defaults plus the text editor escape hatch for config keys that do not yet have native controls.",
         };
     }
@@ -184,6 +185,16 @@ fn backgroundBlurFromCheckbox(
 
 const PaddingAxis = enum { x, y };
 const AppNotificationField = enum { clipboard, config };
+
+fn keybindingsHelpText() []const u8 {
+    return "Useful commands:\n" ++
+        cli_help.keybinding_discovery_hint ++
+        "\n" ++
+        "Config syntax:\n" ++
+        "  keybind = ctrl+shift+c=copy_to_clipboard\n" ++
+        "  keybind = ctrl+a>n=new_window\n" ++
+        "  keybind = chain=goto_split:left";
+}
 
 extern "user32" fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) callconv(.winapi) ATOM;
 extern "user32" fn CreateWindowExW(
@@ -1827,6 +1838,7 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
 const DT_LEFT: UINT = 0x0;
 const DT_WORDBREAK: UINT = 0x10;
 const DT_TOP: UINT = 0x0;
+const DT_CALCRECT: UINT = 0x400;
 
 fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     var ps: PAINTSTRUCT = undefined;
@@ -1942,6 +1954,13 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
         },
         .keybindings => {
             drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Keybind configuration");
+            drawHelpBlock(
+                hdc,
+                pane_left,
+                pane_top + 72 + row_gap,
+                pane_right,
+                keybindingsHelpText(),
+            );
         },
         .advanced => {
             drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Auto-update mode");
@@ -1956,6 +1975,15 @@ fn drawLabel(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) voi
     const w = utf8ToW(&buf, text);
     var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y + 16 };
     _ = DrawTextW(hdc, w, -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+fn drawHelpBlock(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) void {
+    var buf: [1024]u16 = undefined;
+    const w = utf8ToW(&buf, text);
+    const flags = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX;
+    var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y };
+    _ = DrawTextW(hdc, w, -1, &rect, flags | DT_CALCRECT);
+    _ = DrawTextW(hdc, w, -1, &rect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
@@ -2097,4 +2125,17 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
     try testing.expectEqual(@as(usize, 4), round_trip.direct.len);
     try testing.expectEqualStrings("echo hello", round_trip.direct[2]);
     try testing.expectEqualStrings("C:\\Program Files\\winghostty", round_trip.direct[3]);
+}
+
+test "win32_settings: keybinding help points to discoverability commands" {
+    const text = keybindingsHelpText();
+
+    try std.testing.expect(text.len < 1024);
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, 0) == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "+list-keybinds --default") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "+list-keybinds --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "+list-actions --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "+explain-config --keybind=<action>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "keybind = ctrl+a>n=new_window") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "keybind = chain=goto_split:left") != null);
 }
