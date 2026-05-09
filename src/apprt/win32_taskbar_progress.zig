@@ -10,6 +10,8 @@ const DWORD = win32_types.DWORD;
 const HWND = win32_types.HWND;
 const ULONGLONG = u64;
 
+const log = std.log.scoped(.win32_taskbar_progress);
+
 const CLSCTX_INPROC_SERVER: DWORD = 0x1;
 
 pub const TBPFLAG = enum(u32) {
@@ -174,7 +176,10 @@ pub const TaskbarProgress = struct {
             );
             if (value_hr < 0) {
                 const reset_hr = self.taskbar.setProgressState(hwnd, TBPF_NOPROGRESS);
-                if (reset_hr < 0) return error.ResetProgressStateFailed;
+                if (reset_hr < 0) {
+                    log.warn("taskbar progress reset after value failure also failed hr=0x{x}", .{@as(u32, @bitCast(reset_hr))});
+                    return error.ResetProgressStateFailed;
+                }
                 return error.SetProgressValueFailed;
             }
         }
