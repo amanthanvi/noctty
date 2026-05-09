@@ -98,6 +98,10 @@ const CHK_APP_NOTIFY_CLIPBOARD: usize = 418;
 const CHK_APP_NOTIFY_CONFIG: usize = 419;
 const COMBO_AUTO_UPDATE: usize = 420;
 const COMBO_AUTO_UPDATE_CHANNEL: usize = 421;
+const COMBO_CLIPBOARD_READ: usize = 422;
+const COMBO_CLIPBOARD_WRITE: usize = 423;
+const COMBO_LINK_URL: usize = 424;
+const COMBO_LINK_PREVIEWS: usize = 425;
 const ES_NUMBER: u32 = 0x2000;
 const ES_AUTOHSCROLL: u32 = 0x80;
 const EN_CHANGE: u16 = 0x0300;
@@ -163,7 +167,7 @@ pub const Section = enum(u32) {
     fn placeholderText(self: Section) []const u8 {
         return switch (self) {
             .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
-            .terminal => "Scrollback, copy-on-select, clipboard trimming, close confirmation, and notifications.",
+            .terminal => "Scrollback, copy-on-select, OSC 52 clipboard policy, link opening, and notifications.",
             .shell => "Default shell command and shell integration detection mode.",
             .keybindings => "Open the config file for keybind edits; list defaults, actions, and docs from the CLI.",
             .advanced => "Updater defaults plus the text editor escape hatch for config keys that do not yet have native controls.",
@@ -345,6 +349,10 @@ pub const SettingsWindow = struct {
     chk_desktop_notifications: ?HWND = null,
     chk_app_notify_clipboard: ?HWND = null,
     chk_app_notify_config: ?HWND = null,
+    combo_clipboard_read: ?HWND = null,
+    combo_clipboard_write: ?HWND = null,
+    combo_link_url: ?HWND = null,
+    combo_link_previews: ?HWND = null,
     combo_cursor_style: ?HWND = null,
     chk_bg_blur: ?HWND = null,
     combo_pad_balance: ?HWND = null,
@@ -403,6 +411,10 @@ pub const SettingsWindow = struct {
         self.chk_desktop_notifications = null;
         self.chk_app_notify_clipboard = null;
         self.chk_app_notify_config = null;
+        self.combo_clipboard_read = null;
+        self.combo_clipboard_write = null;
+        self.combo_link_url = null;
+        self.combo_link_previews = null;
         self.combo_cursor_style = null;
         self.chk_bg_blur = null;
         self.combo_pad_balance = null;
@@ -451,6 +463,10 @@ pub const SettingsWindow = struct {
         self.chk_desktop_notifications = null;
         self.chk_app_notify_clipboard = null;
         self.chk_app_notify_config = null;
+        self.combo_clipboard_read = null;
+        self.combo_clipboard_write = null;
+        self.combo_link_url = null;
+        self.combo_link_previews = null;
         self.combo_cursor_style = null;
         self.chk_bg_blur = null;
         self.combo_pad_balance = null;
@@ -492,6 +508,10 @@ pub const SettingsWindow = struct {
         if (self.chk_desktop_notifications) |e| _ = ShowWindow(e, show_terminal);
         if (self.chk_app_notify_clipboard) |e| _ = ShowWindow(e, show_terminal);
         if (self.chk_app_notify_config) |e| _ = ShowWindow(e, show_terminal);
+        if (self.combo_clipboard_read) |e| _ = ShowWindow(e, show_terminal);
+        if (self.combo_clipboard_write) |e| _ = ShowWindow(e, show_terminal);
+        if (self.combo_link_url) |e| _ = ShowWindow(e, show_terminal);
+        if (self.combo_link_previews) |e| _ = ShowWindow(e, show_terminal);
         if (self.edit_font_family) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_font_size) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_theme) |e| _ = ShowWindow(e, show_appearance);
@@ -840,6 +860,82 @@ pub const SettingsWindow = struct {
         self.suppress_edit_events = false;
     }
 
+    fn syncClipboardAccessFromCombo(self: *SettingsWindow, comptime field_name: []const u8, combo_opt: ?HWND) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = combo_opt orelse return;
+        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (idx < 0) return;
+        @field(p.*, field_name) = switch (idx) {
+            0 => .ask,
+            1 => .allow,
+            2 => .deny,
+            else => return,
+        };
+    }
+
+    fn displayClipboardAccessInCombo(self: *SettingsWindow, comptime field_name: []const u8, combo_opt: ?HWND) void {
+        const combo = combo_opt orelse return;
+        const p = self.pending orelse return;
+        const idx: usize = switch (@field(p, field_name)) {
+            .ask => 0,
+            .allow => 1,
+            .deny => 2,
+        };
+        self.suppress_edit_events = true;
+        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        self.suppress_edit_events = false;
+    }
+
+    fn syncLinkUrlFromCombo(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = self.combo_link_url orelse return;
+        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (idx < 0) return;
+        p.*.@"link-url" = switch (idx) {
+            0 => true,
+            1 => false,
+            else => return,
+        };
+    }
+
+    fn displayLinkUrlInCombo(self: *SettingsWindow) void {
+        const combo = self.combo_link_url orelse return;
+        const p = self.pending orelse return;
+        const idx: usize = if (p.@"link-url") 0 else 1;
+        self.suppress_edit_events = true;
+        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        self.suppress_edit_events = false;
+    }
+
+    fn syncLinkPreviewsFromCombo(self: *SettingsWindow) void {
+        if (self.suppress_edit_events) return;
+        const p = &(self.pending orelse return);
+        const combo = self.combo_link_previews orelse return;
+        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        if (idx < 0) return;
+        p.*.@"link-previews" = switch (idx) {
+            0 => .true,
+            1 => .osc8,
+            2 => .false,
+            else => return,
+        };
+    }
+
+    fn displayLinkPreviewsInCombo(self: *SettingsWindow) void {
+        const combo = self.combo_link_previews orelse return;
+        const p = self.pending orelse return;
+        const idx: usize = switch (p.@"link-previews") {
+            .true => 0,
+            .osc8 => 1,
+            .false => 2,
+        };
+        self.suppress_edit_events = true;
+        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        self.suppress_edit_events = false;
+    }
+
     fn syncWindowThemeFromCombo(self: *SettingsWindow) void {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
@@ -1061,6 +1157,10 @@ pub const SettingsWindow = struct {
         self.displayAppNotificationsInCheckbox(.config);
         self.displayConfirmCloseInCombo();
         self.displayCopyOnSelectInCombo();
+        self.displayClipboardAccessInCombo("clipboard-read", self.combo_clipboard_read);
+        self.displayClipboardAccessInCombo("clipboard-write", self.combo_clipboard_write);
+        self.displayLinkUrlInCombo();
+        self.displayLinkPreviewsInCombo();
         self.displayWindowThemeInCombo();
         self.displayShellIntegInCombo();
         self.displayCursorStyleInCombo();
@@ -1318,6 +1418,38 @@ pub const SettingsWindow = struct {
             &.{ "false", "true", "clipboard" },
         );
 
+        self.combo_clipboard_read = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_CLIPBOARD_READ,
+            160,
+            &.{ "ask", "allow", "deny" },
+        );
+
+        self.combo_clipboard_write = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_CLIPBOARD_WRITE,
+            160,
+            &.{ "ask", "allow", "deny" },
+        );
+
+        self.combo_link_url = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_LINK_URL,
+            160,
+            &.{ "enabled", "disabled" },
+        );
+
+        self.combo_link_previews = makeCombo(
+            hwnd,
+            self.handle.hinstance,
+            COMBO_LINK_PREVIEWS,
+            160,
+            &.{ "all links", "OSC 8 only", "disabled" },
+        );
+
         self.combo_window_theme = makeCombo(
             hwnd,
             self.handle.hinstance,
@@ -1548,6 +1680,22 @@ fn layoutChildren(self: *SettingsWindow) void {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
         }
+        if (self.combo_clipboard_read) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
+            ty += row_gap;
+        }
+        if (self.combo_clipboard_write) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
+            ty += row_gap;
+        }
+        if (self.combo_link_url) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
+            ty += row_gap;
+        }
+        if (self.combo_link_previews) |e| {
+            _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
+            ty += row_gap;
+        }
         if (self.chk_trim_trail) |e| {
             _ = MoveWindow(e, pane_left, ty, 260, 24, 1);
             ty += row_gap;
@@ -1767,6 +1915,22 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncCopyOnSelectFromCombo();
                 return 0;
             }
+            if (id == COMBO_CLIPBOARD_READ and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncClipboardAccessFromCombo("clipboard-read", o.combo_clipboard_read);
+                return 0;
+            }
+            if (id == COMBO_CLIPBOARD_WRITE and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncClipboardAccessFromCombo("clipboard-write", o.combo_clipboard_write);
+                return 0;
+            }
+            if (id == COMBO_LINK_URL and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncLinkUrlFromCombo();
+                return 0;
+            }
+            if (id == COMBO_LINK_PREVIEWS and notify == CBN_SELCHANGE) {
+                if (owner) |o| o.syncLinkPreviewsFromCombo();
+                return 0;
+            }
             if (id == COMBO_WINDOW_THEME and notify == CBN_SELCHANGE) {
                 if (owner) |o| o.syncWindowThemeFromCombo();
                 return 0;
@@ -1918,6 +2082,10 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
                 "Scrollback limit (rows, 0 = unlimited)",
                 "Close confirmation",
                 "Copy on select",
+                "OSC 52 clipboard read requests",
+                "OSC 52 clipboard write requests",
+                "Clickable URL opening",
+                "Link preview popups",
                 "Clipboard trimming",
                 "Terminal notifications",
                 "Clipboard-copy notification",
