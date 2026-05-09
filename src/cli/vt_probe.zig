@@ -37,9 +37,39 @@ const capabilities = [_]capability{
         .direction = .advertise,
     },
     .{
+        .id = "osc-7-working-directory",
+        .category = .osc,
+        .direction = .parse,
+    },
+    .{
         .id = "osc-8-hyperlink",
         .category = .osc,
         .direction = .parse_emit,
+    },
+    .{
+        .id = "osc-9-desktop-notification",
+        .category = .osc,
+        .direction = .parse,
+    },
+    .{
+        .id = "osc-777-desktop-notification",
+        .category = .osc,
+        .direction = .parse,
+    },
+    .{
+        .id = "osc-9-4-progress",
+        .category = .osc,
+        .direction = .parse,
+    },
+    .{
+        .id = "osc-52-clipboard",
+        .category = .osc,
+        .direction = .parse_emit,
+    },
+    .{
+        .id = "osc-133-semantic-prompt",
+        .category = .osc,
+        .direction = .parse,
     },
     .{
         .id = "osc-4-palette",
@@ -146,14 +176,20 @@ test "vt-probe report includes core capabilities" {
 
     try testing.expectEqualStrings("static", probe.source);
     try testing.expectEqualStrings(defaultTerm, probe.term);
-    try testing.expectEqual(@as(usize, 6), probe.capabilities.len);
+    try testing.expectEqual(@as(usize, 12), probe.capabilities.len);
 
     try testing.expectEqualStrings(terminfoCapabilityId, probe.capabilities[0].id);
-    try testing.expectEqualStrings("osc-8-hyperlink", probe.capabilities[1].id);
-    try testing.expectEqualStrings("osc-4-palette", probe.capabilities[2].id);
-    try testing.expectEqualStrings("osc-10-11-colors", probe.capabilities[3].id);
-    try testing.expectEqualStrings("osc-21-kitty-color-stack", probe.capabilities[4].id);
-    try testing.expectEqualStrings("csi-2026-synchronized-output", probe.capabilities[5].id);
+    try testing.expectEqualStrings("osc-7-working-directory", probe.capabilities[1].id);
+    try testing.expectEqualStrings("osc-8-hyperlink", probe.capabilities[2].id);
+    try testing.expectEqualStrings("osc-9-desktop-notification", probe.capabilities[3].id);
+    try testing.expectEqualStrings("osc-777-desktop-notification", probe.capabilities[4].id);
+    try testing.expectEqualStrings("osc-9-4-progress", probe.capabilities[5].id);
+    try testing.expectEqualStrings("osc-52-clipboard", probe.capabilities[6].id);
+    try testing.expectEqualStrings("osc-133-semantic-prompt", probe.capabilities[7].id);
+    try testing.expectEqualStrings("osc-4-palette", probe.capabilities[8].id);
+    try testing.expectEqualStrings("osc-10-11-colors", probe.capabilities[9].id);
+    try testing.expectEqualStrings("osc-21-kitty-color-stack", probe.capabilities[10].id);
+    try testing.expectEqualStrings("csi-2026-synchronized-output", probe.capabilities[11].id);
 }
 
 test "vt-probe terminfo claim tracks compiled terminfo" {
@@ -174,7 +210,13 @@ test "vt-probe plain output is deterministic" {
         \\probe=static
         \\term=xterm-ghostty
         \\capability=terminfo-xterm-ghostty category=terminfo direction=advertise
+        \\capability=osc-7-working-directory category=osc direction=parse
         \\capability=osc-8-hyperlink category=osc direction=parse+emit
+        \\capability=osc-9-desktop-notification category=osc direction=parse
+        \\capability=osc-777-desktop-notification category=osc direction=parse
+        \\capability=osc-9-4-progress category=osc direction=parse
+        \\capability=osc-52-clipboard category=osc direction=parse+emit
+        \\capability=osc-133-semantic-prompt category=osc direction=parse
         \\capability=osc-4-palette category=osc direction=parse+emit
         \\capability=osc-10-11-colors category=osc direction=parse+emit
         \\capability=osc-21-kitty-color-stack category=osc direction=parse
