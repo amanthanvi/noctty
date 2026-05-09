@@ -71,18 +71,20 @@ pub const Command = union(enum) {
             },
 
             .direct => {
-                // We're not shell expanding, so the arguments are naively
-                // split on spaces.
+                // We're not shell expanding, but we still accept simple
+                // quoting so direct commands can round-trip through config
+                // files and GUI edit controls without losing argv boundaries.
                 var builder: std.ArrayListUnmanaged([:0]const u8) = .empty;
-                var args = std.mem.splitScalar(
-                    u8,
+                var args = try std.process.ArgIteratorGeneral(.{}).init(
+                    alloc,
                     std.mem.trim(u8, str, " "),
-                    ' ',
                 );
+                defer args.deinit();
                 while (args.next()) |arg| {
                     const copy = try alloc.dupeZ(u8, arg);
                     try builder.append(alloc, copy);
                 }
+                if (builder.items.len == 0) return error.ValueRequired;
 
                 self.* = .{ .direct = try builder.toOwnedSlice(alloc) };
             },
@@ -183,18 +185,54 @@ pub const Command = union(enum) {
                 var buf: [4096]u8 = undefined;
                 var writer: std.Io.Writer = .fixed(&buf);
                 writer.writeAll("direct:") catch return error.OutOfMemory;
-                for (v) |arg| {
-                    writer.writeAll(arg) catch return error.OutOfMemory;
-                    writer.writeByte(' ') catch return error.OutOfMemory;
+                for (v, 0..) |arg, i| {
+                    if (i != 0) writer.writeByte(' ') catch return error.OutOfMemory;
+                    writeDirectArg(&writer, arg) catch return error.OutOfMemory;
                 }
 
                 const written = writer.buffered();
                 try formatter.formatEntry(
                     []const u8,
-                    written[0..@intCast(written.len - 1)],
+                    written,
                 );
             },
         }
+    }
+
+    pub fn writeDirectArg(writer: *std.Io.Writer, arg: []const u8) !void {
+        if (!directArgNeedsQuotes(arg)) return writer.writeAll(arg);
+
+        try writer.writeByte('"');
+        var backslashes: usize = 0;
+        for (arg) |ch| switch (ch) {
+            '\\' => backslashes += 1,
+            '"' => {
+                try writeRepeatedByte(writer, '\\', backslashes * 2 + 1);
+                backslashes = 0;
+                try writer.writeByte('"');
+            },
+            else => {
+                try writeRepeatedByte(writer, '\\', backslashes);
+                backslashes = 0;
+                try writer.writeByte(ch);
+            },
+        };
+        try writeRepeatedByte(writer, '\\', backslashes * 2);
+        try writer.writeByte('"');
+    }
+
+    fn directArgNeedsQuotes(arg: []const u8) bool {
+        if (arg.len == 0) return true;
+        for (arg) |ch| switch (ch) {
+            ' ', '\t', '\r', '\n', '\\', '"' => return true,
+            else => {},
+        };
+        return false;
+    }
+
+    fn writeRepeatedByte(writer: *std.Io.Writer, byte: u8, count: usize) !void {
+        var i: usize = 0;
+        while (i < count) : (i += 1) try writer.writeByte(byte);
     }
 
     test "Command: parseCLI errors" {
@@ -207,6 +245,8 @@ pub const Command = union(enum) {
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, null));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, ""));
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, " "));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "direct:"));
+        try testing.expectError(error.ValueRequired, v.parseCLI(alloc, "direct:   "));
     }
 
     test "Command: parseCLI shell expanded" {
@@ -245,6 +285,48 @@ pub const Command = union(enum) {
         try testing.expectEqual(v.direct.len, 2);
         try testing.expectEqualStrings(v.direct[0], "echo");
         try testing.expectEqualStrings(v.direct[1], "hello");
+    }
+
+    test "Command: parseCLI direct quoted args" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var v: Self = undefined;
+        try v.parseCLI(alloc, "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"");
+        try testing.expect(v == .direct);
+        try testing.expectEqual(@as(usize, 4), v.direct.len);
+        try testing.expectEqualStrings("cmd.exe", v.direct[0]);
+        try testing.expectEqualStrings("/c", v.direct[1]);
+        try testing.expectEqualStrings("echo hello", v.direct[2]);
+        try testing.expectEqualStrings("C:\\Program Files\\winghostty", v.direct[3]);
+    }
+
+    test "Command: writeDirectArg round-trips direct args" {
+        const testing = std.testing;
+        var buf: [256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+
+        try writer.writeAll("direct:");
+        try writeDirectArg(&writer, "cmd.exe");
+        try writer.writeByte(' ');
+        try writeDirectArg(&writer, "echo hello");
+        try writer.writeByte(' ');
+        try writeDirectArg(&writer, "C:\\Program Files\\winghostty");
+
+        try testing.expectEqualStrings(
+            "direct:cmd.exe \"echo hello\" \"C:\\Program Files\\winghostty\"",
+            writer.buffered(),
+        );
+
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var v: Self = undefined;
+        try v.parseCLI(arena.allocator(), writer.buffered());
+        try testing.expect(v == .direct);
+        try testing.expectEqualStrings("echo hello", v.direct[1]);
+        try testing.expectEqualStrings("C:\\Program Files\\winghostty", v.direct[2]);
     }
 
     test "Command: parseCLI unknown prefix falls back to shell" {
