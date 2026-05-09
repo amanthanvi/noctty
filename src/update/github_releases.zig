@@ -5,6 +5,7 @@ const internal_os = @import("../os/main.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const log = std.log.scoped(.update_github_releases);
 
 pub const repo_owner = "amanthanvi";
 pub const repo_name = "winghostty";
@@ -274,6 +275,7 @@ pub fn stageWindowsInstall(
     release: *const Release,
 ) !StagedWindowsInstall {
     const candidate = release.windows_install orelse return error.WindowsInstallNotEligible;
+    if (!std.fs.path.isAbsolute(state_path)) return error.InvalidStatePath;
 
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
@@ -350,6 +352,8 @@ fn replaceOptionalOwned(alloc: Allocator, slot: *?[]u8, value: []u8) void {
 }
 
 fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !void {
+    if (!std.fs.path.isAbsolute(dest_path)) return error.InvalidDownloadPath;
+
     const temp_path = try std.fmt.allocPrint(alloc, "{s}.part", .{dest_path});
     defer alloc.free(temp_path);
     var committed = false;
@@ -386,7 +390,7 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     file.close();
     file_open = false;
 
-    if (result.status != .ok) return error.BadGateway;
+    try requireOkHttpStatus("download", url, result.status);
 
     std.fs.deleteFileAbsolute(dest_path) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -394,6 +398,28 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
     };
     try std.fs.renameAbsolute(temp_path, dest_path);
     committed = true;
+}
+
+fn requireOkHttpStatus(context: []const u8, url: []const u8, status: std.http.Status) !void {
+    if (status == .ok) return;
+
+    log.warn("{s} HTTP request failed status={} phrase={s} url={s}", .{
+        context,
+        @intFromEnum(status),
+        status.phrase() orelse "unknown",
+        url,
+    });
+
+    return switch (status) {
+        .unauthorized => error.UpdateHttpUnauthorized,
+        .forbidden => error.UpdateHttpForbidden,
+        .not_found => error.UpdateHttpNotFound,
+        .too_many_requests => error.UpdateHttpRateLimited,
+        else => switch (status.class()) {
+            .server_error => error.BadGateway,
+            else => error.UnexpectedHttpStatus,
+        },
+    };
 }
 
 fn parseExpectedSha256(checksums: []const u8, installer_name: []const u8) ![Sha256.digest_length]u8 {
@@ -458,6 +484,8 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
     const windows = std.os.windows;
     const WinVerifyTrustFn = *const fn (?windows.HWND, *windows.GUID, *WinTrustData) callconv(.winapi) i32;
     const module = try windows.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
+    defer windows.FreeLibrary(module);
+
     const proc = windows.kernel32.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
     const winVerifyTrust: WinVerifyTrustFn = @ptrCast(proc);
 
@@ -479,13 +507,19 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
         .fdwRevocationChecks = WTD_REVOKE_NONE,
         .dwUnionChoice = WTD_CHOICE_FILE,
         .pFile = &file_info,
-        .dwStateAction = WTD_STATEACTION_IGNORE,
+        .dwStateAction = WTD_STATEACTION_VERIFY,
         .hWVTStateData = null,
         .pwszURLReference = null,
         .dwProvFlags = 0,
         .dwUIContext = 0,
         .pSignatureSettings = null,
     };
+    defer {
+        if (data.hWVTStateData != null) {
+            data.dwStateAction = WTD_STATEACTION_CLOSE;
+            _ = winVerifyTrust(null, &action, &data);
+        }
+    }
 
     if (winVerifyTrust(null, &action, &data) != 0) return error.InvalidAuthenticodeSignature;
 }
@@ -493,7 +527,8 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
 const WTD_UI_NONE: u32 = 2;
 const WTD_REVOKE_NONE: u32 = 0;
 const WTD_CHOICE_FILE: u32 = 1;
-const WTD_STATEACTION_IGNORE: u32 = 0;
+const WTD_STATEACTION_VERIFY: u32 = 1;
+const WTD_STATEACTION_CLOSE: u32 = 2;
 
 const WinTrustFileInfo = extern struct {
     cbStruct: u32,
@@ -564,7 +599,7 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
         .response_writer = &response_buf.writer,
     });
 
-    if (result.status != .ok) return error.BadGateway;
+    try requireOkHttpStatus("release metadata", latest_stable_api_url, result.status);
 
     const body = try response_buf.toOwnedSlice();
     defer alloc.free(body);
@@ -755,6 +790,54 @@ test "checksum parser rejects missing installer entry" {
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *other.exe",
             "winghostty-1.3.100-windows-x64-setup.exe",
         ),
+    );
+}
+
+test "http status mapping distinguishes update response failures" {
+    try requireOkHttpStatus("test", "https://example.invalid/ok", .ok);
+    try std.testing.expectError(
+        error.UpdateHttpUnauthorized,
+        requireOkHttpStatus("test", "https://example.invalid/unauthorized", .unauthorized),
+    );
+    try std.testing.expectError(
+        error.UpdateHttpForbidden,
+        requireOkHttpStatus("test", "https://example.invalid/forbidden", .forbidden),
+    );
+    try std.testing.expectError(
+        error.UpdateHttpNotFound,
+        requireOkHttpStatus("test", "https://example.invalid/not-found", .not_found),
+    );
+    try std.testing.expectError(
+        error.UpdateHttpRateLimited,
+        requireOkHttpStatus("test", "https://example.invalid/rate-limit", .too_many_requests),
+    );
+    try std.testing.expectError(
+        error.BadGateway,
+        requireOkHttpStatus("test", "https://example.invalid/server-error", .service_unavailable),
+    );
+    try std.testing.expectError(
+        error.UnexpectedHttpStatus,
+        requireOkHttpStatus("test", "https://example.invalid/client-error", .bad_request),
+    );
+}
+
+test "windows install staging rejects relative state path before download" {
+    const alloc = std.testing.allocator;
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.100"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "winghostty-1.3.100-windows-x64-setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+            .checksums_signature_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt.sig"),
+        },
+    };
+    defer release.deinit(alloc);
+
+    try std.testing.expectError(
+        error.InvalidStatePath,
+        stageWindowsInstall(alloc, "relative-update-state.json", &release),
     );
 }
 

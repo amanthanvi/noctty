@@ -61,8 +61,8 @@ For a row-by-row mapping against official Ghostty docs, see
 - **Manual install**: never replaces the binary silently
 - Gated to at most one check every 24 hours
 - `auto-update = download` stages only Windows installer releases that include
-  checksum metadata and pass SHA-256 plus Authenticode verification. Apply is
-  not automatic.
+  checksum metadata and pass SHA-256 plus Authenticode verification. Applying
+  updates is not automatic.
 
 ### Crash reports
 
