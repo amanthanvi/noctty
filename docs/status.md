@@ -70,7 +70,9 @@ For a row-by-row mapping against official Ghostty docs, see
 - Local directory: `%LOCALAPPDATA%\winghostty\crash`
 - **No automatic upload.** No code path to upload exists in this repo.
 - On Windows the Sentry initialization path is a no-op
-  (`src/crash/sentry.zig`); the directory may stay empty in practice.
+  (`src/crash/sentry.zig`), but winghostty installs a local
+  unhandled-exception filter that writes `.dmp` minidumps through `DbgHelp`
+  when Windows delivers a process-level crash exception.
 - The `+crash-report` CLI reads anything that is there.
 
 ## Experimental / partial
@@ -109,9 +111,10 @@ extractions will land as they stabilize.
 - **Generated help links.** A few generated help strings still link to
   `github.com/ghostty-org/ghostty` rather than this fork. Tracked as a
   doc-generation fix.
-- **Crash capture on Windows is a no-op today.** The Sentry path is
-  gated off on Windows in `src/crash/sentry.zig`. The crash directory
-  exists but may stay empty until local capture is wired in.
+- **Crash capture on Windows is local-only.** The Sentry path is gated off on
+  Windows in `src/crash/sentry.zig`; local minidumps are written by
+  `src/crash/minidump_windows.zig` for process-level unhandled exceptions. Some
+  hard-abort paths may still terminate before Windows can produce a dump.
 
 ## Out of scope
 
@@ -129,7 +132,7 @@ No formal roadmap. Indicative next areas:
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
 - Code signing for Windows releases
-- Local-only crash capture on Windows
+- Broader local crash metadata and report packaging on Windows
 - ARB-context OpenGL migration paired with atlas rebuild
 
 Contributions that advance any of the above are welcome.

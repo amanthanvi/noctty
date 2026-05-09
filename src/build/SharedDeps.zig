@@ -472,6 +472,7 @@ pub fn add(
                 step.linkSystemLibrary2("user32", dynamic_link_opts);
                 step.linkSystemLibrary2("gdi32", dynamic_link_opts);
                 step.linkSystemLibrary2("opengl32", dynamic_link_opts);
+                step.linkSystemLibrary2("dbghelp", dynamic_link_opts);
             },
         }
     }

@@ -138,9 +138,9 @@ winghostty keeps a local crash directory at:
 %LOCALAPPDATA%\winghostty\crash
 ```
 
-Nothing in this directory is ever uploaded. On current Windows builds the
-crash-capture path is a no-op, so the directory may stay empty. Inspect
-what is there with:
+Nothing in this directory is ever uploaded. On Windows, winghostty writes local
+`.dmp` minidumps for process-level unhandled exceptions when Windows can
+deliver one. Inspect what is there with:
 
 ```powershell
 winghostty +crash-report
