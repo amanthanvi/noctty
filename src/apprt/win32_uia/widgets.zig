@@ -23,6 +23,7 @@
 const std = @import("std");
 const com = @import("com.zig");
 const constants = @import("constants.zig");
+const uia_text = @import("text.zig");
 
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
@@ -353,6 +354,10 @@ pub const TerminalProvider = struct {
                 const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
                 out.* = com.VARIANT.fromBstr(com.SysAllocString(literal));
             },
+            constants.UIA_HelpTextPropertyId => {
+                const bstr = self.allocMetadataBstr() orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
             constants.UIA_ValueValuePropertyId => {
                 const bstr = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
@@ -412,6 +417,28 @@ pub const TerminalProvider = struct {
         };
         defer self.alloc.free(text);
         return allocBstrFromUtf8(self.alloc, text);
+    }
+
+    fn allocMetadataBstr(self: *TerminalProvider) ?[*:0]u16 {
+        const value = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider metadata snapshot failed err={}", .{err});
+            return allocBstrFromUtf8(self.alloc, "");
+        };
+        defer self.alloc.free(value);
+
+        const metadata = uia_text.terminalTextMetadata(value) catch |err| {
+            std.log.warn("uia: TerminalProvider metadata decode failed err={}", .{err});
+            return allocBstrFromUtf8(self.alloc, "");
+        };
+
+        const summary = std.fmt.allocPrint(
+            self.alloc,
+            "Text buffer: {d} lines, {d} UTF-16 code units, {d} bytes",
+            .{ metadata.line_count, metadata.utf16_len, metadata.byte_len },
+        ) catch return null;
+        defer self.alloc.free(summary);
+
+        return allocBstrFromUtf8(self.alloc, summary);
     }
 };
 
@@ -614,6 +641,29 @@ test "TerminalProvider ValueValueProperty returns non-null BSTR" {
     try std.testing.expect(value.value.bstr != null);
     try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(value.value.bstr));
     try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), value.value.bstr.?[0..11]);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+}
+
+test "TerminalProvider HelpTextProperty reports terminal text metadata" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var value = com.VARIANT.empty();
+    const hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_HelpTextPropertyId, &value);
+    defer com.SysFreeString(value.value.bstr);
+
+    const expected = std.unicode.utf8ToUtf16LeStringLiteral(
+        "Text buffer: 2 lines, 11 UTF-16 code units, 11 bytes",
+    );
+
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expectEqual(com.VT_BSTR, value.vt);
+    try std.testing.expect(value.value.bstr != null);
+    try std.testing.expectEqual(@as(u32, expected.len), com.SysStringLen(value.value.bstr));
+    try std.testing.expectEqualSlices(u16, expected, value.value.bstr.?[0..expected.len]);
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
 }
 

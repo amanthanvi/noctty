@@ -23,6 +23,7 @@ pub const UIA_NamePropertyId: i32 = 30005;
 pub const UIA_IsKeyboardFocusablePropertyId: i32 = 30009;
 pub const UIA_HasKeyboardFocusPropertyId: i32 = 30008;
 pub const UIA_IsEnabledPropertyId: i32 = 30010;
+pub const UIA_HelpTextPropertyId: i32 = 30013;
 pub const UIA_FrameworkIdPropertyId: i32 = 30024;
 pub const UIA_ValueValuePropertyId: i32 = 30045;
 pub const UIA_ValueIsReadOnlyPropertyId: i32 = 30046;
