@@ -128,7 +128,12 @@ jobs:
           -Demit-exe=true
           -Demit-lib-vt=true
           -Doptimize=ReleaseFast
+          -Dcpu=baseline
           "-Dversion-string=${{ steps.meta.outputs.version }}"
+
+      - name: Verify Windows CPU baseline
+        shell: pwsh
+        run: ./scripts/check-windows-x64-baseline.ps1 -Path zig-out/bin/winghostty.exe
 
       - name: Package Windows artifacts
         shell: pwsh

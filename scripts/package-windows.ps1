@@ -346,7 +346,7 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dcpu=baseline "-Dversion-string=$Version"
         }
         finally {
             Pop-Location
@@ -356,6 +356,8 @@ try {
     if (-not (Test-Path -LiteralPath $exePath)) {
         throw "Expected build output was not found: $exePath"
     }
+
+    & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
 
     Write-Host "Packaging phase: stage portable tree"
     Remove-TreeIfPresent -PathToRemove $stageBase
