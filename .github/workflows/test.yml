@@ -44,3 +44,8 @@ jobs:
 
       - name: Build executable
         run: zig build -Demit-exe=true
+
+      - name: Build ARM64 executable
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+        run: zig build -Demit-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline

@@ -11,7 +11,7 @@ pub const repo_owner = "amanthanvi";
 pub const repo_name = "winghostty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
-pub const windows_checksums_asset_name = "SHA256SUMS.txt";
+pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
 
@@ -281,7 +281,7 @@ pub fn stageWindowsInstall(
 
     const installer_path = try std.fs.path.join(alloc, &.{ stage_dir, candidate.installer_name });
     errdefer alloc.free(installer_path);
-    const checksums_path = try std.fs.path.join(alloc, &.{ stage_dir, windows_checksums_asset_name });
+    const checksums_path = try std.fs.path.join(alloc, &.{ stage_dir, windowsChecksumsAssetName() });
     defer alloc.free(checksums_path);
 
     try downloadUrlToFile(alloc, candidate.checksums_url, checksums_path);
@@ -483,7 +483,7 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
     defer windows.FreeLibrary(module);
 
     const proc = windows.kernel32.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
-    const winVerifyTrust: WinVerifyTrustFn = @ptrCast(proc);
+    const winVerifyTrust: WinVerifyTrustFn = @ptrCast(@alignCast(proc));
 
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
@@ -645,10 +645,11 @@ fn parseWindowsInstallCandidate(
 
     const expected_installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-{s}-windows-x64-setup.exe",
-        .{version_text},
+        "winghostty-{s}-windows-{s}-setup.exe",
+        .{ version_text, windowsInstallerArch() },
     );
     errdefer alloc.free(expected_installer_name);
+    const expected_checksums_name = windowsChecksumsAssetName();
 
     var installer_url: ?[]const u8 = null;
     var checksums_url: ?[]const u8 = null;
@@ -672,7 +673,10 @@ fn parseWindowsInstallCandidate(
             installer_url = browser_download_url;
             continue;
         }
-        if (std.mem.eql(u8, name, windows_checksums_asset_name)) {
+        if (std.mem.eql(u8, name, expected_checksums_name) or
+            (std.mem.eql(u8, windowsInstallerArch(), "x64") and
+                std.mem.eql(u8, name, windows_checksums_asset_name_legacy)))
+        {
             checksums_url = browser_download_url;
             continue;
         }
@@ -692,6 +696,20 @@ fn parseWindowsInstallCandidate(
         .installer_name = expected_installer_name,
         .installer_url = owned_installer_url,
         .checksums_url = owned_checksums_url,
+    };
+}
+
+fn windowsInstallerArch() []const u8 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        else => "x64",
+    };
+}
+
+fn windowsChecksumsAssetName() []const u8 {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => "SHA256SUMS-windows-arm64.txt",
+        else => "SHA256SUMS-windows-x64.txt",
     };
 }
 
@@ -871,22 +889,33 @@ test "windows install staging rejects relative state path before download" {
 
 test "release parser accepts checksum metadata without detached signature" {
     const alloc = std.testing.allocator;
-    const body =
-        \\{
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-1.3.100-windows-{s}-setup.exe",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(installer_name);
+    const checksum_name = windowsChecksumsAssetName();
+    const body = try std.fmt.allocPrint(
+        alloc,
+        \\{{
         \\  "tag_name": "v1.3.100",
         \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
         \\  "assets": [
-        \\    {
-        \\      "name": "winghostty-1.3.100-windows-x64-setup.exe",
-        \\      "browser_download_url": "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"
-        \\    },
-        \\    {
-        \\      "name": "SHA256SUMS.txt",
-        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
-        \\    }
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }}
         \\  ]
-        \\}
-    ;
+        \\}}
+    ,
+        .{ installer_name, installer_name, checksum_name, checksum_name },
+    );
+    defer alloc.free(body);
 
     var release = try parseLatestStableReleaseResponse(alloc, body);
     defer release.deinit(alloc);
@@ -896,40 +925,46 @@ test "release parser accepts checksum metadata without detached signature" {
 
 test "release parser selects windows install candidate when checksum metadata is present" {
     const alloc = std.testing.allocator;
-    const body =
-        \\{
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-1.3.100-windows-{s}-setup.exe",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(installer_name);
+    const checksum_name = windowsChecksumsAssetName();
+    const body = try std.fmt.allocPrint(
+        alloc,
+        \\{{
         \\  "tag_name": "v1.3.100",
         \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
         \\  "assets": [
-        \\    {
-        \\      "name": "winghostty-1.3.100-windows-x64-setup.exe",
-        \\      "browser_download_url": "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"
-        \\    },
-        \\    {
-        \\      "name": "SHA256SUMS.txt",
-        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
-        \\    }
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }}
         \\  ]
-        \\}
-    ;
+        \\}}
+    ,
+        .{ installer_name, installer_name, checksum_name, checksum_name },
+    );
+    defer alloc.free(body);
 
     var release = try parseLatestStableReleaseResponse(alloc, body);
     defer release.deinit(alloc);
 
     try std.testing.expect(release.windows_install != null);
     const windows_install = release.windows_install.?;
-    try std.testing.expectEqualStrings(
-        "winghostty-1.3.100-windows-x64-setup.exe",
-        windows_install.installer_name,
-    );
-    try std.testing.expectEqualStrings(
-        "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe",
-        windows_install.installer_url,
-    );
-    try std.testing.expectEqualStrings(
-        "https://example.invalid/SHA256SUMS.txt",
-        windows_install.checksums_url,
-    );
+    try std.testing.expectEqualStrings(installer_name, windows_install.installer_name);
+    const installer_url = try std.fmt.allocPrint(alloc, "https://example.invalid/{s}", .{installer_name});
+    defer alloc.free(installer_url);
+    try std.testing.expectEqualStrings(installer_url, windows_install.installer_url);
+    const checksum_url = try std.fmt.allocPrint(alloc, "https://example.invalid/{s}", .{checksum_name});
+    defer alloc.free(checksum_url);
+    try std.testing.expectEqualStrings(checksum_url, windows_install.checksums_url);
 }
 
 test "release parser accepts long semver tags for windows install candidate" {
@@ -944,10 +979,11 @@ test "release parser accepts long semver tags for windows install candidate" {
 
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-{s}-windows-x64-setup.exe",
-        .{version_text},
+        "winghostty-{s}-windows-{s}-setup.exe",
+        .{ version_text, windowsInstallerArch() },
     );
     defer alloc.free(installer_name);
+    const checksum_name = windowsChecksumsAssetName();
 
     const body = try std.fmt.allocPrint(
         alloc,
@@ -960,13 +996,13 @@ test "release parser accepts long semver tags for windows install candidate" {
         \\      "browser_download_url": "https://example.invalid/{s}"
         \\    }},
         \\    {{
-        \\      "name": "SHA256SUMS.txt",
-        \\      "browser_download_url": "https://example.invalid/SHA256SUMS.txt"
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
         \\    }}
         \\  ]
         \\}}
     ,
-        .{ version_text, version_text, installer_name, installer_name },
+        .{ version_text, version_text, installer_name, installer_name, checksum_name, checksum_name },
     );
     defer alloc.free(body);
 

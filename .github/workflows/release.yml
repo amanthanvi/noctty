@@ -120,7 +120,7 @@ jobs:
           zig build test -Dtest-filter=scroll
           zig build test -Dtest-filter=keybind
 
-      - name: Build release binaries
+      - name: Build x64 release binaries
         shell: pwsh
         timeout-minutes: 20
         run: >
@@ -128,6 +128,7 @@ jobs:
           -Demit-exe=true
           -Demit-lib-vt=true
           -Doptimize=ReleaseFast
+          -Dtarget=x86_64-windows-msvc
           -Dcpu=baseline
           "-Dversion-string=${{ steps.meta.outputs.version }}"
 
@@ -135,12 +136,40 @@ jobs:
         shell: pwsh
         run: ./scripts/check-windows-x64-baseline.ps1 -Path zig-out/bin/winghostty.exe
 
-      - name: Package Windows artifacts
+      - name: Package x64 Windows artifacts
         shell: pwsh
         timeout-minutes: 15
         run: >
           ./scripts/package-windows.ps1
           -Version ${{ steps.meta.outputs.version }}
+          -Architecture x64
+          -SkipBuild
+          -RequireInstaller
+          -RequireSigning
+
+      - name: Build ARM64 release binaries
+        shell: pwsh
+        timeout-minutes: 20
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+        run: >
+          zig build
+          -Demit-exe=true
+          -Demit-lib-vt=true
+          -Doptimize=ReleaseFast
+          -Dtarget=aarch64-windows-msvc
+          -Dcpu=baseline
+          "-Dversion-string=${{ steps.meta.outputs.version }}"
+
+      - name: Package ARM64 Windows artifacts
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+        run: >
+          ./scripts/package-windows.ps1
+          -Version ${{ steps.meta.outputs.version }}
+          -Architecture arm64
           -SkipBuild
           -RequireInstaller
           -RequireSigning
@@ -152,6 +181,7 @@ jobs:
           -Version ${{ steps.meta.outputs.version }}
           -Tag ${{ steps.meta.outputs.tag }}
           -Repo ${{ github.repository }}
+          -Architectures @("x64", "arm64")
           -UpstreamBaseVersion ${{ steps.meta.outputs.upstream_base_version }}
           -FirstForkPatch ${{ steps.meta.outputs.first_fork_patch }}
 
@@ -165,12 +195,16 @@ jobs:
           $title = "${{ steps.meta.outputs.title }}"
           $versionLine = "${{ steps.meta.outputs.version_line }}"
           $upstreamBaseVersion = "${{ steps.meta.outputs.upstream_base_version }}"
-          $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $artifactDirArm64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-arm64"
           $assets = @(
-            (Join-Path $artifactDir "winghostty-$version-windows-x64-setup.exe"),
-            (Join-Path $artifactDir "winghostty-$version-windows-x64-portable.zip"),
-            (Join-Path $artifactDir "SHA256SUMS.txt"),
-            (Join-Path $artifactDir "winghostty-icon.svg")
+            (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-setup.exe"),
+            (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-portable.zip"),
+            (Join-Path $artifactDirX64 "SHA256SUMS-windows-x64.txt"),
+            (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-setup.exe"),
+            (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-portable.zip"),
+            (Join-Path $artifactDirArm64 "SHA256SUMS-windows-arm64.txt"),
+            (Join-Path $artifactDirX64 "winghostty-icon.svg")
           )
           $notesPrefix = @"
           Compatibility line: Ghostty $versionLine
@@ -206,8 +240,8 @@ jobs:
           }
 
           $version = "${{ steps.meta.outputs.version }}"
-          $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
-          $metadataPath = Join-Path $artifactDir "package-managers/metadata.json"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
           $manifestRelPath = if ($env:SCOOP_BUCKET_MANIFEST_PATH) {
             $env:SCOOP_BUCKET_MANIFEST_PATH
@@ -283,8 +317,8 @@ jobs:
           }
 
           $version = "${{ steps.meta.outputs.version }}"
-          $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
-          $metadataPath = Join-Path $artifactDir "package-managers/metadata.json"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
           $packageIdSegments = $env:WINGET_PACKAGE_IDENTIFIER.Split('.')
           $manifestPath = "manifests/{0}/{1}" -f `
@@ -341,9 +375,14 @@ jobs:
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/msixbundle" -OutFile $bundlePath -ErrorAction Stop
           Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
 
+          $installerUrls = @($metadata.winget.installerUrls)
+          if ($installerUrls.Count -eq 0) {
+            $installerUrls = @($metadata.winget.installerUrl)
+          }
+
           & wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER `
             --version $version `
-            --urls $metadata.winget.installerUrl `
+            --urls @installerUrls `
             --release-notes-url $metadata.release.releaseUrl `
             --submit `
             --no-open `

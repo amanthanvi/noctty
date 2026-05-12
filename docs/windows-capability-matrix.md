@@ -41,13 +41,13 @@ Last reviewed: 2026-05-09.
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
+| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with architecture-specific SHA256 metadata, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
 
 ## Windows-Specific
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Features overview](https://ghostty.org/docs/features) | Upstream Ghostty docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64. |
+| [Features overview](https://ghostty.org/docs/features) | Upstream Ghostty docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64. |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Upstream highlights Metal on macOS and OpenGL on Linux. winghostty renders on Windows with OpenGL 4.3+ via WGL; no D3D/DirectX backend ships. |
 | [Configuration](https://ghostty.org/docs/config) | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream. |
 | Local automation | `winghostty +list-windows` reports local window/tab/pane IDs as JSON, and `winghostty +perform-action <action>` forwards allowlisted keybinding actions over Win32 single-instance IPC. `--surface-id` targets only surface-scoped actions; app-scoped actions target the app. Terminal-input, arbitrary file helper, and crash actions are rejected by the running instance, and new action variants remain disabled until reviewed. |

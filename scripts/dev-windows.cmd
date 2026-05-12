@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "VSDEVCMD=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+set "VSDEVCMD="
 set "GIT_CMD=C:\Program Files\Git\cmd"
 set "GIT_USR_BIN=C:\Program Files\Git\usr\bin"
 set "_SYSTEM_DRIVE=%SystemDrive%"
@@ -11,6 +11,8 @@ if "%_USER_HOME%"=="" set "_USER_HOME=%HOMEDRIVE%%HOMEPATH%"
 if "%_USER_HOME%"=="" set "_USER_HOME=%_SYSTEM_DRIVE%\Users\%USERNAME%"
 set "_PROGRAM_FILES=%ProgramFiles%"
 if "%_PROGRAM_FILES%"=="" set "_PROGRAM_FILES=%_SYSTEM_DRIVE%\Program Files"
+set "_PROGRAM_FILES_X86=%ProgramFiles(x86)%"
+if "%_PROGRAM_FILES_X86%"=="" set "_PROGRAM_FILES_X86=%_SYSTEM_DRIVE%\Program Files (x86)"
 set "_APPDATA=%APPDATA%"
 if "%_APPDATA%"=="" set "_APPDATA=%_USER_HOME%\AppData\Roaming"
 set "_LOCALAPPDATA=%LOCALAPPDATA%"
@@ -21,12 +23,30 @@ set "_TMP_DIR=%TMP%"
 if "%_TMP_DIR%"=="" set "_TMP_DIR=%_TEMP_DIR%"
 
 if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-0.15.2"
+if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-aarch64-windows-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-aarch64-windows-0.15.2"
 if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig-x86_64-windows-0.15.2\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig-x86_64-windows-0.15.2"
 if "%ZIG_HOME%"=="" if exist "%_USER_HOME%\tools\zig\zig.exe" set "ZIG_HOME=%_USER_HOME%\tools\zig"
 if "%ZIG_HOME%"=="" if exist "%_PROGRAM_FILES%\Zig" set "ZIG_HOME=%_PROGRAM_FILES%\Zig"
+for %%I in (zig.exe) do if "%ZIG_HOME%"=="" if not "%%~$PATH:I"=="" set "ZIG_HOME=%%~dp$PATH:I"
+if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES_X86%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES_X86%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
+if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"
+if "%VSDEVCMD%"=="" if exist "%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" set "VSDEVCMD=%_PROGRAM_FILES%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"
+if "%DEV_WINDOWS_ARCH%"=="" (
+  if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" (
+    set "DEV_WINDOWS_ARCH=arm64"
+  ) else (
+    set "DEV_WINDOWS_ARCH=x64"
+  )
+)
+if /i not "%DEV_WINDOWS_ARCH%"=="x64" if /i not "%DEV_WINDOWS_ARCH%"=="arm64" (
+  echo DEV_WINDOWS_ARCH must be x64 or arm64. Resolved: "%DEV_WINDOWS_ARCH%"
+  exit /b 1
+)
 
-if not exist "%VSDEVCMD%" (
-  echo Missing VS Dev shell bootstrap: "%VSDEVCMD%"
+if "%VSDEVCMD%"=="" (
+  echo Missing VS Dev shell bootstrap. Install Visual Studio 2022 Build Tools with the C++ workload.
   exit /b 1
 )
 
@@ -50,7 +70,7 @@ if not exist "%ZIG_HOME%\zig.exe" (
   exit /b 1
 )
 
-call "%VSDEVCMD%" -arch=x64 || exit /b 1
+call "%VSDEVCMD%" -arch=%DEV_WINDOWS_ARCH% || exit /b 1
 for %%I in ("%_USER_HOME%") do (
   set "USERPROFILE=%%~fI"
   set "HOMEDRIVE=%%~dI"
@@ -66,7 +86,7 @@ if not exist "%APPDATA%" mkdir "%APPDATA%" >nul 2>nul
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>nul
 set "ZIG_GLOBAL_CACHE_DIR=%LOCALAPPDATA%\zig"
 set "ZIG_LOCAL_CACHE_DIR=%CD%\.zig-cache"
-set "PATH=%GIT_CMD%;%GIT_USR_BIN%;%ZIG_HOME%;%PATH%"
+set "PATH=%GIT_CMD%;%ZIG_HOME%;%PATH%;%GIT_USR_BIN%"
 
 echo == Versions ==
 where git || exit /b 1

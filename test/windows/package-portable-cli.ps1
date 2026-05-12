@@ -1,5 +1,7 @@
 param(
     [string] $Version = '0.0.1',
+    [ValidateSet('x64', 'arm64')]
+    [string] $Architecture = $(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }),
     [switch] $SkipPackage
 )
 
@@ -10,14 +12,14 @@ $packageScript = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $detachedHarness = Join-Path $repoRoot 'test\windows\cli-detached-action.ps1'
 
-$stageBase = Join-Path $repoRoot ("dist\artifacts\winghostty-{0}-windows-x64" -f $Version)
+$stageBase = Join-Path $repoRoot ("dist\artifacts\winghostty-{0}-windows-{1}" -f $Version, $Architecture)
 $portableRoot = Join-Path $stageBase 'winghostty'
 $portableExe = Join-Path $portableRoot 'winghostty.exe'
 $portableCommand = Join-Path $portableRoot 'winghostty.com'
 $portableResources = Join-Path $portableRoot 'share\ghostty'
 
 if (-not $SkipPackage) {
-    & $packageScript -Version $Version
+    & $packageScript -Version $Version -Architecture $Architecture
 }
 
 foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableResources)) {

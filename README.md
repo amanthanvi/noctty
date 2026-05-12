@@ -52,7 +52,7 @@ install.
 winghostty is a young, single-maintainer fork. First fork commit: 2026-04-06.
 First public releases: 2026-04-16.
 
-- **Supported platform:** Windows 10 and Windows 11 on x64.
+- **Supported platform:** Windows 10 and Windows 11 on x64 and ARM64.
 - **Releases:** unsigned installer + portable ZIP. Windows SmartScreen may
   warn on first run; that is expected until code signing lands.
   Unsigned installers are not eligible for `auto-update = download` staging
@@ -225,7 +225,7 @@ Most users should install from Releases. If you want to build:
 
 **Requirements**
 
-- Windows 10 or 11 on x64
+- Windows 10 or 11 on x64 or ARM64
 - **Zig 0.15.x (patch ≥ 2)** — enforced at compile time via
   `src/build/zig.zig::requireZig`. Newer 0.15 patch releases (`0.15.3`,
   etc.) are accepted; 0.15.0 / 0.15.1, 0.14.x, and 0.16.x will fail to

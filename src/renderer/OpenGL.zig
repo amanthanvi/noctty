@@ -262,7 +262,7 @@ fn ensureWin32SwapInterval(self: *OpenGL) void {
         log.debug("WGL swap interval extension unavailable; leaving window-vsync unmanaged", .{});
         return;
     };
-    const set_swap_interval: WglSwapIntervalExt = @ptrCast(proc);
+    const set_swap_interval: WglSwapIntervalExt = @ptrCast(@alignCast(proc));
     const interval: c_int = if (self.vsync_enabled) 1 else 0;
     if (set_swap_interval(interval) == 0) {
         log.warn("failed to configure WGL swap interval interval={}", .{interval});

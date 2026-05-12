@@ -10,7 +10,7 @@ For a row-by-row mapping against official Ghostty docs, see
 
 ## Supported platform
 
-- **Windows 10** and **Windows 11** — x64
+- **Windows 10** and **Windows 11** — x64 and ARM64
 - No macOS, Linux, or cross-platform app runtime ships from this repo.
   `libghostty-vt` remains buildable for non-Windows targets as a library.
 - WSL *as a launched shell* works when you opt in (`command = wsl.exe`).

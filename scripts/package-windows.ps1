@@ -3,6 +3,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
+    [ValidateSet("x64", "arm64")]
+    [string]$Architecture = $(if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }),
+
     [string]$OutputRoot = "dist/artifacts",
 
     [switch]$SkipBuild,
@@ -29,11 +32,15 @@ $localAppData = if ($env:LOCALAPPDATA) {
 } else {
     Join-Path $userHome "AppData\Local"
 }
-$stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-x64"
+$zigTarget = switch ($Architecture) {
+    "x64" { "x86_64-windows-msvc" }
+    "arm64" { "aarch64-windows-msvc" }
+}
+$stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-$Architecture"
 $portableRoot = Join-Path $stageBase "winghostty"
-$zipPath = Join-Path $stageBase "winghostty-$Version-windows-x64-portable.zip"
-$installerPath = Join-Path $stageBase "winghostty-$Version-windows-x64-setup.exe"
-$checksumsPath = Join-Path $stageBase "SHA256SUMS.txt"
+$zipPath = Join-Path $stageBase "winghostty-$Version-windows-$Architecture-portable.zip"
+$installerPath = Join-Path $stageBase "winghostty-$Version-windows-$Architecture-setup.exe"
+$checksumsPath = Join-Path $stageBase "SHA256SUMS-windows-$Architecture.txt"
 $releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
@@ -346,7 +353,7 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dcpu=baseline "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline "-Dversion-string=$Version"
         }
         finally {
             Pop-Location
@@ -358,6 +365,8 @@ try {
     }
 
     & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
+
+    Write-Host "Packaging arch : $Architecture ($zigTarget)"
 
     Write-Host "Packaging phase: stage portable tree"
     Remove-TreeIfPresent -PathToRemove $stageBase
@@ -418,6 +427,7 @@ try {
     if ($iscc) {
         & $iscc.Source `
             "/DMyAppVersion=$Version" `
+            "/DPackageArch=$Architecture" `
             "/DStageDir=$portableRoot" `
             "/DOutputDir=$stageBase" `
             "/DSourceDir=$repoRoot" `
