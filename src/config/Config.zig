@@ -3156,9 +3156,16 @@ keybind: Keybinds = .{},
 /// command-palette-entry = title:"noctty",description:"Add a little noctty to your terminal.",action:"text:\xf0\x9f\x91\xbb"
 /// ```
 ///
+/// There are some additional special values that can be specified for
+/// command-palette-entry:
+///
+///   * `command-palette-entry=clear` will clear all command entries. Warning: this
+///     removes ALL entries up to this point, including the default
+///     entries. Available since: 1.4.0
+///
 /// By default, the command palette is preloaded with most actions that might
 /// be useful in an interactive setting yet do not have easily accessible or
-/// memorizable shortcuts. The default entries can be cleared by setting this
+/// memorizable shortcuts. The default entries can be restored by setting this
 /// setting to an empty value:
 ///
 /// ```ini
@@ -12008,6 +12015,13 @@ pub const RepeatableCommand = struct {
         // Unset or empty input clears the list
         const input = input_ orelse "";
         if (input.len == 0) {
+            log.info("config has 'command-palette-entry =', using default entries", .{});
+            try self.init(alloc);
+            return;
+        }
+
+        if (std.mem.eql(u8, input, "clear")) {
+            log.info("config has 'command-palette-entry = clear', all command entries cleared", .{});
             self.value.clearRetainingCapacity();
             self.value_c.clearRetainingCapacity();
             return;
@@ -12155,8 +12169,11 @@ pub const RepeatableCommand = struct {
         try testing.expectEqualStrings("Baz", list.value.items[3].title);
         try testing.expectEqualStrings("Raspberry Pie", list.value.items[3].description);
 
-        try list.parseCLI(alloc, "");
+        try list.parseCLI(alloc, "clear");
         try testing.expectEqual(@as(usize, 0), list.value.items.len);
+
+        try list.parseCLI(alloc, "");
+        try testing.expectEqual(inputpkg.command.defaults.len, list.value.items.len);
     }
 
     test "RepeatableCommand formatConfig empty" {
@@ -12271,7 +12288,7 @@ pub const RepeatableCommand = struct {
         try list.parseCLI(alloc, "title:Foo,action:ignore");
         try testing.expectEqual(@as(usize, 1), list.cval().len);
 
-        try list.parseCLI(alloc, "");
+        try list.parseCLI(alloc, "clear");
         try testing.expectEqual(@as(usize, 0), list.cval().len);
     }
 };
@@ -13701,10 +13718,34 @@ test "clone command C view survives source config deinit" {
     try testing.expectEqualStrings("", std.mem.span(custom.description));
 
     // Clearing the palette must stay empty through another complete clone.
-    try copy.@"command-palette-entry".parseCLI(copy._arena.?.allocator(), "");
+    try copy.@"command-palette-entry".parseCLI(copy._arena.?.allocator(), "clear");
     var empty = try copy.clone(testing.allocator);
     defer empty.deinit();
     try testing.expectEqual(@as(usize, 0), empty.@"command-palette-entry".cval().len);
+}
+
+test "command-palette-entry in a config file: clear empties the palette, an empty value restores the defaults" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cleared = try Config.default(alloc);
+    defer cleared.deinit();
+    var clear_reader: std.Io.Reader = .fixed(
+        "command-palette-entry = clear\ncommand-palette-entry = title:Custom,action:open_config\n",
+    );
+    try cleared.loadReader(alloc, &clear_reader, "C:\\noctty-test\\config.ghostty");
+    try testing.expect(cleared._diagnostics.empty());
+    try testing.expectEqual(@as(usize, 1), cleared.@"command-palette-entry".cval().len);
+    try testing.expectEqualStrings("Custom", cleared.@"command-palette-entry".value.items[0].title);
+
+    var restored = try Config.default(alloc);
+    defer restored.deinit();
+    var restore_reader: std.Io.Reader = .fixed(
+        "command-palette-entry = clear\ncommand-palette-entry =\n",
+    );
+    try restored.loadReader(alloc, &restore_reader, "C:\\noctty-test\\config.ghostty");
+    try testing.expect(restored._diagnostics.empty());
+    try testing.expectEqual(inputpkg.command.defaults.len, restored.@"command-palette-entry".cval().len);
 }
 
 test "default quit-after-last-window-closed is enabled in the Windows fork" {
