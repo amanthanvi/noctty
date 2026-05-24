@@ -55,10 +55,10 @@ winghostty is a young, single-maintainer fork. First fork commit: 2026-04-06.
 First public releases: 2026-04-16.
 
 - **Supported platform:** Windows 10 and Windows 11 on x64.
-- **Releases:** unsigned installer + portable ZIP. Windows SmartScreen may
-  warn on first run; that is expected until code signing lands.
-  Unsigned installers are not eligible for `auto-update = download` staging
-  because staging requires a valid Authenticode signature.
+- **Releases:** Authenticode-signed installer and signed Windows binaries
+  inside the portable ZIP. The ZIP container itself is checksummed, not
+  Authenticode-signed. Windows SmartScreen may still warn on first run for a
+  new or low-reputation publisher certificate.
 - **Feedback:** use
   [Discussions](https://github.com/amanthanvi/winghostty/discussions) for
   questions. GitHub Issues are reserved for reproducible bugs.
@@ -118,8 +118,9 @@ scoop install winghostty/winghostty
 ```
 
 On first run, Windows SmartScreen may say *"Windows protected your PC"*.
-Click **More info** → **Run anyway**. Releases are unsigned right now; code
-signing is planned.
+Click **More info** → **Run anyway**. Release installers and Windows binaries
+inside the portable ZIP are Authenticode-signed, but SmartScreen reputation can
+still lag behind signing.
 
 Full walk-through — installer, portable, uninstall —
 **[docs/getting-started.md](docs/getting-started.md)**.
@@ -203,7 +204,7 @@ newer stable version exists and never replaces binaries silently.
 `auto-update = download` downloads only eligible stable Windows installer
 releases, verifies `SHA256SUMS.txt` plus Authenticode, and stages the installer
 locally. Unsigned installers fail that verification and are not staged.
-Applying the staged installer is still manual.
+Applying the staged installer is user-initiated and may prompt for UAC.
 
 ## Crash reports
 

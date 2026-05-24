@@ -3214,9 +3214,9 @@ term: []const u8 = "xterm-ghostty",
 ///  * `check` - Check for updates and notify the user if an update is
 ///    available, but do not automatically install the update.
 ///  * `download` - Check for updates, automatically download the update,
-///    notify the user, but do not automatically install the update.
-///    Windows stages only signed, checksum-matching installer releases and
-///    still requires the user to install manually.
+///    notify the user, but do not automatically apply the update. Windows
+///    stages only signed, checksum-matching installer releases and can launch
+///    the verified staged installer after a user click.
 @"auto-update": ?AutoUpdate = null,
 
 /// The release channel to use for auto-updates.
