@@ -158,6 +158,10 @@ List windows, tabs, and panes:
 winghostty +list-windows
 ```
 
+The JSON schema is `winghostty.windows.v2`. It exposes local window, tab, and
+pane IDs, focus/active state, and structural counts only; it does not expose
+terminal text, shell input, working directories, or file paths.
+
 Invoke a keybinding action on the focused surface:
 
 ```powershell

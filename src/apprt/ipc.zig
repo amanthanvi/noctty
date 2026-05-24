@@ -53,10 +53,12 @@ pub const Target = union(Key) {
     }
 };
 
-pub const automation_window_list_schema = "winghostty.windows.v1";
+pub const automation_window_list_schema = "winghostty.windows.v2";
+pub const automation_window_list_api_version: u32 = 2;
 
 pub const AutomationWindowList = struct {
     schema: []const u8 = automation_window_list_schema,
+    api_version: u32 = automation_window_list_api_version,
     windows: []AutomationWindow,
 
     pub fn deinit(self: *AutomationWindowList, alloc: Allocator) void {
@@ -70,6 +72,8 @@ pub const AutomationWindow = struct {
     window_id: u32,
     focused: bool,
     active_tab_id: ?u32,
+    tab_count: usize,
+    pane_count: usize,
     tabs: []AutomationTab,
 
     pub fn deinit(self: *AutomationWindow, alloc: Allocator) void {
@@ -83,6 +87,7 @@ pub const AutomationTab = struct {
     tab_id: u32,
     active: bool,
     focused_surface_id: ?u64,
+    pane_count: usize,
     panes: []AutomationPane,
 
     pub fn deinit(self: *AutomationTab, alloc: Allocator) void {
@@ -94,6 +99,7 @@ pub const AutomationTab = struct {
 pub const AutomationPane = struct {
     surface_id: u64,
     focused: bool,
+    active: bool,
 };
 
 pub const AutomationActionTarget = union(enum) {
