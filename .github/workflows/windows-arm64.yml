@@ -1,0 +1,102 @@
+name: Windows ARM64
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  native-arm64:
+    name: Native Windows ARM64 Tests
+    runs-on: windows-11-arm
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      WINGHOSTTY_CI_VERSION: 0.0.1
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Verify native ARM64 runner
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          Write-Host "PROCESSOR_ARCHITEW6432=$env:PROCESSOR_ARCHITEW6432"
+          Write-Host "Process architecture=$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          zig version
+          zig env
+
+          if ($env:PROCESSOR_ARCHITECTURE -ne "ARM64") {
+            throw "Expected a native Windows ARM64 runner, got PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE."
+          }
+
+      - name: Run ARM64 Zig tests
+        shell: pwsh
+        run: |
+          zig build test -Dtest-filter=win32 -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+          zig build test -Dtest-filter=scroll -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+          zig build test -Dtest-filter=keybind -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+          zig build test -Dtest-filter=release -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+
+      - name: Build ARM64 binaries
+        shell: pwsh
+        timeout-minutes: 20
+        run: >
+          zig build
+          -Demit-exe=true
+          -Demit-lib-vt=true
+          -Dtarget=aarch64-windows-msvc
+          -Dcpu=baseline
+          "-Dversion-string=$env:WINGHOSTTY_CI_VERSION"
+
+      - name: Run ARM64 CLI smoke
+        shell: pwsh
+        run: |
+          $versionText = & .\zig-out\bin\winghostty.com +version | Out-String
+          Write-Host $versionText
+          if ($versionText -notmatch "Build Config") {
+            throw "winghostty.com +version did not print the expected version output."
+          }
+
+      - name: Package ARM64 portable artifact
+        shell: pwsh
+        run: >
+          ./scripts/package-windows.ps1
+          -Version $env:WINGHOSTTY_CI_VERSION
+          -Architecture arm64
+          -SkipBuild
+
+      - name: Run packaged ARM64 CLI smoke
+        shell: pwsh
+        run: |
+          $portableRoot = Join-Path $PWD "dist/artifacts/winghostty-$env:WINGHOSTTY_CI_VERSION-windows-arm64/winghostty"
+          $portableCommand = Join-Path $portableRoot "winghostty.com"
+          if (-not (Test-Path -LiteralPath $portableCommand)) {
+            throw "Missing packaged ARM64 command shim: $portableCommand"
+          }
+
+          $versionText = & $portableCommand +version | Out-String
+          Write-Host $versionText
+          if ($versionText -notmatch "Build Config") {
+            throw "Packaged winghostty.com +version did not print the expected version output."
+          }
+
+          $themesText = & $portableCommand +list-themes | Out-String
+          if ($themesText -notmatch "0x96f") {
+            throw "Packaged ARM64 +list-themes did not find packaged resources."
+          }
