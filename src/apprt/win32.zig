@@ -11343,7 +11343,7 @@ const Host = struct {
             try append.fmt(&parts, alloc, "Panes {d}", .{pane_count});
         }
         if (surface.readonly) try append.raw(&parts, alloc, "readonly");
-        if (surface.secure_input) try append.raw(&parts, alloc, "secure input");
+        if (surface.secure_input) try append.raw(&parts, alloc, "sensitive input");
         if (surface.inspector_visible) {
             if (tab.tree.zoomed != null and pane_count > 1) {
                 try append.fmt(&parts, alloc, "Inspect {d} zoom", .{pane_count});
@@ -15706,7 +15706,7 @@ fn buildWindowTitle(
     }.call;
 
     if (status.readonly) try appendStatus(&buf, alloc, "readonly", .{});
-    if (status.secure_input) try appendStatus(&buf, alloc, "secure", .{});
+    if (status.secure_input) try appendStatus(&buf, alloc, "sensitive", .{});
     if (status.key_sequence_active) try appendStatus(&buf, alloc, "keys", .{});
     if (status.key_table_name) |name| try appendStatus(&buf, alloc, "table:{s}", .{name});
     if (status.pwd) |pwd| try appendStatus(&buf, alloc, "cwd:{s}", .{pwd});
@@ -28426,7 +28426,7 @@ test "win32 buildWindowTitle appends active status segments" {
     defer std.testing.allocator.free(title);
 
     try std.testing.expectEqualStrings(
-        "pwsh | readonly | secure | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
+        "pwsh | readonly | sensitive | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
         title,
     );
 }
