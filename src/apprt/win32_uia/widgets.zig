@@ -594,10 +594,25 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
         out.* = null;
-        const text = self.visibleText() catch return com.E_OUTOFMEMORY;
+        const document_text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider text snapshot failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+        var document_text_owned = true;
+        defer if (document_text_owned) self.alloc.free(document_text);
 
-        const offset = self.byteOffsetForScreenPoint(text, point);
-        return self.createRangeFromText(text, .{ .start = offset, .end = offset }, out);
+        const visible_text = self.visibleText() catch return com.E_OUTOFMEMORY;
+        defer self.alloc.free(visible_text);
+
+        const visible_offset = self.byteOffsetForScreenPoint(visible_text, point);
+        const document_offset = documentByteOffsetForVisibleOffset(
+            document_text,
+            visible_text,
+            visible_offset,
+        );
+        const hr = self.createRangeFromText(document_text, .{ .start = document_offset, .end = document_offset }, out);
+        if (hr == com.S_OK) document_text_owned = false;
+        return hr;
     }
 
     fn visibleText(self: *TerminalProvider) ![]u8 {
@@ -1062,6 +1077,15 @@ fn utf8BoundaryAtOrBefore(text: []const u8, offset: usize) usize {
     return index;
 }
 
+fn documentByteOffsetForVisibleOffset(document_text: []const u8, visible_text: []const u8, visible_offset: usize) usize {
+    if (document_text.len == 0) return 0;
+    if (visible_text.len == 0) return 0;
+
+    const visible_start = std.mem.lastIndexOf(u8, document_text, visible_text) orelse 0;
+    const raw_offset = @min(document_text.len, visible_start + @min(visible_offset, visible_text.len));
+    return utf8BoundaryAtOrBefore(document_text, raw_offset);
+}
+
 fn safeI32FromUiaCoord(coord: f64) ?i32 {
     if (!std.math.isFinite(coord)) return null;
     const min_i32_float: f64 = @floatFromInt(std.math.minInt(i32));
@@ -1338,6 +1362,29 @@ test "TerminalProvider RangeFromPoint returns a degenerate text range" {
     try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, -1, &out));
     defer com.SysFreeString(out);
     try std.testing.expectEqual(@as(u32, 0), com.SysStringLen(out));
+}
+
+test "TerminalProvider RangeFromPoint returns document-coordinate offsets" {
+    var state_data = TestTerminalStateData{
+        .value_text = "scrollback\nvisible",
+        .visible_value_text = "visible",
+    };
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.RangeFromPoint(&p.text_iface, .{ .x = 0, .y = 0 }, &range),
+    );
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    const concrete: *TerminalTextRangeProvider = @ptrCast(@alignCast(range.?));
+    try std.testing.expectEqual(terminal_text.OffsetRange{ .start = 11, .end = 11 }, concrete.range);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+    try std.testing.expectEqual(@as(u32, 1), state_data.visible_value_calls);
 }
 
 test "TerminalProvider point mapping uses client coordinates and UTF-8 boundaries" {
