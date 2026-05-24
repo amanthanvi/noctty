@@ -28,9 +28,10 @@ pub const Options = struct {
 /// The `list-windows` command prints a read-only automation snapshot for the
 /// matching local winghostty instance as JSON.
 ///
-/// The current schema exposes only stable host/tab/pane identifiers and focus
-/// state. It does not expose terminal text, shell input, working directories,
-/// or any write/control actions.
+/// The current schema exposes only stable host/tab/pane identifiers, focus
+/// state, active-pane state, and structural counts. It does not expose
+/// terminal text, shell input, working directories, or any write/control
+/// actions.
 ///
 /// Flags:
 ///
@@ -129,7 +130,7 @@ test "automation-window-list cli prints json payload" {
                 .class => |class| try testing.allocator.dupe(u8, class),
                 .detect => return error.UnexpectedTarget,
             };
-            return try alloc.dupe(u8, "{\"schema\":\"winghostty.windows.v1\",\"windows\":[]}");
+            return try alloc.dupe(u8, "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[]}");
         }
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
@@ -156,7 +157,7 @@ test "automation-window-list cli prints json payload" {
 
     try testing.expectEqual(@as(u8, 0), exit_code);
     try testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v1\",\"windows\":[]}\n",
+        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[]}\n",
         stdout_buf.written(),
     );
     try testing.expectEqualStrings("", stderr_buf.written());
