@@ -1260,6 +1260,7 @@ const GlobalHotkeySpec = struct {
 const RegisteredGlobalHotkey = struct {
     id: i32,
     trigger: input.Binding.Trigger,
+    spec: GlobalHotkeySpec,
     binding: *const input.Binding.Set.Value,
 };
 
@@ -3442,16 +3443,29 @@ pub const App = struct {
             if (!generic.flags.global) continue;
 
             const spec = hotkeySpecForTrigger(entry.key_ptr.*) orelse {
-                log.debug("skipping unsupported win32 global keybind", .{});
+                log.warn("skipping unsupported win32 global hotkey trigger={f}", .{entry.key_ptr.*});
                 continue;
             };
 
+            if (self.registeredGlobalHotkeyForSpec(spec)) |existing| {
+                log.warn("skipping duplicate win32 global hotkey trigger={f} conflicts_with={f} mods=0x{x} vk=0x{x}", .{
+                    entry.key_ptr.*,
+                    existing.trigger,
+                    spec.modifiers,
+                    spec.vk,
+                });
+                continue;
+            }
+
             if (RegisterHotKey(null, next_id, spec.modifiers, spec.vk) == 0) {
-                log.warn("failed to register win32 global hotkey id={} mods=0x{x} vk=0x{x} err={}", .{
+                const err = windows.kernel32.GetLastError();
+                log.warn("failed to register win32 global hotkey trigger={f} id={} mods=0x{x} vk=0x{x} err={} reason={s}", .{
+                    entry.key_ptr.*,
                     next_id,
                     spec.modifiers,
                     spec.vk,
-                    windows.kernel32.GetLastError(),
+                    err,
+                    hotkeyRegistrationFailureReason(err),
                 });
                 continue;
             }
@@ -3459,10 +3473,18 @@ pub const App = struct {
             try self.global_hotkeys.append(self.core_app.alloc, .{
                 .id = next_id,
                 .trigger = entry.key_ptr.*,
+                .spec = spec,
                 .binding = entry.value_ptr,
             });
             next_id += 1;
         }
+    }
+
+    fn registeredGlobalHotkeyForSpec(self: *const App, spec: GlobalHotkeySpec) ?RegisteredGlobalHotkey {
+        for (self.global_hotkeys.items) |hotkey| {
+            if (hotkeySpecEql(hotkey.spec, spec)) return hotkey;
+        }
+        return null;
     }
 
     fn scheduleGlobalHotkeySync(self: *App) void {
@@ -19114,6 +19136,19 @@ fn hotkeySpecForTrigger(trigger: input.Binding.Trigger) ?GlobalHotkeySpec {
     };
 }
 
+fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
+    return a.modifiers == b.modifiers and a.vk == b.vk;
+}
+
+fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
+    return switch (err) {
+        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another winghostty instance",
+        .INVALID_WINDOW_HANDLE => "invalid registration window",
+        .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
+        else => "unknown Win32 RegisterHotKey failure",
+    };
+}
+
 fn quitTimerDelayMs(delay: configpkg.Config.Duration) UINT {
     const clamped_ns = @max(delay.duration, std.time.ns_per_s);
     const delay_ms_u64 = @max(1, std.math.divCeil(u64, clamped_ns, std.time.ns_per_ms) catch std.math.maxInt(u64));
@@ -27160,6 +27195,39 @@ test "win32 hotkeySpecForTrigger rejects unsupported catch-all triggers" {
         .key = .catch_all,
         .mods = .{ .ctrl = true },
     }) == null);
+}
+
+test "win32 hotkeySpecEql detects duplicate resolved triggers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const physical = hotkeySpecForTrigger(.{
+        .key = .{ .physical = .backquote },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const unicode = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '`' },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const shifted = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '~' },
+        .mods = .{ .ctrl = true },
+    }).?;
+
+    try std.testing.expect(hotkeySpecEql(physical, unicode));
+    try std.testing.expect(!hotkeySpecEql(physical, shifted));
+}
+
+test "win32 hotkeyRegistrationFailureReason names conflicts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "already registered by another app or another winghostty instance",
+        hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
+    );
+    try std.testing.expectEqualStrings(
+        "unknown Win32 RegisterHotKey failure",
+        hotkeyRegistrationFailureReason(.ACCESS_DENIED),
+    );
 }
 
 test "win32 quitTimerDelayMs clamps to at least one second" {
