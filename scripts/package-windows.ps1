@@ -451,7 +451,7 @@ try {
         $destinationPath = Join-Path $portableRoot $runtimeFile
         Copy-Item -LiteralPath $runtimePath -Destination $destinationPath -Force
 
-        if ($signingConfig -and @(".exe", ".dll") -contains [System.IO.Path]::GetExtension($destinationPath)) {
+        if ($signingConfig -and @(".com", ".exe", ".dll") -contains [System.IO.Path]::GetExtension($destinationPath)) {
             Invoke-SignFile -SigningConfig $signingConfig -PathToSign $destinationPath
             Assert-ValidSignature -PathToCheck $destinationPath -SigningConfig $signingConfig
         }
