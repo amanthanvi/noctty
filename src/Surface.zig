@@ -770,11 +770,27 @@ pub fn init(
     // init stuff we should get rid of this. But this is required because
     // sizeCallback does retina-aware stuff we don't do here and don't want
     // to duplicate.
-    try self.resize(self.size.screen);
+    try self.resizeBeforeIoThreadStart(self.size.screen);
 
     // Give the renderer one more opportunity to finalize any surface
     // setup on the main thread prior to spinning up the rendering thread.
     try renderer_impl.finalizeSurfaceInit(rt_surface);
+
+    // Determine our initial window size if configured. We need to do this
+    // quite late in the process because our height/width are in grid dimensions,
+    // so we need to know our cell sizes first.
+    //
+    // This must happen before the IO thread starts. The exec backend opens the
+    // PTY at thread startup, and TUI applications can query the size
+    // immediately after launch.
+    self.recomputeInitialSize(.skip) catch |err| {
+        // We don't treat this as a fatal error because not setting
+        // an initial size shouldn't stop our terminal from working.
+        log.warn("unable to set initial window size: {}", .{err});
+    };
+    self.io.resizeBeforeThreadStart(self.size) catch |err| {
+        log.warn("unable to synchronize initial terminal size before IO thread start: {}", .{err});
+    };
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
@@ -791,19 +807,6 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName("io") catch {};
-
-    // Determine our initial window size if configured. We need to do this
-    // quite late in the process because our height/width are in grid dimensions,
-    // so we need to know our cell sizes first.
-    //
-    // Note: it is important to do this after the renderer is setup above.
-    // This allows the apprt to fully initialize the surface before we
-    // start messing with the window.
-    self.recomputeInitialSize() catch |err| {
-        // We don't treat this as a fatal error because not setting
-        // an initial size shouldn't stop our terminal from working.
-        log.warn("unable to set initial window size: {}", .{err});
-    };
 
     if (config.title) |title| {
         _ = try rt_app.performAction(
@@ -1996,15 +1999,14 @@ test "progress-style enable replays retained progress report" {
 
 const InitialSizeError = error{
     ContentScaleUnavailable,
+    SurfaceSizeUnavailable,
     AppActionFailed,
 };
 
 /// Recalculate the initial size of the window based on the
 /// configuration and invoke the apprt `initial_size` action if
 /// necessary.
-fn recomputeInitialSize(
-    self: *Surface,
-) InitialSizeError!void {
+fn recomputeInitialSize(self: *Surface, io_mode: ResizeIoMode) InitialSizeError!void {
     // Both width and height must be set for this to work, as
     // documented on the config options.
     if (self.config.window_height <= 0 or
@@ -2039,6 +2041,16 @@ fn recomputeInitialSize(
         .initial_size,
         .{ .width = final_width, .height = final_height },
     ) catch return error.AppActionFailed;
+
+    const surface_size = self.rt_surface.getSize() catch
+        return error.SurfaceSizeUnavailable;
+    const screen_size: rendererpkg.ScreenSize = .{
+        .width = surface_size.width,
+        .height = surface_size.height,
+    };
+    if (!self.size.screen.equals(screen_size)) {
+        self.resizeWithIoMode(screen_size, io_mode) catch return error.AppActionFailed;
+    }
 }
 
 /// Represents text read from the terminal and some metadata about it
@@ -2567,7 +2579,7 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     self.queueIo(.{ .resize = self.size }, .unlocked);
 
     // Update our terminal default size if necessary.
-    self.recomputeInitialSize() catch |err| {
+    self.recomputeInitialSize(.queue) catch |err| {
         // We don't treat this as a fatal error because not setting
         // an initial size shouldn't stop our terminal from working.
         log.warn("unable to recompute initial window size: {}", .{err});
@@ -2649,6 +2661,19 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
 }
 
 fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
+    try self.resizeWithIoMode(size, .queue);
+}
+
+fn resizeBeforeIoThreadStart(self: *Surface, size: rendererpkg.ScreenSize) !void {
+    try self.resizeWithIoMode(size, .skip);
+}
+
+const ResizeIoMode = enum {
+    queue,
+    skip,
+};
+
+fn resizeWithIoMode(self: *Surface, size: rendererpkg.ScreenSize, io_mode: ResizeIoMode) !void {
     // Save our screen size
     self.size.screen = size;
     self.balancePaddingIfNeeded();
@@ -2667,8 +2692,9 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
             "set. Is your padding reasonable?", .{});
     }
 
-    // Mail the IO thread
-    self.queueIo(.{ .resize = self.size }, .unlocked);
+    if (io_mode == .queue) {
+        self.queueIo(.{ .resize = self.size }, .unlocked);
+    }
 }
 
 /// Recalculate the balanced padding if needed.

@@ -200,6 +200,7 @@ function Get-HarnessSummary {
 Invoke-Harness -ScriptName 'interactive-win11.ps1'
 Invoke-SuiteBuildIfNeeded
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-configured-size.ps1' -TimeoutSeconds 15
 Invoke-Harness -ScriptName 'interactive-win11-boo-performance.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-boo-multitab.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20

@@ -640,6 +640,38 @@ pub fn resize(
     self.renderer_wakeup.notify() catch {};
 }
 
+/// Resize terminal/backend state before the IO thread starts.
+///
+/// This lets an apprt apply startup window sizing before the exec backend opens
+/// its PTY. Unlike `resize`, this has no thread data yet and therefore cannot
+/// emit in-band size reports.
+pub fn resizeBeforeThreadStart(
+    self: *Termio,
+    size: renderer.Size,
+) !void {
+    self.size = size;
+    const grid_size = size.grid();
+
+    try self.backend.resize(grid_size, size.terminal());
+
+    {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+
+        try self.terminal.resize(
+            self.alloc,
+            grid_size.columns,
+            grid_size.rows,
+        );
+
+        self.terminal.width_px = grid_size.columns * self.size.cell.width;
+        self.terminal.height_px = grid_size.rows * self.size.cell.height;
+        self.terminal.modes.set(.synchronized_output, false);
+    }
+
+    _ = self.renderer_mailbox.push(.{ .resize = size }, .{ .forever = {} });
+}
+
 /// Make a size report.
 pub fn sizeReport(self: *Termio, td: *ThreadData, style: termio.Message.SizeReport) !void {
     self.renderer_state.mutex.lock();
