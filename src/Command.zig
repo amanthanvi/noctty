@@ -391,6 +391,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
             log.warn("windows job object attach failed; continuing without limits err={}", .{last_error});
             _ = windows.CloseHandle(handle);
             job_handle = null;
+
+            var exit_code: windows.DWORD = undefined;
+            if (windows.kernel32.GetExitCodeProcess(process_information.hProcess, &exit_code) == 0) {
+                return windows.unexpectedError(windows.kernel32.GetLastError());
+            }
+            if (exit_code != windows.exp.STILL_ACTIVE) {
+                return error.WindowsJobObjectAttachExitedChild;
+            }
         }
 
         if (windows.exp.kernel32.ResumeThread(process_information.hThread) == std.math.maxInt(windows.DWORD)) {
@@ -1078,6 +1086,7 @@ test "Command: windows job object plan attaches to local child process" {
         .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "exit", "0" },
         .windows_job_object_plan = .{
             .mode = .always,
+            .attach_policy = .hard_fail,
             .active_process_limit = 4,
         },
         .os_pre_exec = null,

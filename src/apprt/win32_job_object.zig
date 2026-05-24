@@ -168,8 +168,7 @@ pub fn configPlan(config: *const configpkg.Config) ConfigPlanError!Plan {
 
 fn isWslExecutable(path: []const u8) bool {
     const base = basename(path);
-    return std.ascii.eqlIgnoreCase(base, "wsl.exe") or
-        std.ascii.eqlIgnoreCase(base, "wsl");
+    return std.ascii.eqlIgnoreCase(base, "wsl.exe");
 }
 
 fn basename(path: []const u8) []const u8 {
@@ -286,6 +285,7 @@ test "win32 job object attach target skips WSL launches" {
     const plan: Plan = .{ .mode = .always };
 
     try std.testing.expectEqual(AttachTarget.attach, attachTarget(plan, "pwsh.exe"));
+    try std.testing.expectEqual(AttachTarget.attach, attachTarget(plan, "wsl"));
     try std.testing.expectEqual(AttachTarget.attach, attachTarget(plan, "C:\\Windows\\System32\\cmd.exe"));
     try std.testing.expectEqual(AttachTarget.unsupported_wsl, attachTarget(plan, "wsl.exe"));
     try std.testing.expectEqual(

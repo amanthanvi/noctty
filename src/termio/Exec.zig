@@ -32,6 +32,7 @@ const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_exec);
 const flatpak_support = false;
+const WindowsJobObjectPlan = if (builtin.os.tag == .windows) apprt.win32_job_object.Plan else void;
 const darwin = if (builtin.os.tag.isDarwin()) struct {
     fn setThreadName(name: [*:0]const u8) void {
         internal_os.macos.pthread_setname_np(name);
@@ -197,11 +198,17 @@ pub fn threadEnter(
     );
     read_thread.setName("io-reader") catch {};
 
+    const command: ?*Command = if (self.subprocess.process) |*subprocess| switch (subprocess.*) {
+        .fork_exec => |*cmd| cmd,
+        .flatpak => null,
+    } else null;
+
     // Setup our threadata backend state to be our own
     td.backend = .{ .exec = .{
         .start = process_start,
         .write_stream = stream,
         .process = process,
+        .command = command,
         .read_thread = read_thread,
         .read_thread_pipe = pipe[1],
         .read_thread_fd = pty_fds.read,
@@ -325,6 +332,7 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
     assert(td.backend == .exec);
     const execdata = &td.backend.exec;
     execdata.exited = true;
+    if (execdata.command) |cmd| cmd.closeWindowsJobObject();
 
     // Determine how long the process was running for.
     const runtime_ms: ?u64 = runtime: {
@@ -557,6 +565,9 @@ pub const ThreadData = struct {
     /// The process watcher
     process: ?xev.Process,
 
+    /// Command backing the process watcher, if this is a local child.
+    command: ?*Command = null,
+
     /// This is the pool of available (unused) write requests. If you grab
     /// one from the pool, you must put it back when you're done!
     write_req_pool: SegmentedPool(xev.WriteRequest, WRITE_REQ_PREALLOC) = .{},
@@ -623,7 +634,7 @@ pub const Config = struct {
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
-    windows_job_object_plan: apprt.win32_job_object.Plan = .{ .mode = .never },
+    windows_job_object_plan: WindowsJobObjectPlan = if (builtin.os.tag == .windows) .{ .mode = .never } else {},
 };
 
 const Subprocess = struct {
@@ -644,7 +655,7 @@ const Subprocess = struct {
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
-    windows_job_object_plan: apprt.win32_job_object.Plan,
+    windows_job_object_plan: WindowsJobObjectPlan,
 
     /// Union that represents the running process type.
     const Process = union(enum) {
