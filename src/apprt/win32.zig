@@ -19143,7 +19143,7 @@ fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
 fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
     return switch (err) {
         .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another winghostty instance",
-        .INVALID_WINDOW_HANDLE => "invalid registration window",
+        .ACCESS_DENIED => "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
         .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
         else => "unknown Win32 RegisterHotKey failure",
     };
@@ -27225,7 +27225,7 @@ test "win32 hotkeyRegistrationFailureReason names conflicts" {
         hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
     );
     try std.testing.expectEqualStrings(
-        "unknown Win32 RegisterHotKey failure",
+        "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
         hotkeyRegistrationFailureReason(.ACCESS_DENIED),
     );
 }
