@@ -38,13 +38,13 @@ jobs:
       - name: Validate release configuration
         shell: pwsh
         run: |
-          $args = @(
+          $scriptArgs = @(
             "-ExecutionPolicy", "Bypass",
             "-File", "scripts/release-preflight.ps1",
             "-Version", "${{ inputs.version }}",
             "-RequireSigning"
           )
           if ("${{ inputs.require_package_managers }}" -eq "true") {
-            $args += "-RequirePackageManagers"
+            $scriptArgs += "-RequirePackageManagers"
           }
-          & powershell @args
+          & powershell @scriptArgs
