@@ -16,6 +16,8 @@
   ·
   <a href="docs/getting-started.md">Getting started</a>
   ·
+  <a href="docs/windows.md">Windows</a>
+  ·
   <a href="docs/status.md">Status</a>
   ·
   <a href="docs/windows-capability-matrix.md">Windows capability matrix</a>
@@ -126,6 +128,10 @@ releases.
 
 Full walk-through — installer, portable, uninstall —
 **[docs/getting-started.md](docs/getting-started.md)**.
+
+Windows-specific paths, shell behavior, app identity, notifications, quick
+terminal, windows/tabs/splits, automation, and troubleshooting live in
+**[docs/windows.md](docs/windows.md)**.
 
 ## First run
 
