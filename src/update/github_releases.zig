@@ -727,9 +727,13 @@ fn parseWindowsInstallCandidate(
             installer_url = browser_download_url;
             continue;
         }
-        if (std.mem.eql(u8, name, expected_checksums_name) or
-            (std.mem.eql(u8, windowsInstallerArch(), "x64") and
-                std.mem.eql(u8, name, windows_checksums_asset_name_legacy)))
+        if (std.mem.eql(u8, name, expected_checksums_name)) {
+            checksums_url = browser_download_url;
+            continue;
+        }
+        if (checksums_url == null and
+            std.mem.eql(u8, windowsInstallerArch(), "x64") and
+            std.mem.eql(u8, name, windows_checksums_asset_name_legacy))
         {
             checksums_url = browser_download_url;
             continue;
@@ -1068,6 +1072,50 @@ test "release parser selects windows install candidate when checksum metadata is
     const checksum_url = try std.fmt.allocPrint(alloc, "https://example.invalid/{s}", .{checksum_name});
     defer alloc.free(checksum_url);
     try std.testing.expectEqualStrings(checksum_url, windows_install.checksums_url);
+}
+
+test "release parser prefers architecture checksum metadata over legacy x64 metadata" {
+    const alloc = std.testing.allocator;
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-1.3.100-windows-{s}-setup.exe",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(installer_name);
+    const checksum_name = windowsChecksumsAssetName();
+    const body = try std.fmt.allocPrint(
+        alloc,
+        \\{{
+        \\  "tag_name": "v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "assets": [
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/arch-checksums.txt"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/legacy-checksums.txt"
+        \\    }}
+        \\  ]
+        \\}}
+    ,
+        .{ installer_name, installer_name, checksum_name, windows_checksums_asset_name_legacy },
+    );
+    defer alloc.free(body);
+
+    var release = try parseLatestStableReleaseResponse(alloc, body);
+    defer release.deinit(alloc);
+
+    try std.testing.expect(release.windows_install != null);
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/arch-checksums.txt",
+        release.windows_install.?.checksums_url,
+    );
 }
 
 test "release parser accepts long semver tags for windows install candidate" {

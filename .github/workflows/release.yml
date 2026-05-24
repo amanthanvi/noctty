@@ -452,12 +452,15 @@ jobs:
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/msixbundle" -OutFile $bundlePath -ErrorAction Stop
           Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
 
-          $installerUrls = @($metadata.winget.installerUrlArgs)
+          $installerUrls = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
           if ($installerUrls.Count -eq 0) {
-            $installerUrls = @($metadata.winget.installerUrls)
+            $installerUrls = @($metadata.winget.installerUrls | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+          }
+          if ($installerUrls.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$metadata.winget.installerUrl)) {
+            $installerUrls = @([string]$metadata.winget.installerUrl)
           }
           if ($installerUrls.Count -eq 0) {
-            $installerUrls = @($metadata.winget.installerUrl)
+            throw "No WinGet installer URLs were found in release metadata."
           }
           $installerUrlArgs = @($installerUrls | ForEach-Object { [string]$_ })
 

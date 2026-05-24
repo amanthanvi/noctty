@@ -106,9 +106,12 @@ Download directly from **[Releases](https://github.com/amanthanvi/winghostty/rel
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
-| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run without installing. |
-| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Verifying downloads. |
+| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
+| [`winghostty-1.3.111-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-arm64-setup.exe) | You want a normal native ARM64 install with a Start menu entry. |
+| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run x64 without installing. |
+| [`winghostty-1.3.111-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-arm64-portable.zip) | You want to run native ARM64 without installing. |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
 
 WinGet users can install the official manifest:
 
@@ -208,9 +211,10 @@ The updater checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
 at most once every 24 hours. `auto-update = check` opens the release page if a
 newer stable version exists and never replaces binaries silently.
 `auto-update = download` downloads only eligible stable Windows installer
-releases, verifies `SHA256SUMS.txt` plus Authenticode, and stages the installer
-locally. Unsigned installers fail that verification and are not staged.
-Applying the staged installer is user-initiated and may prompt for UAC.
+releases, verifies the architecture-specific SHA256SUMS file plus
+Authenticode, and stages the installer locally. Unsigned installers fail that
+verification and are not staged. Applying the staged installer is
+user-initiated and may prompt for UAC.
 
 ## Crash reports
 
