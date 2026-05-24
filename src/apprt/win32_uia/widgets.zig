@@ -564,9 +564,15 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
         out.* = null;
-        const text = self.visibleText() catch return com.E_OUTOFMEMORY;
+        const terminal_snapshot = self.terminalSnapshot() catch return com.E_OUTOFMEMORY;
+        defer self.alloc.free(terminal_snapshot.visible_text);
 
-        return self.createRangeFromText(text, .{ .start = 0, .end = text.len }, out);
+        const document_text = terminal_snapshot.document_text;
+        var document_text_owned = true;
+        defer if (document_text_owned) self.alloc.free(document_text);
+
+        document_text_owned = false;
+        return self.createRangeFromText(document_text, terminal_snapshot.visible_range, out);
     }
 
     fn createDocumentRange(
@@ -1309,7 +1315,7 @@ test "TerminalProvider visible ranges returns a SAFEARRAY" {
 
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(ranges != null);
-    try std.testing.expectEqual(@as(u32, 0), state_data.value_calls);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
     try std.testing.expectEqual(@as(u32, 1), state_data.visible_value_calls);
 }
 
