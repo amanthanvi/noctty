@@ -62,7 +62,7 @@ PowerShell integration emits OSC 7 working-directory updates and OSC 133 prompt
 markers. `cmd.exe` is a plain fallback shell today and does not provide
 automatic prompt, cwd, or command-finish integration.
 
-WSL is supported as an explicit launched shell:
+WSL is supported as an explicitly launched shell:
 
 ```ini
 command = wsl.exe

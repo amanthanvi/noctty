@@ -125,7 +125,7 @@ Full walk-through — installer, portable, uninstall —
 **[docs/getting-started.md](docs/getting-started.md)**.
 
 Windows-specific paths, shell behavior, app identity, notifications, quick
-terminal notes, and troubleshooting live in
+terminal, windows/tabs/splits, automation, and troubleshooting live in
 **[docs/windows.md](docs/windows.md)**.
 
 ## First run
