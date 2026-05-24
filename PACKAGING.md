@@ -9,6 +9,7 @@ The public packaging targets are:
 - `winghostty-<version>-windows-arm64-portable.zip`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
+- `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
 
 Primary distribution URL:
 

@@ -112,6 +112,7 @@ Download directly from **[Releases](https://github.com/amanthanvi/winghostty/rel
 | [`winghostty-1.3.111-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-arm64-portable.zip) | You want to run native ARM64 without installing. |
 | [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
 | [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
+| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Legacy x64 auto-update compatibility alias. |
 
 WinGet users can install the official manifest:
 

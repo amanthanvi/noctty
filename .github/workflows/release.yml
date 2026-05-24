@@ -274,10 +274,13 @@ jobs:
           $upstreamBaseVersion = "${{ steps.meta.outputs.upstream_base_version }}"
           $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
           $artifactDirArm64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-arm64"
+          $legacyChecksumsPath = Join-Path $artifactDirX64 "SHA256SUMS.txt"
+          Copy-Item -LiteralPath (Join-Path $artifactDirX64 "SHA256SUMS-windows-x64.txt") -Destination $legacyChecksumsPath -Force
           $assets = @(
             (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-setup.exe"),
             (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-portable.zip"),
             (Join-Path $artifactDirX64 "SHA256SUMS-windows-x64.txt"),
+            $legacyChecksumsPath,
             (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-setup.exe"),
             (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-portable.zip"),
             (Join-Path $artifactDirArm64 "SHA256SUMS-windows-arm64.txt"),
