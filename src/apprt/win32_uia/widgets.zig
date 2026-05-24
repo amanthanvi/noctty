@@ -608,9 +608,11 @@ pub const TerminalProvider = struct {
     }
 
     fn byteOffsetForScreenPoint(self: *TerminalProvider, text: []const u8, point: com.UiaPoint) usize {
+        const x = safeI32FromUiaCoord(point.x) orelse return 0;
+        const y = safeI32FromUiaCoord(point.y) orelse return 0;
         var client_point = POINT{
-            .x = @intFromFloat(point.x),
-            .y = @intFromFloat(point.y),
+            .x = x,
+            .y = y,
         };
         var client_rect: RECT = undefined;
         if (ScreenToClient(self.hwnd, &client_point) == 0 or
@@ -1059,6 +1061,13 @@ fn utf8BoundaryAtOrBefore(text: []const u8, offset: usize) usize {
     return index;
 }
 
+fn safeI32FromUiaCoord(coord: f64) ?i32 {
+    if (!std.math.isFinite(coord)) return null;
+    const min_i32_float: f64 = @floatFromInt(std.math.minInt(i32));
+    const max_i32_float: f64 = @floatFromInt(std.math.maxInt(i32));
+    return @intFromFloat(std.math.clamp(coord, min_i32_float, max_i32_float));
+}
+
 test "PaletteListProvider refcount balances" {
     var counter: u32 = 0;
     const name_fn = struct {
@@ -1340,6 +1349,19 @@ test "TerminalProvider point mapping uses client coordinates and UTF-8 boundarie
     try std.testing.expectEqual(
         @as(usize, text.len),
         byteOffsetForClientPoint(text, rect, .{ .x = 100, .y = 19 }),
+    );
+}
+
+test "safeI32FromUiaCoord rejects non-finite values and clamps range" {
+    try std.testing.expectEqual(@as(?i32, null), safeI32FromUiaCoord(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(?i32, null), safeI32FromUiaCoord(std.math.inf(f64)));
+    try std.testing.expectEqual(
+        @as(?i32, std.math.maxInt(i32)),
+        safeI32FromUiaCoord(@as(f64, @floatFromInt(std.math.maxInt(i32))) + 1000.0),
+    );
+    try std.testing.expectEqual(
+        @as(?i32, std.math.minInt(i32)),
+        safeI32FromUiaCoord(@as(f64, @floatFromInt(std.math.minInt(i32))) - 1000.0),
     );
 }
 
