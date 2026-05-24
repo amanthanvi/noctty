@@ -1,15 +1,14 @@
 param(
     [string] $Version = '0.0.1',
-    [ValidateSet('x64', 'arm64')]
-    [string] $Architecture = $(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }),
+    [string] $Architecture = $null,
     [switch] $SkipPackage
 )
 
 $ErrorActionPreference = 'Stop'
 
-$Architecture = $Architecture.ToLowerInvariant()
-
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts\windows-architecture.ps1')
+$Architecture = (Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })).Name
 $packageScript = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $detachedHarness = Join-Path $repoRoot 'test\windows\cli-detached-action.ps1'

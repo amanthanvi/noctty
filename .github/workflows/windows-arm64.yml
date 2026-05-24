@@ -53,16 +53,13 @@ jobs:
           zig build test -Dtest-filter=keybind -Dtarget=aarch64-windows-msvc -Dcpu=baseline
           zig build test -Dtest-filter=release -Dtarget=aarch64-windows-msvc -Dcpu=baseline
 
-      - name: Build ARM64 binaries
+      - name: Build and package ARM64 binaries
         shell: pwsh
         timeout-minutes: 20
         run: >
-          zig build
-          -Demit-exe=true
-          -Demit-lib-vt=true
-          -Dtarget=aarch64-windows-msvc
-          -Dcpu=baseline
-          "-Dversion-string=$env:WINGHOSTTY_CI_VERSION"
+          ./scripts/build-package-windows.ps1
+          -Version $env:WINGHOSTTY_CI_VERSION
+          -Architecture arm64
 
       - name: Run ARM64 CLI smoke
         shell: pwsh
@@ -72,14 +69,6 @@ jobs:
           if ($versionText -notmatch "Build Config") {
             throw "winghostty.com +version did not print the expected version output."
           }
-
-      - name: Package ARM64 portable artifact
-        shell: pwsh
-        run: >
-          ./scripts/package-windows.ps1
-          -Version $env:WINGHOSTTY_CI_VERSION
-          -Architecture arm64
-          -SkipBuild
 
       - name: Run packaged ARM64 CLI smoke
         shell: pwsh

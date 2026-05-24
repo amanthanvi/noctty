@@ -7,7 +7,6 @@ param(
 
     [string]$Repo = "amanthanvi/winghostty",
 
-    [ValidateSet("x64", "arm64")]
     [string[]]$Architectures = @("x64"),
 
     [string]$ArtifactRoot,
@@ -24,8 +23,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-architecture.ps1")
 
-$Architectures = @($Architectures | ForEach-Object { ([string]$_).ToLowerInvariant() })
+$Architectures = @($Architectures | ForEach-Object { (Get-WindowsPackageArchitecture -Architecture $_).Name })
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $tagValue = if ($Tag) { $Tag } else { "v$Version" }
@@ -126,9 +126,9 @@ foreach ($arch in $Architectures) {
         [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-$arch"))
     }
 
-    $checksumsPath = Join-Path $artifactRootPath "SHA256SUMS-windows-$arch.txt"
-    $setupName = "winghostty-$Version-windows-$arch-setup.exe"
-    $portableName = "winghostty-$Version-windows-$arch-portable.zip"
+    $checksumsPath = Join-Path $artifactRootPath (New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind checksums)
+    $setupName = New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind setup
+    $portableName = New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind portable
     $setupPath = Join-Path $artifactRootPath $setupName
     $portablePath = Join-Path $artifactRootPath $portableName
 
@@ -186,10 +186,7 @@ $scoopManifest = [ordered]@{
     bin          = "winghostty.exe"
 }
 foreach ($arch in $Architectures) {
-    $scoopArch = switch ($arch) {
-        "x64" { "64bit" }
-        "arm64" { "arm64" }
-    }
+    $scoopArch = (Get-WindowsPackageArchitecture -Architecture $arch).ScoopArchitecture
     $scoopManifest.architecture[$scoopArch] = [ordered]@{
         url  = $artifacts[$arch].portableUrl
         hash = $artifacts[$arch].portableSha256

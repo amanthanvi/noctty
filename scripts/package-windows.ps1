@@ -3,8 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
-    [ValidateSet("x64", "arm64")]
-    [string]$Architecture = $(if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }),
+    [string]$Architecture = $null,
 
     [string]$OutputRoot = "dist/artifacts",
 
@@ -17,8 +16,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot "windows-architecture.ps1")
 
-$Architecture = $Architecture.ToLowerInvariant()
+$archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
+$Architecture = $archInfo.Name
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $outputRootPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
@@ -34,15 +35,12 @@ $localAppData = if ($env:LOCALAPPDATA) {
 } else {
     Join-Path $userHome "AppData\Local"
 }
-$zigTarget = switch ($Architecture) {
-    "x64" { "x86_64-windows-msvc" }
-    "arm64" { "aarch64-windows-msvc" }
-}
+$zigTarget = $archInfo.ZigTarget
 $stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-$Architecture"
 $portableRoot = Join-Path $stageBase "winghostty"
-$zipPath = Join-Path $stageBase "winghostty-$Version-windows-$Architecture-portable.zip"
-$installerPath = Join-Path $stageBase "winghostty-$Version-windows-$Architecture-setup.exe"
-$checksumsPath = Join-Path $stageBase "SHA256SUMS-windows-$Architecture.txt"
+$zipPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind portable)
+$installerPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind setup)
+$checksumsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind checksums)
 $releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
@@ -176,13 +174,7 @@ function Assert-PeMachine {
         [string]$ExpectedArchitecture
     )
 
-    $expectedMachine = switch ($ExpectedArchitecture) {
-        "x64" { 0x8664 }
-        "arm64" { 0xAA64 }
-        default {
-            throw "Unknown architecture '$ExpectedArchitecture'. Supported architectures are: x64, arm64."
-        }
-    }
+    $expectedMachine = (Get-WindowsPackageArchitecture -Architecture $ExpectedArchitecture).PeMachine
     $actualMachine = Get-PeMachine -PathToCheck $PathToCheck
     if ($actualMachine -ne $expectedMachine) {
         throw ("Expected {0} to be {1} PE machine 0x{2:X4}, got 0x{3:X4}." -f $PathToCheck, $ExpectedArchitecture, $expectedMachine, $actualMachine)

@@ -121,61 +121,34 @@ jobs:
           zig build test -Dtest-filter=scroll
           zig build test -Dtest-filter=keybind
 
-      - name: Build x64 release binaries
+      - name: Build and package x64 release artifacts
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: >
-          zig build
-          -Demit-exe=true
-          -Demit-lib-vt=true
-          -Doptimize=ReleaseFast
-          -Dtarget=x86_64-windows-msvc
-          -Dcpu=baseline
-          "-Dversion-string=${{ steps.meta.outputs.version }}"
-
-      - name: Verify Windows CPU baseline
-        shell: pwsh
-        run: ./scripts/check-windows-x64-baseline.ps1 -Path zig-out/bin/winghostty.exe
-
-      - name: Package x64 Windows artifacts
-        shell: pwsh
-        timeout-minutes: 15
-        run: >
-          ./scripts/package-windows.ps1
+          ./scripts/build-package-windows.ps1
           -Version ${{ steps.meta.outputs.version }}
           -Architecture x64
-          -SkipBuild
+          -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
 
-      - name: Build ARM64 release binaries
+      - name: Build and package ARM64 release artifacts
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 35
         env:
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
         run: >
-          zig build
-          -Demit-exe=true
-          -Demit-lib-vt=true
-          -Doptimize=ReleaseFast
-          -Dtarget=aarch64-windows-msvc
-          -Dcpu=baseline
-          "-Dversion-string=${{ steps.meta.outputs.version }}"
-
-      - name: Package ARM64 Windows artifacts
-        shell: pwsh
-        timeout-minutes: 15
-        run: >
-          ./scripts/package-windows.ps1
+          ./scripts/build-package-windows.ps1
           -Version ${{ steps.meta.outputs.version }}
           -Architecture arm64
-          -SkipBuild
+          -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
 
       - name: Verify signed release artifacts
         shell: pwsh
         run: |
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
           $version = "${{ steps.meta.outputs.version }}"
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
           function Test-SelfSignedTrustStatus {
@@ -218,11 +191,11 @@ jobs:
             throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
           }
 
-          foreach ($arch in @("x64", "arm64")) {
+          foreach ($arch in (Get-WindowsPackageArchitectures)) {
             $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
-            $setup = Join-Path $artifactDir "winghostty-$version-windows-$arch-setup.exe"
-            $zip = Join-Path $artifactDir "winghostty-$version-windows-$arch-portable.zip"
-            $checksums = Join-Path $artifactDir "SHA256SUMS-windows-$arch.txt"
+            $setup = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup)
+            $zip = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind portable)
+            $checksums = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind checksums)
             foreach ($path in @($setup, $zip, $checksums)) {
               if (-not (Test-Path -LiteralPath $path)) {
                 throw "Missing required release asset: $path"
@@ -267,23 +240,31 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
           $tag = "${{ steps.meta.outputs.tag }}"
           $version = "${{ steps.meta.outputs.version }}"
           $title = "${{ steps.meta.outputs.title }}"
           $versionLine = "${{ steps.meta.outputs.version_line }}"
           $upstreamBaseVersion = "${{ steps.meta.outputs.upstream_base_version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
-          $artifactDirArm64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-arm64"
-          $legacyChecksumsPath = Join-Path $artifactDirX64 "SHA256SUMS.txt"
-          Copy-Item -LiteralPath (Join-Path $artifactDirX64 "SHA256SUMS-windows-x64.txt") -Destination $legacyChecksumsPath -Force
-          $assets = @(
-            (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-setup.exe"),
-            (Join-Path $artifactDirX64 "winghostty-$version-windows-x64-portable.zip"),
-            (Join-Path $artifactDirX64 "SHA256SUMS-windows-x64.txt"),
+          $architectures = Get-WindowsPackageArchitectures
+          $artifactDirs = @{}
+          foreach ($arch in $architectures) {
+            $artifactDirs[$arch] = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
+          }
+          $artifactDirX64 = $artifactDirs["x64"]
+          $legacyChecksumsPath = Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $version -Architecture x64 -Kind legacy-checksums)
+          Copy-Item -LiteralPath (Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $version -Architecture x64 -Kind checksums)) -Destination $legacyChecksumsPath -Force
+          $assets = @()
+          foreach ($arch in $architectures) {
+            $artifactDir = $artifactDirs[$arch]
+            $assets += @(
+              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup)),
+              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind portable)),
+              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind checksums))
+            )
+          }
+          $assets += @(
             $legacyChecksumsPath,
-            (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-setup.exe"),
-            (Join-Path $artifactDirArm64 "winghostty-$version-windows-arm64-portable.zip"),
-            (Join-Path $artifactDirArm64 "SHA256SUMS-windows-arm64.txt"),
             (Join-Path $artifactDirX64 "winghostty-icon.svg")
           )
           $notesPrefix = @"

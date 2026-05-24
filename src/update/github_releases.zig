@@ -12,6 +12,17 @@ pub const repo_name = "winghostty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
+const windows_asset_metadata = switch (builtin.cpu.arch) {
+    .aarch64 => .{
+        .arch = "arm64",
+        .checksums_asset_name = "SHA256SUMS-windows-arm64.txt",
+    },
+    .x86_64 => .{
+        .arch = "x64",
+        .checksums_asset_name = "SHA256SUMS-windows-x64.txt",
+    },
+    else => @compileError("unsupported Windows architecture for installer assets"),
+};
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
 
@@ -758,19 +769,11 @@ fn parseWindowsInstallCandidate(
 }
 
 fn windowsInstallerArch() []const u8 {
-    return comptime switch (builtin.cpu.arch) {
-        .aarch64 => "arm64",
-        .x86_64 => "x64",
-        else => @compileError("unsupported Windows architecture for installer assets"),
-    };
+    return windows_asset_metadata.arch;
 }
 
 fn windowsChecksumsAssetName() []const u8 {
-    return comptime switch (builtin.cpu.arch) {
-        .aarch64 => "SHA256SUMS-windows-arm64.txt",
-        .x86_64 => "SHA256SUMS-windows-x64.txt",
-        else => @compileError("unsupported Windows architecture for installer assets"),
-    };
+    return windows_asset_metadata.checksums_asset_name;
 }
 
 fn canonicalVersionText(alloc: Allocator, raw_tag: []const u8) ![]u8 {
