@@ -723,6 +723,10 @@ pub fn init(
             .term = config.term,
             .rt_pre_exec_info = .init(config),
             .rt_post_fork_info = .init(config),
+            .windows_job_object_plan = apprt.win32_job_object.configPlan(config) catch |err| {
+                log.warn("invalid windows job object config err={}", .{err});
+                return err;
+            },
         });
         errdefer io_exec.deinit();
 

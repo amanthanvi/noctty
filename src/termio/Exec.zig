@@ -623,6 +623,7 @@ pub const Config = struct {
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
+    windows_job_object_plan: apprt.win32_job_object.Plan = .{ .mode = .never },
 };
 
 const Subprocess = struct {
@@ -643,6 +644,7 @@ const Subprocess = struct {
 
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
+    windows_job_object_plan: apprt.win32_job_object.Plan,
 
     /// Union that represents the running process type.
     const Process = union(enum) {
@@ -936,6 +938,7 @@ const Subprocess = struct {
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
+            .windows_job_object_plan = cfg.windows_job_object_plan,
 
             // Should be initialized with initTerminal call.
             .grid_size = .{},
@@ -1105,6 +1108,7 @@ const Subprocess = struct {
             .rt_pre_exec_info = self.rt_pre_exec_info,
             .rt_post_fork = if (comptime @hasDecl(apprt.runtime, "post_fork")) apprt.runtime.post_fork.postFork else null,
             .rt_post_fork_info = self.rt_post_fork_info,
+            .windows_job_object_plan = self.windows_job_object_plan,
             .data = self,
         };
 
@@ -1153,6 +1157,10 @@ const Subprocess = struct {
     /// Called to notify that we exited externally so we can unset our
     /// running state.
     pub fn externalExit(self: *Subprocess) void {
+        switch (self.process orelse return) {
+            .fork_exec => |*cmd| cmd.closeWindowsJobObject(),
+            .flatpak => {},
+        }
         self.process = null;
     }
 
@@ -1207,6 +1215,7 @@ const Subprocess = struct {
     /// process. This also waits for the command to exit and will return the
     /// exit code.
     fn killCommand(command: *Command) !void {
+        defer command.closeWindowsJobObject();
         if (command.pid) |pid| {
             switch (builtin.os.tag) {
                 .windows => {
