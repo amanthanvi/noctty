@@ -11343,7 +11343,7 @@ const Host = struct {
             try append.fmt(&parts, alloc, "Panes {d}", .{pane_count});
         }
         if (surface.readonly) try append.raw(&parts, alloc, "readonly");
-        if (surface.secure_input) try append.raw(&parts, alloc, "secure input");
+        if (surface.secure_input) try append.raw(&parts, alloc, "sensitive input");
         if (surface.inspector_visible) {
             if (tab.tree.zoomed != null and pane_count > 1) {
                 try append.fmt(&parts, alloc, "Inspect {d} zoom", .{pane_count});
