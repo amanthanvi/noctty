@@ -75,6 +75,7 @@ pub const exp = struct {
     pub const HPCON = windows.LPVOID;
 
     pub const CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    pub const CREATE_SUSPENDED = 0x00000004;
     pub const EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     pub const LPPROC_THREAD_ATTRIBUTE_LIST = ?*anyopaque;
     pub const FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000;
@@ -126,6 +127,9 @@ pub const exp = struct {
             lpTotalBytesAvail: ?*windows.DWORD,
             lpBytesLeftThisMessage: ?*windows.DWORD,
         ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn ResumeThread(
+            hThread: windows.HANDLE,
+        ) callconv(.winapi) windows.DWORD;
         // Duplicated here because lpCommandLine is not marked optional in zig std
         pub extern "kernel32" fn CreateProcessW(
             lpApplicationName: ?windows.LPWSTR,

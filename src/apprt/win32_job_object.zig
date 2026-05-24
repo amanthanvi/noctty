@@ -1,9 +1,10 @@
 //! Minimal Windows Job Object ABI and config planning.
 //!
-//! This first slice is intentionally inert: it only exposes the Win32
-//! declarations and a pure mapping from existing compatibility config to a
-//! future Job Object plan. No live process spawning or enforcement is wired
-//! here yet.
+//! This layer exposes the Win32 declarations plus a small planning surface used
+//! by the Windows process launcher. Enforcement remains opt-in through the
+//! retained linux-cgroup compatibility settings, and WSL launches are excluded
+//! because limiting `wsl.exe` does not safely or predictably limit the Linux
+//! process tree.
 
 const std = @import("std");
 const windows = std.os.windows;
@@ -126,6 +127,18 @@ pub const Plan = struct {
     }
 };
 
+pub const AttachTarget = enum {
+    disabled,
+    attach,
+    unsupported_wsl,
+};
+
+pub fn attachTarget(plan: Plan, argv0: []const u8) AttachTarget {
+    if (!plan.wantsJobObject()) return .disabled;
+    if (isWslExecutable(argv0)) return .unsupported_wsl;
+    return .attach;
+}
+
 pub fn configPlan(config: *const configpkg.Config) ConfigPlanError!Plan {
     const mode = switch (config.@"linux-cgroup") {
         .never => Mode.never,
@@ -151,6 +164,22 @@ pub fn configPlan(config: *const configpkg.Config) ConfigPlanError!Plan {
         else
             null,
     };
+}
+
+fn isWslExecutable(path: []const u8) bool {
+    const base = basename(path);
+    return std.ascii.eqlIgnoreCase(base, "wsl.exe") or
+        std.ascii.eqlIgnoreCase(base, "wsl");
+}
+
+fn basename(path: []const u8) []const u8 {
+    var i: usize = path.len;
+    while (i > 0) : (i -= 1) {
+        const c = path[i - 1];
+        if (c == '\\' or c == '/') return path[i..];
+    }
+
+    return path;
 }
 
 test "win32 job object ABI declarations match expected Win32 values" {
@@ -251,6 +280,20 @@ test "win32 job object single-instance mode can request hard-fail attachment wit
     try std.testing.expect(plan.wantsJobObject());
     try std.testing.expect(!plan.hasLimits());
     try std.testing.expect(plan.extendedLimitInformation() == null);
+}
+
+test "win32 job object attach target skips WSL launches" {
+    const plan: Plan = .{ .mode = .always };
+
+    try std.testing.expectEqual(AttachTarget.attach, attachTarget(plan, "pwsh.exe"));
+    try std.testing.expectEqual(AttachTarget.attach, attachTarget(plan, "C:\\Windows\\System32\\cmd.exe"));
+    try std.testing.expectEqual(AttachTarget.unsupported_wsl, attachTarget(plan, "wsl"));
+    try std.testing.expectEqual(AttachTarget.unsupported_wsl, attachTarget(plan, "wsl.exe"));
+    try std.testing.expectEqual(
+        AttachTarget.unsupported_wsl,
+        attachTarget(plan, "C:\\Windows\\System32\\wsl.exe"),
+    );
+    try std.testing.expectEqual(AttachTarget.disabled, attachTarget(.{ .mode = .never }, "cmd.exe"));
 }
 
 test "win32 job object plan rejects process limits that exceed DWORD" {

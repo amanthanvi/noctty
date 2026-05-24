@@ -32,6 +32,7 @@ const Allocator = std.mem.Allocator;
 const File = std.fs.File;
 const EnvMap = std.process.EnvMap;
 const apprt = @import("apprt.zig");
+const log = std.log.scoped(.command);
 
 /// Function prototype for a function executed /in the child process/ after the
 /// fork, but before exec'ing the command. If the function returns a u8, the
@@ -107,6 +108,13 @@ data: ?*anyopaque = null,
 
 /// Process ID is set after start is called.
 pid: ?posix.pid_t = null,
+
+/// Optional Windows Job Object plan and live handle. Inert on non-Windows
+/// builds.
+windows_job_object_plan: if (builtin.os.tag == .windows) apprt.win32_job_object.Plan else void =
+    if (builtin.os.tag == .windows) .{ .mode = .never } else {},
+windows_job_object_handle: if (builtin.os.tag == .windows) ?windows.HANDLE else void =
+    if (builtin.os.tag == .windows) null else {},
 
 /// The various methods a process may exit.
 pub const Exit = if (builtin.os.tag == .windows) union(enum) {
@@ -345,8 +353,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         .lpAttributeList = attribute_list,
     };
 
+    var job_handle = try self.createWindowsJobObjectForLaunch();
+    errdefer {
+        if (job_handle) |handle| _ = windows.CloseHandle(handle);
+    }
+
     var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
     if (attribute_list != null) flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
+    if (job_handle != null) flags |= windows.exp.CREATE_SUSPENDED;
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
     if (windows.exp.kernel32.CreateProcessW(
@@ -361,8 +375,87 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
     ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    errdefer {
+        _ = windows.kernel32.TerminateProcess(process_information.hProcess, 1);
+        _ = windows.CloseHandle(process_information.hThread);
+        _ = windows.CloseHandle(process_information.hProcess);
+    }
+
+    if (job_handle) |handle| {
+        if (apprt.win32_job_object.AssignProcessToJobObject(handle, process_information.hProcess) == 0) {
+            const last_error = windows.kernel32.GetLastError();
+            if (self.windows_job_object_plan.attach_policy == .hard_fail) {
+                return windows.unexpectedError(last_error);
+            }
+
+            log.warn("windows job object attach failed; continuing without limits err={}", .{last_error});
+            _ = windows.CloseHandle(handle);
+            job_handle = null;
+
+            var exit_code: windows.DWORD = undefined;
+            if (windows.kernel32.GetExitCodeProcess(process_information.hProcess, &exit_code) == 0) {
+                return windows.unexpectedError(windows.kernel32.GetLastError());
+            }
+            if (exit_code != windows.exp.STILL_ACTIVE) {
+                return error.WindowsJobObjectAttachExitedChild;
+            }
+        }
+
+        if (windows.exp.kernel32.ResumeThread(process_information.hThread) == std.math.maxInt(windows.DWORD)) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+    }
+
+    _ = windows.CloseHandle(process_information.hThread);
 
     self.pid = process_information.hProcess;
+    self.windows_job_object_handle = job_handle;
+}
+
+fn createWindowsJobObjectForLaunch(self: *Command) !?windows.HANDLE {
+    const plan = self.windows_job_object_plan;
+    switch (apprt.win32_job_object.attachTarget(plan, self.path)) {
+        .disabled => return null,
+        .unsupported_wsl => {
+            if (plan.attach_policy == .hard_fail) return error.UnsupportedJobObjectTarget;
+            log.warn("windows job object limits are not applied to WSL launches path={s}", .{self.path});
+            return null;
+        },
+        .attach => {},
+    }
+
+    const handle = apprt.win32_job_object.CreateJobObjectW(null, null) orelse {
+        const last_error = windows.kernel32.GetLastError();
+        if (plan.attach_policy == .hard_fail) return windows.unexpectedError(last_error);
+        log.warn("windows job object creation failed; continuing without limits err={}", .{last_error});
+        return null;
+    };
+    errdefer _ = windows.CloseHandle(handle);
+
+    if (plan.extendedLimitInformation()) |limits| {
+        if (apprt.win32_job_object.SetInformationJobObject(
+            handle,
+            .extended_limit_information,
+            &limits,
+            @sizeOf(apprt.win32_job_object.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+        ) == 0) {
+            const last_error = windows.kernel32.GetLastError();
+            if (plan.attach_policy == .hard_fail) return windows.unexpectedError(last_error);
+            log.warn("windows job object limit setup failed; continuing without limits err={}", .{last_error});
+            _ = windows.CloseHandle(handle);
+            return null;
+        }
+    }
+
+    return handle;
+}
+
+pub fn closeWindowsJobObject(self: *Command) void {
+    if (comptime builtin.os.tag != .windows) return;
+    if (self.windows_job_object_handle) |handle| {
+        _ = windows.CloseHandle(handle);
+        self.windows_job_object_handle = null;
+    }
 }
 
 fn safeWindowsCurrentDirectory(
@@ -983,6 +1076,33 @@ test "Command: custom working directory" {
     } else {
         try testing.expectEqualStrings("/tmp\n", contents);
     }
+}
+
+test "Command: windows job object plan attaches to local child process" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "exit", "0" },
+        .windows_job_object_plan = .{
+            .mode = .always,
+            .attach_policy = .hard_fail,
+            .active_process_limit = 4,
+        },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+    defer cmd.closeWindowsJobObject();
+
+    try cmd.testingStart();
+    try testing.expect(cmd.pid != null);
+    try testing.expect(cmd.windows_job_object_handle != null);
+    const exit = try cmd.wait(true);
+    try testing.expect(exit == .Exited);
+    try testing.expectEqual(@as(u32, 0), @as(u32, exit.Exited));
 }
 
 // Test validate an execveZ failure correctly terminates when error.ExecFailedInChild is correctly handled
