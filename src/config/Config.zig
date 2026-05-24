@@ -1060,9 +1060,12 @@ palette: Palette = .{},
 ///     reasonable for a good looking blur. Higher blur intensities may
 ///     cause strange rendering and performance issues.
 ///
-/// In the Windows-only fork this toggles the host window's system backdrop
-/// blur when `background-opacity` is less than 1. The numeric blur intensity
-/// is currently treated as enabled/disabled rather than a tunable radius.
+/// In the Windows-only fork this toggles the host window's DWM system
+/// backdrop when `background-opacity` is less than 1 and the OS supports
+/// `DWMWA_SYSTEMBACKDROP_TYPE` (Windows 11 22H2 / build 22621 and newer).
+/// The numeric blur intensity is currently treated as enabled/disabled
+/// rather than a tunable radius. On older Windows builds this remains a
+/// renderer-only transparent background with no system backdrop.
 @"background-blur": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
@@ -3044,32 +3047,35 @@ keybind: Keybinds = .{},
 ///
 /// These keys continue to parse so existing configs remain loadable.
 ///
-/// In the Windows-only fork they are compatibility-only inputs to the inert
-/// Win32 Job Object planning layer. They do not attach processes to a job or
-/// enforce limits unless future runtime wiring explicitly opts in.
+/// In the Windows-only fork they are compatibility inputs to the Win32 Job
+/// Object planning layer. They are opt-in and apply only to Windows-local
+/// child processes; WSL launches are not attached because a Windows Job Object
+/// cannot safely enforce limits on the Linux process tree behind `wsl.exe`.
 ///
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// Selects whether the inert Win32 Job Object planning layer should synthesize
-/// a compatibility plan. `.never` preserves current Windows behavior.
+/// Selects whether the Win32 Job Object planning layer should synthesize a
+/// compatibility plan. `.never` preserves default Windows behavior.
 @"linux-cgroup": LinuxCgroup = .never,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// Compatibility-only input for inert Win32 Job Object planning. No live
-/// memory limit is enforced in the current Windows runtime.
+/// Compatibility input for Win32 Job Object planning. When `linux-cgroup` is
+/// enabled for a Windows-local launch, this sets `JOB_OBJECT_LIMIT_JOB_MEMORY`.
 @"linux-cgroup-memory-limit": ?u64 = null,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// Compatibility-only input for inert Win32 Job Object planning. No live
-/// process-count limit is enforced in the current Windows runtime.
+/// Compatibility input for Win32 Job Object planning. When `linux-cgroup` is
+/// enabled for a Windows-local launch, this sets
+/// `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`.
 @"linux-cgroup-processes-limit": ?u64 = null,
 
 /// Retained compatibility setting from Linux-specific runtime features.
 ///
-/// Compatibility-only input for inert Win32 Job Object planning. No current
-/// runtime attach path hard-fails based on this setting.
+/// Compatibility input for Win32 Job Object planning. When true, Job Object
+/// creation, limit setup, attachment failure, or unsupported WSL targets fail
+/// the launch instead of continuing without limits.
 @"linux-cgroup-hard-fail": bool = false,
 
 /// Retained compatibility settings from the removed GTK runtime.
@@ -3214,9 +3220,9 @@ term: []const u8 = "xterm-ghostty",
 ///  * `check` - Check for updates and notify the user if an update is
 ///    available, but do not automatically install the update.
 ///  * `download` - Check for updates, automatically download the update,
-///    notify the user, but do not automatically install the update.
-///    Windows stages only signed, checksum-matching installer releases and
-///    still requires the user to install manually.
+///    notify the user, but do not automatically apply the update. Windows
+///    stages only signed, checksum-matching installer releases and can launch
+///    the verified staged installer after a user click.
 @"auto-update": ?AutoUpdate = null,
 
 /// The release channel to use for auto-updates.

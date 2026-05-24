@@ -4,7 +4,21 @@ Step by step: download, install, launch, configure, and uninstall.
 
 ## 1. Download
 
-Go to [Releases](https://github.com/amanthanvi/winghostty/releases) and grab:
+Install with WinGet:
+
+```powershell
+winget install AmanThanvi.winghostty
+```
+
+Or install from the fork-owned Scoop bucket:
+
+```powershell
+scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
+scoop install winghostty/winghostty
+```
+
+You can also go to
+[Releases](https://github.com/amanthanvi/winghostty/releases) and grab:
 
 - **Installer:** `winghostty-<version>-windows-x64-setup.exe`
 - **Portable ZIP:** `winghostty-<version>-windows-x64-portable.zip`
@@ -19,20 +33,27 @@ Get-FileHash .\winghostty-<version>-windows-x64-setup.exe -Algorithm SHA256
 
 ## 2. Install
 
-### Option A — Installer
+### Option A — Package manager
+
+Use the WinGet or Scoop commands above. Both official package-manager tracks
+point at the same GitHub Release assets and checksums.
+
+### Option B — Installer
 
 1. Double-click `winghostty-<version>-windows-x64-setup.exe`.
-2. SmartScreen will warn *"Windows protected your PC"*. Click **More info** →
-   **Run anyway**. Releases are unsigned; this warning is expected until code
-   signing is added.
+2. Current release builds are Authenticode-signed. SmartScreen can still warn
+   on a new publisher reputation, but the installer signature should be present
+   and valid.
 3. Accept the MIT license and install.
 4. Launch **winghostty** from the Start menu.
 
-### Option B — Portable
+### Option C — Portable
 
 1. Extract the ZIP anywhere (for example, `C:\Tools\winghostty\`).
 2. Run `winghostty.exe`.
-3. SmartScreen may show the same warning.
+3. The Windows binaries inside the ZIP are Authenticode-signed. The ZIP
+   container itself is checksummed, not Authenticode-signed, and SmartScreen may
+   show the same warning.
 
 ## 3. First launch
 
@@ -128,8 +149,9 @@ replaces binaries silently. `auto-update = download` downloads only stable
 Windows installer releases that include `SHA256SUMS.txt`, verifies the
 installer SHA-256 against that manifest, requires a valid Windows Authenticode
 signature, and stages the installer under the local winghostty state directory.
-Installing the staged update is still manual. No telemetry or analytics are
-sent.
+For installer-managed installs, the update notice can launch the verified
+staged installer with an explicit user action. UAC may prompt. Portable ZIP
+auto-apply is not implemented yet. No telemetry or analytics are sent.
 
 ## 9. Crash reports
 
@@ -157,6 +179,10 @@ List windows, tabs, and panes:
 ```powershell
 winghostty +list-windows
 ```
+
+The JSON schema is `winghostty.windows.v2`. It exposes local window, tab, and
+pane IDs, focus/active state, and structural counts only; it does not expose
+terminal text, shell input, working directories, or file paths.
 
 Invoke a keybinding action on the focused surface:
 
@@ -191,6 +217,8 @@ slate.
 
 - [docs/status.md](status.md) — what works, what's experimental, known
   caveats
+- [docs/windows.md](windows.md) — Windows-specific behavior,
+  troubleshooting, paths, app identity, notifications, and shell notes
 - [docs/windows-capability-matrix.md](windows-capability-matrix.md) —
   Windows-specific behavior and docs truth
 - [HACKING.md](../HACKING.md) — build, test, runtime notes (for

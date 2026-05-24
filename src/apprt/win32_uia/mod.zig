@@ -7,8 +7,8 @@
 //!     buttons are still announced.
 //!
 //! Per-widget providers (tabs, command palette rows, settings fields)
-//! are added with the widgets they expose. Terminal scrollback is not
-//! exposed through `ITextProvider`.
+//! are added with the widgets they expose. Terminal text is exposed
+//! through a read-only `ITextProvider` / `ITextRangeProvider` slice.
 
 const std = @import("std");
 const com = @import("com.zig");
@@ -31,6 +31,8 @@ pub const HRESULT = com.HRESULT;
 pub const UiaRootObjectId = com.UiaRootObjectId;
 pub const IRawElementProviderSimple = com.IRawElementProviderSimple;
 pub const snapshotTerminalPlainText = text.snapshotTerminalPlainText;
+pub const snapshotTerminalVisiblePlainText = text.snapshotTerminalVisiblePlainText;
+pub const visibleRangeInDocument = text.visibleRangeInDocument;
 
 /// Handle `WM_GETOBJECT` for the main host HWND. Returns `null` if the
 /// caller should fall through to `DefWindowProcW`; otherwise returns

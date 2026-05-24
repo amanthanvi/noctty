@@ -132,6 +132,52 @@ function Copy-Tree {
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
 }
 
+function Get-PeMachine {
+    param([string]$PathToCheck)
+
+    $fullPath = (Resolve-Path -LiteralPath $PathToCheck).Path
+    $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Not a PE file: $fullPath"
+            }
+
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadUInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Missing PE signature: $fullPath"
+            }
+
+            return $reader.ReadUInt16()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeMachine {
+    param(
+        [string]$PathToCheck,
+        [string]$ExpectedArchitecture
+    )
+
+    $expectedMachine = switch ($ExpectedArchitecture) {
+        "x64" { 0x8664 }
+        "arm64" { 0xAA64 }
+    }
+    $actualMachine = Get-PeMachine -PathToCheck $PathToCheck
+    if ($actualMachine -ne $expectedMachine) {
+        throw ("Expected {0} to be {1} PE machine 0x{2:X4}, got 0x{3:X4}." -f $PathToCheck, $ExpectedArchitecture, $expectedMachine, $actualMachine)
+    }
+}
+
 function Find-SignTool {
     param([string]$PreferredPath)
 
@@ -190,6 +236,25 @@ function ConvertTo-Boolean {
             throw "Expected WINDOWS_CODESIGN_TRUST_SELF_SIGNED to be one of: true, false, 1, 0, yes, no, on, off."
         }
     }
+}
+
+function Test-SelfSignedTrustStatus {
+    param([System.Management.Automation.Signature]$Signature)
+
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+        return $true
+    }
+
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
+        return $true
+    }
+
+    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+        return $false
+    }
+
+    $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
+    return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
 }
 
 function New-TemporaryPfxFile {
@@ -314,13 +379,7 @@ function Assert-ValidSignature {
             throw "Expected signer thumbprint $($SigningConfig.CertificateThumbprint) on $PathToCheck, but got $($signature.SignerCertificate.Thumbprint)."
         }
 
-        $acceptableStatuses = @(
-            [System.Management.Automation.SignatureStatus]::Valid,
-            [System.Management.Automation.SignatureStatus]::UnknownError,
-            [System.Management.Automation.SignatureStatus]::NotTrusted
-        )
-
-        if ($acceptableStatuses -notcontains $signature.Status) {
+        if (-not (Test-SelfSignedTrustStatus -Signature $signature)) {
             throw "Expected a self-signed Authenticode signature on $PathToCheck, but got $($signature.Status): $($signature.StatusMessage)"
         }
 
@@ -364,9 +423,17 @@ try {
         throw "Expected build output was not found: $exePath"
     }
 
-    & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
-
     Write-Host "Packaging arch : $Architecture ($zigTarget)"
+    foreach ($runtimeFile in $runtimeFiles) {
+        $runtimePath = Join-Path $zigOutBin $runtimeFile
+        if (-not (Test-Path -LiteralPath $runtimePath)) {
+            throw "Expected build output was not found: $runtimePath"
+        }
+        Assert-PeMachine -PathToCheck $runtimePath -ExpectedArchitecture $Architecture
+    }
+    if ($Architecture -eq "x64") {
+        & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
+    }
 
     Write-Host "Packaging phase: stage portable tree"
     Remove-TreeIfPresent -PathToRemove $stageBase

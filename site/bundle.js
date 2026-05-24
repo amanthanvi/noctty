@@ -239,7 +239,7 @@ function buildScript(v) {
       c: 'dim'
     }, {
       kind: 'out',
-      t: '→ SmartScreen may warn — releases are unsigned. Click More info → Run anyway.',
+      t: '→ SmartScreen may warn while reputation is new. Click More info → Run anyway if you trust the release.',
       c: 'dim'
     }]
   },
@@ -605,8 +605,8 @@ function InstallBlock({
   theme = 'dark'
 }) {
   const [copied, setCopied] = useStateShared(false);
-  const cmd = 'scoop install winghostty/winghostty';
-  const copyCmd = 'scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty\r\nscoop install winghostty/winghostty';
+  const cmd = 'winget install AmanThanvi.winghostty';
+  const copyCmd = 'winget install AmanThanvi.winghostty\r\nscoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty\r\nscoop install winghostty/winghostty';
   const onCopy = () => {
     navigator.clipboard?.writeText(copyCmd).then(() => {
       setCopied(true);
@@ -896,7 +896,7 @@ const WHY_ITEMS = [{
   a: 'Windows 10 and Windows 11 on x64. This fork is focused on shipping a native Windows app.'
 }, {
   q: 'Anything to know before installing?',
-  a: 'Yes. Releases are currently unsigned, so Windows SmartScreen will warn on first run. That is expected for now.'
+  a: 'Yes. Releases are signed, but Windows SmartScreen can still warn while publisher reputation is new.'
 }, {
   q: 'Does it phone home?',
   a: 'No telemetry or analytics. The updater only checks GitHub for new releases and stays notify-only.'

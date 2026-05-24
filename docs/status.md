@@ -3,10 +3,13 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-09, against current fork HEAD.
+Last updated: 2026-05-24, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
+For Windows-specific install paths, app identity, shell behavior,
+notifications, quick terminal notes, and troubleshooting, see
+[windows.md](windows.md).
 
 ## Supported platform
 
@@ -24,7 +27,10 @@ For a row-by-row mapping against official Ghostty docs, see
 
 - VT parsing, screen / scrollback / alt-screen, DEC and xterm behaviors
 - 256-color and true-color
-- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52
+- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52.
+  Windows has one native clipboard, so OSC 52 writes using selectors `c`, `s`,
+  and `p` all target the standard Windows clipboard; OSC 52 read replies
+  preserve the requested selector in the response.
 - Bidi, combining marks, grapheme cluster rendering
 - Kitty graphics protocol and inline image display
 - Shell integration for bash, zsh, fish, PowerShell; `cmd.exe` is a plain
@@ -45,6 +51,11 @@ For a row-by-row mapping against official Ghostty docs, see
 - High-contrast (HC) mode detection and palette switching
   (see `isHighContrastActive` in `src/apprt/win32.zig`)
 - IME for CJK and other composed input (`ImmGetContext`)
+- Sensitive-input indicator for password-style no-echo ConPTY input and the
+  `toggle_secure_input` action. This is a local cursor/status/title affordance
+  only; Windows does not provide the same Secure Keyboard Entry behavior that
+  Ghostty uses on macOS, and winghostty does not block system-wide keyboard
+  hooks.
 - Drag-and-drop of files into the terminal (`WM_DROPFILES` +
   `DragAcceptFiles`)
 - Window/session shape restore via `window-save-state`: host windows, tabs,
@@ -63,11 +74,20 @@ For a row-by-row mapping against official Ghostty docs, see
 ### Updater
 
 - Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
-- **Manual install**: never replaces the binary silently
+- Never replaces the binary silently
 - Gated to at most one check every 24 hours
 - `auto-update = download` stages only Windows installer releases that include
   checksum metadata and pass SHA-256 plus Authenticode verification. Applying
-  updates is not automatic.
+  an installer-managed staged update requires a user click, re-verifies the
+  staged installer, records apply intent, launches the installer elevated, and
+  exits the app. Portable ZIP auto-apply is not implemented.
+
+### Windows package managers
+
+- WinGet package id: `AmanThanvi.winghostty`
+- Scoop bucket: `https://github.com/amanthanvi/scoop-winghostty`
+- Release readiness checks verify that both remote manifests exist before the
+  release workflow is allowed to publish package-manager updates.
 
 ### Crash reports
 
@@ -100,9 +120,11 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **Unsigned installer.** Windows SmartScreen may warn on first install.
-  Click *More info* → *Run anyway*. Code signing is a planned packaging
-  step; no ETA.
+- **SmartScreen reputation.** Release artifacts are expected to be
+  Authenticode-signed for the installer and Windows binaries inside the
+  portable ZIP. The ZIP container itself is checksummed, not
+  Authenticode-signed, and Windows SmartScreen can still warn for a new or
+  low-reputation publisher certificate.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
   are reserved for reproducible bugs. For questions, feature discussion,
   and feedback, use
@@ -135,7 +157,7 @@ No formal roadmap. Indicative next areas:
   exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
-- Code signing for Windows releases
+- Portable ZIP updater apply/rollback
 - Broader local crash metadata and report packaging on Windows
 - ARB-context OpenGL migration paired with atlas rebuild
 

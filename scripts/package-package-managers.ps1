@@ -247,6 +247,7 @@ $metadata = [ordered]@{
         version           = $Version
         installerUrl      = $primaryArtifact.setupUrl
         installerUrls     = @($Architectures | ForEach-Object { $artifacts[$_].setupUrl })
+        installerUrlArgs  = @($Architectures | ForEach-Object { "{0}|{1}" -f $artifacts[$_].setupUrl, $_ })
     }
     scoop      = [ordered]@{
         packageName   = $ScoopPackageName

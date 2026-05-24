@@ -42,6 +42,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #endif
 ChangesAssociations=no
+CloseApplications=yes
+RestartApplications=yes
 UninstallDisplayIcon={app}\winghostty.exe
 SetupIconFile={#SourceDir}\dist\windows\winghostty.ico
 VersionInfoVersion={#MyAppVersion}

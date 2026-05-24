@@ -37,13 +37,15 @@ produces:
 2. A portable ZIP
 3. SHA256 checksums for published assets
 4. A release icon asset
-5. Generated Scoop package-manager metadata
+5. Generated package-manager metadata
 
 Local unsigned packaging is still allowed for smoke validation, but the GitHub
-Release workflow currently requires signing and fails closed when signing is
-absent. SmartScreen and publisher trust should still be treated as incomplete
-until winghostty moves from internal/self-signed signing to a publicly trusted
-certificate.
+Release workflow requires signing and fails closed when signing is absent. The
+release installer and Windows PE files inside the portable ZIP are
+Authenticode-signed; the ZIP container itself is checksummed, not
+Authenticode-signed. SmartScreen and publisher trust should still be treated as
+incomplete until winghostty moves from internal/self-signed signing to a
+publicly trusted certificate.
 
 ## Local Packaging
 
@@ -104,8 +106,9 @@ This emits:
 
 ## Release Automation
 
-The release workflow can optionally publish to Windows package managers after
-the GitHub Release is live. Each path is explicit and configuration-gated.
+The release workflow publishes to the official Windows package-manager tracks
+after the GitHub Release is live. The preflight fails closed unless signing is
+configured and both remote package-manager manifests already exist.
 
 Release metadata comes from the committed `dist/windows/release-metadata.json`
 file, so the release tag, generated package-manager metadata, and GitHub release
@@ -155,11 +158,11 @@ If you prefer a different RFC 3161/Authenticode timestamp service, set
 `WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script will default
 to DigiCert when the variable is absent.
 
-When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, the packaging script imports
-the certificate's public half into `Cert:\CurrentUser\Root` and
-`Cert:\CurrentUser\TrustedPublisher` before `Get-AuthenticodeSignature`
-validation. This keeps internal/self-signed release probes green on the
-current runner. It does not create public publisher trust on other machines.
+When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
+the expected self-signed signer thumbprint plus the narrow untrusted-root
+statuses reported by `Get-AuthenticodeSignature`. This keeps
+internal/self-signed release probes green on the current runner. It does not
+create public publisher trust on other machines.
 
 ### Release Runbook
 
@@ -178,7 +181,7 @@ Recommended order:
    - portable ZIP
    - `SHA256SUMS.txt`
    - GitHub Release notes/assets
-6. Confirm optional follow-on publishes:
+6. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
 
@@ -194,18 +197,11 @@ publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-As of `wingetcreate v1.12.8.0`, the `new` command still prompts for required
-fields such as `PackageIdentifier` and fails in a non-interactive shell when
-they are missing. Keep CI on the truthful `update` path after the package
-already exists in `microsoft/winget-pkgs`.
-
-For the first bootstrap, run `wingetcreate token -s` once locally, then submit
-the current installer interactively with:
-
-```powershell
-wingetcreate new --out "$env:TEMP\wingetcreate-bootstrap" --no-open `
-  https://github.com/amanthanvi/winghostty/releases/download/v<version>/winghostty-<version>-windows-x64-setup.exe
-```
+The official WinGet package is bootstrapped as `AmanThanvi.winghostty`.
+Release preflight verifies that
+`microsoft/winget-pkgs/manifests/a/AmanThanvi/winghostty` exists before the
+release workflow can claim package-manager readiness. Keep CI on the truthful
+`update` path; do not switch to `wingetcreate new` for automated releases.
 
 ### Scoop
 
@@ -216,6 +212,16 @@ wingetcreate new --out "$env:TEMP\wingetcreate-bootstrap" --no-open `
 The workflow updates a manifest in a configured Scoop bucket repository. It
 does not attempt to auto-open PRs against `ScoopInstaller/Extras`; that path is
 review-driven and should stay explicit.
+
+The official Scoop track is the fork-owned bucket:
+
+```powershell
+scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
+scoop install winghostty/winghostty
+```
+
+Release preflight verifies that the configured manifest exists, defaulting to
+`bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
 ## Zig Version
 

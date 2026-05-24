@@ -120,5 +120,6 @@ test "action docs reflect fork platform truth" {
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_visibility, "Implemented on Win32 in this fork") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_background_opacity, "Implemented on Win32 in this fork") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_window_float_on_top, "Implemented on Win32 in this fork") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_secure_input, "Implemented on Win32 in this fork") == null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_secure_input, "there is no equivalent OS API used here") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_strings.KeybindAction.toggle_secure_input, "does not block system-wide keyboard hooks") != null);
 }
