@@ -27,7 +27,7 @@ const std = @import("std");
 // ---------------------------------------------------------------------------
 
 pub const readonly_label = "Read-only";
-pub const secure_input_label = "Secure input";
+pub const secure_input_label = "Sensitive input";
 pub const inspector_label = "Inspector";
 
 // ---------------------------------------------------------------------------

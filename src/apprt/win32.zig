@@ -4597,6 +4597,8 @@ pub const App = struct {
             .window_id = host.id,
             .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
             .active_tab_id = active_tab_id,
+            .tab_count = @intCast(tabs.len),
+            .pane_count = automationPaneCount(tabs),
             .tabs = tabs,
         };
     }
@@ -4615,6 +4617,9 @@ pub const App = struct {
             try panes.append(alloc, .{
                 .surface_id = entry.view.core().id,
                 .focused = if (focused_surface) |surface| surface == entry.view else false,
+                // True only for the focused pane in the active tab, not every
+                // tab-local focused pane.
+                .active = active and (if (focused_surface) |surface| surface == entry.view else false),
             });
         }
 
@@ -4622,8 +4627,15 @@ pub const App = struct {
             .tab_id = tab.id,
             .active = active,
             .focused_surface_id = if (focused_surface) |surface| surface.core().id else null,
+            .pane_count = @intCast(panes.items.len),
             .panes = try panes.toOwnedSlice(alloc),
         };
+    }
+
+    fn automationPaneCount(tabs: []const apprt.ipc.AutomationTab) u64 {
+        var count: u64 = 0;
+        for (tabs) |tab| count += @intCast(tab.panes.len);
+        return count;
     }
 
     fn spawnWindowProcess(
@@ -11343,7 +11355,7 @@ const Host = struct {
             try append.fmt(&parts, alloc, "Panes {d}", .{pane_count});
         }
         if (surface.readonly) try append.raw(&parts, alloc, "readonly");
-        if (surface.secure_input) try append.raw(&parts, alloc, "secure input");
+        if (surface.secure_input) try append.raw(&parts, alloc, "sensitive input");
         if (surface.inspector_visible) {
             if (tab.tree.zoomed != null and pane_count > 1) {
                 try append.fmt(&parts, alloc, "Inspect {d} zoom", .{pane_count});
@@ -15707,7 +15719,7 @@ fn buildWindowTitle(
     }.call;
 
     if (status.readonly) try appendStatus(&buf, alloc, "readonly", .{});
-    if (status.secure_input) try appendStatus(&buf, alloc, "secure", .{});
+    if (status.secure_input) try appendStatus(&buf, alloc, "sensitive", .{});
     if (status.key_sequence_active) try appendStatus(&buf, alloc, "keys", .{});
     if (status.key_table_name) |name| try appendStatus(&buf, alloc, "table:{s}", .{name});
     if (status.pwd) |pwd| try appendStatus(&buf, alloc, "cwd:{s}", .{pwd});
@@ -27958,7 +27970,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v1\",\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"panes\":[{\"surface_id\":701,\"focused\":true}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"panes\":[{\"surface_id\":703,\"focused\":false},{\"surface_id\":702,\"focused\":true}]}]}]}",
+        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
         json,
     );
 }
@@ -28006,7 +28018,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v1\",\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"panes\":[{\"surface_id\":801,\"focused\":true}]}]}]}",
+        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
         json,
     );
 }
@@ -28446,7 +28458,7 @@ test "win32 buildWindowTitle appends active status segments" {
     defer std.testing.allocator.free(title);
 
     try std.testing.expectEqualStrings(
-        "pwsh | readonly | secure | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
+        "pwsh | readonly | sensitive | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
         title,
     );
 }
