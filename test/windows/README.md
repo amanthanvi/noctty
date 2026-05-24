@@ -64,7 +64,7 @@ files under `src\` are newer than `zig-out\bin\winghostty.exe`. Pass
 ## vt-probe-win32-conformance.ps1
 
 Win32 VT protocol conformance metadata validation. It runs `+vt-probe` and
-asserts that each advertised protocol reports a separate Win32-runtime
+asserts that each capability reports a separate Win32-runtime
 classification:
 
 - `validated` means an interactive Win32 harness exercises the behavior.

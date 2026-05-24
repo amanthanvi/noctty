@@ -101,7 +101,7 @@ foreach ($entry in $expectedRuntime.GetEnumerator()) {
     }
 }
 
-if ($stdout -notmatch 'capability=osc-133-semantic-prompt .* win32-runtime=validated ') {
+if ($stdout -notmatch 'capability=osc-133-semantic-prompt .* win32-runtime=validated evidence="test/windows/interactive-win11-command-finish\.ps1"') {
     throw "OSC 133 command-finish evidence is missing from +vt-probe output.`nOutput:`n$stdout"
 }
 

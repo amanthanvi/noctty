@@ -185,16 +185,29 @@ pub fn writePlain(writer: *std.Io.Writer, probe: report) std.Io.Writer.Error!voi
 
     for (probe.capabilities) |entry| {
         try writer.print(
-            "capability={s} category={s} direction={s} win32-runtime={s} evidence={s}\n",
+            "capability={s} category={s} direction={s} win32-runtime={s} evidence=",
             .{
                 entry.id,
                 categoryString(entry.category),
                 directionString(entry.direction),
                 win32RuntimeString(entry.win32_runtime),
-                entry.evidence,
             },
         );
+        try writeQuoted(writer, entry.evidence);
+        try writer.writeByte('\n');
     }
+}
+
+fn writeQuoted(writer: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    try writer.writeByte('"');
+    for (value) |byte| switch (byte) {
+        '\\', '"' => try writer.print("\\{c}", .{byte}),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        else => try writer.writeByte(byte),
+    };
+    try writer.writeByte('"');
 }
 
 fn categoryString(value: category) []const u8 {
@@ -261,28 +274,28 @@ test "vt-probe terminfo claim tracks compiled terminfo" {
 
 test "vt-probe plain output is deterministic" {
     const testing = std.testing;
-    var buf: [4096]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    try writePlain(&writer, probeReport());
+    var writer = std.Io.Writer.Allocating.init(testing.allocator);
+    defer writer.deinit();
+    try writePlain(&writer.writer, probeReport());
 
     try testing.expectEqualStrings(
         \\probe=static
         \\term=xterm-ghostty
-        \\capability=terminfo-xterm-ghostty category=terminfo direction=advertise win32-runtime=not-applicable evidence=terminfo-advertisement
-        \\capability=osc-7-working-directory category=osc direction=parse win32-runtime=parser-only evidence=powershell-shell-integration emits OSC 7; no Win32 GUI state harness
-        \\capability=osc-8-hyperlink category=osc direction=parse+emit win32-runtime=pending evidence=link storage/formatter covered by core tests; no Win32 click/tooltip harness
-        \\capability=osc-9-desktop-notification category=osc direction=parse win32-runtime=validated evidence=test/windows/interactive-win11-command-finish.ps1
-        \\capability=osc-777-desktop-notification category=osc direction=parse win32-runtime=parser-only evidence=shared notification parser path; no dedicated Win32 OSC 777 payload harness
-        \\capability=osc-9-4-progress category=osc direction=parse win32-runtime=validated evidence=test/windows/interactive-win11-progress.ps1
-        \\capability=osc-52-clipboard category=osc direction=parse+emit win32-runtime=pending evidence=Win32 clipboard policy exists; no non-interactive OSC 52 prompt/read/write harness
-        \\capability=osc-133-semantic-prompt category=osc direction=parse win32-runtime=validated evidence=test/windows/interactive-win11-command-finish.ps1
-        \\capability=osc-4-palette category=osc direction=parse+emit win32-runtime=parser-only evidence=core color protocol tests; no Win32 rendered palette harness
-        \\capability=osc-10-11-colors category=osc direction=parse+emit win32-runtime=parser-only evidence=core color protocol tests; no Win32 rendered default-color harness
-        \\capability=osc-21-kitty-color-stack category=osc direction=parse win32-runtime=parser-only evidence=core kitty color protocol tests; no Win32 rendered color-stack harness
-        \\capability=csi-2026-synchronized-output category=csi direction=parse win32-runtime=validated evidence=test/windows/interactive-win11-boo-performance.ps1
-        \\capability=kitty-graphics category=graphics direction=parse win32-runtime=pending evidence=core Kitty graphics tests; no Win32 pixel/renderer harness
+        \\capability=terminfo-xterm-ghostty category=terminfo direction=advertise win32-runtime=not-applicable evidence="terminfo-advertisement"
+        \\capability=osc-7-working-directory category=osc direction=parse win32-runtime=parser-only evidence="powershell-shell-integration emits OSC 7; no Win32 GUI state harness"
+        \\capability=osc-8-hyperlink category=osc direction=parse+emit win32-runtime=pending evidence="link storage/formatter covered by core tests; no Win32 click/tooltip harness"
+        \\capability=osc-9-desktop-notification category=osc direction=parse win32-runtime=validated evidence="test/windows/interactive-win11-command-finish.ps1"
+        \\capability=osc-777-desktop-notification category=osc direction=parse win32-runtime=parser-only evidence="shared notification parser path; no dedicated Win32 OSC 777 payload harness"
+        \\capability=osc-9-4-progress category=osc direction=parse win32-runtime=validated evidence="test/windows/interactive-win11-progress.ps1"
+        \\capability=osc-52-clipboard category=osc direction=parse+emit win32-runtime=pending evidence="Win32 clipboard policy exists; no non-interactive OSC 52 prompt/read/write harness"
+        \\capability=osc-133-semantic-prompt category=osc direction=parse win32-runtime=validated evidence="test/windows/interactive-win11-command-finish.ps1"
+        \\capability=osc-4-palette category=osc direction=parse+emit win32-runtime=parser-only evidence="core color protocol tests; no Win32 rendered palette harness"
+        \\capability=osc-10-11-colors category=osc direction=parse+emit win32-runtime=parser-only evidence="core color protocol tests; no Win32 rendered default-color harness"
+        \\capability=osc-21-kitty-color-stack category=osc direction=parse win32-runtime=parser-only evidence="core kitty color protocol tests; no Win32 rendered color-stack harness"
+        \\capability=csi-2026-synchronized-output category=csi direction=parse win32-runtime=validated evidence="test/windows/interactive-win11-boo-performance.ps1"
+        \\capability=kitty-graphics category=graphics direction=parse win32-runtime=pending evidence="core Kitty graphics tests; no Win32 pixel/renderer harness"
         \\
     ,
-        writer.buffered(),
+        writer.written(),
     );
 }
