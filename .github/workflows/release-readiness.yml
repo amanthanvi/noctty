@@ -36,15 +36,18 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Validate release configuration
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}
         shell: pwsh
         run: |
           $scriptArgs = @(
             "-ExecutionPolicy", "Bypass",
             "-File", "scripts/release-preflight.ps1",
-            "-Version", "${{ inputs.version }}",
+            "-Version", $env:RELEASE_VERSION,
             "-RequireSigning"
           )
-          if ("${{ inputs.require_package_managers }}" -eq "true") {
+          if ($env:REQUIRE_PACKAGE_MANAGERS -eq "true") {
             $scriptArgs += "-RequirePackageManagers"
           }
           & powershell @scriptArgs
