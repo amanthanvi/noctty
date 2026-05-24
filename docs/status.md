@@ -7,6 +7,9 @@ Last updated: 2026-05-09, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
+For Windows-specific install paths, app identity, shell behavior,
+notifications, quick terminal notes, and troubleshooting, see
+[windows.md](windows.md).
 
 ## Supported platform
 
