@@ -38,8 +38,9 @@ try {
     $encodedCommand = __ghostty_encode_osc133_value "Get-ChildItem 'a;b'"
     Assert-True ($encodedCommand -eq 'Get-ChildItem%20%27a%3Bb%27') "OSC 133 command metadata was not URL encoded: $encodedCommand"
 
-    $env:GHOSTTY_SHELL_FEATURES = 'ssh-env,ssh-terminfo'
+    $env:GHOSTTY_SHELL_FEATURES = 'ssh-env, ssh-terminfo'
     Assert-True (__ghostty_has_feature 'ssh-env') "ssh-env feature was not detected"
+    Assert-True (__ghostty_has_feature 'ssh-terminfo') "ssh-terminfo feature with whitespace was not detected"
     Assert-True (__ghostty_has_feature_prefix 'ssh-') "ssh-* feature prefix was not detected"
 
     $cachedProbe = { param([string]$Target) return ($Target -eq 'alice@example.com') }
@@ -64,6 +65,49 @@ try {
         -CacheProbe $cachedProbe
     Assert-True ($plainInvocation.Term -eq 'xterm-256color') "Plain SSH invocation should use xterm-256color"
     Assert-True ($plainInvocation.Options.Count -eq 0) "Plain SSH invocation should not add options"
+
+    $fakeSsh = Join-Path $script:TempDir 'fake-ssh.cmd'
+    $fakeCapture = Join-Path $script:TempDir 'fake-ssh.txt'
+    Set-Content -LiteralPath $fakeSsh -Encoding ASCII -Value @(
+        '@echo off',
+        '(',
+        'echo TERM=%TERM%',
+        'echo COLORTERM=%COLORTERM%',
+        'echo ARGS=%*',
+        ') > "%FAKE_SSH_CAPTURE%"',
+        'exit /b 0'
+    )
+
+    $script:FakeSsh = $fakeSsh
+    $env:FAKE_SSH_CAPTURE = $fakeCapture
+    $env:GHOSTTY_SHELL_FEATURES = 'ssh-env'
+    . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+    Assert-True ($null -ne (Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue)) "ssh wrapper was not installed"
+
+    function __ghostty_find_command_application {
+        param([string[]]$Names)
+        return $script:FakeSsh
+    }
+
+    $env:TERM = 'original-term'
+    $env:COLORTERM = 'original-color'
+    ssh 'example.com' '-p' '22'
+    Assert-True ($env:TERM -eq 'original-term') "ssh wrapper did not restore TERM"
+    Assert-True ($env:COLORTERM -eq 'original-color') "ssh wrapper did not restore COLORTERM"
+    $fakeOutput = Get-Content -LiteralPath $fakeCapture -Raw
+    Assert-True ($fakeOutput.Contains('TERM=xterm-256color')) "ssh wrapper did not set TERM for child process"
+    Assert-True ($fakeOutput.Contains('COLORTERM=truecolor')) "ssh-env wrapper did not set COLORTERM for child process"
+    Assert-True ($fakeOutput.Contains('ARGS=-o "SendEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION" example.com -p 22')) "ssh wrapper argv was not forwarded correctly: $fakeOutput"
+
+    Remove-Item Env:TERM -ErrorAction SilentlyContinue
+    Remove-Item Env:COLORTERM -ErrorAction SilentlyContinue
+    ssh 'example.org'
+    Assert-True (-not (Test-Path Env:TERM)) "ssh wrapper did not remove TERM after child process"
+    Assert-True (-not (Test-Path Env:COLORTERM)) "ssh wrapper did not remove COLORTERM after child process"
+
+    $env:GHOSTTY_SHELL_FEATURES = ''
+    . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+    Assert-True ($null -eq (Get-Command ssh -CommandType Function -ErrorAction SilentlyContinue)) "ssh wrapper was not removed when ssh features were disabled"
 
     $capture = [System.IO.StringWriter]::new()
     [Console]::SetOut($capture)

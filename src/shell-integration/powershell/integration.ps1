@@ -36,6 +36,7 @@ function __ghostty_has_feature {
     param([string]$Name)
     if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
     foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
+        $feature = $feature.Trim()
         if ($feature -eq $Name) { return $true }
     }
     return $false
@@ -45,6 +46,7 @@ function __ghostty_has_feature_prefix {
     param([string]$Prefix)
     if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
     foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
+        $feature = $feature.Trim()
         if ($feature.StartsWith($Prefix, [System.StringComparison]::Ordinal)) {
             return $true
         }
@@ -155,13 +157,15 @@ function __ghostty_build_ssh_invocation {
     }
 }
 
+Remove-Item -Path Function:\ssh,Function:\global:ssh -ErrorAction SilentlyContinue
+
 if (__ghostty_has_feature_prefix 'ssh-') {
     function global:ssh {
         param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
 
         $ssh_command = __ghostty_find_command_application @('ssh.exe', 'ssh')
         if ($null -eq $ssh_command) {
-            throw 'winghostty PowerShell SSH integration could not find ssh.exe'
+            throw 'winghostty PowerShell SSH integration could not find ssh'
         }
 
         [string[]]$ssh_config = @()
@@ -182,10 +186,11 @@ if (__ghostty_has_feature_prefix 'ssh-') {
         $had_colorterm = Test-Path Env:COLORTERM
         $old_term = $env:TERM
         $old_colorterm = $env:COLORTERM
+        $set_colorterm = __ghostty_has_feature 'ssh-env'
 
         try {
             $env:TERM = $invocation.Term
-            $env:COLORTERM = 'truecolor'
+            if ($set_colorterm) { $env:COLORTERM = 'truecolor' }
             [string[]]$ssh_argv = @($invocation.Options) + @($invocation.Arguments)
             & $ssh_command @ssh_argv
         } finally {

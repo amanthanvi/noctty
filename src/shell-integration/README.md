@@ -152,12 +152,12 @@ segment percent-encoded. It also emits OSC 133 prompt marks with a stable
 `aid=$PID` and, when PSReadLine exposes the accepted buffer, URL-encoded
 `cmdline_url` metadata on the command-start mark.
 
-When `GHOSTTY_SHELL_FEATURES` contains `ssh-env`, PowerShell wraps `ssh` to
-send `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`, and runs the
-remote session with `TERM=xterm-256color` and `COLORTERM=truecolor`. When
-`ssh-terminfo` is also enabled, the wrapper checks `winghostty +ssh-cache` for
-the resolved `user@hostname` from `ssh -G`; cached hosts use
-`TERM=xterm-ghostty`.
+When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
+wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
+`ssh-env` also sends `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`
+and sets `COLORTERM=truecolor` for the SSH process. When `ssh-terminfo` is
+enabled, the wrapper checks `winghostty +ssh-cache` for the resolved
+`user@hostname` from `ssh -G`; cached hosts use `TERM=xterm-ghostty`.
 
 PowerShell intentionally does not auto-install remote terminfo. The POSIX
 scripts can pipe `infocmp` through SSH and reuse a control socket for the final
