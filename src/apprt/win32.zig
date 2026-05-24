@@ -19705,9 +19705,23 @@ const TerminalUiaContext = struct {
     }
 
     fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
-        // TerminalFormatter formats the active rendered screen using
-        // PageList .screen bounds, so this excludes offscreen scrollback.
-        return terminalUiaValue(ctx, alloc);
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return try alloc.dupe(u8, "");
+        if (!surface.core_initialized) return try alloc.dupe(u8, "");
+
+        surface.core_surface.renderer_state.mutex.lock();
+        defer surface.core_surface.renderer_state.mutex.unlock();
+
+        var snapshot = try win32_uia.snapshotTerminalVisiblePlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer snapshot.deinit();
+
+        return snapshot.takeText();
     }
 
     fn terminalUiaFocused(ctx: *anyopaque) bool {
