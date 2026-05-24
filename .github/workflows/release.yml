@@ -211,7 +211,7 @@ jobs:
             Remove-Item -LiteralPath $extractDir -Recurse -Force
           }
           Expand-Archive -LiteralPath $zip -DestinationPath $extractDir
-          foreach ($relative in @("winghostty/winghostty.exe", "winghostty/ghostty-vt.dll")) {
+          foreach ($relative in @("winghostty/winghostty.com", "winghostty/winghostty.exe", "winghostty/ghostty-vt.dll")) {
             $path = Join-Path $extractDir $relative
             Assert-ReleaseSignature -Path $path -Label $relative
           }
