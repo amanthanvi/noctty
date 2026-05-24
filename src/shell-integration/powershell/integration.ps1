@@ -29,7 +29,175 @@ function __ghostty_write_osc {
 function __ghostty_encode_osc133_value {
     param([AllowNull()][string]$Value)
     if ($null -eq $Value) { return "" }
-    return [uri]::EscapeDataString($Value)
+    return ([uri]::EscapeDataString($Value)).Replace("'", "%27")
+}
+
+function __ghostty_has_feature {
+    param([string]$Name)
+    if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
+    foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
+        $feature = $feature.Trim()
+        if ($feature -eq $Name) { return $true }
+    }
+    return $false
+}
+
+function __ghostty_has_feature_prefix {
+    param([string]$Prefix)
+    if ([string]::IsNullOrEmpty($env:GHOSTTY_SHELL_FEATURES)) { return $false }
+    foreach ($feature in ($env:GHOSTTY_SHELL_FEATURES -split ',')) {
+        $feature = $feature.Trim()
+        if ($feature.StartsWith($Prefix, [System.StringComparison]::Ordinal)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function __ghostty_find_command_application {
+    param([string[]]$Names)
+    foreach ($name in $Names) {
+        $cmd = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $cmd) { return $cmd.Source }
+    }
+    return $null
+}
+
+function __ghostty_find_winghostty {
+    if (-not [string]::IsNullOrEmpty($env:GHOSTTY_BIN_DIR)) {
+        foreach ($name in @('winghostty.com', 'winghostty.exe', 'winghostty')) {
+            $candidate = Join-Path $env:GHOSTTY_BIN_DIR $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return $candidate
+            }
+        }
+    }
+    return __ghostty_find_command_application @('winghostty.com', 'winghostty.exe', 'winghostty')
+}
+
+function __ghostty_ssh_cache {
+    param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+
+    $winghostty = __ghostty_find_winghostty
+    if ($null -eq $winghostty) { return $false }
+
+    try {
+        & $winghostty '+ssh-cache' @Arguments *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function __ghostty_ssh_target_from_config {
+    param([string[]]$ConfigLines)
+
+    $ssh_user = $null
+    $ssh_hostname = $null
+
+    foreach ($line in $ConfigLines) {
+        if ($line -match '^user\s+(.+)$') {
+            $ssh_user = $Matches[1]
+        } elseif ($line -match '^hostname\s+(.+)$') {
+            $ssh_hostname = $Matches[1]
+        }
+
+        if (-not [string]::IsNullOrEmpty($ssh_user) -and -not [string]::IsNullOrEmpty($ssh_hostname)) {
+            break
+        }
+    }
+
+    if ([string]::IsNullOrEmpty($ssh_hostname)) { return $null }
+
+    $target = $ssh_hostname
+    if (-not [string]::IsNullOrEmpty($ssh_user)) {
+        $target = "$ssh_user@$ssh_hostname"
+    }
+
+    return [pscustomobject]@{
+        User = $ssh_user
+        Hostname = $ssh_hostname
+        Target = $target
+    }
+}
+
+function __ghostty_build_ssh_invocation {
+    param(
+        [string[]]$Arguments,
+        [string[]]$ConfigLines,
+        [scriptblock]$CacheProbe
+    )
+
+    [string[]]$ssh_opts = @()
+    $ssh_term = 'xterm-256color'
+
+    if (__ghostty_has_feature 'ssh-env') {
+        $ssh_opts += @('-o', 'SendEnv COLORTERM TERM_PROGRAM TERM_PROGRAM_VERSION')
+    }
+
+    if (__ghostty_has_feature 'ssh-terminfo') {
+        $ssh_target = __ghostty_ssh_target_from_config $ConfigLines
+        if ($null -ne $ssh_target -and $null -ne $CacheProbe) {
+            $is_cached = $false
+            try {
+                $is_cached = [bool](& $CacheProbe $ssh_target.Target)
+            } catch {
+                $is_cached = $false
+            }
+            if ($is_cached) {
+                $ssh_term = 'xterm-ghostty'
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Term = $ssh_term
+        Options = $ssh_opts
+        Arguments = $Arguments
+    }
+}
+
+Remove-Item -Path Function:\ssh,Function:\global:ssh -ErrorAction SilentlyContinue
+
+if (__ghostty_has_feature_prefix 'ssh-') {
+    function global:ssh {
+        param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
+
+        $ssh_command = __ghostty_find_command_application @('ssh.exe', 'ssh')
+        if ($null -eq $ssh_command) {
+            throw 'winghostty PowerShell SSH integration could not find ssh'
+        }
+
+        [string[]]$ssh_config = @()
+        if (__ghostty_has_feature 'ssh-terminfo') {
+            try {
+                $ssh_config = @(& $ssh_command '-G' @Arguments 2>$null)
+            } catch {
+                $ssh_config = @()
+            }
+        }
+
+        $invocation = __ghostty_build_ssh_invocation `
+            -Arguments $Arguments `
+            -ConfigLines $ssh_config `
+            -CacheProbe { param([string]$Target) __ghostty_ssh_cache "--host=$Target" }
+
+        $had_term = Test-Path Env:TERM
+        $had_colorterm = Test-Path Env:COLORTERM
+        $old_term = $env:TERM
+        $old_colorterm = $env:COLORTERM
+        $set_colorterm = __ghostty_has_feature 'ssh-env'
+
+        try {
+            $env:TERM = $invocation.Term
+            if ($set_colorterm) { $env:COLORTERM = 'truecolor' }
+            [string[]]$ssh_argv = @($invocation.Options) + @($invocation.Arguments)
+            & $ssh_command @ssh_argv
+        } finally {
+            if ($had_term) { $env:TERM = $old_term } else { Remove-Item Env:TERM -ErrorAction SilentlyContinue }
+            if ($had_colorterm) { $env:COLORTERM = $old_colorterm } else { Remove-Item Env:COLORTERM -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
 # ── Helper: build full file:// URI for OSC 7 ────────────────────────────

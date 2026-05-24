@@ -4,7 +4,7 @@ Maps current official Ghostty docs surfaces to winghostty behavior on
 Windows. Keep this short. Update rows when Windows behavior changes or when
 upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-05-09.
+Last reviewed: 2026-05-24.
 
 ## Status legend
 
@@ -31,11 +31,13 @@ Last reviewed: 2026-05-09.
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Shell integration](https://ghostty.org/docs/features/shell-integration) | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`. PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish status, and PSReadLine command metadata when available. `cmd.exe` remains a plain fallback shell without automatic shell integration. |
+| [Shell integration](https://ghostty.org/docs/features/shell-integration) | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`. PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish status, and PSReadLine command metadata when available. PowerShell now wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but it does not auto-install remote terminfo; uncached hosts use `xterm-256color`. `cmd.exe` remains a plain fallback shell without automatic shell integration. |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference) | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`. |
+| [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | Windows implements the action as a local sensitive-input indicator and cursor/status/title state. It does not use a Windows OS API equivalent to macOS Secure Keyboard Entry and does not block system-wide keyboard hooks. |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference) | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
+| OSC 52 primary/selection clipboard selectors | Windows exposes one native clipboard. OSC 52 writes using selectors `c`, `s`, and `p` all target the standard Windows clipboard. OSC 52 read replies still echo the requested selector (`c`, `s`, or `p`) so terminal clients can correlate the response. |
 
 ## No-op Compatibility
 
@@ -50,7 +52,7 @@ Last reviewed: 2026-05-09.
 | [Features overview](https://ghostty.org/docs/features) | Upstream Ghostty docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64. |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Upstream highlights Metal on macOS and OpenGL on Linux. winghostty renders on Windows with OpenGL 4.3+ via WGL; no D3D/DirectX backend ships. |
 | [Configuration](https://ghostty.org/docs/config) | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream. |
-| Local automation | `winghostty +list-windows` reports local window/tab/pane IDs as JSON, and `winghostty +perform-action <action>` forwards allowlisted keybinding actions over Win32 single-instance IPC. `--surface-id` targets only surface-scoped actions; app-scoped actions target the app. Terminal-input, arbitrary file helper, and crash actions are rejected by the running instance, and new action variants remain disabled until reviewed. |
+| Local automation | `winghostty +list-windows` reports `winghostty.windows.v2` JSON with local window/tab/pane IDs, focus/active state, and structural counts. `winghostty +perform-action <action>` forwards allowlisted keybinding actions over Win32 single-instance IPC. `--surface-id` targets only surface-scoped actions; app-scoped actions target the app. Terminal-input, arbitrary file helper, and crash actions are rejected by the running instance, and new action variants remain disabled until reviewed. |
 | [Features overview](https://ghostty.org/docs/features) | Win32-specific UX includes DWM dark title bar integration, high-contrast palette switching, IME, drag-and-drop, and native context menus. |
 
 ## Maintenance Anchors
