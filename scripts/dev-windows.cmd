@@ -86,7 +86,7 @@ if not exist "%APPDATA%" mkdir "%APPDATA%" >nul 2>nul
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>nul
 set "ZIG_GLOBAL_CACHE_DIR=%LOCALAPPDATA%\zig"
 set "ZIG_LOCAL_CACHE_DIR=%CD%\.zig-cache"
-set "PATH=%GIT_CMD%;%ZIG_HOME%;%PATH%;%GIT_USR_BIN%"
+set "PATH=%GIT_CMD%;%GIT_USR_BIN%;%ZIG_HOME%;%PATH%"
 
 echo == Versions ==
 where git || exit /b 1

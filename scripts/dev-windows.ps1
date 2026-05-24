@@ -110,7 +110,7 @@ $env:ZIG_LOCAL_CACHE_DIR = Join-Path (Get-Location) ".zig-cache"
 
 $bootstrap = @"
 call "$vsDevCmd" -arch=$Architecture || exit /b 1
-set "PATH=$gitCmd;$env:ZIG_HOME;%PATH%;$gitUsrBin"
+set "PATH=$gitCmd;$gitUsrBin;$env:ZIG_HOME;%PATH%"
 set "APPDATA=$env:APPDATA"
 set "LOCALAPPDATA=$env:LOCALAPPDATA"
 set "TEMP=$env:TEMP"

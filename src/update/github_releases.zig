@@ -758,16 +758,18 @@ fn parseWindowsInstallCandidate(
 }
 
 fn windowsInstallerArch() []const u8 {
-    return switch (builtin.cpu.arch) {
+    return comptime switch (builtin.cpu.arch) {
         .aarch64 => "arm64",
-        else => "x64",
+        .x86_64 => "x64",
+        else => @compileError("unsupported Windows architecture for installer assets"),
     };
 }
 
 fn windowsChecksumsAssetName() []const u8 {
-    return switch (builtin.cpu.arch) {
+    return comptime switch (builtin.cpu.arch) {
         .aarch64 => "SHA256SUMS-windows-arm64.txt",
-        else => "SHA256SUMS-windows-x64.txt",
+        .x86_64 => "SHA256SUMS-windows-x64.txt",
+        else => @compileError("unsupported Windows architecture for installer assets"),
     };
 }
 
