@@ -103,7 +103,9 @@ extractions will land as they stabilize.
 ## Known caveats
 
 - **SmartScreen reputation.** Release artifacts are expected to be
-  Authenticode-signed, but Windows SmartScreen can still warn for a new or
+  Authenticode-signed for the installer and Windows binaries inside the
+  portable ZIP. The ZIP container itself is checksummed, not
+  Authenticode-signed, and Windows SmartScreen can still warn for a new or
   low-reputation publisher certificate.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
   are reserved for reproducible bugs. For questions, feature discussion,

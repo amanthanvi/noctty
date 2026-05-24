@@ -3640,7 +3640,12 @@ pub const App = struct {
         };
         defer staged.deinit(self.core_app.alloc);
 
-        const install_dir = try currentInstallDir(self.core_app.alloc);
+        const install_dir = currentInstallDir(self.core_app.alloc) catch |err| {
+            self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return err;
+        };
         defer self.core_app.alloc.free(install_dir);
 
         const stage_dir = std.fs.path.dirname(staged.installer_path) orelse return error.InvalidStagedInstallerPath;
@@ -3653,8 +3658,6 @@ pub const App = struct {
 
         const params = try buildInstallerApplyArgs(self.core_app.alloc, install_dir, log_path);
         defer self.core_app.alloc.free(params);
-
-        try updatepkg.recordStagedApplyRequested(self.core_app.alloc, state_path, 0);
 
         const installer_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, staged.installer_path);
         defer self.core_app.alloc.free(installer_w);
@@ -3671,7 +3674,16 @@ pub const App = struct {
             stage_dir_w.ptr,
             SW_SHOW,
         );
-        if (@intFromPtr(result) <= 32) return error.UpdateApplyLaunchFailed;
+        if (@intFromPtr(result) <= 32) {
+            self.showUpdateInfo(updateApplyFailureMessage(error.UpdateApplyLaunchFailed)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return error.UpdateApplyLaunchFailed;
+        }
+
+        updatepkg.recordStagedApplyRequested(self.core_app.alloc, state_path, 0) catch |err| {
+            log.warn("failed to record updater apply request after launch err={}", .{err});
+        };
 
         self.stopQuitTimer();
         self.running = false;
@@ -6771,10 +6783,12 @@ fn updateApplyFailureMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.NoStagedWindowsInstall => "No verified staged update is available. Run Check for Updates again.",
         error.InvalidStagedInstallerPath => "The staged update path is invalid. Run Check for Updates again.",
+        error.InvalidInstallPath => "The current install path is invalid. The staged update was not launched.",
         error.InstallerChecksumMismatch => "The staged update no longer matches its verified checksum. Run Check for Updates again.",
         error.InvalidAuthenticodeSignature => "The staged update signature is no longer trusted. Run Check for Updates again.",
         error.AuthenticodeRequiresWindows => "The staged update can only be applied on Windows.",
         error.SignatureVerifierUnavailable => "Windows signature verification is unavailable. The staged update was not launched.",
+        error.UpdateApplyLaunchFailed => "Windows could not launch the staged installer. The update was not applied.",
         else => "The staged update could not be verified. Run Check for Updates again.",
     };
 }
@@ -6783,9 +6797,7 @@ fn currentInstallDir(alloc: Allocator) ![]u8 {
     const exe_path = try std.fs.selfExePathAlloc(alloc);
     errdefer alloc.free(exe_path);
     const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
-    const result = try alloc.dupe(u8, dir);
-    alloc.free(exe_path);
-    return result;
+    return alloc.realloc(exe_path, dir.len);
 }
 
 fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
@@ -9329,7 +9341,7 @@ const Host = struct {
         if (self.app.update_notice == null) return false;
         if (pointInRect(point, self.update_open_rect)) {
             self.app.openUpdateNotice() catch |err| {
-                log.warn("failed to open release URL err={}", .{err});
+                log.warn("failed to open update notice err={}", .{err});
             };
             return true;
         }

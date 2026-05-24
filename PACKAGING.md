@@ -38,9 +38,11 @@ produces:
 
 Local unsigned packaging is still allowed for smoke validation, but the GitHub
 Release workflow currently requires signing and fails closed when signing is
-absent. SmartScreen and publisher trust should still be treated as incomplete
-until winghostty moves from internal/self-signed signing to a publicly trusted
-certificate.
+absent. The release installer and Windows PE files inside the portable ZIP are
+Authenticode-signed; the ZIP container itself is checksummed, not
+Authenticode-signed. SmartScreen and publisher trust should still be treated as
+incomplete until winghostty moves from internal/self-signed signing to a
+publicly trusted certificate.
 
 ## Local Packaging
 
@@ -147,11 +149,11 @@ If you prefer a different RFC 3161/Authenticode timestamp service, set
 `WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script will default
 to DigiCert when the variable is absent.
 
-When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, the packaging script imports
-the certificate's public half into `Cert:\CurrentUser\Root` and
-`Cert:\CurrentUser\TrustedPublisher` before `Get-AuthenticodeSignature`
-validation. This keeps internal/self-signed release probes green on the
-current runner. It does not create public publisher trust on other machines.
+When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
+the expected self-signed signer thumbprint plus the narrow untrusted-root
+statuses reported by `Get-AuthenticodeSignature`. This keeps
+internal/self-signed release probes green on the current runner. It does not
+create public publisher trust on other machines.
 
 ### Release Runbook
 

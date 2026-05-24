@@ -169,6 +169,25 @@ jobs:
           }
 
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
+          function Test-SelfSignedTrustStatus {
+            param([System.Management.Automation.Signature]$Signature)
+
+            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+              return $true
+            }
+
+            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
+              return $true
+            }
+
+            if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+              return $false
+            }
+
+            $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
+            return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
+          }
+
           function Assert-ReleaseSignature {
             param(
               [string]$Path,
@@ -180,11 +199,10 @@ jobs:
               return
             }
 
-            $selfSignedStatus = @(
-              [System.Management.Automation.SignatureStatus]::UnknownError,
-              [System.Management.Automation.SignatureStatus]::NotTrusted
-            )
-            if ($trustSelfSigned -and $sig.SignerCertificate -and ($selfSignedStatus -contains $sig.Status)) {
+            if ($trustSelfSigned -and
+                $sig.SignerCertificate -and
+                $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
+                (Test-SelfSignedTrustStatus -Signature $sig)) {
               return
             }
 

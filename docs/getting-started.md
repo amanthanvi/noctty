@@ -32,7 +32,9 @@ Get-FileHash .\winghostty-<version>-windows-x64-setup.exe -Algorithm SHA256
 
 1. Extract the ZIP anywhere (for example, `C:\Tools\winghostty\`).
 2. Run `winghostty.exe`.
-3. SmartScreen may show the same warning.
+3. The Windows binaries inside the ZIP are Authenticode-signed. The ZIP
+   container itself is checksummed, not Authenticode-signed, and SmartScreen may
+   show the same warning.
 
 ## 3. First launch
 
