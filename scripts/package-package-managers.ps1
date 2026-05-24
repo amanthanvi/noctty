@@ -249,6 +249,7 @@ $metadata = [ordered]@{
         version           = $Version
         installerUrl      = $primaryArtifact.setupUrl
         installerUrls     = @($Architectures | ForEach-Object { $artifacts[$_].setupUrl })
+        # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
         installerUrlArgs  = @($Architectures | ForEach-Object { "{0}|{1}" -f $artifacts[$_].setupUrl, $_ })
     }
     scoop      = [ordered]@{

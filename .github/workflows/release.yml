@@ -455,6 +455,7 @@ jobs:
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/msixbundle" -OutFile $bundlePath -ErrorAction Stop
           Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
 
+          # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
           $installerUrls = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
           if ($installerUrls.Count -eq 0) {
             $installerUrls = @($metadata.winget.installerUrls | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
