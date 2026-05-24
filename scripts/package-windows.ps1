@@ -146,8 +146,14 @@ function Get-PeMachine {
                 throw "Not a PE file: $fullPath"
             }
 
+            if ($stream.Length -lt 0x40) {
+                throw "PE file is too small to contain a header offset: $fullPath"
+            }
             $stream.Position = 0x3C
             $peOffset = $reader.ReadUInt32()
+            if ($peOffset + 6 -gt $stream.Length) {
+                throw "PE header offset is outside the file bounds: $fullPath"
+            }
             $stream.Position = $peOffset
             if ($reader.ReadUInt32() -ne 0x00004550) {
                 throw "Missing PE signature: $fullPath"
