@@ -74,11 +74,13 @@ notifications, quick terminal notes, and troubleshooting, see
 ### Updater
 
 - Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
-- **Manual install**: never replaces the binary silently
+- Never replaces the binary silently
 - Gated to at most one check every 24 hours
 - `auto-update = download` stages only Windows installer releases that include
   checksum metadata and pass SHA-256 plus Authenticode verification. Applying
-  updates is not automatic.
+  an installer-managed staged update requires a user click, re-verifies the
+  staged installer, records apply intent, launches the installer elevated, and
+  exits the app. Portable ZIP auto-apply is not implemented.
 
 ### Windows package managers
 
@@ -118,9 +120,11 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **SmartScreen reputation.** The installer is signed, but Windows SmartScreen
-  may still warn on first install while publisher reputation is new. Click
-  *More info* → *Run anyway* only if you trust the release source.
+- **SmartScreen reputation.** Release artifacts are expected to be
+  Authenticode-signed for the installer and Windows binaries inside the
+  portable ZIP. The ZIP container itself is checksummed, not
+  Authenticode-signed, and Windows SmartScreen can still warn for a new or
+  low-reputation publisher certificate.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
   are reserved for reproducible bugs. For questions, feature discussion,
   and feedback, use
@@ -153,6 +157,7 @@ No formal roadmap. Indicative next areas:
   exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
+- Portable ZIP updater apply/rollback
 - Broader local crash metadata and report packaging on Windows
 - ARB-context OpenGL migration paired with atlas rebuild
 

@@ -185,6 +185,25 @@ function ConvertTo-Boolean {
     }
 }
 
+function Test-SelfSignedTrustStatus {
+    param([System.Management.Automation.Signature]$Signature)
+
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+        return $true
+    }
+
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
+        return $true
+    }
+
+    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+        return $false
+    }
+
+    $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
+    return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
+}
+
 function New-TemporaryPfxFile {
     param([string]$Base64Value)
 
@@ -307,13 +326,7 @@ function Assert-ValidSignature {
             throw "Expected signer thumbprint $($SigningConfig.CertificateThumbprint) on $PathToCheck, but got $($signature.SignerCertificate.Thumbprint)."
         }
 
-        $acceptableStatuses = @(
-            [System.Management.Automation.SignatureStatus]::Valid,
-            [System.Management.Automation.SignatureStatus]::UnknownError,
-            [System.Management.Automation.SignatureStatus]::NotTrusted
-        )
-
-        if ($acceptableStatuses -notcontains $signature.Status) {
+        if (-not (Test-SelfSignedTrustStatus -Signature $signature)) {
             throw "Expected a self-signed Authenticode signature on $PathToCheck, but got $($signature.Status): $($signature.StatusMessage)"
         }
 

@@ -146,6 +146,82 @@ jobs:
           -RequireInstaller
           -RequireSigning
 
+      - name: Verify signed release artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $setup = Join-Path $artifactDir "winghostty-$version-windows-x64-setup.exe"
+          $zip = Join-Path $artifactDir "winghostty-$version-windows-x64-portable.zip"
+          $checksums = Join-Path $artifactDir "SHA256SUMS.txt"
+          foreach ($path in @($setup, $zip, $checksums)) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing required release asset: $path"
+            }
+          }
+
+          $checksumText = Get-Content -LiteralPath $checksums
+          foreach ($path in @($setup, $zip)) {
+            $name = [System.IO.Path]::GetFileName($path)
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            if ($checksumText -notcontains "$hash *$name") {
+              throw "SHA256SUMS.txt does not contain the expected hash line for $name."
+            }
+          }
+
+          $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
+          function Test-SelfSignedTrustStatus {
+            param([System.Management.Automation.Signature]$Signature)
+
+            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+              return $true
+            }
+
+            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
+              return $true
+            }
+
+            if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+              return $false
+            }
+
+            $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
+            return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
+          }
+
+          function Assert-ReleaseSignature {
+            param(
+              [string]$Path,
+              [string]$Label
+            )
+
+            $sig = Get-AuthenticodeSignature -LiteralPath $Path
+            if ($sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+              return
+            }
+
+            if ($trustSelfSigned -and
+                $sig.SignerCertificate -and
+                $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
+                (Test-SelfSignedTrustStatus -Signature $sig)) {
+              return
+            }
+
+            throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
+          }
+
+          Assert-ReleaseSignature -Path $setup -Label "Setup"
+
+          $extractDir = Join-Path $env:RUNNER_TEMP "winghostty-release-verify"
+          if (Test-Path -LiteralPath $extractDir) {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $extractDir
+          foreach ($relative in @("winghostty/winghostty.com", "winghostty/winghostty.exe", "winghostty/ghostty-vt.dll")) {
+            $path = Join-Path $extractDir $relative
+            Assert-ReleaseSignature -Path $path -Label $relative
+          }
+
       - name: Generate package manager metadata
         shell: pwsh
         run: >

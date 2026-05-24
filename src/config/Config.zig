@@ -1060,9 +1060,12 @@ palette: Palette = .{},
 ///     reasonable for a good looking blur. Higher blur intensities may
 ///     cause strange rendering and performance issues.
 ///
-/// In the Windows-only fork this toggles the host window's system backdrop
-/// blur when `background-opacity` is less than 1. The numeric blur intensity
-/// is currently treated as enabled/disabled rather than a tunable radius.
+/// In the Windows-only fork this toggles the host window's DWM system
+/// backdrop when `background-opacity` is less than 1 and the OS supports
+/// `DWMWA_SYSTEMBACKDROP_TYPE` (Windows 11 22H2 / build 22621 and newer).
+/// The numeric blur intensity is currently treated as enabled/disabled
+/// rather than a tunable radius. On older Windows builds this remains a
+/// renderer-only transparent background with no system backdrop.
 @"background-blur": BackgroundBlur = .false,
 
 /// The opacity level (opposite of transparency) of an unfocused split.
@@ -3214,9 +3217,9 @@ term: []const u8 = "xterm-ghostty",
 ///  * `check` - Check for updates and notify the user if an update is
 ///    available, but do not automatically install the update.
 ///  * `download` - Check for updates, automatically download the update,
-///    notify the user, but do not automatically install the update.
-///    Windows stages only signed, checksum-matching installer releases and
-///    still requires the user to install manually.
+///    notify the user, but do not automatically apply the update. Windows
+///    stages only signed, checksum-matching installer releases and can launch
+///    the verified staged installer after a user click.
 @"auto-update": ?AutoUpdate = null,
 
 /// The release channel to use for auto-updates.

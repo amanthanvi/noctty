@@ -263,9 +263,23 @@ Write-Status -Label "Upstream base" -Value $upstreamBaseVersion
 Write-Status -Label "First fork patch" -Value $firstForkPatch
 
 if ($RequireSigning) {
-    Assert-EnvPresent -Name "WINDOWS_CODESIGN_PFX_BASE64"
+    $hasPfxBase64 = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_BASE64"
+    $hasPfxPath = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PATH"
+    if ($hasPfxBase64 -and $hasPfxPath) {
+        throw "Set only one of WINDOWS_CODESIGN_PFX_BASE64 or WINDOWS_CODESIGN_PFX_PATH."
+    }
+    if (-not $hasPfxBase64 -and -not $hasPfxPath) {
+        throw "Required code-signing certificate was not configured: set WINDOWS_CODESIGN_PFX_BASE64 or WINDOWS_CODESIGN_PFX_PATH."
+    }
+    if ($hasPfxPath) {
+        $pfxPath = Get-EnvValue -Name "WINDOWS_CODESIGN_PFX_PATH"
+        if (-not (Test-Path -LiteralPath $pfxPath)) {
+            throw "WINDOWS_CODESIGN_PFX_PATH does not exist: $pfxPath"
+        }
+    }
     Assert-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PASSWORD"
     Write-Status -Label "Code signing" -Value "enabled"
+    Write-Status -Label "Signing source" -Value $(if ($hasPfxBase64) { "base64 secret" } else { "PFX path" })
     Write-Status -Label "Timestamp URL" -Value $timestampUrl
 } else {
     Write-Status -Label "Code signing" -Value "not required"

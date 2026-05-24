@@ -119,8 +119,8 @@ Windows Terminal's chrome is a custom-frame Win32 window with WM_NCCALCSIZE zero
 
 ### Build-Number Gates
 - **22621+ (Win11 SV2):** DWMWA_SYSTEMBACKDROP_TYPE is publicly supported and functional.
-- **22000 (Win11 RTM):** WT's code notes a "slightly different API surface" existed but the current codebase only uses the SV2 API; the call silently fails on older builds.
-- **Windows 10:** API returns error and does nothing. No fallback; the window uses opaque solid color.
+- **22000-22620 (Win11 RTM / 22H2 pre-release):** WT's code notes a "slightly different API surface" existed but the current codebase only uses the SV2 API. Winghostty skips `DWMWA_SYSTEMBACKDROP_TYPE` on these builds.
+- **Windows 10:** Winghostty skips `DWMWA_SYSTEMBACKDROP_TYPE`; the window uses opaque solid color.
 
 ### Fallback
 - No Mica: titlebar painted with solid background brush color via GDI `FillRect` + `BeginBufferedPaint` in `_OnPaint()`.

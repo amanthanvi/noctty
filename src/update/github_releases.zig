@@ -23,6 +23,7 @@ pub const State = struct {
     staged_installer_path: ?[]u8 = null,
     staged_sha256: ?[]u8 = null,
     staged_at: i64 = 0,
+    apply_requested_at: i64 = 0,
 
     pub fn deinit(self: *State, alloc: Allocator) void {
         if (self.last_seen_version) |value| alloc.free(value);
@@ -164,6 +165,12 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
             else => {},
         }
     }
+    if (root.get("apply_requested_at")) |value| {
+        switch (value) {
+            .integer => |integer| state.apply_requested_at = @intCast(integer),
+            else => {},
+        }
+    }
 
     return state;
 }
@@ -194,6 +201,8 @@ pub fn saveState(path: []const u8, state: *const State) !void {
     try writeOptionalJsonString(writer, state.staged_sha256);
     try writer.writeAll(",\"staged_at\":");
     try writer.print("{d}", .{state.staged_at});
+    try writer.writeAll(",\"apply_requested_at\":");
+    try writer.print("{d}", .{state.apply_requested_at});
     try writer.writeAll("}");
     try writer.flush();
 }
@@ -309,6 +318,7 @@ pub fn stageWindowsInstall(
     replaceOptionalOwned(alloc, &state.staged_installer_path, try alloc.dupe(u8, installer_path));
     replaceOptionalOwned(alloc, &state.staged_sha256, try alloc.dupe(u8, sha256_hex));
     state.staged_at = std.time.timestamp();
+    state.apply_requested_at = 0;
     try saveState(state_path, &state);
 
     return .{
@@ -316,6 +326,50 @@ pub fn stageWindowsInstall(
         .installer_path = installer_path,
         .sha256_hex = sha256_hex,
     };
+}
+
+pub fn verifyStagedWindowsInstall(
+    alloc: Allocator,
+    state_path: []const u8,
+) !StagedWindowsInstall {
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+
+    const version_text = state.staged_version orelse return error.NoStagedWindowsInstall;
+    const installer_path = state.staged_installer_path orelse return error.NoStagedWindowsInstall;
+    const sha256_hex = state.staged_sha256 orelse return error.NoStagedWindowsInstall;
+    if (!std.fs.path.isAbsolute(installer_path)) return error.InvalidStagedInstallerPath;
+
+    const expected_digest = try parseSha256Hex(sha256_hex);
+    const actual_digest = try sha256File(installer_path);
+    if (!std.mem.eql(u8, &expected_digest, &actual_digest)) return error.InstallerChecksumMismatch;
+
+    if (builtin.os.tag == .windows) {
+        try verifyAuthenticodeSignature(installer_path);
+    } else {
+        return error.AuthenticodeRequiresWindows;
+    }
+
+    return .{
+        .version_text = try alloc.dupe(u8, version_text),
+        .installer_path = try alloc.dupe(u8, installer_path),
+        .sha256_hex = try alloc.dupe(u8, sha256_hex),
+    };
+}
+
+pub fn recordStagedApplyRequested(alloc: Allocator, state_path: []const u8, now: i64) !void {
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+
+    if (state.staged_version == null or
+        state.staged_installer_path == null or
+        state.staged_sha256 == null)
+    {
+        return error.NoStagedWindowsInstall;
+    }
+
+    state.apply_requested_at = if (now > 0) now else std.time.timestamp();
+    try saveState(state_path, &state);
 }
 
 fn writeOptionalJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
@@ -743,6 +797,7 @@ test "state persists staged windows install metadata with escaped path" {
         .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\winghostty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
         .staged_at = 456,
+        .apply_requested_at = 789,
     };
     defer state.deinit(alloc);
 
@@ -752,9 +807,57 @@ test "state persists staged windows install metadata with escaped path" {
 
     try std.testing.expectEqual(@as(i64, 123), loaded.last_checked_at);
     try std.testing.expectEqual(@as(i64, 456), loaded.staged_at);
+    try std.testing.expectEqual(@as(i64, 789), loaded.apply_requested_at);
     try std.testing.expectEqualStrings("1.3.101", loaded.staged_version.?);
     try std.testing.expectEqualStrings(state.staged_installer_path.?, loaded.staged_installer_path.?);
     try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
+}
+
+test "record staged apply request requires staged installer metadata" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    defer alloc.free(state_path);
+
+    var state: State = .{
+        .last_seen_version = try alloc.dupe(u8, "1.3.101"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    try std.testing.expectError(
+        error.NoStagedWindowsInstall,
+        recordStagedApplyRequested(alloc, state_path, 123),
+    );
+}
+
+test "record staged apply request persists timestamp" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(tmp_path);
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    defer alloc.free(state_path);
+
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.101"),
+        .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\winghostty-1.3.101-windows-x64-setup.exe"),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    try recordStagedApplyRequested(alloc, state_path, 1234);
+
+    var loaded = try loadState(alloc, state_path);
+    defer loaded.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 1234), loaded.apply_requested_at);
 }
 
 test "state JSON writer escapes ASCII control characters" {

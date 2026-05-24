@@ -589,11 +589,10 @@ const DWMWA_CAPTION_COLOR: DWORD = 35;
 const DWMWA_TEXT_COLOR: DWORD = 36;
 const DWMWA_SYSTEMBACKDROP_TYPE: DWORD = 38;
 const DWMSBT_NONE: u32 = 1;
-const DWMSBT_MAINWINDOW: u32 = 2;
 /// Mica-tabbed backdrop for main windows with visible tab strips.
-/// Win11 22H2+ (build ≥ 22621); older Win11 (≥ 22000) accepts
-/// `DWMSBT_MAINWINDOW` but not this variant.
+/// Win11 22H2+ (build >= 22621).
 const DWMSBT_TABBEDWINDOW: u32 = 4;
+const OS_BUILD_WIN10_22H2: u32 = 19045;
 const OS_BUILD_WIN11_21H2: u32 = 22000;
 const OS_BUILD_WIN11_22H2: u32 = 22621;
 const DC_BRUSH: i32 = 18;
@@ -1034,8 +1033,8 @@ const RTL_OSVERSIONINFOW = extern struct {
 extern "ntdll" fn RtlGetVersion(lpVersionInformation: *RTL_OSVERSIONINFOW) callconv(.winapi) i32;
 
 /// Probe the Windows build number once; cache on `App.os_build`. Build
-/// 22000+ is Win11 (integrated-titlebar / Mica / Snap Layouts); <22000
-/// is Win10 (native caption). Failure returns 0 so downstream gates
+/// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
+/// `DWMWA_SYSTEMBACKDROP_TYPE`. Failure returns 0 so downstream gates
 /// fall through to Win10 behaviour (the safe default).
 fn probeWindowsBuild() u32 {
     var info: RTL_OSVERSIONINFOW = .{
@@ -1238,6 +1237,7 @@ const search_results_pending = "Searching";
 const search_results_none = "No matches";
 const opengl32_name: [*:0]const u8 = "opengl32.dll";
 const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
+const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
 
 var opengl32_module: HMODULE = null;
 
@@ -1260,6 +1260,7 @@ const GlobalHotkeySpec = struct {
 const RegisteredGlobalHotkey = struct {
     id: i32,
     trigger: input.Binding.Trigger,
+    spec: GlobalHotkeySpec,
     binding: *const input.Binding.Set.Value,
 };
 
@@ -2214,7 +2215,7 @@ const UpdateNotice = struct {
             .message_text = if (staged)
                 try std.fmt.allocPrint(
                     alloc,
-                    "Update downloaded and verified: winghostty {s} is staged. Open Release to install.",
+                    "Update downloaded and verified: winghostty {s} is ready to install.",
                     .{version_text},
                 )
             else
@@ -2327,9 +2328,10 @@ pub const App = struct {
     /// touch it on the way down.
     com_initialized: bool = false,
     /// Kernel build number from `RtlGetVersion`. 0 if probe failed.
-    /// 22000 = Win11 21H2 (first Mica build); 22621 = Win11 22H2
-    /// (Snap Layouts; `DWMSBT_TABBEDWINDOW`). Future chrome gates
-    /// read this directly; no runtime config flag, per §12 Q1.
+    /// 22000 = Win11 21H2; 22621 = Win11 22H2
+    /// (`DWMWA_SYSTEMBACKDROP_TYPE` / `DWMSBT_TABBEDWINDOW`).
+    /// Future chrome gates read this directly; no runtime config flag,
+    /// per §12 Q1.
     os_build: u32 = 0,
     /// Top-level switch for the integrated-titlebar path
     /// (`WM_NCCALCSIZE` / `WM_NCHITTEST` state machine). Derived
@@ -3442,16 +3444,29 @@ pub const App = struct {
             if (!generic.flags.global) continue;
 
             const spec = hotkeySpecForTrigger(entry.key_ptr.*) orelse {
-                log.debug("skipping unsupported win32 global keybind", .{});
+                log.warn("skipping unsupported win32 global hotkey trigger={f}", .{entry.key_ptr.*});
                 continue;
             };
 
+            if (self.registeredGlobalHotkeyForSpec(spec)) |existing| {
+                log.warn("skipping duplicate win32 global hotkey trigger={f} conflicts_with={f} mods=0x{x} vk=0x{x}", .{
+                    entry.key_ptr.*,
+                    existing.trigger,
+                    spec.modifiers,
+                    spec.vk,
+                });
+                continue;
+            }
+
             if (RegisterHotKey(null, next_id, spec.modifiers, spec.vk) == 0) {
-                log.warn("failed to register win32 global hotkey id={} mods=0x{x} vk=0x{x} err={}", .{
+                const err = windows.kernel32.GetLastError();
+                log.warn("failed to register win32 global hotkey trigger={f} id={} mods=0x{x} vk=0x{x} err={} reason={s}", .{
+                    entry.key_ptr.*,
                     next_id,
                     spec.modifiers,
                     spec.vk,
-                    windows.kernel32.GetLastError(),
+                    err,
+                    hotkeyRegistrationFailureReason(err),
                 });
                 continue;
             }
@@ -3459,10 +3474,18 @@ pub const App = struct {
             try self.global_hotkeys.append(self.core_app.alloc, .{
                 .id = next_id,
                 .trigger = entry.key_ptr.*,
+                .spec = spec,
                 .binding = entry.value_ptr,
             });
             next_id += 1;
         }
+    }
+
+    fn registeredGlobalHotkeyForSpec(self: *const App, spec: GlobalHotkeySpec) ?RegisteredGlobalHotkey {
+        for (self.global_hotkeys.items) |hotkey| {
+            if (hotkeySpecEql(hotkey.spec, spec)) return hotkey;
+        }
+        return null;
     }
 
     fn scheduleGlobalHotkeySync(self: *App) void {
@@ -3595,11 +3618,26 @@ pub const App = struct {
 
     fn openUpdateNotice(self: *App) !void {
         const notice = self.update_notice orelse return;
+        if (notice.staged) {
+            if (!self.canApplyStagedUpdate()) {
+                if (notice.release_url) |url| {
+                    try self.openUrl(url);
+                    return;
+                }
+            }
+            try self.applyStagedUpdate();
+            return;
+        }
         try self.openUrl(notice.release_url.?);
     }
 
     fn dismissUpdateNotice(self: *App) void {
         const notice = self.update_notice orelse return;
+        if (notice.staged) {
+            self.clearUpdateNotice();
+            return;
+        }
+
         const version_text = notice.version_text orelse {
             self.clearUpdateNotice();
             return;
@@ -3616,6 +3654,82 @@ pub const App = struct {
             log.warn("failed to record updater dismissal err={}", .{err});
         };
         self.clearUpdateNotice();
+    }
+
+    fn applyStagedUpdate(self: *App) !void {
+        const state_path = try updatepkg.defaultStatePath(self.core_app.alloc);
+        defer self.core_app.alloc.free(state_path);
+
+        var staged = updatepkg.verifyStagedWindowsInstall(self.core_app.alloc, state_path) catch |err| {
+            self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return err;
+        };
+        defer staged.deinit(self.core_app.alloc);
+
+        const install_dir = currentInstallDir(self.core_app.alloc) catch |err| {
+            self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return err;
+        };
+        defer self.core_app.alloc.free(install_dir);
+
+        if (!isInstallerManagedInstallDir(install_dir)) {
+            self.showUpdateInfo(updateApplyFailureMessage(error.PortableInstallUpdateApplyUnsupported)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return error.PortableInstallUpdateApplyUnsupported;
+        }
+
+        const stage_dir = std.fs.path.dirname(staged.installer_path) orelse return error.InvalidStagedInstallerPath;
+        const logs_dir = try std.fs.path.join(self.core_app.alloc, &.{ stage_dir, "logs" });
+        defer self.core_app.alloc.free(logs_dir);
+        try std.fs.cwd().makePath(logs_dir);
+
+        const log_path = try std.fs.path.join(self.core_app.alloc, &.{ logs_dir, "apply.log" });
+        defer self.core_app.alloc.free(log_path);
+
+        const params = try buildInstallerApplyArgs(self.core_app.alloc, install_dir, log_path);
+        defer self.core_app.alloc.free(params);
+
+        const installer_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, staged.installer_path);
+        defer self.core_app.alloc.free(installer_w);
+        const params_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, params);
+        defer self.core_app.alloc.free(params_w);
+        const stage_dir_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, stage_dir);
+        defer self.core_app.alloc.free(stage_dir_w);
+
+        const result = ShellExecuteW(
+            null,
+            shell_runas,
+            installer_w.ptr,
+            params_w.ptr,
+            stage_dir_w.ptr,
+            SW_SHOW,
+        );
+        if (@intFromPtr(result) <= 32) {
+            self.showUpdateInfo(updateApplyFailureMessage(error.UpdateApplyLaunchFailed)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return error.UpdateApplyLaunchFailed;
+        }
+
+        updatepkg.recordStagedApplyRequested(self.core_app.alloc, state_path, 0) catch |err| {
+            log.warn("failed to record updater apply request after launch err={}", .{err});
+        };
+
+        self.stopQuitTimer();
+        self.running = false;
+        self.destroyAllWindows();
+        if (self.windows.items.len == 0) PostQuitMessage(0);
+    }
+
+    fn canApplyStagedUpdate(self: *App) bool {
+        const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
+        defer self.core_app.alloc.free(install_dir);
+        return isInstallerManagedInstallDir(install_dir);
     }
 
     fn showUpdateInfo(self: *App, message: []const u8) !void {
@@ -6718,6 +6832,76 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
     );
 }
 
+fn updateApplyFailureMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NoStagedWindowsInstall => "No verified staged update is available. Run Check for Updates again.",
+        error.InvalidStagedInstallerPath => "The staged update path is invalid. Run Check for Updates again.",
+        error.InvalidInstallPath => "The current install path is invalid. The staged update was not launched.",
+        error.InstallerChecksumMismatch => "The staged update no longer matches its verified checksum. Run Check for Updates again.",
+        error.InvalidAuthenticodeSignature => "The staged update signature is no longer trusted. Run Check for Updates again.",
+        error.AuthenticodeRequiresWindows => "The staged update can only be applied on Windows.",
+        error.SignatureVerifierUnavailable => "Windows signature verification is unavailable. The staged update was not launched.",
+        error.PortableInstallUpdateApplyUnsupported => "This portable install cannot launch the staged installer automatically. Download and run the installer manually.",
+        error.UpdateApplyLaunchFailed => "Windows could not launch the staged installer. The update was not applied.",
+        else => "The staged update could not be verified. Run Check for Updates again.",
+    };
+}
+
+fn currentInstallDir(alloc: Allocator) ![]u8 {
+    const exe_path = try std.fs.selfExePathAlloc(alloc);
+    errdefer alloc.free(exe_path);
+    const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
+    return alloc.realloc(exe_path, dir.len);
+}
+
+fn isInstallerManagedInstallDir(install_dir: []const u8) bool {
+    var dir = std.fs.openDirAbsolute(install_dir, .{ .iterate = true }) catch return false;
+    defer dir.close();
+
+    var has_uninstaller_exe = false;
+    var has_uninstaller_dat = false;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        has_uninstaller_exe = has_uninstaller_exe or isInnoUninstallerFileName(entry.name, ".exe");
+        has_uninstaller_dat = has_uninstaller_dat or isInnoUninstallerFileName(entry.name, ".dat");
+        if (has_uninstaller_exe and has_uninstaller_dat) return true;
+    }
+
+    return false;
+}
+
+fn isInnoUninstallerFileName(name: []const u8, extension: []const u8) bool {
+    return std.ascii.startsWithIgnoreCase(name, "unins") and
+        name.len > "unins".len + extension.len and
+        std.ascii.eqlIgnoreCase(name[name.len - extension.len ..], extension);
+}
+
+fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS");
+    try appendInnoQuotedArg(alloc, &buf, " /DIR=", install_dir);
+    try appendInnoQuotedArg(alloc, &buf, " /LOG=", log_path);
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn appendInnoQuotedArg(
+    alloc: Allocator,
+    buf: *std.ArrayList(u8),
+    prefix: []const u8,
+    value: []const u8,
+) !void {
+    try buf.appendSlice(alloc, prefix);
+    try buf.append(alloc, '"');
+    for (value) |c| {
+        if (c == '"') try buf.append(alloc, '"');
+        try buf.append(alloc, c);
+    }
+    try buf.append(alloc, '"');
+}
+
 fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckCompletion) void {
     if (PostThreadMessageW(
         ui_thread_id,
@@ -9234,7 +9418,7 @@ const Host = struct {
         if (self.app.update_notice == null) return false;
         if (pointInRect(point, self.update_open_rect)) {
             self.app.openUpdateNotice() catch |err| {
-                log.warn("failed to open release URL err={}", .{err});
+                log.warn("failed to open update notice err={}", .{err});
             };
             return true;
         }
@@ -13006,11 +13190,14 @@ const Host = struct {
         if (paint_top) self.clearUpdateActionRects();
         if (paint_top and self.overlay_mode == .none and !inspector_panel_visible and self.banner_text == null) {
             if (self.app.update_notice) |notice| {
-                const open_label = std.unicode.utf8ToUtf16LeStringLiteral("Open Release");
+                const open_label = if (notice.staged)
+                    std.unicode.utf8ToUtf16LeStringLiteral("Install")
+                else
+                    std.unicode.utf8ToUtf16LeStringLiteral("Open Release");
                 const dismiss_label = std.unicode.utf8ToUtf16LeStringLiteral("Dismiss");
                 const button_height = self.scaled(22);
                 const dismiss_width = self.scaled(72);
-                const open_width = self.scaled(102);
+                const open_width = if (notice.staged) self.scaled(86) else self.scaled(102);
                 const button_gap = self.scaled(8);
                 const dismiss_rect = RECT{
                     .left = client_rect.right - dismiss_width - self.scaled(16),
@@ -13036,7 +13223,6 @@ const Host = struct {
                 };
 
                 _ = SetTextColor(hdc, theme.info_fg);
-                _ = notice;
                 if (self.cached_banner_w) |banner_w| {
                     drawTextWz(
                         hdc,
@@ -14117,6 +14303,16 @@ fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
         config.@"background-blur".win32SystemBackdropEnabled();
 }
 
+fn supportsDwmSystemBackdropAttribute(os_build: u32) bool {
+    return os_build >= OS_BUILD_WIN11_22H2;
+}
+
+fn systemBackdropTypeForBuild(config: *const configpkg.Config, os_build: u32) u32 {
+    if (!shouldUseSystemBackdrop(config)) return DWMSBT_NONE;
+    if (!supportsDwmSystemBackdropAttribute(os_build)) return DWMSBT_NONE;
+    return DWMSBT_TABBEDWINDOW;
+}
+
 fn configuredHostWindowPosition(config: *const configpkg.Config) ?struct { x: i32, y: i32 } {
     const x = config.@"window-position-x" orelse return null;
     const y = config.@"window-position-y" orelse return null;
@@ -14159,22 +14355,13 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
     const text_color = titlebarTextColor(theme, config);
     _ = DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, @ptrCast(&caption_color), @sizeOf(u32));
     _ = DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, @ptrCast(&text_color), @sizeOf(u32));
-    // Toggle system backdrop blur (Win11+; returns E_INVALIDARG on older
-    // builds, discarded). Main-window backdrop picks the richest variant
-    // the build supports:
-    //   * Win11 22H2+ (build ≥ 22621): `DWMSBT_TABBEDWINDOW` for the Mica-
-    //     with-tabs look that the new chrome expects. Older Win11 can't
-    //     render `TABBEDWINDOW` (`DwmSetWindowAttribute` returns
-    //     `E_INVALIDARG`); probing blindly there would spam the debug
-    //     log on every theme apply, so the build-number gate filters.
-    //   * Win11 < 22H2: `DWMSBT_MAINWINDOW` (plain Mica).
-    //   * Win10 / older / `background-opacity = 1.0` / blur disabled:
-    //     `DWMSBT_NONE`.
-    const backdrop_type: u32 = if (shouldUseSystemBackdrop(config)) blk: {
-        if (os_build >= OS_BUILD_WIN11_22H2) break :blk DWMSBT_TABBEDWINDOW;
-        break :blk DWMSBT_MAINWINDOW;
-    } else DWMSBT_NONE;
-    _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
+    // Toggle system backdrop blur through DWMWA_SYSTEMBACKDROP_TYPE. That
+    // attribute is supported starting with Windows 11 22H2 (build 22621);
+    // older builds skip the call entirely.
+    if (supportsDwmSystemBackdropAttribute(os_build)) {
+        const backdrop_type: u32 = systemBackdropTypeForBuild(config, os_build);
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
+    }
 }
 
 /// Linear-interpolate two `COLORREF`-shaped values (`0x00BBGGRR` on
@@ -19123,6 +19310,19 @@ fn hotkeySpecForTrigger(trigger: input.Binding.Trigger) ?GlobalHotkeySpec {
     return .{
         .modifiers = hotkeyModifiers(mods),
         .vk = vk,
+    };
+}
+
+fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
+    return a.modifiers == b.modifiers and a.vk == b.vk;
+}
+
+fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
+    return switch (err) {
+        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another winghostty instance",
+        .ACCESS_DENIED => "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
+        .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
+        else => "unknown Win32 RegisterHotKey failure",
     };
 }
 
@@ -27174,6 +27374,39 @@ test "win32 hotkeySpecForTrigger rejects unsupported catch-all triggers" {
     }) == null);
 }
 
+test "win32 hotkeySpecEql detects duplicate resolved triggers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const physical = hotkeySpecForTrigger(.{
+        .key = .{ .physical = .backquote },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const unicode = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '`' },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const shifted = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '~' },
+        .mods = .{ .ctrl = true },
+    }).?;
+
+    try std.testing.expect(hotkeySpecEql(physical, unicode));
+    try std.testing.expect(!hotkeySpecEql(physical, shifted));
+}
+
+test "win32 hotkeyRegistrationFailureReason names conflicts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "already registered by another app or another winghostty instance",
+        hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
+    );
+    try std.testing.expectEqualStrings(
+        "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
+        hotkeyRegistrationFailureReason(.ACCESS_DENIED),
+    );
+}
+
 test "win32 quitTimerDelayMs clamps to at least one second" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -27201,6 +27434,25 @@ test "win32 shouldUseSystemBackdrop requires opacity and blur" {
 
     config.@"background-blur" = .true;
     try std.testing.expect(shouldUseSystemBackdrop(&config));
+}
+
+test "win32 systemBackdropTypeForBuild gates unsupported builds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var config: configpkg.Config = .{};
+    config.@"background-opacity" = 0.85;
+    config.@"background-blur" = .true;
+
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN10_22H2));
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_21H2));
+    try std.testing.expect(supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_22H2));
+
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN10_22H2));
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_21H2));
+    try std.testing.expectEqual(DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
+
+    config.@"background-blur" = .false;
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
 }
 
 test "win32 configuredHostWindowPosition requires both coordinates" {
@@ -30229,6 +30481,43 @@ test "win32 surfaceLayoutRuntimeSync only trips on visibility or pane rect chang
     const rect_only = surfaceLayoutRuntimeSync(false, true);
     try std.testing.expect(rect_only.scrollbar_refresh);
     try std.testing.expect(rect_only.core_size_sync);
+}
+
+test "win32 installer apply args preserve install dir and log path" {
+    const alloc = std.testing.allocator;
+    const args = try buildInstallerApplyArgs(
+        alloc,
+        "C:\\Program Files\\winghostty",
+        "C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log",
+    );
+    defer alloc.free(args);
+
+    try std.testing.expect(std.mem.indexOf(u8, args, "/VERYSILENT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/SUPPRESSMSGBOXES") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/NORESTART") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/CLOSEAPPLICATIONS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/RESTARTAPPLICATIONS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\winghostty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/LOG=\"C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log\"") != null);
+}
+
+test "win32 installer apply args double embedded quotes" {
+    const alloc = std.testing.allocator;
+    const args = try buildInstallerApplyArgs(
+        alloc,
+        "C:\\Program Files\\wing\"hostty",
+        "C:\\logs\\apply.log",
+    );
+    defer alloc.free(args);
+
+    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\wing\"\"hostty\"") != null);
+}
+
+test "win32 installer apply guard recognizes Inno uninstaller markers" {
+    try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
+    try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
+    try std.testing.expect(!isInnoUninstallerFileName("winghostty.exe", ".exe"));
+    try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 }
 
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {

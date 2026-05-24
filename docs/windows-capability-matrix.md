@@ -24,6 +24,7 @@ Last reviewed: 2026-05-24.
 | [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs surface. On Windows the config file lives at `%LOCALAPPDATA%\winghostty\config.ghostty`, and live reload is available via `Ctrl+Shift+,`. |
 | [Custom keybindings](https://ghostty.org/docs/config/keybind) | Same `keybind = trigger=action` grammar and `+list-keybinds` flow. Default bindings are Windows-native rather than macOS/Linux defaults. |
 | [Color Theme](https://ghostty.org/docs/features/theme) | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows. |
+| [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference) | Transparent terminal backgrounds work on Windows and can be toggled live. |
 | [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference) | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface used by terminal apps. |
 | [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features) | Native Win32 windows, tabs, and splits ship today in winghostty. |
 
@@ -34,8 +35,9 @@ Last reviewed: 2026-05-24.
 | [Shell integration](https://ghostty.org/docs/features/shell-integration) | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`. PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish status, and PSReadLine command metadata when available. PowerShell now wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but it does not auto-install remote terminfo; uncached hosts use `xterm-256color`. `cmd.exe` remains a plain fallback shell without automatic shell integration. |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference) | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`. |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | Windows implements the action as a local sensitive-input indicator and cursor/status/title state. It does not use a Windows OS API equivalent to macOS Secure Keyboard Entry and does not block system-wide keyboard hooks. |
-| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
+| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases and, for installer-managed installs, launch the verified staged installer after a user click. |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference) | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored. |
+| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference) | On Windows 11 22H2 or newer, `background-opacity < 1` plus enabled `background-blur` requests the DWM tabbed system backdrop. On Windows 10 and Windows 11 21H2, the option remains accepted but no DWM backdrop is requested. Numeric blur radii are treated as enabled/disabled, not as tunable blur strength. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
 | OSC 52 primary/selection clipboard selectors | Windows exposes one native clipboard. OSC 52 writes using selectors `c`, `s`, and `p` all target the standard Windows clipboard. OSC 52 read replies still echo the requested selector (`c`, `s`, or `p`) so terminal clients can correlate the response. |
 
@@ -43,7 +45,7 @@ Last reviewed: 2026-05-24.
 
 | Ghostty docs surface | winghostty note |
 | --- | --- |
-| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, a matching installer SHA-256, and a valid Authenticode signature. It does not install automatically. |
+| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with `SHA256SUMS.txt`, a matching installer SHA-256, and a valid Authenticode signature. Installer apply is user-initiated and may prompt for UAC. Portable ZIP apply is not implemented. |
 
 ## Windows-Specific
 
