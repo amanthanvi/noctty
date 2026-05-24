@@ -151,6 +151,34 @@ pub fn snapshotTerminalVisiblePlainText(
     return snapshotFromTextAndPins(alloc, &text_writer, &pin_map);
 }
 
+pub fn visibleRangeInDocument(
+    document: *const TerminalTextSnapshot,
+    visible: *const TerminalTextSnapshot,
+) ?OffsetRange {
+    if (visible.text.len == 0) return .{ .start = 0, .end = 0 };
+    if (visible.pin_map.len > document.pin_map.len) return null;
+
+    const max_start = document.pin_map.len - visible.pin_map.len;
+    for (0..max_start + 1) |start| {
+        if (!pinSlicesEqual(
+            document.pin_map[start .. start + visible.pin_map.len],
+            visible.pin_map,
+        )) continue;
+
+        return .{ .start = start, .end = start + visible.text.len };
+    }
+
+    return null;
+}
+
+fn pinSlicesEqual(lhs: []const terminal.Pin, rhs: []const terminal.Pin) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |a, b| {
+        if (a.node != b.node or a.x != b.x or a.y != b.y or a.garbage != b.garbage) return false;
+    }
+    return true;
+}
+
 fn snapshotFromTextAndPins(
     alloc: std.mem.Allocator,
     text_writer: *std.Io.Writer.Allocating,
@@ -332,6 +360,33 @@ test "snapshotTerminalVisiblePlainText excludes scrollback rows" {
     try std.testing.expect(std.mem.indexOf(u8, document.text, "line1") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible.text, "line1") == null);
     try std.testing.expect(std.mem.indexOf(u8, visible.text, "line5") != null);
+}
+
+test "visibleRangeInDocument maps viewport pins into document offsets" {
+    var t = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 3,
+        .max_scrollback = 10_000,
+    });
+    defer t.deinit(std.testing.allocator);
+
+    try t.printString("line1\nline2\nline3\nline4\nline5\n");
+
+    var document = try snapshotTerminalPlainText(
+        std.testing.allocator,
+        &t,
+    );
+    defer document.deinit();
+
+    var visible = try snapshotTerminalVisiblePlainText(
+        std.testing.allocator,
+        &t,
+    );
+    defer visible.deinit();
+
+    const range = visibleRangeInDocument(&document, &visible).?;
+    try std.testing.expect(range.start > 0);
+    try std.testing.expectEqualStrings(visible.text, document.text[range.start..range.end]);
 }
 
 test "snapshotTerminalPlainText preserves blank rows in line map" {

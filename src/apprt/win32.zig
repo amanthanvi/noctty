@@ -19670,6 +19670,7 @@ const TerminalUiaContext = struct {
             .name = terminalUiaName,
             .value = terminalUiaValue,
             .visible_value = terminalUiaVisibleValue,
+            .visible_range = terminalUiaVisibleRange,
             .focused = terminalUiaFocused,
         };
     }
@@ -19722,6 +19723,32 @@ const TerminalUiaContext = struct {
         defer snapshot.deinit();
 
         return snapshot.takeText();
+    }
+
+    fn terminalUiaVisibleRange(ctx: *anyopaque, alloc: Allocator) !win32_uia.OffsetRange {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return .{ .start = 0, .end = 0 };
+        if (!surface.core_initialized) return .{ .start = 0, .end = 0 };
+
+        surface.core_surface.renderer_state.mutex.lock();
+        defer surface.core_surface.renderer_state.mutex.unlock();
+
+        var document = try win32_uia.snapshotTerminalPlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer document.deinit();
+
+        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer visible.deinit();
+
+        return win32_uia.visibleRangeInDocument(&document, &visible) orelse .{ .start = 0, .end = 0 };
     }
 
     fn terminalUiaFocused(ctx: *anyopaque) bool {

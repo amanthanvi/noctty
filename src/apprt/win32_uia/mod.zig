@@ -32,6 +32,7 @@ pub const UiaRootObjectId = com.UiaRootObjectId;
 pub const IRawElementProviderSimple = com.IRawElementProviderSimple;
 pub const snapshotTerminalPlainText = text.snapshotTerminalPlainText;
 pub const snapshotTerminalVisiblePlainText = text.snapshotTerminalVisiblePlainText;
+pub const visibleRangeInDocument = text.visibleRangeInDocument;
 
 /// Handle `WM_GETOBJECT` for the main host HWND. Returns `null` if the
 /// caller should fall through to `DefWindowProcW`; otherwise returns

@@ -59,6 +59,7 @@ pub const TerminalState = struct {
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
     value: *const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8,
     visible_value: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8 = null,
+    visible_range: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!terminal_text.OffsetRange = null,
     focused: *const fn (ctx: *anyopaque) bool,
 };
 
@@ -605,11 +606,8 @@ pub const TerminalProvider = struct {
         defer self.alloc.free(visible_text);
 
         const visible_offset = self.byteOffsetForScreenPoint(visible_text, point);
-        const document_offset = documentByteOffsetForVisibleOffset(
-            document_text,
-            visible_text,
-            visible_offset,
-        );
+        const visible_range = self.visibleRange(document_text.len, visible_text.len) catch return com.E_OUTOFMEMORY;
+        const document_offset = visibleOffsetToDocumentOffset(document_text, visible_range, visible_offset);
         const hr = self.createRangeFromText(document_text, .{ .start = document_offset, .end = document_offset }, out);
         if (hr == com.S_OK) document_text_owned = false;
         return hr;
@@ -621,6 +619,21 @@ pub const TerminalProvider = struct {
             std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
             return err;
         };
+    }
+
+    fn visibleRange(
+        self: *TerminalProvider,
+        document_len: usize,
+        visible_len: usize,
+    ) !terminal_text.OffsetRange {
+        const raw_range = if (self.state.visible_range) |range_fn|
+            try range_fn(self.state.ctx, self.alloc)
+        else
+            terminal_text.OffsetRange{ .start = 0, .end = visible_len };
+
+        const start = @min(raw_range.start, document_len);
+        const end = @min(@max(start, raw_range.end), document_len);
+        return .{ .start = start, .end = end };
     }
 
     fn byteOffsetForScreenPoint(self: *TerminalProvider, text: []const u8, point: com.UiaPoint) usize {
@@ -798,6 +811,7 @@ const TerminalTextRangeProvider = struct {
         const other_range = other orelse return com.E_POINTER;
         if (other_range.vtbl != &vtbl) return com.E_INVALIDARG;
         const rhs = fromBase(other_range);
+        if (self.parent != rhs.parent) return com.E_INVALIDARG;
         const lhs_value = if (endpoint == com.TextPatternRangeEndpoint_End) self.range.end else self.range.start;
         const rhs_value = if (target_endpoint == com.TextPatternRangeEndpoint_End) rhs.range.end else rhs.range.start;
         out.* = if (lhs_value < rhs_value) -1 else if (lhs_value > rhs_value) 1 else 0;
@@ -1077,12 +1091,15 @@ fn utf8BoundaryAtOrBefore(text: []const u8, offset: usize) usize {
     return index;
 }
 
-fn documentByteOffsetForVisibleOffset(document_text: []const u8, visible_text: []const u8, visible_offset: usize) usize {
+fn visibleOffsetToDocumentOffset(
+    document_text: []const u8,
+    visible_range: terminal_text.OffsetRange,
+    visible_offset: usize,
+) usize {
     if (document_text.len == 0) return 0;
-    if (visible_text.len == 0) return 0;
 
-    const visible_start = std.mem.lastIndexOf(u8, document_text, visible_text) orelse 0;
-    const raw_offset = @min(document_text.len, visible_start + @min(visible_offset, visible_text.len));
+    const visible_len = visible_range.end - visible_range.start;
+    const raw_offset = @min(document_text.len, visible_range.start + @min(visible_offset, visible_len));
     return utf8BoundaryAtOrBefore(document_text, raw_offset);
 }
 
@@ -1344,6 +1361,36 @@ test "TerminalTextRangeProvider clone and enclosing element retain parent" {
     try std.testing.expectEqual(@as(u32, 3), TerminalProvider.Release(enclosing.?));
 }
 
+test "TerminalTextRangeProvider CompareEndpoints rejects different parents" {
+    var left_data = TestTerminalStateData{};
+    var right_data = TestTerminalStateData{};
+
+    var left = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), testTerminalState(&left_data));
+    defer _ = TerminalProvider.Release(&left.base);
+    var right = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x2), testTerminalState(&right_data));
+    defer _ = TerminalProvider.Release(&right.base);
+
+    var left_range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&left.text_iface, &left_range));
+    defer _ = TerminalTextRangeProvider.Release(left_range.?);
+
+    var right_range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&right.text_iface, &right_range));
+    defer _ = TerminalTextRangeProvider.Release(right_range.?);
+
+    var comparison: i32 = 0;
+    try std.testing.expectEqual(
+        com.E_INVALIDARG,
+        TerminalTextRangeProvider.CompareEndpoints(
+            left_range.?,
+            com.TextPatternRangeEndpoint_Start,
+            right_range,
+            com.TextPatternRangeEndpoint_Start,
+            &comparison,
+        ),
+    );
+}
+
 test "TerminalProvider RangeFromPoint returns a degenerate text range" {
     var state_data = TestTerminalStateData{};
     const state = testTerminalState(&state_data);
@@ -1368,6 +1415,7 @@ test "TerminalProvider RangeFromPoint returns document-coordinate offsets" {
     var state_data = TestTerminalStateData{
         .value_text = "scrollback\nvisible",
         .visible_value_text = "visible",
+        .visible_range = .{ .start = 11, .end = 18 },
     };
     const state = testTerminalState(&state_data);
 
@@ -1492,10 +1540,12 @@ const TestTerminalStateData = struct {
     name_calls: u32 = 0,
     value_calls: u32 = 0,
     visible_value_calls: u32 = 0,
+    visible_range_calls: u32 = 0,
     retains: u32 = 0,
     releases: u32 = 0,
     value_text: []const u8 = "hello\nworld",
     visible_value_text: []const u8 = "visible",
+    visible_range: terminal_text.OffsetRange = .{ .start = 0, .end = 7 },
 };
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {
@@ -1528,6 +1578,12 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
             return try alloc.dupe(u8, d.visible_value_text);
         }
 
+        fn visibleRange(ctx: *anyopaque, _: std.mem.Allocator) !terminal_text.OffsetRange {
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.visible_range_calls += 1;
+            return d.visible_range;
+        }
+
         fn focused(ctx: *anyopaque) bool {
             _ = ctx;
             return true;
@@ -1540,6 +1596,7 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
         .name = callbacks.name,
         .value = callbacks.value,
         .visible_value = callbacks.visibleValue,
+        .visible_range = callbacks.visibleRange,
         .focused = callbacks.focused,
     };
 }
