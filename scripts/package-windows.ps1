@@ -179,6 +179,9 @@ function Assert-PeMachine {
     $expectedMachine = switch ($ExpectedArchitecture) {
         "x64" { 0x8664 }
         "arm64" { 0xAA64 }
+        default {
+            throw "Unknown architecture '$ExpectedArchitecture'. Supported architectures are: x64, arm64."
+        }
     }
     $actualMachine = Get-PeMachine -PathToCheck $PathToCheck
     if ($actualMachine -ne $expectedMachine) {
