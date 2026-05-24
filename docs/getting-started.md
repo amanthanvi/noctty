@@ -4,7 +4,21 @@ Step by step: download, install, launch, configure, and uninstall.
 
 ## 1. Download
 
-Go to [Releases](https://github.com/amanthanvi/winghostty/releases) and grab:
+Install with WinGet:
+
+```powershell
+winget install AmanThanvi.winghostty
+```
+
+Or install from the fork-owned Scoop bucket:
+
+```powershell
+scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
+scoop install winghostty/winghostty
+```
+
+You can also go to
+[Releases](https://github.com/amanthanvi/winghostty/releases) and grab:
 
 - **Installer:** `winghostty-<version>-windows-x64-setup.exe`
 - **Portable ZIP:** `winghostty-<version>-windows-x64-portable.zip`
@@ -19,16 +33,21 @@ Get-FileHash .\winghostty-<version>-windows-x64-setup.exe -Algorithm SHA256
 
 ## 2. Install
 
-### Option A — Installer
+### Option A — Package manager
+
+Use the WinGet or Scoop commands above. Both official package-manager tracks
+point at the same GitHub Release assets and checksums.
+
+### Option B — Installer
 
 1. Double-click `winghostty-<version>-windows-x64-setup.exe`.
 2. SmartScreen will warn *"Windows protected your PC"*. Click **More info** →
-   **Run anyway**. Releases are unsigned; this warning is expected until code
-   signing is added.
+   **Run anyway** if you trust the release. The installer is signed, but
+   SmartScreen reputation can lag new publishers and low-volume releases.
 3. Accept the MIT license and install.
 4. Launch **winghostty** from the Start menu.
 
-### Option B — Portable
+### Option C — Portable
 
 1. Extract the ZIP anywhere (for example, `C:\Tools\winghostty\`).
 2. Run `winghostty.exe`.

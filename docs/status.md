@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-09, against current fork HEAD.
+Last updated: 2026-05-24, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
@@ -69,6 +69,13 @@ For a row-by-row mapping against official Ghostty docs, see
   checksum metadata and pass SHA-256 plus Authenticode verification. Applying
   updates is not automatic.
 
+### Windows package managers
+
+- WinGet package id: `AmanThanvi.winghostty`
+- Scoop bucket: `https://github.com/amanthanvi/scoop-winghostty`
+- Release readiness checks verify that both remote manifests exist before the
+  release workflow is allowed to publish package-manager updates.
+
 ### Crash reports
 
 - Local directory: `%LOCALAPPDATA%\winghostty\crash`
@@ -100,9 +107,9 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **Unsigned installer.** Windows SmartScreen may warn on first install.
-  Click *More info* → *Run anyway*. Code signing is a planned packaging
-  step; no ETA.
+- **SmartScreen reputation.** The installer is signed, but Windows SmartScreen
+  may still warn on first install while publisher reputation is new. Click
+  *More info* → *Run anyway* only if you trust the release source.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
   are reserved for reproducible bugs. For questions, feature discussion,
   and feedback, use
@@ -135,7 +142,6 @@ No formal roadmap. Indicative next areas:
   exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
-- Code signing for Windows releases
 - Broader local crash metadata and report packaging on Windows
 - ARB-context OpenGL migration paired with atlas rebuild
 

@@ -20,7 +20,7 @@ function buildScript(v) {
         { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-x64-setup.exe -OutFile winghostty-setup.exe` },
         { kind: 'cmd', text: '.\\winghostty-setup.exe' },
         { kind: 'out', t: '→ installer build: Start menu entry and standard uninstall path', c: 'dim' },
-        { kind: 'out', t: '→ SmartScreen may warn — releases are unsigned. Click More info → Run anyway.', c: 'dim' },
+        { kind: 'out', t: '→ SmartScreen may warn while reputation is new. Click More info → Run anyway if you trust the release.', c: 'dim' },
       ],
     },
     // SCENE 2 — Portable ZIP
