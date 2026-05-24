@@ -114,7 +114,7 @@ if ($Runtime) {
 
     foreach ($runtimeHarness in $runtimeHarnesses) {
         $scriptPath = Join-Path $PSScriptRoot $runtimeHarness.Script
-        $args = @(
+        $scriptArgs = @(
             '-NoLogo'
             '-NoProfile'
             '-ExecutionPolicy'
@@ -124,9 +124,9 @@ if ($Runtime) {
             '-TimeoutSeconds'
             ($runtimeHarness.Timeout.ToString())
         )
-        if ($ResetState) { $args += '-ResetState' }
+        if ($ResetState) { $scriptArgs += '-ResetState' }
 
-        & powershell.exe @args
+        & powershell.exe @scriptArgs
         if ($LASTEXITCODE -ne 0) {
             throw "$($runtimeHarness.Script) failed with exit code $LASTEXITCODE"
         }
