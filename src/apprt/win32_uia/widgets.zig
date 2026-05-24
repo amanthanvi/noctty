@@ -58,6 +58,7 @@ pub const TerminalState = struct {
     release: ?*const fn (ctx: *anyopaque) void = null,
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
     value: *const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8,
+    visible_value: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8 = null,
     focused: *const fn (ctx: *anyopaque) bool,
 };
 
@@ -555,13 +556,12 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
         out.* = null;
-        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+        const value_fn = self.state.visible_value orelse self.state.value;
+        const text = value_fn(self.state.ctx, self.alloc) catch |err| {
             std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
             return com.E_OUTOFMEMORY;
         };
 
-        // TerminalState.value is the active rendered screen snapshot; expose
-        // that as the visible range and keep DocumentRange as a separate path.
         return self.createRangeFromText(text, .{ .start = 0, .end = text.len }, out);
     }
 
@@ -1212,7 +1212,8 @@ test "TerminalProvider visible ranges returns a SAFEARRAY" {
 
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(ranges != null);
-    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+    try std.testing.expectEqual(@as(u32, 0), state_data.value_calls);
+    try std.testing.expectEqual(@as(u32, 1), state_data.visible_value_calls);
 }
 
 test "TerminalProvider reports document control type" {
@@ -1442,9 +1443,11 @@ test "TerminalProvider value allocation failure returns E_OUTOFMEMORY" {
 const TestTerminalStateData = struct {
     name_calls: u32 = 0,
     value_calls: u32 = 0,
+    visible_value_calls: u32 = 0,
     retains: u32 = 0,
     releases: u32 = 0,
     value_text: []const u8 = "hello\nworld",
+    visible_value_text: []const u8 = "visible",
 };
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {
@@ -1471,6 +1474,12 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
             return try alloc.dupe(u8, d.value_text);
         }
 
+        fn visibleValue(ctx: *anyopaque, alloc: std.mem.Allocator) ![]u8 {
+            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
+            d.visible_value_calls += 1;
+            return try alloc.dupe(u8, d.visible_value_text);
+        }
+
         fn focused(ctx: *anyopaque) bool {
             _ = ctx;
             return true;
@@ -1482,6 +1491,7 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
         .release = callbacks.release,
         .name = callbacks.name,
         .value = callbacks.value,
+        .visible_value = callbacks.visibleValue,
         .focused = callbacks.focused,
     };
 }

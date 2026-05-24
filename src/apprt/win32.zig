@@ -19669,6 +19669,7 @@ const TerminalUiaContext = struct {
             .release = release,
             .name = terminalUiaName,
             .value = terminalUiaValue,
+            .visible_value = terminalUiaVisibleValue,
             .focused = terminalUiaFocused,
         };
     }
@@ -19701,6 +19702,12 @@ const TerminalUiaContext = struct {
         defer snapshot.deinit();
 
         return snapshot.takeText();
+    }
+
+    fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+        // TerminalFormatter formats the active rendered screen using
+        // PageList .screen bounds, so this excludes offscreen scrollback.
+        return terminalUiaValue(ctx, alloc);
     }
 
     fn terminalUiaFocused(ctx: *anyopaque) bool {
