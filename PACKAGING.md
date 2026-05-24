@@ -5,7 +5,11 @@ The public packaging targets are:
 
 - `winghostty-<version>-windows-x64-setup.exe`
 - `winghostty-<version>-windows-x64-portable.zip`
-- `SHA256SUMS.txt`
+- `winghostty-<version>-windows-arm64-setup.exe`
+- `winghostty-<version>-windows-arm64-portable.zip`
+- `SHA256SUMS-windows-x64.txt`
+- `SHA256SUMS-windows-arm64.txt`
+- `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
 
 Primary distribution URL:
 
@@ -66,6 +70,11 @@ Then stage release assets:
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.3.100
 ```
 
+In a native Windows ARM64 PowerShell process, the packaging script defaults to
+ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware. Pass
+`-Architecture x64` or `-Architecture arm64` explicitly when you need a specific
+target.
+
 If Inno Setup is available on the machine, the packaging script can also build
 the installer. If it is not installed, the portable artifact and checksums are
 still produced so packaging can be validated locally.
@@ -87,6 +96,7 @@ To generate the package-manager metadata from staged release assets:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/package-package-managers.ps1 `
   -Version 1.3.100 `
+  -Architectures @("x64", "arm64") `
   -UpstreamBaseVersion 1.3.2 `
   -FirstForkPatch 100
 ```

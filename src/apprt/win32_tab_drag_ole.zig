@@ -165,9 +165,9 @@ fn loadOle32() ?Ole32Fns {
     if (ole32_fns) |fns| return fns;
     const dll = windows.kernel32.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("ole32.dll")) orelse return null;
     var fns: Ole32Fns = .{};
-    fns.DoDragDrop = @ptrCast(windows.kernel32.GetProcAddress(dll, "DoDragDrop") orelse return null);
-    fns.ReleaseStgMedium = @ptrCast(windows.kernel32.GetProcAddress(dll, "ReleaseStgMedium") orelse return null);
-    fns.CoTaskMemFree = @ptrCast(windows.kernel32.GetProcAddress(dll, "CoTaskMemFree") orelse return null);
+    fns.DoDragDrop = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "DoDragDrop") orelse return null));
+    fns.ReleaseStgMedium = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "ReleaseStgMedium") orelse return null));
+    fns.CoTaskMemFree = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "CoTaskMemFree") orelse return null));
     ole32_fns = fns;
     return fns;
 }
@@ -176,11 +176,11 @@ fn loadKernel32() ?Kernel32Fns {
     if (kernel32_fns) |fns| return fns;
     const dll = windows.kernel32.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("kernel32.dll")) orelse return null;
     var fns: Kernel32Fns = .{};
-    fns.GlobalAlloc = @ptrCast(windows.kernel32.GetProcAddress(dll, "GlobalAlloc") orelse return null);
-    fns.GlobalFree = @ptrCast(windows.kernel32.GetProcAddress(dll, "GlobalFree") orelse return null);
-    fns.GlobalLock = @ptrCast(windows.kernel32.GetProcAddress(dll, "GlobalLock") orelse return null);
-    fns.GlobalUnlock = @ptrCast(windows.kernel32.GetProcAddress(dll, "GlobalUnlock") orelse return null);
-    fns.GlobalSize = @ptrCast(windows.kernel32.GetProcAddress(dll, "GlobalSize") orelse return null);
+    fns.GlobalAlloc = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "GlobalAlloc") orelse return null));
+    fns.GlobalFree = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "GlobalFree") orelse return null));
+    fns.GlobalLock = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "GlobalLock") orelse return null));
+    fns.GlobalUnlock = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "GlobalUnlock") orelse return null));
+    fns.GlobalSize = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "GlobalSize") orelse return null));
     kernel32_fns = fns;
     return fns;
 }
@@ -189,7 +189,7 @@ fn loadUser32() ?User32Fns {
     if (user32_fns) |fns| return fns;
     const dll = windows.kernel32.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll")) orelse return null;
     var fns: User32Fns = .{};
-    fns.RegisterClipboardFormatW = @ptrCast(windows.kernel32.GetProcAddress(dll, "RegisterClipboardFormatW") orelse return null);
+    fns.RegisterClipboardFormatW = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(dll, "RegisterClipboardFormatW") orelse return null));
     user32_fns = fns;
     return fns;
 }

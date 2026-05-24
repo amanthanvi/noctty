@@ -39,3 +39,5 @@ vgcore.*
 /src/help_strings.zig
 
 .cursor/
+
+.zig-global-cache/

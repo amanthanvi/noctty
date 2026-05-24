@@ -4,6 +4,9 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
 #endif
+#ifndef PackageArch
+  #define PackageArch "x64"
+#endif
 #ifndef StageDir
   #error StageDir must be defined on the ISCC command line.
 #endif
@@ -27,12 +30,17 @@ DefaultGroupName=winghostty
 DisableProgramGroupPage=yes
 LicenseFile={#StageDir}\LICENSE
 OutputDir={#OutputDir}
-OutputBaseFilename=winghostty-{#MyAppVersion}-windows-x64-setup
+OutputBaseFilename=winghostty-{#MyAppVersion}-windows-{#PackageArch}-setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+#if PackageArch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 ChangesAssociations=no
 CloseApplications=yes
 RestartApplications=yes
@@ -45,7 +53,7 @@ VersionInfoProductTextVersion={#MyAppVersion}
 VersionInfoCompany=Aman Thanvi
 VersionInfoDescription=winghostty Setup
 VersionInfoProductName=winghostty
-VersionInfoOriginalFileName=winghostty-{#MyAppVersion}-windows-x64-setup.exe
+VersionInfoOriginalFileName=winghostty-{#MyAppVersion}-windows-{#PackageArch}-setup.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked

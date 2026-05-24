@@ -44,3 +44,9 @@ jobs:
 
       - name: Build executable
         run: zig build -Demit-exe=true
+
+      - name: Build ARM64 executable
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
+        # Cross-compilation coverage only; native execution runs in windows-arm64.yml.
+        run: zig build -Demit-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline

@@ -54,7 +54,7 @@ install.
 winghostty is a young, single-maintainer fork. First fork commit: 2026-04-06.
 First public releases: 2026-04-16.
 
-- **Supported platform:** Windows 10 and Windows 11 on x64.
+- **Supported platform:** Windows 10 and Windows 11 on x64 and ARM64.
 - **Releases:** Authenticode-signed installer and signed Windows binaries
   inside the portable ZIP. The ZIP container itself is checksummed, not
   Authenticode-signed. Windows SmartScreen may still warn on first run for a
@@ -106,9 +106,15 @@ Download directly from **[Releases](https://github.com/amanthanvi/winghostty/rel
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
-| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run without installing. |
-| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Verifying downloads. |
+| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
+| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run x64 without installing. |
+| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Verifying x64 downloads. |
+
+ARM64 builds are added by the next release after 1.3.111. From that release on,
+Windows releases publish both x64 and ARM64 setup / portable artifacts, plus
+architecture-specific checksum files named `SHA256SUMS-windows-x64.txt` and
+`SHA256SUMS-windows-arm64.txt`. The legacy `SHA256SUMS.txt` file remains an x64
+auto-update compatibility alias.
 
 WinGet users can install the official manifest:
 
@@ -208,9 +214,10 @@ The updater checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
 at most once every 24 hours. `auto-update = check` opens the release page if a
 newer stable version exists and never replaces binaries silently.
 `auto-update = download` downloads only eligible stable Windows installer
-releases, verifies `SHA256SUMS.txt` plus Authenticode, and stages the installer
-locally. Unsigned installers fail that verification and are not staged.
-Applying the staged installer is user-initiated and may prompt for UAC.
+releases, verifies the architecture-specific SHA256SUMS file plus
+Authenticode, and stages the installer locally. Unsigned installers fail that
+verification and are not staged. Applying the staged installer is
+user-initiated and may prompt for UAC.
 
 ## Crash reports
 
@@ -238,7 +245,7 @@ Most users should install from Releases. If you want to build:
 
 **Requirements**
 
-- Windows 10 or 11 on x64
+- Windows 10 or 11 on x64 or ARM64
 - **Zig 0.15.x (patch ≥ 2)** — enforced at compile time via
   `src/build/zig.zig::requireZig`. Newer 0.15 patch releases (`0.15.3`,
   etc.) are accepted; 0.15.0 / 0.15.1, 0.14.x, and 0.16.x will fail to

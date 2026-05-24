@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
+    [string]$Architecture = $null,
+
     [string]$OutputRoot = "dist/artifacts",
 
     [switch]$SkipBuild,
@@ -14,6 +16,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot "windows-architecture.ps1")
+
+$archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
+$Architecture = $archInfo.Name
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $outputRootPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
@@ -29,11 +35,12 @@ $localAppData = if ($env:LOCALAPPDATA) {
 } else {
     Join-Path $userHome "AppData\Local"
 }
-$stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-x64"
+$zigTarget = $archInfo.ZigTarget
+$stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-$Architecture"
 $portableRoot = Join-Path $stageBase "winghostty"
-$zipPath = Join-Path $stageBase "winghostty-$Version-windows-x64-portable.zip"
-$installerPath = Join-Path $stageBase "winghostty-$Version-windows-x64-setup.exe"
-$checksumsPath = Join-Path $stageBase "SHA256SUMS.txt"
+$zipPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind portable)
+$installerPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind setup)
+$checksumsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind checksums)
 $releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
@@ -123,6 +130,55 @@ function Copy-Tree {
 
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
+}
+
+function Get-PeMachine {
+    param([string]$PathToCheck)
+
+    $fullPath = (Resolve-Path -LiteralPath $PathToCheck).Path
+    $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Not a PE file: $fullPath"
+            }
+
+            if ($stream.Length -lt 0x40) {
+                throw "PE file is too small to contain a header offset: $fullPath"
+            }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadUInt32()
+            if ($peOffset + 6 -gt $stream.Length) {
+                throw "PE header offset is outside the file bounds: $fullPath"
+            }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Missing PE signature: $fullPath"
+            }
+
+            return $reader.ReadUInt16()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-PeMachine {
+    param(
+        [string]$PathToCheck,
+        [string]$ExpectedArchitecture
+    )
+
+    $expectedMachine = (Get-WindowsPackageArchitecture -Architecture $ExpectedArchitecture).PeMachine
+    $actualMachine = Get-PeMachine -PathToCheck $PathToCheck
+    if ($actualMachine -ne $expectedMachine) {
+        throw ("Expected {0} to be {1} PE machine 0x{2:X4}, got 0x{3:X4}." -f $PathToCheck, $ExpectedArchitecture, $expectedMachine, $actualMachine)
+    }
 }
 
 function Find-SignTool {
@@ -359,7 +415,7 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast -Dcpu=baseline "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline "-Dversion-string=$Version"
         }
         finally {
             Pop-Location
@@ -370,7 +426,17 @@ try {
         throw "Expected build output was not found: $exePath"
     }
 
-    & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
+    Write-Host "Packaging arch : $Architecture ($zigTarget)"
+    foreach ($runtimeFile in $runtimeFiles) {
+        $runtimePath = Join-Path $zigOutBin $runtimeFile
+        if (-not (Test-Path -LiteralPath $runtimePath)) {
+            throw "Expected build output was not found: $runtimePath"
+        }
+        Assert-PeMachine -PathToCheck $runtimePath -ExpectedArchitecture $Architecture
+    }
+    if ($Architecture -eq "x64") {
+        & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
+    }
 
     Write-Host "Packaging phase: stage portable tree"
     Remove-TreeIfPresent -PathToRemove $stageBase
@@ -431,6 +497,7 @@ try {
     if ($iscc) {
         & $iscc.Source `
             "/DMyAppVersion=$Version" `
+            "/DPackageArch=$Architecture" `
             "/DStageDir=$portableRoot" `
             "/DOutputDir=$stageBase" `
             "/DSourceDir=$repoRoot" `

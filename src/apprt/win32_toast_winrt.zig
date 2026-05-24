@@ -225,18 +225,18 @@ fn loadCombase() InitError!CombaseFns {
         return InitError.RuntimeMissing;
 
     return .{
-        .ro_init = @ptrCast(windows.kernel32.GetProcAddress(combase, "RoInitialize") orelse
-            return InitError.RuntimeMissing),
-        .ro_uninit = @ptrCast(windows.kernel32.GetProcAddress(combase, "RoUninitialize") orelse
-            return InitError.RuntimeMissing),
-        .ro_get_factory = @ptrCast(windows.kernel32.GetProcAddress(combase, "RoGetActivationFactory") orelse
-            return InitError.RuntimeMissing),
-        .ro_activate = @ptrCast(windows.kernel32.GetProcAddress(combase, "RoActivateInstance") orelse
-            return InitError.RuntimeMissing),
-        .create_string = @ptrCast(windows.kernel32.GetProcAddress(combase, "WindowsCreateString") orelse
-            return InitError.RuntimeMissing),
-        .delete_string = @ptrCast(windows.kernel32.GetProcAddress(combase, "WindowsDeleteString") orelse
-            return InitError.RuntimeMissing),
+        .ro_init = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoInitialize") orelse
+            return InitError.RuntimeMissing)),
+        .ro_uninit = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoUninitialize") orelse
+            return InitError.RuntimeMissing)),
+        .ro_get_factory = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoGetActivationFactory") orelse
+            return InitError.RuntimeMissing)),
+        .ro_activate = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "RoActivateInstance") orelse
+            return InitError.RuntimeMissing)),
+        .create_string = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "WindowsCreateString") orelse
+            return InitError.RuntimeMissing)),
+        .delete_string = @ptrCast(@alignCast(windows.kernel32.GetProcAddress(combase, "WindowsDeleteString") orelse
+            return InitError.RuntimeMissing)),
     };
 }
 

@@ -7,6 +7,8 @@ param(
 
     [string]$Repo = "amanthanvi/winghostty",
 
+    [string[]]$Architectures = @("x64"),
+
     [string]$ArtifactRoot,
 
     [string]$OutputRoot,
@@ -21,27 +23,29 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "windows-architecture.ps1")
+
+$Architectures = @($Architectures | ForEach-Object { (Get-WindowsPackageArchitecture -Architecture $_).Name })
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $tagValue = if ($Tag) { $Tag } else { "v$Version" }
-$artifactRootPath = if ($ArtifactRoot) {
+if ($ArtifactRoot -and $Architectures.Count -ne 1) {
+    throw "-ArtifactRoot can only be used with one architecture."
+}
+$primaryArch = if ($Architectures -contains "x64") { "x64" } else { $Architectures[0] }
+$primaryArtifactRootPath = if ($ArtifactRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-x64"))
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-$primaryArch"))
 }
 $outputRootPath = if ($OutputRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $artifactRootPath "package-managers"))
+    [System.IO.Path]::GetFullPath((Join-Path $primaryArtifactRootPath "package-managers"))
 }
 
-$checksumsPath = Join-Path $artifactRootPath "SHA256SUMS.txt"
-$setupName = "winghostty-$Version-windows-x64-setup.exe"
-$portableName = "winghostty-$Version-windows-x64-portable.zip"
 $iconName = "winghostty-icon.svg"
-$setupPath = Join-Path $artifactRootPath $setupName
-$portablePath = Join-Path $artifactRootPath $portableName
-$iconPath = Join-Path $artifactRootPath $iconName
+$iconPath = Join-Path $primaryArtifactRootPath $iconName
 $releaseBaseUrl = "https://github.com/$Repo/releases/download/$tagValue"
 $projectUrl = "https://github.com/$Repo"
 $releaseUrl = "$projectUrl/releases/tag/$tagValue"
@@ -82,6 +86,7 @@ function Get-ChecksumMap {
 function Get-AssetChecksum {
     param(
         [hashtable]$ChecksumMap,
+        [string]$ChecksumsPath,
         [string]$AssetName,
         [string]$AssetPath
     )
@@ -92,7 +97,7 @@ function Get-AssetChecksum {
 
     $checksum = $ChecksumMap[$AssetName]
     if (-not $checksum) {
-        throw "Missing checksum entry for $AssetName in $checksumsPath"
+        throw "Missing checksum entry for $AssetName in $ChecksumsPath"
     }
 
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $AssetPath).Hash.ToLowerInvariant()
@@ -113,16 +118,47 @@ function Get-VersionLine {
     throw "Unable to derive a version line from '$InputVersion'."
 }
 
-$requiredPaths = @($checksumsPath, $setupPath, $portablePath, $iconPath)
-foreach ($requiredPath in $requiredPaths) {
-    if (-not (Test-Path -LiteralPath $requiredPath)) {
-        throw "Expected packaging input was not found: $requiredPath"
+$artifacts = [ordered]@{}
+foreach ($arch in $Architectures) {
+    $artifactRootPath = if ($ArtifactRoot) {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-$arch"))
+    }
+
+    $checksumsPath = Join-Path $artifactRootPath (New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind checksums)
+    $setupName = New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind setup
+    $portableName = New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind portable
+    $setupPath = Join-Path $artifactRootPath $setupName
+    $portablePath = Join-Path $artifactRootPath $portableName
+
+    foreach ($requiredPath in @($checksumsPath, $setupPath, $portablePath)) {
+        if (-not (Test-Path -LiteralPath $requiredPath)) {
+            throw "Expected packaging input was not found: $requiredPath"
+        }
+    }
+
+    $checksumMap = Get-ChecksumMap -Path $checksumsPath
+    $setupSha256 = Get-AssetChecksum -ChecksumMap $checksumMap -ChecksumsPath $checksumsPath -AssetName $setupName -AssetPath $setupPath
+    $portableSha256 = Get-AssetChecksum -ChecksumMap $checksumMap -ChecksumsPath $checksumsPath -AssetName $portableName -AssetPath $portablePath
+
+    $artifacts[$arch] = [ordered]@{
+        setupName      = $setupName
+        setupPath      = $setupPath
+        setupUrl       = "$releaseBaseUrl/$setupName"
+        setupSha256    = $setupSha256
+        portableName   = $portableName
+        portablePath   = $portablePath
+        portableUrl    = "$releaseBaseUrl/$portableName"
+        portableSha256 = $portableSha256
     }
 }
 
-$checksumMap = Get-ChecksumMap -Path $checksumsPath
-$setupSha256 = Get-AssetChecksum -ChecksumMap $checksumMap -AssetName $setupName -AssetPath $setupPath
-$portableSha256 = Get-AssetChecksum -ChecksumMap $checksumMap -AssetName $portableName -AssetPath $portablePath
+if (-not (Test-Path -LiteralPath $iconPath)) {
+    throw "Expected packaging input was not found: $iconPath"
+}
+
+$primaryArtifact = $artifacts[$primaryArch]
 $versionLine = Get-VersionLine -InputVersion $Version
 
 if ($UpstreamBaseVersion) {
@@ -145,16 +181,36 @@ $scoopManifest = [ordered]@{
     description  = $packageDescription
     homepage     = $projectUrl
     license      = "MIT"
-    architecture = [ordered]@{
-        "64bit" = [ordered]@{
-            url  = "$releaseBaseUrl/$portableName"
-            hash = $portableSha256
-        }
-    }
+    architecture = [ordered]@{}
     extract_dir  = "winghostty"
     bin          = "winghostty.exe"
 }
+foreach ($arch in $Architectures) {
+    $scoopArch = (Get-WindowsPackageArchitecture -Architecture $arch).ScoopArchitecture
+    $scoopManifest.architecture[$scoopArch] = [ordered]@{
+        url  = $artifacts[$arch].portableUrl
+        hash = $artifacts[$arch].portableSha256
+    }
+}
 Set-Content -LiteralPath $scoopManifestPath -Value ($scoopManifest | ConvertTo-Json -Depth 5)
+
+$metadataArchitectures = [ordered]@{}
+foreach ($arch in $Architectures) {
+    $metadataArchitectures[$arch] = [ordered]@{
+        installer = [ordered]@{
+            name   = $artifacts[$arch].setupName
+            path   = $artifacts[$arch].setupPath
+            url    = $artifacts[$arch].setupUrl
+            sha256 = $artifacts[$arch].setupSha256
+        }
+        portable  = [ordered]@{
+            name   = $artifacts[$arch].portableName
+            path   = $artifacts[$arch].portablePath
+            url    = $artifacts[$arch].portableUrl
+            sha256 = $artifacts[$arch].portableSha256
+        }
+    }
+}
 
 $metadata = [ordered]@{
     version     = $Version
@@ -172,22 +228,26 @@ $metadata = [ordered]@{
     }
     assets      = [ordered]@{
         installer = [ordered]@{
-            name   = $setupName
-            path   = $setupPath
-            url    = "$releaseBaseUrl/$setupName"
-            sha256 = $setupSha256
+            name   = $primaryArtifact.setupName
+            path   = $primaryArtifact.setupPath
+            url    = $primaryArtifact.setupUrl
+            sha256 = $primaryArtifact.setupSha256
         }
         portable  = [ordered]@{
-            name   = $portableName
-            path   = $portablePath
-            url    = "$releaseBaseUrl/$portableName"
-            sha256 = $portableSha256
+            name   = $primaryArtifact.portableName
+            path   = $primaryArtifact.portablePath
+            url    = $primaryArtifact.portableUrl
+            sha256 = $primaryArtifact.portableSha256
         }
+        architectures = $metadataArchitectures
     }
     winget      = [ordered]@{
         packageIdentifier = $WingetPackageIdentifier
         version           = $Version
-        installerUrl      = "$releaseBaseUrl/$setupName"
+        installerUrl      = $primaryArtifact.setupUrl
+        installerUrls     = @($Architectures | ForEach-Object { $artifacts[$_].setupUrl })
+        # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
+        installerUrlArgs  = @($Architectures | ForEach-Object { "{0}|{1}" -f $artifacts[$_].setupUrl, $_ })
     }
     scoop      = [ordered]@{
         packageName   = $ScoopPackageName

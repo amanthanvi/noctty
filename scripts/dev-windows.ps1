@@ -1,6 +1,17 @@
 $ErrorActionPreference = "Stop"
 
-$vsDevCmd = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"
+$Architecture = if ($env:DEV_WINDOWS_ARCH) {
+    $env:DEV_WINDOWS_ARCH
+} elseif ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
+    "arm64"
+} else {
+    "x64"
+}
+if (@("x64", "arm64") -notcontains $Architecture) {
+    throw "DEV_WINDOWS_ARCH must be x64 or arm64."
+}
+
+$vsDevCmd = $null
 $gitCmd = "C:\Program Files\Git\cmd"
 $gitUsrBin = "C:\Program Files\Git\usr\bin"
 $systemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { "C:" }
@@ -14,13 +25,31 @@ $userHome = if ($env:USERPROFILE) {
     Join-Path $systemDrive "Users"
 }
 $programFiles = if ($env:ProgramFiles) { $env:ProgramFiles } else { Join-Path $systemDrive "Program Files" }
+$programFilesX86 = if (${env:ProgramFiles(x86)}) { ${env:ProgramFiles(x86)} } else { Join-Path $systemDrive "Program Files (x86)" }
 $appData = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $userHome "AppData\Roaming" }
 $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $userHome "AppData\Local" }
 $tempDir = if ($env:TEMP) { $env:TEMP } else { Join-Path $localAppData "Temp" }
 $tmpDir = if ($env:TMP) { $env:TMP } else { $tempDir }
 
+foreach ($candidateRoot in @($programFilesX86, $programFiles)) {
+    foreach ($edition in @("BuildTools", "Community", "Professional", "Enterprise")) {
+        $candidate = Join-Path $candidateRoot "Microsoft Visual Studio\2022\$edition\Common7\Tools\VsDevCmd.bat"
+        if (Test-Path -LiteralPath $candidate) {
+            $vsDevCmd = $candidate
+            break
+        }
+    }
+    if ($vsDevCmd) { break }
+}
+
 if (-not $env:ZIG_HOME) {
     $candidate = Join-Path $userHome "tools\zig-0.15.2"
+    if (Test-Path (Join-Path $candidate "zig.exe")) {
+        $env:ZIG_HOME = $candidate
+    }
+}
+if (-not $env:ZIG_HOME) {
+    $candidate = Join-Path $userHome "tools\zig-aarch64-windows-0.15.2"
     if (Test-Path (Join-Path $candidate "zig.exe")) {
         $env:ZIG_HOME = $candidate
     }
@@ -43,9 +72,15 @@ if (-not $env:ZIG_HOME) {
         $env:ZIG_HOME = $candidate
     }
 }
+if (-not $env:ZIG_HOME) {
+    $zigCommand = Get-Command zig.exe -ErrorAction SilentlyContinue
+    if ($zigCommand) {
+        $env:ZIG_HOME = Split-Path -Parent $zigCommand.Source
+    }
+}
 
-if (-not (Test-Path $vsDevCmd)) {
-    throw "Missing VS Dev shell bootstrap: $vsDevCmd"
+if (-not $vsDevCmd) {
+    throw "Missing VS Dev shell bootstrap. Install Visual Studio 2022 Build Tools with the C++ workload."
 }
 if (-not (Test-Path (Join-Path $gitCmd "git.exe"))) {
     throw "Missing Git executable under $gitCmd"
@@ -74,7 +109,7 @@ $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $env:LOCALAPPDATA "zig"
 $env:ZIG_LOCAL_CACHE_DIR = Join-Path (Get-Location) ".zig-cache"
 
 $bootstrap = @"
-call "$vsDevCmd" -arch=x64 || exit /b 1
+call "$vsDevCmd" -arch=$Architecture || exit /b 1
 set "PATH=$gitCmd;$gitUsrBin;$env:ZIG_HOME;%PATH%"
 set "APPDATA=$env:APPDATA"
 set "LOCALAPPDATA=$env:LOCALAPPDATA"
