@@ -20,6 +20,7 @@ pub const E_NOTIMPL: HRESULT = @bitCast(@as(u32, 0x80004001));
 pub const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
+pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
@@ -62,6 +63,7 @@ pub const VARIANT = extern struct {
         i4: i32,
         bstr: ?[*:0]u16,
         bool_val: i16,
+        unknown: ?*IUnknown,
     },
 
     pub fn empty() VARIANT {
@@ -81,6 +83,10 @@ pub const VARIANT = extern struct {
             .vt = VT_BOOL,
             .value = .{ .bool_val = if (b) VARIANT_TRUE else VARIANT_FALSE },
         };
+    }
+
+    pub fn fromUnknown(p: ?*IUnknown) VARIANT {
+        return .{ .vt = VT_UNKNOWN, .value = .{ .unknown = p } };
     }
 
     // Compile-time assertion that our VARIANT matches the Windows ABI
@@ -279,13 +285,14 @@ pub extern "uiautomationcore" fn UiaRaiseAutomationPropertyChangedEvent(
 /// Report whether a UIA client is currently listening for a given event
 /// so we can skip the raise entirely when nobody cares.
 pub extern "uiautomationcore" fn UiaClientsAreListening() callconv(.winapi) BOOL;
+pub extern "uiautomationcore" fn UiaGetReservedNotSupportedValue(value: *?*IUnknown) callconv(.winapi) HRESULT;
 
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
 pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
 pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
 pub extern "oleaut32" fn SysStringLen(bstr: ?[*:0]const u16) callconv(.winapi) u32;
 pub extern "oleaut32" fn SafeArrayCreateVector(vt: u16, lLbound: i32, cElements: u32) callconv(.winapi) ?*SAFEARRAY;
-pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: *anyopaque) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: ?*anyopaque) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayDestroy(psa: ?*SAFEARRAY) callconv(.winapi) HRESULT;
 
 /// Live HWND text query. Used by the UIA Name provider so screen

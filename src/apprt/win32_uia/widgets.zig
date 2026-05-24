@@ -496,7 +496,7 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) callconv(.winapi) com.HRESULT {
         const self = fromText(self_text);
-        return self.createDocumentRange(out);
+        return self.createRange(.{ .start = 0, .end = 0 }, out);
     }
 
     fn get_DocumentRange(
@@ -523,11 +523,13 @@ pub const TerminalProvider = struct {
         defer _ = TerminalTextRangeProvider.Release(range.?);
 
         const array = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 1) orelse return com.E_OUTOFMEMORY;
-        errdefer _ = com.SafeArrayDestroy(array);
 
         var index: i32 = 0;
         const put_hr = com.SafeArrayPutElement(array, &index, @ptrCast(range.?));
-        if (put_hr != com.S_OK) return put_hr;
+        if (put_hr != com.S_OK) {
+            _ = com.SafeArrayDestroy(array);
+            return put_hr;
+        }
 
         out.* = array;
         return com.S_OK;
@@ -542,15 +544,38 @@ pub const TerminalProvider = struct {
             std.log.warn("uia: TerminalProvider text snapshot failed err={}", .{err});
             return com.E_OUTOFMEMORY;
         };
-        errdefer self.alloc.free(text);
 
+        return self.createRangeFromText(text, .{ .start = 0, .end = text.len }, out);
+    }
+
+    fn createRange(
+        self: *TerminalProvider,
+        range_offsets: terminal_text.OffsetRange,
+        out: *?*com.ITextRangeProvider,
+    ) com.HRESULT {
+        out.* = null;
+        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider text snapshot failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+
+        return self.createRangeFromText(text, range_offsets, out);
+    }
+
+    fn createRangeFromText(
+        self: *TerminalProvider,
+        text: []u8,
+        range_offsets: terminal_text.OffsetRange,
+        out: *?*com.ITextRangeProvider,
+    ) com.HRESULT {
         const range = TerminalTextRangeProvider.create(
             self.alloc,
             self,
             text,
-            .{ .start = 0, .end = text.len },
+            range_offsets,
         ) catch |err| {
             std.log.warn("uia: TerminalTextRangeProvider.create failed err={}", .{err});
+            self.alloc.free(text);
             return com.E_OUTOFMEMORY;
         };
         out.* = &range.base;
@@ -660,8 +685,10 @@ const TerminalTextRangeProvider = struct {
         const self = fromBase(self_base);
         out.* = null;
         const text_copy = self.alloc.dupe(u8, self.text) catch return com.E_OUTOFMEMORY;
-        errdefer self.alloc.free(text_copy);
-        const clone = create(self.alloc, self.parent, text_copy, self.range) catch return com.E_OUTOFMEMORY;
+        const clone = create(self.alloc, self.parent, text_copy, self.range) catch {
+            self.alloc.free(text_copy);
+            return com.E_OUTOFMEMORY;
+        };
         out.* = &clone.base;
         return com.S_OK;
     }
@@ -678,8 +705,7 @@ const TerminalTextRangeProvider = struct {
         const rhs = fromBase(other_range);
         out.* = if (self.parent == rhs.parent and
             self.range.start == rhs.range.start and
-            self.range.end == rhs.range.end and
-            std.mem.eql(u8, self.text, rhs.text)) 1 else 0;
+            self.range.end == rhs.range.end) 1 else 0;
         return com.S_OK;
     }
 
@@ -692,7 +718,7 @@ const TerminalTextRangeProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         const other_range = other orelse return com.E_POINTER;
-        if (other_range.vtbl != &vtbl) return com.E_NOINTERFACE;
+        if (other_range.vtbl != &vtbl) return com.E_INVALIDARG;
         const rhs = fromBase(other_range);
         const lhs_value = if (endpoint == com.TextPatternRangeEndpoint_End) self.range.end else self.range.start;
         const rhs_value = if (target_endpoint == com.TextPatternRangeEndpoint_End) rhs.range.end else rhs.range.start;
@@ -739,7 +765,13 @@ const TerminalTextRangeProvider = struct {
         _: i32,
         out: *com.VARIANT,
     ) callconv(.winapi) com.HRESULT {
-        out.* = com.VARIANT.empty();
+        var not_supported: ?*com.IUnknown = null;
+        const hr = com.UiaGetReservedNotSupportedValue(&not_supported);
+        if (hr != com.S_OK) {
+            out.* = com.VARIANT.empty();
+            return hr;
+        }
+        out.* = com.VARIANT.fromUnknown(not_supported);
         return com.S_OK;
     }
 
@@ -1168,6 +1200,26 @@ test "TerminalTextRangeProvider clone and enclosing element retain parent" {
     try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetEnclosingElement(clone.?, &enclosing));
     try std.testing.expect(enclosing != null);
     try std.testing.expectEqual(@as(u32, 3), TerminalProvider.Release(enclosing.?));
+}
+
+test "TerminalProvider RangeFromPoint returns a degenerate text range" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.RangeFromPoint(&p.text_iface, .{ .x = 0, .y = 0 }, &range),
+    );
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    var out: ?[*:0]u16 = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, -1, &out));
+    defer com.SysFreeString(out);
+    try std.testing.expectEqual(@as(u32, 0), com.SysStringLen(out));
 }
 
 test "TerminalProvider ValueValueProperty returns non-null BSTR" {
