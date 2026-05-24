@@ -28,11 +28,15 @@ because staging requires a valid Authenticode signature.
 
 ## Paths
 
-Runtime state lives under:
+By default, runtime state lives under:
 
 ```text
 %LOCALAPPDATA%\winghostty\
 ```
+
+The shared XDG helpers still honor `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and
+`XDG_CACHE_HOME` when they are set on Windows; `%LOCALAPPDATA%` is the fallback
+used by the normal packaged app environment.
 
 Important files and directories:
 
