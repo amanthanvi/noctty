@@ -61,6 +61,28 @@ The harness rebuilds automatically when `build.zig`, `build.zig.zon`, or
 files under `src\` are newer than `zig-out\bin\winghostty.exe`. Pass
 `-Rebuild` to force a full rebuild anyway.
 
+## vt-probe-win32-conformance.ps1
+
+Win32 VT protocol conformance metadata validation. It runs `+vt-probe` and
+asserts that each advertised protocol reports a separate Win32-runtime
+classification:
+
+- `validated` means an interactive Win32 harness exercises the behavior.
+- `parser-only` means shared parser/core support exists, but no Win32 GUI
+  behavior is validated.
+- `pending` means the Win32 behavior exists or is expected, but the practical
+  harness is still missing.
+
+Run the fast metadata check with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\vt-probe-win32-conformance.ps1 -ResetState -TimeoutSeconds 10
+```
+
+Pass `-Runtime` to also run the heavier Win32 evidence harnesses currently
+referenced by `+vt-probe`: command finish / notification, taskbar progress,
+and synchronized-output repaint performance.
+
 ## interactive-win11-progress.ps1
 
 Interactive Win11 validation for native progress state changes. It
