@@ -25,6 +25,21 @@ const com = @import("com.zig");
 const constants = @import("constants.zig");
 const terminal_text = @import("text.zig");
 
+const POINT = extern struct {
+    x: i32,
+    y: i32,
+};
+
+const RECT = extern struct {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+};
+
+extern "user32" fn GetClientRect(hWnd: com.HWND, lpRect: *RECT) callconv(.winapi) com.BOOL;
+extern "user32" fn ScreenToClient(hWnd: com.HWND, lpPoint: *POINT) callconv(.winapi) com.BOOL;
+
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
 /// provider from `Host` (which lives in `win32.zig` and would pull a
@@ -478,7 +493,7 @@ pub const TerminalProvider = struct {
         out: *?*com.SAFEARRAY,
     ) callconv(.winapi) com.HRESULT {
         const self = fromText(self_text);
-        return self.singleRangeArray(out);
+        return self.singleVisibleRangeArray(out);
     }
 
     fn RangeFromChild(
@@ -492,11 +507,11 @@ pub const TerminalProvider = struct {
 
     fn RangeFromPoint(
         self_text: *com.ITextProvider,
-        _: com.UiaPoint,
+        point: com.UiaPoint,
         out: *?*com.ITextRangeProvider,
     ) callconv(.winapi) com.HRESULT {
         const self = fromText(self_text);
-        return self.createRange(.{ .start = 0, .end = 0 }, out);
+        return self.createRangeFromPoint(point, out);
     }
 
     fn get_DocumentRange(
@@ -515,10 +530,10 @@ pub const TerminalProvider = struct {
         return com.S_OK;
     }
 
-    fn singleRangeArray(self: *TerminalProvider, out: *?*com.SAFEARRAY) com.HRESULT {
+    fn singleVisibleRangeArray(self: *TerminalProvider, out: *?*com.SAFEARRAY) com.HRESULT {
         out.* = null;
         var range: ?*com.ITextRangeProvider = null;
-        const range_hr = self.createDocumentRange(&range);
+        const range_hr = self.createVisibleRange(&range);
         if (range_hr != com.S_OK) return range_hr;
         defer _ = TerminalTextRangeProvider.Release(range.?);
 
@@ -533,6 +548,21 @@ pub const TerminalProvider = struct {
 
         out.* = array;
         return com.S_OK;
+    }
+
+    fn createVisibleRange(
+        self: *TerminalProvider,
+        out: *?*com.ITextRangeProvider,
+    ) com.HRESULT {
+        out.* = null;
+        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+
+        // TerminalState.value is the active rendered screen snapshot; expose
+        // that as the visible range and keep DocumentRange as a separate path.
+        return self.createRangeFromText(text, .{ .start = 0, .end = text.len }, out);
     }
 
     fn createDocumentRange(
@@ -560,6 +590,36 @@ pub const TerminalProvider = struct {
         };
 
         return self.createRangeFromText(text, range_offsets, out);
+    }
+
+    fn createRangeFromPoint(
+        self: *TerminalProvider,
+        point: com.UiaPoint,
+        out: *?*com.ITextRangeProvider,
+    ) com.HRESULT {
+        out.* = null;
+        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider point text snapshot failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+
+        const offset = self.byteOffsetForScreenPoint(text, point);
+        return self.createRangeFromText(text, .{ .start = offset, .end = offset }, out);
+    }
+
+    fn byteOffsetForScreenPoint(self: *TerminalProvider, text: []const u8, point: com.UiaPoint) usize {
+        var client_point = POINT{
+            .x = @intFromFloat(point.x),
+            .y = @intFromFloat(point.y),
+        };
+        var client_rect: RECT = undefined;
+        if (ScreenToClient(self.hwnd, &client_point) == 0 or
+            GetClientRect(self.hwnd, &client_rect) == 0)
+        {
+            return 0;
+        }
+
+        return byteOffsetForClientPoint(text, client_rect, client_point);
     }
 
     fn createRangeFromText(
@@ -952,6 +1012,53 @@ fn utf8PrefixForUtf16Limit(text: []const u8, max_utf16_len: usize) ![]const u8 {
     return text[0..byte_index];
 }
 
+fn byteOffsetForClientPoint(text: []const u8, client_rect: RECT, point: POINT) usize {
+    if (text.len == 0) return 0;
+
+    const line_count = countTextLines(text);
+    const width: usize = @intCast(@max(1, client_rect.right - client_rect.left));
+    const height: usize = @intCast(@max(1, client_rect.bottom - client_rect.top));
+    const x: usize = @intCast(std.math.clamp(point.x - client_rect.left, 0, client_rect.right - client_rect.left));
+    const y: usize = @intCast(std.math.clamp(point.y - client_rect.top, 0, client_rect.bottom - client_rect.top));
+
+    const line_index = @min(line_count - 1, @divTrunc(y * line_count, height));
+    const line_range = lineByteRange(text, line_index);
+    const line_len = line_range.end - line_range.start;
+    if (line_len == 0) return line_range.start;
+
+    const raw_offset = line_range.start + @min(line_len, @divTrunc(x * (line_len + 1), width));
+    return utf8BoundaryAtOrBefore(text, raw_offset);
+}
+
+fn countTextLines(text: []const u8) usize {
+    var count: usize = 1;
+    for (text, 0..) |c, i| {
+        if (c == '\n' and i + 1 < text.len) count += 1;
+    }
+    return count;
+}
+
+fn lineByteRange(text: []const u8, target_line: usize) terminal_text.OffsetRange {
+    var line_index: usize = 0;
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        if (c != '\n' or i + 1 == text.len) continue;
+        if (line_index == target_line) return .{ .start = start, .end = i };
+        line_index += 1;
+        start = i + 1;
+    }
+
+    var end = text.len;
+    if (end > start and text[end - 1] == '\n') end -= 1;
+    return .{ .start = start, .end = end };
+}
+
+fn utf8BoundaryAtOrBefore(text: []const u8, offset: usize) usize {
+    var index = @min(offset, text.len);
+    while (index > 0 and index < text.len and (text[index] & 0b1100_0000) == 0b1000_0000) : (index -= 1) {}
+    return index;
+}
+
 test "PaletteListProvider refcount balances" {
     var counter: u32 = 0;
     const name_fn = struct {
@@ -1220,6 +1327,20 @@ test "TerminalProvider RangeFromPoint returns a degenerate text range" {
     try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, -1, &out));
     defer com.SysFreeString(out);
     try std.testing.expectEqual(@as(u32, 0), com.SysStringLen(out));
+}
+
+test "TerminalProvider point mapping uses client coordinates and UTF-8 boundaries" {
+    const text = "A🔥B\nworld";
+    const rect = RECT{ .left = 0, .top = 0, .right = 100, .bottom = 20 };
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        byteOffsetForClientPoint(text, rect, .{ .x = 35, .y = 0 }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, text.len),
+        byteOffsetForClientPoint(text, rect, .{ .x = 100, .y = 19 }),
+    );
 }
 
 test "TerminalProvider ValueValueProperty returns non-null BSTR" {
