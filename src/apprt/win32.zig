@@ -592,6 +592,7 @@ const DWMSBT_NONE: u32 = 1;
 /// Mica-tabbed backdrop for main windows with visible tab strips.
 /// Win11 22H2+ (build >= 22621).
 const DWMSBT_TABBEDWINDOW: u32 = 4;
+const OS_BUILD_WIN10_22H2: u32 = 19045;
 const OS_BUILD_WIN11_21H2: u32 = 22000;
 const OS_BUILD_WIN11_22H2: u32 = 22621;
 const DC_BRUSH: i32 = 18;
@@ -1032,8 +1033,8 @@ const RTL_OSVERSIONINFOW = extern struct {
 extern "ntdll" fn RtlGetVersion(lpVersionInformation: *RTL_OSVERSIONINFOW) callconv(.winapi) i32;
 
 /// Probe the Windows build number once; cache on `App.os_build`. Build
-/// 22000+ is Win11 (integrated-titlebar / Mica / Snap Layouts); <22000
-/// is Win10 (native caption). Failure returns 0 so downstream gates
+/// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
+/// `DWMWA_SYSTEMBACKDROP_TYPE`. Failure returns 0 so downstream gates
 /// fall through to Win10 behaviour (the safe default).
 fn probeWindowsBuild() u32 {
     var info: RTL_OSVERSIONINFOW = .{
@@ -2325,9 +2326,10 @@ pub const App = struct {
     /// touch it on the way down.
     com_initialized: bool = false,
     /// Kernel build number from `RtlGetVersion`. 0 if probe failed.
-    /// 22000 = Win11 21H2 (first Mica build); 22621 = Win11 22H2
-    /// (Snap Layouts; `DWMSBT_TABBEDWINDOW`). Future chrome gates
-    /// read this directly; no runtime config flag, per §12 Q1.
+    /// 22000 = Win11 21H2; 22621 = Win11 22H2
+    /// (`DWMWA_SYSTEMBACKDROP_TYPE` / `DWMSBT_TABBEDWINDOW`).
+    /// Future chrome gates read this directly; no runtime config flag,
+    /// per §12 Q1.
     os_build: u32 = 0,
     /// Top-level switch for the integrated-titlebar path
     /// (`WM_NCCALCSIZE` / `WM_NCHITTEST` state machine). Derived
@@ -14103,9 +14105,13 @@ fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
         config.@"background-blur".win32SystemBackdropEnabled();
 }
 
+fn supportsDwmSystemBackdropAttribute(os_build: u32) bool {
+    return os_build >= OS_BUILD_WIN11_22H2;
+}
+
 fn systemBackdropTypeForBuild(config: *const configpkg.Config, os_build: u32) u32 {
     if (!shouldUseSystemBackdrop(config)) return DWMSBT_NONE;
-    if (os_build < OS_BUILD_WIN11_22H2) return DWMSBT_NONE;
+    if (!supportsDwmSystemBackdropAttribute(os_build)) return DWMSBT_NONE;
     return DWMSBT_TABBEDWINDOW;
 }
 
@@ -14152,10 +14158,12 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
     _ = DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, @ptrCast(&caption_color), @sizeOf(u32));
     _ = DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, @ptrCast(&text_color), @sizeOf(u32));
     // Toggle system backdrop blur through DWMWA_SYSTEMBACKDROP_TYPE. That
-    // attribute is supported starting with Windows 11 22H2 (build 22621), so
-    // older builds get an explicit NONE instead of relying on DWM to reject it.
-    const backdrop_type: u32 = systemBackdropTypeForBuild(config, os_build);
-    _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
+    // attribute is supported starting with Windows 11 22H2 (build 22621);
+    // older builds skip the call entirely.
+    if (supportsDwmSystemBackdropAttribute(os_build)) {
+        const backdrop_type: u32 = systemBackdropTypeForBuild(config, os_build);
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
+    }
 }
 
 /// Linear-interpolate two `COLORREF`-shaped values (`0x00BBGGRR` on
@@ -27191,7 +27199,11 @@ test "win32 systemBackdropTypeForBuild gates unsupported builds" {
     config.@"background-opacity" = 0.85;
     config.@"background-blur" = .true;
 
-    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, 19045));
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN10_22H2));
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_21H2));
+    try std.testing.expect(supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_22H2));
+
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN10_22H2));
     try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_21H2));
     try std.testing.expectEqual(DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
 
