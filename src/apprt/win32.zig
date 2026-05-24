@@ -11868,6 +11868,16 @@ const Host = struct {
         self.forceHostCompositionPaint();
     }
 
+    fn syncVisibleSurfaceCoreSizesFromClientRects(self: *Host) void {
+        if (self.activeTab()) |tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                if (!entry.view.window_visible) continue;
+                entry.view.syncCoreSizeFromClientRect();
+            }
+        }
+    }
+
     fn forceVisibleSurfaceRepaintsNow(self: *Host) void {
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
@@ -14073,6 +14083,19 @@ fn resizeSettleSurfaceAction(renderer_repaint_requested: bool) ResizeSettleSurfa
 
 fn surfacePixelSizeChanged(previous: apprt.SurfaceSize, next: apprt.SurfaceSize) bool {
     return previous.width != next.width or previous.height != next.height;
+}
+
+fn scaleInitialClientSize(size: apprt.SurfaceSize, scale: apprt.ContentScale) apprt.SurfaceSize {
+    return .{
+        .width = scaleInitialClientAxis(size.width, scale.x),
+        .height = scaleInitialClientAxis(size.height, scale.y),
+    };
+}
+
+fn scaleInitialClientAxis(value: u32, scale: f32) u32 {
+    const scaled = @ceil(@as(f64, @floatFromInt(value)) * @as(f64, @floatCast(scale)));
+    const max_u32: f64 = @floatFromInt(std.math.maxInt(u32));
+    return @intFromFloat(@min(max_u32, @max(1, scaled)));
 }
 
 fn surfaceActivationNeedsHostSync(
@@ -22469,7 +22492,8 @@ pub const Surface = struct {
         if (self.fullscreen or
             self.restore_maximized or
             !shouldResizeHostForInitialSize(self.hostSurfaceCount())) return;
-        try self.resizeClientArea(size.width, size.height);
+        const client_size = scaleInitialClientSize(self.default_client_size.?, self.content_scale);
+        try self.resizeClientArea(client_size.width, client_size.height);
     }
 
     fn hostSurfaceCount(self: *const Surface) usize {
@@ -22483,7 +22507,8 @@ pub const Surface = struct {
         const size = self.default_client_size orelse return;
         if (self.fullscreen) try self.leaveFullscreen();
         if (self.windowHwnd()) |hwnd| _ = ShowWindow(hwnd, SW_RESTORE);
-        try self.resizeClientArea(@intCast(size.width), @intCast(size.height));
+        const client_size = scaleInitialClientSize(size, self.content_scale);
+        try self.resizeClientArea(client_size.width, client_size.height);
     }
 
     fn setSizeLimit(self: *Surface, limit: apprt.action.SizeLimit) void {
@@ -22640,6 +22665,7 @@ pub const Surface = struct {
 
     fn resizeClientArea(self: *Surface, client_width: u32, client_height: u32) !void {
         const hwnd = self.windowHwnd() orelse return;
+        const hosted = self.host != null;
         var client_rect: RECT = undefined;
         if (GetClientRect(hwnd, &client_rect) == 0) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
@@ -22666,6 +22692,14 @@ pub const Surface = struct {
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         ) == 0) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+
+        if (hosted) {
+            const host = self.host orelse unreachable;
+            try host.layout();
+            host.syncVisibleSurfaceCoreSizesFromClientRects();
+        } else {
+            self.syncCoreSizeFromClientRect();
         }
     }
 
@@ -30695,6 +30729,35 @@ test "win32 surfacePixelSizeChanged only trips on width or height deltas" {
     try std.testing.expect(!surfacePixelSizeChanged(stable, .{ .width = 800, .height = 600 }));
     try std.testing.expect(surfacePixelSizeChanged(stable, .{ .width = 801, .height = 600 }));
     try std.testing.expect(surfacePixelSizeChanged(stable, .{ .width = 800, .height = 601 }));
+}
+
+test "win32 scaleInitialClientSize converts logical initial size to physical pixels" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{ .width = 1680, .height = 810 },
+        scaleInitialClientSize(
+            .{ .width = 1120, .height = 540 },
+            .{ .x = 1.5, .y = 1.5 },
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{ .width = 701, .height = 300 },
+        scaleInitialClientSize(
+            .{ .width = 467, .height = 200 },
+            .{ .x = 1.5, .y = 1.5 },
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        apprt.SurfaceSize{
+            .width = std.math.maxInt(u32),
+            .height = std.math.maxInt(u32),
+        },
+        scaleInitialClientSize(
+            .{ .width = std.math.maxInt(u32), .height = std.math.maxInt(u32) },
+            .{ .x = 2.0, .y = 2.0 },
+        ),
+    );
 }
 
 test "win32 surfaceActivationNeedsHostSync only trips on activation-visible deltas" {
