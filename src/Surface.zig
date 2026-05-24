@@ -2383,7 +2383,8 @@ fn clipboardWrite(self: *const Surface, data: []const u8, loc: apprt.Clipboard) 
     // them to confirm the clipboard access. Each app runtime handles this
     // differently.
     const confirm = self.config.clipboard_write == .ask;
-    self.rt_surface.setClipboard(loc, &.{.{
+    const backing = self.osc52ClipboardBacking(loc);
+    self.rt_surface.setClipboard(backing, &.{.{
         .mime = "text/plain",
         .data = buf,
     }}, confirm) catch |err| {
@@ -6306,11 +6307,34 @@ pub fn completeClipboardRequest(
             confirmed,
         ),
 
-        .osc_52_write => |clipboard| try self.rt_surface.setClipboard(clipboard, &.{.{
-            .mime = "text/plain",
-            .data = data,
-        }}, !confirmed),
+        .osc_52_write => |clipboard| {
+            const backing = self.osc52ClipboardBacking(clipboard);
+            try self.rt_surface.setClipboard(backing, &.{.{
+                .mime = "text/plain",
+                .data = data,
+            }}, !confirmed);
+        },
     }
+}
+
+fn osc52ClipboardBacking(self: *const Surface, requested: apprt.Clipboard) apprt.Clipboard {
+    return resolveOSC52ClipboardBacking(
+        requested,
+        self.rt_surface.supportsClipboard(.selection),
+        self.rt_surface.supportsClipboard(.primary),
+    );
+}
+
+fn resolveOSC52ClipboardBacking(
+    requested: apprt.Clipboard,
+    supports_selection: bool,
+    supports_primary: bool,
+) apprt.Clipboard {
+    return switch (requested) {
+        .standard => .standard,
+        .selection => if (supports_selection) .selection else .standard,
+        .primary => if (supports_primary) .primary else .standard,
+    };
 }
 
 /// This starts a clipboard request, with some basic validation. For example,
@@ -6819,6 +6843,36 @@ test "Surface: selection logic" {
         9, 3, // expected start
         0, 3, // expected end
         false, // regular selection
+    );
+}
+
+test "Surface: OSC 52 clipboard backing falls back without selection clipboard support" {
+    try std.testing.expectEqual(
+        apprt.Clipboard.standard,
+        resolveOSC52ClipboardBacking(.standard, false, false),
+    );
+    try std.testing.expectEqual(
+        apprt.Clipboard.standard,
+        resolveOSC52ClipboardBacking(.selection, false, false),
+    );
+    try std.testing.expectEqual(
+        apprt.Clipboard.standard,
+        resolveOSC52ClipboardBacking(.primary, false, false),
+    );
+}
+
+test "Surface: OSC 52 clipboard backing preserves supported selectors" {
+    try std.testing.expectEqual(
+        apprt.Clipboard.selection,
+        resolveOSC52ClipboardBacking(.selection, true, false),
+    );
+    try std.testing.expectEqual(
+        apprt.Clipboard.primary,
+        resolveOSC52ClipboardBacking(.primary, false, true),
+    );
+    try std.testing.expectEqual(
+        apprt.Clipboard.standard,
+        resolveOSC52ClipboardBacking(.primary, true, false),
     );
 }
 

@@ -10,6 +10,18 @@ README or the public winghostty repository documentation
 
 ## Implementation Details
 
+### Support matrix
+
+| Shell | Automatic injection | Prompt / cwd marks | `ssh-env` | `ssh-terminfo` |
+| --- | --- | --- | --- | --- |
+| Bash | Yes, via POSIX `ENV` wrapper | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
+| Zsh | Yes, via temporary `ZDOTDIR` | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
+| Fish | Yes, via `XDG_DATA_DIRS` vendor config | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
+| Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
+| Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
+| PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `winghostty +ssh-cache`, otherwise falls back to `xterm-256color` |
+| cmd.exe | No | No | No | No |
+
 ### Bash
 
 Automatic [Bash](https://www.gnu.org/software/bash/) shell integration works by
@@ -139,6 +151,19 @@ The PowerShell script emits OSC 7 as a full `file://` URI with each path
 segment percent-encoded. It also emits OSC 133 prompt marks with a stable
 `aid=$PID` and, when PSReadLine exposes the accepted buffer, URL-encoded
 `cmdline_url` metadata on the command-start mark.
+
+When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
+wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
+`ssh-env` also sends `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`
+and sets `COLORTERM=truecolor` for the SSH process. When `ssh-terminfo` is
+enabled, the wrapper checks `winghostty +ssh-cache` for the resolved
+`user@hostname` from `ssh -G`; cached hosts use `TERM=xterm-ghostty`.
+
+PowerShell intentionally does not auto-install remote terminfo. The POSIX
+scripts can pipe `infocmp` through SSH and reuse a control socket for the final
+connection. On Windows PowerShell that path is not portable enough to run
+silently, so uncached hosts remain on `xterm-256color` until the terminfo is
+installed by another shell integration path or manually added to the SSH cache.
 
 `cmd.exe` is intentionally not auto-integrated. Command Prompt has no reliable
 prompt/pre-exec hook equivalent, so the Windows profile picker surfaces it as a
