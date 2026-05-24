@@ -19671,6 +19671,7 @@ const TerminalUiaContext = struct {
             .value = terminalUiaValue,
             .visible_value = terminalUiaVisibleValue,
             .visible_range = terminalUiaVisibleRange,
+            .snapshot = terminalUiaSnapshot,
             .focused = terminalUiaFocused,
         };
     }
@@ -19749,6 +19750,49 @@ const TerminalUiaContext = struct {
         defer visible.deinit();
 
         return win32_uia.visibleRangeInDocument(&document, &visible) orelse .{ .start = 0, .end = 0 };
+    }
+
+    fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
+        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const surface = self.surface orelse return try terminalUiaEmptySnapshot(alloc);
+        if (!surface.core_initialized) return try terminalUiaEmptySnapshot(alloc);
+
+        surface.core_surface.renderer_state.mutex.lock();
+        defer surface.core_surface.renderer_state.mutex.unlock();
+
+        var document = try win32_uia.snapshotTerminalPlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer document.deinit();
+
+        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
+            alloc,
+            surface.core_surface.renderer_state.terminal,
+        );
+        defer visible.deinit();
+
+        const visible_range = win32_uia.visibleRangeInDocument(&document, &visible) orelse win32_uia.OffsetRange{ .start = 0, .end = 0 };
+
+        return .{
+            .document_text = document.takeText(),
+            .visible_text = visible.takeText(),
+            .visible_range = visible_range,
+        };
+    }
+
+    fn terminalUiaEmptySnapshot(alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
+        const document_text = try alloc.dupe(u8, "");
+        errdefer alloc.free(document_text);
+        const visible_text = try alloc.dupe(u8, "");
+        return .{
+            .document_text = document_text,
+            .visible_text = visible_text,
+            .visible_range = .{ .start = 0, .end = 0 },
+        };
     }
 
     fn terminalUiaFocused(ctx: *anyopaque) bool {
