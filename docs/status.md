@@ -82,6 +82,13 @@ notifications, quick terminal notes, and troubleshooting, see
   staged installer, records apply intent, launches the installer elevated, and
   exits the app. Portable ZIP auto-apply is not implemented.
 
+### Windows package managers
+
+- WinGet package id: `AmanThanvi.winghostty`
+- Scoop bucket: `https://github.com/amanthanvi/scoop-winghostty`
+- Release readiness checks verify that both remote manifests exist before the
+  release workflow is allowed to publish package-manager updates.
+
 ### Crash reports
 
 - Local directory: `%LOCALAPPDATA%\winghostty\crash`

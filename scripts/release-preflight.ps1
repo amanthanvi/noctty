@@ -69,6 +69,160 @@ function Write-PresenceStatus {
     Write-Status -Label $Label -Value $MissingMessage
 }
 
+function Get-OptionalEnvValue {
+    param([string]$Name)
+
+    if (Test-EnvPresent -Name $Name) {
+        return Get-EnvValue -Name $Name
+    }
+
+    return $null
+}
+
+function Get-WingetManifestPath {
+    param([string]$PackageIdentifier)
+
+    $segments = $PackageIdentifier.Split('.')
+    if ($segments.Count -lt 2) {
+        throw "WINGET_PACKAGE_IDENTIFIER must contain at least publisher and package segments."
+    }
+
+    foreach ($segment in $segments) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            throw "WINGET_PACKAGE_IDENTIFIER contains an empty segment: $PackageIdentifier"
+        }
+    }
+
+    return "manifests/{0}/{1}" -f `
+        $segments[0].Substring(0, 1).ToLowerInvariant(), `
+        ($segments -join '/')
+}
+
+function Get-GitHubApiToken {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
+        if (Test-EnvPresent -Name $name) {
+            return Get-EnvValue -Name $name
+        }
+    }
+
+    return $null
+}
+
+function Get-GitHubResponseText {
+    param($Response)
+
+    if ($null -eq $Response) {
+        return $null
+    }
+
+    try {
+        if ($Response.Content -and $Response.Content.GetType().GetMethod("ReadAsStringAsync")) {
+            return $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        }
+
+        $stream = $Response.GetResponseStream()
+        if ($null -eq $stream) {
+            return $null
+        }
+
+        $reader = [System.IO.StreamReader]::new($stream)
+        try {
+            return $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Test-GitHubContentPath {
+    param(
+        [string]$Repository,
+        [string]$Path,
+        [string]$Label,
+        [string]$Ref,
+        [string]$Token
+    )
+
+    $apiPath = ($Path -replace '\\', '/').TrimStart('/')
+    $uri = "https://api.github.com/repos/$Repository/contents/$apiPath"
+    if (-not [string]::IsNullOrWhiteSpace($Ref)) {
+        $uri = "$uri`?ref=$([System.Uri]::EscapeDataString($Ref))"
+    }
+
+    $headers = @{
+        "Accept" = "application/vnd.github+json"
+        "User-Agent" = "winghostty-release-preflight"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        $headers["Authorization"] = "Bearer $Token"
+    }
+
+    $requestParams = @{
+        Uri = $uri
+        Headers = $headers
+        ErrorAction = "Stop"
+    }
+    if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")) {
+        $requestParams["UseBasicParsing"] = $true
+    }
+
+    try {
+        Invoke-WebRequest @requestParams | Out-Null
+        Write-Status -Label $Label -Value "found ($apiPath)"
+        return $true
+    }
+    catch {
+        $statusCode = if ($_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else {
+            $null
+        }
+
+        if ($statusCode -eq 404) {
+            Write-Status -Label $Label -Value "missing ($apiPath)"
+            return $false
+        }
+
+        $responseText = if ($_.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($_.ErrorDetails.Message)) {
+            [string]$_.ErrorDetails.Message
+        } else {
+            Get-GitHubResponseText -Response $_.Exception.Response
+        }
+        $apiMessage = $null
+        if (-not [string]::IsNullOrWhiteSpace($responseText)) {
+            try {
+                $apiMessage = [string](($responseText | ConvertFrom-Json).message)
+            }
+            catch {
+                $apiMessage = $responseText.Trim()
+            }
+        }
+
+        $detail = "GitHub Contents API probe failed for $Repository/$apiPath"
+        if ($statusCode) {
+            $detail = "$detail (HTTP $statusCode)"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($apiMessage)) {
+            $detail = "${detail}: $apiMessage"
+        }
+        if ($statusCode -eq 403) {
+            $detail = "$detail. Check token permissions, private repository access, and GitHub API rate limits."
+        }
+        elseif ($statusCode) {
+            $detail = "$detail. Check repository/path/ref configuration and token access."
+        }
+
+        throw $detail
+    }
+}
+
 $versionMatch = [regex]::Match($Version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
 if (-not $versionMatch.Success) {
     throw "Unsupported release version format '$Version'. winghostty releases must use plain semver <major>.<minor>.<patch>."
@@ -133,7 +287,35 @@ if ($RequireSigning) {
 
 Write-PresenceStatus -Label "WinGet package id" -Name "WINGET_PACKAGE_IDENTIFIER" -MissingMessage "missing (submit step will skip)" -Required:$RequirePackageManagers
 Write-PresenceStatus -Label "Scoop repo" -Name "SCOOP_BUCKET_REPO" -MissingMessage "missing (publish step will skip)" -Required:$RequirePackageManagers
-Write-PresenceStatus -Label "Scoop token" -Name "SCOOP_BUCKET_TOKEN" -MissingMessage "missing (publish step will skip)" -RedactValue
-Write-PresenceStatus -Label "WinGet token" -Name "WINGETCREATE_TOKEN" -MissingMessage "missing (submit step will skip)" -RedactValue
+Write-PresenceStatus -Label "Scoop token" -Name "SCOOP_BUCKET_TOKEN" -MissingMessage "missing" -RedactValue -Required:$RequirePackageManagers
+Write-PresenceStatus -Label "WinGet token" -Name "WINGETCREATE_TOKEN" -MissingMessage "missing" -RedactValue -Required:$RequirePackageManagers
+
+if ($RequirePackageManagers) {
+    $scoopManifestPath = if (Test-EnvPresent -Name "SCOOP_BUCKET_MANIFEST_PATH") {
+        Get-EnvValue -Name "SCOOP_BUCKET_MANIFEST_PATH"
+    } else {
+        "bucket/winghostty.json"
+    }
+    $wingetManifestPath = Get-WingetManifestPath -PackageIdentifier (Get-EnvValue -Name "WINGET_PACKAGE_IDENTIFIER")
+
+    $scoopReady = Test-GitHubContentPath `
+        -Repository (Get-EnvValue -Name "SCOOP_BUCKET_REPO") `
+        -Path $scoopManifestPath `
+        -Label "Scoop manifest" `
+        -Ref (Get-OptionalEnvValue -Name "SCOOP_BUCKET_BRANCH") `
+        -Token (Get-GitHubApiToken -Names @("SCOOP_BUCKET_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
+    $wingetReady = Test-GitHubContentPath `
+        -Repository "microsoft/winget-pkgs" `
+        -Path $wingetManifestPath `
+        -Label "WinGet manifest" `
+        -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
+
+    if (-not $scoopReady) {
+        throw "RequirePackageManagers was set, but the configured Scoop manifest does not exist."
+    }
+    if (-not $wingetReady) {
+        throw "RequirePackageManagers was set, but $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs."
+    }
+}
 
 Write-Host "Release preflight passed."

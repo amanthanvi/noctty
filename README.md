@@ -99,16 +99,22 @@ official Ghostty docs, see
 ## Install
 
 Latest stable release:
-**[winghostty 1.3.110](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.110)**,
-published 2026-05-09.
+**[winghostty 1.3.111](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.111)**,
+published 2026-05-12.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.110-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.110/winghostty-1.3.110-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
-| [`winghostty-1.3.110-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.110/winghostty-1.3.110-windows-x64-portable.zip) | You want to run without installing. |
-| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.110/SHA256SUMS.txt) | Verifying downloads. |
+| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal install with a Start menu entry. |
+| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run without installing. |
+| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Verifying downloads. |
+
+WinGet users can install the official manifest:
+
+```powershell
+winget install AmanThanvi.winghostty
+```
 
 Scoop users can install from the fork-owned bucket:
 

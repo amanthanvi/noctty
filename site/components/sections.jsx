@@ -4,8 +4,8 @@ const { useState: useStateShared, useRef: useRefShared } = React;
 
 function InstallBlock({ theme = 'dark' }) {
   const [copied, setCopied] = useStateShared(false);
-  const cmd = 'scoop install winghostty/winghostty';
-  const copyCmd = 'scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty\r\nscoop install winghostty/winghostty';
+  const cmd = 'winget install AmanThanvi.winghostty';
+  const copyCmd = 'winget install AmanThanvi.winghostty\r\nscoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty\r\nscoop install winghostty/winghostty';
   const onCopy = () => {
     navigator.clipboard?.writeText(copyCmd).then(() => {
       setCopied(true);
@@ -159,7 +159,7 @@ const WHY_ITEMS = [
   },
   {
     q: 'Anything to know before installing?',
-    a: 'Yes. Releases are currently unsigned, so Windows SmartScreen will warn on first run. That is expected for now.',
+    a: 'Yes. Releases are signed, but Windows SmartScreen can still warn while publisher reputation is new.',
   },
   {
     q: 'Does it phone home?',
