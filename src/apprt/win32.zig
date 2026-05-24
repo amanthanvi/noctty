@@ -15706,7 +15706,7 @@ fn buildWindowTitle(
     }.call;
 
     if (status.readonly) try appendStatus(&buf, alloc, "readonly", .{});
-    if (status.secure_input) try appendStatus(&buf, alloc, "secure", .{});
+    if (status.secure_input) try appendStatus(&buf, alloc, "sensitive", .{});
     if (status.key_sequence_active) try appendStatus(&buf, alloc, "keys", .{});
     if (status.key_table_name) |name| try appendStatus(&buf, alloc, "table:{s}", .{name});
     if (status.pwd) |pwd| try appendStatus(&buf, alloc, "cwd:{s}", .{pwd});
@@ -28426,7 +28426,7 @@ test "win32 buildWindowTitle appends active status segments" {
     defer std.testing.allocator.free(title);
 
     try std.testing.expectEqualStrings(
-        "pwsh | readonly | secure | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
+        "pwsh | readonly | sensitive | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
         title,
     );
 }

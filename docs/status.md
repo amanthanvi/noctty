@@ -45,6 +45,11 @@ For a row-by-row mapping against official Ghostty docs, see
 - High-contrast (HC) mode detection and palette switching
   (see `isHighContrastActive` in `src/apprt/win32.zig`)
 - IME for CJK and other composed input (`ImmGetContext`)
+- Sensitive-input indicator for password-style no-echo ConPTY input and the
+  `toggle_secure_input` action. This is a local cursor/status/title affordance
+  only; Windows does not provide the same Secure Keyboard Entry behavior that
+  Ghostty uses on macOS, and winghostty does not block system-wide keyboard
+  hooks.
 - Drag-and-drop of files into the terminal (`WM_DROPFILES` +
   `DragAcceptFiles`)
 - Window/session shape restore via `window-save-state`: host windows, tabs,

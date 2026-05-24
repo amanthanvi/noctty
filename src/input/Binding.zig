@@ -728,13 +728,18 @@ pub const Action = union(enum) {
 
     /// Toggle secure input mode.
     ///
-    /// This is used to prevent apps from monitoring your keyboard input
-    /// when entering passwords or other sensitive information.
+    /// This is used to mark the terminal as entering passwords or other
+    /// sensitive information.
     ///
-    /// This applies to the entire application, not just the focused terminal.
-    /// You must manually untoggle it or quit winghostty entirely to disable it.
+    /// On macOS this uses the system Secure Keyboard Entry API to prevent
+    /// other applications from monitoring keyboard input.
     ///
-    /// Only implemented on macOS, as this uses a built-in system API.
+    /// In the Windows-only fork, there is no equivalent OS API used here.
+    /// The action is implemented as a local sensitive-input state: it changes
+    /// the cursor/status/title affordances for the focused terminal and is also
+    /// driven automatically while the ConPTY is in password-style no-echo input
+    /// mode. It does not block system-wide keyboard hooks or guarantee input
+    /// privacy from other Windows processes.
     toggle_secure_input,
 
     /// Toggle mouse reporting on or off.
