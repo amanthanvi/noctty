@@ -27,7 +27,10 @@ notifications, quick terminal notes, and troubleshooting, see
 
 - VT parsing, screen / scrollback / alt-screen, DEC and xterm behaviors
 - 256-color and true-color
-- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52
+- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52.
+  Windows has one native clipboard, so OSC 52 writes using selectors `c`, `s`,
+  and `p` all target the standard Windows clipboard; OSC 52 read replies
+  preserve the requested selector in the response.
 - Bidi, combining marks, grapheme cluster rendering
 - Kitty graphics protocol and inline image display
 - Shell integration for bash, zsh, fish, PowerShell; `cmd.exe` is a plain
