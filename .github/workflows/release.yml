@@ -449,13 +449,35 @@ jobs:
           }
           $installerUrlArgs = @($installerUrls | ForEach-Object { [string]$_ })
 
-          & wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER `
-            --version $version `
-            --urls $installerUrlArgs `
-            --release-notes-url $metadata.release.releaseUrl `
-            --submit `
-            --no-open `
-            --token $env:WINGETCREATE_TOKEN
-          if ($LASTEXITCODE -ne 0) {
-            throw "wingetcreate update failed with exit code $LASTEXITCODE"
+          function Invoke-WinGetCreateUpdate {
+            param([string[]]$InstallerUrlArgs)
+
+            $output = & wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER `
+              --version $version `
+              --urls $InstallerUrlArgs `
+              --release-notes-url $metadata.release.releaseUrl `
+              --submit `
+              --no-open `
+              --token $env:WINGETCREATE_TOKEN 2>&1
+            $exitCode = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+
+            return @{
+              ExitCode = $exitCode
+              Output = (@($output) -join "`n")
+            }
+          }
+
+          $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
+          if ($result.ExitCode -ne 0 -and
+              $installerUrlArgs.Count -gt 1 -and
+              $result.Output -match "same number of installer URLs" -and
+              -not [string]::IsNullOrWhiteSpace([string]$metadata.winget.installerUrl)) {
+            Write-Host "WinGet update does not support increasing installer URL count for this package yet; retrying with the primary installer URL."
+            $installerUrlArgs = @([string]$metadata.winget.installerUrl)
+            $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
+          }
+
+          if ($result.ExitCode -ne 0) {
+            throw "wingetcreate update failed with exit code $($result.ExitCode)"
           }
