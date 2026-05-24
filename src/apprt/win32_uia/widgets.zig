@@ -556,11 +556,7 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
         out.* = null;
-        const value_fn = self.state.visible_value orelse self.state.value;
-        const text = value_fn(self.state.ctx, self.alloc) catch |err| {
-            std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
-            return com.E_OUTOFMEMORY;
-        };
+        const text = self.visibleText() catch return com.E_OUTOFMEMORY;
 
         return self.createRangeFromText(text, .{ .start = 0, .end = text.len }, out);
     }
@@ -598,13 +594,18 @@ pub const TerminalProvider = struct {
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
         out.* = null;
-        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
-            std.log.warn("uia: TerminalProvider point text snapshot failed err={}", .{err});
-            return com.E_OUTOFMEMORY;
-        };
+        const text = self.visibleText() catch return com.E_OUTOFMEMORY;
 
         const offset = self.byteOffsetForScreenPoint(text, point);
         return self.createRangeFromText(text, .{ .start = offset, .end = offset }, out);
+    }
+
+    fn visibleText(self: *TerminalProvider) ![]u8 {
+        const value_fn = self.state.visible_value orelse self.state.value;
+        return value_fn(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
+            return err;
+        };
     }
 
     fn byteOffsetForScreenPoint(self: *TerminalProvider, text: []const u8, point: com.UiaPoint) usize {
