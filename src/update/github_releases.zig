@@ -1120,6 +1120,47 @@ test "release parser prefers architecture checksum metadata over legacy x64 meta
     );
 }
 
+test "release parser accepts legacy checksum metadata for x64 install candidate" {
+    if (!std.mem.eql(u8, windowsInstallerArch(), "x64")) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const installer_name = try std.fmt.allocPrint(
+        alloc,
+        "winghostty-1.3.100-windows-{s}-setup.exe",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(installer_name);
+    const body = try std.fmt.allocPrint(
+        alloc,
+        \\{{
+        \\  "tag_name": "v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "assets": [
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/{s}"
+        \\    }},
+        \\    {{
+        \\      "name": "{s}",
+        \\      "browser_download_url": "https://example.invalid/legacy-checksums.txt"
+        \\    }}
+        \\  ]
+        \\}}
+    ,
+        .{ installer_name, installer_name, windows_checksums_asset_name_legacy },
+    );
+    defer alloc.free(body);
+
+    var release = try parseLatestStableReleaseResponse(alloc, body);
+    defer release.deinit(alloc);
+
+    try std.testing.expect(release.windows_install != null);
+    try std.testing.expectEqualStrings(
+        "https://example.invalid/legacy-checksums.txt",
+        release.windows_install.?.checksums_url,
+    );
+}
+
 test "release parser accepts long semver tags for windows install candidate" {
     const alloc = std.testing.allocator;
 
