@@ -6864,6 +6864,10 @@ test "Surface: OSC 52 clipboard backing preserves supported selectors" {
         apprt.Clipboard.primary,
         resolveOSC52ClipboardBacking(.primary, false, true),
     );
+    try std.testing.expectEqual(
+        apprt.Clipboard.standard,
+        resolveOSC52ClipboardBacking(.primary, true, false),
+    );
 }
 
 test "Surface: rectangle selection logic" {

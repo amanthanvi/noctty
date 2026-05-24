@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-09, against current fork HEAD.
+Last updated: 2026-05-24, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
@@ -25,9 +25,9 @@ For a row-by-row mapping against official Ghostty docs, see
 - VT parsing, screen / scrollback / alt-screen, DEC and xterm behaviors
 - 256-color and true-color
 - Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52.
-  Windows has one native clipboard, so OSC 52 `c`, `s`, and `p` writes all
-  target the standard Windows clipboard; OSC 52 read replies preserve the
-  requested selector in the response.
+  Windows has one native clipboard, so OSC 52 writes using selectors `c`, `s`,
+  and `p` all target the standard Windows clipboard; OSC 52 read replies
+  preserve the requested selector in the response.
 - Bidi, combining marks, grapheme cluster rendering
 - Kitty graphics protocol and inline image display
 - Shell integration for bash, zsh, fish, PowerShell; `cmd.exe` is a plain
