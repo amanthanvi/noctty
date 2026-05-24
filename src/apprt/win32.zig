@@ -3597,6 +3597,12 @@ pub const App = struct {
     fn openUpdateNotice(self: *App) !void {
         const notice = self.update_notice orelse return;
         if (notice.staged) {
+            if (!self.canApplyStagedUpdate()) {
+                if (notice.release_url) |url| {
+                    try self.openUrl(url);
+                    return;
+                }
+            }
             try self.applyStagedUpdate();
             return;
         }
@@ -3696,6 +3702,12 @@ pub const App = struct {
         self.running = false;
         self.destroyAllWindows();
         if (self.windows.items.len == 0) PostQuitMessage(0);
+    }
+
+    fn canApplyStagedUpdate(self: *App) bool {
+        const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
+        defer self.core_app.alloc.free(install_dir);
+        return isInstallerManagedInstallDir(install_dir);
     }
 
     fn showUpdateInfo(self: *App, message: []const u8) !void {
