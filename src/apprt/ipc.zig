@@ -56,6 +56,13 @@ pub const Target = union(Key) {
 pub const automation_window_list_schema = "winghostty.windows.v2";
 pub const automation_window_list_api_version: u32 = 2;
 
+comptime {
+    const version_suffix = std.fmt.comptimePrint(".v{d}", .{automation_window_list_api_version});
+    if (!std.mem.endsWith(u8, automation_window_list_schema, version_suffix)) {
+        @compileError("automation window-list schema suffix must match api version");
+    }
+}
+
 pub const AutomationWindowList = struct {
     schema: []const u8 = automation_window_list_schema,
     api_version: u32 = automation_window_list_api_version,
@@ -72,8 +79,8 @@ pub const AutomationWindow = struct {
     window_id: u32,
     focused: bool,
     active_tab_id: ?u32,
-    tab_count: usize,
-    pane_count: usize,
+    tab_count: u64,
+    pane_count: u64,
     tabs: []AutomationTab,
 
     pub fn deinit(self: *AutomationWindow, alloc: Allocator) void {
@@ -87,7 +94,7 @@ pub const AutomationTab = struct {
     tab_id: u32,
     active: bool,
     focused_surface_id: ?u64,
-    pane_count: usize,
+    pane_count: u64,
     panes: []AutomationPane,
 
     pub fn deinit(self: *AutomationTab, alloc: Allocator) void {

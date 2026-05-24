@@ -4597,7 +4597,7 @@ pub const App = struct {
             .window_id = host.id,
             .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
             .active_tab_id = active_tab_id,
-            .tab_count = tabs.len,
+            .tab_count = @intCast(tabs.len),
             .pane_count = automationPaneCount(tabs),
             .tabs = tabs,
         };
@@ -4617,6 +4617,8 @@ pub const App = struct {
             try panes.append(alloc, .{
                 .surface_id = entry.view.core().id,
                 .focused = if (focused_surface) |surface| surface == entry.view else false,
+                // True only for the focused pane in the active tab, not every
+                // tab-local focused pane.
                 .active = active and (if (focused_surface) |surface| surface == entry.view else false),
             });
         }
@@ -4625,14 +4627,14 @@ pub const App = struct {
             .tab_id = tab.id,
             .active = active,
             .focused_surface_id = if (focused_surface) |surface| surface.core().id else null,
-            .pane_count = panes.items.len,
+            .pane_count = @intCast(panes.items.len),
             .panes = try panes.toOwnedSlice(alloc),
         };
     }
 
-    fn automationPaneCount(tabs: []const apprt.ipc.AutomationTab) usize {
-        var count: usize = 0;
-        for (tabs) |tab| count += tab.panes.len;
+    fn automationPaneCount(tabs: []const apprt.ipc.AutomationTab) u64 {
+        var count: u64 = 0;
+        for (tabs) |tab| count += @intCast(tab.panes.len);
         return count;
     }
 
