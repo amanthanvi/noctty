@@ -70,9 +70,10 @@ Then stage release assets:
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.3.100
 ```
 
-On Windows ARM64 hosts, the packaging script defaults to ARM64. Pass
-`-Architecture x64` or `-Architecture arm64` explicitly when you need a
-specific target.
+In a native Windows ARM64 PowerShell process, the packaging script defaults to
+ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware. Pass
+`-Architecture x64` or `-Architecture arm64` explicitly when you need a specific
+target.
 
 If Inno Setup is available on the machine, the packaging script can also build
 the installer. If it is not installed, the portable artifact and checksums are
