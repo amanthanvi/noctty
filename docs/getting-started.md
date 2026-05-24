@@ -22,9 +22,9 @@ Get-FileHash .\winghostty-<version>-windows-x64-setup.exe -Algorithm SHA256
 ### Option A — Installer
 
 1. Double-click `winghostty-<version>-windows-x64-setup.exe`.
-2. SmartScreen will warn *"Windows protected your PC"*. Click **More info** →
-   **Run anyway**. Releases are unsigned; this warning is expected until code
-   signing is added.
+2. Current release builds are Authenticode-signed. SmartScreen can still warn
+   on a new publisher reputation, but the installer signature should be present
+   and valid.
 3. Accept the MIT license and install.
 4. Launch **winghostty** from the Start menu.
 
@@ -128,8 +128,9 @@ replaces binaries silently. `auto-update = download` downloads only stable
 Windows installer releases that include `SHA256SUMS.txt`, verifies the
 installer SHA-256 against that manifest, requires a valid Windows Authenticode
 signature, and stages the installer under the local winghostty state directory.
-Installing the staged update is still manual. No telemetry or analytics are
-sent.
+For installer-managed installs, the update notice can launch the verified
+staged installer with an explicit user action. UAC may prompt. Portable ZIP
+auto-apply is not implemented yet. No telemetry or analytics are sent.
 
 ## 9. Crash reports
 

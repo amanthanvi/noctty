@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-09, against current fork HEAD.
+Last updated: 2026-05-24, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
@@ -63,11 +63,13 @@ For a row-by-row mapping against official Ghostty docs, see
 ### Updater
 
 - Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
-- **Manual install**: never replaces the binary silently
+- Never replaces the binary silently
 - Gated to at most one check every 24 hours
 - `auto-update = download` stages only Windows installer releases that include
   checksum metadata and pass SHA-256 plus Authenticode verification. Applying
-  updates is not automatic.
+  an installer-managed staged update requires a user click, re-verifies the
+  staged installer, records apply intent, launches the installer elevated, and
+  exits the app. Portable ZIP auto-apply is not implemented.
 
 ### Crash reports
 
@@ -100,9 +102,9 @@ extractions will land as they stabilize.
 
 ## Known caveats
 
-- **Unsigned installer.** Windows SmartScreen may warn on first install.
-  Click *More info* → *Run anyway*. Code signing is a planned packaging
-  step; no ETA.
+- **SmartScreen reputation.** Release artifacts are expected to be
+  Authenticode-signed, but Windows SmartScreen can still warn for a new or
+  low-reputation publisher certificate.
 - **Issues disabled for usage questions.** GitHub Issues on this repo
   are reserved for reproducible bugs. For questions, feature discussion,
   and feedback, use
@@ -135,7 +137,7 @@ No formal roadmap. Indicative next areas:
   exposure and more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
-- Code signing for Windows releases
+- Portable ZIP updater apply/rollback
 - Broader local crash metadata and report packaging on Windows
 - ARB-context OpenGL migration paired with atlas rebuild
 

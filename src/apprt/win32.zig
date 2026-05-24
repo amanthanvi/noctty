@@ -1238,6 +1238,7 @@ const search_results_pending = "Searching";
 const search_results_none = "No matches";
 const opengl32_name: [*:0]const u8 = "opengl32.dll";
 const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
+const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
 
 var opengl32_module: HMODULE = null;
 
@@ -2214,7 +2215,7 @@ const UpdateNotice = struct {
             .message_text = if (staged)
                 try std.fmt.allocPrint(
                     alloc,
-                    "Update downloaded and verified: winghostty {s} is staged. Open Release to install.",
+                    "Update downloaded and verified: winghostty {s} is ready to install.",
                     .{version_text},
                 )
             else
@@ -3595,11 +3596,20 @@ pub const App = struct {
 
     fn openUpdateNotice(self: *App) !void {
         const notice = self.update_notice orelse return;
+        if (notice.staged) {
+            try self.applyStagedUpdate();
+            return;
+        }
         try self.openUrl(notice.release_url.?);
     }
 
     fn dismissUpdateNotice(self: *App) void {
         const notice = self.update_notice orelse return;
+        if (notice.staged) {
+            self.clearUpdateNotice();
+            return;
+        }
+
         const version_text = notice.version_text orelse {
             self.clearUpdateNotice();
             return;
@@ -3616,6 +3626,57 @@ pub const App = struct {
             log.warn("failed to record updater dismissal err={}", .{err});
         };
         self.clearUpdateNotice();
+    }
+
+    fn applyStagedUpdate(self: *App) !void {
+        const state_path = try updatepkg.defaultStatePath(self.core_app.alloc);
+        defer self.core_app.alloc.free(state_path);
+
+        var staged = updatepkg.verifyStagedWindowsInstall(self.core_app.alloc, state_path) catch |err| {
+            self.showUpdateInfo(updateApplyFailureMessage(err)) catch |banner_err| {
+                log.warn("failed to show updater apply failure err={}", .{banner_err});
+            };
+            return err;
+        };
+        defer staged.deinit(self.core_app.alloc);
+
+        const install_dir = try currentInstallDir(self.core_app.alloc);
+        defer self.core_app.alloc.free(install_dir);
+
+        const stage_dir = std.fs.path.dirname(staged.installer_path) orelse return error.InvalidStagedInstallerPath;
+        const logs_dir = try std.fs.path.join(self.core_app.alloc, &.{ stage_dir, "logs" });
+        defer self.core_app.alloc.free(logs_dir);
+        try std.fs.cwd().makePath(logs_dir);
+
+        const log_path = try std.fs.path.join(self.core_app.alloc, &.{ logs_dir, "apply.log" });
+        defer self.core_app.alloc.free(log_path);
+
+        const params = try buildInstallerApplyArgs(self.core_app.alloc, install_dir, log_path);
+        defer self.core_app.alloc.free(params);
+
+        try updatepkg.recordStagedApplyRequested(self.core_app.alloc, state_path, 0);
+
+        const installer_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, staged.installer_path);
+        defer self.core_app.alloc.free(installer_w);
+        const params_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, params);
+        defer self.core_app.alloc.free(params_w);
+        const stage_dir_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, stage_dir);
+        defer self.core_app.alloc.free(stage_dir_w);
+
+        const result = ShellExecuteW(
+            null,
+            shell_runas,
+            installer_w.ptr,
+            params_w.ptr,
+            stage_dir_w.ptr,
+            SW_SHOW,
+        );
+        if (@intFromPtr(result) <= 32) return error.UpdateApplyLaunchFailed;
+
+        self.stopQuitTimer();
+        self.running = false;
+        self.destroyAllWindows();
+        if (self.windows.items.len == 0) PostQuitMessage(0);
     }
 
     fn showUpdateInfo(self: *App, message: []const u8) !void {
@@ -6704,6 +6765,52 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
         "Update found, but it could not be verified or staged ({s}).",
         .{@errorName(err)},
     );
+}
+
+fn updateApplyFailureMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.NoStagedWindowsInstall => "No verified staged update is available. Run Check for Updates again.",
+        error.InvalidStagedInstallerPath => "The staged update path is invalid. Run Check for Updates again.",
+        error.InstallerChecksumMismatch => "The staged update no longer matches its verified checksum. Run Check for Updates again.",
+        error.InvalidAuthenticodeSignature => "The staged update signature is no longer trusted. Run Check for Updates again.",
+        error.AuthenticodeRequiresWindows => "The staged update can only be applied on Windows.",
+        error.SignatureVerifierUnavailable => "Windows signature verification is unavailable. The staged update was not launched.",
+        else => "The staged update could not be verified. Run Check for Updates again.",
+    };
+}
+
+fn currentInstallDir(alloc: Allocator) ![]u8 {
+    const exe_path = try std.fs.selfExePathAlloc(alloc);
+    errdefer alloc.free(exe_path);
+    const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidInstallPath;
+    const result = try alloc.dupe(u8, dir);
+    alloc.free(exe_path);
+    return result;
+}
+
+fn buildInstallerApplyArgs(alloc: Allocator, install_dir: []const u8, log_path: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+
+    try buf.appendSlice(alloc, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS");
+    try appendInnoQuotedArg(alloc, &buf, " /DIR=", install_dir);
+    try appendInnoQuotedArg(alloc, &buf, " /LOG=", log_path);
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn appendInnoQuotedArg(
+    alloc: Allocator,
+    buf: *std.ArrayList(u8),
+    prefix: []const u8,
+    value: []const u8,
+) !void {
+    try buf.appendSlice(alloc, prefix);
+    try buf.append(alloc, '"');
+    for (value) |c| {
+        if (c == '"') try buf.append(alloc, '"');
+        try buf.append(alloc, c);
+    }
+    try buf.append(alloc, '"');
 }
 
 fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckCompletion) void {
@@ -12994,11 +13101,14 @@ const Host = struct {
         if (paint_top) self.clearUpdateActionRects();
         if (paint_top and self.overlay_mode == .none and !inspector_panel_visible and self.banner_text == null) {
             if (self.app.update_notice) |notice| {
-                const open_label = std.unicode.utf8ToUtf16LeStringLiteral("Open Release");
+                const open_label = if (notice.staged)
+                    std.unicode.utf8ToUtf16LeStringLiteral("Install")
+                else
+                    std.unicode.utf8ToUtf16LeStringLiteral("Open Release");
                 const dismiss_label = std.unicode.utf8ToUtf16LeStringLiteral("Dismiss");
                 const button_height = self.scaled(22);
                 const dismiss_width = self.scaled(72);
-                const open_width = self.scaled(102);
+                const open_width = if (notice.staged) self.scaled(86) else self.scaled(102);
                 const button_gap = self.scaled(8);
                 const dismiss_rect = RECT{
                     .left = client_rect.right - dismiss_width - self.scaled(16),
@@ -13024,7 +13134,6 @@ const Host = struct {
                 };
 
                 _ = SetTextColor(hdc, theme.info_fg);
-                _ = notice;
                 if (self.cached_banner_w) |banner_w| {
                     drawTextWz(
                         hdc,
@@ -30217,6 +30326,36 @@ test "win32 surfaceLayoutRuntimeSync only trips on visibility or pane rect chang
     const rect_only = surfaceLayoutRuntimeSync(false, true);
     try std.testing.expect(rect_only.scrollbar_refresh);
     try std.testing.expect(rect_only.core_size_sync);
+}
+
+test "win32 installer apply args preserve install dir and log path" {
+    const alloc = std.testing.allocator;
+    const args = try buildInstallerApplyArgs(
+        alloc,
+        "C:\\Program Files\\winghostty",
+        "C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log",
+    );
+    defer alloc.free(args);
+
+    try std.testing.expect(std.mem.indexOf(u8, args, "/VERYSILENT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/SUPPRESSMSGBOXES") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/NORESTART") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/CLOSEAPPLICATIONS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/RESTARTAPPLICATIONS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\winghostty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/LOG=\"C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log\"") != null);
+}
+
+test "win32 installer apply args double embedded quotes" {
+    const alloc = std.testing.allocator;
+    const args = try buildInstallerApplyArgs(
+        alloc,
+        "C:\\Program Files\\wing\"hostty",
+        "C:\\logs\\apply.log",
+    );
+    defer alloc.free(args);
+
+    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\wing\"\"hostty\"") != null);
 }
 
 test "win32 surfaceRepaintRequestMode flushes renderer paints during resize settle" {
