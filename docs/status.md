@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-09, against current fork HEAD.
+Last updated: 2026-05-24, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).

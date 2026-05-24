@@ -4,7 +4,7 @@ Maps current official Ghostty docs surfaces to winghostty behavior on
 Windows. Keep this short. Update rows when Windows behavior changes or when
 upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-05-09.
+Last reviewed: 2026-05-24.
 
 ## Status legend
 

@@ -726,7 +726,7 @@ pub const Action = union(enum) {
     /// Implemented on Win32 in this fork and on macOS.
     toggle_window_float_on_top,
 
-    /// Toggle secure input mode.
+    /// Toggle the sensitive-input indicator.
     ///
     /// This is used to mark the terminal as entering passwords or other
     /// sensitive information.
