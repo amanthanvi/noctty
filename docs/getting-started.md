@@ -191,6 +191,8 @@ slate.
 
 - [docs/status.md](status.md) — what works, what's experimental, known
   caveats
+- [docs/windows.md](windows.md) — Windows-specific behavior,
+  troubleshooting, paths, app identity, notifications, and shell notes
 - [docs/windows-capability-matrix.md](windows-capability-matrix.md) —
   Windows-specific behavior and docs truth
 - [HACKING.md](../HACKING.md) — build, test, runtime notes (for
