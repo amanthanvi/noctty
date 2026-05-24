@@ -25,6 +25,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$Architectures = @($Architectures | ForEach-Object { ([string]$_).ToLowerInvariant() })
+
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $tagValue = if ($Tag) { $Tag } else { "v$Version" }
 if ($ArtifactRoot -and $Architectures.Count -ne 1) {

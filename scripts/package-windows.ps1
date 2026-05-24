@@ -18,6 +18,8 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+$Architecture = $Architecture.ToLowerInvariant()
+
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $outputRootPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 $userHome = if ($env:USERPROFILE) {

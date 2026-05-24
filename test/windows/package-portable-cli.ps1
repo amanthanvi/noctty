@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$Architecture = $Architecture.ToLowerInvariant()
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $packageScript = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
