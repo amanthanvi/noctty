@@ -589,10 +589,8 @@ const DWMWA_CAPTION_COLOR: DWORD = 35;
 const DWMWA_TEXT_COLOR: DWORD = 36;
 const DWMWA_SYSTEMBACKDROP_TYPE: DWORD = 38;
 const DWMSBT_NONE: u32 = 1;
-const DWMSBT_MAINWINDOW: u32 = 2;
 /// Mica-tabbed backdrop for main windows with visible tab strips.
-/// Win11 22H2+ (build ≥ 22621); older Win11 (≥ 22000) accepts
-/// `DWMSBT_MAINWINDOW` but not this variant.
+/// Win11 22H2+ (build >= 22621).
 const DWMSBT_TABBEDWINDOW: u32 = 4;
 const OS_BUILD_WIN11_21H2: u32 = 22000;
 const OS_BUILD_WIN11_22H2: u32 = 22621;
@@ -14105,6 +14103,12 @@ fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
         config.@"background-blur".win32SystemBackdropEnabled();
 }
 
+fn systemBackdropTypeForBuild(config: *const configpkg.Config, os_build: u32) u32 {
+    if (!shouldUseSystemBackdrop(config)) return DWMSBT_NONE;
+    if (os_build < OS_BUILD_WIN11_22H2) return DWMSBT_NONE;
+    return DWMSBT_TABBEDWINDOW;
+}
+
 fn configuredHostWindowPosition(config: *const configpkg.Config) ?struct { x: i32, y: i32 } {
     const x = config.@"window-position-x" orelse return null;
     const y = config.@"window-position-y" orelse return null;
@@ -14147,21 +14151,10 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
     const text_color = titlebarTextColor(theme, config);
     _ = DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, @ptrCast(&caption_color), @sizeOf(u32));
     _ = DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, @ptrCast(&text_color), @sizeOf(u32));
-    // Toggle system backdrop blur (Win11+; returns E_INVALIDARG on older
-    // builds, discarded). Main-window backdrop picks the richest variant
-    // the build supports:
-    //   * Win11 22H2+ (build ≥ 22621): `DWMSBT_TABBEDWINDOW` for the Mica-
-    //     with-tabs look that the new chrome expects. Older Win11 can't
-    //     render `TABBEDWINDOW` (`DwmSetWindowAttribute` returns
-    //     `E_INVALIDARG`); probing blindly there would spam the debug
-    //     log on every theme apply, so the build-number gate filters.
-    //   * Win11 < 22H2: `DWMSBT_MAINWINDOW` (plain Mica).
-    //   * Win10 / older / `background-opacity = 1.0` / blur disabled:
-    //     `DWMSBT_NONE`.
-    const backdrop_type: u32 = if (shouldUseSystemBackdrop(config)) blk: {
-        if (os_build >= OS_BUILD_WIN11_22H2) break :blk DWMSBT_TABBEDWINDOW;
-        break :blk DWMSBT_MAINWINDOW;
-    } else DWMSBT_NONE;
+    // Toggle system backdrop blur through DWMWA_SYSTEMBACKDROP_TYPE. That
+    // attribute is supported starting with Windows 11 22H2 (build 22621), so
+    // older builds get an explicit NONE instead of relying on DWM to reject it.
+    const backdrop_type: u32 = systemBackdropTypeForBuild(config, os_build);
     _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
 }
 
@@ -27189,6 +27182,21 @@ test "win32 shouldUseSystemBackdrop requires opacity and blur" {
 
     config.@"background-blur" = .true;
     try std.testing.expect(shouldUseSystemBackdrop(&config));
+}
+
+test "win32 systemBackdropTypeForBuild gates unsupported builds" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var config: configpkg.Config = .{};
+    config.@"background-opacity" = 0.85;
+    config.@"background-blur" = .true;
+
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, 19045));
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_21H2));
+    try std.testing.expectEqual(DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
+
+    config.@"background-blur" = .false;
+    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
 }
 
 test "win32 configuredHostWindowPosition requires both coordinates" {

@@ -4,7 +4,7 @@ Maps current official Ghostty docs surfaces to winghostty behavior on
 Windows. Keep this short. Update rows when Windows behavior changes or when
 upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-05-09.
+Last reviewed: 2026-05-24.
 
 ## Status legend
 
@@ -24,6 +24,7 @@ Last reviewed: 2026-05-09.
 | [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs surface. On Windows the config file lives at `%LOCALAPPDATA%\winghostty\config.ghostty`, and live reload is available via `Ctrl+Shift+,`. |
 | [Custom keybindings](https://ghostty.org/docs/config/keybind) | Same `keybind = trigger=action` grammar and `+list-keybinds` flow. Default bindings are Windows-native rather than macOS/Linux defaults. |
 | [Color Theme](https://ghostty.org/docs/features/theme) | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows. |
+| [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference) | Transparent terminal backgrounds work on Windows and can be toggled live. |
 | [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference) | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface used by terminal apps. |
 | [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features) | Native Win32 windows, tabs, and splits ship today in winghostty. |
 
@@ -35,6 +36,7 @@ Last reviewed: 2026-05-09.
 | [Action reference](https://ghostty.org/docs/config/keybind/reference) | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`. |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference) | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored. |
+| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference) | On Windows 11 22H2 or newer, `background-opacity < 1` plus enabled `background-blur` requests the DWM tabbed system backdrop. On Windows 10 and Windows 11 21H2, the option remains accepted but no DWM backdrop is requested. Numeric blur radii are treated as enabled/disabled, not as tunable blur strength. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
 
 ## No-op Compatibility
