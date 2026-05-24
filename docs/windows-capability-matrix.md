@@ -36,6 +36,7 @@ Last reviewed: 2026-05-09.
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference) | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases, but install/apply remains manual. |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference) | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored. |
 | [Features overview](https://ghostty.org/docs/features) | Accessibility is partial: the Win32 host exposes a UI Automation root provider and the command palette exposes a list provider, but terminal scrollback is not yet exposed through `ITextProvider`. |
+| OSC 52 primary/selection clipboard selectors | Windows exposes one native clipboard. OSC 52 writes for `c`, `s`, and `p` therefore write the standard Windows clipboard. OSC 52 read replies still echo the requested selector (`c`, `s`, or `p`) so terminal clients can correlate the response. |
 
 ## No-op Compatibility
 
