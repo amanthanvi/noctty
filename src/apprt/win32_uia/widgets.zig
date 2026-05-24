@@ -23,6 +23,7 @@
 const std = @import("std");
 const com = @import("com.zig");
 const constants = @import("constants.zig");
+const terminal_text = @import("text.zig");
 
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
@@ -187,6 +188,7 @@ pub const PaletteListProvider = struct {
 pub const TerminalProvider = struct {
     base: com.IRawElementProviderSimple,
     value_iface: com.IValueProvider,
+    text_iface: com.ITextProvider,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
@@ -211,6 +213,18 @@ pub const TerminalProvider = struct {
         .get_IsReadOnly = TerminalProvider.get_IsReadOnly,
     };
 
+    const text_vtbl: com.ITextProviderVtbl = .{
+        .QueryInterface = TerminalProvider.TextQueryInterface,
+        .AddRef = TerminalProvider.TextAddRef,
+        .Release = TerminalProvider.TextRelease,
+        .GetSelection = TerminalProvider.GetSelection,
+        .GetVisibleRanges = TerminalProvider.GetVisibleRanges,
+        .RangeFromChild = TerminalProvider.RangeFromChild,
+        .RangeFromPoint = TerminalProvider.RangeFromPoint,
+        .get_DocumentRange = TerminalProvider.get_DocumentRange,
+        .get_SupportedTextSelection = TerminalProvider.get_SupportedTextSelection,
+    };
+
     pub fn create(
         alloc: std.mem.Allocator,
         hwnd: com.HWND,
@@ -221,6 +235,7 @@ pub const TerminalProvider = struct {
         self.* = .{
             .base = .{ .vtbl = &simple_vtbl },
             .value_iface = .{ .vtbl = &value_vtbl },
+            .text_iface = .{ .vtbl = &text_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .hwnd = hwnd,
@@ -235,6 +250,10 @@ pub const TerminalProvider = struct {
 
     fn fromValue(p: *com.IValueProvider) *TerminalProvider {
         return @fieldParentPtr("value_iface", p);
+    }
+
+    fn fromText(p: *com.ITextProvider) *TerminalProvider {
+        return @fieldParentPtr("text_iface", p);
     }
 
     pub fn QueryInterface(
@@ -252,6 +271,15 @@ pub const TerminalProvider = struct {
         out: *?*anyopaque,
     ) callconv(.winapi) com.HRESULT {
         const self = fromValue(self_value);
+        return self.queryInterface(iid, out);
+    }
+
+    fn TextQueryInterface(
+        self_text: *com.ITextProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromText(self_text);
         return self.queryInterface(iid, out);
     }
 
@@ -273,6 +301,11 @@ pub const TerminalProvider = struct {
             _ = self.refcount.fetchAdd(1, .monotonic);
             return com.S_OK;
         }
+        if (iidEqual(iid, &com.IID_ITextProvider)) {
+            out.* = @ptrCast(&self.text_iface);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+            return com.S_OK;
+        }
         return com.E_NOINTERFACE;
     }
 
@@ -286,6 +319,11 @@ pub const TerminalProvider = struct {
         return self.refcount.fetchAdd(1, .monotonic) + 1;
     }
 
+    fn TextAddRef(self_text: *com.ITextProvider) callconv(.winapi) u32 {
+        const self = fromText(self_text);
+        return self.refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
     pub fn Release(self_base: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
         const self = fromBase(self_base);
         return self.release();
@@ -293,6 +331,11 @@ pub const TerminalProvider = struct {
 
     fn ValueRelease(self_value: *com.IValueProvider) callconv(.winapi) u32 {
         const self = fromValue(self_value);
+        return self.release();
+    }
+
+    fn TextRelease(self_text: *com.ITextProvider) callconv(.winapi) u32 {
+        const self = fromText(self_text);
         return self.release();
     }
 
@@ -323,6 +366,9 @@ pub const TerminalProvider = struct {
         out.* = null;
         if (pattern_id == constants.UIA_ValuePatternId) {
             out.* = @ptrCast(&self.value_iface);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+        } else if (pattern_id == constants.UIA_TextPatternId) {
+            out.* = @ptrCast(&self.text_iface);
             _ = self.refcount.fetchAdd(1, .monotonic);
         }
         return com.S_OK;
@@ -418,6 +464,373 @@ pub const TerminalProvider = struct {
         defer self.alloc.free(text);
         return allocBstrFromUtf8(self.alloc, text);
     }
+
+    fn GetSelection(
+        _: *com.ITextProvider,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0);
+        return if (out.* == null) com.E_OUTOFMEMORY else com.S_OK;
+    }
+
+    fn GetVisibleRanges(
+        self_text: *com.ITextProvider,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromText(self_text);
+        return self.singleRangeArray(out);
+    }
+
+    fn RangeFromChild(
+        _: *com.ITextProvider,
+        _: ?*com.IRawElementProviderSimple,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.E_NOTIMPL;
+    }
+
+    fn RangeFromPoint(
+        self_text: *com.ITextProvider,
+        _: com.UiaPoint,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromText(self_text);
+        return self.createDocumentRange(out);
+    }
+
+    fn get_DocumentRange(
+        self_text: *com.ITextProvider,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromText(self_text);
+        return self.createDocumentRange(out);
+    }
+
+    fn get_SupportedTextSelection(
+        _: *com.ITextProvider,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.SupportedTextSelection_None;
+        return com.S_OK;
+    }
+
+    fn singleRangeArray(self: *TerminalProvider, out: *?*com.SAFEARRAY) com.HRESULT {
+        out.* = null;
+        var range: ?*com.ITextRangeProvider = null;
+        const range_hr = self.createDocumentRange(&range);
+        if (range_hr != com.S_OK) return range_hr;
+        defer _ = TerminalTextRangeProvider.Release(range.?);
+
+        const array = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 1) orelse return com.E_OUTOFMEMORY;
+        errdefer _ = com.SafeArrayDestroy(array);
+
+        var index: i32 = 0;
+        const put_hr = com.SafeArrayPutElement(array, &index, @ptrCast(range.?));
+        if (put_hr != com.S_OK) return put_hr;
+
+        out.* = array;
+        return com.S_OK;
+    }
+
+    fn createDocumentRange(
+        self: *TerminalProvider,
+        out: *?*com.ITextRangeProvider,
+    ) com.HRESULT {
+        out.* = null;
+        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
+            std.log.warn("uia: TerminalProvider text snapshot failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+        errdefer self.alloc.free(text);
+
+        const range = TerminalTextRangeProvider.create(
+            self.alloc,
+            self,
+            text,
+            .{ .start = 0, .end = text.len },
+        ) catch |err| {
+            std.log.warn("uia: TerminalTextRangeProvider.create failed err={}", .{err});
+            return com.E_OUTOFMEMORY;
+        };
+        out.* = &range.base;
+        return com.S_OK;
+    }
+};
+
+const TerminalTextRangeProvider = struct {
+    base: com.ITextRangeProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    parent: *TerminalProvider,
+    text: []u8,
+    range: terminal_text.OffsetRange,
+
+    const vtbl: com.ITextRangeProviderVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .Clone = Clone,
+        .Compare = Compare,
+        .CompareEndpoints = CompareEndpoints,
+        .ExpandToEnclosingUnit = ExpandToEnclosingUnit,
+        .FindAttribute = FindAttribute,
+        .FindText = FindText,
+        .GetAttributeValue = GetAttributeValue,
+        .GetBoundingRectangles = GetBoundingRectangles,
+        .GetEnclosingElement = GetEnclosingElement,
+        .GetText = GetText,
+        .Move = Move,
+        .MoveEndpointByUnit = MoveEndpointByUnit,
+        .MoveEndpointByRange = MoveEndpointByRange,
+        .Select = Select,
+        .AddToSelection = AddToSelection,
+        .RemoveFromSelection = RemoveFromSelection,
+        .ScrollIntoView = ScrollIntoView,
+        .GetChildren = GetChildren,
+    };
+
+    fn create(
+        alloc: std.mem.Allocator,
+        parent: *TerminalProvider,
+        text: []u8,
+        range: terminal_text.OffsetRange,
+    ) !*TerminalTextRangeProvider {
+        const self = try alloc.create(TerminalTextRangeProvider);
+        _ = TerminalProvider.AddRef(&parent.base);
+        self.* = .{
+            .base = .{ .vtbl = &vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .parent = parent,
+            .text = text,
+            .range = normalizeRange(range, text.len),
+        };
+        return self;
+    }
+
+    fn fromBase(p: *com.ITextRangeProvider) *TerminalTextRangeProvider {
+        return @fieldParentPtr("base", p);
+    }
+
+    fn normalizeRange(range: terminal_text.OffsetRange, text_len: usize) terminal_text.OffsetRange {
+        const start = @min(range.start, text_len);
+        const end = @min(@max(range.end, start), text_len);
+        return .{ .start = start, .end = end };
+    }
+
+    fn QueryInterface(
+        self_base: *com.ITextRangeProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or
+            iidEqual(iid, &com.IID_ITextRangeProvider))
+        {
+            out.* = @ptrCast(&self.base);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+            return com.S_OK;
+        }
+        return com.E_NOINTERFACE;
+    }
+
+    fn AddRef(self_base: *com.ITextRangeProvider) callconv(.winapi) u32 {
+        const self = fromBase(self_base);
+        return self.refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn Release(self_base: *com.ITextRangeProvider) callconv(.winapi) u32 {
+        const self = fromBase(self_base);
+        const prev = self.refcount.fetchSub(1, .acq_rel);
+        if (prev == 1) {
+            self.alloc.free(self.text);
+            _ = TerminalProvider.Release(&self.parent.base);
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return prev - 1;
+    }
+
+    fn Clone(
+        self_base: *com.ITextRangeProvider,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = null;
+        const text_copy = self.alloc.dupe(u8, self.text) catch return com.E_OUTOFMEMORY;
+        errdefer self.alloc.free(text_copy);
+        const clone = create(self.alloc, self.parent, text_copy, self.range) catch return com.E_OUTOFMEMORY;
+        out.* = &clone.base;
+        return com.S_OK;
+    }
+
+    fn Compare(
+        self_base: *com.ITextRangeProvider,
+        other: ?*com.ITextRangeProvider,
+        out: *com.BOOL,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = 0;
+        const other_range = other orelse return com.S_OK;
+        if (other_range.vtbl != &vtbl) return com.S_OK;
+        const rhs = fromBase(other_range);
+        out.* = if (self.parent == rhs.parent and
+            self.range.start == rhs.range.start and
+            self.range.end == rhs.range.end and
+            std.mem.eql(u8, self.text, rhs.text)) 1 else 0;
+        return com.S_OK;
+    }
+
+    fn CompareEndpoints(
+        self_base: *com.ITextRangeProvider,
+        endpoint: i32,
+        other: ?*com.ITextRangeProvider,
+        target_endpoint: i32,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        const other_range = other orelse return com.E_POINTER;
+        if (other_range.vtbl != &vtbl) return com.E_NOINTERFACE;
+        const rhs = fromBase(other_range);
+        const lhs_value = if (endpoint == com.TextPatternRangeEndpoint_End) self.range.end else self.range.start;
+        const rhs_value = if (target_endpoint == com.TextPatternRangeEndpoint_End) rhs.range.end else rhs.range.start;
+        out.* = if (lhs_value < rhs_value) -1 else if (lhs_value > rhs_value) 1 else 0;
+        return com.S_OK;
+    }
+
+    fn ExpandToEnclosingUnit(
+        self_base: *com.ITextRangeProvider,
+        unit: i32,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        if (unit == com.TextUnit_Document) {
+            self.range = .{ .start = 0, .end = self.text.len };
+            return com.S_OK;
+        }
+        return com.E_NOTIMPL;
+    }
+
+    fn FindAttribute(
+        _: *com.ITextRangeProvider,
+        _: i32,
+        _: com.VARIANT,
+        _: com.BOOL,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.S_OK;
+    }
+
+    fn FindText(
+        _: *com.ITextRangeProvider,
+        _: ?[*:0]const u16,
+        _: com.BOOL,
+        _: com.BOOL,
+        out: *?*com.ITextRangeProvider,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.E_NOTIMPL;
+    }
+
+    fn GetAttributeValue(
+        _: *com.ITextRangeProvider,
+        _: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.VARIANT.empty();
+        return com.S_OK;
+    }
+
+    fn GetBoundingRectangles(
+        _: *com.ITextRangeProvider,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.SafeArrayCreateVector(com.VT_R8, 0, 0);
+        return if (out.* == null) com.E_OUTOFMEMORY else com.S_OK;
+    }
+
+    fn GetEnclosingElement(
+        self_base: *com.ITextRangeProvider,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = &self.parent.base;
+        _ = TerminalProvider.AddRef(&self.parent.base);
+        return com.S_OK;
+    }
+
+    fn GetText(
+        self_base: *com.ITextRangeProvider,
+        max_length: i32,
+        out: *?[*:0]u16,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(self_base);
+        out.* = allocBstrFromUtf8Max(
+            self.alloc,
+            self.text[self.range.start..self.range.end],
+            max_length,
+        ) orelse return com.E_OUTOFMEMORY;
+        return com.S_OK;
+    }
+
+    fn Move(
+        _: *com.ITextRangeProvider,
+        _: i32,
+        _: i32,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        return com.E_NOTIMPL;
+    }
+
+    fn MoveEndpointByUnit(
+        _: *com.ITextRangeProvider,
+        _: i32,
+        _: i32,
+        _: i32,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = 0;
+        return com.E_NOTIMPL;
+    }
+
+    fn MoveEndpointByRange(
+        _: *com.ITextRangeProvider,
+        _: i32,
+        _: ?*com.ITextRangeProvider,
+        _: i32,
+    ) callconv(.winapi) com.HRESULT {
+        return com.E_NOTIMPL;
+    }
+
+    fn Select(_: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
+        return com.E_NOTIMPL;
+    }
+
+    fn AddToSelection(_: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
+        return com.E_NOTIMPL;
+    }
+
+    fn RemoveFromSelection(_: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
+        return com.E_NOTIMPL;
+    }
+
+    fn ScrollIntoView(
+        _: *com.ITextRangeProvider,
+        _: com.BOOL,
+    ) callconv(.winapi) com.HRESULT {
+        return com.S_OK;
+    }
+
+    fn GetChildren(
+        _: *com.ITextRangeProvider,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0);
+        return if (out.* == null) com.E_OUTOFMEMORY else com.S_OK;
+    }
 };
 
 /// Handle `WM_GETOBJECT` for the palette list HWND. `state` gives the
@@ -480,6 +893,31 @@ fn allocBstrFromUtf8(alloc: std.mem.Allocator, text: []const u8) ?[*:0]u16 {
     const written = std.unicode.utf8ToUtf16Le(buf, text) catch return null;
     std.debug.assert(written == utf16_len);
     return com.SysAllocString(@ptrCast(buf.ptr));
+}
+
+fn allocBstrFromUtf8Max(
+    alloc: std.mem.Allocator,
+    text: []const u8,
+    max_utf16_len: i32,
+) ?[*:0]u16 {
+    if (max_utf16_len < 0) return allocBstrFromUtf8(alloc, text);
+    const limited = utf8PrefixForUtf16Limit(text, @intCast(max_utf16_len)) catch return null;
+    return allocBstrFromUtf8(alloc, limited);
+}
+
+fn utf8PrefixForUtf16Limit(text: []const u8, max_utf16_len: usize) ![]const u8 {
+    var byte_index: usize = 0;
+    var utf16_len: usize = 0;
+    while (byte_index < text.len) {
+        const seq_len = try std.unicode.utf8ByteSequenceLength(text[byte_index]);
+        if (byte_index + seq_len > text.len) return error.TruncatedUtf8;
+        const codepoint = try std.unicode.utf8Decode(text[byte_index .. byte_index + seq_len]);
+        const next_utf16_len = utf16_len + if (codepoint <= 0xFFFF) @as(usize, 1) else 2;
+        if (next_utf16_len > max_utf16_len) break;
+        byte_index += seq_len;
+        utf16_len = next_utf16_len;
+    }
+    return text[0..byte_index];
 }
 
 test "PaletteListProvider refcount balances" {
@@ -550,6 +988,34 @@ test "TerminalProvider exposes Value pattern provider" {
     _ = TerminalProvider.ValueRelease(@ptrCast(@alignCast(out.?)));
 }
 
+test "TerminalProvider QueryInterface accepts TextProvider" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var out: ?*anyopaque = null;
+    const hr = TerminalProvider.QueryInterface(&p.base, &com.IID_ITextProvider, &out);
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expect(out != null);
+    _ = TerminalProvider.TextRelease(@ptrCast(@alignCast(out.?)));
+}
+
+test "TerminalProvider exposes Text pattern provider" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var out: ?*com.IUnknown = null;
+    const hr = TerminalProvider.GetPatternProvider(&p.base, constants.UIA_TextPatternId, &out);
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expect(out != null);
+    _ = TerminalProvider.TextRelease(@ptrCast(@alignCast(out.?)));
+}
+
 test "TerminalProvider refcount and state retain balance across value provider refs" {
     var state_data = TestTerminalStateData{};
     const state = testTerminalState(&state_data);
@@ -570,6 +1036,35 @@ test "TerminalProvider refcount and state retain balance across value provider r
     try std.testing.expectEqual(@as(u32, 0), TerminalProvider.Release(&p.base));
     try std.testing.expectEqual(@as(u32, 1), state_data.retains);
     try std.testing.expectEqual(@as(u32, 1), state_data.releases);
+}
+
+test "TerminalProvider text provider reports no selectable text" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var selection: i32 = -1;
+    const hr = TerminalProvider.get_SupportedTextSelection(&p.text_iface, &selection);
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expectEqual(com.SupportedTextSelection_None, selection);
+}
+
+test "TerminalProvider visible ranges returns a SAFEARRAY" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var ranges: ?*com.SAFEARRAY = null;
+    const hr = TerminalProvider.GetVisibleRanges(&p.text_iface, &ranges);
+    defer _ = com.SafeArrayDestroy(ranges);
+
+    try std.testing.expectEqual(com.S_OK, hr);
+    try std.testing.expect(ranges != null);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
 }
 
 test "TerminalProvider reports document control type" {
@@ -601,6 +1096,78 @@ test "TerminalProvider get_Value returns non-null BSTR" {
     try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(out));
     try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), out.?[0..11]);
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+}
+
+test "TerminalProvider DocumentRange returns terminal text" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    const range_hr = TerminalProvider.get_DocumentRange(&p.text_iface, &range);
+    try std.testing.expectEqual(com.S_OK, range_hr);
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    var out: ?[*:0]u16 = null;
+    const text_hr = TerminalTextRangeProvider.GetText(range.?, -1, &out);
+    defer com.SysFreeString(out);
+
+    try std.testing.expectEqual(com.S_OK, text_hr);
+    try std.testing.expect(out != null);
+    try std.testing.expectEqual(@as(u32, 11), com.SysStringLen(out));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"), out.?[0..11]);
+    try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
+}
+
+test "TerminalTextRangeProvider GetText honors UTF-16 maxLength" {
+    var state_data = TestTerminalStateData{ .value_text = "A🔥B" };
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&p.text_iface, &range));
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    var one: ?[*:0]u16 = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, 1, &one));
+    defer com.SysFreeString(one);
+    try std.testing.expectEqual(@as(u32, 1), com.SysStringLen(one));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("A"), one.?[0..1]);
+
+    var three: ?[*:0]u16 = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, 3, &three));
+    defer com.SysFreeString(three);
+    try std.testing.expectEqual(@as(u32, 3), com.SysStringLen(three));
+    try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("A🔥"), three.?[0..3]);
+}
+
+test "TerminalTextRangeProvider clone and enclosing element retain parent" {
+    var state_data = TestTerminalStateData{};
+    const state = testTerminalState(&state_data);
+
+    var p = try TerminalProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = TerminalProvider.Release(&p.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, TerminalProvider.get_DocumentRange(&p.text_iface, &range));
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    var clone: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.Clone(range.?, &clone));
+    defer _ = TerminalTextRangeProvider.Release(clone.?);
+
+    var same: com.BOOL = 0;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.Compare(range.?, clone, &same));
+    try std.testing.expectEqual(@as(com.BOOL, 1), same);
+
+    var enclosing: ?*com.IRawElementProviderSimple = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetEnclosingElement(clone.?, &enclosing));
+    try std.testing.expect(enclosing != null);
+    try std.testing.expectEqual(@as(u32, 3), TerminalProvider.Release(enclosing.?));
 }
 
 test "TerminalProvider ValueValueProperty returns non-null BSTR" {
@@ -682,6 +1249,7 @@ const TestTerminalStateData = struct {
     value_calls: u32 = 0,
     retains: u32 = 0,
     releases: u32 = 0,
+    value_text: []const u8 = "hello\nworld",
 };
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {
@@ -705,7 +1273,7 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
         fn value(ctx: *anyopaque, alloc: std.mem.Allocator) ![]u8 {
             const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
             d.value_calls += 1;
-            return try alloc.dupe(u8, "hello\nworld");
+            return try alloc.dupe(u8, d.value_text);
         }
 
         fn focused(ctx: *anyopaque) bool {

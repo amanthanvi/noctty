@@ -7,8 +7,8 @@
 //!     buttons are still announced.
 //!
 //! Per-widget providers (tabs, command palette rows, settings fields)
-//! are added with the widgets they expose. Terminal scrollback is not
-//! exposed through `ITextProvider`.
+//! are added with the widgets they expose. Terminal text is exposed
+//! through a read-only `ITextProvider` / `ITextRangeProvider` slice.
 
 const std = @import("std");
 const com = @import("com.zig");
