@@ -2,6 +2,7 @@ import { InstallCopiedIcon } from './install-copied-icon.jsx';
 import { InstallCopyIcon } from './install-copy-icon.jsx';
 
 const { useState } = React;
+const COPY_RESET_MS = 1400;
 
 const INSTALL_METHODS = {
   scoop: {
@@ -16,19 +17,47 @@ const INSTALL_METHODS = {
   },
 };
 
+function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  const copied = document.execCommand('copy');
+  textarea.remove();
+
+  if (copied) return Promise.resolve();
+  return Promise.reject(new Error('Clipboard copy unavailable'));
+}
+
 export function InstallBlock() {
   const [method, setMethod] = useState('winget');
-  const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState('idle');
   const active = INSTALL_METHODS[method];
+  const copied = copyStatus === 'copied';
+  const copyFailed = copyStatus === 'failed';
 
   const onCopy = () => {
-    navigator.clipboard?.writeText(active.copy).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1400);
-    });
+    writeClipboardText(active.copy)
+      .then(() => {
+        setCopyStatus('copied');
+        setTimeout(() => setCopyStatus('idle'), COPY_RESET_MS);
+      })
+      .catch(() => {
+        setCopyStatus('failed');
+        setTimeout(() => setCopyStatus('idle'), COPY_RESET_MS);
+      });
   };
 
-  const longestCmd = INSTALL_METHODS.winget.cmd;
+  const longestCmd = Object.values(INSTALL_METHODS).reduce(
+    (longest, item) => (item.cmd.length > longest.length ? item.cmd : longest),
+    '',
+  );
 
   return (
     <div className="wg-install-lane">
@@ -64,16 +93,19 @@ export function InstallBlock() {
           </div>
           <div className="wg-install">
             <span className="wg-install__sizer" aria-hidden="true">{longestCmd}</span>
-            <span className="wg-install__sigil">{String.fromCharCode(36)}</span>
+            <span className="wg-install__sigil">$</span>
             <code className="wg-install__command">{active.cmd}</code>
             <button
               type="button"
-              className={`wg-install__copy${copied ? ' is-copied' : ''}`}
+              className={`wg-install__copy${copied ? ' is-copied' : ''}${copyFailed ? ' is-failed' : ''}`}
               onClick={onCopy}
-              aria-label={copied ? 'Copied' : 'Copy install command'}
+              aria-label={copied ? 'Copied' : copyFailed ? 'Copy failed' : 'Copy install command'}
             >
               {copied ? <InstallCopiedIcon /> : <InstallCopyIcon />}
             </button>
+            <span className="wg-sr-only" aria-live="polite">
+              {copied ? 'Copied' : copyFailed ? 'Copy failed' : ''}
+            </span>
           </div>
           <div className="wg-install-tabs" role="tablist" aria-label="Install method">
             {Object.entries(INSTALL_METHODS).map(([key, item]) => (
@@ -83,10 +115,10 @@ export function InstallBlock() {
                 role="tab"
                 aria-selected={method === key}
                 className={method === key ? 'is-active' : undefined}
-                onClick={() => {
-                  setMethod(key);
-                  setCopied(false);
-                }}
+                  onClick={() => {
+                    setMethod(key);
+                    setCopyStatus('idle');
+                  }}
               >
                 {item.label}
               </button>

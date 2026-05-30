@@ -1,13 +1,14 @@
 import { ColorDots } from './color-dots.jsx';
 
 const { useEffect, useState } = React;
+const DEFAULT_WG_VERSION = '1.3.106';
 
 function useLiveVersion() {
-  const [v, setV] = useState(() => (typeof window !== 'undefined' && window.WG_VERSION) || '1.3.106');
+  const [v, setV] = useState(() => (typeof window !== 'undefined' && window.WG_VERSION) || DEFAULT_WG_VERSION);
 
   useEffect(() => {
     const onUpdate = (e) => {
-      const newV = e?.detail?.version || window.WG_VERSION || '1.3.106';
+      const newV = e?.detail?.version || window.WG_VERSION || DEFAULT_WG_VERSION;
       setV(newV);
     };
     window.addEventListener('wg-version-updated', onUpdate);

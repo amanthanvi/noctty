@@ -53,6 +53,8 @@ body {
   --scroll-thumb-hover: oklch(0.36 0.014 265);
   --toggle-ghost: oklch(0.93 0.006 265);
   --toggle-glyph: oklch(0.13 0.008 265);
+  --close-hover-bg: oklch(0.48 0.18 34);
+  --close-hover-fg: oklch(0.99 0.004 95);
   --primary-bg: color-mix(in srgb, var(--wg-blue) 78%, oklch(0.28 0.04 265));
   --primary-fg: oklch(0.98 0.004 265);
   --primary-border: color-mix(in srgb, var(--wg-blue) 55%, oklch(0.34 0.05 265));
@@ -77,6 +79,8 @@ body {
   --scroll-thumb-hover: oklch(0.76 0.008 95);
   --toggle-ghost: oklch(0.16 0.01 265);
   --toggle-glyph: oklch(0.99 0.004 95);
+  --close-hover-bg: oklch(0.5 0.19 34);
+  --close-hover-fg: oklch(0.99 0.004 95);
   --accent-red-soft: color-mix(in srgb, var(--wg-red) 10%, transparent);
   --accent-green-soft: color-mix(in srgb, var(--wg-green) 9%, transparent);
   --accent-blue-soft: color-mix(in srgb, var(--wg-blue) 11%, transparent);
@@ -531,51 +535,51 @@ code {
     filter: brightness(1.03);
   }
 
-  .wg-color-dots:has(.wg-color-dot--red:hover) .wg-color-dot--green:not(:hover) {
+  .wg-color-dots.is-hovering-red .wg-color-dot--green:not(:hover) {
     transform: translate3d(-0.5px, -1px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--red:hover) .wg-color-dot--blue:not(:hover) {
+  .wg-color-dots.is-hovering-red .wg-color-dot--blue:not(:hover) {
     transform: translate3d(-0.65px, -0.85px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--red:hover) .wg-color-dot--yellow:not(:hover) {
+  .wg-color-dots.is-hovering-red .wg-color-dot--yellow:not(:hover) {
     transform: translate3d(-0.75px, -0.75px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--green:hover) .wg-color-dot--red:not(:hover) {
+  .wg-color-dots.is-hovering-green .wg-color-dot--red:not(:hover) {
     transform: translate3d(-0.65px, -0.85px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--green:hover) .wg-color-dot--blue:not(:hover) {
+  .wg-color-dots.is-hovering-green .wg-color-dot--blue:not(:hover) {
     transform: translate3d(0.4px, -1px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--green:hover) .wg-color-dot--yellow:not(:hover) {
+  .wg-color-dots.is-hovering-green .wg-color-dot--yellow:not(:hover) {
     transform: translate3d(0.65px, -0.85px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--blue:hover) .wg-color-dot--red:not(:hover) {
+  .wg-color-dots.is-hovering-blue .wg-color-dot--red:not(:hover) {
     transform: translate3d(-0.75px, -0.75px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--blue:hover) .wg-color-dot--green:not(:hover) {
+  .wg-color-dots.is-hovering-blue .wg-color-dot--green:not(:hover) {
     transform: translate3d(-0.4px, -1px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--blue:hover) .wg-color-dot--yellow:not(:hover) {
+  .wg-color-dots.is-hovering-blue .wg-color-dot--yellow:not(:hover) {
     transform: translate3d(0.65px, -0.85px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--yellow:hover) .wg-color-dot--red:not(:hover) {
+  .wg-color-dots.is-hovering-yellow .wg-color-dot--red:not(:hover) {
     transform: translate3d(-0.75px, -0.75px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--yellow:hover) .wg-color-dot--green:not(:hover) {
+  .wg-color-dots.is-hovering-yellow .wg-color-dot--green:not(:hover) {
     transform: translate3d(0.5px, -1px, 0);
   }
 
-  .wg-color-dots:has(.wg-color-dot--yellow:hover) .wg-color-dot--blue:not(:hover) {
+  .wg-color-dots.is-hovering-yellow .wg-color-dot--blue:not(:hover) {
     transform: translate3d(0.65px, -0.85px, 0);
   }
 }
@@ -899,6 +903,10 @@ code {
   color: var(--wg-green);
 }
 
+.wg-install__copy.is-failed {
+  color: var(--wg-red);
+}
+
 .wg-install__copy:focus-visible {
   outline: 2px solid currentColor;
   outline-offset: 2px;
@@ -1002,12 +1010,12 @@ code {
 }
 
 .wg-terminal__caption-btn--close:hover {
-  background: #c42b1c;
+  background: var(--close-hover-bg);
 }
 
 .wg-terminal__caption-btn--close:hover::before,
 .wg-terminal__caption-btn--close:hover::after {
-  background: #fff;
+  background: var(--close-hover-fg);
 }
 
 .wg-terminal__body {

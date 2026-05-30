@@ -11,6 +11,7 @@
 
   // site/components/install/install-block.jsx
   var { useState } = React;
+  var COPY_RESET_MS = 1400;
   var INSTALL_METHODS = {
     scoop: {
       label: "Scoop",
@@ -23,17 +24,39 @@
       copy: "winget install AmanThanvi.winghostty"
     }
   };
+  function writeClipboardText(text) {
+    if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (copied) return Promise.resolve();
+    return Promise.reject(new Error("Clipboard copy unavailable"));
+  }
   function InstallBlock() {
     const [method, setMethod] = useState("winget");
-    const [copied, setCopied] = useState(false);
+    const [copyStatus, setCopyStatus] = useState("idle");
     const active = INSTALL_METHODS[method];
+    const copied = copyStatus === "copied";
+    const copyFailed = copyStatus === "failed";
     const onCopy = () => {
-      navigator.clipboard?.writeText(active.copy).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1400);
+      writeClipboardText(active.copy).then(() => {
+        setCopyStatus("copied");
+        setTimeout(() => setCopyStatus("idle"), COPY_RESET_MS);
+      }).catch(() => {
+        setCopyStatus("failed");
+        setTimeout(() => setCopyStatus("idle"), COPY_RESET_MS);
       });
     };
-    const longestCmd = INSTALL_METHODS.winget.cmd;
+    const longestCmd = Object.values(INSTALL_METHODS).reduce(
+      (longest, item) => item.cmd.length > longest.length ? item.cmd : longest,
+      ""
+    );
     return /* @__PURE__ */ React.createElement("div", { className: "wg-install-lane" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-panel" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-frame" }, /* @__PURE__ */ React.createElement(
       "svg",
       {
@@ -62,16 +85,16 @@
           }
         )
       ))
-    ), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__pill" }), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__tab" })), /* @__PURE__ */ React.createElement("div", { className: "wg-install" }, /* @__PURE__ */ React.createElement("span", { className: "wg-install__sizer", "aria-hidden": "true" }, longestCmd), /* @__PURE__ */ React.createElement("span", { className: "wg-install__sigil" }, String.fromCharCode(36)), /* @__PURE__ */ React.createElement("code", { className: "wg-install__command" }, active.cmd), /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__pill" }), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__tab" })), /* @__PURE__ */ React.createElement("div", { className: "wg-install" }, /* @__PURE__ */ React.createElement("span", { className: "wg-install__sizer", "aria-hidden": "true" }, longestCmd), /* @__PURE__ */ React.createElement("span", { className: "wg-install__sigil" }, "$"), /* @__PURE__ */ React.createElement("code", { className: "wg-install__command" }, active.cmd), /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
-        className: `wg-install__copy${copied ? " is-copied" : ""}`,
+        className: `wg-install__copy${copied ? " is-copied" : ""}${copyFailed ? " is-failed" : ""}`,
         onClick: onCopy,
-        "aria-label": copied ? "Copied" : "Copy install command"
+        "aria-label": copied ? "Copied" : copyFailed ? "Copy failed" : "Copy install command"
       },
       copied ? /* @__PURE__ */ React.createElement(InstallCopiedIcon, null) : /* @__PURE__ */ React.createElement(InstallCopyIcon, null)
-    )), /* @__PURE__ */ React.createElement("div", { className: "wg-install-tabs", role: "tablist", "aria-label": "Install method" }, Object.entries(INSTALL_METHODS).map(([key, item]) => /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("span", { className: "wg-sr-only", "aria-live": "polite" }, copied ? "Copied" : copyFailed ? "Copy failed" : "")), /* @__PURE__ */ React.createElement("div", { className: "wg-install-tabs", role: "tablist", "aria-label": "Install method" }, Object.entries(INSTALL_METHODS).map(([key, item]) => /* @__PURE__ */ React.createElement(
       "button",
       {
         key,
@@ -81,7 +104,7 @@
         className: method === key ? "is-active" : void 0,
         onClick: () => {
           setMethod(key);
-          setCopied(false);
+          setCopyStatus("idle");
         }
       },
       item.label
@@ -90,17 +113,29 @@
 
   // site/components/hero/color-dots.jsx
   var COLOR_DOT_KEYS = ["red", "green", "blue", "yellow"];
+  var { useState: useState2 } = React;
   function ColorDots() {
-    return /* @__PURE__ */ React.createElement("span", { className: "wg-color-dots", "aria-hidden": "true" }, COLOR_DOT_KEYS.map((key) => /* @__PURE__ */ React.createElement("span", { key, className: `wg-color-dot wg-color-dot--${key}` }, /* @__PURE__ */ React.createElement("span", { className: "wg-color-dot__bob" }, /* @__PURE__ */ React.createElement("span", { className: "wg-color-dot__chip" })))));
+    const [hoveredColor, setHoveredColor] = useState2(null);
+    return /* @__PURE__ */ React.createElement("span", { className: `wg-color-dots${hoveredColor ? ` is-hovering-${hoveredColor}` : ""}`, "aria-hidden": "true" }, COLOR_DOT_KEYS.map((key) => /* @__PURE__ */ React.createElement(
+      "span",
+      {
+        key,
+        className: `wg-color-dot wg-color-dot--${key}`,
+        onPointerEnter: () => setHoveredColor(key),
+        onPointerLeave: () => setHoveredColor(null)
+      },
+      /* @__PURE__ */ React.createElement("span", { className: "wg-color-dot__bob" }, /* @__PURE__ */ React.createElement("span", { className: "wg-color-dot__chip" }))
+    )));
   }
 
   // site/components/hero/version-chip-color.jsx
-  var { useEffect, useState: useState2 } = React;
+  var { useEffect, useState: useState3 } = React;
+  var DEFAULT_WG_VERSION = "1.3.106";
   function useLiveVersion() {
-    const [v, setV] = useState2(() => typeof window !== "undefined" && window.WG_VERSION || "1.3.106");
+    const [v, setV] = useState3(() => typeof window !== "undefined" && window.WG_VERSION || DEFAULT_WG_VERSION);
     useEffect(() => {
       const onUpdate = (e) => {
-        const newV = e?.detail?.version || window.WG_VERSION || "1.3.106";
+        const newV = e?.detail?.version || window.WG_VERSION || DEFAULT_WG_VERSION;
         setV(newV);
       };
       window.addEventListener("wg-version-updated", onUpdate);
@@ -133,27 +168,31 @@
   }
 
   // site/components/mark/winghostty-toggle.jsx
-  var { useState: useState3 } = React;
+  var { useEffect: useEffect2, useRef, useState: useState4 } = React;
   function WinghosttyToggle({ theme, onToggle, size = 22 }) {
-    const [blinking, setBlinking] = useState3(false);
-    const [hover, setHover] = useState3(false);
+    const [blinking, setBlinking] = useState4(false);
+    const blinkTimerRef = useRef(null);
+    useEffect2(() => () => {
+      if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
+    }, []);
     const triggerBlink = () => {
       if (blinking) return;
       setBlinking(true);
       onToggle();
-      setTimeout(() => setBlinking(false), 220);
+      if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
+      blinkTimerRef.current = setTimeout(() => {
+        setBlinking(false);
+        blinkTimerRef.current = null;
+      }, 220);
     };
     return /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
         className: `wg-theme-toggle${blinking ? " is-blinking" : ""}`,
-        onMouseEnter: () => setHover(true),
-        onMouseLeave: () => setHover(false),
         onClick: triggerBlink,
         "aria-label": `Switch to ${theme === "dark" ? "light" : "dark"} mode`,
-        title: `Switch to ${theme === "dark" ? "light" : "dark"} mode`,
-        style: hover ? { background: "var(--surface-strong)" } : void 0
+        title: `Switch to ${theme === "dark" ? "light" : "dark"} mode`
       },
       /* @__PURE__ */ React.createElement("svg", { width: size, height: size * 32 / 27, viewBox: "0 0 27 32", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement(
         "path",
@@ -247,7 +286,7 @@
 
   // site/components/footer/footer.jsx
   function Footer({ theme }) {
-    return /* @__PURE__ */ React.createElement("footer", { className: "wg-footer" }, /* @__PURE__ */ React.createElement("div", { className: "wg-footer__top" }, /* @__PURE__ */ React.createElement(WinghosttyWordmark, { size: 20, theme }), /* @__PURE__ */ React.createElement("div", { className: "wg-footer__links" }, /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty", target: "_blank", rel: "noreferrer" }, "GitHub"), /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty/releases", target: "_blank", rel: "noreferrer" }, "Releases"), /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty/issues", target: "_blank", rel: "noreferrer" }, "Issues"), /* @__PURE__ */ React.createElement("a", { href: "https://ghostty.org", target: "_blank", rel: "noreferrer" }, "Upstream \u2197"))), /* @__PURE__ */ React.createElement("div", { className: "wg-footer__bottom" }, /* @__PURE__ */ React.createElement("span", null, "Built on Ghostty's terminal core by Mitchell Hashimoto & contributors. Win32 runtime by", " ", /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi" }, "@amanthanvi"), "."), /* @__PURE__ */ React.createElement("span", null, "MIT \xB7 Not affiliated with upstream Ghostty")));
+    return /* @__PURE__ */ React.createElement("footer", { className: "wg-footer" }, /* @__PURE__ */ React.createElement("div", { className: "wg-footer__top" }, /* @__PURE__ */ React.createElement(WinghosttyWordmark, { size: 20, theme }), /* @__PURE__ */ React.createElement("div", { className: "wg-footer__links" }, /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty", target: "_blank", rel: "noopener noreferrer" }, "GitHub"), /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty/releases", target: "_blank", rel: "noopener noreferrer" }, "Releases"), /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi/winghostty/issues", target: "_blank", rel: "noopener noreferrer" }, "Issues"), /* @__PURE__ */ React.createElement("a", { href: "https://ghostty.org", target: "_blank", rel: "noopener noreferrer" }, "Upstream \u2197"))), /* @__PURE__ */ React.createElement("div", { className: "wg-footer__bottom" }, /* @__PURE__ */ React.createElement("span", null, "Built on Ghostty's terminal core by Mitchell Hashimoto & contributors. Win32 runtime by", " ", /* @__PURE__ */ React.createElement("a", { href: "https://github.com/amanthanvi", target: "_blank", rel: "noopener noreferrer" }, "@amanthanvi"), "."), /* @__PURE__ */ React.createElement("span", null, "MIT \xB7 Not affiliated with upstream Ghostty")));
   }
 
   // site/components/why/why-fork.jsx
@@ -282,24 +321,28 @@
   }
 
   // site/components/app.jsx
-  var { useEffect: useAppEffect, useState: useAppState } = React;
+  var { useEffect: useEffect3, useState: useState5 } = React;
   function App() {
-    const [theme, setTheme] = useAppState(() => localStorage.getItem("wg-theme") || "dark");
-    useAppEffect(() => {
+    const [theme, setTheme] = useState5(() => localStorage.getItem("wg-theme") || "dark");
+    useEffect3(() => {
       localStorage.setItem("wg-theme", theme);
     }, [theme]);
-    useAppEffect(() => {
+    useEffect3(() => {
       document.documentElement.setAttribute("data-theme", theme);
       document.body.dataset.theme = theme;
     }, [theme]);
-    useAppEffect(() => {
+    useEffect3(() => {
+      const allowedOrigin = window.location.origin;
       const onMessage = (e) => {
+        if (e.origin !== allowedOrigin) return;
         const d = e.data || {};
         if (d.type === "__activate_edit_mode") document.body.dataset.editMode = "on";
         if (d.type === "__deactivate_edit_mode") document.body.dataset.editMode = "off";
       };
       window.addEventListener("message", onMessage);
-      window.parent?.postMessage({ type: "__edit_mode_available" }, "*");
+      if (window.parent !== window) {
+        window.parent.postMessage({ type: "__edit_mode_available" }, allowedOrigin);
+      }
       return () => window.removeEventListener("message", onMessage);
     }, []);
     return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("a", { className: "wg-skip-link", href: "#main-content" }, "Skip to content"), /* @__PURE__ */ React.createElement(TopBar, { theme, setTheme }), /* @__PURE__ */ React.createElement("main", { id: "main-content" }, /* @__PURE__ */ React.createElement("div", { className: "wg-container wg-section wg-section--lead" }, /* @__PURE__ */ React.createElement(HeroColorPop, null)), /* @__PURE__ */ React.createElement(

@@ -3,9 +3,6 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "main": "main.jsx",
-  "source": "main.jsx",
-  "exports": "./main.jsx",
   "scripts": {
     "build": "node ../scripts/build-site-bundle.mjs",
     "doctor": "react-doctor . --yes",

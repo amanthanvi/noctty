@@ -1,6 +1,6 @@
 export function TerminalLine({ prompt, text, cursor }) {
   return (
-    <p>
+    <p className="wg-terminal__line wg-terminal__line--cmd">
       <span className="wg-terminal__prompt">{prompt}</span>
       <span className="wg-terminal__live">
         {text}

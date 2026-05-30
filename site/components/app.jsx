@@ -5,28 +5,32 @@ import { SectionLabel } from './layout/section-label.jsx';
 import { TopBar } from './layout/top-bar.jsx';
 import { FeatureGrid, Footer, WhyFork } from './sections.jsx';
 
-const { useEffect: useAppEffect, useState: useAppState } = React;
+const { useEffect, useState } = React;
 
 export function App() {
-  const [theme, setTheme] = useAppState(() => localStorage.getItem('wg-theme') || 'dark');
+  const [theme, setTheme] = useState(() => localStorage.getItem('wg-theme') || 'dark');
 
-  useAppEffect(() => {
+  useEffect(() => {
     localStorage.setItem('wg-theme', theme);
   }, [theme]);
 
-  useAppEffect(() => {
+  useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     document.body.dataset.theme = theme;
   }, [theme]);
 
-  useAppEffect(() => {
+  useEffect(() => {
+    const allowedOrigin = window.location.origin;
     const onMessage = (e) => {
+      if (e.origin !== allowedOrigin) return;
       const d = e.data || {};
       if (d.type === '__activate_edit_mode') document.body.dataset.editMode = 'on';
       if (d.type === '__deactivate_edit_mode') document.body.dataset.editMode = 'off';
     };
     window.addEventListener('message', onMessage);
-    window.parent?.postMessage({ type: '__edit_mode_available' }, '*');
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: '__edit_mode_available' }, allowedOrigin);
+    }
     return () => window.removeEventListener('message', onMessage);
   }, []);
 

@@ -1,26 +1,31 @@
-const { useState } = React;
+const { useEffect, useRef, useState } = React;
 
 export function WinghosttyToggle({ theme, onToggle, size = 22 }) {
   const [blinking, setBlinking] = useState(false);
-  const [hover, setHover] = useState(false);
+  const blinkTimerRef = useRef(null);
+
+  useEffect(() => () => {
+    if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
+  }, []);
 
   const triggerBlink = () => {
     if (blinking) return;
     setBlinking(true);
     onToggle();
-    setTimeout(() => setBlinking(false), 220);
+    if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
+    blinkTimerRef.current = setTimeout(() => {
+      setBlinking(false);
+      blinkTimerRef.current = null;
+    }, 220);
   };
 
   return (
     <button
       type="button"
       className={`wg-theme-toggle${blinking ? ' is-blinking' : ''}`}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       onClick={triggerBlink}
       aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
       title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-      style={hover ? { background: 'var(--surface-strong)' } : undefined}
     >
       <svg width={size} height={(size * 32) / 27} viewBox="0 0 27 32" fill="none" aria-hidden="true">
         <path

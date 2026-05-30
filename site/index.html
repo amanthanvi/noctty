@@ -20,7 +20,6 @@
       try {
         var t = localStorage.getItem('wg-theme') || 'dark';
         document.documentElement.setAttribute('data-theme', t);
-        document.body && document.body.setAttribute('data-theme', t);
       } catch (e) {}
     })();
   </script>
