@@ -722,12 +722,13 @@ code {
   align-items: center;
   justify-content: center;
   gap: 0;
+  margin: 0;
   padding: 0 4px;
-  border: 1px solid color-mix(in srgb, var(--wg-green) 18%, var(--line));
-  border-top: 0;
+  border: 0;
   border-radius: 0 0 10px 10px;
   clip-path: var(--wg-install-clip);
   background: transparent;
+  min-inline-size: 0;
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.05em;
