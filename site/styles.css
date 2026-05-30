@@ -679,14 +679,6 @@ code {
   padding-bottom: 19px;
 }
 
-.wg-install-defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
 .wg-install-fluid {
   position: absolute;
   inset: 0;

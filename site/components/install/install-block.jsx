@@ -91,30 +91,6 @@ export function InstallBlock() {
     <div className="wg-install-lane">
       <div className="wg-install-panel">
         <div className="wg-install-frame">
-          <svg
-            className="wg-install-defs"
-            aria-hidden="true"
-            focusable="false"
-            width="0"
-            height="0"
-          >
-            <defs>
-              <filter
-                id="wg-goo"
-                x="-15%"
-                y="-15%"
-                width="130%"
-                height="130%"
-                colorInterpolationFilters="sRGB"
-              >
-                <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
-                <feColorMatrix
-                  in="blur"
-                  values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"
-                />
-              </filter>
-            </defs>
-          </svg>
           <div className="wg-install-fluid" aria-hidden="true">
             <div className="wg-install-fluid__pill" />
             <div className="wg-install-fluid__tab" />

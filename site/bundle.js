@@ -81,35 +81,7 @@
       (longest, item) => item.cmd.length > longest.length ? item.cmd : longest,
       ""
     );
-    return /* @__PURE__ */ React.createElement("div", { className: "wg-install-lane" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-panel" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-frame" }, /* @__PURE__ */ React.createElement(
-      "svg",
-      {
-        className: "wg-install-defs",
-        "aria-hidden": "true",
-        focusable: "false",
-        width: "0",
-        height: "0"
-      },
-      /* @__PURE__ */ React.createElement("defs", null, /* @__PURE__ */ React.createElement(
-        "filter",
-        {
-          id: "wg-goo",
-          x: "-15%",
-          y: "-15%",
-          width: "130%",
-          height: "130%",
-          colorInterpolationFilters: "sRGB"
-        },
-        /* @__PURE__ */ React.createElement("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "4", result: "blur" }),
-        /* @__PURE__ */ React.createElement(
-          "feColorMatrix",
-          {
-            in: "blur",
-            values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"
-          }
-        )
-      ))
-    ), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__pill" }), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__tab" })), /* @__PURE__ */ React.createElement("div", { className: "wg-install" }, /* @__PURE__ */ React.createElement("span", { className: "wg-install__sizer", "aria-hidden": "true" }, longestCmd), /* @__PURE__ */ React.createElement("span", { className: "wg-install__sigil" }, "$"), /* @__PURE__ */ React.createElement("code", { className: "wg-install__command" }, active.cmd), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "wg-install-lane" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-panel" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-frame" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__pill" }), /* @__PURE__ */ React.createElement("div", { className: "wg-install-fluid__tab" })), /* @__PURE__ */ React.createElement("div", { className: "wg-install" }, /* @__PURE__ */ React.createElement("span", { className: "wg-install__sizer", "aria-hidden": "true" }, longestCmd), /* @__PURE__ */ React.createElement("span", { className: "wg-install__sigil" }, "$"), /* @__PURE__ */ React.createElement("code", { className: "wg-install__command" }, active.cmd), /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
@@ -275,8 +247,8 @@
       if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
     }, []);
     const triggerBlink = () => {
-      onToggle();
       if (blinking) return;
+      onToggle();
       setBlinking(true);
       blinkTimerRef.current = setTimeout(() => {
         setBlinking(false);
