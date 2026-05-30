@@ -1,0 +1,6 @@
+version: "1"
+
+ignore:
+  - site/bundle.js
+  - site/package-lock.json
+  - site/icons/ghostty-official.png

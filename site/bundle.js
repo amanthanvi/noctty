@@ -10,7 +10,7 @@
   }
 
   // site/components/install/install-block.jsx
-  var { useState } = React;
+  var { useEffect, useRef, useState } = React;
   var COPY_RESET_MS = 1400;
   var INSTALL_METHODS = {
     scoop: {
@@ -41,16 +41,26 @@
   function InstallBlock() {
     const [method, setMethod] = useState("winget");
     const [copyStatus, setCopyStatus] = useState("idle");
+    const copyTimerRef = useRef(null);
     const active = INSTALL_METHODS[method];
     const copied = copyStatus === "copied";
     const copyFailed = copyStatus === "failed";
+    useEffect(() => () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    }, []);
+    const setTemporaryCopyStatus = (status) => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+      setCopyStatus(status);
+      copyTimerRef.current = setTimeout(() => {
+        setCopyStatus("idle");
+        copyTimerRef.current = null;
+      }, COPY_RESET_MS);
+    };
     const onCopy = () => {
       writeClipboardText(active.copy).then(() => {
-        setCopyStatus("copied");
-        setTimeout(() => setCopyStatus("idle"), COPY_RESET_MS);
+        setTemporaryCopyStatus("copied");
       }).catch(() => {
-        setCopyStatus("failed");
-        setTimeout(() => setCopyStatus("idle"), COPY_RESET_MS);
+        setTemporaryCopyStatus("failed");
       });
     };
     const longestCmd = Object.values(INSTALL_METHODS).reduce(
@@ -94,13 +104,12 @@
         "aria-label": copied ? "Copied" : copyFailed ? "Copy failed" : "Copy install command"
       },
       copied ? /* @__PURE__ */ React.createElement(InstallCopiedIcon, null) : /* @__PURE__ */ React.createElement(InstallCopyIcon, null)
-    ), /* @__PURE__ */ React.createElement("span", { className: "wg-sr-only", "aria-live": "polite" }, copied ? "Copied" : copyFailed ? "Copy failed" : "")), /* @__PURE__ */ React.createElement("div", { className: "wg-install-tabs", role: "tablist", "aria-label": "Install method" }, Object.entries(INSTALL_METHODS).map(([key, item]) => /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("span", { className: "wg-sr-only", "aria-live": "polite" }, copied ? "Copied" : copyFailed ? "Copy failed" : "")), /* @__PURE__ */ React.createElement("fieldset", { className: "wg-install-tabs" }, /* @__PURE__ */ React.createElement("legend", { className: "wg-sr-only" }, "Install method"), Object.entries(INSTALL_METHODS).map(([key, item]) => /* @__PURE__ */ React.createElement(
       "button",
       {
         key,
         type: "button",
-        role: "tab",
-        "aria-selected": method === key,
+        "aria-pressed": method === key,
         className: method === key ? "is-active" : void 0,
         onClick: () => {
           setMethod(key);
@@ -129,11 +138,58 @@
   }
 
   // site/components/hero/version-chip-color.jsx
-  var { useEffect, useState: useState3 } = React;
+  var { useEffect: useEffect2, useState: useState3 } = React;
   var DEFAULT_WG_VERSION = "1.3.106";
+  var WG_REPO = "amanthanvi/winghostty";
+  var CACHE_KEY = "wg-latest-release-v1";
+  var CACHE_TTL_MS = 30 * 60 * 1e3;
+  function readCachedVersion() {
+    try {
+      const cached = sessionStorage.getItem(CACHE_KEY);
+      if (!cached) return null;
+      const parsed = JSON.parse(cached);
+      if (!parsed?.tag || Date.now() - parsed.ts > CACHE_TTL_MS) return null;
+      return parsed.tag;
+    } catch (e) {
+      return null;
+    }
+  }
+  function cacheVersion(tag) {
+    try {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify({ tag, ts: Date.now() }));
+    } catch (e) {
+    }
+  }
+  function publishVersion(tag) {
+    if (!tag || tag === window.WG_VERSION) return;
+    window.WG_VERSION = tag;
+    window.dispatchEvent(new CustomEvent("wg-version-updated", { detail: { version: tag } }));
+  }
+  async function fetchLatestVersion() {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const tag = String(data.tag_name || "").replace(/^v/, "");
+      if (!tag) return;
+      cacheVersion(tag);
+      publishVersion(tag);
+    } catch (e) {
+    }
+  }
+  function scheduleLatestVersionFetch() {
+    const cached = readCachedVersion();
+    if (cached) publishVersion(cached);
+    const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
+    idle(fetchLatestVersion);
+  }
+  if (typeof window !== "undefined") {
+    window.WG_VERSION = window.WG_VERSION || DEFAULT_WG_VERSION;
+    scheduleLatestVersionFetch();
+  }
   function useLiveVersion() {
     const [v, setV] = useState3(() => typeof window !== "undefined" && window.WG_VERSION || DEFAULT_WG_VERSION);
-    useEffect(() => {
+    useEffect2(() => {
       const onUpdate = (e) => {
         const newV = e?.detail?.version || window.WG_VERSION || DEFAULT_WG_VERSION;
         setV(newV);
@@ -168,11 +224,11 @@
   }
 
   // site/components/mark/winghostty-toggle.jsx
-  var { useEffect: useEffect2, useRef, useState: useState4 } = React;
+  var { useEffect: useEffect3, useRef: useRef2, useState: useState4 } = React;
   function WinghosttyToggle({ theme, onToggle, size = 22 }) {
     const [blinking, setBlinking] = useState4(false);
-    const blinkTimerRef = useRef(null);
-    useEffect2(() => () => {
+    const blinkTimerRef = useRef2(null);
+    useEffect3(() => () => {
       if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
     }, []);
     const triggerBlink = () => {
@@ -220,12 +276,20 @@
   }
 
   // site/components/mark.jsx
+  var { useId } = React;
   function WinghosttyMark({ size = 28, theme = "dark", animated = false }) {
+    const uniqueId = useId().replace(/:/g, "");
+    const clipIds = {
+      tl: `wg-tl-${size}-${uniqueId}`,
+      tr: `wg-tr-${size}-${uniqueId}`,
+      bl: `wg-bl-${size}-${uniqueId}`,
+      br: `wg-br-${size}-${uniqueId}`
+    };
     const ghostFill = theme === "dark" ? "#ffffff" : "#0a0a0a";
     const outline = theme === "dark" ? "#0a0a0a" : "#ffffff";
     const glyph = theme === "dark" ? "#0a0a0a" : "#ffffff";
     const transition = animated ? "fill 0.5s cubic-bezier(0.45, 0, 0.15, 1)" : void 0;
-    return /* @__PURE__ */ React.createElement("svg", { width: size, height: size * 32 / 27, viewBox: "0 0 27 32", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("defs", null, /* @__PURE__ */ React.createElement("clipPath", { id: `wg-tl-${size}` }, /* @__PURE__ */ React.createElement("rect", { x: "0", y: "0", width: "13.36", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: `wg-tr-${size}` }, /* @__PURE__ */ React.createElement("rect", { x: "13.36", y: "0", width: "13.64", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: `wg-bl-${size}` }, /* @__PURE__ */ React.createElement("rect", { x: "0", y: "16", width: "13.36", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: `wg-br-${size}` }, /* @__PURE__ */ React.createElement("rect", { x: "13.36", y: "16", width: "13.64", height: "16" }))), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#F25022", clipPath: `url(#wg-tl-${size})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#7FBA00", clipPath: `url(#wg-tr-${size})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#00A4EF", clipPath: `url(#wg-bl-${size})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#FFB900", clipPath: `url(#wg-br-${size})` }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M20.4 30.59C19.28 30.59 18.18 30.21 17.32 29.51C17.16 29.39 17 29.36 16.9 29.36C16.72 29.36 16.55 29.43 16.41 29.54C15.55 30.22 14.46 30.6 13.36 30.6C12.26 30.6 11.18 30.22 10.32 29.54C10.18 29.43 10.01 29.37 9.85 29.37C9.68 29.37 9.51 29.43 9.37 29.54C8.51 30.22 7.47 30.59 6.36 30.6H6.33C5.02 30.6 3.78 30.07 2.84 29.11C1.92 28.17 1.41 26.93 1.41 25.62V13.37C1.41 6.77 6.77 1.41 13.36 1.41C19.95 1.41 25.32 6.77 25.32 13.36V25.62C25.32 28.26 23.28 30.44 20.67 30.59C20.58 30.59 20.49 30.59 20.4 30.59Z", fill: outline }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M23.91 13.36V25.62C23.91 27.49 22.47 29.08 20.59 29.18C19.68 29.23 18.84 28.94 18.19 28.41C17.42 27.79 16.32 27.82 15.54 28.43C14.94 28.91 14.18 29.19 13.36 29.19C12.54 29.19 11.78 28.91 11.19 28.43C10.39 27.81 9.3 27.81 8.5 28.43C7.91 28.9 7.16 29.18 6.35 29.19C4.4 29.2 2.81 27.56 2.81 25.61V13.36C2.81 7.54 7.54 2.81 13.36 2.81C19.19 2.81 23.91 7.54 23.91 13.36Z", fill: ghostFill }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M11.28 12.44L7.35 10.17C6.84 9.87 6.18 10.05 5.89 10.56C5.59 11.07 5.77 11.73 6.28 12.02L8.6 13.37L6.28 14.71C5.77 15 5.59 15.66 5.89 16.17C6.18 16.68 6.84 16.86 7.35 16.56L11.28 14.29C11.99 13.88 11.99 12.85 11.28 12.44V12.44Z", fill: glyph }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M20.18 12.29H15.02C14.43 12.29 13.95 12.77 13.95 13.36C13.95 13.96 14.42 14.43 15.02 14.43H20.18C20.77 14.43 21.25 13.96 21.25 13.36C21.25 12.77 20.78 12.29 20.18 12.29Z", fill: glyph }));
+    return /* @__PURE__ */ React.createElement("svg", { width: size, height: size * 32 / 27, viewBox: "0 0 27 32", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ React.createElement("defs", null, /* @__PURE__ */ React.createElement("clipPath", { id: clipIds.tl }, /* @__PURE__ */ React.createElement("rect", { x: "0", y: "0", width: "13.36", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: clipIds.tr }, /* @__PURE__ */ React.createElement("rect", { x: "13.36", y: "0", width: "13.64", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: clipIds.bl }, /* @__PURE__ */ React.createElement("rect", { x: "0", y: "16", width: "13.36", height: "16" })), /* @__PURE__ */ React.createElement("clipPath", { id: clipIds.br }, /* @__PURE__ */ React.createElement("rect", { x: "13.36", y: "16", width: "13.64", height: "16" }))), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#F25022", clipPath: `url(#${clipIds.tl})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#7FBA00", clipPath: `url(#${clipIds.tr})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#00A4EF", clipPath: `url(#${clipIds.bl})` }), /* @__PURE__ */ React.createElement("path", { d: "M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z", fill: "#FFB900", clipPath: `url(#${clipIds.br})` }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M20.4 30.59C19.28 30.59 18.18 30.21 17.32 29.51C17.16 29.39 17 29.36 16.9 29.36C16.72 29.36 16.55 29.43 16.41 29.54C15.55 30.22 14.46 30.6 13.36 30.6C12.26 30.6 11.18 30.22 10.32 29.54C10.18 29.43 10.01 29.37 9.85 29.37C9.68 29.37 9.51 29.43 9.37 29.54C8.51 30.22 7.47 30.59 6.36 30.6H6.33C5.02 30.6 3.78 30.07 2.84 29.11C1.92 28.17 1.41 26.93 1.41 25.62V13.37C1.41 6.77 6.77 1.41 13.36 1.41C19.95 1.41 25.32 6.77 25.32 13.36V25.62C25.32 28.26 23.28 30.44 20.67 30.59C20.58 30.59 20.49 30.59 20.4 30.59Z", fill: outline }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M23.91 13.36V25.62C23.91 27.49 22.47 29.08 20.59 29.18C19.68 29.23 18.84 28.94 18.19 28.41C17.42 27.79 16.32 27.82 15.54 28.43C14.94 28.91 14.18 29.19 13.36 29.19C12.54 29.19 11.78 28.91 11.19 28.43C10.39 27.81 9.3 27.81 8.5 28.43C7.91 28.9 7.16 29.18 6.35 29.19C4.4 29.2 2.81 27.56 2.81 25.61V13.36C2.81 7.54 7.54 2.81 13.36 2.81C19.19 2.81 23.91 7.54 23.91 13.36Z", fill: ghostFill }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M11.28 12.44L7.35 10.17C6.84 9.87 6.18 10.05 5.89 10.56C5.59 11.07 5.77 11.73 6.28 12.02L8.6 13.37L6.28 14.71C5.77 15 5.59 15.66 5.89 16.17C6.18 16.68 6.84 16.86 7.35 16.56L11.28 14.29C11.99 13.88 11.99 12.85 11.28 12.44V12.44Z", fill: glyph }), /* @__PURE__ */ React.createElement("path", { style: { transition }, d: "M20.18 12.29H15.02C14.43 12.29 13.95 12.77 13.95 13.36C13.95 13.96 14.42 14.43 15.02 14.43H20.18C20.77 14.43 21.25 13.96 21.25 13.36C21.25 12.77 20.78 12.29 20.18 12.29Z", fill: glyph }));
   }
 
   // site/components/mark/winghostty-wordmark.jsx
@@ -321,17 +385,32 @@
   }
 
   // site/components/app.jsx
-  var { useEffect: useEffect3, useState: useState5 } = React;
-  function App() {
-    const [theme, setTheme] = useState5(() => localStorage.getItem("wg-theme") || "dark");
-    useEffect3(() => {
+  var { useEffect: useEffect4, useState: useState5 } = React;
+  function getStoredTheme() {
+    try {
+      return localStorage.getItem("wg-theme") || "dark";
+    } catch (e) {
+      return "dark";
+    }
+  }
+  function setStoredTheme(theme) {
+    try {
       localStorage.setItem("wg-theme", theme);
-    }, [theme]);
-    useEffect3(() => {
-      document.documentElement.setAttribute("data-theme", theme);
-      document.body.dataset.theme = theme;
-    }, [theme]);
-    useEffect3(() => {
+    } catch (e) {
+    }
+  }
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    document.body.dataset.theme = theme;
+  }
+  function App() {
+    const [theme, setTheme] = useState5(getStoredTheme);
+    const updateTheme = (nextTheme) => {
+      setStoredTheme(nextTheme);
+      applyTheme(nextTheme);
+      setTheme(nextTheme);
+    };
+    useEffect4(() => {
       const allowedOrigin = window.location.origin;
       const onMessage = (e) => {
         if (e.origin !== allowedOrigin) return;
@@ -345,7 +424,7 @@
       }
       return () => window.removeEventListener("message", onMessage);
     }, []);
-    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("a", { className: "wg-skip-link", href: "#main-content" }, "Skip to content"), /* @__PURE__ */ React.createElement(TopBar, { theme, setTheme }), /* @__PURE__ */ React.createElement("main", { id: "main-content" }, /* @__PURE__ */ React.createElement("div", { className: "wg-container wg-section wg-section--lead" }, /* @__PURE__ */ React.createElement(HeroColorPop, null)), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("a", { className: "wg-skip-link", href: "#main-content" }, "Skip to content"), /* @__PURE__ */ React.createElement(TopBar, { theme, setTheme: updateTheme }), /* @__PURE__ */ React.createElement("main", { id: "main-content" }, /* @__PURE__ */ React.createElement("div", { className: "wg-container wg-section wg-section--lead" }, /* @__PURE__ */ React.createElement(HeroColorPop, null)), /* @__PURE__ */ React.createElement(
       "div",
       {
         className: "wg-container wg-section wg-section--follow",

@@ -19,7 +19,12 @@
     (function () {
       try {
         var t = localStorage.getItem('wg-theme') || 'dark';
+        var setBodyTheme = function () {
+          if (document.body) document.body.setAttribute('data-theme', t);
+        };
         document.documentElement.setAttribute('data-theme', t);
+        if (document.body) setBodyTheme();
+        else document.addEventListener('DOMContentLoaded', setBodyTheme, { once: true });
       } catch (e) {}
     })();
   </script>

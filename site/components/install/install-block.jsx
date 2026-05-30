@@ -1,7 +1,7 @@
 import { InstallCopiedIcon } from './install-copied-icon.jsx';
 import { InstallCopyIcon } from './install-copy-icon.jsx';
 
-const { useState } = React;
+const { useEffect, useRef, useState } = React;
 const COPY_RESET_MS = 1400;
 
 const INSTALL_METHODS = {
@@ -38,19 +38,31 @@ function writeClipboardText(text) {
 export function InstallBlock() {
   const [method, setMethod] = useState('winget');
   const [copyStatus, setCopyStatus] = useState('idle');
+  const copyTimerRef = useRef(null);
   const active = INSTALL_METHODS[method];
   const copied = copyStatus === 'copied';
   const copyFailed = copyStatus === 'failed';
 
+  useEffect(() => () => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+  }, []);
+
+  const setTemporaryCopyStatus = (status) => {
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    setCopyStatus(status);
+    copyTimerRef.current = setTimeout(() => {
+      setCopyStatus('idle');
+      copyTimerRef.current = null;
+    }, COPY_RESET_MS);
+  };
+
   const onCopy = () => {
     writeClipboardText(active.copy)
       .then(() => {
-        setCopyStatus('copied');
-        setTimeout(() => setCopyStatus('idle'), COPY_RESET_MS);
+        setTemporaryCopyStatus('copied');
       })
       .catch(() => {
-        setCopyStatus('failed');
-        setTimeout(() => setCopyStatus('idle'), COPY_RESET_MS);
+        setTemporaryCopyStatus('failed');
       });
   };
 
@@ -107,23 +119,23 @@ export function InstallBlock() {
               {copied ? 'Copied' : copyFailed ? 'Copy failed' : ''}
             </span>
           </div>
-          <div className="wg-install-tabs" role="tablist" aria-label="Install method">
+          <fieldset className="wg-install-tabs">
+            <legend className="wg-sr-only">Install method</legend>
             {Object.entries(INSTALL_METHODS).map(([key, item]) => (
               <button
                 key={key}
                 type="button"
-                role="tab"
-                aria-selected={method === key}
+                aria-pressed={method === key}
                 className={method === key ? 'is-active' : undefined}
-                  onClick={() => {
-                    setMethod(key);
-                    setCopyStatus('idle');
-                  }}
+                onClick={() => {
+                  setMethod(key);
+                  setCopyStatus('idle');
+                }}
               >
                 {item.label}
               </button>
             ))}
-          </div>
+          </fieldset>
         </div>
       </div>
     </div>

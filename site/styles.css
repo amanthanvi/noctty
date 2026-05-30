@@ -10,7 +10,7 @@ body {
 }
 
 :root {
-  --mono: "JetBrains Mono", Consolas, ui-monospace, "SFMono-Regular", "Liberation Mono", monospace;
+  --mono: "JetBrains Mono", consolas, ui-monospace, "SFMono-Regular", "Liberation Mono", monospace;
   --display: "Bricolage Grotesque", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
 
@@ -169,7 +169,7 @@ a:hover {
 
 a:focus-visible,
 button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--wg-blue) 70%, currentColor);
+  outline: 2px solid color-mix(in srgb, var(--wg-blue) 70%, currentcolor);
   outline-offset: 2px;
   border-radius: 8px;
 }
@@ -774,7 +774,7 @@ code {
 }
 
 .wg-install-tabs button:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid currentcolor;
   outline-offset: 1px;
 }
 
@@ -908,7 +908,7 @@ code {
 }
 
 .wg-install__copy:focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid currentcolor;
   outline-offset: 2px;
 }
 
@@ -1164,7 +1164,7 @@ code {
 
 .wg-feature-card__glyph svg {
   display: block;
-  shape-rendering: geometricPrecision;
+  shape-rendering: geometricprecision;
 }
 
 .wg-feature-card:nth-child(3n + 1) .wg-feature-card__glyph {
@@ -1489,7 +1489,7 @@ code {
 @media (prefers-reduced-motion: reduce) and (hover: hover) {
   .wg-color-dot:hover {
     animation: none !important;
-    transform: translate3d(var(--dot-hover-x), var(--dot-hover-y), 0) !important;
+    transform: none !important;
     transition: none !important;
   }
 
@@ -1499,7 +1499,7 @@ code {
 
   .wg-color-dots:hover .wg-color-dot:not(:hover),
   .wg-hero__badge:hover .wg-color-dot:not(:hover),
-  .wg-color-dots:has(.wg-color-dot:hover) .wg-color-dot:not(:hover) {
+  .wg-color-dots[class*="is-hovering-"] .wg-color-dot:not(:hover) {
     transform: none !important;
   }
 

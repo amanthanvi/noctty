@@ -25,8 +25,9 @@ From the repo root:
 node scripts/build-site-bundle.mjs
 ```
 
-This bundles `site/main.jsx` and its imported JSX modules via esbuild. Bump the
-`bundle.js?v=...` query in `index.html` when you want to bust CDN/browser caches.
+This bundles `site/main.jsx` and its imported JSX modules via the pinned local
+esbuild dependency. Bump the `bundle.js?v=...` and `styles.css?v=...` queries in
+`index.html` when you want to bust CDN/browser caches.
 
 ## Legacy: rebuild from inline JSX in the browser
 

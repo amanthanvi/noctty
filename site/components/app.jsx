@@ -7,17 +7,33 @@ import { FeatureGrid, Footer, WhyFork } from './sections.jsx';
 
 const { useEffect, useState } = React;
 
-export function App() {
-  const [theme, setTheme] = useState(() => localStorage.getItem('wg-theme') || 'dark');
+function getStoredTheme() {
+  try {
+    return localStorage.getItem('wg-theme') || 'dark';
+  } catch (e) {
+    return 'dark';
+  }
+}
 
-  useEffect(() => {
+function setStoredTheme(theme) {
+  try {
     localStorage.setItem('wg-theme', theme);
-  }, [theme]);
+  } catch (e) {}
+}
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    document.body.dataset.theme = theme;
-  }, [theme]);
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.body.dataset.theme = theme;
+}
+
+export function App() {
+  const [theme, setTheme] = useState(getStoredTheme);
+
+  const updateTheme = (nextTheme) => {
+    setStoredTheme(nextTheme);
+    applyTheme(nextTheme);
+    setTheme(nextTheme);
+  };
 
   useEffect(() => {
     const allowedOrigin = window.location.origin;
@@ -37,7 +53,7 @@ export function App() {
   return (
     <>
       <a className="wg-skip-link" href="#main-content">Skip to content</a>
-      <TopBar theme={theme} setTheme={setTheme} />
+      <TopBar theme={theme} setTheme={updateTheme} />
       <main id="main-content">
         <div className="wg-container wg-section wg-section--lead">
           <HeroColorPop />

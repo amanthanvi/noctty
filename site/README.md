@@ -17,9 +17,9 @@ runtime shape:
 
 Marketing copy in this directory must be checked against:
 
-- [README.md](/C:/Users/amant/Documents/GitHub/winghostty/README.md)
-- [docs/status.md](/C:/Users/amant/Documents/GitHub/winghostty/docs/status.md)
-- [docs/getting-started.md](/C:/Users/amant/Documents/GitHub/winghostty/docs/getting-started.md)
+- [README.md](../README.md)
+- [docs/status.md](../docs/status.md)
+- [docs/getting-started.md](../docs/getting-started.md)
 
 If those files and the site disagree, tighten the wording until the claim is defensible.
 
