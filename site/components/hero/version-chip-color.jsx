@@ -37,15 +37,15 @@ function compareSemver(a, b) {
   return 0;
 }
 
-function shouldPublishVersion(tag) {
+function shouldPublishVersion(tag, { allowDowngrade = false } = {}) {
   const current = window.WG_VERSION || DEFAULT_WG_VERSION;
-  const aboveDefault = compareSemver(tag, DEFAULT_WG_VERSION);
-  const aboveCurrent = compareSemver(tag, current);
-  return aboveDefault !== null && aboveCurrent !== null && aboveDefault >= 0 && aboveCurrent > 0;
+  const comparedToCurrent = compareSemver(tag, current);
+  if (comparedToCurrent === null) return false;
+  return allowDowngrade ? comparedToCurrent !== 0 : comparedToCurrent > 0;
 }
 
-function publishVersion(tag) {
-  if (!tag || !shouldPublishVersion(tag)) return false;
+function publishVersion(tag, options) {
+  if (!tag || !shouldPublishVersion(tag, options)) return false;
   window.WG_VERSION = tag;
   window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
   return true;
@@ -64,7 +64,7 @@ async function fetchLatestVersion() {
     const data = await res.json();
     const tag = String(data.tag_name || '').replace(/^v/, '');
     cacheVersion(tag);
-    if (shouldPublishVersion(tag)) publishVersion(tag);
+    publishVersion(tag, { allowDowngrade: true });
   } catch (e) {
   } finally {
     clearTimeout(timeoutId);
