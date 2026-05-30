@@ -53,8 +53,14 @@ export function InstallBlock() {
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
   }, []);
 
+  const clearCopyTimer = () => {
+    if (!copyTimerRef.current) return;
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = null;
+  };
+
   const setTemporaryCopyStatus = (status) => {
-    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    clearCopyTimer();
     setCopyStatus(status);
     copyTimerRef.current = setTimeout(() => {
       setCopyStatus('idle');
@@ -135,6 +141,7 @@ export function InstallBlock() {
                 className={method === key ? 'is-active' : undefined}
                 onClick={() => {
                   setMethod(key);
+                  clearCopyTimer();
                   setCopyStatus('idle');
                 }}
               >

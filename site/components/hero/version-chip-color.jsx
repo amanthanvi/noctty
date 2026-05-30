@@ -25,10 +25,30 @@ function cacheVersion(tag) {
   } catch (e) {}
 }
 
+function compareSemver(a, b) {
+  const parse = (v) => String(v || '').split('.').map((part) => Number.parseInt(part, 10));
+  const left = parse(a);
+  const right = parse(b);
+  if (left.length < 3 || right.length < 3 || left.some(Number.isNaN) || right.some(Number.isNaN)) return null;
+
+  for (let i = 0; i < 3; i += 1) {
+    if (left[i] !== right[i]) return left[i] - right[i];
+  }
+  return 0;
+}
+
+function shouldPublishVersion(tag) {
+  const current = window.WG_VERSION || DEFAULT_WG_VERSION;
+  const aboveDefault = compareSemver(tag, DEFAULT_WG_VERSION);
+  const aboveCurrent = compareSemver(tag, current);
+  return aboveDefault !== null && aboveCurrent !== null && aboveDefault >= 0 && aboveCurrent > 0;
+}
+
 function publishVersion(tag) {
-  if (!tag || tag === window.WG_VERSION) return;
+  if (!tag || !shouldPublishVersion(tag)) return false;
   window.WG_VERSION = tag;
   window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
+  return true;
 }
 
 async function fetchLatestVersion() {
@@ -39,10 +59,11 @@ async function fetchLatestVersion() {
     const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`, {
       signal: controller.signal,
     });
+    if (res.status === 429 || res.status === 403) return;
     if (!res.ok) return;
     const data = await res.json();
     const tag = String(data.tag_name || '').replace(/^v/, '');
-    if (!tag) return;
+    if (!shouldPublishVersion(tag)) return;
     cacheVersion(tag);
     publishVersion(tag);
   } catch (e) {
@@ -54,8 +75,8 @@ async function fetchLatestVersion() {
 function scheduleLatestVersionFetch() {
   const cached = readCachedVersion();
   if (cached) {
-    publishVersion(cached);
-    return;
+    const cachedMatchesCurrent = compareSemver(cached, window.WG_VERSION || DEFAULT_WG_VERSION) === 0;
+    if (publishVersion(cached) || cachedMatchesCurrent) return;
   }
 
   const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));

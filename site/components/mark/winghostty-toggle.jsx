@@ -12,7 +12,6 @@ export function WinghosttyToggle({ theme, onToggle, size = 22 }) {
     onToggle();
     if (blinking) return;
     setBlinking(true);
-    if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
     blinkTimerRef.current = setTimeout(() => {
       setBlinking(false);
       blinkTimerRef.current = null;

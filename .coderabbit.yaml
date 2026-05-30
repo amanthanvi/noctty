@@ -34,6 +34,9 @@ reviews:
     - path: "site/components/install/**"
       instructions: |
         Install commands are guarded by scripts/check-site-copy.ps1. Do not replace the WinGet/Scoop command hierarchy when that check passes.
+    - path: "site/components/hero/version-chip-color.jsx"
+      instructions: |
+        This is public static client code on Cloudflare Pages. Do not suggest embedding GitHub tokens in the browser; the intended release lookup behavior is unauthenticated fetch with sessionStorage caching, timeout, and explicit rate-limit bail-out.
     - path: "**/*.zig"
       instructions: |
         This repository is winghostty, a Windows-focused Ghostty fork. Review against amanthanvi/winghostty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes, targeted `zig build test -Dtest-filter=<name>` validation, and `zig fmt` on touched Zig files.

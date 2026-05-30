@@ -133,25 +133,21 @@ body::before {
     radial-gradient(ellipse 42% 44% at 0% 96%, var(--accent-yellow-soft), transparent 72%);
 }
 
-body[data-theme="dark"] ::-webkit-scrollbar,
 :root[data-theme="dark"] ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 
-body[data-theme="dark"] ::-webkit-scrollbar-track,
 :root[data-theme="dark"] ::-webkit-scrollbar-track {
   background: var(--scroll-track);
 }
 
-body[data-theme="dark"] ::-webkit-scrollbar-thumb,
 :root[data-theme="dark"] ::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
   border-radius: 8px;
   border: 2px solid var(--scroll-track);
 }
 
-body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover,
 :root[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
   background: var(--scroll-thumb-hover);
 }
@@ -771,8 +767,8 @@ code {
 }
 
 .wg-install-tabs button:focus-visible {
-  outline: 2px solid currentcolor;
-  outline-offset: 1px;
+  outline: 0;
+  box-shadow: 0 0 0 2px currentcolor;
 }
 
 .wg-button {

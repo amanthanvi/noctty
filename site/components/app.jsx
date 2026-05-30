@@ -23,7 +23,6 @@ function setStoredTheme(theme) {
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
-  document.body.dataset.theme = theme;
 }
 
 export function App() {
@@ -62,7 +61,7 @@ export function App() {
         <div
           className="wg-container wg-section wg-section--follow"
           data-accent="blue"
-          style={{ contentVisibility: 'auto', containIntrinsicSize: '640px' }}
+          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 640px' }}
         >
           <SectionLabel num="01" title="What you get" />
           <FeatureGrid />
@@ -71,13 +70,13 @@ export function App() {
         <div
           className="wg-container wg-section"
           data-accent="yellow"
-          style={{ paddingTop: 32, paddingBottom: 48, contentVisibility: 'auto', containIntrinsicSize: '540px' }}
+          style={{ paddingTop: 32, paddingBottom: 48, contentVisibility: 'auto', containIntrinsicSize: 'auto 540px' }}
         >
           <SectionLabel num="02" title="Why a fork?" />
           <WhyFork />
         </div>
 
-        <div className="wg-container" style={{ contentVisibility: 'auto', containIntrinsicSize: '220px' }}>
+        <div className="wg-container" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }}>
           <Footer theme={theme} />
         </div>
       </main>
