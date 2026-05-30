@@ -1,0 +1,12 @@
+{
+  "ignore": {
+    "files": [
+      "app.js",
+      "bundle.js",
+      "vendor/**"
+    ]
+  },
+  "rules": {
+    "deslop/unused-file": "off"
+  }
+}

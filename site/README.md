@@ -17,9 +17,9 @@ runtime shape:
 
 Marketing copy in this directory must be checked against:
 
-- [README.md](/C:/Users/amant/Documents/GitHub/winghostty/README.md)
-- [docs/status.md](/C:/Users/amant/Documents/GitHub/winghostty/docs/status.md)
-- [docs/getting-started.md](/C:/Users/amant/Documents/GitHub/winghostty/docs/getting-started.md)
+- [README.md](../README.md)
+- [docs/status.md](../docs/status.md)
+- [docs/getting-started.md](../docs/getting-started.md)
 
 If those files and the site disagree, tighten the wording until the claim is defensible.
 
@@ -39,9 +39,9 @@ The check fails on known bad claims and regressions, including:
 - silent-update or signed-release wording
 - parity overclaims
 
-React UMD, Google Fonts, and the GitHub Releases version fetch are currently
-intentional because the landing page was restored to the archive's original
-runtime shape per user direction.
+React UMD, Google Fonts (Bricolage Grotesque + JetBrains Mono), and the GitHub
+Releases version fetch are intentional for the static Pages payload. After JSX
+edits, run `node scripts/build-site-bundle.mjs` from the repo root.
 
 ## Cloudflare Pages
 

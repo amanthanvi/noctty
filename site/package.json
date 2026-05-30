@@ -1,0 +1,18 @@
+{
+  "name": "winghostty-site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node ../scripts/build-site-bundle.mjs",
+    "doctor": "react-doctor . --yes",
+    "doctor:score": "react-doctor . --score --yes"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "esbuild": "0.28.0",
+    "react": "18.3.1",
+    "react-doctor": "0.2.13",
+    "react-dom": "18.3.1"
+  }
+}

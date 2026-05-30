@@ -1,0 +1,4 @@
+ignore:
+  - site/bundle.js
+  - site/package-lock.json
+  - site/icons/
