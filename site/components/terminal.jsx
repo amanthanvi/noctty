@@ -15,7 +15,7 @@ function buildScript(v) {
         { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-x64-setup.exe -OutFile winghostty-setup.exe` },
         { kind: 'cmd', text: '.\\winghostty-setup.exe' },
         { kind: 'out', t: '→ installer build: Start menu entry and standard uninstall path', c: 'dim' },
-        { kind: 'out', t: '→ SmartScreen may warn: self-signed release. Click More info, then Run anyway.', c: 'dim' },
+        { kind: 'out', t: '→ Authenticode-signed; SmartScreen may still warn while reputation builds.', c: 'dim' },
       ],
     },
     {

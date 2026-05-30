@@ -110,7 +110,7 @@ export function VersionChipColor() {
       <span className="wg-hero__badge-version">{`v${v}`}</span>
       <span className="wg-hero__badge-latest">latest</span>
       <span className="wg-hero__badge-sep" aria-hidden="true" />
-      <span className="wg-hero__badge-meta">Win 10/11 · x64</span>
+      <span className="wg-hero__badge-meta">Win 10/11 · x64 + ARM64</span>
       <span className="wg-hero__badge-sep" aria-hidden="true" />
       <span className="wg-hero__badge-stack">MIT · OpenGL 4.3</span>
     </span>

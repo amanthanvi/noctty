@@ -17,7 +17,7 @@ const WHY_ITEMS = [
   },
   {
     q: 'Anything to know before installing?',
-    a: 'Yes. Installers are self-signed, not signed by a public CA, so SmartScreen may still warn on first run. Click More info, then Run anyway.',
+    a: 'Yes. Release installers and Windows binaries are Authenticode-signed, but SmartScreen may still warn while reputation builds. Click More info, then Run anyway.',
   },
   {
     q: 'Does it phone home?',
