@@ -37,7 +37,7 @@ export function HeroColorPop() {
         </div>
 
         <div className="wg-hero__terminal">
-          <WinghosttyTerminal height={0} />
+          <WinghosttyTerminal height={null} />
         </div>
       </div>
     </section>

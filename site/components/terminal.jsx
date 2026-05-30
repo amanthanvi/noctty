@@ -167,7 +167,7 @@ export function WinghosttyTerminal({
     }
   }
 
-  const bodyStyle = height ? { minHeight: height } : undefined;
+  const bodyStyle = height == null ? undefined : { minHeight: height };
 
   return (
     <div className="wg-terminal" data-theme={theme}>
