@@ -4,7 +4,7 @@ import { TerminalLine } from './terminal/terminal-line.jsx';
 
 const { useEffect, useReducer } = React;
 
-let WG_VERSION = window.WG_VERSION || '1.3.106';
+let WG_VERSION = window.WG_VERSION || '1.3.113';
 const WG_REPO = 'amanthanvi/winghostty';
 
 function buildScript(v) {
@@ -103,6 +103,9 @@ export function WinghosttyTerminal({
 }) {
   const [, forceVersion] = useReducer((n) => n + 1, 0);
   useEffect(() => {
+    setTerminalVersion(window.WG_VERSION || WG_VERSION);
+    forceVersion();
+
     const onUpdate = (e) => {
       setTerminalVersion(e?.detail?.version || window.WG_VERSION || WG_VERSION);
       forceVersion();
@@ -110,7 +113,6 @@ export function WinghosttyTerminal({
     window.addEventListener('wg-version-updated', onUpdate);
     return () => window.removeEventListener('wg-version-updated', onUpdate);
   }, []);
-  if (!initialScript) setTerminalVersion(window.WG_VERSION || WG_VERSION);
   const script = initialScript || TERMINAL_SCRIPT;
 
   const [{ sceneIdx, lineIdx, typed }, dispatch] = useReducer(terminalReducer, initialTerminalState);

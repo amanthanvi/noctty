@@ -1,7 +1,7 @@
 import { ColorDots } from './color-dots.jsx';
 
 const { useEffect, useState } = React;
-const DEFAULT_WG_VERSION = '1.3.106';
+const DEFAULT_WG_VERSION = '1.3.113';
 const WG_REPO = 'amanthanvi/winghostty';
 const CACHE_KEY = 'wg-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -79,7 +79,7 @@ function scheduleLatestVersionFetch() {
   }
 
   const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
-  idle(fetchLatestVersion);
+  idle(fetchLatestVersion, { timeout: RELEASE_FETCH_TIMEOUT_MS });
 }
 
 if (typeof window !== 'undefined') {
@@ -110,7 +110,7 @@ export function VersionChipColor() {
       <span className="wg-hero__badge-version">{`v${v}`}</span>
       <span className="wg-hero__badge-latest">latest</span>
       <span className="wg-hero__badge-sep" aria-hidden="true" />
-      <span className="wg-hero__badge-meta">Win 10/11 · x64 · ARM64</span>
+      <span className="wg-hero__badge-meta">Win 10/11 · x64</span>
       <span className="wg-hero__badge-sep" aria-hidden="true" />
       <span className="wg-hero__badge-stack">MIT · OpenGL 4.3</span>
     </span>
