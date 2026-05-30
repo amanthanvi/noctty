@@ -4,7 +4,7 @@ import { TerminalLine } from './terminal/terminal-line.jsx';
 
 const { useEffect, useReducer } = React;
 
-let WG_VERSION = '1.3.106';
+let WG_VERSION = window.WG_VERSION || '1.3.106';
 const WG_REPO = 'amanthanvi/winghostty';
 
 function buildScript(v) {
@@ -57,7 +57,7 @@ function buildScript(v) {
 }
 
 let TERMINAL_SCRIPT = buildScript(WG_VERSION);
-window.WG_VERSION = WG_VERSION;
+window.WG_VERSION = window.WG_VERSION || WG_VERSION;
 
 function setTerminalVersion(tag) {
   if (!tag || tag === WG_VERSION) return false;
@@ -66,43 +66,6 @@ function setTerminalVersion(tag) {
   TERMINAL_SCRIPT = buildScript(WG_VERSION);
   return true;
 }
-
-(function fetchLatestVersionDeferred() {
-  const CACHE_KEY = 'wg-latest-version';
-  const CACHE_TTL = 1000 * 60 * 30;
-  const apply = (tag) => {
-    if (setTerminalVersion(tag)) {
-      window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
-    }
-  };
-
-  try {
-    const cached = sessionStorage.getItem(CACHE_KEY);
-    if (cached) {
-      const { tag, ts } = JSON.parse(cached);
-      if (tag && Date.now() - ts < CACHE_TTL) {
-        apply(tag);
-        return;
-      }
-    }
-  } catch (e) {}
-
-  const run = async () => {
-    try {
-      const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const tag = (data.tag_name || '').replace(/^v/, '');
-      if (tag) {
-        try { sessionStorage.setItem(CACHE_KEY, JSON.stringify({ tag, ts: Date.now() })); } catch (e) {}
-        apply(tag);
-      }
-    } catch (e) {}
-  };
-
-  const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
-  idle(run, { timeout: 4000 });
-})();
 
 const PROMPT = 'PS C:\\Users\\dev>';
 const scheduleDelay = (...args) => window.setTimeout(...args);
