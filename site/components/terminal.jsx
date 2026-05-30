@@ -49,9 +49,9 @@ function buildScript(v) {
 
   return scenes.map((scene) => ({
     ...scene,
-    lines: scene.lines.map((line) => ({
+    lines: scene.lines.map((line, idx) => ({
       ...line,
-      id: `${scene.title}:${line.kind}:${line.text || line.t || ''}`,
+      id: `${scene.title}:${idx}:${line.kind}:${line.text || line.t || ''}`,
     })),
   }));
 }
@@ -174,7 +174,7 @@ export function WinghosttyTerminal({
       dispatch({ type: 'next-output' });
     }, 220);
     return () => clearTimeout(t);
-  }, [autoplay, scene, line, lineIdx, sceneIdx, typed, script.length]);
+  }, [autoplay, scene, line, lineIdx, sceneIdx, typed, script]);
 
   const visible = [];
   if (scene) {

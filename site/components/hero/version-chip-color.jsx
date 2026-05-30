@@ -53,7 +53,10 @@ async function fetchLatestVersion() {
 
 function scheduleLatestVersionFetch() {
   const cached = readCachedVersion();
-  if (cached) publishVersion(cached);
+  if (cached) {
+    publishVersion(cached);
+    return;
+  }
 
   const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
   idle(fetchLatestVersion);

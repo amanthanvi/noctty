@@ -432,7 +432,7 @@ code {
   cursor: default;
   transform-origin: center bottom;
   transform: translate3d(0, 0, 0);
-  transition: transform 0.38s cubic-bezier(0.33, 1, 0.38, 1);
+  transition: transform 0.38s var(--wg-ease-rubber);
 }
 
 .wg-color-dot::before {
