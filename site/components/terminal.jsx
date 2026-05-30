@@ -1,29 +1,23 @@
-// Mock terminal window with typewriter animation
-// Uses React hooks. Exposes WinghosttyTerminal to window.
+// Mock terminal window with typewriter animation.
 
-const { useState, useEffect, useRef, useMemo } = React;
+import { TerminalLine } from './terminal/terminal-line.jsx';
 
-// Latest release version — single source of truth.
-// Default value is overridden at runtime by fetching GitHub Releases (see below).
+const { useEffect, useReducer } = React;
+
 let WG_VERSION = '1.3.106';
 const WG_REPO = 'amanthanvi/winghostty';
-const WG_RELEASE_URL = () => `https://github.com/${WG_REPO}/releases/tag/v${WG_VERSION}`;
 
-// Build the cycling script for a given version. Each entry is a SCENE — a
-// distinct "command run" that clears the terminal before playing.
 function buildScript(v) {
-  return [
-    // SCENE 1 — Installer (.exe)
+  const scenes = [
     {
       title: 'download setup.exe',
       lines: [
         { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-x64-setup.exe -OutFile winghostty-setup.exe` },
         { kind: 'cmd', text: '.\\winghostty-setup.exe' },
         { kind: 'out', t: '→ installer build: Start menu entry and standard uninstall path', c: 'dim' },
-        { kind: 'out', t: '→ SmartScreen may warn while reputation is new. Click More info → Run anyway if you trust the release.', c: 'dim' },
+        { kind: 'out', t: '→ SmartScreen may warn: self-signed release. Click More info, then Run anyway.', c: 'dim' },
       ],
     },
-    // SCENE 2 — Portable ZIP
     {
       title: 'portable (.zip)',
       lines: [
@@ -33,7 +27,6 @@ function buildScript(v) {
         { kind: 'out', t: '→ same Win32 runtime, no install step required', c: 'dim' },
       ],
     },
-    // SCENE 3 — Config docs
     {
       title: 'make it yours',
       lines: [
@@ -43,7 +36,6 @@ function buildScript(v) {
         { kind: 'out', t: '→ profile picker: PowerShell, cmd, Git Bash, and opt-in WSL', c: 'dim' },
       ],
     },
-    // SCENE 4 — launch
     {
       title: 'launch',
       lines: [
@@ -54,18 +46,22 @@ function buildScript(v) {
       ],
     },
   ];
+
+  return scenes.map((scene) => ({
+    ...scene,
+    lines: scene.lines.map((line) => ({
+      ...line,
+      id: `${scene.title}:${line.kind}:${line.text || line.t || ''}`,
+    })),
+  }));
 }
 
-// Initial script (will be regenerated when version is fetched).
 let TERMINAL_SCRIPT = buildScript(WG_VERSION);
 window.WG_VERSION = WG_VERSION;
 
-// Try to fetch the actual latest release tag from GitHub. If it works,
-// dispatch a custom event so the page can re-render with the new version.
-// Defer to idle + cache in sessionStorage so we only hit the API once per tab session.
 (function fetchLatestVersionDeferred() {
   const CACHE_KEY = 'wg-latest-version';
-  const CACHE_TTL = 1000 * 60 * 30; // 30 min
+  const CACHE_TTL = 1000 * 60 * 30;
   const apply = (tag) => {
     if (!tag || tag === WG_VERSION) return;
     WG_VERSION = tag;
@@ -102,65 +98,59 @@ window.WG_VERSION = WG_VERSION;
   idle(run, { timeout: 4000 });
 })();
 
-function TerminalLine({ prompt, text, cursor, promptColor, textColor }) {
-  return (
-    <div style={{ display: 'flex', gap: 8, minHeight: 22 }}>
-      <span style={{ color: promptColor, flexShrink: 0, userSelect: 'none' }}>{prompt}</span>
-      <span style={{ color: textColor, whiteSpace: 'pre' }}>
-        {text}
-        {cursor && <span className="wg-caret">▋</span>}
-      </span>
-    </div>
-  );
+const PROMPT = 'PS C:\\Users\\dev>';
+const scheduleDelay = (...args) => window.setTimeout(...args);
+
+const initialTerminalState = {
+  sceneIdx: 0,
+  lineIdx: 0,
+  typed: '',
+};
+
+function terminalReducer(state, action) {
+  switch (action.type) {
+    case 'type':
+      return { ...state, typed: action.text };
+    case 'next-line':
+      return { ...state, lineIdx: state.lineIdx + 1, typed: '' };
+    case 'next-output':
+      return { ...state, lineIdx: state.lineIdx + 1 };
+    case 'next-scene':
+      return {
+        sceneIdx: (state.sceneIdx + 1) % action.scriptLength,
+        lineIdx: 0,
+        typed: '',
+      };
+    default:
+      return state;
+  }
 }
 
-function WinghosttyTerminal({
+export function WinghosttyTerminal({
   autoplay = true,
   theme = 'dark',
   height = 440,
   compact = false,
   script: initialScript,
 }) {
-  // Use the live TERMINAL_SCRIPT (re-read on every render so async version
-  // updates from GitHub flow through).
-  const [, force] = useState(0);
+  const [, forceVersion] = useReducer((n) => n + 1, 0);
   useEffect(() => {
-    const onUpdate = () => force((n) => n + 1);
+    const onUpdate = () => forceVersion();
     window.addEventListener('wg-version-updated', onUpdate);
     return () => window.removeEventListener('wg-version-updated', onUpdate);
   }, []);
   const script = initialScript || TERMINAL_SCRIPT;
 
-  const PROMPT = 'PS C:\\Users\\dev>';
-
-  const [sceneIdx, setSceneIdx] = useState(0);   // which scene
-  const [lineIdx, setLineIdx] = useState(0);     // which line within scene
-  const [typed, setTyped] = useState('');        // typed chars of current cmd line
-  const [phase, setPhase] = useState('typing');  // typing | reveal | scene-done
-
+  const [{ sceneIdx, lineIdx, typed }, dispatch] = useReducer(terminalReducer, initialTerminalState);
   const scene = script[sceneIdx];
   const line = scene?.lines[lineIdx];
 
-  const C = theme === 'dark' ? {
-    bg: '#0b0b0c', chrome: '#17171a', border: '#26262a', fg: '#e5e5e5',
-    dim: '#707078', prompt: '#a5a5ad', accent: '#ffffff', ok: '#d1d5db', dot: '#3b3b42',
-  } : {
-    bg: '#fafafa', chrome: '#f0f0ef', border: '#d4d4d2', fg: '#1a1a1a',
-    dim: '#7a7a78', prompt: '#52525b', accent: '#0a0a0a', ok: '#3f3f46', dot: '#c4c4c0',
-  };
-
-  // Drive the next step
   useEffect(() => {
     if (!autoplay || !scene) return;
 
-    // End of scene → pause, then clear & advance
     if (lineIdx >= scene.lines.length) {
-      const t = setTimeout(() => {
-        const next = (sceneIdx + 1) % script.length;
-        setSceneIdx(next);
-        setLineIdx(0);
-        setTyped('');
-        setPhase('typing');
+      const t = scheduleDelay(() => {
+        dispatch({ type: 'next-scene', scriptLength: script.length });
       }, 1800);
       return () => clearTimeout(t);
     }
@@ -168,97 +158,70 @@ function WinghosttyTerminal({
     if (!line) return;
 
     if (line.kind === 'cmd') {
-      if (phase === 'typing') {
-        if (typed.length < line.text.length) {
-          const t = setTimeout(() => {
-            setTyped(line.text.slice(0, typed.length + 1));
-          }, 32 + Math.random() * 48);
-          return () => clearTimeout(t);
-        }
-        // finished typing → wait a beat, then advance
-        const t = setTimeout(() => {
-          setLineIdx((i) => i + 1);
-          setTyped('');
-        }, 360);
+      if (typed.length < line.text.length) {
+        const t = scheduleDelay(() => {
+          dispatch({ type: 'type', text: line.text.slice(0, typed.length + 1) });
+        }, 32 + Math.random() * 48);
         return () => clearTimeout(t);
       }
-    } else {
-      // output line — reveal then advance
-      const t = setTimeout(() => {
-        setLineIdx((i) => i + 1);
-      }, 220);
+      const t = scheduleDelay(() => {
+        dispatch({ type: 'next-line' });
+      }, 360);
       return () => clearTimeout(t);
     }
-  }, [autoplay, scene, line, lineIdx, sceneIdx, phase, typed, script.length]);
 
-  // Build the visible buffer: only lines from THIS scene up to lineIdx,
-  // plus the currently-typing command if applicable.
+    const t = scheduleDelay(() => {
+      dispatch({ type: 'next-output' });
+    }, 220);
+    return () => clearTimeout(t);
+  }, [autoplay, scene, line, lineIdx, sceneIdx, typed, script.length]);
+
   const visible = [];
   if (scene) {
     if (!autoplay) {
-      visible.push(...scene.lines);
-      visible.push({ kind: 'cmd', text: '', cursor: true });
+      scene.lines.forEach((entry) => visible.push({ key: entry.id, line: entry }));
+      visible.push({ key: `${scene.title}:cursor`, line: { kind: 'cmd', text: '', cursor: true } });
     } else {
-      for (let i = 0; i < lineIdx && i < scene.lines.length; i++) {
-        visible.push(scene.lines[i]);
-      }
+      scene.lines
+        .slice(0, lineIdx)
+        .forEach((entry) => visible.push({ key: entry.id, line: entry }));
       if (line && line.kind === 'cmd') {
-        // currently typing
-        visible.push({ kind: 'cmd', text: typed, cursor: true });
+        visible.push({ key: `${line.id}:typing`, line: { kind: 'cmd', text: typed, cursor: true } });
       } else if (lineIdx >= scene.lines.length) {
-        // scene complete — show idle prompt with cursor
-        visible.push({ kind: 'cmd', text: '', cursor: true });
+        visible.push({ key: `${scene.title}:idle`, line: { kind: 'cmd', text: '', cursor: true } });
       }
     }
   }
 
+  const bodyStyle = height ? { minHeight: height } : undefined;
+
   return (
-    <div style={{
-      background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden',
-      boxShadow: theme === 'dark'
-        ? '0 40px 120px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04)'
-        : '0 40px 120px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.02)',
-      display: 'flex', flexDirection: 'column', width: '100%', maxWidth: '100%',
-    }}>
-      {/* chrome */}
-      <div style={{
-        height: 36, background: C.chrome, borderBottom: `1px solid ${C.border}`,
-        display: 'flex', alignItems: 'center', padding: '0 12px', gap: 10,
-      }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: C.dot }} />
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: C.dot }} />
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: C.dot }} />
+    <div className="wg-terminal" data-theme={theme}>
+      <div className="wg-terminal__chrome">
+        <div className="wg-terminal__title">
+          winghostty · PowerShell · {scene?.title || 'idle'}
         </div>
-        <div style={{ flex: 1, textAlign: 'center', fontSize: 11, color: C.dim, fontFamily: 'var(--mono)', letterSpacing: '0.02em' }}>
-          winghostty — PowerShell — {scene?.title || 'idle'}
+        <div className="wg-terminal__caption" aria-hidden="true">
+          <span className="wg-terminal__caption-btn" />
+          <span className="wg-terminal__caption-btn" />
+          <span className="wg-terminal__caption-btn wg-terminal__caption-btn--close" />
         </div>
-        <div style={{ width: 44 }} />
       </div>
-      {/* body */}
-      <div style={{
-        flex: 1, height,
-        padding: compact ? '16px 18px' : '22px 24px',
-        fontFamily: 'var(--mono)',
-        fontSize: compact ? 12 : 13,
-        lineHeight: 1.65, color: C.fg, overflow: 'hidden', textAlign: 'left',
-      }}>
-        {visible.map((l, i) => {
+      <div className="wg-terminal__body" style={bodyStyle}>
+        {visible.map(({ key, line: l }) => {
           if (l.kind === 'cmd') {
             return (
               <TerminalLine
-                key={`${sceneIdx}-${i}`}
+                key={key}
                 prompt={PROMPT}
                 text={l.text}
                 cursor={l.cursor}
-                promptColor={C.prompt}
-                textColor={C.fg}
               />
             );
           }
-          const color = l.c === 'dim' ? C.dim : l.c === 'accent' ? C.accent : l.c === 'ok' ? C.ok : C.fg;
+          const className = l.c === 'dim' ? 'wg-terminal__line wg-terminal__line--dim' : 'wg-terminal__line';
           return (
-            <div key={`${sceneIdx}-${i}`} style={{ color, whiteSpace: 'pre', minHeight: 22 }}>
+            <div key={key} className={className}>
               {l.t}
             </div>
           );
@@ -267,5 +230,3 @@ function WinghosttyTerminal({
     </div>
   );
 }
-
-Object.assign(window, { WinghosttyTerminal, WG_REPO });

@@ -6,17 +6,29 @@ performance win.
 
 ## Source layout
 
-- `components/*.jsx` — editable JSX source (kept for readability / future edits).
-- `bundle.js` — concatenated + Babel-compiled output. **This is what the browser loads.**
+- `main.jsx` — browser entrypoint for React.
+- `components/**/*.jsx` — editable JSX source.
+- `bundle.js` — esbuild output. **This is what the browser loads.**
 - `index.html` — references `bundle.js` directly.
 
 ## When to rebuild
 
-Whenever you change anything in `components/*.jsx`, regenerate `bundle.js`.
-`bundle.js` is the shipped runtime, but the mirrored files in `components/`
-should stay in sync so future edits do not drift between source and output.
+Whenever you change `main.jsx` or anything in `components/**/*.jsx`, regenerate
+`bundle.js`. `bundle.js` is the shipped runtime, and the JSX source should stay
+in sync with it.
 
-## How to rebuild from inline JSX
+## How to rebuild from `components/*.jsx`
+
+From the repo root:
+
+```powershell
+node scripts/build-site-bundle.mjs
+```
+
+This bundles `site/main.jsx` and its imported JSX modules via esbuild. Bump the
+`bundle.js?v=...` query in `index.html` when you want to bust CDN/browser caches.
+
+## Legacy: rebuild from inline JSX in the browser
 
 If you want to author in JSX again, paste your JSX into a temporary
 `<script type="text/babel">` block and run this in `run_script`:
@@ -46,6 +58,6 @@ await saveFile('bundle.js', out);
 - **Deferred scripts** so HTML parses first, then JS runs in order.
 - **Lazy + cached GitHub fetch** — version check runs in `requestIdleCallback`,
   cached in `sessionStorage` for 30 minutes.
-- **Font subset** — only weights actually used (mono 400/500, serif 400 + italic).
+- **Font subset** — only weights actually used (display 500/600/700, mono 400/500).
 - **Non-blocking font load** via `media="print"` swap, with a `<noscript>` fallback.
 - **Inline theme bootstrap** in `<head>` to prevent FOUC on theme flip.

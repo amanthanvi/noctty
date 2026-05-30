@@ -10,149 +10,25 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="preload" as="script" href="vendor/react.production.min.js" />
   <link rel="preload" as="script" href="vendor/react-dom.production.min.js" />
-  <link rel="preload" as="script" href="bundle.js?v=2026-04-24-6" />
-  <!-- Non-blocking font load: print-media trick swaps to all once downloaded.
-       Trims weights to only those actually used (400/500 mono, 400 + italic serif). -->
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" media="print" onload="this.media='all'" />
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" /></noscript>
-  <style>
-    /* Tweaks default block — host merges edits in-place */
-    /* prettier-ignore */
-    :root { }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      font-size: 16px;
-      background: #0a0a0b;
-      color: #e5e5e5;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      transition: background 0.2s, color 0.2s;
-      text-rendering: optimizeLegibility;
-    }
-    :root {
-      --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
-      --serif: 'Instrument Serif', 'Iowan Old Style', 'Palatino', serif;
-    }
-
-    .wg-container {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding-left: 32px;
-      padding-right: 32px;
-    }
-
-    /* Blinking caret */
-    .wg-caret {
-      display: inline-block;
-      animation: wg-blink 1.05s steps(2, start) infinite;
-      margin-left: 1px;
-      transform: translateY(1px);
-    }
-    @keyframes wg-blink {
-      to { visibility: hidden; }
-    }
-
-    /* Selection */
-    ::selection {
-      background: #e5e5e5;
-      color: #0a0a0b;
-    }
-    body[data-theme="light"] ::selection {
-      background: #0a0a0a;
-      color: #fafaf9;
-    }
-
-    /* Hero Split */
-    .wg-hero-split {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
-      gap: 56px;
-      align-items: center;
-    }
-    @media (max-width: 980px) {
-      .wg-hero-split { grid-template-columns: 1fr; gap: 40px; }
-      .wg-hero-split-term { order: -1; }
-    }
-
-    /* Feature grid */
-    .wg-feature-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 16px;
-    }
-    @media (max-width: 900px) {
-      .wg-feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 600px) {
-      .wg-feature-grid { grid-template-columns: 1fr; }
-    }
-
-    /* Why grid collapse */
-    @media (max-width: 780px) {
-      .wg-why-grid {
-        grid-template-columns: 1fr !important;
-      }
-    }
-
-    /* Hero editorial label stacks */
-    @media (max-width: 780px) {
-      .wg-hero-editorial-meta,
-      .wg-hero-editorial-title,
-      .wg-hero-editorial-lede,
-      .wg-hero-editorial-demo {
-        grid-template-columns: 1fr !important;
-        gap: 12px !important;
-      }
-    }
-
-    /* Scrollbar */
-    body[data-theme="dark"] ::-webkit-scrollbar { width: 10px; height: 10px; }
-    body[data-theme="dark"] ::-webkit-scrollbar-track { background: #0a0a0b; }
-    body[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #26262a; border-radius: 8px; border: 2px solid #0a0a0b; }
-    body[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #3a3a40; }
-
-    /* Hide variant switch labels on narrow viewports */
-    @media (max-width: 720px) {
-      .wg-variant-switch { display: none !important; }
-    }
-
-    a { color: inherit; }
-    a:hover { opacity: 0.72; }
-    a:focus-visible, button:focus-visible {
-      outline: 2px solid currentColor;
-      outline-offset: 2px;
-      border-radius: 8px;
-    }
-
-    em { font-family: var(--serif); font-style: italic; font-size: 1.08em; letter-spacing: 0; }
-  </style>
-  <!-- Inline theme bootstrap: set bg/data-theme synchronously to avoid a paint flash
-       before React mounts and applies the saved theme. -->
+  <link rel="preload" as="script" href="bundle.js?v=2026-05-30-1" />
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'" />
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" /></noscript>
+  <link rel="stylesheet" href="styles.css?v=2026-05-30-1" />
   <script>
     (function () {
       try {
         var t = localStorage.getItem('wg-theme') || 'dark';
-        var d = document.documentElement;
-        d.setAttribute('data-theme', t);
-        d.style.background = t === 'dark' ? '#0a0a0b' : '#fafaf9';
-        d.style.color = t === 'dark' ? '#e5e5e5' : '#0a0a0a';
+        document.documentElement.setAttribute('data-theme', t);
+        document.body && document.body.setAttribute('data-theme', t);
       } catch (e) {}
     })();
   </script>
 </head>
 <body data-theme="dark">
   <div id="root"></div>
-
-  <!-- React PRODUCTION builds (smaller + faster than .development).
-       JSX is precompiled to plain JS in bundle.js, so Babel-standalone is no longer loaded at runtime.
-       All three scripts use defer so they run in order, after HTML parses, without blocking render. -->
   <script defer src="vendor/react.production.min.js"></script>
   <script defer src="vendor/react-dom.production.min.js"></script>
-  <script defer src="bundle.js?v=2026-04-24-6"></script>
-
-
+  <script defer src="bundle.js?v=2026-05-30-1"></script>
 </body>
 </html>

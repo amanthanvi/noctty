@@ -39,9 +39,9 @@ The check fails on known bad claims and regressions, including:
 - silent-update or signed-release wording
 - parity overclaims
 
-React UMD, Google Fonts, and the GitHub Releases version fetch are currently
-intentional because the landing page was restored to the archive's original
-runtime shape per user direction.
+React UMD, Google Fonts (Bricolage Grotesque + JetBrains Mono), and the GitHub
+Releases version fetch are intentional for the static Pages payload. After JSX
+edits, run `node scripts/build-site-bundle.mjs` from the repo root.
 
 ## Cloudflare Pages
 

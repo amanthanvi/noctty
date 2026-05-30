@@ -1,0 +1,21 @@
+{
+  "name": "winghostty-site",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "main.jsx",
+  "source": "main.jsx",
+  "exports": "./main.jsx",
+  "scripts": {
+    "build": "node ../scripts/build-site-bundle.mjs",
+    "doctor": "react-doctor . --yes",
+    "doctor:score": "react-doctor . --score --yes"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "react-doctor": "^0.2.13"
+  }
+}
