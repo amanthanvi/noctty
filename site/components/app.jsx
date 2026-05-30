@@ -6,6 +6,7 @@ import { TopBar } from './layout/top-bar.jsx';
 import { FeatureGrid, Footer, WhyFork } from './sections.jsx';
 
 const { useEffect, useState } = React;
+const EDIT_MODE_MESSAGE_TYPES = new Set(['__activate_edit_mode', '__deactivate_edit_mode']);
 
 function getStoredTheme() {
   try {
@@ -25,6 +26,15 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
 }
 
+function getParentTargetOrigin() {
+  try {
+    if (!document.referrer) return '*';
+    return new URL(document.referrer).origin;
+  } catch (e) {
+    return '*';
+  }
+}
+
 export function App() {
   const [theme, setTheme] = useState(getStoredTheme);
 
@@ -35,16 +45,19 @@ export function App() {
   };
 
   useEffect(() => {
-    const allowedOrigin = window.location.origin;
+    const parentOrigin = getParentTargetOrigin();
+    const allowedOrigins = new Set([window.location.origin]);
+    if (parentOrigin !== '*') allowedOrigins.add(parentOrigin);
+
     const onMessage = (e) => {
-      if (e.origin !== allowedOrigin) return;
       const d = e.data || {};
-      if (d.type === '__activate_edit_mode') document.body.dataset.editMode = 'on';
-      if (d.type === '__deactivate_edit_mode') document.body.dataset.editMode = 'off';
+      if (!EDIT_MODE_MESSAGE_TYPES.has(d.type)) return;
+      if (parentOrigin !== '*' && !allowedOrigins.has(e.origin)) return;
+      document.body.dataset.editMode = d.type === '__activate_edit_mode' ? 'on' : 'off';
     };
     window.addEventListener('message', onMessage);
     if (window.parent !== window) {
-      window.parent.postMessage({ type: '__edit_mode_available' }, allowedOrigin);
+      window.parent.postMessage({ type: '__edit_mode_available' }, parentOrigin);
     }
     return () => window.removeEventListener('message', onMessage);
   }, []);

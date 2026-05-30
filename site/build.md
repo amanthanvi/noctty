@@ -17,7 +17,7 @@ Whenever you change `main.jsx` or anything in `components/**/*.jsx`, regenerate
 `bundle.js`. `bundle.js` is the shipped runtime, and the JSX source should stay
 in sync with it.
 
-## How to rebuild from `components/*.jsx`
+## How to rebuild from `components/**/*.jsx`
 
 From the repo root:
 

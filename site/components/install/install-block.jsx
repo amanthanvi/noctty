@@ -7,7 +7,7 @@ const COPY_RESET_MS = 1400;
 const INSTALL_METHODS = {
   scoop: {
     label: 'Scoop',
-    cmd: 'scoop install winghostty/winghostty',
+    cmd: 'scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty; scoop install winghostty/winghostty',
     copy: 'scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty\r\nscoop install winghostty/winghostty',
   },
   winget: {
