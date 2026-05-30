@@ -59,15 +59,21 @@ function buildScript(v) {
 let TERMINAL_SCRIPT = buildScript(WG_VERSION);
 window.WG_VERSION = WG_VERSION;
 
+function setTerminalVersion(tag) {
+  if (!tag || tag === WG_VERSION) return false;
+  WG_VERSION = tag;
+  window.WG_VERSION = tag;
+  TERMINAL_SCRIPT = buildScript(WG_VERSION);
+  return true;
+}
+
 (function fetchLatestVersionDeferred() {
   const CACHE_KEY = 'wg-latest-version';
   const CACHE_TTL = 1000 * 60 * 30;
   const apply = (tag) => {
-    if (!tag || tag === WG_VERSION) return;
-    WG_VERSION = tag;
-    window.WG_VERSION = tag;
-    TERMINAL_SCRIPT = buildScript(WG_VERSION);
-    window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
+    if (setTerminalVersion(tag)) {
+      window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
+    }
   };
 
   try {
@@ -134,10 +140,14 @@ export function WinghosttyTerminal({
 }) {
   const [, forceVersion] = useReducer((n) => n + 1, 0);
   useEffect(() => {
-    const onUpdate = () => forceVersion();
+    const onUpdate = (e) => {
+      setTerminalVersion(e?.detail?.version || window.WG_VERSION || WG_VERSION);
+      forceVersion();
+    };
     window.addEventListener('wg-version-updated', onUpdate);
     return () => window.removeEventListener('wg-version-updated', onUpdate);
   }, []);
+  if (!initialScript) setTerminalVersion(window.WG_VERSION || WG_VERSION);
   const script = initialScript || TERMINAL_SCRIPT;
 
   const [{ sceneIdx, lineIdx, typed }, dispatch] = useReducer(terminalReducer, initialTerminalState);
