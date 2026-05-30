@@ -29,7 +29,11 @@ function writeClipboardTextFallback(text) {
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.setAttribute('readonly', '');
+  textarea.setAttribute('aria-hidden', 'true');
+  textarea.tabIndex = -1;
   textarea.style.position = 'fixed';
+  textarea.style.top = '-1000px';
+  textarea.style.left = '-1000px';
   textarea.style.opacity = '0';
   document.body.appendChild(textarea);
   textarea.select();

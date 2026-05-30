@@ -130,7 +130,6 @@ export function WinghosttyTerminal({
   autoplay = true,
   theme = 'dark',
   height = 440,
-  compact = false,
   script: initialScript,
 }) {
   const [, forceVersion] = useReducer((n) => n + 1, 0);
