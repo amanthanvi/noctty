@@ -88,11 +88,6 @@ export function InstallBlock() {
       });
   };
 
-  const longestCmd = Object.values(INSTALL_METHODS).reduce(
-    (longest, item) => (item.cmd.length > longest.length ? item.cmd : longest),
-    '',
-  );
-
   return (
     <div className="wg-install-lane">
       <div className="wg-install-panel">
@@ -102,9 +97,8 @@ export function InstallBlock() {
             <div className="wg-install-fluid__tab" />
           </div>
           <div className="wg-install">
-            <span className="wg-install__sizer" aria-hidden="true">{longestCmd}</span>
             <span className="wg-install__sigil">$</span>
-            <code className="wg-install__command">{active.cmd}</code>
+            <code className="wg-install__command" title={active.cmd}>{active.cmd}</code>
             <button
               type="button"
               className={`wg-install__copy${copied ? ' is-copied' : ''}${copyFailed ? ' is-failed' : ''}`}
