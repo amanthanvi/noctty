@@ -2,6 +2,7 @@
 
 import { InstallBlock } from './install/install-block.jsx';
 import { VersionChipColor } from './hero/version-chip-color.jsx';
+import { WinghosttyTerminal } from './terminal.jsx';
 
 export function HeroColorPop() {
   return (
@@ -33,6 +34,10 @@ export function HeroColorPop() {
             Download latest ↗
           </a>
           <InstallBlock />
+        </div>
+
+        <div className="wg-hero__terminal">
+          <WinghosttyTerminal height={0} />
         </div>
       </div>
     </section>

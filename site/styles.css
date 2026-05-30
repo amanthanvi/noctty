@@ -270,23 +270,6 @@ code {
   min-height: 60px;
 }
 
-.wg-topbar__nav {
-  display: flex;
-  align-items: center;
-  gap: var(--space-lg);
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.wg-topbar__nav a {
-  color: var(--dim);
-  text-decoration: none;
-}
-
-.wg-topbar__nav a:hover {
-  color: var(--fg);
-}
-
 .wg-chip-link,
 .wg-theme-toggle,
 .wg-button {
@@ -352,9 +335,9 @@ code {
   text-align: left;
 }
 
-.wg-section--lead {
+.wg-section.wg-section--lead {
   padding-top: 28px;
-  padding-bottom: var(--space-2xl);
+  padding-bottom: 24px;
 }
 
 .wg-hero-copy {
@@ -652,6 +635,19 @@ code {
   gap: 14px 10px;
   width: auto;
   max-width: 100%;
+}
+
+.wg-hero__terminal {
+  width: min(100%, 860px);
+  margin-top: 6px;
+}
+
+.wg-hero__terminal .wg-terminal {
+  width: 100%;
+}
+
+.wg-hero__terminal .wg-terminal__body {
+  min-height: 220px;
 }
 
 .wg-install-lane {
@@ -1341,12 +1337,6 @@ code {
     padding-top: 12px;
     padding-bottom: 12px;
   }
-
-  .wg-topbar__nav {
-    order: 3;
-    width: 100%;
-    padding-bottom: var(--space-xs);
-  }
 }
 
 @media (max-width: 720px) {
@@ -1424,6 +1414,14 @@ code {
     overflow: hidden;
     text-overflow: ellipsis;
     line-height: 42px;
+  }
+
+  .wg-hero__terminal .wg-terminal__body {
+    min-height: 34px;
+    max-height: 34px;
+    padding: 10px 16px;
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   .wg-feature-card p {

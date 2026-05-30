@@ -26,12 +26,12 @@ function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
 }
 
-function getParentTargetOrigin() {
+function getParentOrigin() {
   try {
-    if (!document.referrer) return '*';
+    if (!document.referrer) return null;
     return new URL(document.referrer).origin;
   } catch (e) {
-    return '*';
+    return null;
   }
 }
 
@@ -45,19 +45,20 @@ export function App() {
   };
 
   useEffect(() => {
-    const parentOrigin = getParentTargetOrigin();
+    const parentOrigin = getParentOrigin();
+    const targetOrigin = parentOrigin || '*';
     const allowedOrigins = new Set([window.location.origin]);
-    if (parentOrigin !== '*') allowedOrigins.add(parentOrigin);
+    if (parentOrigin) allowedOrigins.add(parentOrigin);
 
     const onMessage = (e) => {
       const d = e.data || {};
       if (!EDIT_MODE_MESSAGE_TYPES.has(d.type)) return;
-      if (parentOrigin !== '*' && !allowedOrigins.has(e.origin)) return;
+      if (!allowedOrigins.has(e.origin)) return;
       document.body.dataset.editMode = d.type === '__activate_edit_mode' ? 'on' : 'off';
     };
     window.addEventListener('message', onMessage);
     if (window.parent !== window) {
-      window.parent.postMessage({ type: '__edit_mode_available' }, parentOrigin);
+      window.parent.postMessage({ type: '__edit_mode_available' }, targetOrigin);
     }
     return () => window.removeEventListener('message', onMessage);
   }, []);

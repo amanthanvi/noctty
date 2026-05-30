@@ -25,6 +25,7 @@ execFileSync(process.execPath, [
   "--loader:.jsx=jsx",
   "--format=iife",
   "--platform=browser",
+  "--minify",
   `--outfile=${outFile}`,
 ], { cwd: root, stdio: "inherit" });
 const stat = fs.statSync(outFile);

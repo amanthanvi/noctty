@@ -36,10 +36,16 @@ function writeClipboardTextFallback(text) {
   textarea.style.left = '-1000px';
   textarea.style.opacity = '0';
   document.body.appendChild(textarea);
-  textarea.select();
 
-  const copied = document.execCommand('copy');
-  textarea.remove();
+  let copied = false;
+  try {
+    textarea.select();
+    copied = document.execCommand('copy');
+  } catch (e) {
+    return Promise.reject(e);
+  } finally {
+    textarea.remove();
+  }
 
   if (copied) return Promise.resolve();
   return Promise.reject(new Error('Clipboard copy unavailable'));

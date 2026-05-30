@@ -63,9 +63,8 @@ async function fetchLatestVersion() {
     if (!res.ok) return;
     const data = await res.json();
     const tag = String(data.tag_name || '').replace(/^v/, '');
-    if (!shouldPublishVersion(tag)) return;
     cacheVersion(tag);
-    publishVersion(tag);
+    if (shouldPublishVersion(tag)) publishVersion(tag);
   } catch (e) {
   } finally {
     clearTimeout(timeoutId);
