@@ -4,7 +4,7 @@ export function FeatureCard({ feature }) {
   const glyph = FEATURE_GLYPHS[feature.k] || FEATURE_GLYPHS.compat;
 
   return (
-    <article className="wg-feature-card">
+    <article className="wg-feature-card" data-feature={feature.k}>
       <div className="wg-feature-card__glyph">{glyph}</div>
       <h2>{feature.title}</h2>
       <p>{feature.body}</p>

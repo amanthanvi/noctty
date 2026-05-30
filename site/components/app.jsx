@@ -82,9 +82,9 @@ export function App() {
         </div>
 
         <div
-          className="wg-container wg-section"
+          className="wg-container wg-section wg-section--why"
           data-accent="yellow"
-          style={{ paddingTop: 32, paddingBottom: 48, contentVisibility: 'auto', containIntrinsicSize: 'auto 540px' }}
+          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 540px' }}
         >
           <SectionLabel num="02" title="Why a fork?" />
           <WhyFork />
