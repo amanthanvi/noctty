@@ -60,6 +60,11 @@ body {
   --primary-border: color-mix(in srgb, var(--wg-blue) 55%, oklch(0.34 0.05 265));
   --shadow: 0 32px 80px oklch(0.05 0.02 265 / 0.55), 0 0 0 1px oklch(1 0 0 / 0.05);
   --ambient-strength: 0.72;
+  --wg-install-clip: polygon(0 0,
+      calc(100% - 1px) 0,
+      100% 1px,
+      100% 100%,
+      0 100%);
 }
 
 :root[data-theme="light"] {
@@ -719,11 +724,7 @@ code {
   height: 19px;
   border-top: 0;
   border-radius: 0 0 10px 10px;
-  clip-path: polygon(0 0,
-      calc(100% - 1px) 0,
-      100% 1px,
-      100% 100%,
-      0 100%);
+  clip-path: var(--wg-install-clip);
 }
 
 .wg-install-tabs {
@@ -741,11 +742,7 @@ code {
   border: 1px solid color-mix(in srgb, var(--wg-green) 18%, var(--line));
   border-top: 0;
   border-radius: 0 0 10px 10px;
-  clip-path: polygon(0 0,
-      calc(100% - 1px) 0,
-      100% 1px,
-      100% 100%,
-      0 100%);
+  clip-path: var(--wg-install-clip);
   background: transparent;
   font-family: var(--mono);
   font-size: 9px;

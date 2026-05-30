@@ -18,8 +18,14 @@ const INSTALL_METHODS = {
 };
 
 function writeClipboardText(text) {
-  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => writeClipboardTextFallback(text));
+  }
 
+  return writeClipboardTextFallback(text);
+}
+
+function writeClipboardTextFallback(text) {
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.setAttribute('readonly', '');

@@ -17,11 +17,23 @@ reviews:
   path_filters:
     - "!zig-out/**"
     - "!.zig-cache/**"
+    - "!site/bundle.js"
+    - "!site/package-lock.json"
+    - "!site/icons/**/*.png"
     - "!dist/windows/**/*.zip"
     - "!dist/windows/**/*.msix"
     - "!dist/windows/**/*.png"
     - "!dist/windows/**/*.ico"
   path_instructions:
+    - path: "site/**/*.jsx"
+      instructions: |
+        The static marketing site intentionally loads React and ReactDOM as UMD globals from site/vendor via site/index.html, then bundles only first-party JSX into site/bundle.js. Review source JSX rather than generated bundle output, and do not require ESM React imports unless the runtime loading model changes.
+    - path: "site/index.html"
+      instructions: |
+        Google Fonts and manual bundle/style query-string cache busting are intentional for the static Cloudflare Pages deploy. Flag them only when the referenced assets or cache-bust values are stale or broken.
+    - path: "site/components/install/**"
+      instructions: |
+        Install commands are guarded by scripts/check-site-copy.ps1. Do not replace the WinGet/Scoop command hierarchy when that check passes.
     - path: "**/*.zig"
       instructions: |
         This repository is winghostty, a Windows-focused Ghostty fork. Review against amanthanvi/winghostty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes, targeted `zig build test -Dtest-filter=<name>` validation, and `zig fmt` on touched Zig files.

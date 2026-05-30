@@ -9,9 +9,9 @@ export function WinghosttyToggle({ theme, onToggle, size = 22 }) {
   }, []);
 
   const triggerBlink = () => {
+    onToggle();
     if (blinking) return;
     setBlinking(true);
-    onToggle();
     if (blinkTimerRef.current) clearTimeout(blinkTimerRef.current);
     blinkTimerRef.current = setTimeout(() => {
       setBlinking(false);

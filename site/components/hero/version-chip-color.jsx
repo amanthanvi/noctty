@@ -5,6 +5,7 @@ const DEFAULT_WG_VERSION = '1.3.106';
 const WG_REPO = 'amanthanvi/winghostty';
 const CACHE_KEY = 'wg-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
+const RELEASE_FETCH_TIMEOUT_MS = 4000;
 
 function readCachedVersion() {
   try {
@@ -31,15 +32,23 @@ function publishVersion(tag) {
 }
 
 async function fetchLatestVersion() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), RELEASE_FETCH_TIMEOUT_MS);
+
   try {
-    const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`);
+    const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`, {
+      signal: controller.signal,
+    });
     if (!res.ok) return;
     const data = await res.json();
     const tag = String(data.tag_name || '').replace(/^v/, '');
     if (!tag) return;
     cacheVersion(tag);
     publishVersion(tag);
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function scheduleLatestVersionFetch() {
