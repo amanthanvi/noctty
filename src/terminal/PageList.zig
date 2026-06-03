@@ -10798,6 +10798,37 @@ test "PageList resize (no reflow) less rows and cols" {
     }
 }
 
+test "PageList resize less rows and cols cursor at bottom" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 24, 0);
+    defer s.deinit();
+
+    const cursor_pin = try s.trackPin(s.pin(.{ .active = .{
+        .x = 0,
+        .y = s.rows - 1,
+    } }).?);
+    defer s.untrackPin(cursor_pin);
+
+    // Shrink both axes such that the original cursor.y is strictly past the
+    // new row count, so resizeWithoutReflow leaves self.rows < c.y + 1.
+    try s.resize(.{
+        .cols = 79,
+        .rows = 20,
+        .reflow = true,
+        .cursor = .{ .x = 0, .y = 23, .pin = cursor_pin },
+    });
+    try testing.expectEqual(@as(usize, 79), s.cols);
+    try testing.expectEqual(@as(usize, 20), s.rows);
+
+    // remaining_rows saturates to 0, so the cursor lands on the new bottom row.
+    try testing.expectEqual(point.Point{ .active = .{
+        .x = 0,
+        .y = s.rows - 1,
+    } }, s.pointFromPin(.active, cursor_pin.*).?);
+}
+
 test "PageList resize (no reflow) more rows and less cols" {
     const testing = std.testing;
     const alloc = testing.allocator;
