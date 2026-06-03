@@ -1054,7 +1054,7 @@ fn resizeCols(
         break :cursor .{
             .tracked_pin = c.pin orelse try self.trackPin(p),
             .untrack = c.pin == null,
-            .remaining_rows = self.rows - c.y - 1,
+            .remaining_rows = self.rows -| (c.y + 1),
             .wrapped_rows = wrapped,
         };
     } else null;
@@ -1187,7 +1187,7 @@ fn resizeCols(
             break :wrapped wrapped;
         };
 
-        const current = self.rows - active_pt.active.y - 1;
+        const current = self.rows -| (active_pt.active.y + 1);
 
         var req_rows = c.remaining_rows;
         req_rows -|= wrapped -| c.wrapped_rows;
