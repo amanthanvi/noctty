@@ -1700,6 +1700,38 @@ test "select prev wraps when every match is in history" {
     } }, t.screens.active.pages.pointFromPin(.screen, sel.start).?);
 }
 
+test "select after all matches disappear drops the selection" {
+    // The wrap arithmetic in selectPrev (active_len + history_len - 1) would
+    // underflow if a selection were ever live while both result lists are
+    // empty. This guards the invariant that makes that unreachable: when a
+    // reload/prune empties the results, the selection is dropped, so the next
+    // select() hits the "no matches" guard instead of the wrap arithmetic.
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+    s.nextSlice("Fizz");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "Fizz");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.active_results.items.len);
+
+    // Take a selection, then overwrite the only match so a reload finds none
+    // (active and history both empty).
+    _ = try search.select(.next);
+    try testing.expect(search.selectedMatch() != null);
+    s.nextSlice("\x1b[1;1H    ");
+
+    // Must not underflow; the selection is dropped and nothing is selected.
+    _ = try search.select(.prev);
+    try testing.expect(search.selectedMatch() == null);
+    try testing.expectEqual(0, search.active_results.items.len);
+    try testing.expectEqual(0, search.history_results.items.len);
+}
+
 test "screen search no scrollback has no history" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
