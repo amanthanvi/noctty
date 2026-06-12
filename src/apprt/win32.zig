@@ -480,6 +480,7 @@ const MOD_ALT = 0x0001;
 const MOD_CONTROL = 0x0002;
 const MOD_SHIFT = 0x0004;
 const MOD_WIN = 0x0008;
+const TO_UNICODE_NO_STATE_CHANGE: UINT = 0x0004;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
 const SWP_NOZORDER = 0x0004;
@@ -19452,6 +19453,18 @@ fn shouldCommitDeferredCharMessage(pending_wm_char_text: bool, ime_composing: bo
     return pending_wm_char_text and !ime_composing;
 }
 
+fn translateKeyTextToUnicode(
+    vk: UINT,
+    scan_code: UINT,
+    state: *const [256]u8,
+    utf16: *[4]u16,
+) i32 {
+    // TranslateMessage owns the stateful dead-key composition path. This
+    // helper only probes text metadata for key events, so it must not consume
+    // or reset the layout's pending dead key.
+    return ToUnicode(vk, scan_code, state, utf16, utf16.len, TO_UNICODE_NO_STATE_CHANGE);
+}
+
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
@@ -19463,7 +19476,7 @@ fn translateKeyText(
     };
 
     var utf16: [4]u16 = [_]u16{0} ** 4;
-    const count = ToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16, utf16.len, 0);
+    const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
     if (count <= 0) {
         return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
     }
@@ -27438,6 +27451,7 @@ test "win32 keyFromVirtualKey maps core keys" {
 test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
+    try std.testing.expectEqual(@as(UINT, 0x0004), TO_UNICODE_NO_STATE_CHANGE);
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .key_a,
@@ -27449,6 +27463,12 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .space,
         .{},
         .{ .len = 1, .unshifted_codepoint = ' ' },
+    ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .quote,
+        .{},
+        .{ .unshifted_codepoint = '\'' },
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
