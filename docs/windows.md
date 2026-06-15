@@ -168,6 +168,16 @@ distribution starts in a normal PowerShell session first.
 winghostty needs OpenGL 4.3 or newer. If the window fails to render or exits
 early on older hardware, update GPU drivers before filing a rendering bug.
 
+If startup fails with `LoadLibrary failed with error 126` or the new startup
+dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
+initialization, Windows could not load a graphics-driver DLL or one of its
+dependencies. On AMD+NVIDIA hybrid-GPU laptops, this can happen while WGL loads
+the AMD OpenGL ICD from DriverStore. Update or reinstall the OEM AMD graphics
+driver first, then the NVIDIA driver, and try forcing `winghostty.exe` to the
+discrete or integrated GPU in Windows Graphics settings. winghostty currently
+ships only the OpenGL/WGL renderer on Windows; there is no DirectX or ANGLE
+fallback renderer in this build.
+
 ### Stale Installed Build
 
 When testing a local build, make sure the `winghostty` found on `PATH` is the

@@ -146,7 +146,10 @@ fn glDebugMessageCallback(
 
 /// Prepares the provided GL context, loading it with glad.
 fn prepareContext(getProcAddress: anytype) !void {
-    const version = try gl.glad.load(getProcAddress);
+    const version = gl.glad.load(getProcAddress) catch |err| {
+        recordWin32OpenGLStartupError(.load_functions, err);
+        return err;
+    };
     const major = gl.glad.versionMajor(@intCast(version));
     const minor = gl.glad.versionMinor(@intCast(version));
     errdefer gl.glad.unload();
@@ -160,6 +163,7 @@ fn prepareContext(getProcAddress: anytype) !void {
             "OpenGL version is too old. Ghostty requires OpenGL {d}.{d}",
             .{ MIN_VERSION_MAJOR, MIN_VERSION_MINOR },
         );
+        recordWin32OpenGLStartupError(.version_check, error.OpenGLOutdated);
         return error.OpenGLOutdated;
     }
 
@@ -172,7 +176,16 @@ fn prepareContext(getProcAddress: anytype) !void {
     }
 
     // Enable SRGB framebuffer for linear blending support.
-    try gl.enable(gl.c.GL_FRAMEBUFFER_SRGB);
+    gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch |err| {
+        recordWin32OpenGLStartupError(.framebuffer_srgb, err);
+        return err;
+    };
+}
+
+fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyerror) void {
+    if (apprt.runtime == apprt.win32) {
+        apprt.win32.recordOpenGLStartupError(step, err);
+    }
 }
 
 /// This is called early right after surface creation.
@@ -182,9 +195,13 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
 
         apprt.win32 => {
             log.debug("OpenGL.surfaceInit win32 begin", .{});
+            var loader_dialogs = apprt.win32.suppressStartupLoaderErrorDialogs();
+            defer loader_dialogs.restore();
+
             try surface.makeGLContextCurrent();
             log.debug("OpenGL.surfaceInit win32 current", .{});
             try prepareContext(&apprt.win32.getProcAddress);
+            apprt.win32.clearOpenGLStartupFailure();
             log.debug("OpenGL.surfaceInit win32 prepared", .{});
         },
 

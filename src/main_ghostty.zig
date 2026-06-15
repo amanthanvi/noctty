@@ -45,7 +45,16 @@ pub fn main() !MainReturn {
 
     // Create our runtime app
     var app_runtime: apprt.App = undefined;
-    try app_runtime.init(app, .{});
+    if (comptime builtin.target.os.tag == .windows and
+        build_config.artifact == .exe and
+        build_config.app_runtime == .win32)
+    {
+        var loader_dialogs = apprt.win32.suppressStartupLoaderErrorDialogs();
+        defer loader_dialogs.restore();
+        try app_runtime.init(app, .{});
+    } else {
+        try app_runtime.init(app, .{});
+    }
     defer app_runtime.terminate();
 
     // Run the GUI event loop
@@ -64,6 +73,7 @@ pub export fn WinMain(
 
     main() catch |err| {
         std.log.err("WinMain failed error={}", .{err});
+        apprt.win32.reportStartupFailure(err);
         return 1;
     };
     return 0;
