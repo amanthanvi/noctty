@@ -508,7 +508,10 @@ const LWA_COLORKEY = 0x00000001;
 const LWA_ALPHA = 0x00000002;
 const TRANSPARENT = 1;
 const OPAQUE = 2;
+const MB_OK = 0x00000000;
+const MB_ICONERROR = 0x00000010;
 const MB_ICONINFORMATION = 0x00000040;
+const MB_SETFOREGROUND = 0x00010000;
 const MK_CONTROL = 0x0008;
 const MK_LBUTTON = 0x0001;
 const MK_MBUTTON = 0x0010;
@@ -635,11 +638,14 @@ const HKEY_CURRENT_USER: usize = 0x80000001;
 const KEY_READ: DWORD = 0x20019;
 const REG_DWORD: DWORD = 4;
 const ERROR_SUCCESS: i32 = 0;
+const ERROR_MOD_NOT_FOUND: DWORD = 126;
 const PFD_DRAW_TO_WINDOW = 0x00000004;
 const PFD_SUPPORT_OPENGL = 0x00000020;
 const PFD_DOUBLEBUFFER = 0x00000001;
 const PFD_TYPE_RGBA = 0;
 const PFD_MAIN_PLANE = 0;
+const SEM_FAILCRITICALERRORS: DWORD = 0x0001;
+const SEM_NOOPENFILEERRORBOX: DWORD = 0x8000;
 
 // Context menu constants
 const MF_STRING: UINT = 0x00000000;
@@ -935,6 +941,7 @@ extern "user32" fn DrawTextW(hDC: HDC, lpchText: [*:0]const u16, cchText: i32, l
 extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) LRESULT;
 extern "user32" fn GetFocus() callconv(.winapi) ?HWND;
 extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: ?HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT) callconv(.winapi) i32;
+extern "user32" fn MessageBoxW(hwnd: ?HWND, text: LPCWSTR, caption: LPCWSTR, flags: UINT) callconv(.winapi) c_int;
 extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
 extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
 extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
@@ -1096,6 +1103,7 @@ extern "kernel32" fn MoveFileExW(
 ) callconv(.winapi) BOOL;
 extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
 extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
+extern "kernel32" fn SetThreadErrorMode(dwNewMode: DWORD, lpOldMode: ?*DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn CreateNamedPipeW(
     lpName: LPCWSTR,
     dwOpenMode: DWORD,
@@ -1241,6 +1249,235 @@ const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
 const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
 
 var opengl32_module: HMODULE = null;
+
+pub const StartupLoaderErrorDialogSuppression = struct {
+    previous_mode: DWORD = 0,
+    active: bool = false,
+
+    pub fn restore(self: *StartupLoaderErrorDialogSuppression) void {
+        if (!self.active) return;
+        if (SetThreadErrorMode(self.previous_mode, null) == 0) {
+            log.warn(
+                "failed to restore startup loader thread error mode win32_error={d}",
+                .{@intFromEnum(windows.kernel32.GetLastError())},
+            );
+        }
+        self.active = false;
+    }
+};
+
+pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
+    // Let WinMain report renderer startup failures with app-specific guidance
+    // instead of letting LoadLibrary/WGL surface generic Windows dialogs first.
+    var previous_mode: DWORD = 0;
+    if (SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_mode) == 0) {
+        log.warn(
+            "failed to suppress startup loader error dialogs win32_error={d}",
+            .{@intFromEnum(windows.kernel32.GetLastError())},
+        );
+        return .{};
+    }
+    return .{ .previous_mode = previous_mode, .active = true };
+}
+
+pub const OpenGLStartupStep = enum {
+    get_dc,
+    choose_pixel_format,
+    set_pixel_format,
+    create_context,
+    initial_make_current,
+    load_opengl32,
+    make_current,
+    load_functions,
+    version_check,
+    framebuffer_srgb,
+
+    fn label(self: OpenGLStartupStep) []const u8 {
+        return switch (self) {
+            .get_dc => "acquiring the window device context",
+            .choose_pixel_format => "choosing a WGL pixel format",
+            .set_pixel_format => "setting the WGL pixel format",
+            .create_context => "creating the WGL context",
+            .initial_make_current => "making the initial WGL context current",
+            .load_opengl32 => "loading opengl32.dll",
+            .make_current => "making the WGL context current",
+            .load_functions => "loading OpenGL functions",
+            .version_check => "checking the OpenGL version",
+            .framebuffer_srgb => "enabling OpenGL sRGB framebuffer support",
+        };
+    }
+};
+
+const OpenGLStartupFailure = struct {
+    step: OpenGLStartupStep,
+    win32_error: ?DWORD = null,
+    zig_error_name: ?[]const u8 = null,
+};
+
+var opengl_startup_diagnostics_mutex: std.Thread.Mutex = .{};
+var opengl_startup_diagnostics_active = false;
+var last_opengl_startup_failure: ?OpenGLStartupFailure = null;
+
+fn beginOpenGLStartupDiagnostics() void {
+    opengl_startup_diagnostics_mutex.lock();
+    defer opengl_startup_diagnostics_mutex.unlock();
+
+    opengl_startup_diagnostics_active = true;
+    last_opengl_startup_failure = null;
+}
+
+pub fn clearOpenGLStartupFailure() void {
+    opengl_startup_diagnostics_mutex.lock();
+    defer opengl_startup_diagnostics_mutex.unlock();
+
+    opengl_startup_diagnostics_active = false;
+    last_opengl_startup_failure = null;
+}
+
+fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
+    opengl_startup_diagnostics_mutex.lock();
+    defer opengl_startup_diagnostics_mutex.unlock();
+
+    if (!opengl_startup_diagnostics_active) return false;
+    if (last_opengl_startup_failure) |previous| {
+        if (previous.win32_error != null and failure.win32_error == null) return false;
+    }
+
+    last_opengl_startup_failure = failure;
+    return true;
+}
+
+fn openGLStartupDiagnosticsActive() bool {
+    opengl_startup_diagnostics_mutex.lock();
+    defer opengl_startup_diagnostics_mutex.unlock();
+
+    return opengl_startup_diagnostics_active;
+}
+
+fn currentOpenGLStartupFailure() ?OpenGLStartupFailure {
+    opengl_startup_diagnostics_mutex.lock();
+    defer opengl_startup_diagnostics_mutex.unlock();
+
+    return last_opengl_startup_failure;
+}
+
+fn recordOpenGLStartupWin32Failure(step: OpenGLStartupStep, win32_error: windows.Win32Error) void {
+    const code: DWORD = @intFromEnum(win32_error);
+    if (!recordOpenGLStartupFailure(.{
+        .step = step,
+        .win32_error = code,
+    })) return;
+
+    log.err(
+        "Win32 OpenGL startup failed step={s} win32_error={d}",
+        .{ step.label(), code },
+    );
+}
+
+pub fn recordOpenGLStartupError(step: OpenGLStartupStep, err: anyerror) void {
+    if (!recordOpenGLStartupFailure(.{
+        .step = step,
+        .zig_error_name = @errorName(err),
+    })) return;
+
+    log.err("Win32 OpenGL startup failed step={s} error={s}", .{ step.label(), @errorName(err) });
+}
+
+pub fn reportStartupFailure(err: anyerror) void {
+    if (comptime builtin.os.tag != .windows) return;
+
+    var buf: [4096]u8 = undefined;
+    const message = formatStartupFailureMessage(&buf, err);
+
+    const caption = std.unicode.utf8ToUtf16LeStringLiteral("winghostty failed");
+    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("winghostty failed.");
+
+    const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
+        _ = MessageBoxW(null, fallback, caption, MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        return;
+    };
+    defer std.heap.page_allocator.free(message_w);
+
+    _ = MessageBoxW(null, message_w, caption, MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+}
+
+fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
+    if (currentOpenGLStartupFailure()) |failure| {
+        return formatOpenGLStartupFailureMessage(buf, err, failure) catch
+            "winghostty could not initialize the Windows OpenGL renderer.";
+    }
+
+    return std.fmt.bufPrint(
+        buf,
+        "winghostty {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
+        .{ build_config.version_string, @errorName(err) },
+    ) catch "winghostty failed.";
+}
+
+fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLStartupFailure) ![]const u8 {
+    const zig_error_name = failure.zig_error_name orelse @errorName(err);
+
+    if (failure.win32_error) |win32_error| {
+        return std.fmt.bufPrint(buf,
+            \\winghostty {s} could not initialize the Windows OpenGL renderer while {s}.
+            \\
+            \\Startup error: {s}
+            \\Win32 error: {d}{s}
+            \\
+            \\winghostty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
+            \\
+            \\{s}
+            \\
+            \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force winghostty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/winghostty/issues/64.
+        , .{
+            build_config.version_string,
+            failure.step.label(),
+            zig_error_name,
+            win32_error,
+            win32ErrorSuffix(win32_error),
+            openglStartupFailureHint(failure),
+        });
+    }
+
+    return std.fmt.bufPrint(buf,
+        \\winghostty {s} could not initialize the Windows OpenGL renderer while {s}.
+        \\
+        \\Startup error: {s}
+        \\Win32 error: not reported
+        \\
+        \\winghostty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
+        \\
+        \\{s}
+        \\
+        \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force winghostty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/winghostty/issues/64.
+    , .{
+        build_config.version_string,
+        failure.step.label(),
+        zig_error_name,
+        openglStartupFailureHint(failure),
+    });
+}
+
+fn win32ErrorSuffix(code: DWORD) []const u8 {
+    return switch (code) {
+        ERROR_MOD_NOT_FOUND => " (ERROR_MOD_NOT_FOUND)",
+        else => "",
+    };
+}
+
+fn openglStartupFailureHint(failure: OpenGLStartupFailure) []const u8 {
+    if (failure.win32_error) |code| {
+        if (code == ERROR_MOD_NOT_FOUND) {
+            return "Win32 error 126 means Windows could not load a graphics-driver DLL or one of its dependent DLLs. On AMD+NVIDIA hybrid GPU laptops, this can happen while WGL loads the AMD OpenGL ICD from DriverStore.";
+        }
+    }
+
+    if (failure.step == .version_check) {
+        return "The active GPU driver did not expose the required OpenGL 4.3 feature level.";
+    }
+
+    return "This is usually caused by an unavailable or incompatible OpenGL driver, a stale GPU driver installation, or missing OpenGL 4.3 support.";
+}
 
 const ForwardedArgIterator = struct {
     args: []const [:0]const u8,
@@ -2197,6 +2434,9 @@ pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
 
     if (opengl32_module == null) {
         opengl32_module = LoadLibraryA(opengl32_name);
+        if (opengl32_module == null) {
+            recordOpenGLStartupWin32Failure(.load_opengl32, windows.kernel32.GetLastError());
+        }
     }
 
     const module = opengl32_module orelse return null;
@@ -6156,27 +6396,39 @@ pub const App = struct {
     }
 
     fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
-        _ = self;
+        if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
-        const hdc = GetDC(hwnd) orelse return error.GetDCFailed;
+        const hdc = GetDC(hwnd) orelse {
+            recordOpenGLStartupWin32Failure(.get_dc, windows.kernel32.GetLastError());
+            return error.GetDCFailed;
+        };
         errdefer _ = ReleaseDC(hwnd, hdc);
 
         const pfd = defaultPixelFormatDescriptor();
         const pixel_format = ChoosePixelFormat(hdc, &pfd);
         if (pixel_format == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            const err = windows.kernel32.GetLastError();
+            recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
+            return windows.unexpectedError(err);
         }
 
         if (SetPixelFormat(hdc, pixel_format, &pfd) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            const err = windows.kernel32.GetLastError();
+            recordOpenGLStartupWin32Failure(.set_pixel_format, err);
+            return windows.unexpectedError(err);
         }
 
-        const hglrc = wglCreateContext(hdc) orelse
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        const hglrc = wglCreateContext(hdc) orelse {
+            const err = windows.kernel32.GetLastError();
+            recordOpenGLStartupWin32Failure(.create_context, err);
+            return windows.unexpectedError(err);
+        };
         errdefer _ = wglDeleteContext(hglrc);
 
         if (wglMakeCurrent(hdc, hglrc) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            const err = windows.kernel32.GetLastError();
+            recordOpenGLStartupWin32Failure(.initial_make_current, err);
+            return windows.unexpectedError(err);
         }
 
         return .{ .hdc = hdc, .hglrc = hglrc };
@@ -21081,15 +21333,23 @@ pub const Surface = struct {
     }
 
     pub fn makeGLContextCurrent(self: *Surface) !void {
-        const hdc = self.hdc orelse return error.NoDeviceContext;
-        const hglrc = self.hglrc orelse return error.NoOpenGLContext;
+        const hdc = self.hdc orelse {
+            recordOpenGLStartupError(.make_current, error.NoDeviceContext);
+            return error.NoDeviceContext;
+        };
+        const hglrc = self.hglrc orelse {
+            recordOpenGLStartupError(.make_current, error.NoOpenGLContext);
+            return error.NoOpenGLContext;
+        };
 
         if (wglGetCurrentContext() == hglrc and wglGetCurrentDC() == hdc) {
             return;
         }
 
         if (wglMakeCurrent(hdc, hglrc) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            const err = windows.kernel32.GetLastError();
+            recordOpenGLStartupWin32Failure(.make_current, err);
+            return windows.unexpectedError(err);
         }
     }
 
@@ -21109,7 +21369,8 @@ pub const Surface = struct {
         _ = self.hglrc orelse return error.NoOpenGLContext;
 
         if (SwapBuffers(hdc) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            const err = windows.kernel32.GetLastError();
+            return windows.unexpectedError(err);
         }
         self.render_trace.noteSwapBuffers();
     }
@@ -27792,6 +28053,65 @@ test "win32 host composition redraw avoids terminal child HWNDs" {
     try std.testing.expect((flags & RDW_UPDATENOW) != 0);
     try std.testing.expect((flags & RDW_NOCHILDREN) != 0);
     try std.testing.expect((flags & RDW_ALLCHILDREN) == 0);
+}
+
+test "win32-opengl-startup-failure-message-explains-error-126" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.Unexpected, .{
+        .step = .create_context,
+        .win32_error = ERROR_MOD_NOT_FOUND,
+        .zig_error_name = "Unexpected",
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "AMD+NVIDIA hybrid GPU") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "DirectX or ANGLE fallback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "https://github.com/amanthanvi/winghostty/issues/64") != null);
+}
+
+test "win32-opengl-startup-failure-message-explains-version-floor" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .version_check,
+        .zig_error_name = "OpenGLOutdated",
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "OpenGL 4.3 through WGL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "required OpenGL 4.3 feature level") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: not reported") != null);
+}
+
+test "win32-opengl-startup-failure-recording-is-startup-scoped" {
+    clearOpenGLStartupFailure();
+    recordOpenGLStartupError(.make_current, error.Unexpected);
+    try std.testing.expect(currentOpenGLStartupFailure() == null);
+
+    beginOpenGLStartupDiagnostics();
+    try std.testing.expect(openGLStartupDiagnosticsActive());
+
+    clearOpenGLStartupFailure();
+    try std.testing.expect(!openGLStartupDiagnosticsActive());
+    try std.testing.expect(currentOpenGLStartupFailure() == null);
+}
+
+test "win32-opengl-startup-failure-preserves-win32-loader-cause" {
+    clearOpenGLStartupFailure();
+    beginOpenGLStartupDiagnostics();
+
+    try std.testing.expect(recordOpenGLStartupFailure(.{
+        .step = .load_opengl32,
+        .win32_error = ERROR_MOD_NOT_FOUND,
+    }));
+    try std.testing.expect(!recordOpenGLStartupFailure(.{
+        .step = .load_functions,
+        .zig_error_name = "OpenGLFunctionLoadFailed",
+    }));
+
+    const failure = currentOpenGLStartupFailure().?;
+    try std.testing.expectEqual(OpenGLStartupStep.load_opengl32, failure.step);
+    try std.testing.expectEqual(@as(?DWORD, ERROR_MOD_NOT_FOUND), failure.win32_error);
+
+    clearOpenGLStartupFailure();
 }
 
 test "win32 requestRepaint preserves renderer request during live resize" {
