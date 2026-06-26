@@ -178,10 +178,11 @@ Recommended order:
 4. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>`.
-5. Confirm the workflow published:
+5. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
-   - `SHA256SUMS.txt`
+   - `SHA256SUMS-windows-<arch>.txt`
+   - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
 6. Confirm follow-on publishes:
    - Scoop manifest update

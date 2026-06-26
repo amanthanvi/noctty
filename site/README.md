@@ -25,18 +25,19 @@ If those files and the site disagree, tighten the wording until the claim is def
 
 ## Guardrails
 
-Run the copy check before shipping site edits:
+From the repository root, run the copy checks before shipping site edits:
 
 ```powershell
 pwsh -File scripts/check-site-copy.ps1
+pwsh -File scripts/check-release-copy.ps1
 ```
 
-The check fails on known bad claims and regressions, including:
+The checks fail on known bad claims and regressions, including:
 
 - package-manager install commands that are not officially published yet
 - DirectX or D3D wording for the shipping Windows renderer
 - wrong config-path variants under `%APPDATA%`
-- silent-update or signed-release wording
+- silent-update wording or stale claims about missing signing
 - parity overclaims
 
 React UMD, Google Fonts (Bricolage Grotesque + JetBrains Mono), and the GitHub

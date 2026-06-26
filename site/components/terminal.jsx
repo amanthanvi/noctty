@@ -4,7 +4,7 @@ import { TerminalLine } from './terminal/terminal-line.jsx';
 
 const { useEffect, useReducer } = React;
 
-let WG_VERSION = window.WG_VERSION || '1.3.113';
+let WG_VERSION = window.WG_VERSION || '1.3.115';
 const WG_REPO = 'amanthanvi/winghostty';
 
 function buildScript(v) {
@@ -12,19 +12,24 @@ function buildScript(v) {
     {
       title: 'download setup.exe',
       lines: [
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-x64-setup.exe -OutFile winghostty-setup.exe` },
+        { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
+        { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
+        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-setup.exe -OutFile winghostty-setup.exe` },
         { kind: 'cmd', text: '.\\winghostty-setup.exe' },
         { kind: 'out', t: '→ installer build: Start menu entry and standard uninstall path', c: 'dim' },
-        { kind: 'out', t: '→ Authenticode-signed; SmartScreen may still warn while reputation builds.', c: 'dim' },
+        { kind: 'out', t: '→ x64 and ARM64 installers are Authenticode-signed.', c: 'dim' },
+        { kind: 'out', t: '→ SmartScreen may still warn while reputation builds.', c: 'dim' },
       ],
     },
     {
       title: 'portable (.zip)',
       lines: [
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-x64-portable.zip -OutFile winghostty.zip` },
+        { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
+        { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
+        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-portable.zip -OutFile winghostty.zip` },
         { kind: 'cmd', text: 'Expand-Archive winghostty.zip -DestinationPath .\\winghostty' },
         { kind: 'cmd', text: '.\\winghostty\\winghostty.exe' },
-        { kind: 'out', t: '→ same Win32 runtime, no install step required', c: 'dim' },
+        { kind: 'out', t: '→ same signed Win32 runtime, no install step required', c: 'dim' },
       ],
     },
     {
@@ -40,7 +45,7 @@ function buildScript(v) {
       title: 'launch',
       lines: [
         { kind: 'cmd', text: 'winghostty' },
-        { kind: 'out', t: `winghostty ${v} · windows-x64`, c: 'fg' },
+        { kind: 'out', t: `winghostty ${v} · windows x64/ARM64`, c: 'fg' },
         { kind: 'out', t: '→ native Windows app with tabs, splits, and profiles', c: 'dim' },
         { kind: 'out', t: '→ built on Ghostty\'s terminal core', c: 'dim' },
       ],
