@@ -25,7 +25,7 @@ If those files and the site disagree, tighten the wording until the claim is def
 
 ## Guardrails
 
-Run the copy check before shipping site edits:
+From the repository root, run the copy checks before shipping site edits:
 
 ```powershell
 pwsh -File scripts/check-site-copy.ps1
