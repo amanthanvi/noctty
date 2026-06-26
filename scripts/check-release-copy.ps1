@@ -71,7 +71,7 @@ function Require-Contains {
     )
 
     $text = Get-Text -RelativePath $RelativePath
-    if (-not $text.Contains($Needle)) {
+    if (-not (Test-ContainsOrdinalIgnoreCase -Text $text -Needle $Needle)) {
         Add-Failure "${RelativePath}: missing required text `"$Needle`" - $Reason"
     }
 }
@@ -151,6 +151,7 @@ Require-Contains -RelativePath "docs/status.md" -Needle "x64 and ARM64" -Reason 
 Require-Contains -RelativePath "docs/status.md" -Needle "checksum metadata" -Reason "Updater docs should mention checksum-gated release metadata."
 
 foreach ($sitePath in @("site/components/terminal.jsx", "site/bundle.js")) {
+    Require-Contains -RelativePath $sitePath -Needle 'PROCESSOR_ARCHITEW6432' -Reason "The public site terminal copy should detect the native OS architecture from WOW64 shells."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-setup.exe' -Reason "The public site terminal copy should not hard-code x64 download URLs."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-portable.zip' -Reason "The public site terminal copy should not hard-code x64 download URLs."
     Require-Contains -RelativePath $sitePath -Needle "x64 and ARM64" -Reason "The public site should describe both public release architectures."
@@ -179,40 +180,51 @@ if ($CheckRemoteLatest) {
     } elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Add-Failure "Cannot check remote latest release because gh is not installed."
     } else {
-        $ghOutput = & gh release view --repo amanthanvi/winghostty --json tagName,publishedAt,assets 2>&1
+        $ghOutput = & gh release view --repo amanthanvi/winghostty --json tagName,publishedAt,assets
         if ($LASTEXITCODE -ne 0) {
             Add-Failure "gh release view failed: $ghOutput"
         } else {
-            $publishedDate = $null
-            if ($ghOutput -match '"publishedAt"\s*:\s*"([0-9]{4}-[0-9]{2}-[0-9]{2})') {
-                $publishedDate = $Matches[1]
+            try {
+                $release = $ghOutput | ConvertFrom-Json
+            } catch {
+                Add-Failure "Failed to parse gh release JSON: $($_.Exception.Message)"
+                $release = $null
             }
 
-            $release = $ghOutput | ConvertFrom-Json
-            $expectedTag = "v$latestVersion"
-            if ($release.tagName -ne $expectedTag) {
-                Add-Failure "README latest release is $expectedTag, but GitHub latest release is $($release.tagName)."
-            }
+            if ($release) {
+                $publishedDate = $null
+                try {
+                    $publishedDate = [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime.ToString(
+                        "yyyy-MM-dd",
+                        [Globalization.CultureInfo]::InvariantCulture
+                    )
+                } catch {
+                    Add-Failure "Could not parse GitHub latest-release publishedAt date: $($release.publishedAt)"
+                }
 
-            if ($publishedDate) {
-                Require-Contains -RelativePath "README.md" -Needle "published $publishedDate" -Reason "README latest-release date should match GitHub."
-            } else {
-                Add-Failure "Could not parse GitHub latest-release publishedAt date from gh output."
-            }
+                $expectedTag = "v$latestVersion"
+                if ($release.tagName -ne $expectedTag) {
+                    Add-Failure "README latest release is $expectedTag, but GitHub latest release is $($release.tagName)."
+                }
 
-            $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-            foreach ($arch in $architectures) {
-                foreach ($kind in @("setup", "portable", "checksums")) {
-                    $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
-                    if ($assetNames -notcontains $artifactName) {
-                        Add-Failure "GitHub latest release $expectedTag is missing expected asset $artifactName."
+                if ($publishedDate) {
+                    Require-Contains -RelativePath "README.md" -Needle "published $publishedDate" -Reason "README latest-release date should match GitHub."
+                }
+
+                $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
+                foreach ($arch in $architectures) {
+                    foreach ($kind in @("setup", "portable", "checksums")) {
+                        $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
+                        if ($assetNames -notcontains $artifactName) {
+                            Add-Failure "GitHub latest release $expectedTag is missing expected asset $artifactName."
+                        }
                     }
                 }
-            }
 
-            $legacyName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture "x64" -Kind "legacy-checksums"
-            if ($assetNames -notcontains $legacyName) {
-                Add-Failure "GitHub latest release $expectedTag is missing expected asset $legacyName."
+                $legacyName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture "x64" -Kind "legacy-checksums"
+                if ($assetNames -notcontains $legacyName) {
+                    Add-Failure "GitHub latest release $expectedTag is missing expected asset $legacyName."
+                }
             }
         }
     }

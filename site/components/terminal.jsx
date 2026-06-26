@@ -12,7 +12,8 @@ function buildScript(v) {
     {
       title: 'download setup.exe',
       lines: [
-        { kind: 'cmd', text: "$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }" },
+        { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
+        { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
         { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-setup.exe -OutFile winghostty-setup.exe` },
         { kind: 'cmd', text: '.\\winghostty-setup.exe' },
         { kind: 'out', t: '→ installer build: Start menu entry and standard uninstall path', c: 'dim' },
@@ -23,7 +24,8 @@ function buildScript(v) {
     {
       title: 'portable (.zip)',
       lines: [
-        { kind: 'cmd', text: "$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }" },
+        { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
+        { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
         { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-portable.zip -OutFile winghostty.zip` },
         { kind: 'cmd', text: 'Expand-Archive winghostty.zip -DestinationPath .\\winghostty' },
         { kind: 'cmd', text: '.\\winghostty\\winghostty.exe' },
