@@ -20,15 +20,19 @@ scoop install winghostty/winghostty
 You can also go to
 [Releases](https://github.com/amanthanvi/winghostty/releases) and grab:
 
-- **Installer:** `winghostty-<version>-windows-x64-setup.exe`
-- **Portable ZIP:** `winghostty-<version>-windows-x64-portable.zip`
-- **Checksums:** `SHA256SUMS.txt`
+- **Installer:** `winghostty-<version>-windows-<arch>-setup.exe`
+- **Portable ZIP:** `winghostty-<version>-windows-<arch>-portable.zip`
+- **Checksums:** `SHA256SUMS-windows-<arch>.txt`
+
+Use `x64` or `arm64` for `<arch>`. The current stable release is `1.3.115`;
+both architectures have installer and portable ZIP assets. The legacy
+`SHA256SUMS.txt` file remains an x64 compatibility alias.
 
 Verify a download (optional):
 
 ```powershell
-Get-FileHash .\winghostty-<version>-windows-x64-setup.exe -Algorithm SHA256
-# Compare the output against SHA256SUMS.txt
+Get-FileHash .\winghostty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+# Compare the output against SHA256SUMS-windows-<arch>.txt
 ```
 
 ## 2. Install
@@ -40,7 +44,7 @@ point at the same GitHub Release assets and checksums.
 
 ### Option B — Installer
 
-1. Double-click `winghostty-<version>-windows-x64-setup.exe`.
+1. Double-click `winghostty-<version>-windows-<arch>-setup.exe`.
 2. Current release builds are Authenticode-signed. SmartScreen can still warn
    on a new publisher reputation, but the installer signature should be present
    and valid.
@@ -146,9 +150,10 @@ auto-update = check
 The updater hits GitHub's public releases API at most once every 24 hours,
 opens the release page if a newer stable version is available, and never
 replaces binaries silently. `auto-update = download` downloads only stable
-Windows installer releases that include `SHA256SUMS.txt`, verifies the
-installer SHA-256 against that manifest, requires a valid Windows Authenticode
-signature, and stages the installer under the local winghostty state directory.
+Windows installer releases that include architecture-specific SHA256 metadata,
+verifies the installer SHA-256 against that manifest, requires a valid Windows
+Authenticode signature, and stages the installer under the local winghostty
+state directory.
 For installer-managed installs, the update notice can launch the verified
 staged installer with an explicit user action. UAC may prompt. Portable ZIP
 auto-apply is not implemented yet. No telemetry or analytics are sent.

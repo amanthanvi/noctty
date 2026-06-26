@@ -99,22 +99,22 @@ official Ghostty docs, see
 ## Install
 
 Latest stable release:
-**[winghostty 1.3.111](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.111)**,
-published 2026-05-12.
+**[winghostty 1.3.115](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.115)**,
+published 2026-06-26.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.111-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
-| [`winghostty-1.3.111-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/winghostty-1.3.111-windows-x64-portable.zip) | You want to run x64 without installing. |
-| [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.111/SHA256SUMS.txt) | Verifying x64 downloads. |
+| [`winghostty-1.3.115-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/winghostty-1.3.115-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
+| [`winghostty-1.3.115-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/winghostty-1.3.115-windows-arm64-setup.exe) | You want a normal ARM64 install with a Start menu entry. |
+| [`winghostty-1.3.115-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/winghostty-1.3.115-windows-x64-portable.zip) | You want to run x64 without installing. |
+| [`winghostty-1.3.115-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/winghostty-1.3.115-windows-arm64-portable.zip) | You want to run ARM64 without installing. |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
 
-ARM64 builds are added by the next release after 1.3.111. From that release on,
-Windows releases publish both x64 and ARM64 setup / portable artifacts, plus
-architecture-specific checksum files named `SHA256SUMS-windows-x64.txt` and
-`SHA256SUMS-windows-arm64.txt`. The legacy `SHA256SUMS.txt` file remains an x64
-auto-update compatibility alias.
+The legacy [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.115/SHA256SUMS.txt)
+file remains an x64 auto-update compatibility alias.
 
 WinGet users can install the official manifest:
 

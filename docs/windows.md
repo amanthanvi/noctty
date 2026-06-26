@@ -6,7 +6,7 @@ mapping, see [windows-capability-matrix.md](windows-capability-matrix.md).
 
 ## Supported Systems
 
-- Windows 10 and Windows 11 on x64.
+- Windows 10 and Windows 11 on x64 and ARM64.
 - Native Win32 application runtime.
 - OpenGL 4.3 or newer through WGL.
 - `libghostty-vt` remains portable as a library, but this repository does not
@@ -14,17 +14,21 @@ mapping, see [windows-capability-matrix.md](windows-capability-matrix.md).
 
 ## Install Modes
 
-winghostty publishes two Windows artifacts:
+Current winghostty releases publish signed Windows artifacts for x64 and ARM64:
 
-- `winghostty-<version>-windows-x64-setup.exe` for a normal installed app with
+- `winghostty-<version>-windows-<arch>-setup.exe` for a normal installed app with
   Start menu shortcuts and app identity metadata.
-- `winghostty-<version>-windows-x64-portable.zip` for portable use without an
+- `winghostty-<version>-windows-<arch>-portable.zip` for portable use without an
   installer.
+- `SHA256SUMS-windows-<arch>.txt` for architecture-specific checksum metadata.
 
-Releases are currently unsigned. Windows SmartScreen may warn on first launch;
-click **More info** and **Run anyway** if you trust the downloaded release.
-Unsigned installers are not eligible for `auto-update = download` staging
-because staging requires a valid Authenticode signature.
+Use `x64` or `arm64` for `<arch>`.
+
+Release installers are Authenticode-signed. Windows binaries inside the
+portable ZIP are also Authenticode-signed; the ZIP container itself is
+checksummed, not Authenticode-signed. Windows SmartScreen may still warn on
+first launch while publisher reputation builds. The legacy `SHA256SUMS.txt`
+file remains an x64 auto-update compatibility alias.
 
 ## Paths
 
@@ -142,9 +146,10 @@ and allowlisted.
 
 ### SmartScreen
 
-Current releases are unsigned. SmartScreen warnings are expected until code
-signing lands. Verify `SHA256SUMS.txt` before running downloaded artifacts if
-you want an extra local check.
+Current release installers and Windows binaries inside the portable ZIP are
+Authenticode-signed, but SmartScreen may still warn while publisher reputation
+builds. Verify the matching `SHA256SUMS-windows-<arch>.txt` file before running
+downloaded artifacts if you want an extra local check.
 
 ### Focus Assist and Toasts
 
