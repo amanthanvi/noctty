@@ -14327,7 +14327,14 @@ fn rendererRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
 }
 
 fn surfaceSizeChangeRepaintMode(host: ?*const Host) SurfaceRepaintRequestMode {
-    return surfaceRepaintRequestMode(host);
+    const h = host orelse return surfaceRepaintRequestMode(null);
+    if (h.is_live_resize.load(.acquire)) return .update_now;
+    if (h.resize_settle_timer_active) return .update_now;
+    return surfaceRepaintRequestMode(h);
+}
+
+fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool {
+    return repaint_mode == .update_now;
 }
 
 fn resizeSettleSurfaceAction(renderer_repaint_requested: bool) ResizeSettleSurfaceAction {
@@ -23203,7 +23210,9 @@ pub const Surface = struct {
         // guaranteeing a follow-up paint for the newly exposed pixels. Request
         // one from the child itself after `WM_SIZE`, when the default
         // framebuffer and client rect have both advanced to the new size.
-        self.requestRepaintWithMode(surfaceSizeChangeRepaintMode(self.host)) catch |err| {
+        const repaint_mode = surfaceSizeChangeRepaintMode(self.host);
+        if (surfaceSizeChangePrimesRenderer(repaint_mode)) _ = self.beginRendererRepaintRequest();
+        self.requestRepaintWithMode(repaint_mode) catch |err| {
             log.err("win32 size-change repaint request failed err={}", .{err});
         };
     }
@@ -31033,7 +31042,7 @@ test "win32 resize settle presents pending renderer frames before waking rendere
     );
 }
 
-test "win32 surface size-change repaint obeys live-resize throttle" {
+test "win32 surface size-change repaint stays synchronous during live resize" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(
@@ -31055,11 +31064,16 @@ test "win32 surface size-change repaint obeys live-resize throttle" {
         surfaceSizeChangeRepaintMode(&host),
     );
 
+    host.resize_settle_timer_active = false;
     host.is_live_resize = .init(true);
     try std.testing.expectEqual(
-        SurfaceRepaintRequestMode.defer_until_flush,
+        SurfaceRepaintRequestMode.update_now,
         surfaceSizeChangeRepaintMode(&host),
     );
+
+    try std.testing.expect(!surfaceSizeChangePrimesRenderer(.queue));
+    try std.testing.expect(surfaceSizeChangePrimesRenderer(.update_now));
+    try std.testing.expect(!surfaceSizeChangePrimesRenderer(.defer_until_flush));
 }
 
 test "win32 surfacePixelSizeChanged only trips on width or height deltas" {
