@@ -407,6 +407,7 @@ const WM_IME_COMPOSITION = 0x010F;
 const GCS_COMPSTR: u32 = 0x0008;
 const GCS_RESULTSTR: u32 = 0x0800;
 const CFS_POINT: u32 = 0x0002;
+const CFS_EXCLUDE: u32 = 0x0080;
 const ISC_SHOWUICOMPOSITIONWINDOW: LPARAM = 0x80000000;
 const WM_KILLFOCUS = 0x0008;
 const WM_KEYDOWN = 0x0100;
@@ -1159,8 +1160,16 @@ extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
 extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
 extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?[*]u16, dwBufLen: u32) callconv(.winapi) i32;
 extern "imm32" fn ImmSetCompositionWindow(hIMC: *anyopaque, lpCompForm: *const COMPOSITIONFORM) callconv(.winapi) BOOL;
+extern "imm32" fn ImmSetCandidateWindow(hIMC: *anyopaque, lpCandidate: *const CANDIDATEFORM) callconv(.winapi) BOOL;
 
 const COMPOSITIONFORM = extern struct {
+    dwStyle: u32,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
+
+const CANDIDATEFORM = extern struct {
+    dwIndex: u32,
     dwStyle: u32,
     ptCurrentPos: POINT,
     rcArea: RECT,
@@ -19249,6 +19258,43 @@ fn cursorPosFromLParam(lParam: LPARAM) apprt.CursorPos {
     };
 }
 
+const ImeWindowForms = struct {
+    composition: COMPOSITIONFORM,
+    candidate: CANDIDATEFORM,
+};
+
+fn scaledImeCoord(value: f64, scale: f32) i32 {
+    const scale_f64: f64 = @floatCast(scale);
+    return @intFromFloat(value * scale_f64);
+}
+
+fn imeWindowForms(ime_pos: apprt.IMEPos, content_scale: apprt.ContentScale) ImeWindowForms {
+    const point: POINT = .{
+        .x = scaledImeCoord(ime_pos.x, content_scale.x),
+        .y = scaledImeCoord(ime_pos.y, content_scale.y),
+    };
+    const caret_height = @max(@as(i32, 1), scaledImeCoord(ime_pos.height, content_scale.y));
+
+    return .{
+        .composition = .{
+            .dwStyle = CFS_POINT,
+            .ptCurrentPos = point,
+            .rcArea = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        },
+        .candidate = .{
+            .dwIndex = 0,
+            .dwStyle = CFS_EXCLUDE,
+            .ptCurrentPos = point,
+            .rcArea = .{
+                .left = point.x,
+                .top = point.y - caret_height,
+                .right = point.x + 1,
+                .bottom = point.y,
+            },
+        },
+    };
+}
+
 fn readSystemWheelSetting(action: UINT, fallback: u32) u32 {
     var value: UINT = fallback;
     if (SystemParametersInfoW(action, 0, @ptrCast(&value), 0) == 0) {
@@ -23295,19 +23341,14 @@ pub const Surface = struct {
     }
 
     fn positionImeWindow(self: *Surface) void {
+        if (!self.core_initialized) return;
         const surface_hwnd = self.hwnd orelse return;
         const himc = ImmGetContext(surface_hwnd) orelse return;
         defer _ = ImmReleaseContext(surface_hwnd, himc);
 
-        // Position the IME candidate window at the terminal cursor cell
-        const cursor_x: i32 = @intFromFloat(self.cursor_pos.x);
-        const cursor_y: i32 = @intFromFloat(self.cursor_pos.y);
-        const form = COMPOSITIONFORM{
-            .dwStyle = CFS_POINT,
-            .ptCurrentPos = .{ .x = cursor_x, .y = cursor_y },
-            .rcArea = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-        };
-        _ = ImmSetCompositionWindow(himc, &form);
+        const forms = imeWindowForms(self.core_surface.imePoint(), self.content_scale);
+        _ = ImmSetCompositionWindow(himc, &forms.composition);
+        _ = ImmSetCandidateWindow(himc, &forms.candidate);
     }
 
     fn handleImeResult(self: *Surface) void {
@@ -27912,6 +27953,28 @@ test "win32 cursorPosFromLParam decodes signed coordinates" {
     const pos = cursorPosFromLParam(@bitCast(@as(isize, @intCast(encoded))));
     try std.testing.expectEqual(@as(f32, 12), pos.x);
     try std.testing.expectEqual(@as(f32, -5), pos.y);
+}
+
+test "win32 IME windows use scaled terminal caret geometry" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const forms = imeWindowForms(
+        .{ .x = 12, .y = 34, .width = 0, .height = 16 },
+        .{ .x = 1.5, .y = 2 },
+    );
+
+    try std.testing.expectEqual(CFS_POINT, forms.composition.dwStyle);
+    try std.testing.expectEqual(@as(i32, 18), forms.composition.ptCurrentPos.x);
+    try std.testing.expectEqual(@as(i32, 68), forms.composition.ptCurrentPos.y);
+
+    try std.testing.expectEqual(@as(u32, 0), forms.candidate.dwIndex);
+    try std.testing.expectEqual(CFS_EXCLUDE, forms.candidate.dwStyle);
+    try std.testing.expectEqual(forms.composition.ptCurrentPos.x, forms.candidate.ptCurrentPos.x);
+    try std.testing.expectEqual(forms.composition.ptCurrentPos.y, forms.candidate.ptCurrentPos.y);
+    try std.testing.expectEqual(@as(i32, 18), forms.candidate.rcArea.left);
+    try std.testing.expectEqual(@as(i32, 36), forms.candidate.rcArea.top);
+    try std.testing.expectEqual(@as(i32, 19), forms.candidate.rcArea.right);
+    try std.testing.expectEqual(@as(i32, 68), forms.candidate.rcArea.bottom);
 }
 
 test "win32 mouseButtonFromMessage maps standard buttons" {
