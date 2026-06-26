@@ -45,8 +45,8 @@ function Get-Text {
     $path = Get-RepoPath -RelativePath $RelativePath
     if (-not (Test-Path -LiteralPath $path)) {
         Add-Failure "Missing checked copy file: $RelativePath"
-        $script:textCache[$RelativePath] = ""
-        return ""
+        $script:textCache[$RelativePath] = $null
+        return $null
     }
 
     $text = Get-Content -LiteralPath $path -Raw
@@ -71,6 +71,10 @@ function Require-Contains {
     )
 
     $text = Get-Text -RelativePath $RelativePath
+    if ($null -eq $text) {
+        return
+    }
+
     if (-not (Test-ContainsOrdinalIgnoreCase -Text $text -Needle $Needle)) {
         Add-Failure "${RelativePath}: missing required text `"$Needle`" - $Reason"
     }
@@ -84,6 +88,10 @@ function Require-Regex {
     )
 
     $text = Get-Text -RelativePath $RelativePath
+    if ($null -eq $text) {
+        return
+    }
+
     if (-not [regex]::IsMatch($text, $Pattern)) {
         Add-Failure "${RelativePath}: missing required pattern /$Pattern/ - $Reason"
     }
@@ -97,6 +105,10 @@ function Forbid-CopyText {
 
     foreach ($relativePath in $copyPaths) {
         $text = Get-Text -RelativePath $relativePath
+        if ($null -eq $text) {
+            continue
+        }
+
         if (Test-ContainsOrdinalIgnoreCase -Text $text -Needle $Needle) {
             Add-Failure "${relativePath}: forbidden text `"$Needle`" - $Reason"
         }
@@ -105,7 +117,9 @@ function Forbid-CopyText {
 
 $readme = Get-Text -RelativePath "README.md"
 $latestVersion = $null
-if ($readme -match 'winghostty\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/winghostty/releases/tag/v\1\)') {
+if ($null -eq $readme) {
+    # Get-Text already recorded the missing-file failure.
+} elseif ($readme -match 'winghostty\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/winghostty/releases/tag/v\1\)') {
     $latestVersion = $Matches[1]
 } else {
     Add-Failure "README.md: could not find a self-consistent latest stable release link."

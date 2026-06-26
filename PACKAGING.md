@@ -178,7 +178,7 @@ Recommended order:
 4. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>`.
-5. Confirm the workflow published for both x64 and ARM64:
+5. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
    - `SHA256SUMS-windows-<arch>.txt`
