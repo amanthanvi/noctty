@@ -24,6 +24,8 @@ jobs:
 
       - name: Release copy checks
         shell: pwsh
+        # Keep CI local-only; manual release-copy validation uses -CheckRemoteLatest
+        # to avoid making PR checks depend on GitHub release API availability.
         run: ./scripts/check-release-copy.ps1
 
       - name: Setup Zig

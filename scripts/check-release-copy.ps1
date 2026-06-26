@@ -196,7 +196,7 @@ if ($CheckRemoteLatest) {
                 try {
                     $publishedDate = [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime.ToString(
                         "yyyy-MM-dd",
-                        [Globalization.CultureInfo]::InvariantCulture
+                        [System.Globalization.CultureInfo]::InvariantCulture
                     )
                 } catch {
                     Add-Failure "Could not parse GitHub latest-release publishedAt date: $($release.publishedAt)"
