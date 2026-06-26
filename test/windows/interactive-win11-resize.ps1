@@ -35,8 +35,11 @@ Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class WinghosttyResizeWin32 {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -57,8 +60,20 @@ public static class WinghosttyResizeWin32 {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UpdateWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern int GetDlgCtrlID(IntPtr hwndCtl);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr FindWindowExW(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
@@ -70,6 +85,16 @@ public static class WinghosttyResizeWin32 {
 
 $wmEnterSizeMove = 0x0231
 $wmExitSizeMove = 0x0232
+$wmCommand = 0x0111
+$wmChar = 0x0102
+$showWindowRestore = 9
+$hostCommandPaletteCommandId = 1901
+$hostNewTabCommandId = 1904
+$paletteEditControlId = 2002
+$paletteConfirmCommandId = 2003
+$tabControlIdMin = 1000
+$tabControlIdMaxExclusive = 1900
+$surfaceWindowClassName = 'winghostty.win32'
 
 function Assert-Win32CallSucceeded {
     param(
@@ -103,12 +128,139 @@ function Get-WindowRectObject {
     }
 }
 
+function Get-WindowClassName {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd
+    )
+
+    $builder = [System.Text.StringBuilder]::new(256)
+    [void] [WinghosttyResizeWin32]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    return $builder.ToString()
+}
+
+function Get-VisibleChildWindows {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Parent
+    )
+
+    $children = [System.Collections.Generic.List[object]]::new()
+    $callback = [WinghosttyResizeWin32+EnumWindowsProc] {
+        param([IntPtr] $hwnd, [IntPtr] $lParam)
+
+        if ([WinghosttyResizeWin32]::IsWindowVisible($hwnd)) {
+            [void] $children.Add([pscustomobject]@{
+                Hwnd = $hwnd
+                Id = [WinghosttyResizeWin32]::GetDlgCtrlID($hwnd)
+                ClassName = Get-WindowClassName -Hwnd $hwnd
+            })
+        }
+
+        return $true
+    }
+
+    [void] [WinghosttyResizeWin32]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    return $children.ToArray()
+}
+
+function Get-VisibleTabCount {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Parent
+    )
+
+    return @(Get-VisibleChildWindows -Parent $Parent |
+        Where-Object { $_.Id -ge $tabControlIdMin -and $_.Id -lt $tabControlIdMaxExclusive }).Count
+}
+
+function Get-VisibleSurfaceWindows {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Parent
+    )
+
+    return @(Get-VisibleChildWindows -Parent $Parent |
+        Where-Object { $_.ClassName -eq $surfaceWindowClassName })
+}
+
+function Get-VisibleSurfaceRects {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Parent
+    )
+
+    return @(Get-VisibleSurfaceWindows -Parent $Parent |
+        ForEach-Object {
+            $rect = Get-WindowRectObject -Hwnd $_.Hwnd
+            [pscustomobject]@{
+                Hwnd = $_.Hwnd
+                Left = $rect.Left
+                Top = $rect.Top
+                Right = $rect.Right
+                Bottom = $rect.Bottom
+                Width = $rect.Width
+                Height = $rect.Height
+            }
+        })
+}
+
+function Get-VisibleChildById {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Parent,
+        [Parameter(Mandatory)] [int] $Id
+    )
+
+    return Get-VisibleChildWindows -Parent $Parent |
+        Where-Object { $_.Id -eq $Id } |
+        Select-Object -First 1
+}
+
+function New-WParam {
+    param(
+        [Parameter(Mandatory)] [int] $Low,
+        [int] $High = 0
+    )
+
+    return [UIntPtr]([uint64](((($High -band 0xffff) -shl 16) -bor ($Low -band 0xffff)) -band 0xffffffff))
+}
+
+function Invoke-HostCommand {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [int] $CommandId
+    )
+
+    [void] [WinghosttyResizeWin32]::SendMessageW($HostHwnd, $wmCommand, (New-WParam -Low $CommandId), [IntPtr]::Zero)
+}
+
+function Invoke-CommandPaletteAction {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [string] $Action,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
+    )
+
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $hostCommandPaletteCommandId
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
+        $null -ne (Get-VisibleChildById -Parent $HostHwnd -Id $paletteEditControlId)
+    }
+
+    $edit = Get-VisibleChildById -Parent $HostHwnd -Id $paletteEditControlId
+    foreach ($ch in $Action.ToCharArray()) {
+        [void] [WinghosttyResizeWin32]::SendMessageW(
+            $edit.Hwnd,
+            $wmChar,
+            ([UIntPtr]([uint64]([int][char]$ch))),
+            [IntPtr]::Zero
+        )
+    }
+
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $paletteConfirmCommandId
+}
+
 function Show-ResizeHarnessWindow {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    [void] [WinghosttyResizeWin32]::ShowWindow($Hwnd, 9)
+    [void] [WinghosttyResizeWin32]::ShowWindow($Hwnd, $showWindowRestore)
     [void] [WinghosttyResizeWin32]::SetForegroundWindow($Hwnd)
 }
 
@@ -125,7 +277,12 @@ function Capture-WindowImage {
     try {
         $gfx = [System.Drawing.Graphics]::FromImage($bmp)
         try {
-            $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+            try {
+                $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+            }
+            catch {
+                throw "CopyFromScreen failed for hwnd=$Hwnd rect=$($rect | ConvertTo-Json -Compress): $($_.Exception.Message)"
+            }
         }
         finally {
             $gfx.Dispose()
@@ -134,6 +291,82 @@ function Capture-WindowImage {
     }
     finally {
         $bmp.Dispose()
+    }
+}
+
+function Assert-VisibleSurfaceUnionFillsHostContent {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [int] $ExpectedSurfaceCount,
+        [Parameter(Mandatory)] [string] $Label
+    )
+
+    $hostRect = Get-WindowRectObject -Hwnd $HostHwnd
+    $surfaceRects = @(Get-VisibleSurfaceRects -Parent $HostHwnd)
+    if ($surfaceRects.Count -ne $ExpectedSurfaceCount) {
+        throw "$Label expected $ExpectedSurfaceCount visible surfaces, found $($surfaceRects.Count): $($surfaceRects | ConvertTo-Json -Compress)"
+    }
+
+    $left = ($surfaceRects | Measure-Object -Property Left -Minimum).Minimum
+    $top = ($surfaceRects | Measure-Object -Property Top -Minimum).Minimum
+    $right = ($surfaceRects | Measure-Object -Property Right -Maximum).Maximum
+    $bottom = ($surfaceRects | Measure-Object -Property Bottom -Maximum).Maximum
+    $unionWidth = [Math]::Max(0, $right - $left)
+    $unionHeight = [Math]::Max(0, $bottom - $top)
+
+    $totalSurfaceArea = ($surfaceRects | ForEach-Object { $_.Width * $_.Height } | Measure-Object -Sum).Sum
+    $unionArea = $unionWidth * $unionHeight
+
+    $maxHorizontalInset = 64   # borders/scrollbar allowance around hosted child surfaces
+    $maxVerticalChrome = 128   # integrated titlebar + tab bar allowance above surfaces
+    $minUnionWidth = [Math]::Max(1, $hostRect.Width - $maxHorizontalInset)
+    $minUnionHeight = [Math]::Max(1, $hostRect.Height - $maxVerticalChrome)
+    if ($unionWidth -lt $minUnionWidth -or $unionHeight -lt $minUnionHeight) {
+        throw @"
+$Label visible surface union does not fill host content after resize.
+host=$($hostRect | ConvertTo-Json -Compress)
+surface_union={"left":$left,"top":$top,"right":$right,"bottom":$bottom,"width":$unionWidth,"height":$unionHeight}
+surfaces=$($surfaceRects | ConvertTo-Json -Compress)
+minimum={"width":$minUnionWidth,"height":$minUnionHeight}
+"@
+    }
+
+    $maxOuterSlop = 8
+    if ($left -lt ($hostRect.Left - $maxOuterSlop) -or
+        $top -lt ($hostRect.Top - $maxOuterSlop) -or
+        $right -gt ($hostRect.Right + $maxOuterSlop) -or
+        $bottom -gt ($hostRect.Bottom + $maxOuterSlop)) {
+        throw @"
+$Label visible surface union extends outside host after resize.
+host=$($hostRect | ConvertTo-Json -Compress)
+surface_union={"left":$left,"top":$top,"right":$right,"bottom":$bottom,"width":$unionWidth,"height":$unionHeight}
+surfaces=$($surfaceRects | ConvertTo-Json -Compress)
+max_outer_slop=$maxOuterSlop
+"@
+    }
+
+    $maxGapArea = [Math]::Max(1, [int]($unionArea * 0.03))
+    $gapArea = $unionArea - $totalSurfaceArea
+    if ($gapArea -gt $maxGapArea) {
+        throw @"
+$Label visible surface union contains interior gaps after resize.
+host=$($hostRect | ConvertTo-Json -Compress)
+surface_union={"left":$left,"top":$top,"right":$right,"bottom":$bottom,"width":$unionWidth,"height":$unionHeight,"area":$unionArea}
+surface_area=$totalSurfaceArea
+gap_area=$gapArea
+max_gap_area=$maxGapArea
+surfaces=$($surfaceRects | ConvertTo-Json -Compress)
+"@
+    }
+
+    return [pscustomobject]@{
+        HostWidth = $hostRect.Width
+        HostHeight = $hostRect.Height
+        SurfaceUnionWidth = $unionWidth
+        SurfaceUnionHeight = $unionHeight
+        SurfaceArea = $totalSurfaceArea
+        SurfaceGapArea = $gapArea
+        SurfaceCount = $surfaceRects.Count
     }
 }
 
@@ -175,7 +408,7 @@ function Measure-ExpansionBandRatios {
     }
 }
 
-function Assert-SettledResizeImageHasNoUnpaintedExpansionBands {
+function Assert-ResizeImageHasNoUnpaintedExpansionBands {
     param(
         [Parameter(Mandatory)] [string] $Path
     )
@@ -236,6 +469,8 @@ $configPath = Join-Path $layout.Temp 'interactive-win11-resize.conf'
 $payloadPath = Join-Path $layout.Temp 'interactive-win11-resize-payload.ps1'
 $screenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-grown.png'
 $surfaceScreenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-grown-surface.png'
+$liveScreenshotPath = Join-Path $layout.Logs 'interactive-win11-resize-live-grown.png'
+$instanceClass = "winghostty-resize-$($layout.SandboxId)"
 
 if ($launchAction -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -256,11 +491,11 @@ Write-Output 'resize validation ready'
 Start-Sleep -Seconds 30
 "@ | Set-Content -LiteralPath $payloadPath -Encoding UTF8
 
-Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath, $surfaceScreenshotPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath, $surfaceScreenshotPath, $liveScreenshotPath -ErrorAction SilentlyContinue
 
 $launchArgs = @(
     '--single-instance=false'
-    "--class=winghostty-resize-$($layout.SandboxId)"
+    "--class=$instanceClass"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -322,11 +557,27 @@ try {
         -Operation "initial MoveWindow(hwnd=$($process.MainWindowHandle))"
     Start-Sleep -Milliseconds 600
 
+    $scenarioDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-HostCommand -HostHwnd $process.MainWindowHandle -CommandId $hostNewTabCommandId
+    Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description 'second tab for resize repro' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $process.MainWindowHandle) -ge 2
+    }
+    Invoke-CommandPaletteAction -HostHwnd $process.MainWindowHandle -Action 'new_split:right' -Deadline $scenarioDeadline -Process $process
+    Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description 'split pane for resize repro' -Process $process -Condition {
+        @(Get-VisibleSurfaceWindows -Parent $process.MainWindowHandle).Count -eq 2
+    }
+    $initialUnion = Assert-VisibleSurfaceUnionFillsHostContent -HostHwnd $process.MainWindowHandle -ExpectedSurfaceCount 2 -Label 'initial split layout'
+
     [void] [WinghosttyResizeWin32]::SendMessageW($process.MainWindowHandle, $wmEnterSizeMove, [UIntPtr]::Zero, [IntPtr]::Zero)
     $enteredSizeMove = $true
     Assert-Win32CallSucceeded `
         -Succeeded ([WinghosttyResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $grownWidth, $grownHeight, $true)) `
         -Operation "grown MoveWindow(hwnd=$($process.MainWindowHandle))"
+    Show-ResizeHarnessWindow -Hwnd $process.MainWindowHandle
+    [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
+    Start-Sleep -Milliseconds 150
+    Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $liveScreenshotPath
+    $liveRatios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Path $liveScreenshotPath
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds 700
 
@@ -335,7 +586,7 @@ try {
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds 700
 
-    $surfaceHwnd = [WinghosttyResizeWin32]::FindWindowExW($process.MainWindowHandle, [IntPtr]::Zero, 'winghostty.win32', $null)
+    $surfaceHwnd = [WinghosttyResizeWin32]::FindWindowExW($process.MainWindowHandle, [IntPtr]::Zero, $surfaceWindowClassName, $null)
     if ($surfaceHwnd -eq [IntPtr]::Zero) {
         throw 'failed to locate winghostty surface child HWND after resize'
     }
@@ -344,7 +595,8 @@ try {
     Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $screenshotPath
     Capture-WindowImage -Hwnd $surfaceHwnd -Path $surfaceScreenshotPath
 
-    $ratios = Assert-SettledResizeImageHasNoUnpaintedExpansionBands -Path $surfaceScreenshotPath
+    $grownUnion = Assert-VisibleSurfaceUnionFillsHostContent -HostHwnd $process.MainWindowHandle -ExpectedSurfaceCount 2 -Label 'grown split layout'
+    $ratios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Path $screenshotPath
 
     $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
     if ($stderr -match $runtimeFailurePattern) {
@@ -358,4 +610,4 @@ finally {
     Stop-InteractiveWin11Process -Process $process
 }
 
-Write-Host ("interactive-win11 resize validation: PASS (stderr={0}, screenshot={1}, surface-screenshot={2}, host={3}x{4}, surface={5}x{6}, right-near-black={7:P1}, bottom-near-black={8:P1}, right-neutral-gray={9:P1}, bottom-neutral-gray={10:P1})" -f $stderrPath, $screenshotPath, $surfaceScreenshotPath, $hostRect.Width, $hostRect.Height, $surfaceRect.Width, $surfaceRect.Height, $ratios.RightBlackRatio, $ratios.BottomBlackRatio, $ratios.RightGrayRatio, $ratios.BottomGrayRatio)
+Write-Host ("interactive-win11 resize validation: PASS (stderr={0}, screenshot={1}, live-screenshot={2}, surface-screenshot={3}, host={4}x{5}, surface={6}x{7}, split-union-before={8}x{9}, split-union-after={10}x{11}, live-right-near-black={12:P1}, live-bottom-near-black={13:P1}, live-right-neutral-gray={14:P1}, live-bottom-neutral-gray={15:P1}, right-near-black={16:P1}, bottom-near-black={17:P1}, right-neutral-gray={18:P1}, bottom-neutral-gray={19:P1})" -f $stderrPath, $screenshotPath, $liveScreenshotPath, $surfaceScreenshotPath, $hostRect.Width, $hostRect.Height, $surfaceRect.Width, $surfaceRect.Height, $initialUnion.SurfaceUnionWidth, $initialUnion.SurfaceUnionHeight, $grownUnion.SurfaceUnionWidth, $grownUnion.SurfaceUnionHeight, $liveRatios.RightBlackRatio, $liveRatios.BottomBlackRatio, $liveRatios.RightGrayRatio, $liveRatios.BottomGrayRatio, $ratios.RightBlackRatio, $ratios.BottomBlackRatio, $ratios.RightGrayRatio, $ratios.BottomGrayRatio)
