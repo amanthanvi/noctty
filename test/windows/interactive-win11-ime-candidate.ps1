@@ -386,7 +386,7 @@ try {
     [void] [Win11ImeCandidateNative]::SetFocus($surfaceHwnd)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'scripted caret readiness' -Process $process -Condition {
-        $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
+        $stderr = [string] (Get-InteractiveWin11TextFile -Path $stderrPath)
         if ($stderr -match $runtimeFailurePattern) {
             throw "unexpected runtime failure reported before IME probe:`n$stderr"
         }
