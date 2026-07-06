@@ -202,6 +202,28 @@ function Send-WindowMessage {
     }
 }
 
+function Read-ImeFormTrace {
+    param(
+        [Parameter(Mandatory)] [string] $Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            return $null
+        }
+
+        return $content | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+}
+
 function Assert-ImeCandidateAnchoredToCaret {
     param(
         [Parameter(Mandatory)] $Forms,
@@ -368,11 +390,18 @@ try {
         -Message $WM_IME_STARTCOMPOSITION `
         -Description 'WM_IME_STARTCOMPOSITION'
 
+    $script:Win11ImeCandidateTrace = $null
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'IME form trace' -Process $process -Condition {
-        Test-Path -LiteralPath $tracePath
+        $trace = Read-ImeFormTrace -Path $tracePath
+        if ($null -eq $trace) {
+            return $false
+        }
+
+        $script:Win11ImeCandidateTrace = $trace
+        return $true
     }
 
-    $trace = Get-Content -LiteralPath $tracePath -Raw | ConvertFrom-Json
+    $trace = $script:Win11ImeCandidateTrace
     $forms = [pscustomobject]@{
         Composition = $trace.composition
         Candidate = $trace.candidate
