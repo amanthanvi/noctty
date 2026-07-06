@@ -2251,6 +2251,12 @@ pub fn setAttribute(
         .unknown => return,
     }
 
+    // If the attribute didn't change our style then we can skip the
+    // style update entirely: our current style ID is already correct.
+    // This is a common case in the wild where programs re-assert the
+    // same style repeatedly (e.g. per span or per line).
+    if (self.cursor.style.eql(old_style)) return;
+
     try self.manualStyleUpdate();
 }
 
