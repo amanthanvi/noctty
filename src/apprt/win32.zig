@@ -23424,7 +23424,6 @@ pub const Surface = struct {
         if (!self.core_initialized) return;
         const ime_pos = self.core_surface.imePoint();
         const forms = imeWindowForms(ime_pos, self.content_scale);
-        writeImeWindowFormsTrace(self.app.core_app.alloc, ime_pos, self.content_scale, forms);
 
         const surface_hwnd = self.hwnd orelse return;
         const himc = ImmGetContext(surface_hwnd) orelse return;
