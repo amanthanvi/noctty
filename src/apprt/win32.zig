@@ -19295,6 +19295,78 @@ fn imeWindowForms(ime_pos: apprt.IMEPos, content_scale: apprt.ContentScale) ImeW
     };
 }
 
+fn writeImeWindowFormsTrace(
+    alloc: Allocator,
+    ime_pos: apprt.IMEPos,
+    content_scale: apprt.ContentScale,
+    forms: ImeWindowForms,
+) void {
+    const raw = std.process.getEnvVarOwned(
+        alloc,
+        "WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE",
+    ) catch return;
+    defer alloc.free(raw);
+
+    const trace_path = std.mem.trim(u8, raw, " \t\r\n");
+    if (trace_path.len == 0) return;
+
+    const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+        log.warn("win32 IME form trace create failed path={s} err={}", .{ trace_path, err });
+        return;
+    };
+    defer file.close();
+
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+    const stream = &writer.interface;
+    stream.print("{f}", .{std.json.fmt(.{
+        .ime_pos = .{
+            .x = ime_pos.x,
+            .y = ime_pos.y,
+            .width = ime_pos.width,
+            .height = ime_pos.height,
+        },
+        .content_scale = .{
+            .x = content_scale.x,
+            .y = content_scale.y,
+        },
+        .composition = .{
+            .dwStyle = forms.composition.dwStyle,
+            .ptCurrentPos = .{
+                .X = forms.composition.ptCurrentPos.x,
+                .Y = forms.composition.ptCurrentPos.y,
+            },
+            .rcArea = .{
+                .Left = forms.composition.rcArea.left,
+                .Top = forms.composition.rcArea.top,
+                .Right = forms.composition.rcArea.right,
+                .Bottom = forms.composition.rcArea.bottom,
+            },
+        },
+        .candidate = .{
+            .dwIndex = forms.candidate.dwIndex,
+            .dwStyle = forms.candidate.dwStyle,
+            .ptCurrentPos = .{
+                .X = forms.candidate.ptCurrentPos.x,
+                .Y = forms.candidate.ptCurrentPos.y,
+            },
+            .rcArea = .{
+                .Left = forms.candidate.rcArea.left,
+                .Top = forms.candidate.rcArea.top,
+                .Right = forms.candidate.rcArea.right,
+                .Bottom = forms.candidate.rcArea.bottom,
+            },
+        },
+    }, .{})}) catch |err| {
+        log.warn("win32 IME form trace write failed path={s} err={}", .{ trace_path, err });
+        return;
+    };
+    stream.flush() catch |err| {
+        log.warn("win32 IME form trace flush failed path={s} err={}", .{ trace_path, err });
+        return;
+    };
+}
+
 fn readSystemWheelSetting(action: UINT, fallback: u32) u32 {
     var value: UINT = fallback;
     if (SystemParametersInfoW(action, 0, @ptrCast(&value), 0) == 0) {
@@ -23342,11 +23414,14 @@ pub const Surface = struct {
 
     fn positionImeWindow(self: *Surface) void {
         if (!self.core_initialized) return;
+        const ime_pos = self.core_surface.imePoint();
+        const forms = imeWindowForms(ime_pos, self.content_scale);
+        writeImeWindowFormsTrace(self.app.core_app.alloc, ime_pos, self.content_scale, forms);
+
         const surface_hwnd = self.hwnd orelse return;
         const himc = ImmGetContext(surface_hwnd) orelse return;
         defer _ = ImmReleaseContext(surface_hwnd, himc);
 
-        const forms = imeWindowForms(self.core_surface.imePoint(), self.content_scale);
         _ = ImmSetCompositionWindow(himc, &forms.composition);
         _ = ImmSetCandidateWindow(himc, &forms.candidate);
     }
