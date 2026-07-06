@@ -19263,6 +19263,9 @@ const ImeWindowForms = struct {
     candidate: CANDIDATEFORM,
 };
 
+var ime_window_forms_trace_path_loaded = false;
+var ime_window_forms_trace_path: ?[]const u8 = null;
+
 fn scaledImeCoord(value: f64, scale: f32) i32 {
     const scale_f64: f64 = @floatCast(scale);
     return @intFromFloat(value * scale_f64);
@@ -19295,20 +19298,25 @@ fn imeWindowForms(ime_pos: apprt.IMEPos, content_scale: apprt.ContentScale) ImeW
     };
 }
 
+fn imeWindowFormsTracePath(alloc: Allocator) ?[]const u8 {
+    if (!ime_window_forms_trace_path_loaded) {
+        ime_window_forms_trace_path_loaded = true;
+        ime_window_forms_trace_path = internal_os.getEnvVarOwnedTrimmedNotEmpty(
+            alloc,
+            "WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE",
+        ) catch null;
+    }
+
+    return ime_window_forms_trace_path;
+}
+
 fn writeImeWindowFormsTrace(
     alloc: Allocator,
     ime_pos: apprt.IMEPos,
     content_scale: apprt.ContentScale,
     forms: ImeWindowForms,
 ) void {
-    const raw = std.process.getEnvVarOwned(
-        alloc,
-        "WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE",
-    ) catch return;
-    defer alloc.free(raw);
-
-    const trace_path = std.mem.trim(u8, raw, " \t\r\n");
-    if (trace_path.len == 0) return;
+    const trace_path = imeWindowFormsTracePath(alloc) orelse return;
 
     const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
         log.warn("win32 IME form trace create failed path={s} err={}", .{ trace_path, err });
