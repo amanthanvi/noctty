@@ -123,6 +123,28 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-resize.ps1 -ResetState -TimeoutSeconds 15
 ```
 
+## interactive-win11-ime-candidate.ps1
+
+Interactive Win11 validation for IME candidate anchoring. It launches
+`winghostty`, scripts the terminal cursor to a non-origin row/column,
+sends a synthetic mouse move near the surface origin to poison the old
+mouse-derived path, triggers `WM_IME_STARTCOMPOSITION` on the surface
+HWND, and reads the env-gated runtime trace for the composition/candidate
+forms computed inside `positionImeWindow()`.
+
+The harness verifies that the traced candidate form uses `CFS_EXCLUDE`,
+shares the composition point, exposes a caret-height exclusion rect, and
+lands near the scripted caret instead of the poisoned mouse coordinate. It
+does not assert that Windows created an IME context or that a real IME
+language pack renders a visible candidate popup; that remains
+manual/IME-environment coverage.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-ime-candidate.ps1 -ResetState -TimeoutSeconds 18
+```
+
 ## interactive-win11-undo.ps1
 
 Interactive Win11 validation for the shipped undo/redo action set. It launches
