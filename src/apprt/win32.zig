@@ -23422,8 +23422,11 @@ pub const Surface = struct {
         const himc = ImmGetContext(surface_hwnd) orelse return;
         defer _ = ImmReleaseContext(surface_hwnd, himc);
 
-        _ = ImmSetCompositionWindow(himc, &forms.composition);
-        _ = ImmSetCandidateWindow(himc, &forms.candidate);
+        const composition_set = ImmSetCompositionWindow(himc, &forms.composition) != 0;
+        const candidate_set = ImmSetCandidateWindow(himc, &forms.candidate) != 0;
+        if (composition_set and candidate_set) {
+            writeImeWindowFormsTrace(self.app.core_app.alloc, ime_pos, self.content_scale, forms);
+        }
     }
 
     fn handleImeResult(self: *Surface) void {

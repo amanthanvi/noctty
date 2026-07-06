@@ -224,14 +224,27 @@ function Read-ImeFormTrace {
     }
 }
 
+function Get-ScaledImeCoord {
+    param(
+        [Parameter(Mandatory)] [double] $Value,
+        [Parameter(Mandatory)] [double] $Scale
+    )
+
+    return [int] [Math]::Truncate($Value * $Scale)
+}
+
 function Assert-ImeCandidateAnchoredToCaret {
     param(
         [Parameter(Mandatory)] $Forms,
+        [Parameter(Mandatory)] $ImePos,
+        [Parameter(Mandatory)] $ContentScale,
         [Parameter(Mandatory)] $SurfaceClientRect
     )
 
     $composition = $Forms.Composition
     $candidate = $Forms.Candidate
+    $expectedCaretHeight = [Math]::Max(1, (Get-ScaledImeCoord -Value $ImePos.height -Scale $ContentScale.y))
+    $expectedRectTop = $candidate.rcArea.Bottom - $expectedCaretHeight
 
     if ($composition.dwStyle -ne $CFS_POINT) {
         throw "composition form style was $($composition.dwStyle), expected CFS_POINT"
@@ -250,8 +263,8 @@ function Assert-ImeCandidateAnchoredToCaret {
     if ($candidate.rcArea.Left -ne $candidate.ptCurrentPos.X -or
         $candidate.rcArea.Right -ne ($candidate.ptCurrentPos.X + 1) -or
         $candidate.rcArea.Bottom -ne $candidate.ptCurrentPos.Y -or
-        $candidate.rcArea.Top -ge $candidate.rcArea.Bottom) {
-        throw "candidate exclusion rect is not caret-shaped: point=$($candidate.ptCurrentPos.X),$($candidate.ptCurrentPos.Y) rect=$($candidate.rcArea.Left),$($candidate.rcArea.Top),$($candidate.rcArea.Right),$($candidate.rcArea.Bottom)"
+        $candidate.rcArea.Top -ne $expectedRectTop) {
+        throw "candidate exclusion rect is not caret-shaped: point=$($candidate.ptCurrentPos.X),$($candidate.ptCurrentPos.Y) rect=$($candidate.rcArea.Left),$($candidate.rcArea.Top),$($candidate.rcArea.Right),$($candidate.rcArea.Bottom) expected-top=$expectedRectTop caret-height=$expectedCaretHeight"
     }
 
     if ($candidate.ptCurrentPos.X -lt 120 -or $candidate.ptCurrentPos.Y -lt 120) {
@@ -406,7 +419,11 @@ try {
         Composition = $trace.composition
         Candidate = $trace.candidate
     }
-    Assert-ImeCandidateAnchoredToCaret -Forms $forms -SurfaceClientRect $surfaceRect
+    Assert-ImeCandidateAnchoredToCaret `
+        -Forms $forms `
+        -ImePos $trace.ime_pos `
+        -ContentScale $trace.content_scale `
+        -SurfaceClientRect $surfaceRect
 
     $result = [ordered]@{
         surface = @{
