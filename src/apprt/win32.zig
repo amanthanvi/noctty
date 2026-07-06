@@ -2932,6 +2932,7 @@ pub const App = struct {
             self.core_app.alloc.free(path);
             self.startup_cwd = null;
         }
+        deinitImeWindowFormsTracePath(self.core_app.alloc);
         self.config.deinit();
         if (self.com_initialized) {
             CoUninitialize();
@@ -19308,6 +19309,12 @@ fn imeWindowFormsTracePath(alloc: Allocator) ?[]const u8 {
     }
 
     return ime_window_forms_trace_path;
+}
+
+fn deinitImeWindowFormsTracePath(alloc: Allocator) void {
+    if (ime_window_forms_trace_path) |path| alloc.free(path);
+    ime_window_forms_trace_path = null;
+    ime_window_forms_trace_path_loaded = false;
 }
 
 fn writeImeWindowFormsTrace(
