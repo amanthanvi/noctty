@@ -243,6 +243,8 @@ function Assert-ImeCandidateAnchoredToCaret {
 
     $composition = $Forms.Composition
     $candidate = $Forms.Candidate
+    $expectedCaretX = Get-ScaledImeCoord -Value $ImePos.x -Scale $ContentScale.x
+    $expectedCaretY = Get-ScaledImeCoord -Value $ImePos.y -Scale $ContentScale.y
     $expectedCaretHeight = [Math]::Max(1, (Get-ScaledImeCoord -Value $ImePos.height -Scale $ContentScale.y))
     $expectedRectTop = $candidate.rcArea.Bottom - $expectedCaretHeight
 
@@ -258,6 +260,12 @@ function Assert-ImeCandidateAnchoredToCaret {
     if ($candidate.ptCurrentPos.X -ne $composition.ptCurrentPos.X -or
         $candidate.ptCurrentPos.Y -ne $composition.ptCurrentPos.Y) {
         throw "composition and candidate points diverged: composition=$($composition.ptCurrentPos.X),$($composition.ptCurrentPos.Y) candidate=$($candidate.ptCurrentPos.X),$($candidate.ptCurrentPos.Y)"
+    }
+
+    $pointTolerance = 1
+    if ([Math]::Abs($candidate.ptCurrentPos.X - $expectedCaretX) -gt $pointTolerance -or
+        [Math]::Abs($candidate.ptCurrentPos.Y - $expectedCaretY) -gt $pointTolerance) {
+        throw "candidate point did not match the scaled IME caret: point=$($candidate.ptCurrentPos.X),$($candidate.ptCurrentPos.Y) expected=$expectedCaretX,$expectedCaretY tolerance=$pointTolerance"
     }
 
     if ($candidate.rcArea.Left -ne $candidate.ptCurrentPos.X -or
