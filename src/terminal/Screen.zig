@@ -4348,6 +4348,55 @@ test "Screen cursorChangePin hyperlink after style migration splits the page" {
     try s.testWriteString("B");
 }
 
+test "Screen write regrows compacted page capacity" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try Screen.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    // Compact the active page so every managed capacity dimension is
+    // zero, then reload the cursor since its cached row/cell pointers
+    // point into the replaced page. Only an oversized page compacts.
+    {
+        _ = try s.increaseCapacity(s.cursor.page_pin.node, .grapheme_bytes);
+        const node = (try s.pages.compact(s.cursor.page_pin.node)).?;
+        try testing.expectEqual(0, node.data.capacity.styles);
+        try testing.expectEqual(0, node.data.capacity.grapheme_bytes);
+        try testing.expectEqual(0, node.data.capacity.string_bytes);
+        try testing.expectEqual(0, node.data.capacity.hyperlink_bytes);
+        s.cursorReload();
+    }
+
+    // Styled write: exercises the manualStyleUpdate single-retry
+    // path. Prior to increaseCapacity handling zero dimensions, the
+    // retry would fail and the style would be dropped.
+    try s.setAttribute(.{ .bold = {} });
+    try s.testWriteString("A");
+
+    // Grapheme write: exercises the appendGrapheme single-retry path.
+    // We can't use testWriteString here because it appends graphemes
+    // directly on the page without the capacity retry.
+    try s.testWriteString("a");
+    try s.appendGrapheme(s.cursorCellLeft(1), 0x0301);
+
+    // Hyperlink: exercises the startHyperlink retry loop, which used
+    // to loop forever when capacity growth from zero didn't grow.
+    try s.startHyperlink("https://example.com/", null);
+    try s.testWriteString("B");
+    s.endHyperlink();
+
+    // Verify the content landed on the page.
+    const page = &s.cursor.page_pin.node.data;
+    try testing.expect(page.styles.count() >= 1);
+    try testing.expect(page.hyperlink_set.count() >= 1);
+    try testing.expect(page.graphemeCount() >= 1);
+}
+
 test "Screen cursorCopy hyperlink deref new page" {
     const testing = std.testing;
     const alloc = testing.allocator;

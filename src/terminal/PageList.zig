@@ -3455,21 +3455,36 @@ pub fn increaseCapacity(
             const Int = @FieldType(Capacity, field_name);
             const old = @field(cap, field_name);
 
-            // We use checked math to prevent overflow. If there is an
-            // overflow it means we're out of space in this dimension,
-            // since pages can take up to their maxInt capacity in any
-            // category.
-            const new = std.math.mul(
-                Int,
-                old,
-                2,
-            ) catch |err| overflow: {
-                comptime assert(@TypeOf(err) == error{Overflow});
-                // Our final doubling would overflow since maxInt is
-                // 2^N - 1 for an unsignged int of N bits. So, if we overflow
-                // and we haven't used all the bits, use all the bits.
-                if (old < std.math.maxInt(Int)) break :overflow std.math.maxInt(Int);
-                return error.OutOfSpace;
+            const new: Int = new: {
+                // A dimension can be zero for pages with exact
+                // capacities (see compact). Doubling zero stays zero,
+                // which would break our guarantee that we always
+                // increase by at least one unit and turn caller retry
+                // loops into infinite loops. Jump straight to the
+                // standard default instead: it is what all standard
+                // pages start with, so retrying callers are guaranteed
+                // enough room for their pending allocation.
+                if (old == 0) {
+                    const default: Capacity = .{ .cols = 0, .rows = 0 };
+                    break :new @field(default, field_name);
+                }
+
+                // We use checked math to prevent overflow. If there is
+                // an overflow it means we're out of space in this
+                // dimension, since pages can take up to their maxInt
+                // capacity in any category.
+                break :new std.math.mul(
+                    Int,
+                    old,
+                    2,
+                ) catch |err| overflow: {
+                    comptime assert(@TypeOf(err) == error{Overflow});
+                    // Our final doubling would overflow since maxInt is
+                    // 2^N - 1 for an unsignged int of N bits. So, if we overflow
+                    // and we haven't used all the bits, use all the bits.
+                    if (old < std.math.maxInt(Int)) break :overflow std.math.maxInt(Int);
+                    return error.OutOfSpace;
+                };
             };
             @field(cap, field_name) = new;
 
@@ -14788,6 +14803,44 @@ test "PageList compact oversized page" {
             );
         }
     }
+}
+
+test "PageList increaseCapacity from zero-capacity dimensions" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 24, 0);
+    defer s.deinit();
+
+    // Compact the only page. A plain page has no styled, grapheme,
+    // or hyperlink content so the exact capacity is zero in every
+    // managed dimension. Only an oversized page compacts.
+    var node = s.pages.first.?;
+    while (node.data.memory.len <= std_size) {
+        node = try s.increaseCapacity(node, .grapheme_bytes);
+    }
+    node = (try s.compact(node)).?;
+    try testing.expectEqual(0, node.data.capacity.styles);
+    try testing.expectEqual(0, node.data.capacity.grapheme_bytes);
+    try testing.expectEqual(0, node.data.capacity.string_bytes);
+    try testing.expectEqual(0, node.data.capacity.hyperlink_bytes);
+
+    // Increasing each dimension from zero must actually grow it.
+    // Regression: 0 * 2 == 0 used to "succeed" without growing,
+    // which turned caller retry loops into infinite loops.
+    node = try s.increaseCapacity(node, .styles);
+    try testing.expect(node.data.capacity.styles > 0);
+    node = try s.increaseCapacity(node, .grapheme_bytes);
+    try testing.expect(node.data.capacity.grapheme_bytes > 0);
+    node = try s.increaseCapacity(node, .string_bytes);
+    try testing.expect(node.data.capacity.string_bytes > 0);
+    node = try s.increaseCapacity(node, .hyperlink_bytes);
+    try testing.expect(node.data.capacity.hyperlink_bytes > 0);
+
+    // Increasing a non-zero dimension still doubles.
+    const styles = node.data.capacity.styles;
+    node = try s.increaseCapacity(node, .styles);
+    try testing.expectEqual(styles * 2, node.data.capacity.styles);
 }
 
 test "PageList compact insufficient savings returns null" {
