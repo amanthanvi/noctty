@@ -629,8 +629,7 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
     }
 }
 
-/// Deinit the pagelist. If you own the memory pool (used clonePool) then
-/// this will reset the pool and retain capacity.
+/// Deinit the pagelist, freeing all page memory and the memory pool.
 pub fn deinit(self: *PageList) void {
     // Verify integrity before cleanup
     self.assertIntegrity();
@@ -3632,6 +3631,14 @@ inline fn createPageExt(
 
     // In runtime safety modes, allocators fill with 0xAA. On freestanding
     // (WASM), the WasmAllocator reuses freed slots without zeroing.
+    //
+    // Otherwise, we rely on pool item buffers being zeroed: fresh items
+    // come from the OS page allocator (zeroed pages) and destroyNodeExt
+    // zeroes buffers before returning them to the pool. The one
+    // exception is the first pointer-size bytes, which hold the pool's
+    // free list node while a buffer is in the free list; initBuf below
+    // always overwrites those since the page rows start at offset 0
+    // (comptime-asserted in Page).
     if (comptime std.debug.runtime_safety or builtin.os.tag == .freestanding)
         @memset(page_buf, 0);
 

@@ -11491,9 +11491,9 @@ test "Screen: cursorDown to page with insufficient capacity" {
     // cursor movement functions). The bug pattern:
     //
     // 1. cursorDown creates a by-value copy of the pin via page_pin.down(n)
-    // 2. cursorChangePin is called, which may trigger adjustCapacity
+    // 2. cursorChangePin is called, which may trigger increaseCapacity
     //    if the target page's style map is full
-    // 3. adjustCapacity frees the old page and creates a new one
+    // 3. increaseCapacity frees the old page and creates a new one
     // 4. The local pin copy still points to the freed page
     // 5. rowAndCell() on the stale pin accesses freed memory
 
@@ -11516,7 +11516,7 @@ test "Screen: cursorDown to page with insufficient capacity" {
     try testing.expect(start_page != new_page);
 
     // Fill new_page's style map to capacity. When we move INTO this page
-    // with a style set, adjustCapacity will be triggered.
+    // with a style set, increaseCapacity will be triggered.
     {
         new_page.pauseIntegrityChecks(true);
         defer new_page.pauseIntegrityChecks(false);
@@ -11545,7 +11545,7 @@ test "Screen: cursorDown to page with insufficient capacity" {
                 try testing.expect(&next_pin.node.data == new_page);
 
                 // This cursorDown triggers the bug: the local page_pin copy
-                // becomes stale after adjustCapacity, causing rowAndCell()
+                // becomes stale after increaseCapacity, causing rowAndCell()
                 // to access freed memory.
                 s.cursorDown(1);
 
