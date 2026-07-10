@@ -2820,8 +2820,28 @@ pub fn select(self: *Screen, sel_: ?Selection) Allocator.Error!void {
     const tracked_sel = if (sel.tracked()) sel else try sel.track(self);
     errdefer if (!sel.tracked()) tracked_sel.deinit(self);
 
-    // Untrack prior selection
-    if (self.selection) |*old| old.deinit(self);
+    // Untrack prior selection pins that aren't also owned by the replacement.
+    // A caller may pass our current tracked selection back to us by value, so
+    // releasing both old pins unconditionally would leave the replacement
+    // pointing at freed pool entries.
+    if (self.selection) |old| {
+        const new_bounds = tracked_sel.bounds.tracked;
+        switch (old.bounds) {
+            .untracked => old.deinit(self),
+            .tracked => |old_bounds| {
+                if (old_bounds.start != new_bounds.start and
+                    old_bounds.start != new_bounds.end)
+                {
+                    self.pages.untrackPin(old_bounds.start);
+                }
+                if (old_bounds.end != new_bounds.start and
+                    old_bounds.end != new_bounds.end)
+                {
+                    self.pages.untrackPin(old_bounds.end);
+                }
+            },
+        }
+    }
     self.selection = tracked_sel;
     self.dirty.selection = true;
 }
@@ -9252,6 +9272,23 @@ test "Screen: select replaces existing pins" {
         false,
     ));
     try testing.expectEqual(tracked + 2, s.pages.countTrackedPins());
+}
+
+test "Screen: reselecting tracked selection preserves its pins" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 10, .rows = 2, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.select(Selection.init(
+        s.pages.pin(.{ .active = .{ .x = 1, .y = 0 } }).?,
+        s.pages.pin(.{ .active = .{ .x = 3, .y = 0 } }).?,
+        false,
+    ));
+
+    try s.select(s.selection.?);
+    try testing.expectEqual(Selection.Order.forward, s.selection.?.order(&s));
 }
 
 test "Screen: selectAll" {
