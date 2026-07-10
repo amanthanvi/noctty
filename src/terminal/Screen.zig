@@ -1550,6 +1550,8 @@ pub fn clearCells(
     row: *Row,
     cells: []Cell,
 ) void {
+    if (cells.len == 0) return;
+
     // This whole operation does unsafe things, so we just want to assert
     // the end state.
     page.pauseIntegrityChecks(true);
@@ -4636,6 +4638,18 @@ test "Screen clearRows active styled line" {
     const str = try s.dumpStringAlloc(alloc, .{ .screen = .{} });
     defer alloc.free(str);
     try testing.expectEqualStrings("", str);
+}
+
+test "Screen clearCells empty range" {
+    const testing = std.testing;
+
+    var s = try Screen.init(testing.allocator, .default);
+    defer s.deinit();
+
+    const page = &s.cursor.page_pin.node.data;
+    const row = s.cursor.page_row;
+    const cells = page.getCells(row);
+    s.clearCells(page, row, cells[0..0]);
 }
 
 test "Screen clearRows protected" {
