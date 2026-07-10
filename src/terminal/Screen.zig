@@ -669,7 +669,7 @@ pub fn cursorCellEndOfPrev(self: *Screen) *pagepkg.Cell {
     assert(self.cursor.y > 0);
 
     var page_pin = self.cursor.page_pin.up(1).?;
-    page_pin.x = self.pages.cols - 1;
+    page_pin.x = page_pin.node.data.size.cols - 1;
     const page_rac = page_pin.rowAndCell();
     return page_rac.cell;
 }
@@ -4775,6 +4775,27 @@ test "Screen eraseRows active partial" {
         defer alloc.free(str);
         try testing.expectEqualStrings("3", str);
     }
+}
+
+test "Screen: cursorCellEndOfPrev across mixed-width pages" {
+    const testing = std.testing;
+    var s = try init(testing.allocator, .{
+        .cols = 4,
+        .rows = 2,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    try s.testWriteString("ABCDE");
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 1 });
+    s.cursorReload();
+    const second = first.next.?;
+    first.data.size.cols = 2;
+
+    try testing.expectEqual(second, s.cursor.page_pin.node);
+    const expected = (Pin{ .node = first, .x = 1 }).rowAndCell().cell;
+    try testing.expectEqual(expected, s.cursorCellEndOfPrev());
 }
 
 test "Screen: cursorDown across pages preserves style" {
