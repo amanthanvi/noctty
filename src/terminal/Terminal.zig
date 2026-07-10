@@ -416,7 +416,13 @@ pub fn print(self: *Terminal, c: u21) !void {
                 const cps = self.screens.active.cursor.page_pin.node.data.lookupGrapheme(prev.cell).?;
                 for (cps) |cp2| {
                     // log.debug("cp1={x} cp2={x}", .{ previous_codepoint, cp2 });
-                    assert(!unicode.graphemeBreak(previous_codepoint, cp2, &state));
+                    // With mode 2027 disabled, zero-width codepoints are
+                    // attached without applying grapheme boundary rules. If
+                    // the mode is enabled later, an existing cell can
+                    // therefore contain one or more breaks. Feed those breaks
+                    // into the state machine so it can reset its context and
+                    // determine the boundary for the new codepoint.
+                    _ = unicode.graphemeBreak(previous_codepoint, cp2, &state);
                     previous_codepoint = cp2;
                 }
             }
@@ -4000,6 +4006,22 @@ test "Terminal: print multicodepoint grapheme, disabled mode 2027" {
     }
 
     try testing.expect(t.isDirty(.{ .screen = .{ .x = 0, .y = 0 } }));
+}
+
+test "Terminal: enabling grapheme mode handles stored breaks" {
+    var t = try init(testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer t.deinit(testing.allocator);
+
+    t.modes.set(.grapheme_cluster, false);
+    try t.print('a');
+    try t.print(0x200B); // Zero width space is stored on the prior cell.
+
+    t.modes.set(.grapheme_cluster, true);
+    try t.print(0x0301);
+
+    const str = try t.plainString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expectEqualStrings("a\xE2\x80\x8B\xCC\x81", str);
 }
 
 test "Terminal: VS16 doesn't make character with 2027 disabled" {
