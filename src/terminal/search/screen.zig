@@ -527,6 +527,13 @@ pub const ScreenSearch = struct {
                 // Everything from here forward we assume is invalid because
                 // our history results only get older.
                 const alloc = self.allocator();
+                if (self.selected) |*m| {
+                    const first_pruned = self.active_results.items.len + i;
+                    if (m.idx >= first_pruned) {
+                        m.deinit(self.screen);
+                        self.selected = null;
+                    }
+                }
                 for (self.history_results.items[i..]) |*prune_hl| prune_hl.deinit(alloc);
                 self.history_results.shrinkAndFree(alloc, i);
                 self.markMatchRowsDirty();
@@ -1815,6 +1822,38 @@ test "select after all matches disappear drops the selection" {
     try testing.expect(search.selectedMatch() == null);
     try testing.expectEqual(0, search.active_results.items.len);
     try testing.expectEqual(0, search.history_results.items.len);
+}
+
+test "select after partial history erase drops a pruned selection" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("error\r\n");
+    const first = list.pages.first.?;
+    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    const first_rows = first.data.size.rows;
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(0, search.active_results.items.len);
+    try testing.expectEqual(1, search.history_results.items.len);
+    try testing.expect(try search.select(.next));
+
+    list.eraseHistory(.{ .history = .{ .y = first_rows - 1 } });
+    try testing.expect(!search.selected.?.highlight.start.garbage);
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
 }
 
 test "screen search no scrollback has no history" {
