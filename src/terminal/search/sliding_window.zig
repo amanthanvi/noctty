@@ -973,12 +973,14 @@ pub const SlidingWindow = struct {
             .reverse => {
                 const slice = self.chunk_buf.slice();
                 const nodes = slice.items(.node);
+                const serials = slice.items(.serial);
                 const starts = slice.items(.start);
                 const ends = slice.items(.end);
 
                 if (self.chunk_buf.len > 1) {
                     // Reverse all our chunks. This should be pretty obvious why.
                     std.mem.reverse(*PageList.List.Node, nodes);
+                    std.mem.reverse(u64, serials);
                     std.mem.reverse(size.CellCountInt, starts);
                     std.mem.reverse(size.CellCountInt, ends);
 
@@ -2452,6 +2454,15 @@ test "SlidingWindow two pages match across boundary reversed" {
     // Search should find a match
     {
         const h = (try w.next()).?;
+        const chunks = h.chunks.slice();
+        const nodes = chunks.items(.node);
+        const serials = chunks.items(.serial);
+        try testing.expectEqual(2, chunks.len);
+        try testing.expectEqual(node, nodes[0]);
+        try testing.expectEqual(node.serial, serials[0]);
+        try testing.expectEqual(node.next.?, nodes[1]);
+        try testing.expectEqual(node.next.?.serial, serials[1]);
+
         const sel = h.untracked();
         try testing.expectEqual(point.Point{ .active = .{
             .x = 76,
