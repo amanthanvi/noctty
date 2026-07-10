@@ -5560,13 +5560,14 @@ pub const Pin = struct {
         if (n <= remaining_in_row) return self.left(n);
 
         const extra_after_remaining = n - remaining_in_row;
-
-        const rows_off = 1 + extra_after_remaining / cols;
+        const rows_off = 1 + (extra_after_remaining - 1) / cols;
 
         switch (self.upOverflow(rows_off)) {
             .offset => |v| {
                 var result = v;
-                result.x = @intCast(cols - extra_after_remaining % cols);
+                result.x = @intCast(
+                    cols - 1 - (extra_after_remaining - 1) % cols,
+                );
                 return result;
             },
             .overflow => return null,
@@ -5587,13 +5588,12 @@ pub const Pin = struct {
         if (n <= remaining_in_row) return self.right(n);
 
         const extra_after_remaining = n - remaining_in_row;
-
-        const rows_off = 1 + extra_after_remaining / cols;
+        const rows_off = 1 + (extra_after_remaining - 1) / cols;
 
         switch (self.downOverflow(rows_off)) {
             .offset => |v| {
                 var result = v;
-                result.x = @intCast(extra_after_remaining % cols - 1);
+                result.x = @intCast((extra_after_remaining - 1) % cols);
                 return result;
             },
             .overflow => return null,
@@ -5740,6 +5740,58 @@ pub const Cell = struct {
         } };
     }
 };
+
+test "PageList Pin rightWrap exact row multiple" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    const start = s.pin(.{ .active = .{ .x = 5, .y = 0 } }).?;
+    const wrapped = start.rightWrap(14).?;
+    _ = wrapped.rowAndCell();
+
+    try testing.expectEqual(
+        point.Point{ .active = .{ .x = 9, .y = 1 } },
+        s.pointFromPin(.active, wrapped),
+    );
+}
+
+test "PageList Pin leftWrap exact row multiple" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    const start = s.pin(.{ .active = .{ .x = 5, .y = 2 } }).?;
+    const wrapped = start.leftWrap(15).?;
+    _ = wrapped.rowAndCell();
+
+    try testing.expectEqual(
+        point.Point{ .active = .{ .x = 0, .y = 1 } },
+        s.pointFromPin(.active, wrapped),
+    );
+}
+
+test "PageList Pin rightWrap maximum distance" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 1, 3, null);
+    defer s.deinit();
+
+    const start = s.pin(.{ .active = .{ .y = 0 } }).?;
+    try testing.expectEqual(null, start.rightWrap(std.math.maxInt(usize)));
+}
+
+test "PageList Pin leftWrap maximum distance" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 1, 3, null);
+    defer s.deinit();
+
+    const start = s.pin(.{ .active = .{ .y = 2 } }).?;
+    try testing.expectEqual(null, start.leftWrap(std.math.maxInt(usize)));
+}
 
 test "PageList" {
     const testing = std.testing;
