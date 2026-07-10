@@ -4313,6 +4313,24 @@ pub fn pinIsValid(self: *const PageList, p: Pin) bool {
     return false;
 }
 
+/// Returns whether a node pointer and serial still identify the same page in
+/// this list. The node pointer is only compared and is safe even if the node
+/// has been destroyed or reused since the serial was captured.
+pub fn nodeIsValid(
+    self: *const PageList,
+    target: *List.Node,
+    serial: u64,
+) bool {
+    if (serial < self.page_serial_min) return false;
+
+    var it = self.pages.first;
+    while (it) |node| : (it = node.next) {
+        if (node == target) return node.serial == serial;
+    }
+
+    return false;
+}
+
 /// Returns the viewport for the given pin, preferring to pin to
 /// "active" if the pin is within the active area.
 fn pinIsActive(self: *const PageList, p: Pin) bool {
