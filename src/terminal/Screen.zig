@@ -2493,13 +2493,13 @@ pub fn startHyperlink(
         .id = if (id_) |id| .{
             .explicit = id,
         } else implicit: {
-            defer self.cursor.hyperlink_implicit_id += 1;
+            defer self.cursor.hyperlink_implicit_id +%= 1;
             break :implicit .{ .implicit = self.cursor.hyperlink_implicit_id };
         },
     };
     errdefer switch (link.id) {
         .explicit => {},
-        .implicit => self.cursor.hyperlink_implicit_id -= 1,
+        .implicit => self.cursor.hyperlink_implicit_id -%= 1,
     };
 
     try self.startHyperlinkLink(link);
@@ -10995,6 +10995,43 @@ test "Screen: hyperlink start/end" {
         const page = &s.cursor.page_pin.node.data;
         try testing.expectEqual(0, page.hyperlink_set.count());
     }
+}
+
+test "Screen: implicit hyperlink ID wraps" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursor.hyperlink_implicit_id = std.math.maxInt(size.OffsetInt);
+    try s.startHyperlink("http://example.com", null);
+
+    try testing.expectEqual(@as(size.OffsetInt, 0), s.cursor.hyperlink_implicit_id);
+    try testing.expectEqual(
+        std.math.maxInt(size.OffsetInt),
+        s.cursor.hyperlink.?.id.implicit,
+    );
+
+    // A failed allocation must roll the wrapped counter back to its
+    // original value as well.
+    s.endHyperlink();
+    s.cursor.hyperlink_implicit_id = std.math.maxInt(size.OffsetInt);
+    var failing = testing.FailingAllocator.init(alloc, .{});
+    failing.fail_index = failing.alloc_index;
+    {
+        const original_alloc = s.alloc;
+        defer s.alloc = original_alloc;
+        s.alloc = failing.allocator();
+        try testing.expectError(
+            error.OutOfMemory,
+            s.startHyperlink("http://example.com", null),
+        );
+    }
+    try testing.expectEqual(
+        std.math.maxInt(size.OffsetInt),
+        s.cursor.hyperlink_implicit_id,
+    );
 }
 
 test "Screen: hyperlink reuse" {
