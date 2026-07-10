@@ -2867,7 +2867,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 fn scrollPrompt(self: *PageList, delta: isize) void {
     // If we aren't jumping any prompts then we don't need to do anything.
     if (delta == 0) return;
-    const delta_start: usize = @intCast(if (delta > 0) delta else -delta);
+    const delta_start: usize = @abs(delta);
     var delta_rem: usize = delta_start;
 
     // We start at the row before or after our viewport depending on the
@@ -7157,6 +7157,16 @@ test "PageList: jump zero prompts" {
         .offset = s.total_rows - s.rows,
         .len = s.rows,
     }, s.scrollbar());
+}
+
+test "PageList: jump minimum prompt delta" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    s.scroll(.{ .delta_prompt = std.math.minInt(isize) });
+    try testing.expectEqual(Viewport.active, s.viewport);
 }
 
 test "Screen: jump back one prompt" {
