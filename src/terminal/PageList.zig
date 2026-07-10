@@ -2765,6 +2765,8 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
         },
         .delta_prompt => |n| self.scrollPrompt(n),
         .delta_row => |n| delta_row: {
+            const amount: usize = @abs(n);
+
             switch (self.viewport) {
                 // If we're at the top and we're scrolling backwards,
                 // we don't have to do anything, because there's nowhere to go.
@@ -2781,11 +2783,11 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                 .pin => switch (std.math.order(n, 0)) {
                     .eq => break :delta_row,
 
-                    .lt => switch (self.viewport_pin.upOverflow(@intCast(-n))) {
+                    .lt => switch (self.viewport_pin.upOverflow(amount)) {
                         .offset => |new_pin| {
                             self.viewport_pin.* = new_pin;
                             if (self.viewport_pin_row_offset) |*v| {
-                                v.* -= @as(usize, @intCast(-n));
+                                v.* -= amount;
                             }
                             break :delta_row;
                         },
@@ -2797,7 +2799,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                         },
                     },
 
-                    .gt => switch (self.viewport_pin.downOverflow(@intCast(n))) {
+                    .gt => switch (self.viewport_pin.downOverflow(amount)) {
                         // If we offset its a valid pin but we still have to
                         // check if we're in the active area.
                         .offset => |new_pin| {
@@ -2806,7 +2808,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                             } else {
                                 self.viewport_pin.* = new_pin;
                                 if (self.viewport_pin_row_offset) |*v| {
-                                    v.* += @intCast(n);
+                                    v.* += amount;
                                 }
                             }
                             break :delta_row;
@@ -2824,10 +2826,10 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             // Slow path: we have to calculate the new pin by moving
             // from our viewport.
             const top = self.getTopLeft(.viewport);
-            const p: Pin = if (n < 0) switch (top.upOverflow(@intCast(-n))) {
+            const p: Pin = if (n < 0) switch (top.upOverflow(amount)) {
                 .offset => |v| v,
                 .overflow => |v| v.end,
-            } else switch (top.downOverflow(@intCast(n))) {
+            } else switch (top.downOverflow(amount)) {
                 .offset => |v| v,
                 .overflow => |v| v.end,
             };
@@ -6426,6 +6428,20 @@ test "PageList scroll delta row back overflow" {
         .offset = 0,
         .len = s.rows,
     }, s.scrollbar());
+}
+
+test "PageList scroll minimum row delta" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    // Create one row of history so scrolling all the way back has an
+    // observable result.
+    try s.growRows(1);
+    s.scroll(.{ .delta_row = std.math.minInt(isize) });
+
+    try testing.expectEqual(Viewport.top, s.viewport);
 }
 
 test "PageList scroll delta row forward" {
