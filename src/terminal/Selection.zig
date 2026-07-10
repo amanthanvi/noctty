@@ -320,6 +320,7 @@ pub fn containedRowCached(
     br: point.Coordinate,
     p: point.Coordinate,
 ) ?Selection {
+    _ = s;
     if (p.y < tl.y or p.y > br.y) return null;
 
     // Rectangle case: we can return early as the x range will always be the
@@ -327,12 +328,12 @@ pub fn containedRowCached(
     if (self.rectangle) return init(
         start: {
             var copy: Pin = pin;
-            copy.x = tl.x;
+            copy.x = @min(tl.x, copy.node.data.size.cols - 1);
             break :start copy;
         },
         end: {
             var copy: Pin = pin;
-            copy.x = br.x;
+            copy.x = @min(br.x, copy.node.data.size.cols - 1);
             break :end copy;
         },
         true,
@@ -349,7 +350,7 @@ pub fn containedRowCached(
             tl_pin,
             end: {
                 var copy: Pin = pin;
-                copy.x = s.pages.cols - 1;
+                copy.x = copy.node.data.size.cols - 1;
                 break :end copy;
             },
             false,
@@ -381,7 +382,7 @@ pub fn containedRowCached(
         },
         end: {
             var copy: Pin = pin;
-            copy.x = s.pages.cols - 1;
+            copy.x = copy.node.data.size.cols - 1;
             break :end copy;
         },
         false,
@@ -1595,4 +1596,47 @@ test "Selection: containedRow" {
             s.pages.pin(.{ .screen = .{ .x = 1, .y = 1 } }).?,
         ).?);
     }
+}
+
+test "Selection: containedRow clamps mixed-width pages" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.allocator, .{
+        .cols = 4,
+        .rows = 3,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 2 });
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const middle = first.next.?;
+    const last = middle.next.?;
+    middle.data.size.cols = 2;
+
+    const linear = Selection.init(
+        .{ .node = first, .x = 1 },
+        .{ .node = last, .x = 1 },
+        false,
+    );
+    const linear_row = linear.containedRow(
+        &s,
+        .{ .node = middle },
+    ).?;
+    _ = linear_row.end().rowAndCell();
+    try testing.expect((Pin{ .node = middle }).eql(linear_row.start()));
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(linear_row.end()));
+
+    const rectangle = Selection.init(
+        .{ .node = first, .x = 1 },
+        .{ .node = last, .x = 3 },
+        true,
+    );
+    const rectangle_row = rectangle.containedRow(
+        &s,
+        .{ .node = middle },
+    ).?;
+    _ = rectangle_row.end().rowAndCell();
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.start()));
+    try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.end()));
 }
