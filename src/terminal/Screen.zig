@@ -548,20 +548,30 @@ pub fn clone(
             }
 
             // We move the top pin back in bounds to the top row.
+            const node = pages.pages.first.?;
             break :start try pages.trackPin(.{
-                .node = pages.pages.first.?,
-                .x = if (sel.rectangle) ordered.tl.x else 0,
+                .node = node,
+                .x = if (sel.rectangle)
+                    @min(ordered.tl.x, node.data.size.cols - 1)
+                else
+                    0,
             });
         };
 
         // If we got to this point it means that the selection is not
         // fully out of bounds, so we move the bottom right pin back
         // in bounds if it isn't already.
-        const end_pin = pin_remap.get(ordered.br) orelse try pages.trackPin(.{
-            .node = pages.pages.last.?,
-            .x = if (sel.rectangle) ordered.br.x else pages.cols - 1,
-            .y = pages.pages.last.?.data.size.rows - 1,
-        });
+        const end_pin = pin_remap.get(ordered.br) orelse end: {
+            const node = pages.pages.last.?;
+            break :end try pages.trackPin(.{
+                .node = node,
+                .x = if (sel.rectangle)
+                    @min(ordered.br.x, node.data.size.cols - 1)
+                else
+                    node.data.size.cols - 1,
+                .y = node.data.size.rows - 1,
+            });
+        };
 
         break :sel .{
             .bounds = .{ .tracked = .{
@@ -6665,6 +6675,51 @@ test "Screen: clone contains subset of selection" {
             .y = 3,
         } }, s2.pages.pointFromPin(.active, sel.end()).?);
     }
+}
+
+test "Screen: clone clamps clipped selections to mixed-width pages" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 4, .rows = 3, .max_scrollback = 0 });
+    defer s.deinit();
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 2 });
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const middle = first.next.?;
+    const last = middle.next.?;
+    middle.data.size.cols = 2;
+
+    try s.select(Selection.init(
+        .{ .node = first },
+        .{ .node = last, .x = 3 },
+        false,
+    ));
+    var linear = try s.clone(
+        alloc,
+        .{ .screen = .{} },
+        .{ .screen = .{ .y = 1 } },
+    );
+    defer linear.deinit();
+    const linear_end = linear.selection.?.end();
+    _ = linear_end.rowAndCell();
+    try testing.expectEqual(@as(size.CellCountInt, 1), linear_end.x);
+
+    try s.select(Selection.init(
+        .{ .node = first, .x = 3 },
+        .{ .node = last, .x = 3 },
+        true,
+    ));
+    var rectangle = try s.clone(
+        alloc,
+        .{ .screen = .{ .y = 1 } },
+        null,
+    );
+    defer rectangle.deinit();
+    const rectangle_start = rectangle.selection.?.start();
+    _ = rectangle_start.rowAndCell();
+    try testing.expectEqual(@as(size.CellCountInt, 1), rectangle_start.x);
 }
 
 test "Screen: clone contains subset of rectangle selection" {
