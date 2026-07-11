@@ -20,7 +20,7 @@ pub const Id = size.HyperlinkCountInt;
 // The mapping of cell to hyperlink. We use an offset hash map to save space
 // since its very unlikely a cell is a hyperlink, so its a waste to store
 // the hyperlink ID in the cell itself.
-pub const Map = AutoOffsetHashMap(Offset(Cell), Id);
+pub const Map = AutoOffsetHashMap(Offset(Cell), Id, 80);
 
 /// Whether a hyperlink's URI may become a clickable anchor in text exported
 /// for other applications (the HTML copy). The URI is chosen by whatever

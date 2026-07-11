@@ -42,12 +42,24 @@ const Offset = @import("size.zig").Offset;
 const OffsetBuf = @import("size.zig").OffsetBuf;
 const getOffset = @import("size.zig").getOffset;
 
-pub fn AutoOffsetHashMap(comptime K: type, comptime V: type) type {
-    return OffsetHashMap(K, V, AutoContext(K));
+/// The default preserves the original behavior of allowing every raw slot to
+/// be occupied. Callers can choose a lower value to bound probe lengths.
+pub const default_max_load_percentage: u8 = 100;
+
+pub fn AutoOffsetHashMap(
+    comptime K: type,
+    comptime V: type,
+    comptime max_load_percentage: u8,
+) type {
+    return OffsetHashMap(K, V, AutoContext(K), max_load_percentage);
 }
 
-fn AutoHashMapUnmanaged(comptime K: type, comptime V: type) type {
-    return HashMapUnmanaged(K, V, AutoContext(K));
+fn AutoHashMapUnmanaged(
+    comptime K: type,
+    comptime V: type,
+    comptime max_load_percentage: u8,
+) type {
+    return HashMapUnmanaged(K, V, AutoContext(K), max_load_percentage);
 }
 
 fn AutoContext(comptime K: type) type {
@@ -64,12 +76,18 @@ pub fn OffsetHashMap(
     comptime K: type,
     comptime V: type,
     comptime Context: type,
+    comptime max_load_percentage: u8,
 ) type {
     return struct {
         const Self = @This();
 
         /// This is the pointer-based map that we're wrapping.
-        pub const Unmanaged = HashMapUnmanaged(K, V, Context);
+        pub const Unmanaged = HashMapUnmanaged(
+            K,
+            V,
+            Context,
+            max_load_percentage,
+        );
         pub const Layout = Unmanaged.Layout;
 
         /// This is the alignment that the base pointer must have.
@@ -81,7 +99,7 @@ pub fn OffsetHashMap(
         /// HashMap with the given capacity. The base ptr must also be
         /// aligned to base_align.
         pub fn layout(cap: Unmanaged.Size) Layout {
-            return Unmanaged.layoutForCapacity(cap);
+            return Unmanaged.layoutForSize(cap);
         }
 
         /// Initialize a new HashMap with the given capacity and backing
@@ -112,12 +130,15 @@ fn HashMapUnmanaged(
     comptime K: type,
     comptime V: type,
     comptime Context: type,
+    comptime max_load_percentage: u8,
 ) type {
     return struct {
         const Self = @This();
 
         comptime {
             assert(@alignOf(Metadata) == 1);
+            assert(max_load_percentage > 0);
+            assert(max_load_percentage <= 100);
         }
 
         const header_align = @alignOf(Header);
@@ -166,6 +187,11 @@ fn HashMapUnmanaged(
             keys: Offset(K),
             capacity: Size,
             size: Size,
+
+            /// Number of insertions into free slots allowed before the map
+            /// must be rebuilt. Removing an entry creates a tombstone and
+            /// intentionally does not restore this count.
+            available: Size,
         };
 
         /// Metadata for a slot. It can be in three states: empty, used or
@@ -301,6 +327,7 @@ fn HashMapUnmanaged(
             const hdr = map.header();
             hdr.capacity = layout.capacity;
             hdr.size = 0;
+            hdr.available = maxLoadForCapacity(layout.capacity);
             if (@sizeOf([*]K) != 0) hdr.keys = metadata_buf.member(K, layout.keys_start);
             if (@sizeOf([*]V) != 0) hdr.values = metadata_buf.member(V, layout.vals_start);
             map.initMetadatas();
@@ -322,6 +349,7 @@ fn HashMapUnmanaged(
             if (self.metadata) |_| {
                 self.initMetadatas();
                 self.header().size = 0;
+                self.header().available = self.maxLoad();
             }
         }
 
@@ -345,6 +373,12 @@ fn HashMapUnmanaged(
             if (self.metadata == null) return 0;
 
             return self.header().capacity;
+        }
+
+        /// Maximum number of occupied or tombstone slots before the map must
+        /// be rebuilt. This bounds unsuccessful probe lengths.
+        pub fn maxLoad(self: *const Self) Size {
+            return maxLoadForCapacity(self.capacity());
         }
 
         pub fn iterator(self: *const Self) Iterator {
@@ -430,6 +464,7 @@ fn HashMapUnmanaged(
             }
 
             const fingerprint = Metadata.takeFingerprint(hash);
+            if (metadata[0].isFree()) self.header().available -= 1;
             metadata[0].fill(fingerprint);
             self.keys()[idx] = key;
             self.values()[idx] = value;
@@ -646,6 +681,8 @@ fn HashMapUnmanaged(
             return null;
         }
 
+        /// The get-or-put family may rehash a fragmented table. Any key or
+        /// value pointers previously returned by this map may be invalidated.
         pub fn getOrPut(self: *Self, key: K) Allocator.Error!GetOrPutResult {
             if (@sizeOf(Context) != 0)
                 @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call getOrPutContext instead.");
@@ -665,6 +702,18 @@ fn HashMapUnmanaged(
         }
         pub fn getOrPutContextAdapted(self: *Self, key: anytype, key_ctx: anytype) Allocator.Error!GetOrPutResult {
             self.growIfNeeded(1) catch |err| {
+                // Canonical lookups can rebuild resident keys in place. If
+                // live entries still fit, insertion headroom was consumed by
+                // tombstones rather than live load.
+                if (comptime @TypeOf(key) == K and
+                    @TypeOf(key_ctx) == Context)
+                {
+                    if (self.header().size < self.maxLoad()) {
+                        self.rehash(key_ctx);
+                        return self.getOrPutAssumeCapacityAdapted(key, key_ctx);
+                    }
+                }
+
                 // If allocation fails, try to do the lookup anyway.
                 // If we find an existing item, we can return it.
                 // Otherwise return the error, we could not add another.
@@ -705,6 +754,7 @@ fn HashMapUnmanaged(
             var idx = @as(usize, @truncate(hash & mask));
 
             var first_tombstone_idx: usize = self.capacity(); // invalid index
+            var tombstones: Size = 0;
             var metadata = self.metadata.? + idx;
             while (!metadata[0].isFree() and limit != 0) {
                 if (metadata[0].isUsed() and metadata[0].fingerprint == fingerprint) {
@@ -724,8 +774,24 @@ fn HashMapUnmanaged(
                             .found_existing = true,
                         };
                     }
-                } else if (first_tombstone_idx == self.capacity() and metadata[0].isTombstone()) {
-                    first_tombstone_idx = idx;
+                } else if (metadata[0].isTombstone()) {
+                    if (first_tombstone_idx == self.capacity()) {
+                        first_tombstone_idx = idx;
+                    }
+
+                    // Rehash once this probe demonstrates meaningful
+                    // fragmentation. Only canonical lookups have the
+                    // context required to rehash resident K values.
+                    if (comptime @TypeOf(key) == K and @TypeOf(ctx) == Context) {
+                        tombstones += 1;
+                        // Amortize the O(capacity) rebuild and avoid doing it
+                        // for an otherwise healthy, nearly full table.
+                        const threshold = @max(self.capacity() / 8, 1);
+                        if (tombstones >= threshold) {
+                            self.rehash(ctx);
+                            return self.getOrPutAssumeCapacityAdapted(key, ctx);
+                        }
+                    }
                 }
 
                 limit -= 1;
@@ -739,6 +805,25 @@ fn HashMapUnmanaged(
                 metadata = self.metadata.? + idx;
             }
 
+            if (metadata[0].isFree()) {
+                // Assume-capacity callers can arrive here after a removal
+                // consumed all insertion headroom. Canonical lookups can
+                // rebuild resident keys before consuming another free slot.
+                if (self.header().available == 0) {
+                    if (comptime @TypeOf(key) == K and
+                        @TypeOf(ctx) == Context)
+                    {
+                        assert(self.header().size < self.maxLoad());
+                        self.rehash(ctx);
+                        return self.getOrPutAssumeCapacityAdapted(key, ctx);
+                    }
+
+                    // Adapted contexts cannot hash resident keys to rehash.
+                    // Their caller must honor the assume-capacity contract.
+                    assert(self.header().available > 0);
+                }
+                self.header().available -= 1;
+            }
             metadata[0].fill(fingerprint);
             const new_key = &self.keys()[idx];
             const new_value = &self.values()[idx];
@@ -827,9 +912,94 @@ fn HashMapUnmanaged(
             @memset(@as([*]u8, @ptrCast(self.metadata.?))[0 .. @sizeOf(Metadata) * self.capacity()], 0);
         }
 
+        /// Rebuild the map in place, removing all tombstones. This moves
+        /// entries and invalidates existing key and value pointers.
+        pub fn rehash(self: *Self, ctx: Context) void {
+            const mask = self.capacity() - 1;
+
+            const metadata = self.metadata.?;
+            const keys_ptr = self.keys();
+            const values_ptr = self.values();
+            var curr: Size = 0;
+
+            // Mark used buckets as awaiting rehash and clear tombstones.
+            while (curr < self.capacity()) : (curr += 1) {
+                metadata[curr].fingerprint = Metadata.free;
+            }
+
+            curr = 0;
+            while (curr < self.capacity()) {
+                if (!metadata[curr].isUsed()) {
+                    assert(metadata[curr].isFree());
+                    curr += 1;
+                    continue;
+                }
+
+                const hash = ctx.hash(keys_ptr[curr]);
+                const fingerprint = Metadata.takeFingerprint(hash);
+                var idx = @as(usize, @truncate(hash & mask));
+
+                // For each bucket, rehash to an index:
+                // 1) before the cursor, probed into a free slot, or
+                // 2) equal to the cursor, no need to move, or
+                // 3) ahead of the cursor, probing over already rehashed.
+                while ((idx < curr and metadata[idx].isUsed()) or
+                    (idx > curr and metadata[idx].fingerprint == Metadata.tombstone))
+                {
+                    idx = (idx + 1) & mask;
+                }
+
+                if (idx < curr) {
+                    assert(metadata[idx].isFree());
+                    metadata[idx].fill(fingerprint);
+                    keys_ptr[idx] = keys_ptr[curr];
+                    values_ptr[idx] = values_ptr[curr];
+
+                    metadata[curr].used = 0;
+                    assert(metadata[curr].isFree());
+                    keys_ptr[curr] = undefined;
+                    values_ptr[curr] = undefined;
+
+                    curr += 1;
+                } else if (idx == curr) {
+                    metadata[idx].fingerprint = fingerprint;
+                    curr += 1;
+                } else {
+                    assert(metadata[idx].fingerprint != Metadata.tombstone);
+                    metadata[idx].fingerprint = Metadata.tombstone;
+                    if (metadata[idx].isUsed()) {
+                        mem.swap(K, &keys_ptr[curr], &keys_ptr[idx]);
+                        mem.swap(V, &values_ptr[curr], &values_ptr[idx]);
+                    } else {
+                        metadata[idx].used = 1;
+                        keys_ptr[idx] = keys_ptr[curr];
+                        values_ptr[idx] = values_ptr[curr];
+
+                        metadata[curr].fingerprint = Metadata.free;
+                        metadata[curr].used = 0;
+                        keys_ptr[curr] = undefined;
+                        values_ptr[curr] = undefined;
+
+                        curr += 1;
+                    }
+                }
+            }
+
+            // Rehashing removes every tombstone, so all unused load-factor
+            // headroom is available for insertions again.
+            self.header().available = self.maxLoad() - self.header().size;
+        }
+
         fn growIfNeeded(self: *Self, new_count: Size) Allocator.Error!void {
-            const available = self.capacity() - self.header().size;
-            if (new_count > available) return error.OutOfMemory;
+            if (new_count > self.header().available) return error.OutOfMemory;
+        }
+
+        fn maxLoadForCapacity(cap: Size) Size {
+            if (cap == 0) return 0;
+            return @intCast(@divFloor(
+                @as(u64, cap) * max_load_percentage,
+                100,
+            ));
         }
 
         /// The memory layout for the underlying buffer for a given capacity.
@@ -888,6 +1058,37 @@ fn HashMapUnmanaged(
                 .capacity = new_capacity,
             };
         }
+
+        /// Returns a layout with enough raw slots to hold `new_size` entries
+        /// at the configured maximum load factor.
+        pub fn layoutForSize(new_size: Size) Layout {
+            if (new_size == 0) return layoutForCapacity(0);
+
+            // Scale the requested number of entries up to the raw slot count
+            // required by the load factor. Widen first so `new_size * 100`
+            // cannot overflow Size.
+            const minimum_capacity = std.math.divCeil(
+                u64,
+                @as(u64, new_size) * 100,
+                max_load_percentage,
+            ) catch unreachable;
+
+            // Capacities must be powers of two, so the largest capacity that
+            // fits in Size is the highest bit rather than maxInt(Size).
+            const max_capacity = @as(u64, 1) <<
+                (@typeInfo(Size).int.bits - 1);
+            if (minimum_capacity > max_capacity) {
+                return layoutForCapacity(@intCast(max_capacity));
+            }
+
+            // Linear probing uses a mask for wraparound, which requires the
+            // final raw capacity to be rounded up to a power of two.
+            const raw_capacity = std.math.ceilPowerOfTwo(
+                u64,
+                minimum_capacity,
+            ) catch unreachable;
+            return layoutForCapacity(@intCast(raw_capacity));
+        }
     };
 }
 
@@ -896,7 +1097,7 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
 test "HashMap basic usage" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
 
     const alloc = testing.allocator;
     const cap = 16;
@@ -931,7 +1132,7 @@ test "HashMap basic usage" {
 }
 
 test "HashMap ensureTotalCapacity" {
-    const Map = AutoHashMapUnmanaged(i32, i32);
+    const Map = AutoHashMapUnmanaged(i32, i32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -951,7 +1152,7 @@ test "HashMap ensureTotalCapacity" {
 }
 
 test "HashMap ensureUnusedCapacity with tombstones" {
-    const Map = AutoHashMapUnmanaged(i32, i32);
+    const Map = AutoHashMapUnmanaged(i32, i32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -969,7 +1170,7 @@ test "HashMap ensureUnusedCapacity with tombstones" {
 }
 
 test "HashMap clearRetainingCapacity" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 16;
 
     const alloc = testing.allocator;
@@ -1000,7 +1201,7 @@ test "HashMap clearRetainingCapacity" {
 }
 
 test "HashMap ensureTotalCapacity with existing elements" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = Map.minimal_capacity;
 
     const alloc = testing.allocator;
@@ -1019,7 +1220,7 @@ test "HashMap ensureTotalCapacity with existing elements" {
 }
 
 test "HashMap remove" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1057,7 +1258,7 @@ test "HashMap remove" {
 }
 
 test "HashMap reverse removes" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1085,7 +1286,7 @@ test "HashMap reverse removes" {
 }
 
 test "HashMap multiple removes on same metadata" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1128,7 +1329,7 @@ test "HashMap multiple removes on same metadata" {
 }
 
 test "HashMap put and remove loop in random order" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 64;
 
     const alloc = testing.allocator;
@@ -1166,7 +1367,7 @@ test "HashMap put and remove loop in random order" {
 }
 
 test "HashMap put" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1197,7 +1398,7 @@ test "HashMap put" {
 }
 
 test "HashMap put full load" {
-    const Map = AutoHashMapUnmanaged(usize, usize);
+    const Map = AutoHashMapUnmanaged(usize, usize, default_max_load_percentage);
     const cap = 16;
 
     const alloc = testing.allocator;
@@ -1213,7 +1414,7 @@ test "HashMap put full load" {
 }
 
 test "HashMap putAssumeCapacity" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1248,7 +1449,7 @@ test "HashMap putAssumeCapacity" {
 }
 
 test "HashMap repeat putAssumeCapacity/remove" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1283,8 +1484,175 @@ test "HashMap repeat putAssumeCapacity/remove" {
     try expectEqual(map.count(), limit);
 }
 
+test "HashMap clobber insert rehashes exhausted headroom" {
+    const Context = struct {
+        pub fn hash(_: @This(), key: u32) u64 {
+            return key;
+        }
+
+        pub fn eql(_: @This(), a: u32, b: u32) bool {
+            return a == b;
+        }
+    };
+    const Map = HashMapUnmanaged(u32, u32, Context, 80);
+    const cap = 16;
+
+    const alloc = testing.allocator;
+    const layout = Map.layoutForCapacity(cap);
+    const buf = try alloc.alignedAlloc(u8, Map.base_align, layout.total_size);
+    defer alloc.free(buf);
+    var map = Map.init(.init(buf), layout);
+
+    const max_load = map.maxLoad();
+    for (0..max_load) |i| {
+        map.putAssumeCapacityNoClobberContext(
+            @intCast(i),
+            @intCast(i),
+            .{},
+        );
+    }
+
+    try expect(map.removeContext(0, .{}));
+    map.putAssumeCapacityContext(15, 15, .{});
+
+    try expectEqual(max_load, map.count());
+    try expectEqual(15, map.getContext(15, .{}).?);
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        try expect(!metadata.isTombstone());
+    }
+}
+
+test "HashMap getOrPut rehashes a fragmented probe" {
+    const Context = struct {
+        pub fn hash(_: @This(), _: u32) u64 {
+            return 0;
+        }
+
+        pub fn eql(_: @This(), a: u32, b: u32) bool {
+            return a == b;
+        }
+    };
+    const AdaptedContext = struct {
+        pub fn hash(_: @This(), _: []const u8) u64 {
+            return 0;
+        }
+
+        pub fn eql(_: @This(), adapted: []const u8, key: u32) bool {
+            return std.fmt.parseInt(u32, adapted, 10) catch unreachable == key;
+        }
+    };
+    const Map = HashMapUnmanaged(
+        u32,
+        u32,
+        Context,
+        default_max_load_percentage,
+    );
+    const cap = 32;
+
+    const alloc = testing.allocator;
+    const layout = Map.layoutForCapacity(cap);
+    const buf = try alloc.alignedAlloc(u8, Map.base_align, layout.total_size);
+    defer alloc.free(buf);
+    var map = Map.init(.init(buf), layout);
+
+    for (0..cap) |i| {
+        map.putAssumeCapacityNoClobberContext(@intCast(i), @intCast(i), .{});
+    }
+
+    // Rehashing preserves a table at the supported 100% live occupancy.
+    map.rehash(.{});
+    try expectEqual(cap, map.count());
+    for (0..cap) |i| {
+        try expectEqual(i, map.getContext(@intCast(i), .{}).?);
+    }
+
+    for (0..cap / 2) |i| {
+        try expect(map.removeContext(@intCast(i), .{}));
+    }
+
+    var tombstones: usize = 0;
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        if (metadata.isTombstone()) tombstones += 1;
+    }
+    try expectEqual(cap / 2, tombstones);
+
+    // An adapted lookup cannot rehash without the context for resident keys.
+    const adapted = try map.getOrPutAdapted("31", AdaptedContext{});
+    try expect(adapted.found_existing);
+    try expectEqual(cap - 1, adapted.value_ptr.*);
+    tombstones = 0;
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        if (metadata.isTombstone()) tombstones += 1;
+    }
+    try expectEqual(cap / 2, tombstones);
+
+    // Looking up an existing key beyond the tombstones rehashes and retries
+    // before returning pointers into the map.
+    const gop = try map.getOrPutContext(cap - 1, .{});
+    try expect(gop.found_existing);
+    try expectEqual(cap - 1, gop.value_ptr.*);
+    try expectEqual(cap / 2, map.count());
+
+    tombstones = 0;
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        if (metadata.isTombstone()) tombstones += 1;
+    }
+    try expectEqual(0, tombstones);
+
+    for (cap / 2..cap) |i| {
+        try expectEqual(i, map.getContext(@intCast(i), .{}).?);
+    }
+}
+
+test "HashMap rehash with real hashes" {
+    const Map = AutoHashMapUnmanaged(
+        u32,
+        u32,
+        default_max_load_percentage,
+    );
+    const cap = 512;
+
+    const alloc = testing.allocator;
+    const layout = Map.layoutForCapacity(cap);
+    const buf = try alloc.alignedAlloc(u8, Map.base_align, layout.total_size);
+    defer alloc.free(buf);
+    var map = Map.init(.init(buf), layout);
+
+    for (0..cap) |i| {
+        map.putAssumeCapacityNoClobber(@intCast(i), @intCast(i));
+    }
+
+    map.rehash(undefined);
+    try expectEqual(cap, map.count());
+    for (0..cap) |i| {
+        try expectEqual(i, map.get(@intCast(i)).?);
+    }
+
+    var expected_count: usize = cap;
+    for (0..cap) |i| {
+        if (i % 3 == 0) {
+            try expect(map.remove(@intCast(i)));
+            expected_count -= 1;
+        }
+    }
+
+    map.rehash(undefined);
+    try expectEqual(expected_count, map.count());
+    for (0..cap) |i| {
+        if (i % 3 == 0) {
+            try expectEqual(null, map.get(@intCast(i)));
+        } else {
+            try expectEqual(i, map.get(@intCast(i)).?);
+        }
+    }
+
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        try expect(!metadata.isTombstone());
+    }
+}
+
 test "HashMap getOrPut" {
-    const Map = AutoHashMapUnmanaged(u32, u32);
+    const Map = AutoHashMapUnmanaged(u32, u32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1313,7 +1681,7 @@ test "HashMap getOrPut" {
 }
 
 test "HashMap basic hash map usage" {
-    const Map = AutoHashMapUnmanaged(i32, i32);
+    const Map = AutoHashMapUnmanaged(i32, i32, default_max_load_percentage);
     const cap = 32;
 
     const alloc = testing.allocator;
@@ -1364,7 +1732,7 @@ test "HashMap basic hash map usage" {
 }
 
 test "HashMap ensureUnusedCapacity" {
-    const Map = AutoHashMapUnmanaged(u64, u64);
+    const Map = AutoHashMapUnmanaged(u64, u64, default_max_load_percentage);
     const cap = 64;
 
     const alloc = testing.allocator;
@@ -1378,7 +1746,7 @@ test "HashMap ensureUnusedCapacity" {
 }
 
 test "HashMap removeByPtr" {
-    const Map = AutoHashMapUnmanaged(i32, u64);
+    const Map = AutoHashMapUnmanaged(i32, u64, default_max_load_percentage);
     const cap = 64;
 
     const alloc = testing.allocator;
@@ -1409,7 +1777,7 @@ test "HashMap removeByPtr" {
 }
 
 test "HashMap removeByPtr 0 sized key" {
-    const Map = AutoHashMapUnmanaged(i32, u64);
+    const Map = AutoHashMapUnmanaged(i32, u64, default_max_load_percentage);
     const cap = 64;
 
     const alloc = testing.allocator;
@@ -1433,7 +1801,7 @@ test "HashMap removeByPtr 0 sized key" {
 }
 
 test "HashMap repeat fetchRemove" {
-    const Map = AutoHashMapUnmanaged(u64, void);
+    const Map = AutoHashMapUnmanaged(u64, void, default_max_load_percentage);
     const cap = 64;
 
     const alloc = testing.allocator;
@@ -1461,7 +1829,11 @@ test "HashMap repeat fetchRemove" {
 }
 
 test "OffsetHashMap basic usage" {
-    const OffsetMap = AutoOffsetHashMap(u32, u32);
+    const OffsetMap = AutoOffsetHashMap(
+        u32,
+        u32,
+        default_max_load_percentage,
+    );
     const cap = 16;
 
     const alloc = testing.allocator;
@@ -1496,7 +1868,11 @@ test "OffsetHashMap basic usage" {
 }
 
 test "OffsetHashMap remake map" {
-    const OffsetMap = AutoOffsetHashMap(u32, u32);
+    const OffsetMap = AutoOffsetHashMap(
+        u32,
+        u32,
+        default_max_load_percentage,
+    );
     const cap = 16;
 
     const alloc = testing.allocator;
@@ -1516,12 +1892,44 @@ test "OffsetHashMap remake map" {
     }
 }
 
+test "OffsetHashMap maximum load leaves probe headroom" {
+    const OffsetMap = AutoOffsetHashMap(u32, u32, 80);
+    const alloc = testing.allocator;
+    const requested_size = 16;
+    const layout = OffsetMap.layout(requested_size);
+    const buf = try alloc.alignedAlloc(
+        u8,
+        OffsetMap.base_align,
+        layout.total_size,
+    );
+    defer alloc.free(buf);
+
+    const offset_map = OffsetMap.init(.init(buf), layout);
+    var map = offset_map.map(buf);
+
+    try testing.expect(map.capacity() > requested_size);
+    try testing.expect(map.maxLoad() >= requested_size);
+    try testing.expect(map.maxLoad() < map.capacity());
+
+    for (0..requested_size) |i| try map.put(@intCast(i), @intCast(i));
+    for (0..100) |_| {
+        for (0..requested_size) |i| {
+            try testing.expect(map.remove(@intCast(i)));
+            try map.put(@intCast(i), @intCast(i));
+        }
+    }
+
+    for (0..requested_size) |i| {
+        try testing.expectEqual(@as(u32, @intCast(i)), map.get(@intCast(i)));
+    }
+}
+
 test "layoutForCapacity no overflow for large capacity" {
     // Test that layoutForCapacity correctly handles large capacities without overflow.
     // Prior to the fix, new_capacity (u32) was multiplied before widening to usize,
     // causing overflow when new_capacity * @sizeOf(K) exceeded 2^32.
     // See: https://github.com/ghostty-org/ghostty/issues/9862
-    const Map = AutoHashMapUnmanaged(u64, u64);
+    const Map = AutoHashMapUnmanaged(u64, u64, default_max_load_percentage);
 
     // Use 2^30 capacity - this would overflow in u32 when multiplied by @sizeOf(u64)=8
     // 0x40000000 * 8 = 0x2_0000_0000 which wraps to 0 in u32

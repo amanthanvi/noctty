@@ -4720,11 +4720,10 @@ test "Terminal: VS16 widening when the spacer tail grows the page" {
 
     // Fill the page hyperlink map until a single slot is left. The '#' below
     // takes that slot so the spacer tail is what forces the page to grow.
-    // (This fork's map has no load-factor limit, so it fills to capacity.)
     while (true) {
         const page = &t.screens.active.cursor.page_pin.node.data;
         const map = page.hyperlink_map.map(page.memory);
-        if (map.capacity() - map.count() == 1) break;
+        if (map.maxLoad() - map.count() == 1) break;
         try t.print('x');
     }
 

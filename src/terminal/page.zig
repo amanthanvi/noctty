@@ -92,7 +92,11 @@ const grapheme_chunk = grapheme_chunk_len * @sizeOf(u21);
 const GraphemeAlloc = BitmapAllocator(grapheme_chunk);
 const grapheme_count_default = GraphemeAlloc.bitmap_bit_size;
 pub const grapheme_bytes_default = grapheme_count_default * grapheme_chunk;
-const GraphemeMap = AutoOffsetHashMap(Offset(Cell), Offset(u21).Slice);
+const GraphemeMap = AutoOffsetHashMap(
+    Offset(Cell),
+    Offset(u21).Slice,
+    hash_map.default_max_load_percentage,
+);
 
 /// The allocator used for shared utf8-encoded strings within a page.
 /// Note the chunk size below is the minimum size of a single allocation
@@ -754,11 +758,11 @@ pub const Page = struct {
             }
         }
 
-        // The hyperlink_map capacity in layout() is computed as:
-        //   hyperlink_count * hyperlink_cell_multiplier (rounded to power of 2)
-        // We need enough hyperlink_bytes so that when layout() computes
-        // the map capacity, it can accommodate all hyperlink cells. This
-        // is unit tested.
+        // layout() requests `hyperlink_count * hyperlink_cell_multiplier`
+        // usable map entries. The map layout adds load-factor headroom and
+        // rounds the raw slot count to a power of two. We need enough
+        // hyperlink_bytes for that requested entry count to accommodate all
+        // hyperlink cells. This is unit tested.
         const hyperlink_cap = cap: {
             const hyperlink_count = id_set.count();
             const hyperlink_set_cap = hyperlink.Set.capacityForCount(hyperlink_count);
@@ -1490,7 +1494,7 @@ pub const Page = struct {
     /// Returns the hyperlink capacity for the page. This isn't the byte
     /// size but the number of unique cells that can have hyperlink data.
     pub inline fn hyperlinkCapacity(self: *const Page) usize {
-        return self.hyperlink_map.map(self.memory).capacity();
+        return self.hyperlink_map.map(self.memory).maxLoad();
     }
 
     /// Set the graphemes for the given cell. This asserts that the cell
@@ -1756,7 +1760,7 @@ pub const Page = struct {
                 u32,
                 hyperlink_count * hyperlink_cell_multiplier,
             ) orelse break :count std.math.maxInt(u32);
-            break :count std.math.ceilPowerOfTwoAssert(u32, mult);
+            break :count mult;
         };
         const hyperlink_map_layout = hyperlink.Map.layout(hyperlink_map_count);
         const hyperlink_map_start = alignForward(usize, hyperlink_set_end, hyperlink.Map.base_align.toByteUnits());
@@ -3947,4 +3951,21 @@ test "Page exactRowCapacity hyperlink map capacity for many cells" {
         const cloned_cell = &cloned.rows.ptr(cloned.memory)[0].cells.ptr(cloned.memory)[x];
         try testing.expect(cloned_cell.hyperlink);
     }
+}
+
+test "Page layout avoids double rounding hyperlink map capacity" {
+    const hyperlink_count = 3;
+    const layout = Page.layout(.{
+        .cols = 1,
+        .rows = 1,
+        .hyperlink_bytes = hyperlink_count * @sizeOf(hyperlink.Set.Item),
+    });
+
+    // Three set entries request 48 usable map entries. Scaling that for the
+    // 80% load factor needs 60 raw slots, which rounds once to 64. Rounding
+    // the request before applying the load factor would allocate 128 slots.
+    try std.testing.expectEqual(
+        @as(u32, 64),
+        layout.hyperlink_map_layout.capacity,
+    );
 }
