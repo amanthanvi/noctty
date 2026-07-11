@@ -110,7 +110,26 @@ jobs:
               Select-Object -First 1 -ExpandProperty FullName
             if (-not $resultPath) { continue }
             $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-            $hashesBound = @($result.artifacts | Where-Object { -not $_.sha256 }).Count -eq 0
+            $artifactRootFull = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            $resultDir = Split-Path -Parent $resultPath
+            $hashesBound = $true
+            foreach ($artifact in @($result.artifacts)) {
+              if (-not $artifact.sha256 -or -not $artifact.path) {
+                $hashesBound = $false
+                break
+              }
+              $artifactPath = [IO.Path]::GetFullPath((Join-Path $resultDir ([string]$artifact.path)))
+              if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+                $hashesBound = $false
+                break
+              }
+              $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {
+                $hashesBound = $false
+                break
+              }
+            }
             if ($result.status -eq 'pass' -and
                 $result.implementation_commit -eq $sha -and
                 [string]$result.workflow_run_id -eq [string]$run.databaseId -and

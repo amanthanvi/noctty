@@ -230,6 +230,7 @@ pub const TerminalProvider = struct {
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
     state: TerminalState,
+    detached: std.atomic.Value(bool),
 
     const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
         .QueryInterface = TerminalProvider.QueryInterface,
@@ -277,8 +278,15 @@ pub const TerminalProvider = struct {
             .alloc = alloc,
             .hwnd = hwnd,
             .state = state,
+            .detached = std.atomic.Value(bool).init(false),
         };
         return self;
+    }
+
+    /// Disconnect from the HWND before its owner is destroyed. UIA clients
+    /// may retain COM references beyond terminal window teardown.
+    pub fn detach(self: *TerminalProvider) void {
+        self.detached.store(true, .release);
     }
 
     fn fromBase(p: *com.IRawElementProviderSimple) *TerminalProvider {
@@ -466,6 +474,10 @@ pub const TerminalProvider = struct {
         out: *?*com.IRawElementProviderSimple,
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
+        if (self.detached.load(.acquire)) {
+            out.* = null;
+            return @bitCast(@as(u32, 0x80040201));
+        }
         return com.UiaHostProviderFromHwnd(self.hwnd, out);
     }
 
@@ -1699,6 +1711,22 @@ test "detached palette provider rejects late UIA name queries" {
     );
     try std.testing.expect(hr != com.S_OK);
     try std.testing.expectEqual(@as(u32, 0), callback_calls);
+}
+
+test "detached terminal provider rejects late host provider queries" {
+    var data = TestTerminalStateData{};
+    const provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+    provider.detach();
+
+    var host: ?*com.IRawElementProviderSimple = undefined;
+    const hr = TerminalProvider.get_HostRawElementProvider(&provider.base, &host);
+    try std.testing.expectEqual(@as(com.HRESULT, @bitCast(@as(u32, 0x80040201))), hr);
+    try std.testing.expectEqual(@as(?*com.IRawElementProviderSimple, null), host);
 }
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {

@@ -25343,6 +25343,7 @@ pub const Surface = struct {
         if (self.terminal_uia_context) |ctx| {
             ctx.detachSurface();
             if (self.terminal_uia_provider) |provider| {
+                provider.detach();
                 _ = win32_uia.TerminalProvider.Release(&provider.base);
                 self.terminal_uia_provider = null;
             }
