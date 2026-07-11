@@ -1,0 +1,18 @@
+{
+  "schema_version": "winghostty.verification.result.v1",
+  "example": true,
+  "scenario_id": "example.windows.portable-cli.x64",
+  "status": "pass",
+  "started_at": "2026-07-11T00:00:00Z",
+  "finished_at": "2026-07-11T00:00:01Z",
+  "duration_ms": 1000,
+  "baseline_commit": null,
+  "implementation_commit": "0000000000000000000000000000000000000000",
+  "workflow_run_id": null,
+  "workflow_run_attempt": null,
+  "environment": { "os": "Windows", "architecture": "x86_64" },
+  "measurements": {},
+  "assertions": [{ "id": "cli-contract", "status": "pass", "message": null }],
+  "artifacts": [{ "kind": "log", "path": "transcript.log", "sha256": "0000000000000000000000000000000000000000000000000000000000000000" }],
+  "failure": null
+}

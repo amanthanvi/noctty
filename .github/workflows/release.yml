@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,19 +43,123 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Require remote default-branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+        shell: pwsh
+        run: |
+          $defaultBranch = $env:DEFAULT_BRANCH
+          git fetch origin $defaultBranch --no-tags
+          if ($LASTEXITCODE -ne 0) { throw "Failed to fetch origin/$defaultBranch." }
+          $current = (git rev-parse HEAD).Trim()
+          $defaultHead = (git rev-parse "origin/$defaultBranch").Trim()
+          if ($current -ne $defaultHead) {
+            throw "Release SHA $current is not remote default-branch head $defaultHead."
+          }
+          if ($env:RELEASE_EVENT_NAME -eq "push") {
+            $tagCommit = (git rev-list -n 1 $env:RELEASE_REF_NAME).Trim()
+            if ($tagCommit -ne $defaultHead) {
+              throw "Release tag does not point at remote default-branch head."
+            }
+          }
+      - name: Require successful Test workflow for release SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          $runsJson = gh run list `
+            --repo $env:GH_REPOSITORY `
+            --workflow Test `
+            --commit $sha `
+            --status success `
+            --limit 20 `
+            --json databaseId,headSha,conclusion,status
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to query Test workflow runs for $sha."
+          }
+          $runs = @($runsJson | ConvertFrom-Json)
+          $matching = @($runs | Where-Object {
+            $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success"
+          })
+          if ($matching.Count -eq 0) {
+            throw "Release SHA $sha has no completed successful Test workflow run."
+          }
+          $evidenceRun = $null
+          foreach ($run in $matching) {
+            $jobs = gh api "repos/$env:GH_REPOSITORY/actions/runs/$($run.databaseId)/jobs?per_page=100" |
+              ConvertFrom-Json
+            $interactive = @($jobs.jobs | Where-Object {
+              $_.name -eq 'Windows 11 Interactive Composite' -and $_.conclusion -eq 'success'
+            })
+            if ($interactive.Count -eq 0) { continue }
+
+            $artifactName = "flagship-interactive-win11-$($run.databaseId)"
+            $artifactRoot = Join-Path $env:RUNNER_TEMP "flagship-release-evidence-$($run.databaseId)"
+            New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+            gh run download $run.databaseId --repo $env:GH_REPOSITORY --name $artifactName --dir $artifactRoot
+            if ($LASTEXITCODE -ne 0) { continue }
+            $resultPath = Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -Recurse |
+              Select-Object -First 1 -ExpandProperty FullName
+            if (-not $resultPath) { continue }
+            $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+            $artifactRootFull = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+            $resultDir = Split-Path -Parent $resultPath
+            $hashesBound = $true
+            foreach ($artifact in @($result.artifacts)) {
+              if (-not $artifact.sha256 -or -not $artifact.path) {
+                $hashesBound = $false
+                break
+              }
+              $artifactPath = [IO.Path]::GetFullPath((Join-Path $resultDir ([string]$artifact.path)))
+              if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+                $hashesBound = $false
+                break
+              }
+              $actualHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {
+                $hashesBound = $false
+                break
+              }
+            }
+            if ($result.status -eq 'pass' -and
+                $result.implementation_commit -eq $sha -and
+                [string]$result.workflow_run_id -eq [string]$run.databaseId -and
+                $hashesBound) {
+              $evidenceRun = $run
+              break
+            }
+          }
+          if (-not $evidenceRun) {
+            throw "Release SHA $sha has no successful interactive Win11 Test run with exact-SHA, hash-bound evidence. Dispatch Test with run_interactive_win11=true first."
+          }
+          Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."
 
       - name: Resolve release metadata
         id: meta
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          RELEASE_PRERELEASE_INPUT: ${{ inputs.prerelease }}
         shell: pwsh
         run: |
-          if ("${{ github.event_name }}" -eq "push") {
-            $tag = "${{ github.ref_name }}"
+          if ($env:RELEASE_EVENT_NAME -eq "push") {
+            $tag = $env:RELEASE_REF_NAME
             $version = $tag.TrimStart('v')
             $prerelease = "false"
           } else {
-            $version = "${{ inputs.version }}"
+            $version = $env:RELEASE_VERSION_INPUT
             $tag = "v$version"
-            $prerelease = "${{ inputs.prerelease }}"
+            $prerelease = $env:RELEASE_PRERELEASE_INPUT
           }
 
           $versionMatch = [regex]::Match($version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
@@ -114,12 +219,13 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      - name: Run targeted tests
+      - name: Run full test suite
         shell: pwsh
-        run: |
-          zig build test -Dtest-filter=win32
-          zig build test -Dtest-filter=scroll
-          zig build test -Dtest-filter=keybind
+        run: zig build test -Demit-test-exe=true
+
+      - name: Run native Win32 compositor tests
+        shell: pwsh
+        run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
       - name: Build and package x64 release artifacts
         shell: pwsh

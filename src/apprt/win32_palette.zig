@@ -8,6 +8,10 @@ const std = @import("std");
 const zf = @import("zf");
 const command = @import("../input/command.zig");
 
+/// Universal catalog adapter. Existing action-only APIs below remain stable
+/// while the Win32 host migrates providers onto this shared production path.
+pub const catalog = @import("win32_palette_catalog.zig");
+
 /// Non-owning view over the palette's command + cval lists.
 pub const Snapshot = struct {
     commands: []const command.Command,
@@ -151,4 +155,17 @@ test "empty query yields empty ranked slice" {
     var buf: [max_ranked]RankedIndex = undefined;
     try std.testing.expectEqual(@as(usize, 0), rankedForQuery(snap, "", &buf).len);
     try std.testing.expectEqual(@as(usize, 0), rankedForQuery(snap, "   ", &buf).len);
+}
+
+test "default actions populate universal catalog with unique stable IDs" {
+    var item_storage: [command.defaults.len]catalog.Item = undefined;
+    var payload_storage: [command.defaults.len]catalog.Payload = undefined;
+    var universal_catalog = try catalog.Catalog.init(&item_storage, &payload_storage);
+    try universal_catalog.appendActionSnapshot(Snapshot.fromDefaults());
+    try std.testing.expectEqual(command.defaults.len, universal_catalog.items().len);
+    try std.testing.expect(universal_catalog.items().len > 0);
+}
+
+test {
+    _ = catalog;
 }

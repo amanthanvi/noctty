@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://winghostty.dev/schemas/verification/result.v1.json",
+  "title": "winghostty verification result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenario_id", "status", "started_at", "finished_at", "duration_ms", "environment", "assertions", "artifacts"],
+  "properties": {
+    "schema_version": { "const": "winghostty.verification.result.v1" },
+    "example": { "type": "boolean" },
+    "scenario_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+    "status": { "enum": ["pass", "fail", "skip", "error"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "baseline_commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+    "implementation_commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+    "workflow_run_id": { "type": ["string", "null"], "pattern": "^[0-9]+$" },
+    "workflow_run_attempt": { "type": ["integer", "null"], "minimum": 1 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": { "type": ["number", "integer", "string", "boolean", "null"] }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
+          "status": { "enum": ["pass", "fail", "skip"] },
+          "message": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path"],
+        "properties": {
+          "kind": { "enum": ["result", "log", "trace", "screenshot", "package", "other"] },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "failure": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "message": { "type": "string", "minLength": 1 },
+        "type": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

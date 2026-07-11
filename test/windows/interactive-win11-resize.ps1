@@ -80,6 +80,7 @@ public static class WinghosttyResizeWin32 {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
+
 }
 '@
 
@@ -270,28 +271,41 @@ function Capture-WindowImage {
         [Parameter(Mandatory)] [string] $Path
     )
 
-    $rect = Get-WindowRectObject -Hwnd $Hwnd
-    $width = [Math]::Max(1, $rect.Width)
-    $height = [Math]::Max(1, $rect.Height)
-    $bmp = New-Object System.Drawing.Bitmap $width, $height
-    try {
-        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    $rect = $null
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $rect = Get-WindowRectObject -Hwnd $Hwnd
+        $width = [Math]::Max(1, $rect.Width)
+        $height = [Math]::Max(1, $rect.Height)
+        $bmp = New-Object System.Drawing.Bitmap $width, $height
+        $captured = $false
         try {
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
             try {
-                $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+                try {
+                    $gfx.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+                    $captured = $true
+                }
+                catch {
+                    $lastError = $_.Exception.Message
+                }
             }
-            catch {
-                throw "CopyFromScreen failed for hwnd=$Hwnd rect=$($rect | ConvertTo-Json -Compress): $($_.Exception.Message)"
+            finally {
+                $gfx.Dispose()
+            }
+            if ($captured) {
+                $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+                return
             }
         }
         finally {
-            $gfx.Dispose()
+            $bmp.Dispose()
         }
-        $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Show-ResizeHarnessWindow -Hwnd $Hwnd
+        Start-Sleep -Milliseconds 150
     }
-    finally {
-        $bmp.Dispose()
-    }
+
+    throw "CopyFromScreen failed after 3 attempts for hwnd=$Hwnd rect=$($rect | ConvertTo-Json -Compress): $lastError"
 }
 
 function Assert-VisibleSurfaceUnionFillsHostContent {

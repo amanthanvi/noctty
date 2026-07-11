@@ -31,6 +31,19 @@ pub fn raiseSelectionInvalidated(provider: *com.IRawElementProviderSimple) void 
     logIfFailed("UIA_Selection_InvalidatedEventId", hr);
 }
 
+/// Notify clients that a widget's live accessible name changed. Empty
+/// VARIANTs intentionally ask clients to re-query the provider; this avoids
+/// allocating duplicate BSTRs solely for an event whose value is already
+/// available through `GetPropertyValue`.
+pub fn raiseNameChanged(provider: *com.IRawElementProviderSimple) void {
+    raisePropertyChanged(
+        provider,
+        constants.UIA_NamePropertyId,
+        com.VARIANT.empty(),
+        com.VARIANT.empty(),
+    );
+}
+
 pub const StructureChange = enum {
     child_added,
     child_removed,

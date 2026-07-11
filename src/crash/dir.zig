@@ -45,7 +45,8 @@ pub const ReportIterator = struct {
     it: std.fs.Dir.Iterator = undefined,
 
     pub fn deinit(self: *ReportIterator) void {
-        if (self.dir) |dir| dir.close();
+        if (self.dir) |*dir| dir.close();
+        self.dir = null;
     }
 
     pub fn next(self: *ReportIterator) !?Report {

@@ -14,15 +14,15 @@
 //!   * `SettingsWindow.destroy(self)` — called from App.terminate;
 //!     `DestroyWindow` + free the struct.
 //!
-//! The editable draft is a shallow-cloned `Config` saved atomically
-//! through `AppHandle.saveAndReload`. Per AGENTS.md:49, the clone MUST
-//! NOT deinit an inherited `command` override.
+//! The editable draft is a deeply owned `Config` snapshot saved atomically
+//! through `AppHandle.saveAndReload`.
 
 const std = @import("std");
 const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
 const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
+const settings_transaction = @import("win32_settings_transaction.zig");
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
 /// live in `win32_types.zig` so this module stays free of an `*App` type
@@ -44,6 +44,8 @@ const LONG_PTR = win32_types.LONG_PTR;
 const ATOM = win32_types.ATOM;
 const COLORREF = win32_types.COLORREF;
 const RECT = win32_types.RECT;
+const GUID = windows.GUID;
+const HRESULT = windows.HRESULT;
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
@@ -75,6 +77,8 @@ const BTN_SECTION_TERMINAL: usize = 202;
 const BTN_SECTION_SHELL: usize = 203;
 const BTN_SECTION_KEYBINDINGS: usize = 204;
 const BTN_SECTION_ADVANCED: usize = 205;
+const BTN_SECTION_PRIVACY: usize = 206;
+const BTN_SECTION_UPDATES: usize = 207;
 const BTN_SAVE: usize = 301;
 const BTN_KEYBINDINGS_EDITOR: usize = 302;
 const EDIT_SCROLLBACK: usize = 401;
@@ -115,12 +119,21 @@ const BM_SETCHECK: UINT = 0x00F1;
 const BM_GETCHECK: UINT = 0x00F0;
 const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
+const MB_YESNO: UINT = 0x00000004;
+const MB_ICONWARNING: UINT = 0x00000030;
+const IDYES: c_int = 6;
 const CB_ADDSTRING: UINT = 0x0143;
 const CB_SETCURSEL: UINT = 0x014E;
 const CB_GETCURSEL: UINT = 0x0147;
 const CB_RESETCONTENT: UINT = 0x014B;
 const CBS_DROPDOWNLIST: u32 = 0x3;
 const CBS_HASSTRINGS: u32 = 0x200;
+const OBJID_CLIENT: u32 = @bitCast(@as(i32, -4));
+const CHILDID_SELF: u32 = 0;
+const PROPID_ACC_NAME = GUID.parse("{608D3DF8-8128-4AA7-A428-F55E49267291}");
+const CLSID_ACC_PROP_SERVICES = GUID.parse("{B5F8350B-0548-48B1-A6EE-88BD00B4A5E7}");
+const IID_IACC_PROP_SERVICES = GUID.parse("{6E26E776-04F0-495D-80E4-3330352E3169}");
+const CLSCTX_INPROC_SERVER: u32 = 0x1;
 
 /// Sections on the left rail. Section-specific controls (e.g. the
 /// "Open in default editor" button in Advanced) are shown / hidden on
@@ -130,6 +143,8 @@ pub const Section = enum(u32) {
     appearance,
     terminal,
     shell,
+    privacy,
+    updates,
     keybindings,
     advanced,
 
@@ -138,6 +153,8 @@ pub const Section = enum(u32) {
             BTN_SECTION_APPEARANCE => .appearance,
             BTN_SECTION_TERMINAL => .terminal,
             BTN_SECTION_SHELL => .shell,
+            BTN_SECTION_PRIVACY => .privacy,
+            BTN_SECTION_UPDATES => .updates,
             BTN_SECTION_KEYBINDINGS => .keybindings,
             BTN_SECTION_ADVANCED => .advanced,
             else => null,
@@ -149,6 +166,8 @@ pub const Section = enum(u32) {
             .appearance => std.unicode.utf8ToUtf16LeStringLiteral("Appearance"),
             .terminal => std.unicode.utf8ToUtf16LeStringLiteral("Terminal"),
             .shell => std.unicode.utf8ToUtf16LeStringLiteral("Shell"),
+            .privacy => std.unicode.utf8ToUtf16LeStringLiteral("Privacy"),
+            .updates => std.unicode.utf8ToUtf16LeStringLiteral("Updates"),
             .keybindings => std.unicode.utf8ToUtf16LeStringLiteral("Keybindings"),
             .advanced => std.unicode.utf8ToUtf16LeStringLiteral("Advanced"),
         };
@@ -159,6 +178,8 @@ pub const Section = enum(u32) {
             .appearance => "Appearance",
             .terminal => "Terminal",
             .shell => "Shell",
+            .privacy => "Privacy",
+            .updates => "Updates",
             .keybindings => "Keybindings",
             .advanced => "Advanced",
         };
@@ -169,6 +190,8 @@ pub const Section = enum(u32) {
             .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
             .terminal => "Scrollback, close confirmation, copy behavior, OSC 52 clipboard policy, link opening, and notifications.",
             .shell => "Default shell command and shell integration detection mode.",
+            .privacy => "Clipboard access, link handling, and notification privacy controls.",
+            .updates => "Automatic update policy and release channel.",
             .keybindings => "Open the config file for keybind edits; list defaults, actions, and docs from the CLI.",
             .advanced => "Updater defaults plus the text editor escape hatch for config keys that do not yet have native controls.",
         };
@@ -189,6 +212,128 @@ fn backgroundBlurFromCheckbox(
 
 const PaddingAxis = enum { x, y };
 const AppNotificationField = enum { clipboard, config };
+
+/// Ownership-safe native settings tracked by the transaction model. String and
+/// arena-backed fields (`font-family`, `theme`, and `command`) continue through
+/// the legacy staged Save path until they gain owned snapshot values.
+pub const SettingField = enum {
+    scrollback_limit,
+    font_size,
+    background_opacity,
+    window_padding_x,
+    window_padding_y,
+    trim_trailing_spaces,
+    desktop_notifications,
+    app_notify_clipboard,
+    app_notify_config,
+    confirm_close,
+    copy_on_select,
+    clipboard_read,
+    clipboard_write,
+    link_url,
+    link_previews,
+    window_theme,
+    shell_integration,
+    cursor_style,
+    background_blur,
+    padding_balance,
+    auto_update,
+    auto_update_channel,
+};
+
+pub const SettingValue = union(SettingField) {
+    scrollback_limit: @FieldType(Config, "scrollback-limit"),
+    font_size: @FieldType(Config, "font-size"),
+    background_opacity: @FieldType(Config, "background-opacity"),
+    window_padding_x: @FieldType(Config, "window-padding-x"),
+    window_padding_y: @FieldType(Config, "window-padding-y"),
+    trim_trailing_spaces: @FieldType(Config, "clipboard-trim-trailing-spaces"),
+    desktop_notifications: @FieldType(Config, "desktop-notifications"),
+    app_notify_clipboard: bool,
+    app_notify_config: bool,
+    confirm_close: @FieldType(Config, "confirm-close-surface"),
+    copy_on_select: @FieldType(Config, "copy-on-select"),
+    clipboard_read: @FieldType(Config, "clipboard-read"),
+    clipboard_write: @FieldType(Config, "clipboard-write"),
+    link_url: @FieldType(Config, "link-url"),
+    link_previews: @FieldType(Config, "link-previews"),
+    window_theme: @FieldType(Config, "window-theme"),
+    shell_integration: @FieldType(Config, "shell-integration"),
+    cursor_style: @FieldType(Config, "cursor-style"),
+    background_blur: @FieldType(Config, "background-blur"),
+    padding_balance: @FieldType(Config, "window-padding-balance"),
+    auto_update: @FieldType(Config, "auto-update"),
+    auto_update_channel: @FieldType(Config, "auto-update-channel"),
+};
+
+fn settingValueEql(a: SettingValue, b: SettingValue) bool {
+    return std.meta.eql(a, b);
+}
+
+const SettingsTransaction = settings_transaction.Transaction(SettingField, SettingValue, settingValueEql);
+const setting_field_count = std.enums.values(SettingField).len;
+
+pub const ConflictResolution = SettingsTransaction.Resolution;
+pub const ApplyId = SettingsTransaction.ApplyId;
+
+pub const SaveCompletion = union(enum) {
+    succeeded: u64,
+    failed: SaveError,
+};
+
+fn settingValue(config: *const Config, field: SettingField) SettingValue {
+    return switch (field) {
+        .scrollback_limit => .{ .scrollback_limit = config.@"scrollback-limit" },
+        .font_size => .{ .font_size = config.@"font-size" },
+        .background_opacity => .{ .background_opacity = config.@"background-opacity" },
+        .window_padding_x => .{ .window_padding_x = config.@"window-padding-x" },
+        .window_padding_y => .{ .window_padding_y = config.@"window-padding-y" },
+        .trim_trailing_spaces => .{ .trim_trailing_spaces = config.@"clipboard-trim-trailing-spaces" },
+        .desktop_notifications => .{ .desktop_notifications = config.@"desktop-notifications" },
+        .app_notify_clipboard => .{ .app_notify_clipboard = config.@"app-notifications".@"clipboard-copy" },
+        .app_notify_config => .{ .app_notify_config = config.@"app-notifications".@"config-reload" },
+        .confirm_close => .{ .confirm_close = config.@"confirm-close-surface" },
+        .copy_on_select => .{ .copy_on_select = config.@"copy-on-select" },
+        .clipboard_read => .{ .clipboard_read = config.@"clipboard-read" },
+        .clipboard_write => .{ .clipboard_write = config.@"clipboard-write" },
+        .link_url => .{ .link_url = config.@"link-url" },
+        .link_previews => .{ .link_previews = config.@"link-previews" },
+        .window_theme => .{ .window_theme = config.@"window-theme" },
+        .shell_integration => .{ .shell_integration = config.@"shell-integration" },
+        .cursor_style => .{ .cursor_style = config.@"cursor-style" },
+        .background_blur => .{ .background_blur = config.@"background-blur" },
+        .padding_balance => .{ .padding_balance = config.@"window-padding-balance" },
+        .auto_update => .{ .auto_update = config.@"auto-update" },
+        .auto_update_channel => .{ .auto_update_channel = config.@"auto-update-channel" },
+    };
+}
+
+fn setSettingValue(config: *Config, value: SettingValue) void {
+    switch (value) {
+        .scrollback_limit => |v| config.@"scrollback-limit" = v,
+        .font_size => |v| config.@"font-size" = v,
+        .background_opacity => |v| config.@"background-opacity" = v,
+        .window_padding_x => |v| config.@"window-padding-x" = v,
+        .window_padding_y => |v| config.@"window-padding-y" = v,
+        .trim_trailing_spaces => |v| config.@"clipboard-trim-trailing-spaces" = v,
+        .desktop_notifications => |v| config.@"desktop-notifications" = v,
+        .app_notify_clipboard => |v| config.@"app-notifications".@"clipboard-copy" = v,
+        .app_notify_config => |v| config.@"app-notifications".@"config-reload" = v,
+        .confirm_close => |v| config.@"confirm-close-surface" = v,
+        .copy_on_select => |v| config.@"copy-on-select" = v,
+        .clipboard_read => |v| config.@"clipboard-read" = v,
+        .clipboard_write => |v| config.@"clipboard-write" = v,
+        .link_url => |v| config.@"link-url" = v,
+        .link_previews => |v| config.@"link-previews" = v,
+        .window_theme => |v| config.@"window-theme" = v,
+        .shell_integration => |v| config.@"shell-integration" = v,
+        .cursor_style => |v| config.@"cursor-style" = v,
+        .background_blur => |v| config.@"background-blur" = v,
+        .padding_balance => |v| config.@"window-padding-balance" = v,
+        .auto_update => |v| config.@"auto-update" = v,
+        .auto_update_channel => |v| config.@"auto-update-channel" = v,
+    }
+}
 
 fn keybindingsHelpText() []const u8 {
     return "Useful commands:\n" ++
@@ -263,7 +408,10 @@ extern "user32" fn CreateWindowExW(
 ) callconv(.winapi) ?HWND;
 extern "user32" fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
 extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
+extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
 extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
+extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
+extern "user32" fn MessageBoxW(hWnd: ?HWND, lpText: LPCWSTR, lpCaption: LPCWSTR, uType: UINT) callconv(.winapi) c_int;
 extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
 extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: LPCWSTR) callconv(.winapi) HCURSOR;
@@ -355,6 +503,25 @@ pub const AppHandle = struct {
         pending: *const Config,
         original: *const Config,
     ) SaveError!void,
+    /// Optional monotonic revision of the effective config. When absent, the
+    /// settings window maintains a local revision for compatibility.
+    configRevision: ?*const fn (ctx: *anyopaque) u64 = null,
+    /// Optional live-preview hook for ownership-safe fields. Effects are
+    /// idempotent: apply `value` as the current preview for `field`.
+    previewField: ?*const fn (ctx: *anyopaque, field: SettingField, value: SettingValue) void = null,
+    /// Optional conflict notification. The UI model retains the draft until
+    /// `resolveConflict` is called with keep-mine or use-disk.
+    notifyConflict: ?*const fn (ctx: *anyopaque, field: SettingField) void = null,
+    /// Optional asynchronous two-phase persistence hook. The receiver must
+    /// eventually call `SettingsWindow.completeSave` with the same `apply_id`.
+    /// When absent, `saveAndReload` remains the synchronous compatibility path.
+    requestSave: ?*const fn (
+        ctx: *anyopaque,
+        pending: *const Config,
+        original: *const Config,
+        apply_id: ApplyId,
+        expected_revision: u64,
+    ) void = null,
     /// Fire-and-forget success toast for the app-level in-app stack
     /// (e.g. "Settings saved"). Borrowed title + body — caller must
     /// keep them alive only for the duration of the call; the stack
@@ -375,6 +542,8 @@ pub const SettingsWindow = struct {
     btn_section_appearance: ?HWND = null,
     btn_section_terminal: ?HWND = null,
     btn_section_shell: ?HWND = null,
+    btn_section_privacy: ?HWND = null,
+    btn_section_updates: ?HWND = null,
     btn_section_keybindings: ?HWND = null,
     btn_section_advanced: ?HWND = null,
     btn_save: ?HWND = null,
@@ -409,17 +578,21 @@ pub const SettingsWindow = struct {
     class_atom: ATOM = 0,
 
     /// Frozen snapshot of the config at the moment the window last
-    /// opened. Owned by this struct via `Config.shallowClone` so an
+    /// opened. Independently owned via `Config.clone` so an
     /// external `reload_config` that fires while the window is open
     /// does not mutate our diff baseline. Only valid while
     /// `pending != null`.
     original: ?Config = null,
-    /// Editable draft owned by `handle.alloc`. Created on open via
-    /// `Config.shallowClone(handle.alloc)`; freed on close/save. Per
-    /// AGENTS.md:49, we must NOT deinit an inherited `command` field
-    /// on this clone — `Config.deinit` already honours that because
-    /// the clone owns only its `_arena`, not the inherited pointers.
+    /// Latest effective config snapshot used for preview rollback and
+    /// three-way external-edit resolution.
+    current: ?Config = null,
+    /// Editable draft owned by `handle.alloc`. Created on open via a
+    /// deep `Config.clone(handle.alloc)` and freed on close/save.
     pending: ?Config = null,
+    transaction_storage: [setting_field_count]SettingsTransaction.Entry = undefined,
+    transaction: ?SettingsTransaction = null,
+    local_revision: u64 = 1,
+    save_in_flight: bool = false,
     /// Guard flag so the EN_CHANGE handler doesn't fire a cascade
     /// when we programmatically set the EDIT text on open.
     suppress_edit_events: bool = false,
@@ -437,6 +610,8 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
         self.btn_section_shell = null;
+        self.btn_section_privacy = null;
+        self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.btn_save = null;
@@ -474,10 +649,192 @@ pub const SettingsWindow = struct {
     /// next `open` starts with a fresh clone of the (possibly just-
     /// reloaded) app config.
     fn clearPending(self: *SettingsWindow) void {
+        if (self.transaction) |*transaction| {
+            var effects: [setting_field_count]SettingsTransaction.Effect = undefined;
+            if (transaction.dispatch(.revert, &effects)) |emitted| {
+                self.dispatchEffects(emitted);
+            } else |err| switch (err) {
+                // An asynchronous save owns the preview until its completion
+                // callback settles the transaction.
+                error.ApplyAlreadyPending => {},
+                else => std.log.warn("settings: preview rollback failed err={}", .{err}),
+            }
+        }
+        self.transaction = null;
+        self.save_in_flight = false;
         if (self.pending) |*p| p.deinit();
         self.pending = null;
         if (self.original) |*o| o.deinit();
         self.original = null;
+        if (self.current) |*c| c.deinit();
+        self.current = null;
+    }
+
+    fn currentRevision(self: *const SettingsWindow) u64 {
+        if (self.handle.configRevision) |get_revision| {
+            return get_revision(self.handle.ctx);
+        }
+        return self.local_revision;
+    }
+
+    fn initTransaction(self: *SettingsWindow) void {
+        const current = self.current orelse return;
+        var initial: [setting_field_count]SettingsTransaction.FieldValue = undefined;
+        for (std.enums.values(SettingField), 0..) |field, i| {
+            initial[i] = .{ .field = field, .value = settingValue(&current, field) };
+        }
+        self.transaction = SettingsTransaction.init(
+            &self.transaction_storage,
+            &initial,
+            self.currentRevision(),
+        ) catch |err| {
+            std.log.err("settings: transaction initialization failed err={}", .{err});
+            return;
+        };
+    }
+
+    fn dispatchEffects(self: *SettingsWindow, effects: []const SettingsTransaction.Effect) void {
+        for (effects) |effect| switch (effect) {
+            .set_preview => |change| if (self.handle.previewField) |preview| {
+                preview(self.handle.ctx, change.field, change.value);
+            },
+            .conflict_detected => |field| if (self.handle.notifyConflict) |notify| {
+                notify(self.handle.ctx, field);
+            },
+            .apply_requested, .persist_field => {},
+        };
+    }
+
+    fn trackEdit(self: *SettingsWindow, field: SettingField, live_preview: bool) void {
+        const pending = self.pending orelse return;
+        const transaction = &(self.transaction orelse return);
+        var effects: [1]SettingsTransaction.Effect = undefined;
+        const emitted = transaction.dispatch(.{ .edit = .{
+            .field = field,
+            .value = settingValue(&pending, field),
+            .live_preview = live_preview,
+        } }, &effects) catch |err| {
+            std.log.warn("settings: edit transaction failed field={s} err={}", .{ @tagName(field), err });
+            return;
+        };
+        self.dispatchEffects(emitted);
+    }
+
+    fn setSaveInFlight(self: *SettingsWindow, in_flight: bool) void {
+        self.save_in_flight = in_flight;
+        if (self.hwnd) |hwnd| _ = EnableWindow(hwnd, @intFromBool(!in_flight));
+    }
+
+    /// Merge a newly-reloaded effective config into the open settings session.
+    /// Disjoint disk changes advance both staged baselines; overlapping edits
+    /// retain the user's draft and become explicit conflicts.
+    pub fn externalConfigChanged(self: *SettingsWindow, config: *const Config, revision: u64) void {
+        const transaction = &(self.transaction orelse return);
+        var replacement = config.clone(self.handle.alloc) catch |err| {
+            std.log.warn("settings: external config snapshot failed revision={d} err={}", .{ revision, err });
+            return;
+        };
+        var replacement_owned = true;
+        defer if (replacement_owned) replacement.deinit();
+        var changes: [setting_field_count]SettingsTransaction.FieldValue = undefined;
+        for (std.enums.values(SettingField), 0..) |field, i| {
+            changes[i] = .{ .field = field, .value = settingValue(&replacement, field) };
+        }
+        var effects: [setting_field_count]SettingsTransaction.Effect = undefined;
+        const emitted = transaction.dispatch(.{ .external_update = .{
+            .revision = revision,
+            .changes = &changes,
+        } }, &effects) catch |err| {
+            if (err == error.ApplyAlreadyPending) return;
+            std.log.warn("settings: external update rejected revision={d} err={}", .{ revision, err });
+            return;
+        };
+        self.dispatchEffects(emitted);
+        if (self.handle.configRevision == null) {
+            self.local_revision = @max(self.local_revision, revision);
+        }
+
+        if (self.current) |*old| old.deinit();
+        self.current = replacement;
+        replacement_owned = false;
+
+        const original = &(self.original orelse return);
+        const pending = &(self.pending orelse return);
+        for (transaction.entries) |entry| {
+            if (entry.dirty or entry.conflict) continue;
+            setSettingValue(original, entry.current);
+            setSettingValue(pending, entry.current);
+        }
+        if (self.handle.previewField) |preview| {
+            for (transaction.entries) |entry| {
+                if (entry.dirty and entry.previewed) {
+                    preview(self.handle.ctx, entry.field, entry.draft);
+                }
+            }
+        }
+        self.refreshAllControls();
+    }
+
+    pub fn conflictCount(self: *const SettingsWindow) usize {
+        const transaction = &(self.transaction orelse return 0);
+        return transaction.conflictCount();
+    }
+
+    fn pendingDiffText(self: *const SettingsWindow, buf: []u8) []const u8 {
+        const transaction = &(self.transaction orelse return "No pending source changes.");
+        var writer: std.Io.Writer = .fixed(buf);
+        var count: usize = 0;
+        for (transaction.entries) |entry| {
+            if (!entry.dirty) continue;
+            writer.print("{s}: {any} -> {any}\n", .{
+                @tagName(entry.field),
+                entry.baseline,
+                entry.draft,
+            }) catch break;
+            count += 1;
+        }
+        return if (count == 0) "No pending source changes." else writer.buffered();
+    }
+
+    pub fn hasConflict(self: *const SettingsWindow, field: SettingField) bool {
+        const transaction = &(self.transaction orelse return false);
+        const entry = transaction.entryConst(field) orelse return false;
+        return entry.conflict;
+    }
+
+    pub fn resolveConflict(
+        self: *SettingsWindow,
+        field: SettingField,
+        resolution: ConflictResolution,
+    ) void {
+        const transaction = &(self.transaction orelse return);
+        var effects: [1]SettingsTransaction.Effect = undefined;
+        const emitted = transaction.dispatch(.{ .resolve_conflict = .{
+            .field = field,
+            .resolution = resolution,
+        } }, &effects) catch |err| {
+            std.log.warn("settings: conflict resolution failed field={s} err={}", .{ @tagName(field), err });
+            return;
+        };
+        self.dispatchEffects(emitted);
+        const entry = transaction.entryConst(field).?;
+        if (self.original) |*original| setSettingValue(original, entry.current);
+        if (resolution == .use_disk) {
+            if (self.pending) |*pending| setSettingValue(pending, entry.current);
+            self.refreshAllControls();
+        }
+    }
+
+    /// Resolve an external-edit conflict with an always-visible native prompt.
+    /// Yes keeps the in-window draft; No adopts the value reloaded from disk.
+    pub fn promptConflict(self: *SettingsWindow, field: SettingField) void {
+        const result = MessageBoxW(
+            self.hwnd,
+            std.unicode.utf8ToUtf16LeStringLiteral("This setting also changed on disk.\n\nYes: Keep my edit\nNo: Use the value from disk"),
+            std.unicode.utf8ToUtf16LeStringLiteral("winghostty settings conflict"),
+            MB_YESNO | MB_ICONWARNING,
+        );
+        self.resolveConflict(field, if (result == IDYES) .keep_mine else .use_disk);
     }
 
     /// Null out child HWND references + drop pending. Called from
@@ -489,6 +846,8 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
         self.btn_section_shell = null;
+        self.btn_section_privacy = null;
+        self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.btn_save = null;
@@ -526,6 +885,8 @@ pub const SettingsWindow = struct {
             .appearance => self.btn_section_appearance,
             .terminal => self.btn_section_terminal,
             .shell => self.btn_section_shell,
+            .privacy => self.btn_section_privacy,
+            .updates => self.btn_section_updates,
             .keybindings => self.btn_section_keybindings,
             .advanced => self.btn_section_advanced,
         };
@@ -543,6 +904,8 @@ pub const SettingsWindow = struct {
         const show_terminal: i32 = if (self.active_section == .terminal) SW_SHOWNORMAL else SW_HIDE;
         const show_appearance: i32 = if (self.active_section == .appearance) SW_SHOWNORMAL else SW_HIDE;
         const show_shell: i32 = if (self.active_section == .shell) SW_SHOWNORMAL else SW_HIDE;
+        const show_privacy: i32 = if (self.active_section == .privacy) SW_SHOWNORMAL else SW_HIDE;
+        const show_updates: i32 = if (self.active_section == .updates) SW_SHOWNORMAL else SW_HIDE;
         const show_keybindings: i32 = if (self.active_section == .keybindings) SW_SHOWNORMAL else SW_HIDE;
 
         if (self.btn_open_editor) |btn| _ = ShowWindow(btn, show_advanced);
@@ -551,13 +914,13 @@ pub const SettingsWindow = struct {
         if (self.combo_confirm_close) |e| _ = ShowWindow(e, show_terminal);
         if (self.combo_copy_on_select) |e| _ = ShowWindow(e, show_terminal);
         if (self.chk_trim_trail) |e| _ = ShowWindow(e, show_terminal);
-        if (self.chk_desktop_notifications) |e| _ = ShowWindow(e, show_terminal);
-        if (self.chk_app_notify_clipboard) |e| _ = ShowWindow(e, show_terminal);
-        if (self.chk_app_notify_config) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_clipboard_read) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_clipboard_write) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_link_url) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_link_previews) |e| _ = ShowWindow(e, show_terminal);
+        if (self.chk_desktop_notifications) |e| _ = ShowWindow(e, show_privacy);
+        if (self.chk_app_notify_clipboard) |e| _ = ShowWindow(e, show_privacy);
+        if (self.chk_app_notify_config) |e| _ = ShowWindow(e, show_privacy);
+        if (self.combo_clipboard_read) |e| _ = ShowWindow(e, show_privacy);
+        if (self.combo_clipboard_write) |e| _ = ShowWindow(e, show_privacy);
+        if (self.combo_link_url) |e| _ = ShowWindow(e, show_privacy);
+        if (self.combo_link_previews) |e| _ = ShowWindow(e, show_privacy);
         if (self.edit_font_family) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_font_size) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_theme) |e| _ = ShowWindow(e, show_appearance);
@@ -570,8 +933,8 @@ pub const SettingsWindow = struct {
         if (self.combo_pad_balance) |e| _ = ShowWindow(e, show_appearance);
         if (self.edit_command) |e| _ = ShowWindow(e, show_shell);
         if (self.combo_shell_integ) |e| _ = ShowWindow(e, show_shell);
-        if (self.combo_auto_update) |e| _ = ShowWindow(e, show_advanced);
-        if (self.combo_auto_update_channel) |e| _ = ShowWindow(e, show_advanced);
+        if (self.combo_auto_update) |e| _ = ShowWindow(e, show_updates);
+        if (self.combo_auto_update_channel) |e| _ = ShowWindow(e, show_updates);
     }
 
     /// Read the current EDIT text and write the parsed integer into
@@ -593,6 +956,7 @@ pub const SettingsWindow = struct {
         if (trimmed.len == 0) return;
         const parsed = std.fmt.parseInt(usize, trimmed, 10) catch return;
         p.*.@"scrollback-limit" = parsed;
+        self.trackEdit(.scrollback_limit, false);
     }
 
     fn displayScrollbackInEdit(self: *SettingsWindow) void {
@@ -645,6 +1009,7 @@ pub const SettingsWindow = struct {
         // the same the GUI spinner catalogue will offer (6..72).
         if (parsed < 6.0 or parsed > 72.0) return;
         p.*.@"font-size" = parsed;
+        self.trackEdit(.font_size, true);
     }
 
     fn displayFontSizeInEdit(self: *SettingsWindow) void {
@@ -705,6 +1070,7 @@ pub const SettingsWindow = struct {
         const parsed = std.fmt.parseFloat(f64, trimmed) catch return;
         if (parsed < 0.0 or parsed > 1.0) return;
         p.*.@"background-opacity" = parsed;
+        self.trackEdit(.background_opacity, true);
     }
 
     fn displayBgOpacityInEdit(self: *SettingsWindow) void {
@@ -756,8 +1122,14 @@ pub const SettingsWindow = struct {
         const text = readEditUtf8(edit, &text_buf) orelse return;
         const parsed = Config.WindowPadding.parseCLI(std.mem.trim(u8, text, " \t")) catch return;
         switch (axis) {
-            .x => p.*.@"window-padding-x" = parsed,
-            .y => p.*.@"window-padding-y" = parsed,
+            .x => {
+                p.*.@"window-padding-x" = parsed;
+                self.trackEdit(.window_padding_x, true);
+            },
+            .y => {
+                p.*.@"window-padding-y" = parsed;
+                self.trackEdit(.window_padding_y, true);
+            },
         }
     }
 
@@ -785,6 +1157,7 @@ pub const SettingsWindow = struct {
         const chk = self.chk_trim_trail orelse return;
         const state = SendMessageW(chk, BM_GETCHECK, 0, 0);
         p.*.@"clipboard-trim-trailing-spaces" = (state == BST_CHECKED);
+        self.trackEdit(.trim_trailing_spaces, false);
     }
 
     fn displayTrimTrailInCheckbox(self: *SettingsWindow) void {
@@ -805,6 +1178,7 @@ pub const SettingsWindow = struct {
         const p = &(self.pending orelse return);
         const chk = self.chk_desktop_notifications orelse return;
         p.*.@"desktop-notifications" = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        self.trackEdit(.desktop_notifications, false);
     }
 
     fn displayDesktopNotificationsInCheckbox(self: *SettingsWindow) void {
@@ -829,8 +1203,14 @@ pub const SettingsWindow = struct {
         } orelse return;
         const enabled = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
         switch (field) {
-            .clipboard => p.*.@"app-notifications".@"clipboard-copy" = enabled,
-            .config => p.*.@"app-notifications".@"config-reload" = enabled,
+            .clipboard => {
+                p.*.@"app-notifications".@"clipboard-copy" = enabled;
+                self.trackEdit(.app_notify_clipboard, false);
+            },
+            .config => {
+                p.*.@"app-notifications".@"config-reload" = enabled;
+                self.trackEdit(.app_notify_config, false);
+            },
         }
     }
 
@@ -864,6 +1244,7 @@ pub const SettingsWindow = struct {
             2 => .always,
             else => return,
         };
+        self.trackEdit(.confirm_close, false);
     }
 
     fn displayConfirmCloseInCombo(self: *SettingsWindow) void {
@@ -891,6 +1272,7 @@ pub const SettingsWindow = struct {
             2 => .clipboard,
             else => return,
         };
+        self.trackEdit(.copy_on_select, false);
     }
 
     fn displayCopyOnSelectInCombo(self: *SettingsWindow) void {
@@ -913,6 +1295,11 @@ pub const SettingsWindow = struct {
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         @field(p.*, field_name) = clipboardAccessFromComboIndex(idx) orelse return;
+        if (comptime std.mem.eql(u8, field_name, "clipboard-read")) {
+            self.trackEdit(.clipboard_read, false);
+        } else if (comptime std.mem.eql(u8, field_name, "clipboard-write")) {
+            self.trackEdit(.clipboard_write, false);
+        }
     }
 
     fn displayClipboardAccessInCombo(self: *SettingsWindow, comptime field_name: []const u8, combo_opt: ?HWND) void {
@@ -931,6 +1318,7 @@ pub const SettingsWindow = struct {
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"link-url" = linkUrlFromComboIndex(idx) orelse return;
+        self.trackEdit(.link_url, false);
     }
 
     fn displayLinkUrlInCombo(self: *SettingsWindow) void {
@@ -949,6 +1337,7 @@ pub const SettingsWindow = struct {
         const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"link-previews" = linkPreviewsFromComboIndex(idx) orelse return;
+        self.trackEdit(.link_previews, false);
     }
 
     fn displayLinkPreviewsInCombo(self: *SettingsWindow) void {
@@ -974,6 +1363,7 @@ pub const SettingsWindow = struct {
             4 => .ghostty,
             else => return,
         };
+        self.trackEdit(.window_theme, true);
     }
 
     fn displayWindowThemeInCombo(self: *SettingsWindow) void {
@@ -1007,6 +1397,7 @@ pub const SettingsWindow = struct {
             6 => .zsh,
             else => return,
         };
+        self.trackEdit(.shell_integration, false);
     }
 
     fn displayShellIntegInCombo(self: *SettingsWindow) void {
@@ -1039,6 +1430,7 @@ pub const SettingsWindow = struct {
             3 => .block_hollow,
             else => return,
         };
+        self.trackEdit(.cursor_style, true);
     }
 
     fn displayCursorStyleInCombo(self: *SettingsWindow) void {
@@ -1067,6 +1459,7 @@ pub const SettingsWindow = struct {
             p.*.@"background-blur",
             state == BST_CHECKED,
         );
+        self.trackEdit(.background_blur, true);
     }
 
     fn displayBgBlurInCheckbox(self: *SettingsWindow) void {
@@ -1095,6 +1488,7 @@ pub const SettingsWindow = struct {
             2 => .equal,
             else => return,
         };
+        self.trackEdit(.padding_balance, true);
     }
 
     fn displayPadBalanceInCombo(self: *SettingsWindow) void {
@@ -1123,6 +1517,7 @@ pub const SettingsWindow = struct {
             3 => .download,
             else => return,
         };
+        self.trackEdit(.auto_update, false);
     }
 
     fn displayAutoUpdateInCombo(self: *SettingsWindow) void {
@@ -1150,6 +1545,7 @@ pub const SettingsWindow = struct {
             2 => .tip,
             else => return,
         };
+        self.trackEdit(.auto_update_channel, false);
     }
 
     fn displayAutoUpdateChannelInCombo(self: *SettingsWindow) void {
@@ -1198,14 +1594,36 @@ pub const SettingsWindow = struct {
         self.syncCommandFromEdit();
         const p = self.pending orelse return;
         const o = self.original orelse return;
+
+        var apply_id: ?ApplyId = null;
+        var expected_revision: u64 = self.currentRevision();
+        if (self.transaction) |*transaction| {
+            var effects: [setting_field_count + 1]SettingsTransaction.Effect = undefined;
+            const emitted = transaction.dispatch(.apply, &effects) catch |err| {
+                std.log.warn("settings: save transaction rejected err={}; draft preserved", .{err});
+                return;
+            };
+            for (emitted) |effect| switch (effect) {
+                .apply_requested => |request| {
+                    apply_id = request.apply_id;
+                    expected_revision = request.expected_current_revision;
+                },
+                .set_preview, .conflict_detected, .persist_field => {},
+            };
+        }
+
+        if (apply_id) |id| if (self.handle.requestSave) |request_save| {
+            // Config pointers are borrowed for the callback duration. An
+            // asynchronous implementation must take its own snapshots before
+            // returning, then report completion with this token.
+            self.setSaveInFlight(true);
+            request_save(self.handle.ctx, &p, &o, id, expected_revision);
+            return;
+        };
+
         const result = self.handle.saveAndReload(self.handle.ctx, &p, &o);
         if (result) |_| {
-            // Success path: refresh baseline so subsequent edits
-            // diff correctly against the new saved state.
-            self.clearPending();
-            self.adoptCurrentConfig();
-            self.refreshAllControls();
-            self.handle.notifySuccess(self.handle.ctx, "Settings saved", "");
+            self.completeSynchronousSave(apply_id, false);
         } else |err| switch (err) {
             error.SavedButMasked => {
                 // Persisted bytes are correct but a later config
@@ -1213,14 +1631,7 @@ pub const SettingsWindow = struct {
                 // refresh as success since the file IS written.
                 // The toast copy tells the user the bytes made it
                 // to disk but the effective value differs.
-                self.clearPending();
-                self.adoptCurrentConfig();
-                self.refreshAllControls();
-                self.handle.notifySuccess(
-                    self.handle.ctx,
-                    "Settings saved — some values are masked by a later config-file layer",
-                    "Check the log for which fields.",
-                );
+                self.completeSynchronousSave(apply_id, true);
             },
             else => {
                 // Write failed. DO NOT discard `pending` — the user's
@@ -1230,21 +1641,127 @@ pub const SettingsWindow = struct {
                 // would be destructive. Leave `pending` alone so
                 // the user can retry Save once the underlying issue
                 // is fixed, or close the window to discard.
+                if (apply_id) |id| self.failApply(id);
                 std.log.warn("settings: save failed err={}; draft preserved", .{err});
             },
         }
     }
 
-    fn adoptCurrentConfig(self: *SettingsWindow) void {
+    fn nextSuccessfulRevision(self: *SettingsWindow) u64 {
+        if (self.handle.configRevision) |get_revision| {
+            return get_revision(self.handle.ctx);
+        }
+        self.local_revision +%= 1;
+        return self.local_revision;
+    }
+
+    fn succeedApply(self: *SettingsWindow, apply_id: ApplyId, revision: u64) bool {
+        const transaction = &(self.transaction orelse return false);
+        _ = transaction.dispatch(.{ .apply_succeeded = .{
+            .apply_id = apply_id,
+            .revision = revision,
+        } }, &.{}) catch |err| {
+            std.log.err("settings: save completion rejected apply_id={d} err={}", .{ apply_id, err });
+            return false;
+        };
+        return true;
+    }
+
+    fn failApply(self: *SettingsWindow, apply_id: ApplyId) void {
+        const transaction = &(self.transaction orelse return);
+        _ = transaction.dispatch(.{ .apply_failed = .{ .apply_id = apply_id } }, &.{}) catch |err| {
+            std.log.err("settings: save failure completion rejected apply_id={d} err={}", .{ apply_id, err });
+        };
+    }
+
+    fn finishSuccessfulSave(self: *SettingsWindow, masked: bool) void {
+        self.adoptCurrentConfig() catch |err| {
+            std.log.err("settings: failed to refresh saved config snapshot err={}", .{err});
+            return;
+        };
+        self.refreshAllControls();
+        if (masked) {
+            self.handle.notifySuccess(
+                self.handle.ctx,
+                "Settings saved — some values are masked by a later config-file layer",
+                "Check the log for which fields.",
+            );
+        } else {
+            self.handle.notifySuccess(self.handle.ctx, "Settings saved", "");
+        }
+    }
+
+    fn completeSynchronousSave(self: *SettingsWindow, apply_id: ?ApplyId, masked: bool) void {
+        const revision = self.nextSuccessfulRevision();
+        if (apply_id) |id| {
+            if (!self.succeedApply(id, revision)) return;
+        }
+        self.finishSuccessfulSave(masked);
+    }
+
+    /// Settle an asynchronous request emitted by `requestSave`. Stale or
+    /// duplicate tokens are rejected without discarding the staged draft.
+    pub fn completeSave(self: *SettingsWindow, apply_id: ApplyId, completion: SaveCompletion) void {
+        switch (completion) {
+            .succeeded => |revision| {
+                if (!self.succeedApply(apply_id, revision)) return;
+                self.setSaveInFlight(false);
+                if (self.handle.configRevision == null) self.local_revision = revision;
+                self.finishSuccessfulSave(false);
+            },
+            .failed => |err| {
+                self.failApply(apply_id);
+                self.setSaveInFlight(false);
+                std.log.warn("settings: asynchronous save failed err={}; draft preserved", .{err});
+            },
+        }
+    }
+
+    fn adoptCurrentConfig(self: *SettingsWindow) !void {
         const current = self.handle.currentConfig(self.handle.ctx);
-        // Two independent shallow clones so each struct has its own
-        // arena. The `original` clone is a frozen baseline for the
-        // save-path diff; the `pending` clone is the editable draft.
-        // Mutations to `pending` go through its arena; `original`
-        // stays byte-identical to the config at window-open time
-        // even if `App.config` mutates via an external reload.
-        self.original = current.shallowClone(self.handle.alloc);
-        self.pending = current.shallowClone(self.handle.alloc);
+        var original = try current.clone(self.handle.alloc);
+        errdefer original.deinit();
+        var current_snapshot = try current.clone(self.handle.alloc);
+        errdefer current_snapshot.deinit();
+        var pending = try current.clone(self.handle.alloc);
+        errdefer pending.deinit();
+
+        self.clearPending();
+        self.original = original;
+        self.current = current_snapshot;
+        self.pending = pending;
+        self.initTransaction();
+    }
+
+    /// Open settings at the exact native control that owns `field`.
+    pub fn openField(self: *SettingsWindow, field: SettingField) !void {
+        try self.open();
+        const destination: struct { section: Section, hwnd: ?HWND } = switch (field) {
+            .font_size => .{ .section = .appearance, .hwnd = self.edit_font_size },
+            .background_opacity => .{ .section = .appearance, .hwnd = self.edit_bg_opacity },
+            .window_padding_x => .{ .section = .appearance, .hwnd = self.edit_pad_x },
+            .window_padding_y => .{ .section = .appearance, .hwnd = self.edit_pad_y },
+            .window_theme => .{ .section = .appearance, .hwnd = self.combo_window_theme },
+            .cursor_style => .{ .section = .appearance, .hwnd = self.combo_cursor_style },
+            .background_blur => .{ .section = .appearance, .hwnd = self.chk_bg_blur },
+            .padding_balance => .{ .section = .appearance, .hwnd = self.combo_pad_balance },
+            .scrollback_limit => .{ .section = .terminal, .hwnd = self.edit_scrollback },
+            .trim_trailing_spaces => .{ .section = .terminal, .hwnd = self.chk_trim_trail },
+            .desktop_notifications => .{ .section = .privacy, .hwnd = self.chk_desktop_notifications },
+            .app_notify_clipboard => .{ .section = .privacy, .hwnd = self.chk_app_notify_clipboard },
+            .app_notify_config => .{ .section = .privacy, .hwnd = self.chk_app_notify_config },
+            .confirm_close => .{ .section = .terminal, .hwnd = self.combo_confirm_close },
+            .copy_on_select => .{ .section = .terminal, .hwnd = self.combo_copy_on_select },
+            .clipboard_read => .{ .section = .privacy, .hwnd = self.combo_clipboard_read },
+            .clipboard_write => .{ .section = .privacy, .hwnd = self.combo_clipboard_write },
+            .link_url => .{ .section = .privacy, .hwnd = self.combo_link_url },
+            .link_previews => .{ .section = .privacy, .hwnd = self.combo_link_previews },
+            .shell_integration => .{ .section = .shell, .hwnd = self.combo_shell_integ },
+            .auto_update => .{ .section = .updates, .hwnd = self.combo_auto_update },
+            .auto_update_channel => .{ .section = .updates, .hwnd = self.combo_auto_update_channel },
+        };
+        self.setActiveSection(destination.section);
+        if (destination.hwnd) |control| _ = SetFocus(control);
     }
 
     /// Bring the settings window up. Idempotent: a subsequent open
@@ -1260,10 +1777,9 @@ pub const SettingsWindow = struct {
             self.hwnd = null;
         }
 
-        // Fresh pending clone of the live config. Discarded on close
-        // or refreshed after a successful save.
-        self.clearPending();
-        self.adoptCurrentConfig();
+        // Fresh owned snapshots of the live config. Discarded on close
+        // or atomically refreshed after a successful save.
+        try self.adoptCurrentConfig();
 
         if (self.class_atom == 0) {
             const wc: WNDCLASSEXW = .{
@@ -1295,7 +1811,7 @@ pub const SettingsWindow = struct {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             960,
-            720,
+            840,
             null,
             null,
             self.handle.hinstance,
@@ -1311,6 +1827,8 @@ pub const SettingsWindow = struct {
         self.btn_section_appearance = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.appearance);
         self.btn_section_terminal = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.terminal);
         self.btn_section_shell = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.shell);
+        self.btn_section_privacy = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.privacy);
+        self.btn_section_updates = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.updates);
         self.btn_section_keybindings = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.keybindings);
         self.btn_section_advanced = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.advanced);
 
@@ -1530,6 +2048,12 @@ pub const SettingsWindow = struct {
             &.{ "default", "stable", "tip" },
         );
 
+        // Painted field labels keep the native dark visual treatment, while
+        // MSAA annotations give the existing EDIT/COMBO HWNDs stable names
+        // through the UI Automation bridge. Values remain owned by the native
+        // controls and are not conflated with their accessible names.
+        annotateAccessibleControls(self);
+
         self.refreshAllControls();
 
         self.applySectionVisibility();
@@ -1538,6 +2062,108 @@ pub const SettingsWindow = struct {
         layoutChildren(self);
     }
 };
+
+extern "ole32" fn CoCreateInstance(
+    class_id: *const GUID,
+    outer: ?*anyopaque,
+    context: u32,
+    interface_id: *const GUID,
+    result: *?*anyopaque,
+) callconv(.winapi) HRESULT;
+
+const IAccPropServicesVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    SetPropValue: *const anyopaque,
+    SetPropServer: *const anyopaque,
+    ClearProps: *const anyopaque,
+    SetHwndProp: *const anyopaque,
+    SetHwndPropStr: *const fn (
+        *anyopaque,
+        HWND,
+        u32,
+        u32,
+        GUID,
+        LPCWSTR,
+    ) callconv(.winapi) HRESULT,
+};
+
+const IAccPropServices = extern struct {
+    vtbl: *const IAccPropServicesVtbl,
+
+    fn asRaw(self: *IAccPropServices) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *IAccPropServices) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+
+    fn setName(self: *IAccPropServices, hwnd: HWND, comptime name: []const u8) HRESULT {
+        return self.vtbl.SetHwndPropStr(
+            self.asRaw(),
+            hwnd,
+            OBJID_CLIENT,
+            CHILDID_SELF,
+            PROPID_ACC_NAME,
+            std.unicode.utf8ToUtf16LeStringLiteral(name),
+        );
+    }
+};
+
+fn createAccPropServices() ?*IAccPropServices {
+    var raw: ?*anyopaque = null;
+    const hr = CoCreateInstance(
+        &CLSID_ACC_PROP_SERVICES,
+        null,
+        CLSCTX_INPROC_SERVER,
+        &IID_IACC_PROP_SERVICES,
+        &raw,
+    );
+    if (hr < 0 or raw == null) return null;
+    return @ptrCast(@alignCast(raw.?));
+}
+
+fn setAccessibleName(service: *IAccPropServices, hwnd_opt: ?HWND, comptime name: []const u8) void {
+    const hwnd = hwnd_opt orelse return;
+    const hr = service.setName(hwnd, name);
+    if (hr < 0) {
+        std.log.warn("settings: failed to set accessible name '{s}' hr=0x{x}", .{
+            name,
+            @as(u32, @bitCast(hr)),
+        });
+    }
+}
+
+fn annotateAccessibleControls(self: *SettingsWindow) void {
+    const service = createAccPropServices() orelse {
+        std.log.warn("settings: accessibility annotation service unavailable", .{});
+        return;
+    };
+    defer service.release();
+
+    setAccessibleName(service, self.edit_scrollback, "Scrollback limit");
+    setAccessibleName(service, self.combo_confirm_close, "Close confirmation");
+    setAccessibleName(service, self.combo_copy_on_select, "Copy on select");
+    setAccessibleName(service, self.edit_font_family, "Font family fallbacks");
+    setAccessibleName(service, self.edit_font_size, "Font size");
+    setAccessibleName(service, self.edit_theme, "Terminal theme");
+    setAccessibleName(service, self.edit_bg_opacity, "Background opacity");
+    setAccessibleName(service, self.combo_window_theme, "Window theme");
+    setAccessibleName(service, self.combo_cursor_style, "Cursor style");
+    setAccessibleName(service, self.edit_pad_x, "Window padding X");
+    setAccessibleName(service, self.edit_pad_y, "Window padding Y");
+    setAccessibleName(service, self.combo_pad_balance, "Window padding balance");
+    setAccessibleName(service, self.edit_command, "Default command");
+    setAccessibleName(service, self.combo_shell_integ, "Shell integration");
+    setAccessibleName(service, self.combo_clipboard_read, "OSC 52 clipboard read requests");
+    setAccessibleName(service, self.combo_clipboard_write, "OSC 52 clipboard write requests");
+    setAccessibleName(service, self.combo_link_url, "Clickable URL opening");
+    setAccessibleName(service, self.combo_link_previews, "Link preview popups");
+    setAccessibleName(service, self.combo_auto_update, "Auto-update mode");
+    setAccessibleName(service, self.combo_auto_update_channel, "Auto-update channel");
+}
 
 fn populateCombo(combo_opt: ?HWND, items: []const []const u8) void {
     const combo = combo_opt orelse return;
@@ -1635,6 +2261,8 @@ fn makeSectionButton(
         .appearance => BTN_SECTION_APPEARANCE,
         .terminal => BTN_SECTION_TERMINAL,
         .shell => BTN_SECTION_SHELL,
+        .privacy => BTN_SECTION_PRIVACY,
+        .updates => BTN_SECTION_UPDATES,
         .keybindings => BTN_SECTION_KEYBINDINGS,
         .advanced => BTN_SECTION_ADVANCED,
     };
@@ -1659,6 +2287,20 @@ const section_btn_height: i32 = 36;
 const section_btn_top_pad: i32 = 16;
 const section_btn_gap: i32 = 4;
 const side_pad: i32 = 16;
+// Keep native controls clear of both the section summary and their painted
+// labels. These values are shared by layout and paint so DPI-scaled system
+// fonts cannot drift into the controls.
+const field_stack_top_offset: i32 = 108;
+const field_row_gap: i32 = 56;
+const field_label_offset: i32 = 24;
+const field_label_height: i32 = 20;
+
+test "settings field geometry keeps labels clear of adjacent controls" {
+    const edit_height: i32 = 28;
+    const minimum_gap: i32 = 4;
+    try std.testing.expect(field_label_offset - field_label_height >= minimum_gap);
+    try std.testing.expect(field_row_gap - field_label_offset - edit_height >= minimum_gap);
+}
 
 fn layoutChildren(self: *SettingsWindow) void {
     const hwnd = self.hwnd orelse return;
@@ -1673,6 +2315,8 @@ fn layoutChildren(self: *SettingsWindow) void {
         self.btn_section_appearance,
         self.btn_section_terminal,
         self.btn_section_shell,
+        self.btn_section_privacy,
+        self.btn_section_updates,
         self.btn_section_keybindings,
         self.btn_section_advanced,
     }) |btn_opt| {
@@ -1684,14 +2328,14 @@ fn layoutChildren(self: *SettingsWindow) void {
 
     const pane_left = left_rail_width + side_pad;
     const pane_top = section_btn_top_pad;
-    const row_gap: i32 = 48;
+    const row_gap = field_row_gap;
 
     // Terminal section stack. All rows share this section and are
     // hidden by `applySectionVisibility` when another section is
     // active. Layout is a single-column flow from the content-pane
     // header down.
     {
-        var ty: i32 = pane_top + 72;
+        var ty: i32 = pane_top + field_stack_top_offset;
         if (self.edit_scrollback) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 28, 1);
             ty += row_gap;
@@ -1704,6 +2348,14 @@ fn layoutChildren(self: *SettingsWindow) void {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
         }
+        if (self.chk_trim_trail) |e| {
+            _ = MoveWindow(e, pane_left, ty, 260, 24, 1);
+        }
+    }
+
+    // Privacy section stack.
+    {
+        var ty: i32 = pane_top + field_stack_top_offset;
         if (self.combo_clipboard_read) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
@@ -1718,10 +2370,6 @@ fn layoutChildren(self: *SettingsWindow) void {
         }
         if (self.combo_link_previews) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
-            ty += row_gap;
-        }
-        if (self.chk_trim_trail) |e| {
-            _ = MoveWindow(e, pane_left, ty, 260, 24, 1);
             ty += row_gap;
         }
         if (self.chk_desktop_notifications) |e| {
@@ -1739,7 +2387,7 @@ fn layoutChildren(self: *SettingsWindow) void {
 
     // Appearance section stack.
     {
-        var ty: i32 = pane_top + 72;
+        var ty: i32 = pane_top + field_stack_top_offset;
         if (self.edit_font_family) |e| {
             _ = MoveWindow(e, pane_left, ty, 300, 28, 1);
             ty += row_gap;
@@ -1783,7 +2431,7 @@ fn layoutChildren(self: *SettingsWindow) void {
 
     // Shell section.
     {
-        var ty: i32 = pane_top + 72;
+        var ty: i32 = pane_top + field_stack_top_offset;
         if (self.edit_command) |e| {
             _ = MoveWindow(e, pane_left, ty, 360, 28, 1);
             ty += row_gap;
@@ -1794,33 +2442,23 @@ fn layoutChildren(self: *SettingsWindow) void {
     }
 
     if (self.btn_keybindings_editor) |btn| {
-        _ = MoveWindow(btn, pane_left, pane_top + 72, 220, 32, 1);
+        _ = MoveWindow(btn, pane_left, pane_top + field_stack_top_offset, 220, 32, 1);
     }
 
-    // Advanced-section "Open in default editor" button — anchored
-    // under the content-pane header.
+    // Updates section.
     {
-        var ty: i32 = pane_top + 72;
+        var ty: i32 = pane_top + field_stack_top_offset;
         if (self.combo_auto_update) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 160, 1);
             ty += row_gap;
         }
         if (self.combo_auto_update_channel) |e| {
             _ = MoveWindow(e, pane_left, ty, 200, 140, 1);
-            ty += row_gap;
         }
-        if (self.btn_open_editor) |btn| {
-            const w: i32 = 220;
-            const h: i32 = 32;
-            _ = MoveWindow(
-                btn,
-                pane_left,
-                ty,
-                w,
-                h,
-                1,
-            );
-        }
+    }
+
+    if (self.btn_open_editor) |btn| {
+        _ = MoveWindow(btn, pane_left, pane_top + field_stack_top_offset, 220, 32, 1);
     }
 
     // Save button — always-visible, bottom-right of window.
@@ -2098,24 +2736,17 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     // only drawn for the active section's controls to avoid clutter.
     // The y-values match the layout stack in `layoutChildren` minus
     // the label_pad.
-    const label_pad: i32 = 18;
-    const row_gap: i32 = 48;
+    const label_pad = field_label_offset;
+    const row_gap = field_row_gap;
     switch (owner.active_section) {
         .terminal => {
             const labels = [_][]const u8{
                 "Scrollback limit (rows, 0 = unlimited)",
                 "Close confirmation",
                 "Copy on select",
-                "OSC 52 clipboard read requests",
-                "OSC 52 clipboard write requests",
-                "Clickable URL opening",
-                "Link preview popups",
                 "Clipboard trimming",
-                "Terminal notifications",
-                "Clipboard-copy notification",
-                "Config-reload notification",
             };
-            var ly: i32 = pane_top + 72;
+            var ly: i32 = pane_top + field_stack_top_offset;
             for (labels) |lbl| {
                 drawLabel(hdc, pane_left, ly - label_pad, pane_right, lbl);
                 ly += row_gap;
@@ -2134,30 +2765,56 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
                 "Window padding balance",
                 "Background blur",
             };
-            var ly: i32 = pane_top + 72;
+            var ly: i32 = pane_top + field_stack_top_offset;
             for (labels) |lbl| {
                 drawLabel(hdc, pane_left, ly - label_pad, pane_right, lbl);
                 ly += row_gap;
             }
         },
         .shell => {
-            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Default command (blank = auto-detect)");
-            drawLabel(hdc, pane_left, pane_top + 72 + row_gap - label_pad, pane_right, "Shell integration");
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset - label_pad, pane_right, "Default command (blank = auto-detect)");
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset + row_gap - label_pad, pane_right, "Shell integration");
+        },
+        .privacy => {
+            const labels = [_][]const u8{
+                "OSC 52 clipboard read requests",
+                "OSC 52 clipboard write requests",
+                "Clickable URL opening",
+                "Link preview popups",
+                "Terminal notifications",
+                "Clipboard-copy notification",
+                "Config-reload notification",
+            };
+            var ly: i32 = pane_top + field_stack_top_offset;
+            for (labels) |lbl| {
+                drawLabel(hdc, pane_left, ly - label_pad, pane_right, lbl);
+                ly += row_gap;
+            }
+        },
+        .updates => {
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset - label_pad, pane_right, "Auto-update mode");
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset + row_gap - label_pad, pane_right, "Auto-update channel");
         },
         .keybindings => {
-            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Keybind configuration");
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset - label_pad, pane_right, "Keybind configuration");
             drawHelpBlock(
                 hdc,
                 pane_left,
-                pane_top + 72 + row_gap,
+                pane_top + field_stack_top_offset + row_gap,
                 pane_right,
                 keybindingsHelpText(),
             );
         },
         .advanced => {
-            drawLabel(hdc, pane_left, pane_top + 72 - label_pad, pane_right, "Auto-update mode");
-            drawLabel(hdc, pane_left, pane_top + 72 + row_gap - label_pad, pane_right, "Auto-update channel");
-            drawLabel(hdc, pane_left, pane_top + 72 + row_gap * 2 - label_pad, pane_right, "Full config editor");
+            drawLabel(hdc, pane_left, pane_top + field_stack_top_offset - label_pad, pane_right, "Full config editor");
+            var diff_buf: [2048]u8 = undefined;
+            drawHelpBlock(
+                hdc,
+                pane_left,
+                pane_top + field_stack_top_offset + row_gap,
+                pane_right,
+                owner.pendingDiffText(&diff_buf),
+            );
         },
     }
 }
@@ -2165,7 +2822,7 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
 fn drawLabel(hdc: ?*anyopaque, x: i32, y: i32, right: i32, text: []const u8) void {
     var buf: [128]u16 = undefined;
     const w = utf8ToW(&buf, text);
-    var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y + 16 };
+    var rect: RECT = .{ .left = x, .top = y, .right = right, .bottom = y + field_label_height };
     _ = DrawTextW(hdc, w, -1, &rect, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 }
 
@@ -2302,6 +2959,37 @@ test "settings policy combo mappings round trip" {
     try std.testing.expectEqual(@as(usize, 0), comboIndexFromLinkPreviews(.true));
     try std.testing.expectEqual(@as(usize, 1), comboIndexFromLinkPreviews(.osc8));
     try std.testing.expectEqual(@as(usize, 2), comboIndexFromLinkPreviews(.false));
+}
+
+test "win32_settings: every tracked field maps to its matching config value" {
+    var config = try Config.default(std.testing.allocator);
+    defer config.deinit();
+    var copy = config.shallowClone(std.testing.allocator);
+    defer copy.deinit();
+
+    for (std.enums.values(SettingField)) |field| {
+        const value = settingValue(&config, field);
+        try std.testing.expectEqual(field, std.meta.activeTag(value));
+        setSettingValue(&copy, value);
+        try std.testing.expect(settingValueEql(value, settingValue(&copy, field)));
+    }
+}
+
+test "win32_settings: owned snapshots survive source config deinit" {
+    var source = try Config.default(std.testing.allocator);
+    const source_alloc = source._arena.?.allocator();
+    source.command = .{ .shell = try source_alloc.dupeZ(u8, "pwsh.exe -NoLogo") };
+
+    var snapshot = try source.clone(std.testing.allocator);
+    defer snapshot.deinit();
+    source.deinit();
+
+    const command_value = snapshot.command orelse return error.TestUnexpectedResult;
+    const command = switch (command_value) {
+        .shell => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("pwsh.exe -NoLogo", command);
 }
 
 test "win32_settings: font-family edit text builds repeatable list" {

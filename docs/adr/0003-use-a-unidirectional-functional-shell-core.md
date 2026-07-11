@@ -1,0 +1,3 @@
+# Use a unidirectional functional shell core
+
+winghostty models window, tab, pane, and focus topology in `ShellState`, transformed by closed typed intents and committed through revision-guarded prepared transactions. Settings and startup recovery use separate pure transaction/policy modules because their persistence and lifecycle boundaries differ from live topology. Ghostty `CoreApp` remains authoritative for terminal-core behavior. These reducers exist to make Win32 state transitions deterministic, testable, and safe from stale asynchronous pointers; this ADR does not claim one global reducer for every application concern.

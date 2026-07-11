@@ -35,6 +35,7 @@ const win32_surface_drop_target = @import("win32_surface_drop_target.zig");
 const win32_toast_activation = @import("win32_toast_activation.zig");
 const win32_tab_drag = @import("win32_tab_drag.zig");
 const win32_tab_drag_ole = @import("win32_tab_drag_ole.zig");
+const win32_tab_drop_zones = @import("win32_tab_drop_zones.zig");
 const win32_search_bar = @import("win32_search_bar.zig");
 const win32_icons = @import("win32_icons.zig");
 const win32_paste_protection = @import("win32_paste_protection.zig");
@@ -45,6 +46,10 @@ const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
 const win32_session_state = @import("win32_session_state.zig");
+const win32_recovery = @import("win32_recovery.zig");
+const win32_compositor = @import("win32_compositor.zig");
+const win32_compositor_native = @import("win32_compositor_native.zig");
+const win32_shell = @import("win32_shell.zig");
 
 // Re-export types from theme module
 const ThemeColors = win32_theme.ThemeColors;
@@ -477,6 +482,7 @@ const WS_TABSTOP = 0x00010000;
 const WS_OVERLAPPEDWINDOW = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
 const WS_POPUP = 0x80000000;
 const WS_EX_LAYERED = 0x00080000;
+const WS_EX_TRANSPARENT = 0x00000020;
 const MOD_ALT = 0x0001;
 const MOD_CONTROL = 0x0002;
 const MOD_SHIFT = 0x0004;
@@ -580,6 +586,14 @@ const PaletteSnapshot = win32_palette.Snapshot;
 const RankedIndex = win32_palette.RankedIndex;
 const palette_max_tokens = win32_palette.max_tokens;
 const palette_max_ranked = win32_palette.max_ranked;
+const PaletteCatalog = win32_palette.catalog.Catalog;
+const PaletteItem = win32_palette.catalog.Item;
+const PalettePayload = win32_palette.catalog.Payload;
+const PaletteRanked = win32_palette.catalog.Ranked;
+const palette_catalog_capacity: usize = 512;
+const palette_action_capacity: usize = 384;
+const palette_catalog_label_capacity: usize = 256;
+const palette_catalog_label_bytes: usize = 128;
 const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
@@ -1103,6 +1117,7 @@ extern "kernel32" fn MoveFileExW(
     dwFlags: u32,
 ) callconv(.winapi) BOOL;
 extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
 extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 extern "kernel32" fn SetThreadErrorMode(dwNewMode: DWORD, lpOldMode: ?*DWORD) callconv(.winapi) BOOL;
 extern "kernel32" fn CreateNamedPipeW(
@@ -2210,7 +2225,8 @@ fn normalizeForwardedStartupArg(
 ) !?[:0]const u8 {
     if (std.mem.startsWith(u8, arg, "--class=") or
         std.mem.startsWith(u8, arg, "--single-instance=") or
-        std.mem.startsWith(u8, arg, "--gtk-single-instance="))
+        std.mem.startsWith(u8, arg, "--gtk-single-instance=") or
+        std.mem.eql(u8, arg, "--safe-mode"))
     {
         return null;
     }
@@ -2517,11 +2533,110 @@ const UpdateCheckCompletion = struct {
     }
 };
 
+const RecoveryStartup = struct {
+    attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined,
+    count: usize = 0,
+    decision: win32_recovery.Decision = .normal,
+};
+
+fn unixMillis() u64 {
+    return @intCast(@max(std.time.milliTimestamp(), 0));
+}
+
+fn utf8PrefixLen(value: []const u8, capacity: usize) usize {
+    var len = @min(value.len, capacity);
+    while (len > 0 and !std.unicode.utf8ValidateSlice(value[0..len])) {
+        len -= 1;
+    }
+    return len;
+}
+
+fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
+    const max_config_size = 16 * 1024 * 1024;
+    if (size > max_config_size) return error.SerializeFailed;
+    return @intCast(size);
+}
+
+test "win32 bounded UTF-8 prefix never splits a codepoint" {
+    const value = "123\u{1f680}tail";
+    try std.testing.expectEqual(@as(usize, 3), utf8PrefixLen(value, 4));
+    try std.testing.expectEqual(@as(usize, 7), utf8PrefixLen(value, 7));
+    try std.testing.expectEqual(value.len, utf8PrefixLen(value, value.len + 10));
+}
+
+test "win32 settings save rejects files above the read cap" {
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), try settingsFileSize(16 * 1024 * 1024));
+    try std.testing.expectError(error.SerializeFailed, settingsFileSize(16 * 1024 * 1024 + 1));
+}
+
+fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
+    const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return null;
+    defer alloc.free(local);
+    const dir = std.fs.path.join(alloc, &.{ local, "winghostty" }) catch return null;
+    defer alloc.free(dir);
+    return std.fs.path.join(alloc, &.{ dir, name }) catch null;
+}
+
+fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
+    var result: RecoveryStartup = .{};
+    const now = unixMillis();
+    var record: win32_recovery.StartupAttemptRecord = .{};
+    var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
+    defer if (parsed_record) |*parsed| parsed.deinit();
+
+    if (localAppDataPathAlloc(alloc, "startup-attempts.json")) |path| {
+        defer alloc.free(path);
+        if (std.fs.openFileAbsolute(path, .{})) |file| {
+            defer file.close();
+            if (file.readToEndAlloc(alloc, 64 * 1024)) |raw| {
+                defer alloc.free(raw);
+                parsed_record = win32_recovery.parseAlloc(alloc, raw) catch |err| invalid: {
+                    log.warn("win32 recovery: ignored invalid startup history err={}", .{err});
+                    break :invalid null;
+                };
+                if (parsed_record) |*parsed| record = parsed.value;
+            } else |err| {
+                log.warn("win32 recovery: startup history read failed err={}", .{err});
+            }
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => log.warn("win32 recovery: startup history open failed err={}", .{err}),
+        }
+    }
+
+    result.decision = win32_recovery.decide(record, now, false, .{});
+    const appended = win32_recovery.appendBounded(
+        record,
+        .{ .started_at_unix_ms = now },
+        &result.attempts,
+    ) catch |err| {
+        log.warn("win32 recovery: attempt append failed err={}", .{err});
+        return result;
+    };
+    result.count = appended.attempts.len;
+    persistRecoveryRecord(alloc, result.attempts[0..result.count]) catch |err| {
+        log.warn("win32 recovery: startup marker persist failed err={}", .{err});
+    };
+    return result;
+}
+
+fn persistRecoveryRecord(
+    alloc: Allocator,
+    attempts: []const win32_recovery.StartupAttempt,
+) !void {
+    const path = localAppDataPathAlloc(alloc, "startup-attempts.json") orelse return;
+    defer alloc.free(path);
+    const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
+    defer alloc.free(encoded);
+    try App.writeSessionStateFile(alloc, path, encoded);
+}
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
 
     core_app: *CoreApp,
     config: configpkg.Config,
+    config_revision: u64 = 1,
     resolved_theme: ThemeColors = darkTheme(),
     hinstance: HINSTANCE,
     class_atom: ATOM = 0,
@@ -2539,6 +2654,12 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only interleaving seam for the focus revision race between a
+    /// structural split-close prepare and commit.
+    test_before_split_undo_shell_commit: ?*const fn (
+        app: *App,
+        source_pane: win32_shell.model.PaneId,
+    ) anyerror!void = null,
     next_host_id: u32 = 1,
     launcher_profile_key: ?[:0]const u8 = null,
     launcher_profile_hint: ?[:0]const u8 = null,
@@ -2558,6 +2679,11 @@ pub const App = struct {
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
+    /// True only while the app is synchronously draining every host during
+    /// shutdown. Child HWND teardown still repairs native split trees, but it
+    /// must not diagnose the intentionally absent per-pane close preflight as
+    /// an ordinary-close invariant failure.
+    quitting: bool = false,
     windows_hidden: bool = false,
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_check_running: std.atomic.Value(bool) = .init(false),
@@ -2630,17 +2756,34 @@ pub const App = struct {
     /// requested surface/window identity and fall back to the newly
     /// created primary surface when the IDs came from a prior process.
     pending_toast_activation: ?win32_toast_activation.ActivationTarget = null,
+    /// Ephemeral recovery launch: default config, no saved workspace restore.
+    safe_mode: bool = false,
+    recovery_startup: RecoveryStartup = .{},
+    /// Top-level shell composition only. Terminal child HWNDs retain their
+    /// existing WGL/SwapBuffers ownership regardless of this backend state.
+    shell_compositor_driver: win32_compositor_native.NativeDriver = undefined,
+    shell_compositor: win32_compositor.Backend = undefined,
+    shell_compositor_initialized: bool = false,
+    shell_runtime: win32_shell.runtime.Runtime = undefined,
+    shell_runtime_initialized: bool = false,
 
     pub fn init(
         self: *App,
         core_app: *CoreApp,
-        opts: struct {},
+        opts: struct { safe_mode: bool = false },
     ) !void {
-        _ = opts;
-
+        const recovery_startup = beginRecoveryStartup(core_app.alloc);
+        const safe_mode = opts.safe_mode or recovery_startup.decision == .safe_mode;
         self.* = .{
             .core_app = core_app,
-            .config = try configpkg.Config.load(core_app.alloc),
+            .config = if (safe_mode) config: {
+                var config = try configpkg.Config.default(core_app.alloc);
+                errdefer config.deinit();
+                try config.finalize();
+                break :config config;
+            } else try configpkg.Config.load(core_app.alloc),
+            .safe_mode = safe_mode,
+            .recovery_startup = recovery_startup,
             .hinstance = GetModuleHandleW(null),
             .launcher_profile_hint = detectDefaultProfileHint(core_app.alloc),
             .launcher_profile_order_hint = windows_shell.profileOrderHint(core_app.alloc),
@@ -2711,6 +2854,9 @@ pub const App = struct {
             self.os_build,
             self.use_integrated_titlebar,
         });
+        if (recovery_startup.decision == .safe_mode and !opts.safe_mode) {
+            log.warn("win32 recovery: repeated incomplete startups selected safe mode", .{});
+        }
 
         self.initComApartment();
         self.taskbar_progress = win32_taskbar_progress.TaskbarProgress.init() catch |err| blk: {
@@ -2730,10 +2876,28 @@ pub const App = struct {
             .openInEditor = &settingsOpenInEditorThunk,
             .currentConfig = &settingsCurrentConfigThunk,
             .saveAndReload = &settingsSaveAndReloadThunk,
+            .configRevision = &settingsConfigRevisionThunk,
+            .previewField = &settingsPreviewFieldThunk,
+            .notifyConflict = &settingsNotifyConflictThunk,
             .notifySuccess = &settingsNotifySuccessThunk,
             .onClosed = &settingsOnClosedThunk,
         });
         self.link_hover_tracker = win32_link_preview.HoverTracker.init();
+        // The driver interface retains a pointer to its App-owned field, so
+        // construct it only after `self.*` has established the final address.
+        self.shell_compositor_driver = win32_compositor_native.NativeDriver.init(core_app.alloc);
+        self.shell_compositor = win32_compositor.Backend.init(
+            win32_compositor.probeNativeCapability(),
+            self.shell_compositor_driver.interface(),
+        );
+        self.shell_compositor_initialized = true;
+        self.shell_runtime = win32_shell.runtime.Runtime.init(core_app.alloc);
+        self.shell_runtime_initialized = true;
+        const compositor_status = self.shell_compositor.status();
+        log.info("shell compositor state={s} fallback={?s}", .{
+            @tagName(compositor_status.state),
+            if (compositor_status.fallback_reason) |reason| @tagName(reason) else null,
+        });
     }
 
     /// Bring the STA apartment online for in-process COM consumers
@@ -2766,7 +2930,11 @@ pub const App = struct {
 
         try self.ensureWindowClass();
 
-        if (try self.tryForwardStartupToExistingInstance()) {
+        if (!self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
+            // Forwarding is a successful startup outcome for this process.
+            // Mark it ready so repeated new-window launches cannot accumulate
+            // false crash-loop evidence and trigger automatic safe mode.
+            self.markRecoveryReady();
             return;
         }
 
@@ -2780,10 +2948,12 @@ pub const App = struct {
             self.running = false;
         }
 
-        try self.startIpcServer();
+        // Safe mode is an isolated recovery process. It neither forwards into
+        // the normal instance nor competes for that instance's IPC endpoint.
+        if (!self.safe_mode) try self.startIpcServer();
 
         if (self.config.@"initial-window") {
-            const restored = try self.restoreSessionState();
+            const restored = if (self.safe_mode) false else try self.restoreSessionState();
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
@@ -2805,6 +2975,8 @@ pub const App = struct {
             };
         }
         if (self.windows.items.len == 0) self.startQuitTimer();
+
+        self.markRecoveryReady();
 
         var msg: MSG = undefined;
         while (true) {
@@ -2901,6 +3073,14 @@ pub const App = struct {
         self.stopIpcServer();
         self.saveSessionState();
         self.destroyAllWindows();
+        if (self.shell_runtime_initialized) {
+            self.shell_runtime.deinit();
+            self.shell_runtime_initialized = false;
+        }
+        if (self.shell_compositor_initialized) {
+            self.shell_compositor.deinit();
+            self.shell_compositor_initialized = false;
+        }
         self.hosts.deinit(self.core_app.alloc);
         self.windows.deinit(self.core_app.alloc);
         self.global_hotkeys.deinit(self.core_app.alloc);
@@ -2944,17 +3124,7 @@ pub const App = struct {
     /// `core_app.alloc`. Returns null if `LOCALAPPDATA` is unreadable
     /// or allocation fails.
     fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
-        const local = std.process.getEnvVarOwned(
-            self.core_app.alloc,
-            "LOCALAPPDATA",
-        ) catch return null;
-        defer self.core_app.alloc.free(local);
-        const dir = std.fs.path.join(self.core_app.alloc, &.{
-            local,
-            "winghostty",
-        }) catch return null;
-        defer self.core_app.alloc.free(dir);
-        return std.fs.path.join(self.core_app.alloc, &.{ dir, name }) catch null;
+        return localAppDataPathAlloc(self.core_app.alloc, name);
     }
 
     /// Resolve `%LOCALAPPDATA%\winghostty\palette-mru.txt`. Caller frees
@@ -2970,7 +3140,10 @@ pub const App = struct {
     }
 
     fn sessionStateEnabled(self: *const App) bool {
-        return self.config.@"window-save-state" != .never;
+        // Safe mode is deliberately non-destructive. It starts without
+        // restoring the saved session and must not replace or delete that
+        // session when the diagnostic run exits.
+        return sessionStatePolicyAllows(self.safe_mode, self.config.@"window-save-state");
     }
 
     /// Populate `palette_mru` from the on-disk file, one action per line
@@ -3050,12 +3223,19 @@ pub const App = struct {
 
         const raw = try file.readToEndAlloc(self.core_app.alloc, 1024 * 1024);
         defer self.core_app.alloc.free(raw);
-        return try win32_session_state.parseAlloc(self.core_app.alloc, raw);
+        return win32_session_state.parseAlloc(self.core_app.alloc, raw) catch |err| {
+            // Only validated payload failures justify moving user state.
+            // Transient open/read/OOM failures remain retryable and leave the
+            // session file untouched.
+            if (err == error.OutOfMemory) return err;
+            self.quarantineInvalidSessionState(err);
+            return null;
+        };
     }
 
     fn restoreSessionState(self: *App) !bool {
         var parsed = self.loadSessionState() catch |err| {
-            log.warn("win32 session restore: ignored unreadable session state err={}", .{err});
+            log.warn("win32 session restore: state read failed; leaving file untouched err={}", .{err});
             return false;
         } orelse return false;
         defer parsed.deinit();
@@ -3071,6 +3251,76 @@ pub const App = struct {
         }
 
         return restored;
+    }
+
+    fn quarantineInvalidSessionState(self: *App, parse_error: anyerror) void {
+        const path = self.sessionStatePath() orelse {
+            log.warn("win32 session restore: ignored unreadable session state err={}", .{parse_error});
+            return;
+        };
+        defer self.core_app.alloc.free(path);
+        var plan = win32_recovery.quarantinePlanAlloc(
+            self.core_app.alloc,
+            path,
+            unixMillis(),
+        ) catch {
+            log.warn("win32 session restore: quarantine planning failed err={}", .{parse_error});
+            return;
+        };
+        defer plan.deinit();
+        std.fs.renameAbsolute(plan.source_path, plan.destination_path) catch |err| {
+            log.warn("win32 session restore: quarantine failed path={s} parse_err={} move_err={}", .{ path, parse_error, err });
+            return;
+        };
+        log.warn("win32 session restore: quarantined unreadable state path={s} parse_err={}", .{ plan.destination_path, parse_error });
+    }
+
+    fn markRecoveryReady(self: *App) void {
+        if (self.recovery_startup.count == 0) return;
+        const memory_attempts = self.recovery_startup.attempts[0..self.recovery_startup.count];
+        const target_started_at = memory_attempts[memory_attempts.len - 1].started_at_unix_ms;
+        if (memory_attempts[memory_attempts.len - 1].ready_at_unix_ms != null) return;
+
+        var disk_record: win32_recovery.StartupAttemptRecord = .{};
+        var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
+        defer if (parsed_record) |*parsed| parsed.deinit();
+        if (localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json")) |path| {
+            defer self.core_app.alloc.free(path);
+            if (std.fs.openFileAbsolute(path, .{})) |file| {
+                defer file.close();
+                if (file.readToEndAlloc(self.core_app.alloc, 64 * 1024)) |raw| {
+                    defer self.core_app.alloc.free(raw);
+                    parsed_record = win32_recovery.parseAlloc(self.core_app.alloc, raw) catch |err| invalid: {
+                        log.warn("win32 recovery: ready merge ignored invalid disk history err={}", .{err});
+                        break :invalid null;
+                    };
+                    if (parsed_record) |*parsed| disk_record = parsed.value;
+                } else |err| {
+                    log.warn("win32 recovery: ready merge read failed err={}", .{err});
+                }
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => log.warn("win32 recovery: ready merge open failed err={}", .{err}),
+            }
+        }
+
+        var merged_attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
+        const merged = win32_recovery.mergeMarkReady(
+            disk_record,
+            .{ .attempts = memory_attempts },
+            target_started_at,
+            unixMillis(),
+            &merged_attempts,
+        ) catch |err| {
+            log.warn("win32 recovery: ready marker merge failed err={}", .{err});
+            return;
+        };
+        @memcpy(self.recovery_startup.attempts[0..merged.attempts.len], merged.attempts);
+        self.recovery_startup.count = merged.attempts.len;
+        persistRecoveryRecord(
+            self.core_app.alloc,
+            self.recovery_startup.attempts[0..self.recovery_startup.count],
+        ) catch |err| log.warn("win32 recovery: ready marker persist failed err={}", .{err});
     }
 
     fn restoreSessionWindow(
@@ -3514,7 +3764,11 @@ pub const App = struct {
             };
         }
 
-        const tmp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{path});
+        const tmp_path = try std.fmt.allocPrint(
+            alloc,
+            "{s}.tmp-{x}-{x}",
+            .{ path, GetCurrentProcessId(), unixMillis() },
+        );
         defer alloc.free(tmp_path);
         errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
 
@@ -4081,13 +4335,17 @@ pub const App = struct {
     }
 
     fn scheduleUndoPruneTimer(self: *App) void {
+        self.scheduleUndoPruneTimerWithMinimum(1);
+    }
+
+    fn scheduleUndoPruneTimerWithMinimum(self: *App, minimum_delay_ms: u64) void {
         if (!self.running) return;
         self.stopUndoPruneTimer();
 
         const oldest = self.oldestUndoTimestamp() orelse return;
         const now = GetTickCount64();
         const expires_at = oldest +| self.undoTimeoutMs() +| 1;
-        const delay_ms = if (expires_at <= now) 1 else expires_at - now;
+        const delay_ms = @max(minimum_delay_ms, if (expires_at <= now) 1 else expires_at - now);
         const timer_id = SetTimer(
             null,
             0,
@@ -4103,7 +4361,8 @@ pub const App = struct {
         self.undo_prune_timer_id = timer_id;
     }
 
-    fn pruneUndoHistoryBefore(self: *App, min_timestamp_ms: u64) void {
+    fn pruneUndoHistoryBefore(self: *App, min_timestamp_ms: u64) bool {
+        var complete = true;
         for (self.windows.items) |surface| {
             surface.undo_stack.discardExpired(min_timestamp_ms);
         }
@@ -4111,7 +4370,7 @@ pub const App = struct {
         var i: usize = 0;
         while (i < self.hosts.items.len) {
             const host = self.hosts.items[i];
-            host.pruneStructuralHistoryBefore(min_timestamp_ms);
+            if (!host.pruneStructuralHistoryBefore(min_timestamp_ms)) complete = false;
             if (host.destroy_after_structural_dispose and host.tabs.items.len == 0 and !host.hasStructuralHistory()) {
                 if (host.hwnd) |hwnd| {
                     _ = DestroyWindow(hwnd);
@@ -4124,11 +4383,15 @@ pub const App = struct {
                 i += 1;
             }
         }
+        return complete;
     }
 
     fn pruneUndoHistoryNow(self: *App) void {
-        self.pruneUndoHistoryBefore(self.undoCutoffTimestampMs());
-        self.scheduleUndoPruneTimer();
+        const complete = self.pruneUndoHistoryBefore(self.undoCutoffTimestampMs());
+        if (complete)
+            self.scheduleUndoPruneTimer()
+        else
+            self.scheduleUndoPruneTimerWithMinimum(1000);
         if (self.running and !self.hasLiveUiWindows()) self.startQuitTimer();
     }
 
@@ -4245,7 +4508,7 @@ pub const App = struct {
                     } },
                 })) |_| {} else |err| {
                     log.warn("new_split undo snapshot failed err={}", .{err});
-                    tab_info.host.clearStructuralRedo();
+                    _ = tab_info.host.clearStructuralRedo();
                 }
                 self.activateSurface(surface);
                 return true;
@@ -4279,11 +4542,17 @@ pub const App = struct {
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
+                        self.config_revision +%= 1;
+                        if (self.config_revision == 0) self.config_revision = 1;
+                        for (self.hosts.items) |host| {
+                            if (host.overlay_mode == .command_palette) host.rebuildPaletteList();
+                        }
                         self.scheduleGlobalHotkeySync();
                         self.reconfigureTheme();
                         for (self.windows.items) |surface| {
                             try surface.applyRuntimeConfig(&self.config);
                         }
+                        self.settings_window.externalConfigChanged(&self.config, self.config_revision);
                         if (self.windows.items.len == 0) {
                             self.startQuitTimer();
                         } else {
@@ -5325,6 +5594,84 @@ pub const App = struct {
         return id;
     }
 
+    fn prepareShellSurfaceCreate(
+        self: *App,
+        existing_host: ?*Host,
+        opts: SurfaceInitOptions,
+    ) !?win32_shell.runtime.Prepared {
+        if (!self.shell_runtime_initialized) return null;
+        const host = existing_host orelse return try self.shell_runtime.prepare(.create_window);
+        if (opts.tab_id == null) {
+            const window_id = host.shell_id orelse return error.ShellStateOutOfSync;
+            return try self.shell_runtime.prepare(.{ .create_tab = window_id });
+        }
+
+        const source = opts.clone_state_from orelse return error.ShellStateOutOfSync;
+        const pane_id = source.shell_id orelse return error.ShellStateOutOfSync;
+        const direction: win32_shell.model.Direction = switch (opts.split_direction) {
+            .left => .left,
+            .right => .right,
+            .up => .up,
+            .down => .down,
+        };
+        return try self.shell_runtime.prepare(.{ .split_pane = .{
+            .pane = pane_id,
+            .direction = direction,
+        } });
+    }
+
+    fn auditShellNativeMapping(self: *App, context: []const u8) void {
+        if (comptime builtin.mode != .Debug) return;
+        if (!self.shell_runtime_initialized) return;
+        self.validateShellNativeMapping() catch |err| {
+            log.err("shell/native invariant failed context={s} err={}", .{ context, err });
+        };
+    }
+
+    fn validateShellNativeMapping(self: *App) !void {
+        const state = &self.shell_runtime.state;
+        var mapped_hosts: usize = 0;
+        for (self.hosts.items) |host| {
+            const window_id = host.shell_id orelse continue;
+            mapped_hosts += 1;
+            const window = state.windowConst(window_id) orelse return error.MissingShellWindow;
+            if (window.tabs.items.len != host.tabs.items.len) return error.TabCountMismatch;
+            if (host.tabs.items.len == 0) {
+                if (window.active_tab != null) return error.ActiveTabMismatch;
+                continue;
+            }
+            if (host.active_tab >= host.tabs.items.len) return error.ActiveTabMismatch;
+            const native_active = host.tabs.items[host.active_tab].shell_id orelse
+                return error.MissingShellTab;
+            if (window.active_tab == null or !window.active_tab.?.eql(native_active))
+                return error.ActiveTabMismatch;
+
+            for (host.tabs.items, 0..) |*native_tab, index| {
+                const tab_id = native_tab.shell_id orelse return error.MissingShellTab;
+                if (!window.tabs.items[index].eql(tab_id)) return error.TabOrderMismatch;
+                const tab = state.tabConst(tab_id) orelse return error.MissingShellTab;
+                var native_panes: usize = 0;
+                var focused_found = false;
+                var it = native_tab.tree.iterator();
+                while (it.next()) |entry| {
+                    native_panes += 1;
+                    const pane_id = entry.view.shell_id orelse return error.MissingShellPane;
+                    const pane = state.paneConst(pane_id) orelse return error.MissingShellPane;
+                    if (!pane.tab.eql(tab_id)) return error.PaneOwnerMismatch;
+                    if (entry.handle == native_tab.focused and pane_id.eql(tab.focused_pane))
+                        focused_found = true;
+                }
+                var model_panes: usize = 0;
+                for (state.panes.items) |pane| if (pane.tab.eql(tab_id)) {
+                    model_panes += 1;
+                };
+                if (native_panes != model_panes) return error.PaneCountMismatch;
+                if (!focused_found) return error.FocusedPaneMismatch;
+            }
+        }
+        if (mapped_hosts != state.windows.items.len) return error.WindowCountMismatch;
+    }
+
     fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface, passive_show: bool) !*Host {
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
@@ -5336,6 +5683,10 @@ pub const App = struct {
             .app = self,
             .id = self.allocateHostId(),
         };
+        host.palette_catalog = try PaletteCatalog.init(
+            &host.palette_catalog_items,
+            &host.palette_catalog_payloads,
+        );
         host.tween_sched.init(self.core_app.alloc);
         if (self.launcher_profile_key) |key| {
             try appendOwnedString(self.core_app.alloc, &host.selected_profile_key, key);
@@ -5369,6 +5720,8 @@ pub const App = struct {
         host.recreateTitlebarIconFonts();
         errdefer _ = DestroyWindow(hwnd);
 
+        self.attachShellCompositorWindow(hwnd);
+
         try self.hosts.append(self.core_app.alloc, host);
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
@@ -5383,6 +5736,144 @@ pub const App = struct {
         _ = UpdateWindow(hwnd);
         self.maybeScheduleAutomaticUpdateCheck();
         return host;
+    }
+
+    fn attachShellCompositorWindow(self: *App, hwnd: HWND) void {
+        if (!self.shell_compositor_initialized) return;
+        self.shell_compositor.attachWindow(@intFromPtr(hwnd)) catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell compositor recovery after attach failed err={}", .{recover_err});
+                    return;
+                };
+                self.shell_compositor.attachWindow(@intFromPtr(hwnd)) catch |retry_err| {
+                    log.warn("shell compositor attach retry failed err={}", .{retry_err});
+                    return;
+                };
+            },
+            else => {
+                log.warn("shell compositor attach unavailable err={}", .{err});
+                return;
+            },
+        };
+        self.commitShellCompositor();
+    }
+
+    fn detachShellCompositorWindow(self: *App, hwnd: HWND) void {
+        if (!self.shell_compositor_initialized) return;
+        self.shell_compositor.detachWindow(@intFromPtr(hwnd)) catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell compositor recovery before detach failed err={}", .{recover_err});
+                    return;
+                };
+                self.shell_compositor.detachWindow(@intFromPtr(hwnd)) catch |retry_err| {
+                    log.warn("shell compositor detach retry failed err={}", .{retry_err});
+                    return;
+                };
+            },
+            error.FallbackOnly, error.InvalidState => return,
+            else => {
+                log.warn("shell compositor detach failed err={}", .{err});
+                return;
+            },
+        };
+        if (self.shell_compositor.status().state == .active) self.commitShellCompositor();
+    }
+
+    fn resizeShellCompositorWindow(self: *App, hwnd: HWND) void {
+        if (!self.shell_compositor_initialized or
+            self.shell_compositor.status().state != .active) return;
+        const changed = self.shell_compositor_driver.resizeWindow(@intFromPtr(hwnd)) catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.markDeviceLost();
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell compositor resize recovery failed err={}", .{recover_err});
+                    return;
+                };
+                const retry_changed = self.shell_compositor_driver.resizeWindow(@intFromPtr(hwnd)) catch |retry_err| {
+                    if (retry_err == error.DeviceLost) self.shell_compositor.markDeviceLost();
+                    log.warn("shell compositor resize retry failed err={}", .{retry_err});
+                    return;
+                };
+                if (retry_changed) self.commitShellCompositor();
+                return;
+            },
+            else => {
+                log.warn("shell compositor resize unavailable err={}", .{err});
+                return;
+            },
+        };
+        if (changed) self.commitShellCompositor();
+    }
+
+    fn renderShellChromeText(
+        self: *App,
+        hwnd: HWND,
+        args: win32_compositor_native.ChromeText,
+    ) bool {
+        if (!self.shell_compositor_initialized or
+            self.shell_compositor.status().state != .active) return false;
+
+        self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.markDeviceLost();
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell chrome DWrite recovery failed err={}", .{recover_err});
+                    return false;
+                };
+                self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |retry_err| {
+                    if (retry_err == error.DeviceLost) self.shell_compositor.markDeviceLost();
+                    log.warn("shell chrome DWrite retry failed err={}", .{retry_err});
+                    return false;
+                };
+            },
+            else => {
+                log.warn("shell chrome DWrite unavailable err={}", .{err});
+                return false;
+            },
+        };
+        self.shell_compositor.commit() catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.markDeviceLost();
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell chrome DWrite commit recovery failed err={}", .{recover_err});
+                    return false;
+                };
+                self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |retry_render_err| {
+                    if (retry_render_err == error.DeviceLost) self.shell_compositor.markDeviceLost();
+                    log.warn("shell chrome DWrite commit recovery render retry failed err={}", .{retry_render_err});
+                    return false;
+                };
+                self.shell_compositor.commit() catch |retry_commit_err| {
+                    log.warn("shell chrome DWrite commit recovery commit retry failed err={}", .{retry_commit_err});
+                    return false;
+                };
+            },
+            else => {
+                log.warn("shell chrome DWrite commit failed err={}", .{err});
+                return false;
+            },
+        };
+        return true;
+    }
+
+    fn commitShellCompositor(self: *App) void {
+        self.shell_compositor.commit() catch |err| switch (err) {
+            error.DeviceLost => {
+                self.shell_compositor.markDeviceLost();
+                self.shell_compositor.recover() catch |recover_err| {
+                    log.warn("shell compositor commit recovery failed err={}", .{recover_err});
+                    return;
+                };
+                if (self.shell_compositor.status().state == .active) {
+                    self.shell_compositor.commit() catch |retry_err| {
+                        log.warn("shell compositor commit retry failed err={}", .{retry_err});
+                    };
+                }
+            },
+            else => log.warn("shell compositor commit unavailable err={}", .{err}),
+        };
     }
 
     fn findHostById(self: *App, id: u32) ?*Host {
@@ -5654,12 +6145,28 @@ pub const App = struct {
             if (found.tab.focused != handle) found.tab.focused = handle;
             if (!needs_host_sync) {
                 surface.presentWindow();
+                self.commitShellSurfaceFocus(surface);
                 self.syncTaskbarProgressForHost(surface.host_id);
                 return;
             }
         }
         self.showHostSurface(surface, true);
+        self.commitShellSurfaceFocus(surface);
         self.syncTaskbarProgressForHost(surface.host_id);
+    }
+
+    fn commitShellSurfaceFocus(self: *App, surface: *Surface) void {
+        if (!self.shell_runtime_initialized) return;
+        // Surface creation publishes provisional generational IDs before the
+        // native HWND can receive its first focus message. Ignore that early
+        // message until the prepared create transaction is authoritative.
+        if (!surface.shell_committed) return;
+        const pane_id = surface.shell_id orelse return;
+        _ = self.shell_runtime.focusPane(pane_id) catch |err| {
+            log.err("shell focus transaction rejected pane={d}:{d} err={}", .{ pane_id.index, pane_id.generation, err });
+            return;
+        };
+        self.auditShellNativeMapping("focus");
     }
 
     fn syncTaskbarProgressForHost(self: *App, host_id: u32) void {
@@ -5752,11 +6259,13 @@ pub const App = struct {
             if (found.tab.focused != handle) found.tab.focused = handle;
             if (!needs_host_sync) {
                 surface.setVisible(true);
+                self.commitShellSurfaceFocus(surface);
                 self.syncTaskbarProgressForHost(surface.host_id);
                 return;
             }
         }
         self.showHostSurface(surface, false);
+        self.commitShellSurfaceFocus(surface);
         self.syncTaskbarProgressForHost(surface.host_id);
     }
 
@@ -5771,6 +6280,7 @@ pub const App = struct {
         );
         found.host.active_tab = found.index;
         found.tab.focused = handle;
+        self.commitShellSurfaceFocus(surface);
         return changed;
     }
 
@@ -5814,6 +6324,9 @@ pub const App = struct {
             host.setHoveredButton(null);
             host.tab_drag_index = null;
             host.tab_drag_active = false;
+            if (host.tab_drop_target_surface == surface) {
+                host.hideTabDropPreview();
+            }
 
             for (host.tabs.items, 0..) |*tab, i| {
                 if (tab.findHandle(surface)) |handle| {
@@ -5827,7 +6340,18 @@ pub const App = struct {
                             host.active_tab = host.tabs.items.len - 1;
                         }
                     } else {
-                        const next_tree = tab.tree.remove(self.core_app.alloc, handle) catch break;
+                        const next_tree = if (surface.pending_close_tree) |prepared_tree| prepared: {
+                            surface.pending_close_tree = null;
+                            break :prepared prepared_tree;
+                        } else emergency: {
+                            if (!self.quitting) {
+                                log.warn("surface destroyed without close-tree preflight; attempting emergency repair", .{});
+                            }
+                            break :emergency tab.tree.remove(self.core_app.alloc, handle) catch |err| {
+                                log.err("emergency split removal failed after surface destruction err={}", .{err});
+                                break;
+                            };
+                        };
                         tab.tree.deinit();
                         tab.tree = next_tree;
                         var it = tab.tree.iterator();
@@ -5837,9 +6361,30 @@ pub const App = struct {
                 }
             }
 
+            if (surface.pending_close_tree) |*unused_tree| {
+                unused_tree.deinit();
+                surface.pending_close_tree = null;
+            }
+            var shell_mapping_changed = false;
+            if (surface.pending_shell_close) |*prepared| {
+                const close_intent = prepared.intent;
+                prepared.commitRetryingInterleavedFocus(&self.shell_runtime) catch |err| {
+                    log.err("shell close retry failed after native teardown err={}; forcing reconciliation", .{err});
+                    self.shell_runtime.forceClose(close_intent) catch |force_err| switch (force_err) {
+                        error.StaleId, error.LastPane => {},
+                        else => log.err("forced shell close reconciliation failed err={}", .{force_err}),
+                    };
+                };
+                prepared.deinit();
+                surface.pending_shell_close = null;
+                shell_mapping_changed = true;
+            }
+
+            var shell_mapping_stable = true;
             if (host.tabs.items.len == 0) {
                 if (host.structural_history_disposing) {
                     host.destroy_after_structural_dispose = true;
+                    shell_mapping_stable = false;
                 } else {
                     if (host.hwnd) |hwnd| _ = DestroyWindow(hwnd);
                     self.removeHost(host);
@@ -5851,6 +6396,9 @@ pub const App = struct {
                 // `.auto` still shows the row since it carries the
                 // essential host controls (+, overflow).
                 host.layout() catch {};
+            }
+            if (shell_mapping_changed and shell_mapping_stable) {
+                self.auditShellNativeMapping("surface-close");
             }
         }
 
@@ -5926,8 +6474,12 @@ pub const App = struct {
             unchanged.deinit();
             return false;
         }
+        if (!found.host.tryClearStructuralHistory(.normal)) {
+            var rejected = next_tree;
+            rejected.deinit();
+            return error.HistoryDisposalDeferred;
+        }
         found.tab.clearRedoHistory();
-        found.host.clearStructuralHistory(.normal);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
         try found.host.layout();
@@ -5943,8 +6495,12 @@ pub const App = struct {
             unchanged.deinit();
             return false;
         }
+        if (!found.host.tryClearStructuralHistory(.normal)) {
+            var rejected = next_tree;
+            rejected.deinit();
+            return error.HistoryDisposalDeferred;
+        }
         found.tab.clearRedoHistory();
-        found.host.clearStructuralHistory(.normal);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
         try found.host.layout();
@@ -5963,11 +6519,34 @@ pub const App = struct {
                 const stored_entry = host.pushStructuralUndo(entry) catch |err| {
                     log.warn("close_tab undo snapshot failed err={}", .{err});
                     var failed = entry;
-                    errdefer failed.dispose(host, .normal);
-                    _ = try host.restoreClosedTabEntry(&failed.payload.close_tab);
+                    errdefer failed.dispose(host, .normal) catch {};
+                    _ = try host.restoreClosedTabEntryNative(&failed.payload.close_tab);
                     if (host.activeSurface()) |restored| self.activateSurface(restored);
                     return err;
                 };
+                if (self.shell_runtime_initialized) shell: {
+                    const shell_tab_id = stored_entry.payload.close_tab.shell_id orelse {
+                        var failed = host.structural_undo_entries.pop().?;
+                        _ = try host.restoreClosedTabEntryNative(&failed.payload.close_tab);
+                        if (host.activeSurface()) |restored| self.activateSurface(restored);
+                        return error.ShellStateOutOfSync;
+                    };
+                    var prepared = self.shell_runtime.prepare(.{ .detach_tab = shell_tab_id }) catch |err| {
+                        var failed = host.structural_undo_entries.pop().?;
+                        _ = try host.restoreClosedTabEntryNative(&failed.payload.close_tab);
+                        if (host.activeSurface()) |restored| self.activateSurface(restored);
+                        return err;
+                    };
+                    defer prepared.deinit();
+                    prepared.commit(&self.shell_runtime) catch |err| {
+                        var failed = host.structural_undo_entries.pop().?;
+                        _ = try host.restoreClosedTabEntryNative(&failed.payload.close_tab);
+                        if (host.activeSurface()) |restored| self.activateSurface(restored);
+                        return err;
+                    };
+                    self.auditShellNativeMapping("tab-detach");
+                    break :shell;
+                }
                 if (stored_entry.payload.close_tab.tab) |*tab| tab.clearRedoHistory();
                 if (host.activeSurface()) |replacement| {
                     self.activateSurface(replacement);
@@ -5982,13 +6561,14 @@ pub const App = struct {
 
             .other => {
                 if (host.tabs.items.len <= 1) return false;
+                if (!host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
                 found.tab.clearRedoHistory();
-                host.clearStructuralHistory(.normal);
                 var closed = false;
                 var i = host.tabs.items.len;
                 while (i > 0) {
                     i -= 1;
                     if (i == current_idx) continue;
+                    host.tabs.items[i].clearRedoHistory();
                     var it = host.tabs.items[i].tree.iterator();
                     while (it.next()) |entry| entry.view.close(false);
                     closed = true;
@@ -5999,12 +6579,13 @@ pub const App = struct {
 
             .right => {
                 if (current_idx + 1 >= host.tabs.items.len) return false;
+                if (!host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
                 found.tab.clearRedoHistory();
-                host.clearStructuralHistory(.normal);
                 var closed = false;
                 var i = host.tabs.items.len;
                 while (i > current_idx + 1) {
                     i -= 1;
+                    host.tabs.items[i].clearRedoHistory();
                     var it = host.tabs.items[i].tree.iterator();
                     while (it.next()) |entry| entry.view.close(false);
                     closed = true;
@@ -6036,11 +6617,27 @@ pub const App = struct {
         const current_idx = found.index;
         const desired = desiredMoveIndex(found.host.tabs.items.len, current_idx, move.amount) orelse return false;
         if (desired == current_idx) return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.shell_runtime_initialized) {
+            const shell_id = found.tab.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.shell_runtime.prepare(.{ .reorder_tab = .{
+                .tab = shell_id,
+                .index = desired,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+        if (!found.host.tryClearStructuralHistory(.normal)) return error.HistoryDisposalDeferred;
         found.tab.clearRedoHistory();
-        found.host.clearStructuralHistory(.normal);
         const tab = found.host.tabs.orderedRemove(current_idx);
-        try found.host.tabs.insert(self.core_app.alloc, desired, tab);
+        found.host.tabs.insertAssumeCapacity(desired, tab);
         found.host.active_tab = desired;
+        if (shell_prepared) |*prepared| prepared.commit(&self.shell_runtime) catch |err| {
+            const rollback = found.host.tabs.orderedRemove(desired);
+            found.host.tabs.insertAssumeCapacity(current_idx, rollback);
+            found.host.active_tab = current_idx;
+            return err;
+        };
+        self.auditShellNativeMapping("tab-reorder");
         const surface = found.host.tabs.items[desired].focusedSurface() orelse return false;
         self.activateSurface(surface);
         return true;
@@ -6314,6 +6911,8 @@ pub const App = struct {
     }
 
     fn destroyAllWindows(self: *App) void {
+        self.quitting = true;
+        defer self.quitting = false;
         while (self.hosts.items.len > 0) {
             const host = self.hosts.items[self.hosts.items.len - 1];
             const hwnd = host.hwnd orelse {
@@ -6500,7 +7099,11 @@ pub const App = struct {
         };
         defer alloc.free(target_path);
 
-        const tmp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{target_path});
+        const tmp_path = try std.fmt.allocPrint(
+            alloc,
+            "{s}.tmp-{x}-{x}",
+            .{ target_path, GetCurrentProcessId(), unixMillis() },
+        );
         defer alloc.free(tmp_path);
 
         // Build a file-only baseline: `Config.default()` merged with
@@ -6627,8 +7230,7 @@ pub const App = struct {
             };
             defer f.close();
             const stat = f.stat() catch return error.SerializeFailed;
-            const size = @min(stat.size, 16 * 1024 * 1024);
-            const slice = alloc.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
+            const slice = alloc.alloc(u8, settingsFileSize(stat.size) catch return error.SerializeFailed) catch return error.OutOfMemory;
             errdefer alloc.free(slice);
             const n = f.readAll(slice) catch return error.SerializeFailed;
             break :blk try alloc.realloc(slice, n);
@@ -6661,13 +7263,17 @@ pub const App = struct {
         // Write to the sibling temp file, close, then rename. Scoped
         // block so the file is closed BEFORE ReplaceFileW — Windows
         // blocks the replace while the temp handle is open.
+        var temp_pending = false;
+        defer if (temp_pending) std.fs.cwd().deleteFile(tmp_path) catch {};
         {
             const tmp = std.fs.cwd().createFile(tmp_path, .{}) catch return error.TempCreateFailed;
+            temp_pending = true;
             defer tmp.close();
             var write_buf: [4096]u8 = undefined;
             var fw = tmp.writer(&write_buf);
             fw.interface.writeAll(patched.items) catch return error.SerializeFailed;
             fw.interface.flush() catch return error.SerializeFailed;
+            tmp.sync() catch return error.SerializeFailed;
         }
 
         const target_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, target_path) catch return error.OutOfMemory;
@@ -6683,6 +7289,7 @@ pub const App = struct {
                 return error.ReplaceFailed;
             }
         }
+        temp_pending = false;
 
         // Mirror the `.reload_config` hard-reload path at win32.zig
         // line ~2106: re-read from disk + push through CoreApp so
@@ -7495,6 +8102,7 @@ const SplitTreeSurface = SplitTree(Surface);
 const Tab = struct {
     alloc: Allocator,
     id: u32,
+    shell_id: ?win32_shell.model.TabId = null,
     tree: SplitTreeSurface,
     focused: SplitTreeSurface.Node.Handle = .root,
     button_hwnd: ?HWND = null,
@@ -7619,6 +8227,7 @@ const QuickTerminalAnimation = struct {
 const Host = struct {
     app: *App,
     id: u32,
+    shell_id: ?win32_shell.model.WindowId = null,
     hwnd: ?HWND = null,
     cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
@@ -7753,15 +8362,25 @@ const Host = struct {
     update_dismiss_rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
     tab_drag_index: ?usize = null,
     tab_drag_start_x: i32 = 0,
+    tab_drag_start_y: i32 = 0,
     tab_drag_active: bool = false,
+    tab_drop_operation: win32_tab_drop_zones.Operation = .none,
+    tab_drop_target_surface: ?*Surface = null,
+    tab_drop_preview_hwnd: ?HWND = null,
 
     // Command palette list UI. Backed by a custom child HWND shown
     // only while the palette is open. `palette_list_ranked` caches the
     // current query's ranked matches so the paint path doesn't re-rank
     // on every WM_PAINT; rebuilt on EDIT text change.
     palette_list_hwnd: ?HWND = null,
+    palette_list_uia_provider: ?*win32_uia.PaletteListProvider = null,
     palette_list_placement: ChildPlacement = .{},
-    palette_list_ranked: [win32_palette.max_ranked]win32_palette.RankedIndex = undefined,
+    palette_catalog_items: [palette_catalog_capacity]PaletteItem = undefined,
+    palette_catalog_payloads: [palette_catalog_capacity]PalettePayload = undefined,
+    palette_catalog: ?PaletteCatalog = null,
+    palette_catalog_labels: [palette_catalog_label_capacity][palette_catalog_label_bytes]u8 = undefined,
+    palette_catalog_label_count: usize = 0,
+    palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     palette_list_scroll: usize = 0,
     /// Currently-selected row (absolute index into ranked). Enter runs
@@ -7790,12 +8409,14 @@ const Host = struct {
     const StructuralUndoKind = enum {
         close_tab,
         split_create,
+        tab_subtree_transfer,
     };
 
     const CloseTabUndo = struct {
         tab: ?Tab = null,
         index: usize,
         tab_id: u32,
+        shell_id: ?win32_shell.model.TabId = null,
     };
 
     const SplitCreateUndo = struct {
@@ -7805,6 +8426,17 @@ const Host = struct {
         detached: bool = false,
     };
 
+    const TabSubtreeTransferUndo = struct {
+        source_tab: ?Tab,
+        source_index: usize,
+        source_tab_id: u32,
+        target_tab_id: u32,
+        alternate_tree: SplitTreeSurface,
+        alternate_focus: SplitTreeSurface.Node.Handle,
+        source_root: win32_shell.model.NodeId,
+        applied: bool = true,
+    };
+
     const StructuralUndoEntry = struct {
         kind: StructuralUndoKind,
         timestamp_ms: u64,
@@ -7812,18 +8444,19 @@ const Host = struct {
         payload: union(StructuralUndoKind) {
             close_tab: CloseTabUndo,
             split_create: SplitCreateUndo,
+            tab_subtree_transfer: TabSubtreeTransferUndo,
         },
 
         fn dispose(
             self: *StructuralUndoEntry,
             host: *Host,
             mode: StructuralHistoryDisposeMode,
-        ) void {
+        ) !void {
             switch (self.payload) {
                 .close_tab => |*value| {
                     if (value.tab) |*tab| {
                         switch (mode) {
-                            .normal => host.disposeDetachedUndoTab(tab),
+                            .normal => try host.disposeDetachedUndoTab(tab),
                             .host_destroy => tab.deinit(),
                         }
                         value.tab = null;
@@ -7837,6 +8470,26 @@ const Host = struct {
                         .host_destroy => {},
                     }
                     value.detached = false;
+                },
+
+                .tab_subtree_transfer => |*value| {
+                    if (mode == .normal) {
+                        var shell_discard: ?win32_shell.runtime.Prepared = null;
+                        if (host.app.shell_runtime_initialized) {
+                            shell_discard = try host.app.shell_runtime.prepare(.{ .discard_transfer = value.source_root });
+                        }
+                        defer if (shell_discard) |*prepared| prepared.deinit();
+                        if (shell_discard) |*prepared| try prepared.commit(&host.app.shell_runtime);
+                    }
+
+                    // Both the detached source Tab (applied phase) and the
+                    // alternate tree are duplicate references. Moved Surfaces
+                    // remain owned by the live tree and must never be closed.
+                    if (value.source_tab) |*tab| {
+                        tab.deinit();
+                        value.source_tab = null;
+                    }
+                    value.alternate_tree.deinit();
                 },
             }
         }
@@ -7854,6 +8507,14 @@ const Host = struct {
                 },
 
                 .split_create => |value| value.source_surface == surface or value.created_surface == surface,
+                .tab_subtree_transfer => |value| transfer: {
+                    if (value.source_tab) |tab| {
+                        if (tab.findHandle(surface) != null) break :transfer true;
+                    }
+                    var it = value.alternate_tree.iterator();
+                    while (it.next()) |entry| if (entry.view == surface) break :transfer true;
+                    break :transfer false;
+                },
             };
         }
     };
@@ -7878,7 +8539,18 @@ const Host = struct {
         surface.close(false);
     }
 
-    fn disposeDetachedUndoTab(self: *Host, tab: *Tab) void {
+    fn disposeDetachedUndoTab(self: *Host, tab: *Tab) !void {
+        var shell_discard: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const shell_id = tab.shell_id orelse return error.ShellStateOutOfSync;
+            shell_discard = try self.app.shell_runtime.prepare(.{ .discard_detached_tab = shell_id });
+        }
+        defer if (shell_discard) |*prepared| prepared.deinit();
+
+        // Commit first: after this allocation-free state swap the retained
+        // native objects are deliberately unaddressable by ShellState. Their
+        // synchronous HWND teardown cannot issue a second model close.
+        if (shell_discard) |*prepared| try prepared.commit(&self.app.shell_runtime);
         self.structural_history_disposing = true;
         defer self.structural_history_disposing = false;
 
@@ -7889,41 +8561,74 @@ const Host = struct {
         tab.deinit();
     }
 
-    fn discardNewestStructuralUndo(self: *Host) void {
-        var entry = self.structural_undo_entries.pop() orelse return;
-        entry.dispose(self, .normal);
+    fn discardNewestStructuralUndo(self: *Host) bool {
+        if (self.structural_undo_entries.items.len == 0) return true;
+        const index = self.structural_undo_entries.items.len - 1;
+        self.structural_undo_entries.items[index].dispose(self, .normal) catch |err| {
+            log.err("structural undo disposal deferred err={}", .{err});
+            return false;
+        };
+        _ = self.structural_undo_entries.pop();
+        return true;
     }
 
-    fn discardNewestStructuralRedo(self: *Host) void {
-        var entry = self.structural_redo_entries.pop() orelse return;
-        entry.dispose(self, .normal);
+    fn discardNewestStructuralRedo(self: *Host) bool {
+        if (self.structural_redo_entries.items.len == 0) return true;
+        const index = self.structural_redo_entries.items.len - 1;
+        self.structural_redo_entries.items[index].dispose(self, .normal) catch |err| {
+            log.err("structural redo disposal deferred err={}", .{err});
+            return false;
+        };
+        _ = self.structural_redo_entries.pop();
+        return true;
     }
 
-    fn clearStructuralRedo(self: *Host) void {
+    fn clearStructuralRedo(self: *Host) bool {
         while (self.structural_redo_entries.items.len > 0) {
-            self.discardNewestStructuralRedo();
+            if (!self.discardNewestStructuralRedo()) return false;
         }
+        return true;
+    }
+
+    fn tryClearStructuralHistory(
+        self: *Host,
+        mode: StructuralHistoryDisposeMode,
+    ) bool {
+        var complete = true;
+        while (self.structural_undo_entries.items.len > 0) {
+            const index = self.structural_undo_entries.items.len - 1;
+            self.structural_undo_entries.items[index].dispose(self, mode) catch |err| {
+                log.err("structural undo clear deferred err={}", .{err});
+                complete = false;
+                break;
+            };
+            _ = self.structural_undo_entries.pop();
+        }
+        while (self.structural_redo_entries.items.len > 0) {
+            const index = self.structural_redo_entries.items.len - 1;
+            self.structural_redo_entries.items[index].dispose(self, mode) catch |err| {
+                log.err("structural redo clear deferred err={}", .{err});
+                complete = false;
+                break;
+            };
+            _ = self.structural_redo_entries.pop();
+        }
+        return complete;
     }
 
     fn clearStructuralHistory(
         self: *Host,
         mode: StructuralHistoryDisposeMode,
     ) void {
-        while (self.structural_undo_entries.items.len > 0) {
-            var entry = self.structural_undo_entries.pop().?;
-            entry.dispose(self, mode);
-        }
-        while (self.structural_redo_entries.items.len > 0) {
-            var entry = self.structural_redo_entries.pop().?;
-            entry.dispose(self, mode);
-        }
+        _ = self.tryClearStructuralHistory(mode);
     }
 
     fn discardExpiredStructuralEntries(
         self: *Host,
         list: *std.ArrayListUnmanaged(StructuralUndoEntry),
         min_timestamp_ms: u64,
-    ) void {
+    ) bool {
+        var complete = true;
         var i: usize = 0;
         while (i < list.items.len) {
             if (list.items[i].timestamp_ms >= min_timestamp_ms) {
@@ -7931,9 +8636,15 @@ const Host = struct {
                 continue;
             }
 
-            var expired = list.orderedRemove(i);
-            expired.dispose(self, .normal);
+            list.items[i].dispose(self, .normal) catch |err| {
+                log.err("expired structural history disposal deferred err={}", .{err});
+                complete = false;
+                i += 1;
+                continue;
+            };
+            _ = list.orderedRemove(i);
         }
+        return complete;
     }
 
     fn oldestStructuralTimestamp(self: *const Host) ?u64 {
@@ -7951,23 +8662,32 @@ const Host = struct {
         return self.structural_undo_entries.items.len > 0 or self.structural_redo_entries.items.len > 0;
     }
 
-    fn pruneStructuralHistoryBefore(self: *Host, min_timestamp_ms: u64) void {
-        self.discardExpiredStructuralEntries(&self.structural_undo_entries, min_timestamp_ms);
-        self.discardExpiredStructuralEntries(&self.structural_redo_entries, min_timestamp_ms);
+    fn pruneStructuralHistoryBefore(self: *Host, min_timestamp_ms: u64) bool {
+        const undo_complete = self.discardExpiredStructuralEntries(&self.structural_undo_entries, min_timestamp_ms);
+        const redo_complete = self.discardExpiredStructuralEntries(&self.structural_redo_entries, min_timestamp_ms);
+        return undo_complete and redo_complete;
     }
 
-    fn pruneStructuralHistory(self: *Host) void {
-        self.pruneStructuralHistoryBefore(self.app.undoCutoffTimestampMs());
+    fn pruneStructuralHistory(self: *Host) bool {
+        return self.pruneStructuralHistoryBefore(self.app.undoCutoffTimestampMs());
     }
 
-    fn pushStructuralUndo(self: *Host, entry: StructuralUndoEntry) Allocator.Error!*StructuralUndoEntry {
-        self.pruneStructuralHistory();
+    fn pushStructuralUndo(self: *Host, entry: StructuralUndoEntry) !*StructuralUndoEntry {
+        try self.reserveStructuralUndoSlot();
+        return self.appendStructuralUndoAssumeCapacity(entry);
+    }
+
+    fn reserveStructuralUndoSlot(self: *Host) !void {
+        if (!self.pruneStructuralHistory()) return error.HistoryDisposalDeferred;
         try self.structural_undo_entries.ensureUnusedCapacity(self.app.core_app.alloc, 1);
-        self.clearStructuralRedo();
+        if (!self.clearStructuralRedo()) return error.HistoryDisposalDeferred;
         while (self.structural_undo_entries.items.len >= win32_undo.max_entries) {
-            var oldest = self.structural_undo_entries.orderedRemove(0);
-            oldest.dispose(self, .normal);
+            try self.structural_undo_entries.items[0].dispose(self, .normal);
+            _ = self.structural_undo_entries.orderedRemove(0);
         }
+    }
+
+    fn appendStructuralUndoAssumeCapacity(self: *Host, entry: StructuralUndoEntry) *StructuralUndoEntry {
         self.structural_undo_entries.appendAssumeCapacity(entry);
         self.app.scheduleUndoPruneTimer();
         return &self.structural_undo_entries.items[self.structural_undo_entries.items.len - 1];
@@ -8021,8 +8741,12 @@ const Host = struct {
                 continue;
             }
 
-            var removed = self.structural_undo_entries.orderedRemove(i);
-            removed.dispose(self, .normal);
+            self.structural_undo_entries.items[i].dispose(self, .normal) catch |err| {
+                log.err("referenced structural undo disposal deferred err={}", .{err});
+                i += 1;
+                continue;
+            };
+            _ = self.structural_undo_entries.orderedRemove(i);
         }
 
         i = 0;
@@ -8032,8 +8756,12 @@ const Host = struct {
                 continue;
             }
 
-            var removed = self.structural_redo_entries.orderedRemove(i);
-            removed.dispose(self, .normal);
+            self.structural_redo_entries.items[i].dispose(self, .normal) catch |err| {
+                log.err("referenced structural redo disposal deferred err={}", .{err});
+                i += 1;
+                continue;
+            };
+            _ = self.structural_redo_entries.orderedRemove(i);
         }
     }
 
@@ -8073,11 +8801,12 @@ const Host = struct {
                 .tab = removed,
                 .index = index,
                 .tab_id = tab_id,
+                .shell_id = removed.shell_id,
             } },
         };
     }
 
-    fn restoreClosedTabEntry(self: *Host, value: *CloseTabUndo) Allocator.Error!bool {
+    fn restoreClosedTabEntryNative(self: *Host, value: *CloseTabUndo) Allocator.Error!bool {
         const tab = value.tab orelse return false;
         const insert_index = clampTabInsertIndex(value.index, self.tabs.items.len);
         try self.tabs.insert(self.app.core_app.alloc, insert_index, tab);
@@ -8087,9 +8816,35 @@ const Host = struct {
         return self.activeSurface() != null;
     }
 
-    fn redoClosedTabEntry(self: *Host, value: *CloseTabUndo) bool {
+    fn restoreClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
+        const insert_index = clampTabInsertIndex(value.index, self.tabs.items.len);
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .restore_tab = .{
+                .tab = shell_id,
+                .index = insert_index,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+        if (!(try self.restoreClosedTabEntryNative(value))) return false;
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            value.tab = self.tabs.orderedRemove(insert_index);
+            return err;
+        };
+        self.app.auditShellNativeMapping("tab-restore");
+        return self.activeSurface() != null;
+    }
+
+    fn redoClosedTabEntry(self: *Host, value: *CloseTabUndo) !bool {
         if (value.tab != null) return false;
         const index = self.findTabIndexById(value.tab_id) orelse return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const shell_id = value.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .detach_tab = shell_id });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
         var removed = self.tabs.orderedRemove(index);
         destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
         removed.button_placement = .{};
@@ -8109,6 +8864,15 @@ const Host = struct {
             self.tabs.items.len - 1
         else
             index;
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            try self.tabs.insert(self.app.core_app.alloc, index, removed);
+            value.tab = null;
+            self.active_tab = index;
+            var restored_it = self.tabs.items[index].tree.iterator();
+            while (restored_it.next()) |entry| entry.view.host_active = true;
+            return err;
+        };
+        self.app.auditShellNativeMapping("tab-redetach");
         return true;
     }
 
@@ -8117,6 +8881,13 @@ const Host = struct {
         const found = self.app.findTabForSurface(value.source_surface) orelse return false;
         if (found.host != self) return false;
         const created_handle = found.tab.findHandle(value.created_surface) orelse return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const pane_id = value.created_surface.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .close_pane = pane_id });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+
         const next_tree = try found.tab.tree.remove(self.app.core_app.alloc, created_handle);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
@@ -8125,6 +8896,16 @@ const Host = struct {
         value.created_surface.setVisible(false);
         value.detached = true;
         self.active_tab = found.index;
+        if (self.app.test_before_split_undo_shell_commit) |hook| {
+            try hook(self.app, value.source_surface.shell_id.?);
+        }
+        if (shell_prepared) |*prepared| prepared.commitRetryingInterleavedFocus(&self.app.shell_runtime) catch |err| {
+            log.err("split-create undo shell commit failed err={}", .{err});
+            return err;
+        };
+        value.created_surface.shell_id = null;
+        value.created_surface.shell_committed = false;
+        self.app.auditShellNativeMapping("split-create-undo");
         return true;
     }
 
@@ -8132,6 +8913,21 @@ const Host = struct {
         if (!value.detached) return false;
         const found = self.app.findTabForSurface(value.source_surface) orelse return false;
         if (found.host != self) return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const pane_id = value.source_surface.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .split_pane = .{
+                .pane = pane_id,
+                .direction = switch (value.direction) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                },
+                .ratio = 0.5,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const source_handle = found.tab.findHandle(value.source_surface) orelse return false;
         const inserted = try SplitTreeSurface.init(self.app.core_app.alloc, value.created_surface);
@@ -8152,6 +8948,106 @@ const Host = struct {
         found.tab.focused = found.tab.findHandle(value.created_surface) orelse source_handle;
         value.detached = false;
         self.active_tab = found.index;
+        if (shell_prepared) |*prepared| {
+            prepared.commit(&self.app.shell_runtime) catch |err| {
+                log.err("split-create redo shell commit failed err={}", .{err});
+                return err;
+            };
+            value.created_surface.shell_id = prepared.created.pane;
+            value.created_surface.shell_committed = true;
+        }
+        self.app.auditShellNativeMapping("split-create-redo");
+        return true;
+    }
+
+    fn undoTabSubtreeTransferEntry(self: *Host, value: *TabSubtreeTransferUndo) !bool {
+        if (!value.applied) return false;
+        const source_tab = value.source_tab orelse return false;
+        const target_index = self.findTabIndexById(value.target_tab_id) orelse return false;
+        try self.tabs.ensureUnusedCapacity(self.app.core_app.alloc, 1);
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .set_transfer_applied = .{
+                .source_root = value.source_root,
+                .applied = false,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+
+        const old_active = self.active_tab;
+        std.mem.swap(SplitTreeSurface, &self.tabs.items[target_index].tree, &value.alternate_tree);
+        std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[target_index].focused, &value.alternate_focus);
+        const insert_index = clampTabInsertIndex(value.source_index, self.tabs.items.len);
+        self.tabs.insertAssumeCapacity(insert_index, source_tab);
+        value.source_tab = null;
+        value.source_index = insert_index;
+        value.applied = false;
+        self.active_tab = insert_index;
+        var source_it = self.tabs.items[insert_index].tree.iterator();
+        while (source_it.next()) |entry| entry.view.host_active = true;
+
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            value.source_tab = self.tabs.orderedRemove(insert_index);
+            const rollback_target = self.findTabIndexById(value.target_tab_id) orelse return err;
+            std.mem.swap(SplitTreeSurface, &self.tabs.items[rollback_target].tree, &value.alternate_tree);
+            std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[rollback_target].focused, &value.alternate_focus);
+            value.applied = true;
+            self.active_tab = old_active;
+            return err;
+        };
+        // The moved pane stayed visible throughout the drag, so the normal
+        // activation fast path cannot infer that the restored target tab must
+        // be hidden. Re-establish tab visibility and recreate the detached
+        // tab button before focus returns to the source tab.
+        self.prepareActiveTabVisibility(self.active_tab);
+        self.layout() catch |err| log.warn("tab split transfer undo layout sync failed err={}", .{err});
+        self.refreshChrome() catch |err| log.warn("tab split transfer undo chrome sync failed err={}", .{err});
+        self.app.auditShellNativeMapping("tab-subtree-transfer-undo");
+        return true;
+    }
+
+    fn redoTabSubtreeTransferEntry(self: *Host, value: *TabSubtreeTransferUndo) !bool {
+        if (value.applied or value.source_tab != null) return false;
+        const source_index = self.findTabIndexById(value.source_tab_id) orelse return false;
+        _ = self.findTabIndexById(value.target_tab_id) orelse return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .set_transfer_applied = .{
+                .source_root = value.source_root,
+                .applied = true,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+
+        const old_active = self.active_tab;
+        var removed = self.tabs.orderedRemove(source_index);
+        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        removed.button_placement = .{};
+        removed.button_label_cache_valid = false;
+        const target_index = self.findTabIndexById(value.target_tab_id) orelse {
+            self.tabs.insertAssumeCapacity(source_index, removed);
+            return false;
+        };
+        std.mem.swap(SplitTreeSurface, &self.tabs.items[target_index].tree, &value.alternate_tree);
+        std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[target_index].focused, &value.alternate_focus);
+        value.source_tab = removed;
+        value.source_index = source_index;
+        value.applied = true;
+        self.active_tab = target_index;
+
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            std.mem.swap(SplitTreeSurface, &self.tabs.items[target_index].tree, &value.alternate_tree);
+            std.mem.swap(SplitTreeSurface.Node.Handle, &self.tabs.items[target_index].focused, &value.alternate_focus);
+            self.tabs.insertAssumeCapacity(source_index, value.source_tab.?);
+            value.source_tab = null;
+            value.applied = false;
+            self.active_tab = old_active;
+            return err;
+        };
+        self.prepareActiveTabVisibility(self.active_tab);
+        self.layout() catch |err| log.warn("tab split transfer redo layout sync failed err={}", .{err});
+        self.refreshChrome() catch |err| log.warn("tab split transfer redo chrome sync failed err={}", .{err});
+        self.app.auditShellNativeMapping("tab-subtree-transfer-redo");
         return true;
     }
 
@@ -8162,11 +9058,11 @@ const Host = struct {
         switch (entry.payload) {
             .close_tab => |*value| {
                 if (!(try self.restoreClosedTabEntry(value))) {
-                    self.discardNewestStructuralRedo();
+                    _ = self.discardNewestStructuralRedo();
                     return null;
                 }
                 const surface = self.activeSurface() orelse {
-                    self.discardNewestStructuralRedo();
+                    _ = self.discardNewestStructuralRedo();
                     return null;
                 };
                 self.app.activateSurface(surface);
@@ -8175,11 +9071,26 @@ const Host = struct {
 
             .split_create => |*value| {
                 if (!(try self.undoSplitCreateEntry(value))) {
-                    self.discardNewestStructuralRedo();
+                    _ = self.discardNewestStructuralRedo();
                     return null;
                 }
                 self.app.activateSurface(value.source_surface);
                 return "New split undone.";
+            },
+
+            .tab_subtree_transfer => |*value| {
+                if (!(try self.undoTabSubtreeTransferEntry(value))) {
+                    log.warn("tab split transfer undo rejected source_tab={any} applied={}", .{
+                        value.source_tab != null,
+                        value.applied,
+                    });
+                    _ = self.discardNewestStructuralRedo();
+                    return null;
+                }
+                const source_index = self.findTabIndexById(value.source_tab_id) orelse return null;
+                const surface = self.tabs.items[source_index].focusedSurface() orelse return null;
+                self.app.activateSurface(surface);
+                return "Tab split transfer undone.";
             },
         }
     }
@@ -8190,8 +9101,8 @@ const Host = struct {
 
         switch (entry.payload) {
             .close_tab => |*value| {
-                if (!self.redoClosedTabEntry(value)) {
-                    self.discardNewestStructuralUndo();
+                if (!(try self.redoClosedTabEntry(value))) {
+                    _ = self.discardNewestStructuralUndo();
                     return null;
                 }
                 if (self.activeSurface()) |surface| {
@@ -8206,11 +9117,21 @@ const Host = struct {
 
             .split_create => |*value| {
                 if (!(try self.redoSplitCreateEntry(value))) {
-                    self.discardNewestStructuralUndo();
+                    _ = self.discardNewestStructuralUndo();
                     return null;
                 }
                 self.app.activateSurface(value.created_surface);
                 return "Split restored.";
+            },
+
+            .tab_subtree_transfer => |*value| {
+                if (!(try self.redoTabSubtreeTransferEntry(value))) {
+                    _ = self.discardNewestStructuralUndo();
+                    return null;
+                }
+                const moved = if (value.source_tab) |*tab| tab.focusedSurface() else null;
+                if (moved) |surface| self.app.activateSurface(surface);
+                return "Tab split transfer restored.";
             },
         }
     }
@@ -8585,6 +9506,24 @@ const Host = struct {
     /// invalidate the list so WM_PAINT redraws. Called from
     /// `syncCommandPaletteBanner` on every keystroke, and from
     /// `showOverlay(.command_palette)` when the palette opens.
+    fn storePaletteCatalogLabel(self: *Host, value: []const u8) []const u8 {
+        if (self.palette_catalog_label_count >= self.palette_catalog_labels.len) return "Terminal";
+        const slot = &self.palette_catalog_labels[self.palette_catalog_label_count];
+        self.palette_catalog_label_count += 1;
+        const len = utf8PrefixLen(value, slot.len);
+        @memcpy(slot[0..len], value[0..len]);
+        return slot[0..len];
+    }
+
+    fn appendPaletteDescriptor(self: *Host, descriptor: win32_palette.catalog.Descriptor) bool {
+        const catalog = if (self.palette_catalog) |*value| value else return false;
+        catalog.append(descriptor) catch |err| {
+            log.warn("palette catalog item skipped kind={} err={}", .{ descriptor.item.id.kind, err });
+            return false;
+        };
+        return true;
+    }
+
     fn rebuildPaletteList(self: *Host) void {
         // `overlayEditText` returns either a literal "" or a borrowed
         // view of `self.cached_overlay_edit`; the Host owns the cache
@@ -8602,9 +9541,156 @@ const Host = struct {
             .{ text.len, snap.commands.len, snap.cvals.len },
         );
 
-        const ranked = win32_palette.rankedForQuery(
-            snap,
+        const catalog = if (self.palette_catalog) |*value| value else return;
+        catalog.reset();
+        self.palette_catalog_label_count = 0;
+        const action_batch = if (snap.commands.len > palette_action_capacity)
+            error.StorageTooSmall
+        else
+            catalog.appendActionSnapshot(snap);
+        action_batch catch |err| fallback: {
+            log.warn("palette action batch rejected err={} using per-entry fallback", .{err});
+            catalog.reset();
+            const fallback_count = @min(
+                @min(snap.commands.len, snap.cvals.len),
+                palette_action_capacity,
+            );
+            for (0..fallback_count) |index| {
+                const command_entry = snap.commands[index];
+                const cval = snap.cvals[index];
+                const action_text = std.mem.span(cval.action);
+                var id = win32_palette.catalog.actionStableId(command_entry.title, action_text);
+                id.value ^= @as(u64, @intCast(index + 1)) *% 0x9e37_79b9_7f4a_7c15;
+                if (!self.appendPaletteDescriptor(.{
+                    .item = .{
+                        .id = id,
+                        .title = command_entry.title,
+                        .subtitle = command_entry.description,
+                        .keywords = action_text,
+                    },
+                    .payload = .{ .action = .{
+                        .snapshot_index = index,
+                        .action = action_text,
+                    } },
+                })) break :fallback;
+            }
+        };
+
+        for (self.tabs.items, 0..) |*tab, tab_index| {
+            var title_buf: [palette_catalog_label_bytes]u8 = undefined;
+            const raw_title = tab.cached_button_title orelse std.fmt.bufPrint(
+                &title_buf,
+                "Tab {d}",
+                .{tab_index + 1},
+            ) catch "Tab";
+            const title = self.storePaletteCatalogLabel(raw_title);
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = .{ .kind = .tab, .value = tab.id },
+                    .title = title,
+                    .subtitle = "Tab",
+                    .keywords = "tab terminal",
+                    .recency = .{ .mru_rank = if (tab_index == self.active_tab) 0 else null },
+                },
+                .payload = .{ .tab = tab.id },
+            });
+
+            if (tab_index != self.active_tab) {
+                const target_surface = self.activeSurface();
+                if (target_surface) |target| {
+                    const directions = [_]struct {
+                        direction: win32_palette.catalog.TransferDirection,
+                        title: []const u8,
+                        keywords: []const u8,
+                    }{
+                        .{ .direction = .left, .title = "Move tab to pane — left", .keywords = "move tab split pane left" },
+                        .{ .direction = .right, .title = "Move tab to pane — right", .keywords = "move tab split pane right" },
+                        .{ .direction = .up, .title = "Move tab to pane — above", .keywords = "move tab split pane up above" },
+                        .{ .direction = .down, .title = "Move tab to pane — below", .keywords = "move tab split pane down below" },
+                    };
+                    for (directions) |move| {
+                        _ = self.appendPaletteDescriptor(.{
+                            .item = .{
+                                .id = .{
+                                    .kind = .action,
+                                    .value = std.hash.Wyhash.hash(tab.id, @tagName(move.direction)),
+                                },
+                                .title = move.title,
+                                .subtitle = title,
+                                .keywords = move.keywords,
+                            },
+                            .payload = .{ .action = .{ .tab_transfer = .{
+                                .source_tab = tab.id,
+                                .target_pane = target.core().id,
+                                .direction = move.direction,
+                            } } },
+                        });
+                    }
+                }
+            }
+
+            var pane_index: usize = 0;
+            var iterator = tab.tree.iterator();
+            while (iterator.next()) |entry| : (pane_index += 1) {
+                var pane_buf: [palette_catalog_label_bytes]u8 = undefined;
+                const raw_pane_title = entry.view.effectiveTitle() orelse std.fmt.bufPrint(
+                    &pane_buf,
+                    "Pane {d}",
+                    .{pane_index + 1},
+                ) catch "Pane";
+                const pane_title = self.storePaletteCatalogLabel(raw_pane_title);
+                _ = self.appendPaletteDescriptor(.{
+                    .item = .{
+                        .id = .{ .kind = .pane, .value = entry.view.core().id },
+                        .title = pane_title,
+                        .subtitle = title,
+                        .keywords = "pane split terminal",
+                        .recency = .{ .mru_rank = if (entry.view == self.activeSurface()) 0 else null },
+                    },
+                    .payload = .{ .pane = entry.view.core().id },
+                });
+            }
+        }
+
+        if (self.ensureProfiles() catch false) {
+            for (self.profiles.?) |profile| {
+                _ = self.appendPaletteDescriptor(.{
+                    .item = .{
+                        .id = win32_palette.catalog.stableStringId(.profile, profile.key),
+                        .title = profile.label,
+                        .subtitle = "Profile",
+                        .keywords = profile.key,
+                    },
+                    .payload = .{ .profile = profile.key },
+                });
+            }
+        }
+
+        for (std.enums.values(win32_settings.SettingField)) |field| {
+            const key = @tagName(field);
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.setting, key),
+                    .title = key,
+                    .subtitle = "Setting",
+                    .keywords = "settings preferences configuration",
+                },
+                .payload = .{ .setting = key },
+            });
+        }
+
+        catalog.appendReviewedHelp() catch |err| {
+            log.warn("palette help batch rejected err={}", .{err});
+        };
+        var mru_buf: [5][]const u8 = undefined;
+        const mru = self.app.paletteMruSlice(&mru_buf);
+        catalog.appendRecentActionMru(snap, mru) catch |err| {
+            log.warn("palette recent-action batch rejected err={}", .{err});
+        };
+
+        const ranked = catalog.rank(
             text,
+            .{ .max_results = self.palette_list_ranked.len },
             &self.palette_list_ranked,
         );
         // Defensive cap: `rankedForQuery` is bounded by
@@ -8623,6 +9709,7 @@ const Host = struct {
         );
 
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        self.announcePaletteSelection();
     }
 
     /// Move the list selection up/down one row, scrolling if the new
@@ -8666,19 +9753,24 @@ const Host = struct {
                 .{},
             ) catch "Command palette";
         }
-        const snap = self.paletteSnapshot();
         const idx = @min(
             self.palette_list_selected,
             self.palette_list_ranked_count - 1,
         );
-        const cmd_index = self.palette_list_ranked[idx].index;
-        if (cmd_index >= snap.commands.len) return "Command palette";
-        const cmd = snap.commands[cmd_index];
-        const action = std.mem.span(snap.cvals[cmd_index].action);
+        const catalog = if (self.palette_catalog) |*value| value else return "Command palette";
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[idx]) orelse return "Command palette";
         return std.fmt.bufPrint(
             buf,
             "Command palette, {d} of {d}: {s} — {s}",
-            .{ idx + 1, self.palette_list_ranked_count, cmd.title, action },
+            .{
+                idx + 1,
+                self.palette_list_ranked_count,
+                descriptor.item.title,
+                if (descriptor.item.enabled)
+                    descriptor.item.subtitle
+                else
+                    descriptor.item.disabled_reason orelse "Unavailable",
+            },
         ) catch "Command palette";
     }
 
@@ -8690,11 +9782,8 @@ const Host = struct {
     }
 
     fn announcePaletteSelection(self: *const Host) void {
-        // Selection-change UIA events need a stable provider instance
-        // to target. The current WM_GETOBJECT path creates a fresh one
-        // per query, so there's nothing to raise against without
-        // caching.
-        _ = self;
+        const provider = self.palette_list_uia_provider orelse return;
+        win32_uia.events.raiseNameChanged(&provider.base);
     }
 
     /// Translate a y coordinate (client-area) into an absolute rank
@@ -8716,15 +9805,89 @@ const Host = struct {
     fn invokePaletteRow(self: *Host, row: usize) !void {
         if (row >= self.palette_list_ranked_count) return;
         if (row >= self.palette_list_ranked.len) return;
-        const snap = self.paletteSnapshot();
-        const cmd_index = self.palette_list_ranked[row].index;
-        if (cmd_index >= snap.commands.len) return;
-        if (cmd_index >= snap.cvals.len) return;
-        const action = snap.commands[cmd_index].action;
-        const action_str = std.mem.span(snap.cvals[cmd_index].action);
+        const catalog = if (self.palette_catalog) |*value| value else return;
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return;
+        if (!descriptor.item.enabled) {
+            try self.setBanner(.err, descriptor.item.disabled_reason orelse "This item is unavailable.");
+            return;
+        }
 
+        switch (descriptor.payload) {
+            .action => |payload| {
+                return self.invokePaletteAction(payload, true);
+            },
+            .tab => |tab_id| {
+                const index = self.findTabIndexById(@intCast(tab_id)) orelse return;
+                self.hideOverlay();
+                _ = self.activateTabIndex(index);
+            },
+            .pane => |surface_id| {
+                const surface = self.app.findSurfaceById(surface_id) orelse return;
+                self.hideOverlay();
+                self.app.activateSurface(surface);
+            },
+            .profile => |key| {
+                const profiles = self.profiles orelse return;
+                const index = profileIndexByKey(profiles, key) orelse return;
+                _ = try self.setSelectedProfileIndex(index);
+                self.hideOverlay();
+                _ = self.openSelectedProfile(.tab);
+            },
+            .setting => |key| {
+                const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse return;
+                self.hideOverlay();
+                try self.app.settings_window.openField(field);
+            },
+            .theme => |_| {
+                try self.setBanner(.err, "Theme selection is not available from this build.");
+            },
+            .help => |target| switch (target) {
+                .settings => {
+                    self.hideOverlay();
+                    try self.app.settings_window.openField(.font_size);
+                },
+                .keyboard_shortcuts => try self.setBanner(.info, "Keyboard shortcuts are configured in Settings > Keybindings."),
+                .configuration => try self.setBanner(.info, "Open Settings, then Advanced, to edit the configuration file."),
+                .troubleshooting => try self.setBanner(.info, "Run winghostty +diagnostic-bundle when reporting a problem."),
+                .diagnostics => try self.setBanner(.info, "Run winghostty +diagnostic-bundle to export a redacted support bundle."),
+                .accessibility => try self.setBanner(.info, "winghostty supports keyboard navigation and Windows UI Automation."),
+            },
+            .recent_command => |payload| return self.invokePaletteAction(payload, false),
+        }
+    }
+
+    fn invokePaletteAction(
+        self: *Host,
+        payload: win32_palette.catalog.ActionPayload,
+        record_mru: bool,
+    ) !void {
+        if (payload.tab_transfer) |transfer| {
+            const source_index = self.findTabIndexById(@intCast(transfer.source_tab)) orelse return;
+            const target = self.app.findSurfaceById(transfer.target_pane) orelse return;
+            const target_found = self.app.findTabForSurface(target) orelse return;
+            if (target_found.host != self or target_found.index != self.active_tab) return;
+            self.tab_drop_target_surface = target;
+            self.tab_drop_operation = switch (transfer.direction) {
+                .left => .split_left,
+                .right => .split_right,
+                .up => .split_up,
+                .down => .split_down,
+            };
+            if (!self.commitTabDropSplit(source_index)) {
+                try self.setBanner(.err, "Tab move could not be completed; no layout was changed.");
+                return;
+            }
+            self.hideOverlay();
+            return;
+        }
+        const snap = self.paletteSnapshot();
+        const snapshot_index = payload.snapshot_index orelse return;
+        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) return;
+        const current_text = std.mem.span(snap.cvals[snapshot_index].action);
+        if (!std.mem.eql(u8, current_text, payload.action)) return;
+        const action = snap.commands[snapshot_index].action;
         const surface = self.activeSurface() orelse return;
-        self.app.pushPaletteMru(action_str) catch |err| {
+        if (record_mru) self.app.pushPaletteMru(current_text) catch |err| {
             std.log.warn("palette MRU push failed err={}", .{err});
         };
         self.hideOverlay();
@@ -8807,7 +9970,7 @@ const Host = struct {
 
         if (self.palette_list_ranked_count == 0) return;
 
-        const snap = self.paletteSnapshot();
+        const catalog = if (self.palette_catalog) |*value| value else return;
         const row_h = self.scaled(palette_row_height);
         const padding = self.scaled(12);
         const title_width = self.scaled(200);
@@ -8837,18 +10000,20 @@ const Host = struct {
                 fillSolidRect(hdc, row_rect, theme.button_active_bg);
             }
             if (i >= self.palette_list_ranked.len) break;
-            const cmd_index = self.palette_list_ranked[i].index;
-            if (cmd_index >= snap.commands.len) continue;
-            if (cmd_index >= snap.cvals.len) continue;
-            const cmd = snap.commands[cmd_index];
-            const action_str = std.mem.span(snap.cvals[cmd_index].action);
+            const descriptor = catalog.descriptorFor(self.palette_list_ranked[i]) orelse continue;
+            const item = descriptor.item;
 
-            const title_color = if (is_selected) theme.button_active_fg else theme.text_primary;
+            const title_color = if (item.destructive)
+                theme.error_fg
+            else if (is_selected)
+                theme.button_active_fg
+            else
+                theme.text_primary;
             const secondary_color = if (is_selected) theme.button_active_fg else theme.text_secondary;
 
             drawPaletteRowText(
                 hdc,
-                cmd.title,
+                item.title,
                 .{
                     .left = row_rect.left + padding,
                     .top = row_rect.top,
@@ -8859,7 +10024,7 @@ const Host = struct {
             );
             drawPaletteRowText(
                 hdc,
-                action_str,
+                if (item.enabled) item.subtitle else item.disabled_reason orelse "Unavailable",
                 .{
                     .left = row_rect.left + padding + title_width,
                     .top = row_rect.top,
@@ -8873,22 +10038,33 @@ const Host = struct {
             // in the reverse index that `Binding.Set` already maintains.
             // Format into a stack buffer — the per-frame allocation
             // would otherwise stack up at every keystroke's WM_PAINT.
-            if (self.app.config.keybind.set.reverse.get(cmd.action)) |trigger| {
-                var hint_buf: [96]u8 = undefined;
-                const hint = std.fmt.bufPrint(&hint_buf, "{f}", .{trigger}) catch null;
-                if (hint) |text| {
-                    drawPaletteRowText(
-                        hdc,
-                        text,
-                        .{
-                            .left = row_rect.right - padding - hint_width,
-                            .top = row_rect.top,
-                            .right = row_rect.right - padding,
-                            .bottom = row_rect.bottom,
-                        },
-                        secondary_color,
-                    );
-                }
+            var hint_buf: [96]u8 = undefined;
+            const hint: ?[]const u8 = if (item.shortcut) |shortcut|
+                shortcut.label
+            else switch (descriptor.payload) {
+                .action => |payload| blk: {
+                    const snapshot_index = payload.snapshot_index orelse break :blk null;
+                    const snap = self.paletteSnapshot();
+                    if (snapshot_index >= snap.commands.len) break :blk null;
+                    if (self.app.config.keybind.set.reverse.get(snap.commands[snapshot_index].action)) |trigger| {
+                        break :blk std.fmt.bufPrint(&hint_buf, "{f}", .{trigger}) catch null;
+                    }
+                    break :blk null;
+                },
+                else => null,
+            };
+            if (hint) |hint_text| {
+                drawPaletteRowText(
+                    hdc,
+                    hint_text,
+                    .{
+                        .left = row_rect.right - padding - hint_width,
+                        .top = row_rect.top,
+                        .right = row_rect.right - padding,
+                        .bottom = row_rect.bottom,
+                    },
+                    secondary_color,
+                );
             }
         }
     }
@@ -8964,7 +10140,13 @@ const Host = struct {
         destroySubclassedWindowWithPrev(&self.new_tab_hwnd, chrome_prev);
         destroySubclassedWindowWithPrev(&self.overflow_hwnd, chrome_prev);
 
+        if (self.palette_list_uia_provider) |provider| {
+            provider.detach();
+            _ = win32_uia.PaletteListProvider.Release(&provider.base);
+            self.palette_list_uia_provider = null;
+        }
         destroyChildWindow(&self.palette_list_hwnd);
+        destroyChildWindow(&self.tab_drop_preview_hwnd);
 
         self.hovered_button_hwnd = null;
         self.tab_close_hover_hwnd = null;
@@ -9091,19 +10273,237 @@ const Host = struct {
     fn swapTabs(self: *Host, a: usize, b: usize) void {
         if (a == b) return;
         if (a >= self.tabs.items.len or b >= self.tabs.items.len) return;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) shell: {
+            const shell_id = self.tabs.items[a].shell_id orelse {
+                log.err("refusing tab drag reorder: shell tab mapping missing", .{});
+                return;
+            };
+            shell_prepared = self.app.shell_runtime.prepare(.{ .reorder_tab = .{
+                .tab = shell_id,
+                .index = b,
+            } }) catch |err| {
+                log.err("refusing tab drag reorder: shell preflight failed err={}", .{err});
+                return;
+            };
+            break :shell;
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+        if (!self.tryClearStructuralHistory(.normal)) {
+            log.err("refusing tab drag reorder: structural history disposal deferred", .{});
+            return;
+        }
+
+        const old_active = self.active_tab;
+        const moved = self.tabs.orderedRemove(a);
+        self.tabs.insertAssumeCapacity(b, moved);
+        self.active_tab = movedIndexAfterReorder(old_active, a, b);
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            const rollback = self.tabs.orderedRemove(b);
+            self.tabs.insertAssumeCapacity(a, rollback);
+            self.active_tab = old_active;
+            log.err("tab drag reorder shell commit failed err={}", .{err});
+            return;
+        };
         self.tabs.items[a].clearRedoHistory();
         self.tabs.items[b].clearRedoHistory();
-        self.clearStructuralHistory(.normal);
-        const tmp = self.tabs.items[a];
-        self.tabs.items[a] = self.tabs.items[b];
-        self.tabs.items[b] = tmp;
-        // Update active tab index to follow the moved tab
-        if (self.active_tab == a) {
-            self.active_tab = b;
-        } else if (self.active_tab == b) {
-            self.active_tab = a;
-        }
+        self.app.auditShellNativeMapping("tab-drag-reorder");
         self.layout() catch {};
+    }
+
+    fn hideTabDropPreview(self: *Host) void {
+        self.tab_drop_operation = .none;
+        self.tab_drop_target_surface = null;
+        if (self.tab_drop_preview_hwnd) |preview| _ = ShowWindow(preview, SW_HIDE);
+    }
+
+    fn updateTabDropPreview(self: *Host, source_index: usize, screen_point: POINT) void {
+        if (source_index >= self.tabs.items.len or
+            source_index == self.active_tab)
+        {
+            self.hideTabDropPreview();
+            return;
+        }
+        const hwnd = self.hwnd orelse return self.hideTabDropPreview();
+        var client_point = screen_point;
+        if (ScreenToClient(hwnd, &client_point) == 0) return self.hideTabDropPreview();
+        const target_surface = target: {
+            const tab = self.activeTab() orelse return self.hideTabDropPreview();
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| {
+                if (!entry.view.placement.rect_known) continue;
+                const rect = entry.view.placement.rect;
+                if (client_point.x >= rect.left and client_point.x < rect.right and
+                    client_point.y >= rect.top and client_point.y < rect.bottom)
+                    break :target entry.view;
+            }
+            return self.hideTabDropPreview();
+        };
+        const content = target_surface.placement.rect;
+        const target = win32_tab_drop_zones.resolve(
+            .{ .left = content.left, .top = content.top, .right = content.right, .bottom = content.bottom },
+            .{ .x = client_point.x, .y = client_point.y },
+            self.current_dpi,
+            self.tab_drop_operation,
+            .{},
+        );
+        switch (target.operation) {
+            .split_left, .split_right, .split_up, .split_down => {},
+            .none, .new_tab => return self.hideTabDropPreview(),
+        }
+        const preview_rect = target.preview_rect orelse return self.hideTabDropPreview();
+        if (self.tab_drop_preview_hwnd == null) {
+            self.tab_drop_preview_hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                prompt_label_class,
+                std.unicode.utf8ToUtf16LeStringLiteral(""),
+                WS_CHILD,
+                preview_rect.left,
+                preview_rect.top,
+                preview_rect.right - preview_rect.left,
+                preview_rect.bottom - preview_rect.top,
+                hwnd,
+                null,
+                self.app.hinstance,
+                null,
+            );
+            if (self.tab_drop_preview_hwnd) |preview| {
+                _ = SetLayeredWindowAttributes(preview, 0, 72, LWA_ALPHA);
+            }
+        }
+        const preview = self.tab_drop_preview_hwnd orelse return;
+        self.tab_drop_operation = target.operation;
+        self.tab_drop_target_surface = target_surface;
+        const operation_label: LPCWSTR = switch (target.operation) {
+            .split_left => std.unicode.utf8ToUtf16LeStringLiteral("Split left"),
+            .split_right => std.unicode.utf8ToUtf16LeStringLiteral("Split right"),
+            .split_up => std.unicode.utf8ToUtf16LeStringLiteral("Split above"),
+            .split_down => std.unicode.utf8ToUtf16LeStringLiteral("Split below"),
+            .none, .new_tab => unreachable,
+        };
+        _ = SetWindowTextW(preview, operation_label);
+        _ = SetWindowPos(
+            preview,
+            null,
+            preview_rect.left,
+            preview_rect.top,
+            preview_rect.right - preview_rect.left,
+            preview_rect.bottom - preview_rect.top,
+            SWP_NOACTIVATE,
+        );
+        _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
+        _ = InvalidateRect(preview, null, 1);
+    }
+
+    fn commitTabDropSplit(self: *Host, source_index: usize) bool {
+        const direction: SplitTreeSurface.Split.Direction = switch (self.tab_drop_operation) {
+            .split_left => .left,
+            .split_right => .right,
+            .split_up => .up,
+            .split_down => .down,
+            .none, .new_tab => return false,
+        };
+        if (source_index >= self.tabs.items.len or source_index == self.active_tab) return false;
+        const source_tab_shell = self.tabs.items[source_index].shell_id orelse return false;
+        const source_model = self.app.shell_runtime.state.tabConst(source_tab_shell) orelse return false;
+        const source_root = source_model.root;
+        const source_surface = self.tabs.items[source_index].focusedSurface() orelse return false;
+        const target_surface = self.tab_drop_target_surface orelse return false;
+        const target_found = self.app.findTabForSurface(target_surface) orelse return false;
+        if (target_found.host != self or target_found.index != self.active_tab) return false;
+        const target_pane = target_surface.shell_id orelse return false;
+        const target_tab_id = self.tabs.items[self.active_tab].id;
+        const target_handle = self.tabs.items[self.active_tab].findHandle(target_surface) orelse return false;
+        var next_tree = self.tabs.items[self.active_tab].tree.split(
+            self.app.core_app.alloc,
+            target_handle,
+            direction,
+            0.5,
+            &self.tabs.items[source_index].tree,
+        ) catch return false;
+        self.structural_undo_entries.ensureUnusedCapacity(self.app.core_app.alloc, 1) catch |err| {
+            next_tree.deinit();
+            log.err("tab split transfer history preflight failed err={}", .{err});
+            return false;
+        };
+        const model_direction: win32_shell.model.Direction = switch (direction) {
+            .left => .left,
+            .right => .right,
+            .up => .up,
+            .down => .down,
+        };
+        var shell_prepared = self.app.shell_runtime.prepare(.{ .transfer_subtree = .{
+            .source_root = source_root,
+            .target_pane = target_pane,
+            .direction = model_direction,
+            .ratio = 0.5,
+        } }) catch |err| {
+            next_tree.deinit();
+            log.err("tab split transfer shell preflight failed err={}", .{err});
+            return false;
+        };
+        defer shell_prepared.deinit();
+        if (!self.tryClearStructuralHistory(.normal)) {
+            next_tree.deinit();
+            log.err("tab split transfer history disposal deferred", .{});
+            return false;
+        }
+
+        const target_node_count = self.tabs.items[self.active_tab].tree.nodes.len;
+        const source_focus = self.tabs.items[source_index].focused;
+        const prior_target_tree = self.tabs.items[self.active_tab].tree;
+        const prior_target_focus = self.tabs.items[self.active_tab].focused;
+        self.tabs.items[self.active_tab].tree = next_tree;
+        self.tabs.items[self.active_tab].focused = @enumFromInt(target_node_count + source_focus.idx());
+        var removed = self.tabs.orderedRemove(source_index);
+        destroySubclassedWindow(&removed.button_hwnd, &removed.button_prev_proc);
+        removed.button_placement = .{};
+        removed.button_label_cache_valid = false;
+        const target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
+        self.active_tab = target_index;
+        _ = self.appendStructuralUndoAssumeCapacity(.{
+            .kind = .tab_subtree_transfer,
+            .timestamp_ms = GetTickCount64(),
+            .sequence_id = self.app.nextUndoSequence(),
+            .payload = .{ .tab_subtree_transfer = .{
+                .source_tab = removed,
+                .source_index = source_index,
+                .source_tab_id = removed.id,
+                .target_tab_id = target_tab_id,
+                .alternate_tree = prior_target_tree,
+                .alternate_focus = prior_target_focus,
+                .source_root = source_root,
+            } },
+        });
+        shell_prepared.commit(&self.app.shell_runtime) catch |err| {
+            var failed = self.structural_undo_entries.pop().?;
+            const payload = &failed.payload.tab_subtree_transfer;
+            const live_target_index = self.findTabIndexById(target_tab_id) orelse unreachable;
+            var combined = self.tabs.items[live_target_index].tree;
+            self.tabs.items[live_target_index].tree = payload.alternate_tree;
+            self.tabs.items[live_target_index].focused = payload.alternate_focus;
+            combined.deinit();
+            self.tabs.insertAssumeCapacity(source_index, payload.source_tab.?);
+            payload.source_tab = null;
+            self.active_tab = self.findTabIndexById(target_tab_id) orelse self.active_tab;
+            log.err("tab split transfer shell commit failed err={}", .{err});
+            return false;
+        };
+        const committed_entry = &self.structural_undo_entries.items[self.structural_undo_entries.items.len - 1];
+        if (committed_entry.payload.tab_subtree_transfer.source_tab) |*source_tab| {
+            source_tab.clearRedoHistory();
+        }
+        self.tabs.items[self.active_tab].clearRedoHistory();
+        while (self.structural_undo_entries.items.len > win32_undo.max_entries) {
+            self.structural_undo_entries.items[0].dispose(self, .normal) catch break;
+            _ = self.structural_undo_entries.orderedRemove(0);
+        }
+        source_surface.host_active = true;
+        source_surface.setVisible(true);
+        self.layout() catch {};
+        self.app.activateSurface(source_surface);
+        self.app.auditShellNativeMapping("tab-subtree-transfer");
+        return true;
     }
 
     fn activateTabIndex(self: *Host, index: usize) bool {
@@ -9174,8 +10574,11 @@ const Host = struct {
     }
 
     fn reloadProfiles(self: *Host) !bool {
+        const replacing = self.profiles != null;
+        const next_profiles = try windows_shell.listProfiles(self.app.core_app.alloc);
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
-        self.profiles = try windows_shell.listProfiles(self.app.core_app.alloc);
+        self.profiles = next_profiles;
+        if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
         self.app.applyLauncherQuickSlotPreferences(self.profiles.?);
         const profiles = self.profiles.?;
         if (profiles.len == 0) {
@@ -9824,6 +11227,14 @@ const Host = struct {
             GWLP_USERDATA,
             @as(LONG_PTR, @intCast(@intFromPtr(self))),
         );
+        self.palette_list_uia_provider = win32_uia.PaletteListProvider.create(
+            std.heap.page_allocator,
+            self.palette_list_hwnd.?,
+            self.paletteListUiaState(),
+        ) catch |err| blk: {
+            log.warn("palette UIA provider unavailable err={}", .{err});
+            break :blk null;
+        };
 
         self.hideOverlay();
     }
@@ -11521,7 +12932,7 @@ const Host = struct {
     fn submitOverlay(self: *Host) !bool {
         _ = self.overlay_edit_hwnd orelse return false;
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        if (text.len == 0 and self.overlay_mode != .search and self.overlay_mode != .profile) {
+        if (text.len == 0 and self.overlay_mode != .search and self.overlay_mode != .profile and self.overlay_mode != .command_palette) {
             self.hideOverlay();
             try self.layout();
             return false;
@@ -11759,7 +13170,11 @@ const Host = struct {
         for (self.tabs.items) |*tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| surfaces.append(alloc, entry.view) catch {
-                if (fallback_hwnd) |hwnd| _ = DestroyWindow(hwnd);
+                // Closing the parent HWND here would recursively destroy every
+                // child surface without running confirmation or the native ↔
+                // ShellState close preflight. An allocation failure must leave
+                // the live session untouched; the user can retry the close.
+                log.err("refusing host close: unable to stage surface list", .{});
                 return;
             };
         }
@@ -13460,6 +14875,26 @@ const Host = struct {
             }
             self.chrome_text_dirty.banner = false;
         }
+        const dwrite_banner_painted = if (paint_top) blk: {
+            const text: []const u16 = if (explicit_banner_text != null)
+                if (self.cached_banner_w) |value| value else &.{}
+            else
+                &.{};
+            const color = switch (banner_kind) {
+                .none => theme.text_primary,
+                .info => theme.info_fg,
+                .err => theme.error_fg,
+            };
+            const rendered = self.app.renderShellChromeText(hwnd, .{
+                .text = text,
+                .left_px = self.scaled(16),
+                .top_px = banner_y,
+                .right_px = @max(self.scaled(16), client_rect.right - self.scaled(16)),
+                .bottom_px = banner_y + self.scaled(24),
+                .color_ref = color,
+            });
+            break :blk rendered and text.len > 0;
+        } else false;
         if (paint_top) self.clearUpdateActionRects();
         if (paint_top and self.overlay_mode == .none and !inspector_panel_visible and self.banner_text == null) {
             if (self.app.update_notice) |notice| {
@@ -13557,7 +14992,7 @@ const Host = struct {
                     textOutWz(hdc, self.scaled(16), banner_y, banner_w);
                 }
             }
-        } else if (explicit_banner_text != null) {
+        } else if (explicit_banner_text != null and !dwrite_banner_painted) {
             _ = SetTextColor(hdc, switch (banner_kind) {
                 .none => theme.text_primary,
                 .info => theme.info_fg,
@@ -14760,6 +16195,51 @@ fn settingsCurrentConfigThunk(ctx: *anyopaque) *const configpkg.Config {
     const app: *const App = @ptrCast(@alignCast(ctx));
     return &app.config;
 }
+fn settingsConfigRevisionThunk(ctx: *anyopaque) u64 {
+    const app: *const App = @ptrCast(@alignCast(ctx));
+    return app.config_revision;
+}
+fn settingsPreviewFieldThunk(
+    ctx: *anyopaque,
+    field: win32_settings.SettingField,
+    value: win32_settings.SettingValue,
+) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    switch (field) {
+        .scrollback_limit => app.config.@"scrollback-limit" = value.scrollback_limit,
+        .font_size => app.config.@"font-size" = value.font_size,
+        .background_opacity => app.config.@"background-opacity" = value.background_opacity,
+        .window_padding_x => app.config.@"window-padding-x" = value.window_padding_x,
+        .window_padding_y => app.config.@"window-padding-y" = value.window_padding_y,
+        .trim_trailing_spaces => app.config.@"clipboard-trim-trailing-spaces" = value.trim_trailing_spaces,
+        .desktop_notifications => app.config.@"desktop-notifications" = value.desktop_notifications,
+        .app_notify_clipboard => app.config.@"app-notifications".@"clipboard-copy" = value.app_notify_clipboard,
+        .app_notify_config => app.config.@"app-notifications".@"config-reload" = value.app_notify_config,
+        .confirm_close => app.config.@"confirm-close-surface" = value.confirm_close,
+        .copy_on_select => app.config.@"copy-on-select" = value.copy_on_select,
+        .clipboard_read => app.config.@"clipboard-read" = value.clipboard_read,
+        .clipboard_write => app.config.@"clipboard-write" = value.clipboard_write,
+        .link_url => app.config.@"link-url" = value.link_url,
+        .link_previews => app.config.@"link-previews" = value.link_previews,
+        .window_theme => app.config.@"window-theme" = value.window_theme,
+        .shell_integration => app.config.@"shell-integration" = value.shell_integration,
+        .cursor_style => app.config.@"cursor-style" = value.cursor_style,
+        .background_blur => app.config.@"background-blur" = value.background_blur,
+        .padding_balance => app.config.@"window-padding-balance" = value.padding_balance,
+        .auto_update => app.config.@"auto-update" = value.auto_update,
+        .auto_update_channel => app.config.@"auto-update-channel" = value.auto_update_channel,
+    }
+    app.reconfigureTheme();
+    for (app.windows.items) |surface| {
+        surface.applyRuntimeConfig(&app.config) catch |err| {
+            log.warn("settings live preview apply failed field={} err={}", .{ field, err });
+        };
+    }
+}
+fn settingsNotifyConflictThunk(ctx: *anyopaque, field: win32_settings.SettingField) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    app.settings_window.promptConflict(field);
+}
 fn settingsSaveAndReloadThunk(
     ctx: *anyopaque,
     pending: *const configpkg.Config,
@@ -14842,8 +16322,7 @@ fn buildToastLaunchForSurface(
 fn surfaceConfirmCloseAccept(userdata: ?*anyopaque) void {
     const ud = userdata orelse return;
     const surface: *Surface = @ptrCast(@alignCast(ud));
-    surface.invalidateStructuralHistoryForClose();
-    if (surface.hwnd) |hwnd| _ = DestroyWindow(hwnd);
+    _ = surface.requestClose();
 }
 
 /// Accept callback for a deferred paste confirm. Ownership of the
@@ -15684,9 +17163,18 @@ fn paletteListProc(
         },
         WM_GETOBJECT => {
             const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (host.palette_list_uia_provider) |provider| {
+                if (win32_uia.returnPaletteListProvider(
+                    hwnd,
+                    wParam,
+                    lParam,
+                    provider,
+                )) |lr| return lr;
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
             const state = host.paletteListUiaState();
             if (win32_uia.handlePaletteListGetObject(
-                host.app.core_app.alloc,
+                std.heap.page_allocator,
                 hwnd,
                 wParam,
                 lParam,
@@ -18011,6 +19499,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         // Start potential drag: record origin
                         v.tab_drag_index = index;
                         v.tab_drag_start_x = down_x;
+                        v.tab_drag_start_y = signedHighWord(lParamBits(lParam));
                         v.tab_drag_active = false;
                         _ = SetCapture(hwnd);
                     }
@@ -18019,9 +19508,21 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                 WM_LBUTTONUP => {
                     const drag_index = v.tab_drag_index;
                     const was_drag = v.tab_drag_active;
+                    const drop_operation = v.tab_drop_operation;
+                    const drop_target_surface = v.tab_drop_target_surface;
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
                     _ = ReleaseCapture();
+                    if (was_drag) {
+                        if (drag_index) |source_index| {
+                            v.tab_drop_operation = drop_operation;
+                            v.tab_drop_target_surface = drop_target_surface;
+                            const transferred = v.commitTabDropSplit(source_index);
+                            v.hideTabDropPreview();
+                            if (transferred) return 0;
+                        }
+                    }
+                    v.hideTabDropPreview();
                     const click_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
                     _ = GetClientRect(hwnd, &btn_rect);
@@ -18052,6 +19553,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                 WM_CAPTURECHANGED => {
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
+                    v.hideTabDropPreview();
                 },
                 WM_MOUSEMOVE => {
                     var track: TRACKMOUSEEVENT = .{
@@ -18066,25 +19568,36 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     // Handle tab drag reorder
                     if (v.tab_drag_index) |drag_idx| {
                         const mouse_x = signedLowWord(lParamBits(lParam));
+                        const mouse_y = signedHighWord(lParamBits(lParam));
                         const dx = if (mouse_x > v.tab_drag_start_x)
                             mouse_x - v.tab_drag_start_x
                         else
                             v.tab_drag_start_x - mouse_x;
+                        const dy = if (mouse_y > v.tab_drag_start_y)
+                            mouse_y - v.tab_drag_start_y
+                        else
+                            v.tab_drag_start_y - mouse_y;
 
                         // Activate drag after 5px threshold
-                        if (!v.tab_drag_active and dx > 5) {
+                        if (!v.tab_drag_active and dx + dy > 5) {
                             v.tab_drag_active = true;
                         }
 
                         if (v.tab_drag_active) {
-                            // Convert to screen coords, then find target tab
-                            var pt: POINT = .{ .x = mouse_x, .y = 0 };
+                            // A vertical excursion resolves an exact pane and
+                            // labeled split operation. Staying in the tab row
+                            // keeps the established ordered-reorder gesture.
+                            var pt: POINT = .{ .x = mouse_x, .y = mouse_y };
                             _ = ClientToScreen(hwnd, &pt);
-                            if (v.tabIndexAtScreenX(pt.x)) |target_idx| {
-                                if (target_idx != drag_idx and v.tabs.items.len > 1) {
-                                    v.swapTabs(drag_idx, target_idx);
-                                    v.tab_drag_index = target_idx;
-                                    v.tab_drag_start_x = mouse_x;
+                            v.updateTabDropPreview(drag_idx, pt);
+                            if (v.tab_drop_operation == .none) {
+                                if (v.tabIndexAtScreenX(pt.x)) |target_idx| {
+                                    if (target_idx != drag_idx and v.tabs.items.len > 1) {
+                                        v.swapTabs(drag_idx, target_idx);
+                                        v.tab_drag_index = target_idx;
+                                        v.tab_drag_start_x = mouse_x;
+                                        v.tab_drag_start_y = mouse_y;
+                                    }
                                 }
                             }
                         }
@@ -18521,8 +20034,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
         WM_GETOBJECT => {
-            if (host) |v| {
-                if (win32_uia.handleGetObject(v.app.core_app.alloc, hwnd, wParam, lParam)) |lr| {
+            if (host != null) {
+                if (win32_uia.handleGetObject(std.heap.page_allocator, hwnd, wParam, lParam)) |lr| {
                     return lr;
                 }
             }
@@ -18577,6 +20090,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
                 // Relayout and repaint
                 v.layout() catch {};
+                v.app.resizeShellCompositorWindow(hwnd);
                 if (chromeTextNeedsFullInvalidation(v.statusBarHeight())) {
                     v.invalidateChromeText();
                 } else {
@@ -18873,6 +20387,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                 }
                 v.layout() catch {};
+                v.app.resizeShellCompositorWindow(hwnd);
                 if (size_kind == SIZE_MAXIMIZED or
                     (size_kind == SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
                 {
@@ -18987,7 +20502,10 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         },
 
         WM_DESTROY => {
-            if (host) |v| v.hwnd = null;
+            if (host) |v| {
+                v.app.detachShellCompositorWindow(hwnd);
+                v.hwnd = null;
+            }
             return 0;
         },
 
@@ -19037,6 +20555,13 @@ fn desiredMoveIndex(total: usize, current: usize, amount: isize) ?usize {
     const current_i: isize = @intCast(current);
     const normalized = @mod(current_i + amount, total_i);
     return @intCast(normalized);
+}
+
+fn movedIndexAfterReorder(active: usize, from: usize, to: usize) usize {
+    if (active == from) return to;
+    if (from < to and active > from and active <= to) return active - 1;
+    if (from > to and active >= to and active < from) return active + 1;
+    return active;
 }
 
 fn quickSlotProfileIndex(
@@ -19969,16 +21494,20 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_GETOBJECT => {
             if (surface) |v| {
-                const state = v.terminalUiaState() catch |err| {
-                    log.warn("uia: terminal state init failed err={}", .{err});
+                // UIA may query the child HWND reentrantly while DestroyWindow
+                // is unwinding. Surface.destroy clears this flag before it
+                // releases the owner context, so never recreate that context
+                // once teardown has begun (or before core init completes).
+                if (!v.destroy_on_wm_destroy) return DefWindowProcW(hwnd, msg, wParam, lParam);
+                const provider = v.terminalUiaProvider() catch |err| {
+                    log.warn("uia: terminal provider init failed err={}", .{err});
                     return DefWindowProcW(hwnd, msg, wParam, lParam);
                 };
-                if (win32_uia.handleTerminalGetObject(
-                    v.app.core_app.alloc,
+                if (win32_uia.returnTerminalProvider(
                     hwnd,
                     wParam,
                     lParam,
-                    state,
+                    provider,
                 )) |lr| return lr;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -20231,8 +21760,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         },
 
         WM_CLOSE => {
-            if (surface) |v| v.invalidateStructuralHistoryForClose();
-            _ = DestroyWindow(hwnd);
+            if (surface) |v| _ = v.requestClose();
             return 0;
         },
 
@@ -20435,6 +21963,8 @@ const TerminalUiaContext = struct {
 
 pub const Surface = struct {
     app: *App,
+    shell_id: ?win32_shell.model.PaneId = null,
+    shell_committed: bool = false,
     host: ?*Host = null,
     host_id: u32 = 0,
     host_active: bool = true,
@@ -20563,6 +22093,12 @@ pub const Surface = struct {
     /// leak.
     pending_clipboard_op: ?PendingClipboardOp = null,
     terminal_uia_context: ?*TerminalUiaContext = null,
+    terminal_uia_provider: ?*win32_uia.TerminalProvider = null,
+    /// Close preflight ownership. Normal close paths build both candidates
+    /// before HWND/core teardown; `windowDestroyed` consumes them without
+    /// allocating after the Surface is already dead.
+    pending_close_tree: ?SplitTreeSurface = null,
+    pending_shell_close: ?win32_shell.runtime.Prepared = null,
 
     fn searchBarButtonHwnd(self: *const Surface, role: SearchBarButtonRole) ?HWND {
         return switch (role) {
@@ -20627,10 +22163,17 @@ pub const Surface = struct {
         opts: SurfaceInitOptions,
     ) !void {
         log.debug("surface.init begin", .{});
-        const host = if (opts.host_id) |host_id|
+        const existing_host = if (opts.host_id) |host_id|
             app.findHostById(host_id) orelse return error.InvalidHost
         else
+            null;
+        var shell_prepared = try app.prepareShellSurfaceCreate(existing_host, opts);
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+
+        const host = existing_host orelse
             try app.createHost(title, opts.clone_state_from, opts.passive_show);
+        const created_host = existing_host == null;
+        errdefer if (created_host) app.removeHost(host);
         self.* = .{
             .app = app,
             .host = host,
@@ -20759,6 +22302,14 @@ pub const Surface = struct {
                 try host.tabs.insert(app.core_app.alloc, inserted_tab_index.?, tab);
             }
         }
+
+        if (shell_prepared) |*prepared| {
+            self.shell_id = prepared.created.pane;
+            if (host.shell_id == null) host.shell_id = prepared.created.window;
+            if (inserted_tab_index) |index| {
+                host.tabs.items[index].shell_id = prepared.created.tab;
+            }
+        }
         // Rollback the tab entry if core_surface.init or later init steps fail.
         // Without this, a zombie tab with a dangling surface pointer would remain
         // in host.tabs, causing use-after-free on subsequent refreshChrome/layout.
@@ -20822,9 +22373,16 @@ pub const Surface = struct {
         }
 
         if (opts.clone_state_from) |source| {
-            if (sharesHostWindowState(self.host_id, source.host_id)) return;
-            try self.inheritWindowStateFrom(source);
+            if (!sharesHostWindowState(self.host_id, source.host_id)) {
+                try self.inheritWindowStateFrom(source);
+            }
         }
+        if (shell_prepared) |*prepared| {
+            try prepared.commit(&app.shell_runtime);
+            self.shell_committed = true;
+            if (self.window_focused) app.commitShellSurfaceFocus(self);
+        }
+        app.auditShellNativeMapping("surface-create");
     }
 
     pub fn deinit(self: *Surface) void {
@@ -20874,7 +22432,7 @@ pub const Surface = struct {
                 // direct destroy. Shouldn't happen in practice; the
                 // Win32 apprt always attaches a Host before close
                 // paths fire.
-                if (self.hwnd) |hwnd| _ = DestroyWindow(hwnd);
+                _ = mutable.requestClose();
                 return;
             };
             host.showConfirm(
@@ -20899,8 +22457,67 @@ pub const Surface = struct {
             return;
         }
         const mutable: *Surface = @constCast(self);
-        mutable.invalidateStructuralHistoryForClose();
-        if (self.hwnd) |hwnd| _ = DestroyWindow(hwnd);
+        _ = mutable.requestClose();
+    }
+
+    fn requestClose(self: *Surface) bool {
+        const hwnd = self.hwnd orelse return false;
+        if (self.pending_close_tree != null or self.pending_shell_close != null) return false;
+        const found = self.app.findTabForSurface(self) orelse {
+            // Detached structural-history objects are deliberately outside
+            // active ShellState and can be destroyed during history disposal.
+            if (self.host) |host| if (host.structural_history_disposing) {
+                return DestroyWindow(hwnd) != 0;
+            };
+            log.err("refusing unpreflighted surface close: native tab mapping missing", .{});
+            return false;
+        };
+        const handle = found.tab.findHandle(self) orelse return false;
+
+        var next_tree: ?SplitTreeSurface = null;
+        if (found.tab.tree.nodes.len > 1) {
+            next_tree = found.tab.tree.remove(self.app.core_app.alloc, handle) catch |err| {
+                log.warn("surface close preflight tree build failed err={}", .{err});
+                return false;
+            };
+        }
+        defer if (next_tree) |*tree| tree.deinit();
+
+        if (!self.invalidateStructuralHistoryForClose()) return false;
+
+        var shell_close: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const pane_id = self.shell_id orelse {
+                log.err("refusing surface close: shell pane mapping missing", .{});
+                return false;
+            };
+            const intent: win32_shell.intent.Intent = if (found.tab.tree.nodes.len > 1)
+                .{ .close_pane = pane_id }
+            else close_tab: {
+                const tab_id = found.tab.shell_id orelse {
+                    log.err("refusing surface close: shell tab mapping missing", .{});
+                    return false;
+                };
+                break :close_tab .{ .close_tab = tab_id };
+            };
+            shell_close = self.app.shell_runtime.prepare(intent) catch |err| {
+                log.err("surface close shell preflight rejected err={}", .{err});
+                return false;
+            };
+        }
+        defer if (shell_close) |*prepared| prepared.deinit();
+
+        self.pending_close_tree = next_tree;
+        next_tree = null;
+        self.pending_shell_close = shell_close;
+        shell_close = null;
+        if (DestroyWindow(hwnd) != 0) return true;
+
+        if (self.pending_close_tree) |*tree| tree.deinit();
+        self.pending_close_tree = null;
+        if (self.pending_shell_close) |*prepared| prepared.deinit();
+        self.pending_shell_close = null;
+        return false;
     }
 
     pub fn captureUndoClearScreen(self: *Surface) !void {
@@ -20917,12 +22534,12 @@ pub const Surface = struct {
     }
 
     fn invalidateRedoForNewLocalAction(self: *Surface) void {
-        if (self.host) |host| host.clearStructuralRedo();
+        if (self.host) |host| _ = host.clearStructuralRedo();
     }
 
     fn invalidateRedoForUnsupportedStructuralAction(self: *Surface) void {
         self.undo_stack.clearRedo();
-        if (self.host) |host| host.clearStructuralRedo();
+        if (self.host) |host| _ = host.clearStructuralRedo();
     }
 
     fn invalidateRedoForUnsupportedTabStructuralAction(self: *Surface) void {
@@ -20931,17 +22548,13 @@ pub const Surface = struct {
             return;
         };
         found.tab.clearRedoHistory();
-        found.host.clearStructuralRedo();
+        _ = found.host.clearStructuralRedo();
     }
 
-    fn invalidateStructuralHistoryForClose(self: *Surface) void {
-        const found = self.app.findTabForSurface(self) orelse return;
+    fn invalidateStructuralHistoryForClose(self: *Surface) bool {
+        const found = self.app.findTabForSurface(self) orelse return true;
         found.tab.clearRedoHistory();
-        if (found.tab.tree.nodes.len == 1) {
-            found.host.clearStructuralHistory(.normal);
-            return;
-        }
-        found.host.clearStructuralRedo();
+        return found.host.tryClearStructuralHistory(.normal);
     }
 
     fn invalidateStructuralHistoryForDestroy(self: *Surface) void {
@@ -20951,7 +22564,7 @@ pub const Surface = struct {
             found.host.clearStructuralHistory(.normal);
             return;
         }
-        found.host.clearStructuralRedo();
+        _ = found.host.clearStructuralRedo();
     }
 
     fn pushUndoEntryAndInvalidateRedo(
@@ -21164,9 +22777,21 @@ pub const Surface = struct {
 
     fn terminalUiaState(self: *Surface) !win32_uia.TerminalState {
         if (self.terminal_uia_context == null) {
-            self.terminal_uia_context = try TerminalUiaContext.create(self.app.core_app.alloc, self);
+            self.terminal_uia_context = try TerminalUiaContext.create(std.heap.page_allocator, self);
         }
         return self.terminal_uia_context.?.state();
+    }
+
+    fn terminalUiaProvider(self: *Surface) !*win32_uia.TerminalProvider {
+        if (self.terminal_uia_provider == null) {
+            const hwnd = self.hwnd orelse return error.NoWindow;
+            self.terminal_uia_provider = try win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                hwnd,
+                try self.terminalUiaState(),
+            );
+        }
+        return self.terminal_uia_provider.?;
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -21520,6 +23145,14 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.title, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
+    }
+
+    fn notifyTerminalUiaNameChanged(self: *Surface) void {
+        if (!win32_uia.events.clientsAreListening()) return;
+        const provider = self.terminal_uia_provider orelse return;
+        win32_uia.events.raiseNameChanged(&provider.base);
+        win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
     }
 
     fn setTitleOverride(self: *Surface, title: ?[]const u8) !void {
@@ -21527,6 +23160,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.title_override, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
     }
 
     fn setTabTitleOverride(self: *Surface, title: ?[]const u8) !void {
@@ -21534,6 +23168,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.tab_title_override, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
     }
 
     fn effectiveTitle(self: *const Surface) ?[:0]const u8 {
@@ -23358,6 +24993,11 @@ pub const Surface = struct {
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("win32 focus callback failed err={}", .{err});
         };
+        if (focused and win32_uia.events.clientsAreListening()) {
+            if (self.terminal_uia_provider) |provider| {
+                win32_uia.events.raiseFocusChanged(&provider.base);
+            }
+        }
         // Host chrome only changes for split-pane focus borders.
         if (self.host) |host| {
             const pane_count = if (host.activeTab()) |tab| tab.leafCount() else 0;
@@ -23702,6 +25342,11 @@ pub const Surface = struct {
 
         if (self.terminal_uia_context) |ctx| {
             ctx.detachSurface();
+            if (self.terminal_uia_provider) |provider| {
+                provider.detach();
+                _ = win32_uia.TerminalProvider.Release(&provider.base);
+                self.terminal_uia_provider = null;
+            }
             TerminalUiaContext.release(@ptrCast(ctx));
             self.terminal_uia_context = null;
         }
@@ -24415,7 +26060,7 @@ test "win32 undo prune expires local and structural histories" {
         } },
     });
 
-    app.pruneUndoHistoryBefore(100);
+    _ = app.pruneUndoHistoryBefore(100);
 
     try std.testing.expectEqual(@as(usize, 0), surface_a.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_a.undo_stack.redoDepth());
@@ -26128,7 +27773,7 @@ test "win32 prune preserves empty host while structural undo remains" {
     try host.structural_undo_entries.append(std.testing.allocator, entry);
     host.destroy_after_structural_dispose = true;
 
-    app.pruneUndoHistoryBefore(0);
+    _ = app.pruneUndoHistoryBefore(0);
 
     try std.testing.expectEqual(@as(usize, 1), app.hosts.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
@@ -27240,7 +28885,7 @@ test "win32 close_surface on single-surface tab invalidates structural history" 
         } },
     });
 
-    surface_a.invalidateStructuralHistoryForClose();
+    try std.testing.expect(surface_a.invalidateStructuralHistoryForClose());
 
     try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
@@ -27248,7 +28893,7 @@ test "win32 close_surface on single-surface tab invalidates structural history" 
     try std.testing.expectEqual(@as(usize, 0), surface_a.undo_stack.redoDepth());
 }
 
-test "win32 close_surface on split pane clears affected tab redo and structural redo only" {
+test "win32 close_surface on split pane clears structural history before shell close" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
@@ -27337,9 +28982,9 @@ test "win32 close_surface on split pane clears affected tab redo and structural 
         } },
     });
 
-    surface_a.invalidateStructuralHistoryForClose();
+    try std.testing.expect(surface_a.invalidateStructuralHistoryForClose());
 
-    try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), surface_a.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 0), surface_a.undo_stack.redoDepth());
@@ -27356,6 +29001,7 @@ test "win32 windowDestroyed backup clears affected tab redo and structural redo 
     var app: App = undefined;
     app.core_app = &core_app;
     app.running = false;
+    app.shell_runtime_initialized = false;
     app.hosts = .empty;
     app.windows = .empty;
     defer {
@@ -27386,6 +29032,8 @@ test "win32 windowDestroyed backup clears affected tab redo and structural redo 
     surface_a.window_visible = true;
     surface_a.host_active = true;
     surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
+    surface_a.pending_close_tree = null;
+    surface_a.pending_shell_close = null;
     defer surface_a.undo_stack.deinit();
 
     var surface_b: Surface = undefined;
@@ -27468,6 +29116,7 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     var app: App = undefined;
     app.core_app = &core_app;
     app.running = false;
+    app.shell_runtime_initialized = false;
     app.hosts = .empty;
     app.windows = .empty;
     defer {
@@ -27498,6 +29147,8 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     surface_a.window_visible = true;
     surface_a.host_active = true;
     surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
+    surface_a.pending_close_tree = null;
+    surface_a.pending_shell_close = null;
 
     var surface_b: Surface = undefined;
     surface_b.app = &app;
@@ -27641,7 +29292,7 @@ test "win32 close_tab structural undo restores and redoes a detached tab" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_b));
 
     var entry = host.detachTabForUndo(1).?;
-    defer entry.dispose(&host, .host_destroy);
+    defer entry.dispose(&host, .host_destroy) catch {};
 
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
@@ -27655,7 +29306,7 @@ test "win32 close_tab structural undo restores and redoes a detached tab" {
     try std.testing.expectEqual(@as(usize, 1), host.active_tab);
     try std.testing.expect(close_tab.tab == null);
 
-    try std.testing.expect(host.redoClosedTabEntry(close_tab));
+    try std.testing.expect(try host.redoClosedTabEntry(close_tab));
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
     try std.testing.expect(close_tab.tab != null);
@@ -27694,7 +29345,7 @@ test "win32 close_tab structural undo detaches the last remaining tab" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
 
     var entry = host.detachTabForUndo(0).?;
-    defer entry.dispose(&host, .host_destroy);
+    defer entry.dispose(&host, .host_destroy) catch {};
 
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
@@ -27735,14 +29386,14 @@ test "win32 close_tab structural redo can detach the last restored tab" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
 
     var entry = host.detachTabForUndo(0).?;
-    defer entry.dispose(&host, .host_destroy);
+    defer entry.dispose(&host, .host_destroy) catch {};
 
     const close_tab = &entry.payload.close_tab;
     try std.testing.expect(try host.restoreClosedTabEntry(close_tab));
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expect(close_tab.tab == null);
 
-    try std.testing.expect(host.redoClosedTabEntry(close_tab));
+    try std.testing.expect(try host.redoClosedTabEntry(close_tab));
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
     try std.testing.expect(close_tab.tab != null);
@@ -27758,6 +29409,15 @@ test "win32 split_create structural undo removes and redoes the split" {
 
     var app: App = undefined;
     app.core_app = &core_app;
+    app.hosts = .empty;
+    app.windows = .empty;
+    app.shell_runtime = win32_shell.runtime.Runtime.init(std.testing.allocator);
+    app.shell_runtime_initialized = true;
+    defer {
+        app.shell_runtime.deinit();
+        app.hosts.deinit(std.testing.allocator);
+        app.windows.deinit(std.testing.allocator);
+    }
 
     var host: Host = .{
         .app = &app,
@@ -27765,6 +29425,11 @@ test "win32 split_create structural undo removes and redoes the split" {
         .tabs = .empty,
         .active_tab = 0,
     };
+    var shell_window = try app.shell_runtime.prepare(.create_window);
+    defer shell_window.deinit();
+    try shell_window.commit(&app.shell_runtime);
+    host.shell_id = shell_window.created.window;
+    try app.hosts.append(std.testing.allocator, &host);
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
         host.tabs.deinit(std.testing.allocator);
@@ -27777,6 +29442,8 @@ test "win32 split_create structural undo removes and redoes the split" {
     surface_a.core_initialized = false;
     surface_a.window_visible = true;
     surface_a.host_active = true;
+    surface_a.shell_id = shell_window.created.pane;
+    surface_a.shell_committed = true;
 
     var surface_b: Surface = undefined;
     surface_b.app = &app;
@@ -27786,8 +29453,18 @@ test "win32 split_create structural undo removes and redoes the split" {
     surface_b.window_visible = true;
     surface_b.host_active = true;
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
+    var initial_tab = try Tab.init(std.testing.allocator, 1, &surface_a);
+    initial_tab.shell_id = shell_window.created.tab;
+    try host.tabs.append(std.testing.allocator, initial_tab);
 
+    var shell_split = try app.shell_runtime.prepare(.{ .split_pane = .{
+        .pane = surface_a.shell_id.?,
+        .direction = .down,
+    } });
+    defer shell_split.deinit();
+    try shell_split.commit(&app.shell_runtime);
+    surface_b.shell_id = shell_split.created.pane;
+    surface_b.shell_committed = true;
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -27810,12 +29487,23 @@ test "win32 split_create structural undo removes and redoes the split" {
         .direction = .down,
     };
 
+    const FocusInterleave = struct {
+        fn run(target_app: *App, source_pane: win32_shell.model.PaneId) !void {
+            try std.testing.expect(try target_app.shell_runtime.focusPane(source_pane));
+        }
+    };
+    app.test_before_split_undo_shell_commit = &FocusInterleave.run;
+
     try std.testing.expect(try host.undoSplitCreateEntry(&split_create));
     try std.testing.expectEqual(@as(?SplitTreeSurface.Node.Handle, null), host.tabs.items[0].findHandle(&surface_b));
     try std.testing.expectEqual(@as(?*Surface, &surface_a), host.tabs.items[0].focusedSurface());
     try std.testing.expect(split_create.detached);
     try std.testing.expect(!surface_b.window_visible);
     try std.testing.expect(!surface_b.host_active);
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, null), surface_b.shell_id);
+    try std.testing.expect(!surface_b.shell_committed);
+    try std.testing.expectEqual(@as(usize, 1), app.shell_runtime.state.panes.items.len);
+    try app.validateShellNativeMapping();
 
     try std.testing.expect(try host.redoSplitCreateEntry(&split_create));
     try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
@@ -27825,6 +29513,10 @@ test "win32 split_create structural undo removes and redoes the split" {
     );
     try std.testing.expectEqual(@as(?*Surface, &surface_b), host.tabs.items[0].focusedSurface());
     try std.testing.expect(!split_create.detached);
+    try std.testing.expect(surface_b.shell_id != null);
+    try std.testing.expect(surface_b.shell_committed);
+    try std.testing.expectEqual(@as(usize, 2), app.shell_runtime.state.panes.items.len);
+    try app.validateShellNativeMapping();
 }
 
 test "win32 runtime can initialize config" {
@@ -28420,6 +30112,7 @@ test "win32 normalizeForwardedStartupArg drops class and normalizes working dire
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--class=dev") == null);
+    try std.testing.expect(try normalizeForwardedStartupArg(std.testing.allocator, "--safe-mode") == null);
 
     const inherit = (try normalizeForwardedStartupArg(std.testing.allocator, "--working-directory=inherit")).?;
     defer std.testing.allocator.free(inherit);
@@ -29447,6 +31140,19 @@ test "win32 session save skips quick terminal tabs" {
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows.len);
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows[0].tabs.len);
     try std.testing.expectEqual(@as(usize, 0), mixed_state.windows[0].selected_tab);
+}
+
+fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
+    return !safe_mode and policy != .never;
+}
+
+test "win32 safe mode never mutates saved session state" {
+    try std.testing.expect(!sessionStatePolicyAllows(true, .default));
+    try std.testing.expect(!sessionStatePolicyAllows(true, .always));
+    try std.testing.expect(!sessionStatePolicyAllows(true, .never));
+    try std.testing.expect(sessionStatePolicyAllows(false, .default));
+    try std.testing.expect(sessionStatePolicyAllows(false, .always));
+    try std.testing.expect(!sessionStatePolicyAllows(false, .never));
 }
 
 test "win32 session state window rect requires complete geometry" {
@@ -32548,6 +34254,13 @@ test "win32 desiredMoveIndex wraps tab order" {
     try std.testing.expectEqual(@as(?usize, 0), desiredMoveIndex(4, 1, -1));
     try std.testing.expectEqual(@as(?usize, 0), desiredMoveIndex(4, 3, 1));
     try std.testing.expectEqual(@as(?usize, 3), desiredMoveIndex(4, 0, -1));
+}
+
+test "win32 ordered tab reorder keeps active identity" {
+    try std.testing.expectEqual(@as(usize, 3), movedIndexAfterReorder(1, 1, 3));
+    try std.testing.expectEqual(@as(usize, 1), movedIndexAfterReorder(2, 0, 3));
+    try std.testing.expectEqual(@as(usize, 2), movedIndexAfterReorder(1, 3, 0));
+    try std.testing.expectEqual(@as(usize, 0), movedIndexAfterReorder(0, 1, 3));
 }
 
 test "win32 gotoSplitFallback maps only previous and next" {

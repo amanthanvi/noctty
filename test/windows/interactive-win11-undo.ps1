@@ -68,6 +68,9 @@ public static class Win11UndoNative {
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
     public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
 }
 
@@ -326,6 +329,57 @@ function Invoke-CloseSecondTab {
     [void] [Win11UndoNative]::SendMessageW($tab.Hwnd, 0x0202, [UIntPtr]::Zero, $lParam)
 }
 
+function Invoke-DragFirstTabIntoActiveSurface {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd
+    )
+
+    $sourceTab = Get-VisibleTabButtons -Parent $HostHwnd |
+        Where-Object { $_.Id -eq 1000 } |
+        Select-Object -First 1
+    $targetSurface = Get-VisibleChildControls -Parent $HostHwnd |
+        Where-Object { (Get-WindowClassName -Hwnd $_.Hwnd) -eq 'winghostty.win32' } |
+        Select-Object -First 1
+    if ($null -eq $sourceTab -or $null -eq $targetSurface) {
+        throw 'drag source tab or active target surface was not visible'
+    }
+
+    $tabClient = [Win11UndoNative+RECT]::new()
+    $tabScreen = [Win11UndoNative+RECT]::new()
+    $surfaceScreen = [Win11UndoNative+RECT]::new()
+    if (-not [Win11UndoNative]::GetClientRect($sourceTab.Hwnd, [ref] $tabClient) -or
+        -not [Win11UndoNative]::GetWindowRect($sourceTab.Hwnd, [ref] $tabScreen) -or
+        -not [Win11UndoNative]::GetWindowRect($targetSurface.Hwnd, [ref] $surfaceScreen)) {
+        throw 'failed to read drag geometry'
+    }
+
+    $downX = [Math]::Max(4, [int] (($tabClient.Right - $tabClient.Left) / 2))
+    $downY = [Math]::Max(4, [int] (($tabClient.Bottom - $tabClient.Top) / 2))
+    $targetScreenX = [Math]::Max($surfaceScreen.Left, $surfaceScreen.Right - 20)
+    $targetScreenY = [int] (($surfaceScreen.Top + $surfaceScreen.Bottom) / 2)
+    $moveX = $targetScreenX - $tabScreen.Left
+    $moveY = $targetScreenY - $tabScreen.Top
+
+    [void] [Win11UndoNative]::SendMessageW(
+        $sourceTab.Hwnd,
+        0x0201,
+        [UIntPtr]::Zero,
+        (New-LParam -X $downX -Y $downY)
+    )
+    [void] [Win11UndoNative]::SendMessageW(
+        $sourceTab.Hwnd,
+        0x0200,
+        (New-WParam -Low 1),
+        (New-LParam -X $moveX -Y $moveY)
+    )
+    [void] [Win11UndoNative]::SendMessageW(
+        $sourceTab.Hwnd,
+        0x0202,
+        [UIntPtr]::Zero,
+        (New-LParam -X $moveX -Y $moveY)
+    )
+}
+
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'undo' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
@@ -425,6 +479,32 @@ try {
         (Get-LogPatternCount -Path $stderrPath -Pattern $successPattern) -ge 3
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 2 'tab count after new_tab'
+
+    Invoke-DragFirstTabIntoActiveSurface -HostHwnd $hostHwnd
+    Wait-Until -Deadline $deadline -Description 'tab drag split transfer' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $hostHwnd) -eq 1 -and
+        (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
+    }
+    Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after drag split transfer'
+    Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'pane count after drag split transfer'
+
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
+    Wait-Until -Deadline $deadline -Description 'undo tab drag split transfer' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
+    }
+    Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible pane count after drag transfer undo'
+
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
+    Wait-Until -Deadline $deadline -Description 'redo tab drag split transfer' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $hostHwnd) -eq 1 -and
+        (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
+    }
+
+    Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
+    Wait-Until -Deadline $deadline -Description 'restore two tabs after drag transfer checks' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $hostHwnd) -eq 2 -and
+        (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
+    }
 
     Invoke-CloseSecondTab -HostHwnd $hostHwnd
     Wait-Until -Deadline $deadline -Description 'second tab close' -Process $process -Condition {

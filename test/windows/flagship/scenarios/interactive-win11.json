@@ -1,0 +1,24 @@
+{
+  "schema_version": "winghostty.verification.scenario.v1",
+  "id": "windows.interactive-win11.composite",
+  "title": "Windows 11 interactive composite",
+  "category": "interaction",
+  "runner": {
+    "os": "windows-11",
+    "architecture": "x86_64",
+    "capabilities": ["interactive-desktop", "powershell", "foreground-control", "screen-capture", "zig"]
+  },
+  "timeout_seconds": 1800,
+  "steps": [
+    { "id": "build", "description": "Build the current executable once when required." },
+    { "id": "composite", "description": "Run the existing Win11 interaction, rendering, IME, notification, and undo harnesses." }
+  ],
+  "assertions": [
+    { "id": "composite-pass", "description": "Every required harness reports PASS without timeout or crash." }
+  ],
+  "artifacts": [
+    { "kind": "result", "path": "result.json" },
+    { "kind": "log", "path": "transcript.log" },
+    { "kind": "trace", "path": "boo-performance.json" }
+  ]
+}

@@ -49,6 +49,8 @@ const help_prelude =
     \\  `winghostty +new-window` forwards into the running instance when possible.
     \\  `winghostty +list-windows` prints local automation window IDs as JSON.
     \\  `winghostty +perform-action new_tab` forwards a safe UI action.
+    \\  `winghostty --safe-mode` uses built-in config and skips session restore.
+    \\  `winghostty +diagnostic-bundle` creates a local redacted support bundle.
     \\  `winghostty +edit-config` opens the config file in your default editor.
     \\
     \\Available actions:
@@ -105,6 +107,8 @@ test "help prelude points to CLI discovery commands" {
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-actions --docs") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --default") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+list-keybinds --docs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "--safe-mode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "+diagnostic-bundle") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "src/config/Config.zig") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "future update") == null);
 }

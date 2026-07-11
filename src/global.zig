@@ -41,6 +41,9 @@ pub const GlobalState = struct {
     gpa: ?GPA,
     alloc: std.mem.Allocator,
     action: ?cli_ghostty_action.Action,
+    /// Start with built-in defaults and no workspace restore. This is an
+    /// ephemeral recovery launch mode and is never persisted.
+    safe_mode: bool,
     logging: Logging,
     rlimits: ResourceLimits = .{},
 
@@ -67,6 +70,7 @@ pub const GlobalState = struct {
             .gpa = null,
             .alloc = undefined,
             .action = null,
+            .safe_mode = false,
             .logging = .{},
             .rlimits = .{},
             .resources_dir = .{},
@@ -96,6 +100,8 @@ pub const GlobalState = struct {
             std.heap.c_allocator
         else
             unreachable;
+
+        self.safe_mode = detectSafeMode(self.alloc) catch false;
 
         // We first try to parse any action that we may be executing.
         self.action = try cli_action.detectArgs(
@@ -137,6 +143,7 @@ pub const GlobalState = struct {
         }
         std.log.info("renderer={}", .{build_config.renderer});
         std.log.info("event backend={t}", .{xev.backend});
+        if (self.safe_mode) std.log.warn("safe mode enabled: using built-in config and skipping session restore", .{});
 
         // As early as possible, initialize our resource limits.
         self.rlimits = .init();
@@ -202,6 +209,26 @@ pub const GlobalState = struct {
         p.sigaction(p.SIG.PIPE, &sa, null);
     }
 };
+
+fn detectSafeMode(alloc: std.mem.Allocator) !bool {
+    const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
+    return safeModeInArgs(argv);
+}
+
+fn safeModeInArgs(argv: []const []const u8) bool {
+    for (argv[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) return false;
+        if (std.mem.eql(u8, arg, "--safe-mode")) return true;
+    }
+    return false;
+}
+
+test "safe mode only applies to application arguments" {
+    try std.testing.expect(safeModeInArgs(&.{ "winghostty", "--safe-mode" }));
+    try std.testing.expect(!safeModeInArgs(&.{ "winghostty", "-e", "tool", "--safe-mode" }));
+    try std.testing.expect(!safeModeInArgs(&.{"winghostty"}));
+}
 
 /// Maintains the Unix resource limits that we set for our process. This
 /// can be used to restore the limits to their original values.

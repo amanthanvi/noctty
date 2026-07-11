@@ -117,3 +117,4 @@ if "%~1"=="" (
 )
 
 %*
+exit /b %errorlevel%
