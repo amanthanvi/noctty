@@ -455,6 +455,7 @@ fn closeTab(state: *model.ShellState, out: *Reduction, tab_id: model.TabId) !voi
     const window_id = tab.window;
     const window = activeWindowForTab(state, tab_id) orelse return error.StaleId;
     if (window.tabs.items.len == 1) return closeWindow(state, out, window_id);
+    const active_index = indexOfId(window.tabs.items, tab_id) orelse return error.StaleId;
 
     const pane_count = selectors.paneCount(state, tab_id);
     try out.effects.ensureUnusedCapacity(state.allocator, pane_count + 3);
@@ -488,7 +489,9 @@ fn closeTab(state: *model.ShellState, out: *Reduction, tab_id: model.TabId) !voi
     removeTab(state, tab_id);
     try state.tab_ids.release(state.allocator, tab_id);
     removeTabId(window, tab_id);
-    if (window.active_tab.?.eql(tab_id)) window.active_tab = window.tabs.items[0];
+    if (window.active_tab.?.eql(tab_id)) {
+        window.active_tab = window.tabs.items[@min(active_index, window.tabs.items.len - 1)];
+    }
     const focused = state.tab(window.active_tab.?).?.focused_pane;
     out.effects.appendAssumeCapacity(.{ .focus_surface = focused });
     out.effects.appendAssumeCapacity(.{ .relayout_window = window_id });
@@ -804,4 +807,60 @@ fn removeTabId(window: *model.Window, id: model.TabId) void {
         _ = window.tabs.orderedRemove(i);
         return;
     };
+}
+
+test "close active tab preserves adjacent focus instead of jumping to first tab" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const window_id = state.focused_window.?;
+
+    inline for (0..3) |_| {
+        reduction = try apply(&state, .{ .create_tab = window_id });
+        reduction.deinit(std.testing.allocator);
+    }
+
+    const window = state.window(window_id).?;
+    const tab_a = window.tabs.items[0];
+    const tab_b = window.tabs.items[1];
+    const tab_c = window.tabs.items[2];
+    const tab_d = window.tabs.items[3];
+
+    reduction = try apply(&state, .{ .focus_tab = tab_b });
+    reduction.deinit(std.testing.allocator);
+    try std.testing.expect(window.active_tab.?.eql(tab_b));
+
+    reduction = try apply(&state, .{ .close_tab = tab_b });
+    reduction.deinit(std.testing.allocator);
+
+    try std.testing.expect(window.tabs.items[0].eql(tab_a));
+    try std.testing.expect(window.tabs.items[1].eql(tab_c));
+    try std.testing.expect(window.tabs.items[2].eql(tab_d));
+    try std.testing.expect(window.active_tab.?.eql(tab_c));
+}
+
+test "close active last tab preserves previous adjacent focus" {
+    var state = model.ShellState.init(std.testing.allocator);
+    defer state.deinit();
+
+    var reduction = try apply(&state, .create_window);
+    reduction.deinit(std.testing.allocator);
+    const window_id = state.focused_window.?;
+
+    reduction = try apply(&state, .{ .create_tab = window_id });
+    reduction.deinit(std.testing.allocator);
+
+    const window = state.window(window_id).?;
+    const tab_a = window.tabs.items[0];
+    const tab_b = window.tabs.items[1];
+    try std.testing.expect(window.active_tab.?.eql(tab_b));
+
+    reduction = try apply(&state, .{ .close_tab = tab_b });
+    reduction.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), window.tabs.items.len);
+    try std.testing.expect(window.tabs.items[0].eql(tab_a));
+    try std.testing.expect(window.active_tab.?.eql(tab_a));
 }

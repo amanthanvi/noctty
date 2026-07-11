@@ -163,7 +163,7 @@ fn nearestEdge(
         best_distance = distances.up;
     }
     if (available.vertical and distances.down < vertical_threshold and distances.down < best_distance) {
-        operation = .split_down;
+        return .split_down;
     }
     return operation;
 }

@@ -8785,6 +8785,13 @@ const Host = struct {
         const found = self.app.findTabForSurface(value.source_surface) orelse return false;
         if (found.host != self) return false;
         const created_handle = found.tab.findHandle(value.created_surface) orelse return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const pane_id = value.created_surface.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .close_pane = pane_id });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
+
         const next_tree = try found.tab.tree.remove(self.app.core_app.alloc, created_handle);
         found.tab.tree.deinit();
         found.tab.tree = next_tree;
@@ -8793,6 +8800,13 @@ const Host = struct {
         value.created_surface.setVisible(false);
         value.detached = true;
         self.active_tab = found.index;
+        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+            log.err("split-create undo shell commit failed err={}", .{err});
+            return err;
+        };
+        value.created_surface.shell_id = null;
+        value.created_surface.shell_committed = false;
+        self.app.auditShellNativeMapping("split-create-undo");
         return true;
     }
 
@@ -8800,6 +8814,21 @@ const Host = struct {
         if (!value.detached) return false;
         const found = self.app.findTabForSurface(value.source_surface) orelse return false;
         if (found.host != self) return false;
+        var shell_prepared: ?win32_shell.runtime.Prepared = null;
+        if (self.app.shell_runtime_initialized) {
+            const pane_id = value.source_surface.shell_id orelse return error.ShellStateOutOfSync;
+            shell_prepared = try self.app.shell_runtime.prepare(.{ .split_pane = .{
+                .pane = pane_id,
+                .direction = switch (value.direction) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                },
+                .ratio = 0.5,
+            } });
+        }
+        defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const source_handle = found.tab.findHandle(value.source_surface) orelse return false;
         const inserted = try SplitTreeSurface.init(self.app.core_app.alloc, value.created_surface);
@@ -8820,6 +8849,15 @@ const Host = struct {
         found.tab.focused = found.tab.findHandle(value.created_surface) orelse source_handle;
         value.detached = false;
         self.active_tab = found.index;
+        if (shell_prepared) |*prepared| {
+            prepared.commit(&self.app.shell_runtime) catch |err| {
+                log.err("split-create redo shell commit failed err={}", .{err});
+                return err;
+            };
+            value.created_surface.shell_id = prepared.created.pane;
+            value.created_surface.shell_committed = true;
+        }
+        self.app.auditShellNativeMapping("split-create-redo");
         return true;
     }
 
@@ -29239,6 +29277,15 @@ test "win32 split_create structural undo removes and redoes the split" {
 
     var app: App = undefined;
     app.core_app = &core_app;
+    app.hosts = .empty;
+    app.windows = .empty;
+    app.shell_runtime = win32_shell.runtime.Runtime.init(std.testing.allocator);
+    app.shell_runtime_initialized = true;
+    defer {
+        app.shell_runtime.deinit();
+        app.hosts.deinit(std.testing.allocator);
+        app.windows.deinit(std.testing.allocator);
+    }
 
     var host: Host = .{
         .app = &app,
@@ -29246,6 +29293,11 @@ test "win32 split_create structural undo removes and redoes the split" {
         .tabs = .empty,
         .active_tab = 0,
     };
+    var shell_window = try app.shell_runtime.prepare(.create_window);
+    defer shell_window.deinit();
+    try shell_window.commit(&app.shell_runtime);
+    host.shell_id = shell_window.created.window;
+    try app.hosts.append(std.testing.allocator, &host);
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
         host.tabs.deinit(std.testing.allocator);
@@ -29258,6 +29310,8 @@ test "win32 split_create structural undo removes and redoes the split" {
     surface_a.core_initialized = false;
     surface_a.window_visible = true;
     surface_a.host_active = true;
+    surface_a.shell_id = shell_window.created.pane;
+    surface_a.shell_committed = true;
 
     var surface_b: Surface = undefined;
     surface_b.app = &app;
@@ -29267,8 +29321,18 @@ test "win32 split_create structural undo removes and redoes the split" {
     surface_b.window_visible = true;
     surface_b.host_active = true;
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
+    var initial_tab = try Tab.init(std.testing.allocator, 1, &surface_a);
+    initial_tab.shell_id = shell_window.created.tab;
+    try host.tabs.append(std.testing.allocator, initial_tab);
 
+    var shell_split = try app.shell_runtime.prepare(.{ .split_pane = .{
+        .pane = surface_a.shell_id.?,
+        .direction = .down,
+    } });
+    defer shell_split.deinit();
+    try shell_split.commit(&app.shell_runtime);
+    surface_b.shell_id = shell_split.created.pane;
+    surface_b.shell_committed = true;
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29297,6 +29361,10 @@ test "win32 split_create structural undo removes and redoes the split" {
     try std.testing.expect(split_create.detached);
     try std.testing.expect(!surface_b.window_visible);
     try std.testing.expect(!surface_b.host_active);
+    try std.testing.expectEqual(@as(?win32_shell.model.PaneId, null), surface_b.shell_id);
+    try std.testing.expect(!surface_b.shell_committed);
+    try std.testing.expectEqual(@as(usize, 1), app.shell_runtime.state.panes.items.len);
+    try app.validateShellNativeMapping();
 
     try std.testing.expect(try host.redoSplitCreateEntry(&split_create));
     try std.testing.expect(host.tabs.items[0].findHandle(&surface_b) != null);
@@ -29306,6 +29374,10 @@ test "win32 split_create structural undo removes and redoes the split" {
     );
     try std.testing.expectEqual(@as(?*Surface, &surface_b), host.tabs.items[0].focusedSurface());
     try std.testing.expect(!split_create.detached);
+    try std.testing.expect(surface_b.shell_id != null);
+    try std.testing.expect(surface_b.shell_committed);
+    try std.testing.expectEqual(@as(usize, 2), app.shell_runtime.state.panes.items.len);
+    try app.validateShellNativeMapping();
 }
 
 test "win32 runtime can initialize config" {
