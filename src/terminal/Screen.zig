@@ -2640,9 +2640,9 @@ pub fn cursorSetHyperlink(self: *Screen) PageList.IncreaseCapacityError!void {
                 page = &new_node.data;
             }
 
-            // Canonical map insertion rehashes tombstones in place. Reaching
-            // this error therefore means live entries fill the usable map
-            // capacity and the page must grow.
+            // The hyperlink map is fixed-capacity, so reaching this error
+            // means live entries fill the usable map capacity and the page
+            // must grow.
             _ = try self.increaseCapacity(
                 self.cursor.page_pin.node,
                 .hyperlink_bytes,
