@@ -6290,18 +6290,21 @@ pub const App = struct {
                 unused_tree.deinit();
                 surface.pending_close_tree = null;
             }
+            var shell_mapping_changed = false;
             if (surface.pending_shell_close) |*prepared| {
                 prepared.commit(&self.shell_runtime) catch |err| {
                     log.err("shell close commit failed after native teardown err={}", .{err});
                 };
                 prepared.deinit();
                 surface.pending_shell_close = null;
-                self.auditShellNativeMapping("surface-close");
+                shell_mapping_changed = true;
             }
 
+            var shell_mapping_stable = true;
             if (host.tabs.items.len == 0) {
                 if (host.structural_history_disposing) {
                     host.destroy_after_structural_dispose = true;
+                    shell_mapping_stable = false;
                 } else {
                     if (host.hwnd) |hwnd| _ = DestroyWindow(hwnd);
                     self.removeHost(host);
@@ -6313,6 +6316,9 @@ pub const App = struct {
                 // `.auto` still shows the row since it carries the
                 // essential host controls (+, overflow).
                 host.layout() catch {};
+            }
+            if (shell_mapping_changed and shell_mapping_stable) {
+                self.auditShellNativeMapping("surface-close");
             }
         }
 
@@ -21395,6 +21401,11 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_GETOBJECT => {
             if (surface) |v| {
+                // UIA may query the child HWND reentrantly while DestroyWindow
+                // is unwinding. Surface.destroy clears this flag before it
+                // releases the owner context, so never recreate that context
+                // once teardown has begun (or before core init completes).
+                if (!v.destroy_on_wm_destroy) return DefWindowProcW(hwnd, msg, wParam, lParam);
                 const state = v.terminalUiaState() catch |err| {
                     log.warn("uia: terminal state init failed err={}", .{err});
                     return DefWindowProcW(hwnd, msg, wParam, lParam);
