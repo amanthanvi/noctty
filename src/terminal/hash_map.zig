@@ -425,7 +425,12 @@ fn HashMapUnmanaged(
         }
         pub fn putNoClobberContext(self: *Self, key: K, value: V, ctx: Context) Allocator.Error!void {
             assert(!self.containsContext(key, ctx));
-            try self.growIfNeeded(1);
+            self.growIfNeeded(1) catch |err| {
+                // Live entries still fit, so an assume-capacity insertion can
+                // either recycle a tombstone or rehash if its probe reaches a
+                // genuinely free slot.
+                if (self.header().size >= self.maxLoad()) return err;
+            };
 
             self.putAssumeCapacityNoClobberContext(key, value, ctx);
         }
@@ -464,7 +469,22 @@ fn HashMapUnmanaged(
             }
 
             const fingerprint = Metadata.takeFingerprint(hash);
-            if (metadata[0].isFree()) self.header().available -= 1;
+            if (metadata[0].isFree()) {
+                // Removal does not restore insertion headroom. A move can
+                // therefore remove its source, probe to a different free
+                // slot, and arrive here with no headroom left. Rehash before
+                // consuming that slot so the counter and metadata agree.
+                if (self.header().available == 0) {
+                    assert(self.header().size < self.maxLoad());
+                    self.rehash(ctx);
+                    return self.putAssumeCapacityNoClobberContext(
+                        key,
+                        value,
+                        ctx,
+                    );
+                }
+                self.header().available -= 1;
+            }
             metadata[0].fill(fingerprint);
             self.keys()[idx] = key;
             self.values()[idx] = value;
@@ -1482,6 +1502,47 @@ test "HashMap repeat putAssumeCapacity/remove" {
         try expectEqual(map.get(limit + i), i);
     }
     try expectEqual(map.count(), limit);
+}
+
+test "HashMap no-clobber move rehashes exhausted headroom" {
+    const Context = struct {
+        pub fn hash(_: @This(), key: u32) u64 {
+            return key;
+        }
+
+        pub fn eql(_: @This(), a: u32, b: u32) bool {
+            return a == b;
+        }
+    };
+    const Map = HashMapUnmanaged(u32, u32, Context, 80);
+    const cap = 16;
+
+    const alloc = testing.allocator;
+    const layout = Map.layoutForCapacity(cap);
+    const buf = try alloc.alignedAlloc(u8, Map.base_align, layout.total_size);
+    defer alloc.free(buf);
+    var map = Map.init(.init(buf), layout);
+
+    // Fill all insertion headroom with keys in the first part of the table.
+    const max_load = map.maxLoad();
+    for (0..max_load) |i| {
+        map.putAssumeCapacityNoClobberContext(
+            @intCast(i),
+            @intCast(i),
+            .{},
+        );
+    }
+
+    // Model a managed-cell move: removing the source leaves a tombstone but
+    // does not restore headroom, and the destination hashes to a free slot.
+    try expect(map.removeContext(0, .{}));
+    map.putAssumeCapacityNoClobberContext(15, 15, .{});
+
+    try expectEqual(max_load, map.count());
+    try expectEqual(15, map.getContext(15, .{}).?);
+    for (map.metadata.?[0..map.capacity()]) |metadata| {
+        try expect(!metadata.isTombstone());
+    }
 }
 
 test "HashMap clobber insert rehashes exhausted headroom" {
