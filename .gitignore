@@ -41,3 +41,6 @@ vgcore.*
 .cursor/
 
 .zig-global-cache/
+# Local flagship verification evidence.
+/test/windows/flagship/artifacts/
+/dist/artifacts/

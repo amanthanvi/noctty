@@ -26,6 +26,7 @@ pub const PaletteListState = widgets.PaletteListState;
 pub const TerminalProvider = widgets.TerminalProvider;
 pub const TerminalState = widgets.TerminalState;
 pub const handlePaletteListGetObject = widgets.handlePaletteListGetObject;
+pub const returnPaletteListProvider = widgets.returnPaletteListProvider;
 pub const handleTerminalGetObject = widgets.handleTerminalGetObject;
 pub const HRESULT = com.HRESULT;
 pub const UiaRootObjectId = com.UiaRootObjectId;

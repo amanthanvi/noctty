@@ -76,6 +76,7 @@ pub const PaletteListProvider = struct {
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
     state: PaletteListState,
+    detached: std.atomic.Value(bool),
 
     const vtbl: com.IRawElementProviderSimpleVtbl = .{
         .QueryInterface = PaletteListProvider.QueryInterface,
@@ -99,8 +100,15 @@ pub const PaletteListProvider = struct {
             .alloc = alloc,
             .hwnd = hwnd,
             .state = state,
+            .detached = std.atomic.Value(bool).init(false),
         };
         return self;
+    }
+
+    /// Disconnect from the widget before its owner is freed. UIA clients may
+    /// retain COM references beyond HWND teardown.
+    pub fn detach(self: *PaletteListProvider) void {
+        self.detached.store(true, .release);
     }
 
     fn fromBase(p: *com.IRawElementProviderSimple) *PaletteListProvider {
@@ -163,6 +171,7 @@ pub const PaletteListProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         out.* = com.VARIANT.empty();
+        if (self.detached.load(.acquire)) return @bitCast(@as(u32, 0x80040201));
 
         switch (prop_id) {
             constants.UIA_ControlTypePropertyId => {
@@ -205,6 +214,10 @@ pub const PaletteListProvider = struct {
         out: *?*com.IRawElementProviderSimple,
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
+        if (self.detached.load(.acquire)) {
+            out.* = null;
+            return @bitCast(@as(u32, 0x80040201));
+        }
         return com.UiaHostProviderFromHwnd(self.hwnd, out);
     }
 };
@@ -1003,6 +1016,19 @@ pub fn handlePaletteListGetObject(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
+/// Return an already-owned palette provider for `WM_GETOBJECT`. A stable
+/// provider identity is required when the widget also raises events between
+/// accessibility queries.
+pub fn returnPaletteListProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *PaletteListProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
 pub fn handleTerminalGetObject(
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
@@ -1634,6 +1660,33 @@ const TestTerminalStateData = struct {
     visible_value_text: []const u8 = "visible",
     visible_range: terminal_text.OffsetRange = .{ .start = 0, .end = 7 },
 };
+
+test "detached palette provider rejects late UIA name queries" {
+    var callback_calls: u32 = 0;
+    const callbacks = struct {
+        fn name(ctx: *anyopaque, _: []u8) []const u8 {
+            const calls: *u32 = @ptrCast(@alignCast(ctx));
+            calls.* += 1;
+            return "unsafe";
+        }
+    };
+    const hwnd: com.HWND = @ptrFromInt(1);
+    const provider = try PaletteListProvider.create(std.testing.allocator, hwnd, .{
+        .ctx = @ptrCast(&callback_calls),
+        .name = callbacks.name,
+    });
+    defer _ = PaletteListProvider.Release(&provider.base);
+    provider.detach();
+
+    var value = com.VARIANT.empty();
+    const hr = PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_NamePropertyId,
+        &value,
+    );
+    try std.testing.expect(hr != com.S_OK);
+    try std.testing.expectEqual(@as(u32, 0), callback_calls);
+}
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {
     const callbacks = struct {

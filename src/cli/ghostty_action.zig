@@ -51,6 +51,9 @@ pub const Action = enum {
     // List local crash reports.
     @"crash-report",
 
+    // Create a local, privacy-redacted diagnostic bundle.
+    @"diagnostic-bundle",
+
     // Boo!
     boo,
 

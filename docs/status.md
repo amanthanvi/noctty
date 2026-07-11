@@ -3,7 +3,7 @@
 What currently works in winghostty, what is experimental, and what is out of
 scope. When this page disagrees with a commit message, trust this page.
 
-Last updated: 2026-05-24, against current fork HEAD.
+Last updated: 2026-07-11, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md).
@@ -16,7 +16,7 @@ notifications, quick terminal notes, and troubleshooting, see
 - **Windows 10** and **Windows 11** — x64 and ARM64
 - No macOS, Linux, or cross-platform app runtime ships from this repo.
   `libghostty-vt` remains buildable for non-Windows targets as a library.
-- WSL *as a launched shell* works when you opt in (`command = wsl.exe`).
+- WSL _as a launched shell_ works when you opt in (`command = wsl.exe`).
   Implicit-default WSL is avoided because `wsl.exe --status` reporting
   healthy is not a reliable signal that a session launch will succeed
   (see `src/config/windows_shell.zig`).
@@ -41,7 +41,14 @@ notifications, quick terminal notes, and troubleshooting, see
 ### Windows application runtime (new in this fork)
 
 - Native Win32 message loop and window management
-- Tab bar with overflow and drag-reorder
+- Tab bar with overflow, same-window drag-reorder, and exact-pane drag-to-split.
+  Drop previews name the resulting split direction; commits move the complete
+  source split subtree through one reversible ShellState/native transaction.
+  Undo and redo restore exact tab, pane, split-tree, ratio, focus, and control
+  visibility. Cross-window OLE transfer remains a tested adapter foundation.
+- Close-tab undo/redo retains exact tab, pane, split-tree, ratio, and focus
+  identity. Retained history has bounded expiry and releases generational IDs
+  only after an authoritative discard transaction succeeds.
 - Horizontal and vertical splits
 - Native right-click context menus
 - In-app profile picker that auto-detects installed Windows shells:
@@ -64,10 +71,30 @@ notifications, quick terminal notes, and troubleshooting, see
   contents and child process state are not restored.
 - Windows-convention default keybindings (see
   `src/config/Config.zig` for the full set)
+- Native settings window with Appearance, Terminal, Shell, Keybindings, and
+  Advanced sections. Edits are staged until Save and applied through an atomic,
+  source-preserving config patch. Keybinding editing still opens the text config
+  and points to CLI discovery commands. Ownership-safe fields support
+  reversible live preview, revision-aware external-edit merging, and explicit
+  field-conflict resolution.
+- Universal palette blending configurable actions, live tabs, panes, Windows
+  profiles, and exact native-setting controls. Typed stable IDs, category
+  prefixes, fuzzy ranking, keyboard navigation, and a scrollable accessible
+  result list ship. Reviewed help destinations and a snapshot-validated recent
+  action provider also ship; installed-theme selection remains planned.
 
 ### Renderer
 
 - OpenGL 4.3+ via WGL on Windows
+- A concrete D3D11/DirectComposition shell driver owns a target, root visual,
+  and DPI-sized DirectComposition surface for every top-level Host window.
+  Direct2D/DirectWrite resources and per-window content recover across device
+  loss, with WARP and truthful GDI fallback. The attached migration surface is
+  transparent and the first isolated production zone—host banners and
+  operation feedback—renders through DirectWrite. Any draw, commit, or recovery
+  failure falls back to the proven GDI path for that paint. Remaining chrome
+  zones stay on GDI/DWM; terminal presentation remains independently owned by
+  WGL `SwapBuffers`.
 - `src/renderer/Metal.zig` is inherited source but is unreachable from any
   shipping app runtime in this fork
 
@@ -105,9 +132,9 @@ notifications, quick terminal notes, and troubleshooting, see
 
 UI Automation is **partial, not complete**. The Win32 host answers
 `WM_GETOBJECT` with a root provider, caption buttons still chain through the
-system host provider, and the command palette exposes a list provider so
-Narrator/NVDA can announce selection changes. Terminal scrollback is not yet
-exposed through `ITextProvider`, and broader per-widget coverage remains
+system host provider, the command palette exposes a list provider, and terminal
+text is exposed read-only through `ITextProvider` / `ITextRangeProvider`.
+Broader per-widget coverage and complete screen-reader validation remain
 planned.
 
 ### Win32 runtime extraction
@@ -141,6 +168,15 @@ extractions will land as they stabilize.
   Windows in `src/crash/sentry.zig`; local minidumps are written by
   `src/crash/minidump_windows.zig` for process-level unhandled exceptions. Some
   hard-abort paths may still terminate before Windows can produce a dump.
+- **Startup recovery is local and non-destructive.** winghostty attempts to
+  move unreadable session state to a timestamped sibling before startup opens
+  a fresh window; if the filesystem move fails, the source remains untouched.
+  Recent incomplete startups are counted in a bounded local schema; three
+  consecutive failures select built-in configuration and skip session restore.
+  `--safe-mode` provides the same ephemeral recovery path explicitly.
+- **Diagnostic export is explicit.** `+diagnostic-bundle` creates a local,
+  inspectable bundle. Terminal content, commands, environment, working
+  directories, config values, and crash dumps are excluded by default.
 
 ## Out of scope
 
@@ -153,8 +189,8 @@ extractions will land as they stabilize.
 
 No formal roadmap. Indicative next areas:
 
-- Broader UI Automation / screen reader coverage, including terminal text
-  exposure and more per-widget support
+- Broader UI Automation / screen reader coverage for application chrome and
+  more per-widget support
 - Continuing the `src/apprt/win32.zig` extraction begun in commit
   `a759eb6`
 - Portable ZIP updater apply/rollback

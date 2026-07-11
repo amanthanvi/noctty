@@ -51,7 +51,7 @@ pub fn main() !MainReturn {
     {
         var loader_dialogs = apprt.win32.suppressStartupLoaderErrorDialogs();
         defer loader_dialogs.restore();
-        try app_runtime.init(app, .{});
+        try app_runtime.init(app, .{ .safe_mode = state.safe_mode });
     } else {
         try app_runtime.init(app, .{});
     }

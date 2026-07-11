@@ -1,0 +1,19 @@
+{
+  "schema_version": "winghostty.verification.baseline-manifest.v1",
+  "captured_at": "2026-07-11T00:00:00Z",
+  "git_commit": "77c5354f60000000000000000000000000000000",
+  "platform": {
+    "os": "Windows 11",
+    "architecture": "x86_64",
+    "description": "Format example only; replace placeholder hashes during oracle capture."
+  },
+  "artifacts": [
+    {
+      "id": "winghostty-exe",
+      "kind": "executable",
+      "path": "bin/winghostty.exe",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "scenario_id": null
+    }
+  ]
+}

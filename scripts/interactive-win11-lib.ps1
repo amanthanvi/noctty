@@ -143,14 +143,14 @@ function Invoke-InteractiveWin11Bootstrap {
     )
 
     $bootstrapCmd = Join-Path $RepoRoot 'scripts\dev-windows.cmd'
-    $exitCode = 0
+    $childExitCode = 0
     [System.Environment]::SetEnvironmentVariable($EnvironmentVariable, '1', 'Process')
 
     Push-Location $RepoRoot
     try {
         & $bootstrapCmd powershell.exe -ExecutionPolicy Bypass -File $LauncherPath @ArgumentList
         if ($null -ne $LASTEXITCODE) {
-            $exitCode = $LASTEXITCODE
+            $childExitCode = $LASTEXITCODE
         }
     }
     finally {
@@ -163,7 +163,7 @@ function Invoke-InteractiveWin11Bootstrap {
     }
 
     if ($null -ne $ExitCode) {
-        $ExitCode.Value = $exitCode
+        $ExitCode.Value = $childExitCode
     }
 }
 

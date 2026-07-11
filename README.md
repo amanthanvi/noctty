@@ -68,9 +68,10 @@ First public releases: 2026-04-16.
 - **Coexistence:** winghostty runs as its own top-level app window. It does
   not register as a Windows Terminal profile provider; installing it
   alongside Windows Terminal, WezTerm, or Alacritty is fine.
-- **Accessibility:** partial UI Automation support ships today, but
-  terminal scrollback and broader screen reader coverage are still
-  incomplete.
+- **Accessibility:** terminal text is exposed through UI Automation
+  `ITextProvider` / `ITextRangeProvider`, alongside native chrome semantics.
+  Broader Narrator/NVDA coverage and complete interaction announcements remain
+  active work.
 
 ## What works today
 
@@ -99,21 +100,21 @@ official Ghostty docs, see
 ## Install
 
 Latest stable release:
-**[winghostty 1.3.116](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.116)**,
+**[winghostty 1.3.117](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.117)**,
 published 2026-06-27.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
 | File | Use when |
 | --- | --- |
-| [`winghostty-1.3.116-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/winghostty-1.3.116-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
-| [`winghostty-1.3.116-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/winghostty-1.3.116-windows-arm64-setup.exe) | You want a normal ARM64 install with a Start menu entry. |
-| [`winghostty-1.3.116-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/winghostty-1.3.116-windows-x64-portable.zip) | You want to run x64 without installing. |
-| [`winghostty-1.3.116-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/winghostty-1.3.116-windows-arm64-portable.zip) | You want to run ARM64 without installing. |
-| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
-| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
+| [`winghostty-1.3.117-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
+| [`winghostty-1.3.117-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-setup.exe) | You want a normal ARM64 install with a Start menu entry. |
+| [`winghostty-1.3.117-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-portable.zip) | You want to run x64 without installing. |
+| [`winghostty-1.3.117-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-portable.zip) | You want to run ARM64 without installing. |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
 
-The legacy [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.116/SHA256SUMS.txt)
+The legacy [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS.txt)
 file remains an x64 auto-update compatibility alias.
 
 WinGet users can install the official manifest:
@@ -238,6 +239,22 @@ winghostty +crash-report
 
 Contents, if any, may include sensitive memory from the crashed process;
 review before sharing.
+
+If configuration or saved workspace state prevents a normal launch, start once
+with built-in defaults and no session restore:
+
+```powershell
+winghostty --safe-mode
+```
+
+Create an inspectable, local-only support bundle with redacted defaults:
+
+```powershell
+winghostty +diagnostic-bundle --output=winghostty-diagnostics
+```
+
+Crash dumps are excluded unless `--include-crash-dumps` is supplied. Dumps may
+contain sensitive process memory; review the directory before sharing it.
 
 ## Build from source
 

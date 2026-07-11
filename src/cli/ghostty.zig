@@ -17,6 +17,7 @@ const show_config = @import("show_config.zig");
 const explain_config = @import("explain_config.zig");
 const validate_config = @import("validate_config.zig");
 const crash_report = @import("crash_report.zig");
+const diagnostic_bundle = @import("diagnostic_bundle.zig");
 const show_face = @import("show_face.zig");
 const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
@@ -72,6 +73,7 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"explain-config" => try explain_config.run(alloc),
         .@"validate-config" => try validate_config.run(alloc),
         .@"crash-report" => try crash_report.run(alloc),
+        .@"diagnostic-bundle" => try diagnostic_bundle.run(alloc),
         .@"show-face" => try show_face.run(alloc),
         .boo => try boo.run(alloc),
         .@"new-window" => try new_window.run(alloc),
@@ -100,6 +102,7 @@ pub fn options(comptime self: Action) type {
             .@"explain-config" => explain_config.Options,
             .@"validate-config" => validate_config.Options,
             .@"crash-report" => crash_report.Options,
+            .@"diagnostic-bundle" => diagnostic_bundle.Options,
             .@"show-face" => show_face.Options,
             .boo => boo.Options,
             .@"new-window" => new_window.Options,

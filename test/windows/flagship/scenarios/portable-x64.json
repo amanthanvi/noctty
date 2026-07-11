@@ -1,0 +1,25 @@
+{
+  "schema_version": "winghostty.verification.scenario.v1",
+  "id": "windows.portable-cli.x64",
+  "title": "Windows x64 portable package CLI smoke",
+  "category": "packaging",
+  "runner": {
+    "os": "windows-10-or-newer",
+    "architecture": "x86_64",
+    "capabilities": ["powershell", "cmd", "zig"]
+  },
+  "timeout_seconds": 2400,
+  "steps": [
+    { "id": "package", "description": "Build and stage the x64 portable package." },
+    { "id": "cli", "description": "Exercise console and detached CLI actions from the package." }
+  ],
+  "assertions": [
+    { "id": "package-layout", "description": "Executable, command shim, DLL, and resources exist in the package." },
+    { "id": "cli-contract", "description": "Documented CLI actions return expected output from cmd and PowerShell." }
+  ],
+  "artifacts": [
+    { "kind": "result", "path": "result.json" },
+    { "kind": "log", "path": "transcript.log" },
+    { "kind": "package", "path": "dist/artifacts/winghostty-0.0.1-windows-x64/winghostty/winghostty.exe" }
+  ]
+}

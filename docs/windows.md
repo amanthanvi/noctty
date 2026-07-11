@@ -44,12 +44,12 @@ used by the normal packaged app environment.
 
 Important files and directories:
 
-| Path | Purpose |
-| --- | --- |
-| `%LOCALAPPDATA%\winghostty\config.ghostty` | User config written on first launch. |
+| Path                                           | Purpose                                                                                        |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `%LOCALAPPDATA%\winghostty\config.ghostty`     | User config written on first launch.                                                           |
 | `%LOCALAPPDATA%\winghostty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
-| `%LOCALAPPDATA%\winghostty\crash\` | Local crash dump directory. Nothing here is uploaded automatically. |
-| `%LOCALAPPDATA%\winghostty\shell-integration\` | Installed shell-integration payloads and manual fallbacks. |
+| `%LOCALAPPDATA%\winghostty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
+| `%LOCALAPPDATA%\winghostty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
 
 The portable ZIP carries the bundled resources next to the executable. Do not
 move only `winghostty.exe` out of the extracted tree; it needs the packaged
@@ -104,7 +104,8 @@ state through Ghostty's shared VT/OSC support.
 
 winghostty uses a native Win32 host window with:
 
-- tab bar, overflow handling, and drag reorder
+- tab bar, overflow handling, same-window drag reorder, and exact-pane
+  drag-to-split with reversible subtree transfer
 - horizontal and vertical splits
 - per-monitor DPI handling
 - DWM dark title bar integration
@@ -115,7 +116,30 @@ winghostty uses a native Win32 host window with:
 
 Session restore persists practical shape: host windows, tabs, split layout,
 selected profiles, working directories, and explicit titles. It does not
-restore terminal contents or child process state.
+restore terminal contents or child process state. If the session-state file is
+unreadable, winghostty logs the failure and starts with a fresh window; it does
+so after attempting to move the invalid state to a timestamped quarantine
+sibling. A failed move leaves the source untouched and does not block a clean
+window.
+Three recent consecutive pre-ready startup failures automatically select an
+ephemeral safe mode (built-in config and no session restore); `--safe-mode`
+selects it explicitly. User config and quarantined state are never deleted.
+
+`winghostty +diagnostic-bundle` creates a local, inspectable support bundle.
+Sensitive terminal, command, environment, cwd, config-value, and dump data are
+excluded by default; crash dumps require an explicit opt-in flag.
+
+The universal palette blends configured actions, live tabs, panes, Windows
+profiles, and native settings in one fuzzy-ranked, keyboard-accessible list.
+Use `>`, `@`, `/`, `~`, or `:` to filter a category. Theme, help, and shell
+command-history providers are not exposed yet.
+
+The native Settings window covers Appearance, Terminal, Shell, Keybindings,
+and Advanced. It stages edits until Save, patches the target config without
+rewriting unrelated text, and reloads the effective configuration. Keybinding
+editing still uses the text config and CLI discovery commands. Ownership-safe
+native fields support reversible live preview, external-edit conflict
+detection, and explicit Keep mine / Use disk resolution.
 
 ## Quick Terminal and Global Hotkeys
 

@@ -24,7 +24,7 @@ You can also go to
 - **Portable ZIP:** `winghostty-<version>-windows-<arch>-portable.zip`
 - **Checksums:** `SHA256SUMS-windows-<arch>.txt`
 
-Use `x64` or `arm64` for `<arch>`. The current stable release is `1.3.116`;
+Use `x64` or `arm64` for `<arch>`. The current stable release is `1.3.117`;
 both architectures have installer and portable ZIP assets. The legacy
 `SHA256SUMS.txt` file remains an x64 compatibility alias.
 
@@ -173,6 +173,22 @@ deliver one. Inspect what is there with:
 ```powershell
 winghostty +crash-report
 ```
+
+For a recovery launch that ignores user config and saved workspace state for
+that process only:
+
+```powershell
+winghostty --safe-mode
+```
+
+Create a redacted, local-only diagnostic directory:
+
+```powershell
+winghostty +diagnostic-bundle --output=winghostty-diagnostics
+```
+
+Crash dumps require the explicit `--include-crash-dumps` flag and may contain
+sensitive process memory.
 
 ## 10. Local automation
 

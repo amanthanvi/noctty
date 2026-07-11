@@ -3,7 +3,13 @@ name: Test
 on:
   push: {}
   pull_request: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      run_interactive_win11:
+        description: Run the full GUI suite on the interactive self-hosted runner
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
@@ -17,6 +23,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Flagship verification contract checks
+        shell: pwsh
+        run: ./test/windows/flagship/Test-VerificationContracts.ps1
 
       - name: Site copy checks
         shell: pwsh
@@ -36,14 +46,11 @@ jobs:
       - name: Zig version
         run: zig version
 
-      - name: Win32 tests
-        run: zig build test -Dtest-filter=win32
+      - name: Full Zig test suite
+        run: zig build test -Demit-test-exe=true
 
-      - name: Scroll tests
-        run: zig build test -Dtest-filter=scroll
-
-      - name: Keybind tests
-        run: zig build test -Dtest-filter=keybind
+      - name: Native Win32 compositor tests
+        run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
       - name: Build
         run: zig build
@@ -56,3 +63,60 @@ jobs:
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
         # Cross-compilation coverage only; native execution runs in windows-arm64.yml.
         run: zig build -Demit-exe=true -Dtarget=aarch64-windows-msvc -Dcpu=baseline
+
+  windows-portable-smoke:
+    name: Windows x64 Portable Package Smoke
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Run portable package CLI smoke
+        shell: pwsh
+        run: ./test/windows/flagship/Invoke-PortableSmoke.ps1
+
+      - name: Upload portable smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flagship-portable-x64-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            test/windows/flagship/artifacts/portable-x64
+            dist/artifacts/winghostty-0.0.1-windows-x64
+
+  windows-interactive:
+    name: Windows 11 Interactive Composite
+    if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
+    runs-on: [self-hosted, Windows, X64, winghostty-interactive]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Run interactive Win11 composite
+        shell: pwsh
+        run: ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+
+      - name: Upload interactive evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flagship-interactive-win11-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: test/windows/flagship/artifacts/interactive-win11
