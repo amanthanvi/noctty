@@ -31,6 +31,16 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          use-cache: false
+
+      - name: Configure Zig cache directories
+        shell: pwsh
+        run: |
+          $globalCache = Join-Path $env:GITHUB_WORKSPACE ".zig-global-cache"
+          $localCache = Join-Path $env:GITHUB_WORKSPACE ".zig-cache-arm64"
+          New-Item -ItemType Directory -Force -Path $globalCache, $localCache | Out-Null
+          "ZIG_GLOBAL_CACHE_DIR=$globalCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIG_LOCAL_CACHE_DIR=$localCache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Verify native ARM64 runner
         shell: pwsh
