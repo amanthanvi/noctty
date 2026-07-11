@@ -2654,6 +2654,12 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only interleaving seam for the focus revision race between a
+    /// structural split-close prepare and commit.
+    test_before_split_undo_shell_commit: ?*const fn (
+        app: *App,
+        source_pane: win32_shell.model.PaneId,
+    ) anyerror!void = null,
     next_host_id: u32 = 1,
     launcher_profile_key: ?[:0]const u8 = null,
     launcher_profile_hint: ?[:0]const u8 = null,
@@ -8890,7 +8896,10 @@ const Host = struct {
         value.created_surface.setVisible(false);
         value.detached = true;
         self.active_tab = found.index;
-        if (shell_prepared) |*prepared| prepared.commit(&self.app.shell_runtime) catch |err| {
+        if (self.app.test_before_split_undo_shell_commit) |hook| {
+            try hook(self.app, value.source_surface.shell_id.?);
+        }
+        if (shell_prepared) |*prepared| prepared.commitRetryingInterleavedFocus(&self.app.shell_runtime) catch |err| {
             log.err("split-create undo shell commit failed err={}", .{err});
             return err;
         };
@@ -29476,6 +29485,13 @@ test "win32 split_create structural undo removes and redoes the split" {
         .created_surface = &surface_b,
         .direction = .down,
     };
+
+    const FocusInterleave = struct {
+        fn run(target_app: *App, source_pane: win32_shell.model.PaneId) !void {
+            try std.testing.expect(try target_app.shell_runtime.focusPane(source_pane));
+        }
+    };
+    app.test_before_split_undo_shell_commit = &FocusInterleave.run;
 
     try std.testing.expect(try host.undoSplitCreateEntry(&split_create));
     try std.testing.expectEqual(@as(?SplitTreeSurface.Node.Handle, null), host.tabs.items[0].findHandle(&surface_b));
