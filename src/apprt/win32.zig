@@ -21411,7 +21411,10 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     return DefWindowProcW(hwnd, msg, wParam, lParam);
                 };
                 if (win32_uia.handleTerminalGetObject(
-                    v.app.core_app.alloc,
+                    // UIA may retain providers beyond App allocator teardown.
+                    // Provider callbacks detach from Surface separately, so
+                    // use process-lifetime storage for the COM object graph.
+                    std.heap.page_allocator,
                     hwnd,
                     wParam,
                     lParam,
@@ -22688,7 +22691,7 @@ pub const Surface = struct {
 
     fn terminalUiaState(self: *Surface) !win32_uia.TerminalState {
         if (self.terminal_uia_context == null) {
-            self.terminal_uia_context = try TerminalUiaContext.create(self.app.core_app.alloc, self);
+            self.terminal_uia_context = try TerminalUiaContext.create(std.heap.page_allocator, self);
         }
         return self.terminal_uia_context.?.state();
     }
