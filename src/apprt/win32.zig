@@ -11135,7 +11135,7 @@ const Host = struct {
             @as(LONG_PTR, @intCast(@intFromPtr(self))),
         );
         self.palette_list_uia_provider = win32_uia.PaletteListProvider.create(
-            self.app.core_app.alloc,
+            std.heap.page_allocator,
             self.palette_list_hwnd.?,
             self.paletteListUiaState(),
         ) catch |err| blk: {
@@ -17081,7 +17081,7 @@ fn paletteListProc(
             }
             const state = host.paletteListUiaState();
             if (win32_uia.handlePaletteListGetObject(
-                host.app.core_app.alloc,
+                std.heap.page_allocator,
                 hwnd,
                 wParam,
                 lParam,
@@ -19941,8 +19941,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
         WM_GETOBJECT => {
-            if (host) |v| {
-                if (win32_uia.handleGetObject(v.app.core_app.alloc, hwnd, wParam, lParam)) |lr| {
+            if (host != null) {
+                if (win32_uia.handleGetObject(std.heap.page_allocator, hwnd, wParam, lParam)) |lr| {
                     return lr;
                 }
             }
