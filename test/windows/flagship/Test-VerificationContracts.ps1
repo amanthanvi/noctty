@@ -17,6 +17,15 @@ function Assert-JsonDocument {
     }
 }
 
+function Assert-PassArtifactsBound {
+    param([Parameter(Mandatory)] [string] $Path)
+
+    $result = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    if ($result.status -eq 'pass' -and @($result.artifacts | Where-Object { -not $_.sha256 }).Count -ne 0) {
+        throw "Passing verification result has an unbound artifact hash: $Path"
+    }
+}
+
 $schemaPaths = @(
     'scenario.schema.json'
     'result.schema.json'
@@ -40,6 +49,15 @@ foreach ($scenarioPath in Get-ChildItem -LiteralPath (Join-Path $root 'scenarios
 Assert-JsonDocument `
     -Path (Join-Path $root 'examples\result.json') `
     -SchemaPath (Join-Path $root 'result.schema.json')
+$exampleResult = Get-Content -LiteralPath (Join-Path $root 'examples\result.json') -Raw | ConvertFrom-Json
+if (-not $exampleResult.example -or -not $exampleResult.scenario_id.StartsWith('example.')) {
+    throw 'Example verification result must be explicitly marked and use an example.* scenario id.'
+}
+Assert-PassArtifactsBound -Path (Join-Path $root 'examples\result.json')
+foreach ($resultPath in Get-ChildItem -LiteralPath (Join-Path $root 'artifacts') -Filter result.json -Recurse -ErrorAction SilentlyContinue) {
+    Assert-JsonDocument -Path $resultPath.FullName -SchemaPath (Join-Path $root 'result.schema.json')
+    Assert-PassArtifactsBound -Path $resultPath.FullName
+}
 Assert-JsonDocument `
     -Path (Join-Path $root 'examples\baseline-manifest.json') `
     -SchemaPath (Join-Path $root 'baseline-manifest.schema.json')

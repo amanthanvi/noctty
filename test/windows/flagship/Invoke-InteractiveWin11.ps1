@@ -20,7 +20,48 @@ $measurements = [ordered]@{}
 $performanceHash = $null
 $oldForeground = $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
 
+if (-not ('Winghostty.Flagship.DesktopProbe' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Winghostty.Flagship {
+    public static class DesktopProbe {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct USEROBJECTFLAGS {
+            public int fInherit;
+            public int fReserved;
+            public uint dwFlags;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr GetProcessWindowStation();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetUserObjectInformation(
+            IntPtr hObj, int nIndex, out USEROBJECTFLAGS pvInfo,
+            int nLength, out int lpnLengthNeeded);
+
+        public static bool HasVisibleWindowStation() {
+            const int UOI_FLAGS = 1;
+            const uint WSF_VISIBLE = 0x0001;
+            USEROBJECTFLAGS flags;
+            int needed;
+            IntPtr station = GetProcessWindowStation();
+            return station != IntPtr.Zero &&
+                GetUserObjectInformation(station, UOI_FLAGS, out flags,
+                    Marshal.SizeOf(typeof(USEROBJECTFLAGS)), out needed) &&
+                (flags.dwFlags & WSF_VISIBLE) != 0;
+        }
+    }
+}
+'@
+}
+$interactiveDesktop = [Environment]::UserInteractive -and [Winghostty.Flagship.DesktopProbe]::HasVisibleWindowStation()
+
 try {
+    if (-not $interactiveDesktop) {
+        throw 'Interactive Win11 verification requires a visible interactive window station.'
+    }
     $dirty = @(& git -C $repoRoot status --porcelain --untracked-files=all)
     if ($LASTEXITCODE -ne 0) { throw 'Unable to establish verification provenance.' }
     if ($dirty.Count -ne 0) { throw 'Refusing provenance-bearing verification for a dirty worktree.' }
@@ -93,11 +134,13 @@ finally {
         duration_ms = [Math]::Max(0, [long]($finished - $started).TotalMilliseconds)
         baseline_commit = $null
         implementation_commit = $commit
+        workflow_run_id = $(if ($env:GITHUB_RUN_ID) { [string]$env:GITHUB_RUN_ID } else { $null })
+        workflow_run_attempt = $(if ($env:GITHUB_RUN_ATTEMPT) { [int]$env:GITHUB_RUN_ATTEMPT } else { $null })
         environment = [ordered]@{
             os = [System.Environment]::OSVersion.VersionString
             architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
             ci = [bool]$env:CI
-            interactive_desktop = $true
+            interactive_desktop = $interactiveDesktop
         }
         measurements = $measurements
         assertions = @([ordered]@{

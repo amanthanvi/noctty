@@ -71,8 +71,8 @@ notifications, quick terminal notes, and troubleshooting, see
   contents and child process state are not restored.
 - Windows-convention default keybindings (see
   `src/config/Config.zig` for the full set)
-- Native settings window with Appearance, Terminal, Shell, Keybindings, and
-  Advanced sections. Edits are staged until Save and applied through an atomic,
+- Native settings window with Appearance, Terminal, Shell, Privacy, Updates,
+  Keybindings, and Advanced sections. Edits are staged until Save and applied through an atomic,
   source-preserving config patch. Keybinding editing still opens the text config
   and points to CLI discovery commands. Ownership-safe fields support
   reversible live preview, revision-aware external-edit merging, and explicit

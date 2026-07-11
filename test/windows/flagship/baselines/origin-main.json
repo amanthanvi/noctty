@@ -5,7 +5,7 @@
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Pre-rewrite Windows-checkout source contracts, verified unchanged from origin/main and hashed after checkout normalization. Green x64 CI run 28793070254; ARM64 CI run 28793070676."
+    "description": "Pre-rewrite Windows-checkout source contracts, verified unchanged from origin/main and hashed after checkout normalization."
   },
   "artifacts": [
     {
