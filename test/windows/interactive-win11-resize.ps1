@@ -271,11 +271,12 @@ function Capture-WindowImage {
         [Parameter(Mandatory)] [string] $Path
     )
 
-    $rect = Get-WindowRectObject -Hwnd $Hwnd
-    $width = [Math]::Max(1, $rect.Width)
-    $height = [Math]::Max(1, $rect.Height)
+    $rect = $null
     $lastError = $null
     for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $rect = Get-WindowRectObject -Hwnd $Hwnd
+        $width = [Math]::Max(1, $rect.Width)
+        $height = [Math]::Max(1, $rect.Height)
         $bmp = New-Object System.Drawing.Bitmap $width, $height
         $captured = $false
         try {

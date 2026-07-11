@@ -75,7 +75,7 @@ fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
     else
         null;
     defer if (generated_output) |path| alloc.free(path);
-    const output = opts.output orelse generated_output.?;
+    const output: []const u8 = opts.output orelse generated_output.?;
 
     // Never reuse a directory: a previous opt-in bundle may contain crash
     // dumps that a later redacted invocation must not accidentally retain.
