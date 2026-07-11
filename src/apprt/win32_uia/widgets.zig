@@ -1047,6 +1047,19 @@ pub fn handleTerminalGetObject(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
+/// Return an already-owned terminal provider for `WM_GETOBJECT`. A stable
+/// provider identity lets focus and name-change events refer to the same COM
+/// object clients discover through the child HWND.
+pub fn returnTerminalProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *TerminalProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
 fn iidEqual(a: *const com.GUID, b: *const com.GUID) bool {
     return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
 }

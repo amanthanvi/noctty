@@ -2543,6 +2543,32 @@ fn unixMillis() u64 {
     return @intCast(@max(std.time.milliTimestamp(), 0));
 }
 
+fn utf8PrefixLen(value: []const u8, capacity: usize) usize {
+    var len = @min(value.len, capacity);
+    while (len > 0 and !std.unicode.utf8ValidateSlice(value[0..len])) {
+        len -= 1;
+    }
+    return len;
+}
+
+fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
+    const max_config_size = 16 * 1024 * 1024;
+    if (size > max_config_size) return error.SerializeFailed;
+    return @intCast(size);
+}
+
+test "win32 bounded UTF-8 prefix never splits a codepoint" {
+    const value = "123\u{1f680}tail";
+    try std.testing.expectEqual(@as(usize, 3), utf8PrefixLen(value, 4));
+    try std.testing.expectEqual(@as(usize, 7), utf8PrefixLen(value, 7));
+    try std.testing.expectEqual(value.len, utf8PrefixLen(value, value.len + 10));
+}
+
+test "win32 settings save rejects files above the read cap" {
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), try settingsFileSize(16 * 1024 * 1024));
+    try std.testing.expectError(error.SerializeFailed, settingsFileSize(16 * 1024 * 1024 + 1));
+}
+
 fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
     const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return null;
     defer alloc.free(local);
@@ -2647,6 +2673,11 @@ pub const App = struct {
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
+    /// True only while the app is synchronously draining every host during
+    /// shutdown. Child HWND teardown still repairs native split trees, but it
+    /// must not diagnose the intentionally absent per-pane close preflight as
+    /// an ordinary-close invariant failure.
+    quitting: bool = false,
     windows_hidden: bool = false,
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_check_running: std.atomic.Value(bool) = .init(false),
@@ -3240,13 +3271,46 @@ pub const App = struct {
 
     fn markRecoveryReady(self: *App) void {
         if (self.recovery_startup.count == 0) return;
-        win32_recovery.markLatestReady(
-            self.recovery_startup.attempts[0..self.recovery_startup.count],
+        const memory_attempts = self.recovery_startup.attempts[0..self.recovery_startup.count];
+        const target_started_at = memory_attempts[memory_attempts.len - 1].started_at_unix_ms;
+        if (memory_attempts[memory_attempts.len - 1].ready_at_unix_ms != null) return;
+
+        var disk_record: win32_recovery.StartupAttemptRecord = .{};
+        var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
+        defer if (parsed_record) |*parsed| parsed.deinit();
+        if (localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json")) |path| {
+            defer self.core_app.alloc.free(path);
+            if (std.fs.openFileAbsolute(path, .{})) |file| {
+                defer file.close();
+                if (file.readToEndAlloc(self.core_app.alloc, 64 * 1024)) |raw| {
+                    defer self.core_app.alloc.free(raw);
+                    parsed_record = win32_recovery.parseAlloc(self.core_app.alloc, raw) catch |err| invalid: {
+                        log.warn("win32 recovery: ready merge ignored invalid disk history err={}", .{err});
+                        break :invalid null;
+                    };
+                    if (parsed_record) |*parsed| disk_record = parsed.value;
+                } else |err| {
+                    log.warn("win32 recovery: ready merge read failed err={}", .{err});
+                }
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => log.warn("win32 recovery: ready merge open failed err={}", .{err}),
+            }
+        }
+
+        var merged_attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
+        const merged = win32_recovery.mergeMarkReady(
+            disk_record,
+            .{ .attempts = memory_attempts },
+            target_started_at,
             unixMillis(),
+            &merged_attempts,
         ) catch |err| {
-            log.warn("win32 recovery: ready marker failed err={}", .{err});
+            log.warn("win32 recovery: ready marker merge failed err={}", .{err});
             return;
         };
+        @memcpy(self.recovery_startup.attempts[0..merged.attempts.len], merged.attempts);
+        self.recovery_startup.count = merged.attempts.len;
         persistRecoveryRecord(
             self.core_app.alloc,
             self.recovery_startup.attempts[0..self.recovery_startup.count],
@@ -6254,6 +6318,9 @@ pub const App = struct {
             host.setHoveredButton(null);
             host.tab_drag_index = null;
             host.tab_drag_active = false;
+            if (host.tab_drop_target_surface == surface) {
+                host.hideTabDropPreview();
+            }
 
             for (host.tabs.items, 0..) |*tab, i| {
                 if (tab.findHandle(surface)) |handle| {
@@ -6271,7 +6338,9 @@ pub const App = struct {
                             surface.pending_close_tree = null;
                             break :prepared prepared_tree;
                         } else emergency: {
-                            log.warn("surface destroyed without close-tree preflight; attempting emergency repair", .{});
+                            if (!self.quitting) {
+                                log.warn("surface destroyed without close-tree preflight; attempting emergency repair", .{});
+                            }
                             break :emergency tab.tree.remove(self.core_app.alloc, handle) catch |err| {
                                 log.err("emergency split removal failed after surface destruction err={}", .{err});
                                 break;
@@ -6292,8 +6361,13 @@ pub const App = struct {
             }
             var shell_mapping_changed = false;
             if (surface.pending_shell_close) |*prepared| {
-                prepared.commit(&self.shell_runtime) catch |err| {
-                    log.err("shell close commit failed after native teardown err={}", .{err});
+                const close_intent = prepared.intent;
+                prepared.commitRetryingInterleavedFocus(&self.shell_runtime) catch |err| {
+                    log.err("shell close retry failed after native teardown err={}; forcing reconciliation", .{err});
+                    self.shell_runtime.forceClose(close_intent) catch |force_err| switch (force_err) {
+                        error.StaleId, error.LastPane => {},
+                        else => log.err("forced shell close reconciliation failed err={}", .{force_err}),
+                    };
                 };
                 prepared.deinit();
                 surface.pending_shell_close = null;
@@ -6831,6 +6905,8 @@ pub const App = struct {
     }
 
     fn destroyAllWindows(self: *App) void {
+        self.quitting = true;
+        defer self.quitting = false;
         while (self.hosts.items.len > 0) {
             const host = self.hosts.items[self.hosts.items.len - 1];
             const hwnd = host.hwnd orelse {
@@ -7017,7 +7093,11 @@ pub const App = struct {
         };
         defer alloc.free(target_path);
 
-        const tmp_path = try std.fmt.allocPrint(alloc, "{s}.tmp", .{target_path});
+        const tmp_path = try std.fmt.allocPrint(
+            alloc,
+            "{s}.tmp-{x}-{x}",
+            .{ target_path, GetCurrentProcessId(), unixMillis() },
+        );
         defer alloc.free(tmp_path);
 
         // Build a file-only baseline: `Config.default()` merged with
@@ -7144,8 +7224,7 @@ pub const App = struct {
             };
             defer f.close();
             const stat = f.stat() catch return error.SerializeFailed;
-            const size = @min(stat.size, 16 * 1024 * 1024);
-            const slice = alloc.alloc(u8, @intCast(size)) catch return error.OutOfMemory;
+            const slice = alloc.alloc(u8, settingsFileSize(stat.size) catch return error.SerializeFailed) catch return error.OutOfMemory;
             errdefer alloc.free(slice);
             const n = f.readAll(slice) catch return error.SerializeFailed;
             break :blk try alloc.realloc(slice, n);
@@ -7178,13 +7257,17 @@ pub const App = struct {
         // Write to the sibling temp file, close, then rename. Scoped
         // block so the file is closed BEFORE ReplaceFileW — Windows
         // blocks the replace while the temp handle is open.
+        var temp_pending = false;
+        defer if (temp_pending) std.fs.cwd().deleteFile(tmp_path) catch {};
         {
             const tmp = std.fs.cwd().createFile(tmp_path, .{}) catch return error.TempCreateFailed;
+            temp_pending = true;
             defer tmp.close();
             var write_buf: [4096]u8 = undefined;
             var fw = tmp.writer(&write_buf);
             fw.interface.writeAll(patched.items) catch return error.SerializeFailed;
             fw.interface.flush() catch return error.SerializeFailed;
+            tmp.sync() catch return error.SerializeFailed;
         }
 
         const target_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, target_path) catch return error.OutOfMemory;
@@ -7200,6 +7283,7 @@ pub const App = struct {
                 return error.ReplaceFailed;
             }
         }
+        temp_pending = false;
 
         // Mirror the `.reload_config` hard-reload path at win32.zig
         // line ~2106: re-read from disk + push through CoreApp so
@@ -9417,7 +9501,7 @@ const Host = struct {
         if (self.palette_catalog_label_count >= self.palette_catalog_labels.len) return "Terminal";
         const slot = &self.palette_catalog_labels[self.palette_catalog_label_count];
         self.palette_catalog_label_count += 1;
-        const len = @min(value.len, slot.len);
+        const len = utf8PrefixLen(value, slot.len);
         @memcpy(slot[0..len], value[0..len]);
         return slot[0..len];
     }
@@ -21406,19 +21490,15 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 // releases the owner context, so never recreate that context
                 // once teardown has begun (or before core init completes).
                 if (!v.destroy_on_wm_destroy) return DefWindowProcW(hwnd, msg, wParam, lParam);
-                const state = v.terminalUiaState() catch |err| {
-                    log.warn("uia: terminal state init failed err={}", .{err});
+                const provider = v.terminalUiaProvider() catch |err| {
+                    log.warn("uia: terminal provider init failed err={}", .{err});
                     return DefWindowProcW(hwnd, msg, wParam, lParam);
                 };
-                if (win32_uia.handleTerminalGetObject(
-                    // UIA may retain providers beyond App allocator teardown.
-                    // Provider callbacks detach from Surface separately, so
-                    // use process-lifetime storage for the COM object graph.
-                    std.heap.page_allocator,
+                if (win32_uia.returnTerminalProvider(
                     hwnd,
                     wParam,
                     lParam,
-                    state,
+                    provider,
                 )) |lr| return lr;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -22004,6 +22084,7 @@ pub const Surface = struct {
     /// leak.
     pending_clipboard_op: ?PendingClipboardOp = null,
     terminal_uia_context: ?*TerminalUiaContext = null,
+    terminal_uia_provider: ?*win32_uia.TerminalProvider = null,
     /// Close preflight ownership. Normal close paths build both candidates
     /// before HWND/core teardown; `windowDestroyed` consumes them without
     /// allocating after the Surface is already dead.
@@ -22393,6 +22474,8 @@ pub const Surface = struct {
         }
         defer if (next_tree) |*tree| tree.deinit();
 
+        if (!self.invalidateStructuralHistoryForClose()) return false;
+
         var shell_close: ?win32_shell.runtime.Prepared = null;
         if (self.app.shell_runtime_initialized) {
             const pane_id = self.shell_id orelse {
@@ -22414,8 +22497,6 @@ pub const Surface = struct {
             };
         }
         defer if (shell_close) |*prepared| prepared.deinit();
-
-        if (!self.invalidateStructuralHistoryForClose()) return false;
 
         self.pending_close_tree = next_tree;
         next_tree = null;
@@ -22464,11 +22545,7 @@ pub const Surface = struct {
     fn invalidateStructuralHistoryForClose(self: *Surface) bool {
         const found = self.app.findTabForSurface(self) orelse return true;
         found.tab.clearRedoHistory();
-        if (found.tab.tree.nodes.len == 1) {
-            return found.host.tryClearStructuralHistory(.normal);
-        }
-        _ = found.host.clearStructuralRedo();
-        return true;
+        return found.host.tryClearStructuralHistory(.normal);
     }
 
     fn invalidateStructuralHistoryForDestroy(self: *Surface) void {
@@ -22694,6 +22771,18 @@ pub const Surface = struct {
             self.terminal_uia_context = try TerminalUiaContext.create(std.heap.page_allocator, self);
         }
         return self.terminal_uia_context.?.state();
+    }
+
+    fn terminalUiaProvider(self: *Surface) !*win32_uia.TerminalProvider {
+        if (self.terminal_uia_provider == null) {
+            const hwnd = self.hwnd orelse return error.NoWindow;
+            self.terminal_uia_provider = try win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                hwnd,
+                try self.terminalUiaState(),
+            );
+        }
+        return self.terminal_uia_provider.?;
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -23047,6 +23136,14 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.title, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
+    }
+
+    fn notifyTerminalUiaNameChanged(self: *Surface) void {
+        if (!win32_uia.events.clientsAreListening()) return;
+        const provider = self.terminal_uia_provider orelse return;
+        win32_uia.events.raiseNameChanged(&provider.base);
+        win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
     }
 
     fn setTitleOverride(self: *Surface, title: ?[]const u8) !void {
@@ -23054,6 +23151,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.title_override, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
     }
 
     fn setTabTitleOverride(self: *Surface, title: ?[]const u8) !void {
@@ -23061,6 +23159,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.tab_title_override, title);
         try self.refreshWindowTitle();
+        self.notifyTerminalUiaNameChanged();
     }
 
     fn effectiveTitle(self: *const Surface) ?[:0]const u8 {
@@ -24885,6 +24984,11 @@ pub const Surface = struct {
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("win32 focus callback failed err={}", .{err});
         };
+        if (focused and win32_uia.events.clientsAreListening()) {
+            if (self.terminal_uia_provider) |provider| {
+                win32_uia.events.raiseFocusChanged(&provider.base);
+            }
+        }
         // Host chrome only changes for split-pane focus borders.
         if (self.host) |host| {
             const pane_count = if (host.activeTab()) |tab| tab.leafCount() else 0;
@@ -25229,6 +25333,10 @@ pub const Surface = struct {
 
         if (self.terminal_uia_context) |ctx| {
             ctx.detachSurface();
+            if (self.terminal_uia_provider) |provider| {
+                _ = win32_uia.TerminalProvider.Release(&provider.base);
+                self.terminal_uia_provider = null;
+            }
             TerminalUiaContext.release(@ptrCast(ctx));
             self.terminal_uia_context = null;
         }
@@ -28775,7 +28883,7 @@ test "win32 close_surface on single-surface tab invalidates structural history" 
     try std.testing.expectEqual(@as(usize, 0), surface_a.undo_stack.redoDepth());
 }
 
-test "win32 close_surface on split pane clears affected tab redo and structural redo only" {
+test "win32 close_surface on split pane clears structural history before shell close" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
@@ -28866,7 +28974,7 @@ test "win32 close_surface on split pane clears affected tab redo and structural 
 
     try std.testing.expect(surface_a.invalidateStructuralHistoryForClose());
 
-    try std.testing.expectEqual(@as(usize, 1), host.structural_undo_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), host.structural_undo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.structural_redo_entries.items.len);
     try std.testing.expectEqual(@as(usize, 1), surface_a.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 0), surface_a.undo_stack.redoDepth());

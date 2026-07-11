@@ -60,6 +60,12 @@ pub const MarkReadyError = error{
     ReadyBeforeStart,
 };
 
+pub const MergeReadyError = error{
+    OutputBufferTooSmall,
+    TargetAttemptMissing,
+    ReadyBeforeStart,
+};
+
 /// A caller-owned atomic replacement contract. Write `contents` to
 /// `temporary_path`, flush and close it, then atomically replace `target_path`.
 /// If replacement fails, remove only the temporary file; never remove the
@@ -202,6 +208,67 @@ pub fn markLatestReady(
     latest.ready_at_unix_ms = ready_at_unix_ms;
 }
 
+/// Merge the startup snapshot retained by this process with a freshly-read
+/// disk record, then mark this process's attempt ready. Attempts are keyed by
+/// their monotonic wall-clock start marker; duplicate observations collapse,
+/// preferring the observation that already reached ready. The newest bounded
+/// history is returned in `out`.
+pub fn mergeMarkReady(
+    disk: StartupAttemptRecord,
+    memory: StartupAttemptRecord,
+    target_started_at_unix_ms: u64,
+    ready_at_unix_ms: u64,
+    out: []StartupAttempt,
+) (ValidationError || MergeReadyError)!StartupAttemptRecord {
+    try validate(disk);
+    try validate(memory);
+    if (out.len < max_attempts) return error.OutputBufferTooSmall;
+
+    var merged: [max_attempts * 2]StartupAttempt = undefined;
+    var count: usize = 0;
+    var disk_i: usize = 0;
+    var memory_i: usize = 0;
+    while (disk_i < disk.attempts.len or memory_i < memory.attempts.len) {
+        const next = if (memory_i >= memory.attempts.len or
+            (disk_i < disk.attempts.len and
+                disk.attempts[disk_i].started_at_unix_ms <= memory.attempts[memory_i].started_at_unix_ms))
+        blk: {
+            const value = disk.attempts[disk_i];
+            disk_i += 1;
+            break :blk value;
+        } else blk: {
+            const value = memory.attempts[memory_i];
+            memory_i += 1;
+            break :blk value;
+        };
+
+        if (count > 0 and merged[count - 1].started_at_unix_ms == next.started_at_unix_ms) {
+            if (merged[count - 1].ready_at_unix_ms == null and next.ready_at_unix_ms != null) {
+                merged[count - 1].ready_at_unix_ms = next.ready_at_unix_ms;
+            }
+            continue;
+        }
+        merged[count] = next;
+        count += 1;
+    }
+
+    var found = false;
+    for (merged[0..count]) |*attempt| {
+        if (attempt.started_at_unix_ms != target_started_at_unix_ms) continue;
+        if (ready_at_unix_ms < attempt.started_at_unix_ms) return error.ReadyBeforeStart;
+        attempt.ready_at_unix_ms = ready_at_unix_ms;
+        found = true;
+        break;
+    }
+    if (!found) return error.TargetAttemptMissing;
+
+    const retained_count = @min(count, max_attempts);
+    @memcpy(out[0..retained_count], merged[count - retained_count .. count]);
+    const result: StartupAttemptRecord = .{ .attempts = out[0..retained_count] };
+    try validate(result);
+    return result;
+}
+
 /// Count consecutive unresolved attempts from newest to oldest. Counting stops
 /// at the first ready attempt, future timestamp, or attempt older than the
 /// policy window. This prevents old isolated crashes from accumulating forever.
@@ -308,6 +375,31 @@ test "win32 recovery record round trips strict schema v1" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.attempts.len);
     try std.testing.expectEqual(@as(?u64, 120), parsed.value.attempts[0].ready_at_unix_ms);
     try std.testing.expectEqual(@as(?u64, null), parsed.value.attempts[1].ready_at_unix_ms);
+}
+
+test "win32 recovery ready merge preserves a concurrent attempt" {
+    const memory_attempts = [_]StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
+        .{ .started_at_unix_ms = 200 },
+    };
+    const disk_attempts = [_]StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
+        .{ .started_at_unix_ms = 200 },
+        .{ .started_at_unix_ms = 300 },
+    };
+    var out: [max_attempts]StartupAttempt = undefined;
+    const merged = try mergeMarkReady(
+        .{ .attempts = &disk_attempts },
+        .{ .attempts = &memory_attempts },
+        200,
+        250,
+        &out,
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), merged.attempts.len);
+    try std.testing.expectEqual(@as(?u64, 250), merged.attempts[1].ready_at_unix_ms);
+    try std.testing.expectEqual(@as(u64, 300), merged.attempts[2].started_at_unix_ms);
+    try std.testing.expectEqual(@as(?u64, null), merged.attempts[2].ready_at_unix_ms);
 }
 
 test "win32 recovery parser rejects unsupported and unknown schema" {

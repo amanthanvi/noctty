@@ -36,6 +36,7 @@ pub const Runtime = struct {
             .next = next,
             .reduction = reduction,
             .created = createdEntities(&next, &reduction),
+            .intent = intent,
             .expected_revision = self.revision,
         };
     }
@@ -60,12 +61,27 @@ pub const Runtime = struct {
         self.revision +%= 1;
         if (self.revision == 0) self.revision = 1;
     }
+
+    /// Emergency close reconciliation after native teardown. The close
+    /// reducers reserve every fallible allocation before mutating state, so a
+    /// failure leaves authority unchanged.
+    pub fn forceClose(self: *Runtime, intent: intent_mod.Intent) !void {
+        switch (intent) {
+            .close_window, .close_tab, .close_pane => {},
+            else => return error.InvalidForceIntent,
+        }
+        var reduction = try reducer.apply(&self.state, intent);
+        defer reduction.deinit(self.state.allocator);
+        try self.state.validate();
+        self.bumpRevision();
+    }
 };
 
 pub const Prepared = struct {
     next: ?model.ShellState,
     reduction: reducer.Reduction,
     created: Created,
+    intent: intent_mod.Intent,
     expected_revision: u64,
 
     pub fn deinit(self: *Prepared) void {
@@ -84,6 +100,23 @@ pub const Prepared = struct {
         runtime.state = next;
         self.next = null;
         runtime.bumpRevision();
+    }
+
+    /// A synchronous DestroyWindow can dispatch focus messages between close
+    /// prepare and commit. Rebuild the close candidate from current authority
+    /// so the latest focus survives rather than stranding the removed pane.
+    pub fn commitRetryingInterleavedFocus(self: *Prepared, runtime: *Runtime) !void {
+        self.commit(runtime) catch |err| switch (err) {
+            error.StaleRevision => {
+                var retry = runtime.prepare(self.intent) catch |retry_err| switch (retry_err) {
+                    error.StaleId, error.LastPane => return,
+                    else => return retry_err,
+                };
+                defer retry.deinit();
+                try retry.commit(runtime);
+            },
+            else => return err,
+        };
     }
 };
 
@@ -168,4 +201,88 @@ test "focus pane is allocation free and revisioned" {
     try std.testing.expect(try runtime.focusPane(original));
     try std.testing.expectEqual(revision + 1, runtime.revision);
     try std.testing.expect(!try runtime.focusPane(original));
+}
+
+test "close retry preserves interleaved focus and removes pane" {
+    const allocator = std.testing.allocator;
+    var runtime = Runtime.init(allocator);
+    defer runtime.deinit();
+
+    var window = try runtime.prepare(.create_window);
+    defer window.deinit();
+    try window.commit(&runtime);
+    const original = runtime.state.panes.items[0].id;
+
+    var split = try runtime.prepare(.{ .split_pane = .{ .pane = original, .direction = .right } });
+    defer split.deinit();
+    try split.commit(&runtime);
+    const sibling = split.created.pane.?;
+    try std.testing.expect(try runtime.focusPane(original));
+
+    var close = try runtime.prepare(.{ .close_pane = original });
+    defer close.deinit();
+    try std.testing.expectEqual(std.meta.Tag(intent_mod.Intent).close_pane, std.meta.activeTag(close.intent));
+    try std.testing.expect(try runtime.focusPane(sibling));
+    try std.testing.expectError(error.StaleRevision, close.commit(&runtime));
+    try close.commitRetryingInterleavedFocus(&runtime);
+
+    try runtime.state.validate();
+    try std.testing.expect(runtime.state.pane(original) == null);
+    try std.testing.expect(runtime.state.pane(sibling) != null);
+    try std.testing.expect(runtime.state.tab(runtime.state.pane(sibling).?.tab).?.focused_pane.eql(sibling));
+}
+
+test "close tab retry preserves focus in the surviving tab" {
+    const allocator = std.testing.allocator;
+    var runtime = Runtime.init(allocator);
+    defer runtime.deinit();
+
+    var window = try runtime.prepare(.create_window);
+    defer window.deinit();
+    try window.commit(&runtime);
+    const window_id = window.created.window.?;
+    const original_pane = window.created.pane.?;
+    const original_tab = window.created.tab.?;
+
+    var second = try runtime.prepare(.{ .create_tab = window_id });
+    defer second.deinit();
+    try second.commit(&runtime);
+    const surviving_pane = second.created.pane.?;
+    const surviving_tab = second.created.tab.?;
+    try std.testing.expect(try runtime.focusPane(original_pane));
+
+    var close = try runtime.prepare(.{ .close_tab = original_tab });
+    defer close.deinit();
+    try std.testing.expectEqual(std.meta.Tag(intent_mod.Intent).close_tab, std.meta.activeTag(close.intent));
+    try std.testing.expect(try runtime.focusPane(surviving_pane));
+    try close.commitRetryingInterleavedFocus(&runtime);
+
+    try runtime.state.validate();
+    try std.testing.expect(runtime.state.tab(original_tab) == null);
+    try std.testing.expect(runtime.state.tab(surviving_tab) != null);
+    try std.testing.expect(runtime.state.window(window_id).?.active_tab.?.eql(surviving_tab));
+    try std.testing.expect(runtime.state.tab(surviving_tab).?.focused_pane.eql(surviving_pane));
+}
+
+test "close retry treats an already removed entity as complete" {
+    const allocator = std.testing.allocator;
+    var runtime = Runtime.init(allocator);
+    defer runtime.deinit();
+
+    var window = try runtime.prepare(.create_window);
+    defer window.deinit();
+    try window.commit(&runtime);
+    const original = runtime.state.panes.items[0].id;
+    var split = try runtime.prepare(.{ .split_pane = .{ .pane = original, .direction = .right } });
+    defer split.deinit();
+    try split.commit(&runtime);
+
+    var stale = try runtime.prepare(.{ .close_pane = original });
+    defer stale.deinit();
+    var current = try runtime.prepare(.{ .close_pane = original });
+    defer current.deinit();
+    try current.commit(&runtime);
+    try stale.commitRetryingInterleavedFocus(&runtime);
+    try runtime.state.validate();
+    try std.testing.expect(runtime.state.pane(original) == null);
 }
