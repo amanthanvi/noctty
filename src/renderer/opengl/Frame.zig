@@ -18,6 +18,8 @@ pub const Options = struct {};
 
 renderer: *Renderer,
 target: *Target,
+healthy: bool = true,
+failure_context: ?[]const u8 = null,
 
 /// Begin encoding a frame.
 pub fn begin(
@@ -39,11 +41,25 @@ pub fn begin(
 /// Add a render pass to this frame with the provided attachments.
 /// Returns a RenderPass which allows render steps to be added.
 pub inline fn renderPass(
-    self: *const Self,
+    self: *Self,
     attachments: []const RenderPass.Options.Attachment,
 ) RenderPass {
-    _ = self;
-    return RenderPass.begin(.{ .attachments = attachments });
+    return RenderPass.begin(.{
+        .attachments = attachments,
+        .frame_healthy = &self.healthy,
+        .frame_failure_context = &self.failure_context,
+    });
+}
+
+/// Mark this frame as unsafe to present.
+///
+/// This is used for failures that happen between `beginFrame` and
+/// `complete`, but outside a `RenderPass.step`. The pass itself marks the
+/// frame unhealthy when a GL operation fails.
+pub fn markUnhealthy(self: *Self, context: []const u8, err: anyerror) void {
+    self.healthy = false;
+    if (self.failure_context == null) self.failure_context = context;
+    log.warn("OpenGL frame marked unhealthy context={s} err={}", .{ context, err });
 }
 
 /// Complete this frame and present the target.
@@ -54,7 +70,15 @@ pub inline fn renderPass(
 pub fn complete(self: *const Self, sync: bool) void {
     _ = sync;
     gl.flush();
-    var health: Health = if (gl.errors.getError()) .healthy else |_| .unhealthy;
+    var health: Health = if (!self.healthy) unhealthy: {
+        if (self.failure_context) |context| {
+            log.warn("OpenGL frame suppressed present context={s}", .{context});
+        }
+        break :unhealthy .unhealthy;
+    } else if (gl.errors.getError()) .healthy else |err| unhealthy: {
+        log.warn("OpenGL frame marked unhealthy context=gl.flush err={}", .{err});
+        break :unhealthy .unhealthy;
+    };
 
     // If the frame is healthy, present it.
     if (health == .healthy) {

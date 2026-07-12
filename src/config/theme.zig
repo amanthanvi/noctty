@@ -93,6 +93,92 @@ pub const LocationIterator = struct {
     }
 };
 
+pub const Entry = struct {
+    location: Location,
+    path: []const u8,
+    name: []const u8,
+
+    pub fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
+        return std.ascii.orderIgnoreCase(lhs.name, rhs.name) == .lt;
+    }
+};
+
+pub const Directory = struct {
+    location: Location,
+    dir: []const u8,
+};
+
+pub fn list(alloc: Allocator, arena_alloc: Allocator) ![]Entry {
+    var dirs: std.ArrayList(Directory) = .empty;
+    defer dirs.deinit(alloc);
+
+    var it: LocationIterator = .{ .arena_alloc = arena_alloc };
+    while (try it.next()) |loc| {
+        try dirs.append(alloc, .{
+            .location = loc.location,
+            .dir = loc.dir,
+        });
+    }
+
+    return try listFromDirectories(alloc, dirs.items);
+}
+
+/// Enumerate installed theme files with the same directory priority as
+/// `open`: user themes first, bundled resources second. Duplicate names keep
+/// the first location so user themes shadow bundled themes deterministically.
+pub fn listFromDirectories(alloc: Allocator, dirs: []const Directory) ![]Entry {
+    var themes: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (themes.items) |entry| {
+            alloc.free(entry.path);
+            alloc.free(entry.name);
+        }
+        themes.deinit(alloc);
+    }
+
+    for (dirs) |loc| {
+        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => continue,
+        };
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            switch (entry.kind) {
+                .file, .sym_link => {},
+                else => continue,
+            }
+            if (std.mem.eql(u8, entry.name, ".DS_Store")) continue;
+            if (containsThemeName(themes.items, entry.name)) continue;
+
+            try themes.append(alloc, .{
+                .location = loc.location,
+                .path = try std.fs.path.join(alloc, &.{ loc.dir, entry.name }),
+                .name = try alloc.dupe(u8, entry.name),
+            });
+        }
+    }
+
+    std.mem.sortUnstable(Entry, themes.items, {}, Entry.lessThan);
+    return try themes.toOwnedSlice(alloc);
+}
+
+pub fn freeList(alloc: Allocator, themes: []Entry) void {
+    for (themes) |entry| {
+        alloc.free(entry.path);
+        alloc.free(entry.name);
+    }
+    alloc.free(themes);
+}
+
+fn containsThemeName(themes: []const Entry, name: []const u8) bool {
+    for (themes) |theme| {
+        if (std.mem.eql(u8, theme.name, name)) return true;
+    }
+    return false;
+}
+
 /// Open the given named theme. If there are any errors then messages
 /// will be appended to the given error list and null is returned. If
 /// a non-null return value is returned, there are never any errors added.
@@ -274,4 +360,43 @@ pub fn openAbsolute(
 
         return null;
     };
+}
+
+test "theme list keeps first duplicate by directory priority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("user");
+    try tmp.dir.makePath("resources");
+    {
+        var file = try tmp.dir.createFile("user/Dupe", .{});
+        file.close();
+    }
+    {
+        var file = try tmp.dir.createFile("resources/Dupe", .{});
+        file.close();
+    }
+    {
+        var file = try tmp.dir.createFile("resources/Other", .{});
+        file.close();
+    }
+
+    var user_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var resources_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const user_dir = try tmp.dir.realpath("user", &user_buf);
+    const resources_dir = try tmp.dir.realpath("resources", &resources_buf);
+    const entries = try listFromDirectories(std.testing.allocator, &.{
+        .{ .location = .user, .dir = user_dir },
+        .{ .location = .resources, .dir = resources_dir },
+    });
+    defer freeList(std.testing.allocator, entries);
+
+    try std.testing.expectEqual(@as(usize, 2), entries.len);
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "Dupe")) {
+            try std.testing.expectEqual(Location.user, entry.location);
+            return;
+        }
+    }
+    return error.TestExpectedEqual;
 }

@@ -6,10 +6,11 @@ const face = @import("face.zig");
 const font = @import("font.zig");
 const shapepkg = @import("shape.zig");
 const versionpkg = @import("version.zig");
+const build_options = @import("build_options");
 
 pub const c = @import("c.zig").c;
 pub const freetype = @import("freetype.zig");
-pub const coretext = @import("coretext.zig");
+pub const coretext = if (build_options.coretext) @import("coretext.zig") else struct {};
 pub const MemoryMode = blob.MemoryMode;
 pub const Blob = blob.Blob;
 pub const Buffer = buffer.Buffer;

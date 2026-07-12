@@ -1684,7 +1684,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .buffers = &.{frame.bg_image_buffer.buffer},
                         .textures = &.{texture},
                         .draw = .{ .type = .triangle, .vertex_count = 3 },
-                    }),
+                    }) catch |err| {
+                        if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                            frame_ctx.markUnhealthy("background_image", err);
+                        }
+                        return err;
+                    },
                     else => {},
                 } else {
                     pass.step(.{
@@ -1692,7 +1697,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .uniforms = frame.uniforms.buffer,
                         .buffers = &.{ null, frame.cells_bg.buffer },
                         .draw = .{ .type = .triangle, .vertex_count = 3 },
-                    });
+                    }) catch |err| {
+                        if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                            frame_ctx.markUnhealthy("background_color", err);
+                        }
+                        return err;
+                    };
                 }
 
                 // Then we draw any kitty images that need
@@ -1702,7 +1712,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_below_bg,
-                );
+                ) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("kitty_below_bg", err);
+                    }
+                    return err;
+                };
 
                 // Then we draw any opaque cell backgrounds.
                 pass.step(.{
@@ -1710,7 +1725,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .uniforms = frame.uniforms.buffer,
                     .buffers = &.{ null, frame.cells_bg.buffer },
                     .draw = .{ .type = .triangle, .vertex_count = 3 },
-                });
+                }) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("cell_background", err);
+                    }
+                    return err;
+                };
 
                 // Kitty images between cell backgrounds and text.
                 self.images.draw(
@@ -1718,7 +1738,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_below_text,
-                );
+                ) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("kitty_below_text", err);
+                    }
+                    return err;
+                };
 
                 // Text.
                 pass.step(.{
@@ -1737,7 +1762,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .vertex_count = 4,
                         .instance_count = fg_count,
                     },
-                });
+                }) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("cell_text", err);
+                    }
+                    return err;
+                };
 
                 // Kitty images in front of text.
                 self.images.draw(
@@ -1745,7 +1775,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.shaders.pipelines.image,
                     &pass,
                     .kitty_above_text,
-                );
+                ) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("kitty_above_text", err);
+                    }
+                    return err;
+                };
 
                 // Debug overlay. We do this before any custom shader state
                 // because our debug overlay is aligned with the grid.
@@ -1754,7 +1789,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.shaders.pipelines.image,
                     &pass,
                     .overlay,
-                );
+                ) catch |err| {
+                    if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                        frame_ctx.markUnhealthy("overlay", err);
+                    }
+                    return err;
+                };
                 if (apprt.runtime == apprt.win32) log.debug("drawFrame primary renderPass done", .{});
             }
 
@@ -1784,7 +1824,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             .type = .triangle,
                             .vertex_count = 3,
                         },
-                    });
+                    }) catch |err| {
+                        if (comptime @hasDecl(@TypeOf(frame_ctx), "markUnhealthy")) {
+                            frame_ctx.markUnhealthy("post_pipeline", err);
+                        }
+                        return err;
+                    };
                 }
                 if (apprt.runtime == apprt.win32) log.debug("drawFrame post pipelines done", .{});
             }

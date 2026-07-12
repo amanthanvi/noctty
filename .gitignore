@@ -40,6 +40,22 @@ vgcore.*
 
 .cursor/
 
+# Project-local skills installed by `npx skills`.
+/.agents/skills/animation-vocabulary/
+/.agents/skills/apple-design/
+/.agents/skills/emil-design-eng/
+/.agents/skills/improve-animations/
+/.agents/skills/improve/
+/.agents/skills/ponytail-audit/
+/.agents/skills/ponytail-debt/
+/.agents/skills/ponytail-gain/
+/.agents/skills/ponytail-help/
+/.agents/skills/ponytail-review/
+/.agents/skills/ponytail/
+/.agents/skills/review-animations/
+/agent/
+/skills-lock.json
+
 .zig-global-cache/
 # Local flagship verification evidence.
 /test/windows/flagship/artifacts/

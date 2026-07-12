@@ -174,18 +174,29 @@ pub const Catalog = struct {
     /// and selectable. All strings are borrowed until reset; callers must keep
     /// the snapshot backing storage alive through rank, paint, UIA, and invoke.
     pub fn appendThemes(self: *Catalog, themes: []const ThemeEntry) Error!void {
-        if (themes.len > self.item_storage.len - self.count) return error.StorageTooSmall;
-        for (themes, 0..) |theme, index| {
+        _ = try self.appendThemesBounded(themes, themes.len);
+    }
+
+    /// Append at most `limit` themes. The accepted prefix is still
+    /// transactional: validation/capacity errors leave the catalog unchanged.
+    /// This lets production expose a deterministic installed-theme subset when
+    /// the machine has more themes than the fixed palette storage can hold.
+    pub fn appendThemesBounded(self: *Catalog, themes: []const ThemeEntry, limit: usize) Error!usize {
+        const selected_len = @min(themes.len, limit);
+        const selected = themes[0..selected_len];
+        if (selected.len == 0) return 0;
+        if (selected.len > self.item_storage.len - self.count) return error.StorageTooSmall;
+        for (selected, 0..) |theme, index| {
             const id = stableStringId(.theme, theme.name);
             if (self.containsId(id)) return error.DuplicateStableId;
             if (!theme.enabled and (theme.disabled_reason == null or theme.disabled_reason.?.len == 0)) {
                 return error.DisabledReasonMissing;
             }
-            for (themes[0..index]) |previous| {
+            for (selected[0..index]) |previous| {
                 if (stableStringId(.theme, previous.name).eql(id)) return error.DuplicateStableId;
             }
         }
-        for (themes) |theme| {
+        for (selected) |theme| {
             self.item_storage[self.count] = .{
                 .id = stableStringId(.theme, theme.name),
                 .title = theme.name,
@@ -197,6 +208,7 @@ pub const Catalog = struct {
             self.payload_storage[self.count] = .{ .theme = theme.name };
             self.count += 1;
         }
+        return selected.len;
     }
 
     /// Append the built-in reviewed help surface. Titles and targets have
@@ -480,6 +492,29 @@ test "installed theme snapshot and reviewed help produce typed payloads" {
     try std.testing.expectEqualStrings("Winghostty Dark", catalog.payloadFor(theme_results[0]).?.theme);
     const help_results = catalog.rank("?keyboard", .{}, &ranked_storage);
     try std.testing.expectEqual(HelpTarget.keyboard_shortcuts, catalog.payloadFor(help_results[0]).?.help);
+}
+
+test "bounded theme append keeps deterministic prefix under storage pressure" {
+    const themes = [_]ThemeEntry{
+        .{ .name = "Alpha", .description = "First" },
+        .{ .name = "Beta", .description = "Second" },
+        .{ .name = "Gamma", .description = "Third" },
+    };
+    var item_storage: [2]Item = undefined;
+    var payload_storage: [2]Payload = undefined;
+    var catalog = try Catalog.init(&item_storage, &payload_storage);
+
+    const appended = try catalog.appendThemesBounded(&themes, 2);
+    try std.testing.expectEqual(@as(usize, 2), appended);
+    try std.testing.expectEqual(@as(usize, 2), catalog.items().len);
+
+    var ranked_storage: [2]Ranked = undefined;
+    const alpha_results = catalog.rank("%alpha", .{}, &ranked_storage);
+    try std.testing.expectEqual(@as(usize, 1), alpha_results.len);
+    try std.testing.expectEqualStrings("Alpha", catalog.payloadFor(alpha_results[0]).?.theme);
+
+    const gamma_results = catalog.rank("%gamma", .{}, &ranked_storage);
+    try std.testing.expectEqual(@as(usize, 0), gamma_results.len);
 }
 
 test "recent history accepts only exact current palette actions" {

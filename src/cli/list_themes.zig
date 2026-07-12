@@ -134,38 +134,15 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
     var count: usize = 0;
 
     var themes: std.ArrayList(ThemeListElement) = .empty;
-
-    var it: themepkg.LocationIterator = .{ .arena_alloc = arena.allocator() };
-
-    while (try it.next()) |loc| {
-        var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => {
-                std.debug.print("error trying to open {s}: {}\n", .{ loc.dir, err });
-                continue;
-            },
-        };
-        defer dir.close();
-
-        var walker = dir.iterate();
-
-        while (try walker.next()) |entry| {
-            switch (entry.kind) {
-                .file, .sym_link => {
-                    if (std.mem.eql(u8, entry.name, ".DS_Store"))
-                        continue;
-                    count += 1;
-
-                    const path = try std.fs.path.join(alloc, &.{ loc.dir, entry.name });
-                    try themes.append(alloc, .{
-                        .path = path,
-                        .location = loc.location,
-                        .theme = try alloc.dupe(u8, entry.name),
-                    });
-                },
-                else => {},
-            }
-        }
+    const installed_themes = try themepkg.list(gpa_alloc, arena.allocator());
+    defer themepkg.freeList(gpa_alloc, installed_themes);
+    for (installed_themes) |theme| {
+        count += 1;
+        try themes.append(alloc, .{
+            .path = try alloc.dupe(u8, theme.path),
+            .location = theme.location,
+            .theme = try alloc.dupe(u8, theme.name),
+        });
     }
 
     if (count == 0) {
@@ -173,8 +150,6 @@ pub fn run(gpa_alloc: std.mem.Allocator) !u8 {
         try stderr.flush();
         return 1;
     }
-
-    std.mem.sortUnstable(ThemeListElement, themes.items, {}, ThemeListElement.lessThan);
 
     if (tui.can_pretty_print and !opts.plain and stdout_file.isTty()) {
         try preview(gpa_alloc, themes.items, opts.color);

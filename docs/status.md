@@ -78,10 +78,11 @@ notifications, quick terminal notes, and troubleshooting, see
   reversible live preview, revision-aware external-edit merging, and explicit
   field-conflict resolution.
 - Universal palette blending configurable actions, live tabs, panes, Windows
-  profiles, and exact native-setting controls. Typed stable IDs, category
-  prefixes, fuzzy ranking, keyboard navigation, and a scrollable accessible
-  result list ship. Reviewed help destinations and a snapshot-validated recent
-  action provider also ship; installed-theme selection remains planned.
+  profiles, installed themes, and exact native-setting controls. Typed stable
+  IDs, category prefixes, fuzzy ranking, keyboard navigation, live theme
+  preview/revert/commit, and a scrollable accessible result list ship.
+  Reviewed help destinations and a snapshot-validated recent action provider
+  also ship.
 
 ### Renderer
 
@@ -158,9 +159,6 @@ extractions will land as they stabilize.
   [Discussions](https://github.com/amanthanvi/winghostty/discussions).
 - **No Nix / Flatpak / Snap packaging.** Upstream's Linux packaging
   surfaces have been stubbed out or removed.
-- **`build.zig.zon` identity.** The Zig package is still declared
-  `.name = .ghostty`. Library consumers using Zig's package manager will
-  see the upstream package name. Rename is planned.
 - **Generated help links.** A few generated help strings still link to
   `github.com/ghostty-org/ghostty` rather than this fork. Tracked as a
   doc-generation fix.
