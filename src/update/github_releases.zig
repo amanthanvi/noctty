@@ -776,7 +776,7 @@ const der_tag_sequence: u8 = 0x30;
 const der_tag_context_0: u8 = 0xa0;
 
 fn readDerElement(buf: []const u8, start: usize) !DerElement {
-    if (start + 2 > buf.len) return error.InvalidDer;
+    if (start > buf.len or buf.len - start < 2) return error.InvalidDer;
 
     const tag = buf[start];
     var offset = start + 1;
@@ -788,7 +788,7 @@ fn readDerElement(buf: []const u8, start: usize) !DerElement {
         len = len_byte;
     } else {
         const len_len: usize = len_byte & 0x7f;
-        if (len_len == 0 or len_len > @sizeOf(usize) or offset + len_len > buf.len) {
+        if (len_len == 0 or len_len > @sizeOf(usize) or len_len > buf.len - offset) {
             return error.InvalidDer;
         }
         for (buf[offset .. offset + len_len]) |b| {
@@ -797,13 +797,14 @@ fn readDerElement(buf: []const u8, start: usize) !DerElement {
         offset += len_len;
     }
 
-    if (offset + len > buf.len) return error.InvalidDer;
+    if (len > buf.len - offset) return error.InvalidDer;
+    const end = offset + len;
     return .{
         .tag = tag,
         .start = start,
         .content_start = offset,
-        .content_end = offset + len,
-        .end = offset + len,
+        .content_end = end,
+        .end = end,
     };
 }
 
@@ -1599,4 +1600,18 @@ test "windows updater extracts SPKI hash from certificate DER" {
 
     const actual = try certificateSpkiSha256(&cert_der);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "DER element rejects overflowing offsets and lengths" {
+    const short = [_]u8{ der_tag_sequence, 0 };
+    try std.testing.expectError(error.InvalidDer, readDerElement(&short, std.math.maxInt(usize)));
+
+    const maximal_length = [_]u8{
+        der_tag_sequence, 0x88,
+        0xff,             0xff,
+        0xff,             0xff,
+        0xff,             0xff,
+        0xff,             0xff,
+    };
+    try std.testing.expectError(error.InvalidDer, readDerElement(&maximal_length, 0));
 }
