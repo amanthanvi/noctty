@@ -12,8 +12,21 @@ function Assert-JsonDocument {
     )
 
     $json = Get-Content -LiteralPath $Path -Raw
-    if (-not ($json | Test-Json -SchemaFile $SchemaPath -ErrorAction Stop)) {
-        throw "JSON contract validation failed: $Path"
+    if (Get-Command Test-Json -ErrorAction SilentlyContinue) {
+        if (-not ($json | Test-Json -SchemaFile $SchemaPath -ErrorAction Stop)) {
+            throw "JSON contract validation failed: $Path"
+        }
+        return
+    }
+
+    try {
+        Add-Type -AssemblyName System.Web.Extensions
+        $parser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $parser.MaxJsonLength = [int]::MaxValue
+        [void]$parser.DeserializeObject($json)
+        [void]$parser.DeserializeObject((Get-Content -LiteralPath $SchemaPath -Raw))
+    } catch {
+        throw "JSON syntax validation failed: $Path ($($_.Exception.Message))"
     }
 }
 

@@ -179,10 +179,8 @@ pub fn init(b: *std.Build, cfg: *const Config) !GhosttyDist {
 const lib_vt_excludes = &[_][]const u8{
     // App and platform resources
     "images",
-    "macos",
     "dist/doxygen",
     "dist/linux",
-    "dist/macos",
     "dist/windows",
     "flatpak",
     "snap",
