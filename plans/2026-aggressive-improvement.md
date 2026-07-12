@@ -1,6 +1,6 @@
 # Aggressive improvement roadmap
 
-Status: active until the fork PR is squash-merged and its signed release is verified.
+Status: complete.
 
 ## Gates
 
@@ -15,7 +15,9 @@ Status: active until the fork PR is squash-merged and its signed release is veri
 - [x] Installed-theme palette preview/revert/commit transaction.
 - [x] Conditional Apple dependencies and stale exclusions removed.
 - [x] PR smoke plus nightly/main interactive Win11 policy.
-- [ ] Fork-only review loop clean; squash merge and signed release complete.
+- [x] Fork-only review loop clean; squash merge and signed release complete.
+
+Closure evidence: PRs #81 and #82 squash-merged; exact-SHA Test run 29202934856 passed; signed release v1.3.118 published and verified.
 
 Implementation evidence belongs in the PR and release. Reopen a checkbox when
 its acceptance condition regresses.
