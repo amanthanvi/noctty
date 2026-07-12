@@ -29,7 +29,7 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
         @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2002).Count -gt 0
     }
     $edit = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2002 | Select-Object -First 1
-    Send-StatefulText $edit.Hwnd $Query
+    Set-StatefulEditText $HostHwnd $edit.Hwnd $Query
     return $edit.Hwnd
 }
 
@@ -37,33 +37,45 @@ $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize
 if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
 $hcChanged = $false
 $runs = [Collections.Generic.List[object]]::new()
+$draculaRgb = [Convert]::ToInt32('282a36', 16)
+$themeRgb = [Convert]::ToInt32('262427', 16)
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $run = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-normal'; $runs.Add($run)
     $hostHwnd = Wait-StatefulHost $run $deadline
-    $surface = Get-StatefulSurface $hostHwnd; if ($null -eq $surface) { throw 'No terminal surface HWND.' }
-    $originalPixel = Get-StatefulPixel $surface.Hwnd
+    $surface = Wait-StatefulSurface $hostHwnd $run $deadline
+    Show-StatefulHost $hostHwnd
+    Write-Host ('theme initial framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula background render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme preview pixel change' -Process $run.Process -Condition { (Get-StatefulPixel $surface.Hwnd) -ne $originalPixel }
+    Start-Sleep -Milliseconds 750
+    Write-Host ('theme preview framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
+    Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f preview render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
     if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*Dracula') { throw 'Preview mutated config before commit.' }
-    Send-StatefulKey $edit 0x1B
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme preview rollback' -Process $run.Process -Condition { (Get-StatefulPixel $surface.Hwnd) -eq $originalPixel }
+    Invoke-StatefulCommand $hostHwnd 2004
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula preview rollback' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
-    Invoke-StatefulCommand $hostHwnd 2003
+    Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f commit preview' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
+    $script:PaletteThemeHost = $hostHwnd
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme palette result list' -Process $run.Process -Condition {
+        @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2006).Count -gt 0
+    }
+    Invoke-StatefulPaletteFirstRow $hostHwnd
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme config persistence' -Process $run.Process -Condition { (Get-Content $configPath -Raw) -match 'theme\s*=\s*0x96f' }
     Close-StatefulHost $hostHwnd $run $deadline
 
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $enabled = $originalHc; $enabled.dwFlags = $enabled.dwFlags -bor 1
     if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
     $hcChanged = $true
     $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
     $hcHost = Wait-StatefulHost $hcRun $deadline
-    $hcSurface = Get-StatefulSurface $hcHost; $hcPixel = Get-StatefulPixel $hcSurface.Hwnd
+    $hcSurface = Wait-StatefulSurface $hcHost $hcRun $deadline; Show-StatefulHost $hcHost; $hcPixel = Get-StatefulPixel $hcSurface.Hwnd
     $hcEdit = Open-ThemeQuery $hcHost 'Dracula' $deadline $hcRun.Process
     Start-Sleep -Milliseconds 500
     if ((Get-StatefulPixel $hcSurface.Hwnd) -ne $hcPixel) { throw 'Theme preview changed terminal colors while High Contrast was active.' }
     if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
-    Send-StatefulKey $hcEdit 0x1B
+    Invoke-StatefulCommand $hcHost 2004
     Close-StatefulHost $hcHost $hcRun $deadline
 }
 finally {

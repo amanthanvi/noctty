@@ -11,7 +11,7 @@ const file_load = @import("file_load.zig");
 /// the first non-empty file that already exists.
 ///
 /// The returned value is allocated using the provided allocator.
-pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
+pub fn openPath(alloc_gpa: Allocator) ![]const u8 {
     // Use an arena to make memory management easier in here.
     var arena = ArenaAllocator.init(alloc_gpa);
     defer arena.deinit();
@@ -36,7 +36,7 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
         }
     };
 
-    return try alloc_gpa.dupeZ(u8, config_path);
+    return try alloc_gpa.dupe(u8, config_path);
 }
 
 /// Returns the config path to use for open for the current OS.

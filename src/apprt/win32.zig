@@ -2407,6 +2407,10 @@ pub const App = struct {
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
+    /// A normal last-host close destroys the native/session model before
+    /// `terminate` runs. Preserve the successful pre-close snapshot instead
+    /// of replacing it with an empty snapshot during final teardown.
+    session_state_saved_before_last_host_close: bool = false,
     /// True only while the app is synchronously draining every host during
     /// shutdown. Child HWND teardown still repairs native split trees, but it
     /// must not diagnose the intentionally absent per-pane close preflight as
@@ -2799,7 +2803,9 @@ pub const App = struct {
         }
         self.unregisterGlobalHotkeys();
         self.stopIpcServer();
-        self.saveSessionState();
+        if (!self.session_state_saved_before_last_host_close or self.hosts.items.len > 0) {
+            _ = self.saveSessionState();
+        }
         self.destroyAllWindows();
         if (self.shell_runtime_initialized) {
             self.shell_runtime.deinit();
@@ -3208,9 +3214,9 @@ pub const App = struct {
         }
     }
 
-    fn saveSessionState(self: *const App) void {
-        if (!self.sessionStateEnabled()) return;
-        const path = self.sessionStatePath() orelse return;
+    fn saveSessionState(self: *const App) bool {
+        if (!self.sessionStateEnabled()) return false;
+        const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
 
         var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
@@ -3219,24 +3225,27 @@ pub const App = struct {
 
         const state = self.buildSessionState(alloc) catch |err| {
             log.warn("win32 session save: snapshot failed err={}", .{err});
-            return;
+            return false;
         };
         if (state.windows.len == 0) {
             win32_session_persistence.deleteFileIfPresent(path) catch |err| {
                 log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
+                return false;
             };
-            return;
+            return true;
         }
 
         const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
             log.warn("win32 session save: encode failed err={}", .{err});
-            return;
+            return false;
         };
         defer self.core_app.alloc.free(encoded);
 
         writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
             log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
+            return false;
         };
+        return true;
     }
 
     fn buildSessionState(
@@ -6874,6 +6883,11 @@ pub const App = struct {
                 else => {}, // skip pointer / optional-pointer / array fields
             }
         }
+        const theme_key = ConfigKey.theme;
+        if (original.changed(pending, theme_key)) {
+            user_edited.set(@intFromEnum(theme_key));
+            any_edit = true;
+        }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -7047,6 +7061,10 @@ pub const App = struct {
                 },
                 else => {},
             }
+        }
+        if (user_edited.isSet(@intFromEnum(theme_key)) and pending.changed(&reloaded, theme_key)) {
+            std.log.warn("settings save: field 'theme' was saved but is masked by a later config-file layer", .{});
+            any_masked = true;
         }
 
         self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
@@ -9632,7 +9650,31 @@ const Host = struct {
             .light = owned,
             .dark = owned,
         };
-        try config.finalize();
+    }
+
+    fn loadPaletteThemeConfig(self: *Host, name: []const u8) !configpkg.Config {
+        const alloc = self.app.core_app.alloc;
+        const cwd_before = try std.process.getCwdAlloc(alloc);
+        defer alloc.free(cwd_before);
+
+        var changed_cwd = false;
+        if (self.app.startup_cwd) |cwd| {
+            try std.process.changeCurDir(cwd);
+            changed_cwd = true;
+        }
+        defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
+            log.warn("palette theme cwd restore failed path={s} err={}", .{ cwd_before, err });
+        };
+
+        var preview = try configpkg.Config.default(alloc);
+        errdefer preview.deinit();
+        try preview.loadDefaultFiles(alloc);
+        try preview.loadCliArgs(alloc);
+        try preview.loadRecursiveFiles(alloc);
+        preview._conditional_state = self.app.config._conditional_state;
+        try setConfigTheme(&preview, name);
+        try preview.finalize();
+        return preview;
     }
 
     fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
@@ -9643,6 +9685,9 @@ const Host = struct {
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
         for (self.app.windows.items) |surface| {
+            surface.core().updateConfig(&self.app.config) catch |err| {
+                log.warn("palette theme core apply failed err={}", .{err});
+            };
             surface.applyRuntimeConfig(&self.app.config) catch |err| {
                 log.warn("palette theme runtime apply failed err={}", .{err});
             };
@@ -9655,6 +9700,11 @@ const Host = struct {
     }
 
     fn previewSelectedPaletteTheme(self: *Host) void {
+        if (isHighContrastActive()) {
+            self.revertPaletteThemePreview();
+            return;
+        }
+
         const name = self.selectedPaletteThemeName() orelse {
             self.revertPaletteThemePreview();
             return;
@@ -9675,9 +9725,8 @@ const Host = struct {
             self.palette_theme_preview_original = try self.app.config.clone(self.app.core_app.alloc);
         }
 
-        var preview = try self.palette_theme_preview_original.?.clone(self.app.core_app.alloc);
+        var preview = try self.loadPaletteThemeConfig(name);
         errdefer preview.deinit();
-        try setConfigTheme(&preview, name);
         self.replaceRuntimeConfigFromPalette(preview);
     }
 
@@ -11204,6 +11253,7 @@ const Host = struct {
 
     fn hideOverlay(self: *Host) void {
         const was_confirm = self.overlay_mode == .confirm;
+        self.revertPaletteThemePreview();
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
         self.setBanner(.none, null) catch {};
@@ -13052,6 +13102,9 @@ const Host = struct {
             if (fallback_hwnd) |hwnd| _ = DestroyWindow(hwnd);
             self.app.removeHost(self);
             return;
+        }
+        if (self.app.hosts.items.len == 1) {
+            self.app.session_state_saved_before_last_host_close = self.app.saveSessionState();
         }
         for (surfaces.items) |surface| surface.close(false);
     }
@@ -16804,6 +16857,28 @@ fn patchOrAppendEdits(
             try out.appendSlice(alloc, scratch.written());
         }
     }
+}
+
+test "win32 settings patch persists a palette theme selection" {
+    const testing = std.testing;
+    const ConfigKey = @import("../config/key.zig").Key;
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+    try Host.setConfigTheme(&pending, "0x96f");
+
+    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    edited.set(@intFromEnum(ConfigKey.theme));
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(
+        testing.allocator,
+        "theme = Dracula\nwindow-save-state = never\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "theme = 0x96f") != null);
+    try testing.expect(std.mem.indexOf(u8, patched.items, "window-save-state = never") != null);
 }
 
 /// Strip HTML tags for the CF_UNICODETEXT fallback when core only

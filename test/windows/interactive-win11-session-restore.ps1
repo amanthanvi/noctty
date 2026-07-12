@@ -28,24 +28,28 @@ try {
     $hostHwnd = Wait-StatefulHost $first $deadline
     Invoke-StatefulCommand $hostHwnd 1904; Invoke-StatefulCommand $hostHwnd 1904
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
-    Invoke-StatefulCommand $hostHwnd 1001
+    Invoke-StatefulButton $hostHwnd 1001
     Close-StatefulHost $hostHwnd $first $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'session-state file' -Condition { Test-Path $statePath }
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
     if ($saved.windows[0].tabs.Count -ne 3 -or $saved.windows[0].selected_tab -ne 1) { throw "Saved session mismatch: $($saved | ConvertTo-Json -Depth 8 -Compress)" }
 
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $second = Start-StatefulApp $layout $exe $repoRoot 'session-restore'; $runs.Add($second)
     $restoredHost = Wait-StatefulHost $second $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'restored tabs' -Process $second.Process -Condition { (Get-StatefulTabCount $restoredHost) -eq 3 }
     Close-StatefulHost $restoredHost $second $deadline
 
     [IO.File]::WriteAllText($statePath, '{not valid json', [Text.UTF8Encoding]::new($false))
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $third = Start-StatefulApp $layout $exe $repoRoot 'session-corrupt'; $runs.Add($third)
     $freshHost = Wait-StatefulHost $third $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'corrupt state quarantine' -Process $third.Process -Condition {
         -not (Test-Path $statePath) -and @(Get-ChildItem $stateDir -Filter 'session-state.json.corrupt*' -ErrorAction SilentlyContinue).Count -gt 0
     }
-    if ((Get-StatefulTabCount $freshHost) -ne 1) { throw 'Corrupt session restored tabs instead of starting fresh.' }
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh tab after corrupt state' -Process $third.Process -Condition {
+        (Get-StatefulTabCount $freshHost) -eq 1
+    }
     Close-StatefulHost $freshHost $third $deadline
 }
 finally {

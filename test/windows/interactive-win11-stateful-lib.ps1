@@ -6,6 +6,9 @@ using System.Runtime.InteropServices;
 using System.Text;
 public static class WinghosttyStatefulNative {
     public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT {
+        public int Left; public int Top; public int Right; public int Bottom;
+    }
     [StructLayout(LayoutKind.Sequential)] public struct HIGHCONTRAST {
         public uint cbSize; public uint dwFlags; public IntPtr lpszDefaultScheme;
     }
@@ -15,10 +18,11 @@ public static class WinghosttyStatefulNative {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
-    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
-    [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr dc, int x, int y);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
 }
 '@
@@ -72,14 +76,36 @@ function Get-StatefulSurface([IntPtr] $HostHwnd) {
     return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'winghostty.win32' | Select-Object -First 1
 }
 
+function Get-StatefulWindowRect([IntPtr] $Hwnd) {
+    $rect = [WinghosttyStatefulNative+RECT]::new()
+    if (-not [WinghosttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) { return $null }
+    return $rect
+}
+
 function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId) {
     [void][WinghosttyStatefulNative]::SendMessageW($HostHwnd, 0x0111, [UIntPtr]([uint64]$CommandId), [IntPtr]::Zero)
 }
 
-function Send-StatefulText([IntPtr] $Hwnd, [string] $Text) {
-    foreach ($character in $Text.ToCharArray()) {
-        [void][WinghosttyStatefulNative]::SendMessageW($Hwnd, 0x0102, [UIntPtr]([uint64][int][char]$character), [IntPtr]::Zero)
+function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text) {
+    $textPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
+    try {
+        $result = [WinghosttyStatefulNative]::SendMessageW($Hwnd, 0x000C, [UIntPtr]::Zero, $textPointer)
+        if ($result -eq [IntPtr]::Zero) { throw "WM_SETTEXT failed for hwnd=$Hwnd" }
     }
+    finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($textPointer)
+    }
+    $enChange = 0x0300
+    $controlId = [WinghosttyStatefulNative]::GetDlgCtrlID($Hwnd)
+    $command = [uint64]([uint32]$controlId -bor ([uint32]$enChange -shl 16))
+    [void][WinghosttyStatefulNative]::SendMessageW($HostHwnd, 0x0111, [UIntPtr]$command, $Hwnd)
+}
+
+function Show-StatefulHost([IntPtr] $HostHwnd) {
+    [void][WinghosttyStatefulNative]::ShowWindow($HostHwnd, 9)
+    [void][WinghosttyStatefulNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    [void][WinghosttyStatefulNative]::SetForegroundWindow($HostHwnd)
+    Start-Sleep -Milliseconds 200
 }
 
 function Send-StatefulKey([IntPtr] $Hwnd, [int] $VirtualKey) {
@@ -88,10 +114,35 @@ function Send-StatefulKey([IntPtr] $Hwnd, [int] $VirtualKey) {
 }
 
 function Get-StatefulPixel([IntPtr] $Hwnd) {
-    $dc = [WinghosttyStatefulNative]::GetDC($Hwnd)
-    if ($dc -eq [IntPtr]::Zero) { throw "GetDC failed for hwnd=$Hwnd" }
-    try { return [uint32][WinghosttyStatefulNative]::GetPixel($dc, 4, 4) }
-    finally { [void][WinghosttyStatefulNative]::ReleaseDC($Hwnd, $dc) }
+    $rect = [WinghosttyStatefulNative+RECT]::new()
+    if (-not [WinghosttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) {
+        throw "GetWindowRect failed for hwnd=$Hwnd"
+    }
+    $bitmap = [Drawing.Bitmap]::new(1, 1)
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    try {
+        $counts = @{}
+        $bestColor = 0
+        $bestCount = 0
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        foreach ($column in 1..4) {
+            foreach ($row in 1..4) {
+                $sampleX = $rect.Left + [int](($width * $column) / 5)
+                $sampleY = $rect.Top + [int](($height * $row) / 5)
+                $graphics.CopyFromScreen($sampleX, $sampleY, 0, 0, [Drawing.Size]::new(1, 1))
+                $color = $bitmap.GetPixel(0, 0).ToArgb()
+                $count = 1 + [int]($counts[$color])
+                $counts[$color] = $count
+                if ($count -gt $bestCount) { $bestColor = $color; $bestCount = $count }
+            }
+        }
+        return $bestColor
+    }
+    finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
 }
 
 function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] $Name) {
@@ -108,6 +159,30 @@ function Wait-StatefulHost($Run, [DateTime] $Deadline) {
         [IntPtr]::Zero -ne (Find-StatefulHost $script:StatefulWaitProcess.Id)
     }
     return Find-StatefulHost $Run.Process.Id
+}
+
+function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId) {
+    $button = Get-StatefulChildren $HostHwnd | Where-Object Id -eq $ControlId | Select-Object -First 1
+    if ($null -eq $button) { throw "No visible button with control ID $ControlId." }
+    [void][WinghosttyStatefulNative]::SendMessageW($button.Hwnd, 0x00F5, [UIntPtr]::Zero, [IntPtr]::Zero)
+}
+
+function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd) {
+    $list = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
+    if ($null -eq $list) { throw 'No visible command-palette list.' }
+    $coordinates = [IntPtr](4 -bor (4 -shl 16))
+    [void][WinghosttyStatefulNative]::SendMessageW($list.Hwnd, 0x0201, [UIntPtr]::Zero, $coordinates)
+}
+
+function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
+    $script:StatefulSurfaceHost = $HostHwnd
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'terminal surface window' -Process $Run.Process -Condition {
+        $surface = Get-StatefulSurface $script:StatefulSurfaceHost
+        if ($null -eq $surface) { return $false }
+        $rect = Get-StatefulWindowRect $surface.Hwnd
+        return $null -ne $rect -and ($rect.Right - $rect.Left) -gt 100 -and ($rect.Bottom - $rect.Top) -gt 100
+    }
+    return Get-StatefulSurface $HostHwnd
 }
 
 function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
