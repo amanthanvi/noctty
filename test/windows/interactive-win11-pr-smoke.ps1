@@ -11,6 +11,12 @@ if ($Rebuild) {
     if ($LASTEXITCODE -ne 0) { throw "PR smoke build failed with exit code $LASTEXITCODE." }
 }
 
+$childPowerShell = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty Source
+if (-not $childPowerShell) {
+    $childPowerShell = (Get-Process -Id $PID).Path
+}
+
 foreach ($harness in @(
     'interactive-win11-smoke.ps1',
     'interactive-win11-key-input.ps1',
@@ -29,7 +35,7 @@ foreach ($harness in @(
     )
     if ($ResetState) { $harnessArgs += '-ResetState' }
 
-    & (Join-Path $PSHOME 'pwsh.exe') @harnessArgs
+    & $childPowerShell @harnessArgs
     if ($LASTEXITCODE -ne 0) { throw "$harness failed with exit code $LASTEXITCODE." }
 }
 

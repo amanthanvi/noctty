@@ -265,6 +265,7 @@ const RenderTrace = struct {
         sustained_max_gap_ms: ?*std.atomic.Value(u64),
         sustained_max_gap_ended_at_ms: ?*std.atomic.Value(u64),
     ) void {
+        std.debug.assert((sustained_max_gap_ms == null) == (sustained_max_gap_ended_at_ms == null));
         const now = GetTickCount64();
         const elapsed_ms = elapsedTraceMs(self.start_tick_ms, now);
         _ = counter.fetchAdd(1, .acq_rel);

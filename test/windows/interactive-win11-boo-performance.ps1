@@ -140,6 +140,7 @@ if ($renderTrace.paint_draw_count -lt 250) {
     throw "Expected visible paint cadence to stay well above the prior stalled path (expected >= 250, got $($renderTrace.paint_draw_count))"
 }
 $requiredRenderTraceFields = @(
+    'max_paint_gap_ms',
     'max_paint_gap_ended_at_ms',
     'max_sustained_paint_gap_ms',
     'max_sustained_paint_gap_ended_at_ms',
