@@ -110,6 +110,7 @@ finally {
         $measurements = [ordered]@{
             paint_draw_count = [long]$render.paint_draw_count
             max_paint_gap_ms = [long]$render.max_paint_gap_ms
+            max_sustained_paint_gap_ms = [long]$render.max_sustained_paint_gap_ms
             max_paint_draw_duration_ms = [long]$render.max_paint_draw_duration_ms
             process_output_count = [long]$termio.process_output_count
             max_process_output_gap_ms = [long]$termio.max_process_output_gap_ms
