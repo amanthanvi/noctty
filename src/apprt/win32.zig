@@ -2133,23 +2133,21 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
 }
 
 fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
-    var request: CoreApp.Message.AutomationWindowListRequest = .{
-        .alloc = alloc,
-    };
+    const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    if (mailbox.push(.{ .automation_window_list = &request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+    if (mailbox.push(.{ .automation_window_list = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
         return error.IPCFailed;
     }
 
-    // `request` is stack-backed and the mailbox stores its address. Once the
-    // bounded push succeeds, the UI consumer must finish before this frame can
-    // return. Timing out here would leave a dangling request in the mailbox.
-    waitForAutomationCompletion(&request.done);
+    try waitForAutomationCompletion(app, &request.completed);
     if (request.err) |err| return err;
-    return request.result orelse error.IPCFailed;
+    return request.takeResult() orelse error.IPCFailed;
 }
 
 fn requestAutomationAction(
@@ -2161,26 +2159,31 @@ fn requestAutomationAction(
         return error.InvalidAutomationAction;
     }
 
-    var request: CoreApp.Message.AutomationActionRequest = .{
-        .target = target,
-        .action_text = action_text,
-    };
+    const request = try CoreApp.Message.AutomationActionRequest.create(
+        app.core_app.alloc,
+        target,
+        action_text,
+    );
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    if (mailbox.push(.{ .automation_action = &request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+    if (mailbox.push(.{ .automation_action = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
         return error.IPCFailed;
     }
 
-    // The request and action slice are borrowed by the mailbox consumer. The
-    // admission wait is bounded; after admission, wait until the borrow ends.
-    waitForAutomationCompletion(&request.done);
+    try waitForAutomationCompletion(app, &request.completed);
     if (request.err) |err| return err;
 }
 
-fn waitForAutomationCompletion(done: *std.Thread.ResetEvent) void {
-    done.wait();
+fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
+    while (!completed.load(.acquire)) {
+        if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -2711,9 +2714,6 @@ pub const App = struct {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
-                self.startup_profile_picker = false;
-            } else if (restored) {
-                self.startup_profile_picker = false;
             }
         } else {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
@@ -6648,6 +6648,18 @@ pub const App = struct {
             };
             host.clearStructuralHistory(.normal);
             _ = DestroyWindow(hwnd);
+        }
+    }
+
+    fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
+        const previous_quitting = self.quitting;
+        self.quitting = true;
+        defer self.quitting = previous_quitting;
+        host.clearStructuralHistory(.normal);
+        if (host.hwnd) |hwnd| {
+            _ = DestroyWindow(hwnd);
+        } else {
+            self.removeHost(host);
         }
     }
 
@@ -30524,27 +30536,17 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     );
 }
 
-test "win32 admitted automation request keeps producer alive until consumption" {
-    const Context = struct {
-        done: std.Thread.ResetEvent = .{},
-        started: std.Thread.ResetEvent = .{},
-        returned: std.Thread.ResetEvent = .{},
-
-        fn run(ctx: *@This()) void {
-            ctx.started.set();
-            waitForAutomationCompletion(&ctx.done);
-            ctx.returned.set();
-        }
-    };
-
-    var ctx: Context = .{};
-    const thread = try std.Thread.spawn(.{}, Context.run, .{&ctx});
-    defer thread.join();
-    defer ctx.done.set();
-    ctx.started.wait();
-    try std.testing.expectError(error.Timeout, ctx.returned.timedWait(std.time.ns_per_ms));
-    ctx.done.set();
-    try ctx.returned.timedWait(std.time.ns_per_s);
+test "win32 timed out automation request remains owned until consumption" {
+    const request = try CoreApp.Message.AutomationActionRequest.create(
+        std.testing.allocator,
+        .focused,
+        "new_tab",
+    );
+    request.retain();
+    request.release(); // Producer times out and drops its ownership.
+    try std.testing.expectEqualStrings("new_tab", request.action_text);
+    request.completed.store(true, .release);
+    request.release(); // Delayed mailbox consumer owns the final reference.
 }
 
 test "win32 IPC silent client read is bounded" {
@@ -31260,11 +31262,15 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
 }
 
 const SessionRestoreTransaction = struct {
+    app: ?*App = null,
     host: ?*Host = null,
     committed: bool = false,
 
     fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
-        if (self.host == null) self.host = surface.host;
+        if (self.host == null) {
+            self.app = surface.app;
+            self.host = surface.host;
+        }
     }
 
     fn commit(self: *SessionRestoreTransaction) void {
@@ -31273,8 +31279,9 @@ const SessionRestoreTransaction = struct {
 
     fn rollback(self: *SessionRestoreTransaction) void {
         if (self.committed) return;
+        const app = self.app orelse return;
         const host = self.host orelse return;
-        host.close();
+        app.rollbackSessionRestoreHost(host);
     }
 };
 

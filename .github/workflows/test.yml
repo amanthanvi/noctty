@@ -132,7 +132,7 @@ jobs:
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
             ./test/windows/interactive-win11-accessibility.ps1 -ResetState
-            ./test/windows/interactive-win11-palette-theme.ps1 -ResetState
+            ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
             ./test/windows/interactive-win11-session-restore.ps1 -ResetState
           }
 

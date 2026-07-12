@@ -280,14 +280,14 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 try self.newWindow(rt_app, msg);
             },
             .automation_window_list => |request| {
-                defer request.done.set();
                 request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
                     request.err = err;
                     break :blk null;
                 };
+                request.completed.store(true, .release);
+                request.release();
             },
             .automation_action => |request| {
-                defer request.done.set();
                 self.performAutomationAction(
                     rt_app,
                     request.target,
@@ -295,6 +295,8 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 ) catch |err| {
                     request.err = err;
                 };
+                request.completed.store(true, .release);
+                request.release();
             },
             .close => |surface| self.closeSurface(surface),
             .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
@@ -750,16 +752,66 @@ pub const Message = union(enum) {
 
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
-        done: std.Thread.ResetEvent = .{},
+        refs: std.atomic.Value(u32) = .init(1),
+        completed: std.atomic.Value(bool) = .init(false),
         result: ?[]u8 = null,
         err: ?anyerror = null,
+
+        pub fn create(alloc: Allocator) !*@This() {
+            const request = try alloc.create(@This());
+            request.* = .{ .alloc = alloc };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            if (self.result) |result| self.alloc.free(result);
+            self.alloc.destroy(self);
+        }
+
+        pub fn takeResult(self: *@This()) ?[]u8 {
+            const result = self.result;
+            self.result = null;
+            return result;
+        }
     };
 
     pub const AutomationActionRequest = struct {
+        alloc: Allocator,
+        refs: std.atomic.Value(u32) = .init(1),
         target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
-        done: std.Thread.ResetEvent = .{},
+        completed: std.atomic.Value(bool) = .init(false),
         err: ?anyerror = null,
+
+        pub fn create(
+            alloc: Allocator,
+            target: apprt.ipc.AutomationActionTarget,
+            action_text: []const u8,
+        ) !*@This() {
+            const request = try alloc.create(@This());
+            errdefer alloc.destroy(request);
+            request.* = .{
+                .alloc = alloc,
+                .target = target,
+                .action_text = try alloc.dupe(u8, action_text),
+            };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            self.alloc.free(self.action_text);
+            self.alloc.destroy(self);
+        }
     };
 
     const NewWindow = struct {
