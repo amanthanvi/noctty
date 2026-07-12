@@ -6,10 +6,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$common = @{
-    ResetState = $ResetState
-}
-
 if ($Rebuild) {
     & (Join-Path $repoRoot 'scripts\dev-windows.cmd') zig build -Demit-exe=true
     if ($LASTEXITCODE -ne 0) { throw "PR smoke build failed with exit code $LASTEXITCODE." }
@@ -25,7 +21,15 @@ foreach ($harness in @(
     'interactive-win11-palette-theme.ps1',
     'interactive-win11-session-restore.ps1'
 )) {
-    & (Join-Path $PSScriptRoot $harness) @common
+    $harnessArgs = @(
+        '-NoLogo'
+        '-NoProfile'
+        '-File'
+        (Join-Path $PSScriptRoot $harness)
+    )
+    if ($ResetState) { $harnessArgs += '-ResetState' }
+
+    & (Join-Path $PSHOME 'pwsh.exe') @harnessArgs
     if ($LASTEXITCODE -ne 0) { throw "$harness failed with exit code $LASTEXITCODE." }
 }
 
