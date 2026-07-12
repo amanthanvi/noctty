@@ -3,6 +3,8 @@ name: Test
 on:
   push: {}
   pull_request: {}
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       run_interactive_win11:
@@ -48,16 +50,23 @@ jobs:
       - name: Zig version
         run: zig version
 
+      - name: Zig formatting
+        shell: pwsh
+        run: ./scripts/check-zig-format.ps1
+
+      - name: PowerShell and text formatting
+        shell: pwsh
+        run: ./scripts/check-source-format.ps1
+
       - name: Full Zig test suite
         run: zig build test -Demit-test-exe=true
 
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
-      - name: Build
-        run: zig build
-
       - name: Build executable
+        # This traverses the default build graph too; a preceding plain
+        # `zig build` duplicated the same Windows compile/link work.
         run: zig build -Demit-exe=true
 
       - name: Build ARM64 executable
@@ -97,7 +106,11 @@ jobs:
 
   windows-interactive:
     name: Windows 11 Interactive Composite
-    if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'schedule' ||
+      github.ref == 'refs/heads/main' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11)
     runs-on: [self-hosted, Windows, X64, winghostty-interactive]
     timeout-minutes: 30
 
@@ -112,7 +125,16 @@ jobs:
 
       - name: Run interactive Win11 composite
         shell: pwsh
-        run: ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+        run: |
+          $quick = '${{ github.event_name }}' -eq 'pull_request'
+          if ($quick) {
+            ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
+          } else {
+            ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+            ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+            ./test/windows/interactive-win11-palette-theme.ps1 -ResetState
+            ./test/windows/interactive-win11-session-restore.ps1 -ResetState
+          }
 
       - name: Upload interactive evidence
         if: always()
@@ -121,4 +143,6 @@ jobs:
           name: flagship-interactive-win11-${{ github.run_id }}
           if-no-files-found: warn
           retention-days: 14
-          path: test/windows/flagship/artifacts/interactive-win11
+          path: |
+            test/windows/flagship/artifacts/interactive-win11
+            ${{ runner.temp }}/winghostty-interactive-win11-*/logs/**

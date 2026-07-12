@@ -64,11 +64,12 @@ terminal under the same sandboxed env, run
 
 ## Project Layout (quick map)
 
-- `src/apprt/win32.zig` — Win32 application runtime entry point (~13.7k
-  LOC, single file; extractions in progress, see commit `a759eb6`).
+- `src/apprt/win32.zig` — Win32 application runtime entry point (large single
+  file; behavior-bearing extractions are in progress).
 - `src/apprt/win32_theme.zig` — theme tokens, DWM integration, accent
   helpers, HC handling (extracted from `win32.zig` in `a759eb6`).
-- `src/update/github_releases.zig` — notify-only GitHub Releases updater.
+- `src/update/github_releases.zig` — release checks plus verified installer
+  staging for user-initiated updates.
 - `src/renderer/OpenGL.zig` — WGL + OpenGL 4.3 renderer backend.
 - `src/config/Config.zig` — single source of config options and defaults.
 - `dist/windows/` — Inno Setup script, icon, manifest, RC file.

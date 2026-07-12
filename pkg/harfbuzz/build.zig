@@ -1,11 +1,11 @@
 const std = @import("std");
-const apple_sdk = @import("apple_sdk");
 
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const coretext_enabled = b.option(bool, "enable-coretext", "Build coretext") orelse false;
+    const requested_coretext = b.option(bool, "enable-coretext", "Build coretext") orelse false;
+    const coretext_enabled = requested_coretext and target.result.os.tag.isDarwin();
     const freetype_enabled = b.option(bool, "enable-freetype", "Build freetype") orelse true;
 
     const freetype = b.dependency("freetype", .{
@@ -13,18 +13,18 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .@"enable-libpng" = true,
     });
-    const macos = b.dependency("macos", .{ .target = target, .optimize = optimize });
 
     const module = harfbuzz: {
         const module = b.addModule("harfbuzz", .{
             .root_source_file = b.path("main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "freetype", .module = freetype.module("freetype") },
-                .{ .name = "macos", .module = macos.module("macos") },
-            },
         });
+        module.addImport("freetype", freetype.module("freetype"));
+        if (coretext_enabled) {
+            const macos = b.dependency("macos", .{ .target = target, .optimize = optimize });
+            module.addImport("macos", macos.module("macos"));
+        }
 
         const options = b.addOptions();
         options.addOption(bool, "coretext", coretext_enabled);
@@ -113,6 +113,7 @@ fn buildLib(b: *std.Build, module: *std.Build.Module, options: anytype) !*std.Bu
     }
 
     if (target.result.os.tag.isDarwin()) {
+        const apple_sdk = @import("apple_sdk");
         try apple_sdk.addPaths(b, lib);
     }
 

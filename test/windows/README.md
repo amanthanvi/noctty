@@ -158,6 +158,19 @@ Run with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-undo.ps1 -ResetState -TimeoutSeconds 35
+
+## interactive-win11-palette-theme.ps1
+
+Validates Universal Palette theme preview, Escape rollback, Enter commit and
+config persistence, plus suppression of theme preview while Windows High
+Contrast is active. The harness restores the original system High Contrast
+setting in `finally`.
+
+## interactive-win11-session-restore.ps1
+
+Validates a three-tab session save/restart restore with the second tab selected,
+then injects corrupt state and requires a fresh one-tab launch plus a uniquely
+named quarantine artifact.
 ```
 
 ## ..\..\scripts\interactive-win11.ps1
