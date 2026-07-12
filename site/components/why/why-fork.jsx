@@ -21,7 +21,7 @@ const WHY_ITEMS = [
   },
   {
     q: 'Does it phone home?',
-    a: 'No telemetry or analytics. The updater only checks GitHub for new releases and stays notify-only.',
+    a: 'No telemetry or analytics. Update checks query GitHub Releases; download mode stages a verified signed installer and waits for your confirmation.',
   },
 ];
 

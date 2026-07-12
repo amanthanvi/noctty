@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Rebuild, [switch]$ResetState, [int]$TimeoutSeconds = 30)
+param([switch]$Rebuild, [switch]$ResetState, [switch]$ExerciseHighContrast, [int]$TimeoutSeconds = 30)
 $ErrorActionPreference = 'Stop'
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
@@ -8,6 +8,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED) {
     $args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
+    if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
     $code = 0
     Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
     exit $code
@@ -36,6 +37,7 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
 $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
 if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
 $hcChanged = $false
+$hcMutex = $null
 $runs = [Collections.Generic.List[object]]::new()
 $draculaRgb = [Convert]::ToInt32('282a36', 16)
 $themeRgb = [Convert]::ToInt32('262427', 16)
@@ -64,22 +66,29 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme config persistence' -Process $run.Process -Condition { (Get-Content $configPath -Raw) -match 'theme\s*=\s*0x96f' }
     Close-StatefulHost $hostHwnd $run $deadline
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $enabled = $originalHc; $enabled.dwFlags = $enabled.dwFlags -bor 1
-    if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
-    $hcChanged = $true
-    $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
-    $hcHost = Wait-StatefulHost $hcRun $deadline
-    $hcSurface = Wait-StatefulSurface $hcHost $hcRun $deadline; Show-StatefulHost $hcHost; $hcPixel = Get-StatefulPixel $hcSurface.Hwnd
-    $hcEdit = Open-ThemeQuery $hcHost 'Dracula' $deadline $hcRun.Process
-    Start-Sleep -Milliseconds 500
-    if ((Get-StatefulPixel $hcSurface.Hwnd) -ne $hcPixel) { throw 'Theme preview changed terminal colors while High Contrast was active.' }
-    if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
-    Invoke-StatefulCommand $hcHost 2004
-    Close-StatefulHost $hcHost $hcRun $deadline
+    if ($ExerciseHighContrast) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        if (($originalHc.dwFlags -band 1) -eq 0) {
+            $hcMutex = [Threading.Mutex]::new($false, 'Global\WinghosttyHighContrastHarness')
+            if (-not $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))) { throw 'Timed out waiting for the High Contrast harness mutex.' }
+            $enabled = $originalHc; $enabled.dwFlags = $enabled.dwFlags -bor 1
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
+            $hcChanged = $true
+        }
+        $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
+        $hcHost = Wait-StatefulHost $hcRun $deadline
+        $hcSurface = Wait-StatefulSurface $hcHost $hcRun $deadline; Show-StatefulHost $hcHost; $hcPixel = Get-StatefulPixel $hcSurface.Hwnd
+        $hcEdit = Open-ThemeQuery $hcHost 'Dracula' $deadline $hcRun.Process
+        Start-Sleep -Milliseconds 500
+        if ((Get-StatefulPixel $hcSurface.Hwnd) -ne $hcPixel) { throw 'Theme preview changed terminal colors while High Contrast was active.' }
+        if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
+        Invoke-StatefulCommand $hcHost 2004
+        Close-StatefulHost $hcHost $hcRun $deadline
+    }
 }
 finally {
-    if ($hcChanged) { [void][WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2) }
+    if ($hcChanged -and -not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) { Write-Error 'Failed to restore the original High Contrast setting.' }
+    if ($null -ne $hcMutex) { try { $hcMutex.ReleaseMutex() } catch { }; $hcMutex.Dispose() }
     foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
 }
 Write-Host "interactive-win11 palette-theme validation: PASS (config=$configPath)"

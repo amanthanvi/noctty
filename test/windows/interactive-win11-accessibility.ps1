@@ -36,6 +36,8 @@ public static class WinghosttyAccessibilityNative {
     public static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
 }
 '@
 }
@@ -110,6 +112,46 @@ try {
     if ($null -eq $focused -or $focused.Current.ProcessId -ne $process.Id) {
         throw 'UIA focus did not resolve to an element owned by winghostty.'
     }
+    if (-not [WinghosttyAccessibilityNative]::PostMessage($process.MainWindowHandle, 0x0111, [UIntPtr]([uint64]1901), [IntPtr]::Zero)) {
+        throw "Failed to open command palette: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    $paletteDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    $palette = $null
+    do {
+        Start-Sleep -Milliseconds 100
+        $palette = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::List
+            )
+        ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
+    } while ($null -eq $palette -and [DateTime]::UtcNow -lt $paletteDeadline)
+    if ($null -eq $palette) { throw 'UIA tree contains no command palette List element.' }
+    $paletteBounds = $palette.Current.BoundingRectangle
+    if ($paletteBounds.Width -le 0 -or $paletteBounds.Height -le 0) { throw 'Command palette List has empty UIA bounds.' }
+    $paletteItems = @($palette.FindAll(
+        [System.Windows.Automation.TreeScope]::Children,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::ListItem
+        )
+    ) | ForEach-Object { $_ })
+    if ($paletteItems.Count -eq 0) { throw 'Command palette List exposes no ListItem children.' }
+    $selectedItems = @($paletteItems | Where-Object {
+        $pattern = $null
+        $_.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern) -and $pattern.Current.IsSelected
+    })
+    if ($selectedItems.Count -ne 1) { throw "Command palette exposes $($selectedItems.Count) selected rows; expected one." }
+    $selectedBounds = $selectedItems[0].Current.BoundingRectangle
+    if ($selectedBounds.Width -le 0 -or $selectedBounds.Height -le 0 -or $selectedItems[0].Current.IsOffscreen) {
+        throw 'Selected command palette row is not visible with positive UIA bounds.'
+    }
+    if ($selectedBounds.Left -lt $paletteBounds.Left -or $selectedBounds.Top -lt $paletteBounds.Top -or
+        $selectedBounds.Right -gt $paletteBounds.Right -or $selectedBounds.Bottom -gt $paletteBounds.Bottom) {
+        throw 'Selected command palette row bounds escape the List bounds.'
+    }
+    [void][WinghosttyAccessibilityNative]::PostMessage($process.MainWindowHandle, 0x0111, [UIntPtr]([uint64]2004), [IntPtr]::Zero)
     $hc = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
     if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(0x42, $hc.cbSize, [ref]$hc, 0)) {
@@ -120,6 +162,13 @@ try {
         process_id = $process.Id
         high_contrast = [bool]($hc.dwFlags -band 1)
         focused = $focused.Current.Name
+        palette = [ordered]@{
+            name = $palette.Current.Name
+            item_count = $paletteItems.Count
+            selected_name = $selectedItems[0].Current.Name
+            bounds = [ordered]@{ left = $paletteBounds.Left; top = $paletteBounds.Top; width = $paletteBounds.Width; height = $paletteBounds.Height }
+            selected_bounds = [ordered]@{ left = $selectedBounds.Left; top = $selectedBounds.Top; width = $selectedBounds.Width; height = $selectedBounds.Height }
+        }
         nodes = $nodes
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $artifact -Encoding utf8
 }

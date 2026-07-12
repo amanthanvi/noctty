@@ -52,6 +52,14 @@ pub const PaletteListState = struct {
     selected_index: ?*const fn (ctx: *anyopaque) ?usize = null,
     row_name: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
+    geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+};
+
+pub const PaletteListGeometry = struct {
+    bounds: com.UiaRect,
+    first_visible: usize,
+    visible_count: usize,
+    row_height: f64,
 };
 
 pub const TerminalState = struct {
@@ -183,6 +191,29 @@ pub const PaletteListProvider = struct {
     fn createRow(self: *PaletteListProvider, index: usize) ?*PaletteRowProvider {
         if (index >= self.rowCount()) return null;
         return PaletteRowProvider.create(self.alloc, self, index) catch null;
+    }
+
+    fn geometry(self: *const PaletteListProvider) ?PaletteListGeometry {
+        if (!self.isAvailable()) return null;
+        const callback = self.state.geometry orelse return null;
+        const value = callback(self.state.ctx) orelse return null;
+        if (value.bounds.width <= 0 or value.bounds.height <= 0 or value.row_height <= 0) return null;
+        return value;
+    }
+
+    fn rowBounds(self: *const PaletteListProvider, index: usize) ?com.UiaRect {
+        const snapshot = self.geometry() orelse return null;
+        if (index < snapshot.first_visible or index >= snapshot.first_visible + snapshot.visible_count) return null;
+        const offset: f64 = @floatFromInt(index - snapshot.first_visible);
+        const top = snapshot.bounds.top + offset * snapshot.row_height;
+        const remaining = snapshot.bounds.top + snapshot.bounds.height - top;
+        if (remaining <= 0) return null;
+        return .{
+            .left = snapshot.bounds.left,
+            .top = top,
+            .width = snapshot.bounds.width,
+            .height = @min(snapshot.row_height, remaining),
+        };
     }
 
     pub fn QueryInterface(
@@ -361,10 +392,12 @@ pub const PaletteListProvider = struct {
     }
 
     fn FragmentGetBoundingRectangle(
-        _: *com.IRawElementProviderFragment,
+        self_fragment: *com.IRawElementProviderFragment,
         out: *com.UiaRect,
     ) callconv(.winapi) com.HRESULT {
-        out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+        const self = fromFragment(self_fragment);
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = if (self.geometry()) |value| value.bounds else .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         return com.S_OK;
     }
 
@@ -391,12 +424,26 @@ pub const PaletteListProvider = struct {
     }
 
     fn FragmentRootElementProviderFromPoint(
-        _: *com.IRawElementProviderFragmentRoot,
-        _: f64,
-        _: f64,
+        self_root: *com.IRawElementProviderFragmentRoot,
+        x: f64,
+        y: f64,
         out: *?*com.IRawElementProviderFragment,
     ) callconv(.winapi) com.HRESULT {
         out.* = null;
+        const self = fromFragmentRoot(self_root);
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return com.S_OK;
+        const snapshot = self.geometry() orelse return com.S_OK;
+        if (x < snapshot.bounds.left or x >= snapshot.bounds.left + snapshot.bounds.width or
+            y < snapshot.bounds.top or y >= snapshot.bounds.top + snapshot.bounds.height)
+        {
+            return com.S_OK;
+        }
+        const offset: usize = @intFromFloat(@floor((y - snapshot.bounds.top) / snapshot.row_height));
+        if (offset >= snapshot.visible_count) return com.S_OK;
+        const index = snapshot.first_visible + offset;
+        const row = self.createRow(index) orelse return com.S_OK;
+        out.* = &row.fragment;
         return com.S_OK;
     }
 
@@ -551,6 +598,7 @@ const PaletteRowProvider = struct {
                 out.* = com.VARIANT.fromBstr(allocBstrFromUtf8(self.alloc, callback(self.parent.state.ctx, self.index, &buf)));
             },
             constants.UIA_SelectionItemIsSelectedPropertyId => out.* = com.VARIANT.fromBool(self.parent.selectedIndex() == self.index),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(self.parent.rowBounds(self.index) == null),
             constants.UIA_IsControlElementPropertyId, constants.UIA_IsContentElementPropertyId, constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(true),
             else => {},
         }
@@ -599,8 +647,10 @@ const PaletteRowProvider = struct {
         out.* = array;
         return com.S_OK;
     }
-    fn GetBoundingRectangle(_: *com.IRawElementProviderFragment, out: *com.UiaRect) callconv(.winapi) com.HRESULT {
-        out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+    fn GetBoundingRectangle(p: *com.IRawElementProviderFragment, out: *com.UiaRect) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = self.parent.rowBounds(self.index) orelse .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         return com.S_OK;
     }
     fn GetEmbeddedFragmentRoots(_: *com.IRawElementProviderFragment, out: *?*com.SAFEARRAY) callconv(.winapi) com.HRESULT {
@@ -1691,6 +1741,7 @@ const TestPaletteState = struct {
     selected_by_provider: ?usize = null,
     reentrant_provider: ?*PaletteListProvider = null,
     reentrant_queries: u32 = 0,
+    list_geometry: ?PaletteListGeometry = null,
 
     fn name(_: *anyopaque, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "palette", .{}) catch "";
@@ -1723,6 +1774,11 @@ const TestPaletteState = struct {
         }
     }
 
+    fn geometry(ctx: *anyopaque) ?PaletteListGeometry {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        return self.list_geometry;
+    }
+
     fn state(self: *TestPaletteState) PaletteListState {
         return .{
             .ctx = self,
@@ -1731,9 +1787,55 @@ const TestPaletteState = struct {
             .selected_index = selectedIndex,
             .row_name = rowName,
             .select_row = selectRow,
+            .geometry = geometry,
         };
     }
 };
+
+test "Palette geometry maps scrolled rows and hit testing" {
+    var state_data = TestPaletteState{
+        .count = 10,
+        .selected = 5,
+        .list_geometry = .{
+            .bounds = .{ .left = 100, .top = 200, .width = 300, .height = 108 },
+            .first_visible = 4,
+            .visible_count = 3,
+            .row_height = 36,
+        },
+    };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    const visible = provider.rowBounds(5).?;
+    try std.testing.expectEqual(@as(f64, 100), visible.left);
+    try std.testing.expectEqual(@as(f64, 236), visible.top);
+    try std.testing.expectEqual(@as(f64, 300), visible.width);
+    try std.testing.expectEqual(@as(f64, 36), visible.height);
+    try std.testing.expect(provider.rowBounds(3) == null);
+    try std.testing.expect(provider.rowBounds(7) == null);
+
+    var hit: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootElementProviderFromPoint(
+        &provider.fragment_root,
+        150,
+        218,
+        &hit,
+    ));
+    defer if (hit) |row| {
+        _ = PaletteRowProvider.FragmentRelease(row);
+    };
+    try std.testing.expect(hit != null);
+    try std.testing.expectEqual(@as(usize, 4), PaletteRowProvider.fromFragment(hit.?).index);
+
+    var outside: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootElementProviderFromPoint(
+        &provider.fragment_root,
+        400,
+        218,
+        &outside,
+    ));
+    try std.testing.expectEqual(@as(?*com.IRawElementProviderFragment, null), outside);
+}
 
 test "PaletteListProvider fragment navigation reaches rows and parent" {
     var state_data = TestPaletteState{};

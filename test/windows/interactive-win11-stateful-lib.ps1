@@ -108,11 +108,6 @@ function Show-StatefulHost([IntPtr] $HostHwnd) {
     Start-Sleep -Milliseconds 200
 }
 
-function Send-StatefulKey([IntPtr] $Hwnd, [int] $VirtualKey) {
-    [void][WinghosttyStatefulNative]::SendMessageW($Hwnd, 0x0100, [UIntPtr]([uint64]$VirtualKey), [IntPtr]::Zero)
-    [void][WinghosttyStatefulNative]::SendMessageW($Hwnd, 0x0101, [UIntPtr]([uint64]$VirtualKey), [IntPtr]::Zero)
-}
-
 function Get-StatefulPixel([IntPtr] $Hwnd) {
     $rect = [WinghosttyStatefulNative+RECT]::new()
     if (-not [WinghosttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) {
@@ -145,10 +140,11 @@ function Get-StatefulPixel([IntPtr] $Hwnd) {
     }
 }
 
-function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] $Name) {
+function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] $Name, [string[]] $ExtraArguments = @()) {
     $stdout = Join-Path $Layout.Logs "$Name-stdout.log"
     $stderr = Join-Path $Layout.Logs "$Name-stderr.log"
-    $process = Start-Process -FilePath $Exe -ArgumentList @(Get-InteractiveWin11LaunchArguments -Layout $Layout) `
+    $arguments = @((Get-InteractiveWin11LaunchArguments -Layout $Layout)) + @($ExtraArguments)
+    $process = Start-Process -FilePath $Exe -ArgumentList $arguments `
         -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     return [pscustomobject]@{ Process = $process; Stdout = $stdout; Stderr = $stderr }
 }

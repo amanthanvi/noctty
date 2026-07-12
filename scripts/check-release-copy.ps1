@@ -19,6 +19,7 @@ $copyPaths = @(
     "site/components/terminal.jsx",
     "site/components/hero/version-chip-color.jsx",
     "site/components/why/why-fork.jsx",
+    "site/components/features/feature-grid.jsx",
     "site/bundle.js"
 )
 
@@ -147,6 +148,8 @@ $forbiddenRules = @(
     @{ Text = "code signing lands"; Reason = "Release signing is already part of the public release track." }
     @{ Text = "Update installation remains manual"; Reason = "Download mode supports a user-initiated verified installer launch." }
     @{ Text = "notify-only GitHub Releases updater"; Reason = "Download mode stages verified installers for user-initiated apply." }
+    @{ Text = "updates stay notify-only"; Reason = "Download mode stages verified installers for user-initiated apply." }
+    @{ Text = "updater only checks GitHub"; Reason = "Download mode can stage a verified installer after checking GitHub Releases." }
     @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the winghostty package identity." }
 )
 

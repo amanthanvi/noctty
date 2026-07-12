@@ -1886,6 +1886,7 @@ fn sendListWindowsIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
+    defer win32_ipc.writeAll(pipe, &.{win32_ipc.ack_success}) catch {};
     return try win32_ipc.readDataResponse(alloc, pipe);
 }
 
@@ -2043,16 +2044,25 @@ fn ipcServerMain(app: *App) void {
             break;
         }
 
-        handleIpcClient(app, pipe) catch |err| {
+        const handled_kind: ?win32_ipc.RequestKind = handleIpcClient(app, pipe) catch |err| failed: {
             log.warn("failed to process win32 IPC client err={}", .{err});
+            break :failed null;
         };
+
+        // Hold list responses until the reader confirms consumption. Without
+        // this bounded handshake, DisconnectNamedPipe can discard bytes that
+        // WriteFile already accepted into the server buffer.
+        if (handled_kind == .list_windows) {
+            var completion: [1]u8 = undefined;
+            win32_ipc.readExactWithTimeout(pipe, &completion, win32_ipc.io_timeout_ms) catch {};
+        }
 
         _ = DisconnectNamedPipe(pipe);
         _ = windows.CloseHandle(pipe);
     }
 }
 
-fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
+fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
     const kind = win32_ipc.decodeRequestKind(pipe) catch |err| {
         win32_ipc.writeAck(pipe, false) catch {};
         return err;
@@ -2072,6 +2082,7 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
             try win32_ipc.writeAck(pipe, false);
         },
     }
+    return kind;
 }
 
 fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
@@ -2133,7 +2144,10 @@ fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
         return error.IPCFailed;
     }
 
-    request.done.timedWait(win32_ipc.io_timeout_ms * std.time.ns_per_ms) catch return error.IpcTimeout;
+    // `request` is stack-backed and the mailbox stores its address. Once the
+    // bounded push succeeds, the UI consumer must finish before this frame can
+    // return. Timing out here would leave a dangling request in the mailbox.
+    waitForAutomationCompletion(&request.done);
     if (request.err) |err| return err;
     return request.result orelse error.IPCFailed;
 }
@@ -2159,8 +2173,14 @@ fn requestAutomationAction(
         return error.IPCFailed;
     }
 
-    request.done.timedWait(win32_ipc.io_timeout_ms * std.time.ns_per_ms) catch return error.IpcTimeout;
+    // The request and action slice are borrowed by the mailbox consumer. The
+    // admission wait is bounded; after admission, wait until the borrow ends.
+    waitForAutomationCompletion(&request.done);
     if (request.err) |err| return err;
+}
+
+fn waitForAutomationCompletion(done: *std.Thread.ResetEvent) void {
+    done.wait();
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -2685,7 +2705,7 @@ pub const App = struct {
         if (!self.safe_mode) try self.startIpcServer();
 
         if (self.config.@"initial-window") {
-            const restored = if (self.safe_mode) false else try self.restoreSessionState();
+            const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
@@ -2877,7 +2897,17 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return sessionStatePolicyAllows(self.safe_mode, self.config.@"window-save-state");
+        return self.sessionRestoreEligible();
+    }
+
+    fn sessionRestoreEligible(self: *const App) bool {
+        return sessionRestorePolicyAllows(
+            self.safe_mode,
+            self.config.@"window-save-state",
+            self.config.@"initial-window",
+            self.config.@"initial-command" != null,
+            self.startup_profile_picker,
+        );
     }
 
     /// Populate `palette_mru` from the on-disk file, one action per line
@@ -3052,6 +3082,8 @@ pub const App = struct {
         self: *App,
         window: win32_session_state.Window,
     ) !*Surface {
+        var transaction: SessionRestoreTransaction = .{};
+        defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
 
@@ -3060,6 +3092,7 @@ pub const App = struct {
                 saved_tab,
                 host,
                 tab_index,
+                &transaction,
             );
             if (host == null) {
                 host = tab_surface.host;
@@ -3078,7 +3111,9 @@ pub const App = struct {
         if (restored_host.tabs.items.len == 0) return error.EmptyTabs;
         restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
         const active_tab = &restored_host.tabs.items[restored_host.active_tab];
-        return active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+        const selected = active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+        transaction.commit();
+        return selected;
     }
 
     fn restoreSessionTab(
@@ -3086,6 +3121,7 @@ pub const App = struct {
         saved_tab: win32_session_state.Tab,
         existing_host: ?*Host,
         tab_index: usize,
+        transaction: *SessionRestoreTransaction,
     ) !*Surface {
         var tab_surface: ?*Surface = null;
         var created: usize = 0;
@@ -3105,6 +3141,7 @@ pub const App = struct {
                 tab_surface,
                 tab_index,
                 preferredSplitDirection(saved_tab.layout),
+                transaction,
             );
             node_surfaces[node_index] = surface;
             if (tab_surface == null) tab_surface = surface;
@@ -3137,6 +3174,7 @@ pub const App = struct {
         tab_surface: ?*Surface,
         tab_index: usize,
         split_direction: SplitTreeSurface.Split.Direction,
+        transaction: *SessionRestoreTransaction,
     ) !*Surface {
         const host = existing_host orelse if (tab_surface) |source| source.host else null;
         const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
@@ -3165,6 +3203,7 @@ pub const App = struct {
             .clone_state_from = tab_surface,
             .split_direction = split_direction,
         });
+        transaction.noteSurface(surface);
 
         if (pane.profile) |key| try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
         if (pane.title_override) |title| try surface.setTitleOverride(title);
@@ -9509,6 +9548,7 @@ const Host = struct {
             .selected_index = &paletteListSelectedIndexThunk,
             .row_name = &paletteListRowNameThunk,
             .select_row = &paletteListSelectRowThunk,
+            .geometry = &paletteListGeometryThunk,
         };
     }
 
@@ -16129,6 +16169,27 @@ fn paletteListRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 
 fn paletteListSelectRowThunk(ctx: *anyopaque, index: usize) void {
     const host: *Host = @ptrCast(@alignCast(ctx));
     _ = host.setPaletteListSelection(index);
+}
+
+fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.palette_list_hwnd orelse return null;
+    var rect: RECT = undefined;
+    if (GetWindowRect(hwnd, &rect) == 0) return null;
+    const row_height = host.scaled(palette_row_height);
+    if (row_height <= 0 or rect.right <= rect.left or rect.bottom <= rect.top) return null;
+    const remaining = host.palette_list_ranked_count -| host.palette_list_scroll;
+    return .{
+        .bounds = .{
+            .left = @floatFromInt(rect.left),
+            .top = @floatFromInt(rect.top),
+            .width = @floatFromInt(rect.right - rect.left),
+            .height = @floatFromInt(rect.bottom - rect.top),
+        },
+        .first_visible = host.palette_list_scroll,
+        .visible_count = @min(remaining, palette_max_visible_rows),
+        .row_height = @floatFromInt(row_height),
+    };
 }
 
 /// Thunks adapting `*App` into the `AppHandle` callback shape used by
@@ -30463,6 +30524,29 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     );
 }
 
+test "win32 admitted automation request keeps producer alive until consumption" {
+    const Context = struct {
+        done: std.Thread.ResetEvent = .{},
+        started: std.Thread.ResetEvent = .{},
+        returned: std.Thread.ResetEvent = .{},
+
+        fn run(ctx: *@This()) void {
+            ctx.started.set();
+            waitForAutomationCompletion(&ctx.done);
+            ctx.returned.set();
+        }
+    };
+
+    var ctx: Context = .{};
+    const thread = try std.Thread.spawn(.{}, Context.run, .{&ctx});
+    defer thread.join();
+    defer ctx.done.set();
+    ctx.started.wait();
+    try std.testing.expectError(error.Timeout, ctx.returned.timedWait(std.time.ns_per_ms));
+    ctx.done.set();
+    try ctx.returned.timedWait(std.time.ns_per_s);
+}
+
 test "win32 IPC silent client read is bounded" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -31175,6 +31259,38 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
     return !safe_mode and policy != .never;
 }
 
+const SessionRestoreTransaction = struct {
+    host: ?*Host = null,
+    committed: bool = false,
+
+    fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
+        if (self.host == null) self.host = surface.host;
+    }
+
+    fn commit(self: *SessionRestoreTransaction) void {
+        self.committed = true;
+    }
+
+    fn rollback(self: *SessionRestoreTransaction) void {
+        if (self.committed) return;
+        const host = self.host orelse return;
+        host.close();
+    }
+};
+
+fn sessionRestorePolicyAllows(
+    safe_mode: bool,
+    policy: configpkg.Config.WindowSaveState,
+    initial_window: bool,
+    has_initial_command: bool,
+    startup_profile_picker: bool,
+) bool {
+    return sessionStatePolicyAllows(safe_mode, policy) and
+        initial_window and
+        !has_initial_command and
+        !startup_profile_picker;
+}
+
 test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(!sessionStatePolicyAllows(true, .default));
     try std.testing.expect(!sessionStatePolicyAllows(true, .always));
@@ -31182,6 +31298,17 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(sessionStatePolicyAllows(false, .default));
     try std.testing.expect(sessionStatePolicyAllows(false, .always));
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
+}
+
+test "win32 explicit startup flows bypass session restore" {
+    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
 }
 
 test "win32 session state window rect requires complete geometry" {

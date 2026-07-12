@@ -41,4 +41,4 @@ if ($failures.Count -gt 0) {
     $failures | Sort-Object -Unique | ForEach-Object { Write-Error $_ }
     exit 1
 }
-Write-Host 'PowerShell syntax and text formatting checks passed.' -ForegroundColor Green
+Write-Host 'PowerShell syntax and JSON validity checks passed.' -ForegroundColor Green

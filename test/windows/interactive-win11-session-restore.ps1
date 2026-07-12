@@ -22,9 +22,25 @@ $stateDir = Join-Path $layout.LocalAppData 'winghostty'; New-Item -ItemType Dire
 $configPath = Join-Path $stateDir 'config.ghostty'; [IO.File]::WriteAllText($configPath, "window-save-state = always`r`n", [Text.UTF8Encoding]::new($false))
 $statePath = Join-Path $stateDir 'session-state.json'
 $runs = [Collections.Generic.List[object]]::new()
+$instanceClass = "winghostty-interactive-$($layout.SandboxId)"
+function Get-SessionAutomationSnapshot([string]$Name) {
+    $cli = Join-Path (Split-Path -Parent $exe) 'winghostty.com'
+    if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }
+    $lastError = ''
+    foreach ($attempt in 1..3) {
+        $out = Join-Path $layout.Logs "$Name-$attempt.json"
+        $err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"
+        $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+        $query.WaitForExit(); $query.Refresh()
+        if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return Get-Content $out -Raw | ConvertFrom-Json }
+        $lastError = if (Test-Path $err) { Get-Content $err -Raw } else { "exit $($query.ExitCode)" }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Session automation query failed after three attempts: $lastError"
+}
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $first = Start-StatefulApp $layout $exe $repoRoot 'session-save'; $runs.Add($first)
+    $first = Start-StatefulApp $layout $exe $repoRoot 'session-save' @('--single-instance=true'); $runs.Add($first)
     $hostHwnd = Wait-StatefulHost $first $deadline
     Invoke-StatefulCommand $hostHwnd 1904; Invoke-StatefulCommand $hostHwnd 1904
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
@@ -33,11 +49,25 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'session-state file' -Condition { Test-Path $statePath }
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
     if ($saved.windows[0].tabs.Count -ne 3 -or $saved.windows[0].selected_tab -ne 1) { throw "Saved session mismatch: $($saved | ConvertTo-Json -Depth 8 -Compress)" }
+    $savedRaw = Get-Content $statePath -Raw
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $second = Start-StatefulApp $layout $exe $repoRoot 'session-restore'; $runs.Add($second)
+    $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
+    $explicitHost = Wait-StatefulHost $explicit $deadline
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
+    Close-StatefulHost $explicitHost $explicit $deadline
+    if ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $second = Start-StatefulApp $layout $exe $repoRoot 'session-restore' @('--single-instance=true'); $runs.Add($second)
     $restoredHost = Wait-StatefulHost $second $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'restored tabs' -Process $second.Process -Condition { (Get-StatefulTabCount $restoredHost) -eq 3 }
+    $snapshot = Get-SessionAutomationSnapshot 'session-restore-automation'
+    if ($snapshot.windows.Count -ne 1 -or $snapshot.windows[0].tabs.Count -ne 3) { throw "Restored automation shape mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)" }
+    $activeTabs = @($snapshot.windows[0].tabs | Where-Object active)
+    if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[1].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[1].active) {
+        throw "Restored selected tab mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)"
+    }
     Close-StatefulHost $restoredHost $second $deadline
 
     [IO.File]::WriteAllText($statePath, '{not valid json', [Text.UTF8Encoding]::new($false))

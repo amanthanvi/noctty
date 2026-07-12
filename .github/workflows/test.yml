@@ -54,7 +54,7 @@ jobs:
         shell: pwsh
         run: ./scripts/check-zig-format.ps1
 
-      - name: PowerShell and text formatting
+      - name: PowerShell syntax and JSON validity
         shell: pwsh
         run: ./scripts/check-source-format.ps1
 

@@ -24,6 +24,7 @@ pub const UIA_ControlTypePropertyId: i32 = 30003;
 pub const UIA_LocalizedControlTypePropertyId: i32 = 30004;
 pub const UIA_NamePropertyId: i32 = 30005;
 pub const UIA_IsKeyboardFocusablePropertyId: i32 = 30009;
+pub const UIA_IsOffscreenPropertyId: i32 = 30022;
 pub const UIA_HasKeyboardFocusPropertyId: i32 = 30008;
 pub const UIA_IsEnabledPropertyId: i32 = 30010;
 pub const UIA_HelpTextPropertyId: i32 = 30013;
