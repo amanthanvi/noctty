@@ -17,7 +17,7 @@ Status: complete.
 - [x] PR smoke plus nightly/main interactive Win11 policy.
 - [x] Fork-only review loop clean; squash merge and signed release complete.
 
-Closure evidence: PRs #81 and #82 squash-merged; exact-SHA Test run 29202934856 passed; signed release v1.3.118 published and verified.
+Closure evidence: PRs #81 and #82 squash-merged; exact-SHA Test run 29202934856 passed at implementation SHA `6f91c8377efd627a3b13bc561997b4b771fd46ec`; signed release v1.3.118 published and verified.
 
 Implementation evidence belongs in the PR and release. Reopen a checkbox when
 its acceptance condition regresses.
