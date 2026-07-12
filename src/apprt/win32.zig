@@ -6664,12 +6664,20 @@ pub const App = struct {
         defer self.quitting = previous_quitting;
         self.session_restore_rollback_host = host;
         defer self.session_restore_rollback_host = null;
-        if (self.shell_runtime_initialized) {
-            if (host.shell_id) |window_id| self.shell_runtime.rollbackWindow(window_id);
-        }
         host.clearStructuralHistory(.normal);
         if (host.hwnd) |hwnd| {
-            _ = DestroyWindow(hwnd);
+            if (DestroyWindow(hwnd) == 0) {
+                const destroy_err = windows.kernel32.GetLastError();
+                if (IsWindow(hwnd) != 0) {
+                    log.err("failed to destroy partially restored host; retaining ownership err={}", .{
+                        destroy_err,
+                    });
+                    return;
+                }
+            }
+        }
+        if (self.shell_runtime_initialized) {
+            if (host.shell_id) |window_id| self.shell_runtime.rollbackWindow(window_id);
         }
         self.removeHost(host);
     }

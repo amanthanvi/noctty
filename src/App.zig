@@ -103,6 +103,8 @@ pub fn init(
 }
 
 pub fn deinit(self: *App) void {
+    while (self.mailbox.pop()) |message| message.deinit(self.alloc);
+
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
     self.surfaces.deinit(self.alloc);
@@ -750,6 +752,19 @@ pub const Message = union(enum) {
     /// message if it needs to.
     redraw_surface: *apprt.Surface,
 
+    pub fn deinit(self: Message, alloc: Allocator) void {
+        switch (self) {
+            .new_window => |message| message.deinit(alloc),
+            .automation_window_list => |request| request.release(),
+            .automation_action => |request| request.release(),
+            .surface_message => |payload| {
+                var message = payload.message;
+                message.deinit();
+            },
+            else => {},
+        }
+    }
+
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
         refs: std.atomic.Value(u32) = .init(1),
@@ -829,6 +844,22 @@ pub const Message = union(enum) {
         }
     };
 };
+
+test "queued automation messages release consumer ownership during teardown" {
+    const action_request = try Message.AutomationActionRequest.create(
+        std.testing.allocator,
+        .focused,
+        "new_tab",
+    );
+    action_request.retain();
+    action_request.release();
+    (Message{ .automation_action = action_request }).deinit(std.testing.allocator);
+
+    const list_request = try Message.AutomationWindowListRequest.create(std.testing.allocator);
+    list_request.retain();
+    list_request.release();
+    (Message{ .automation_window_list = list_request }).deinit(std.testing.allocator);
+}
 
 /// Mailbox is the way that other threads send the app thread messages.
 pub const Mailbox = struct {
