@@ -139,7 +139,10 @@ pub fn listFromDirectories(alloc: Allocator, dirs: []const Directory) ![]Entry {
     for (dirs) |loc| {
         var dir = std.fs.cwd().openDir(loc.dir, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => continue,
-            else => continue,
+            else => {
+                std.log.warn("failed to open theme directory dir={s} err={}", .{ loc.dir, err });
+                continue;
+            },
         };
         defer dir.close();
 

@@ -2175,8 +2175,10 @@ fn requestAutomationAction(
 }
 
 fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
+    const deadline_ms = GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
     while (!completed.load(.acquire)) {
         if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
+        if (GetTickCount64() >= deadline_ms) return error.IpcTimeout;
         std.Thread.sleep(std.time.ns_per_ms);
     }
 }

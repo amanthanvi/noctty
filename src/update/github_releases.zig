@@ -368,10 +368,13 @@ pub fn verifyStagedWindowsInstall(
     const stage_dir = std.fs.path.dirname(installer_path) orelse return error.InvalidStagedInstallerPath;
     var locked_stage_dir = try openLockedStageDirectory(stage_dir);
     errdefer locked_stage_dir.close();
+    if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
+        return error.InvalidStagedInstallerPath;
+    }
 
     var locked_file = try openLockedInstaller(installer_path);
     errdefer locked_file.close();
-    if (!try lockedFileMatchesPath(alloc, installer_path, locked_file.handle)) {
+    if (!try lockedHandleMatchesPath(alloc, installer_path, locked_file.handle)) {
         return error.InvalidStagedInstallerPath;
     }
 
@@ -576,7 +579,6 @@ fn openLockedInstaller(path: []const u8) !std.fs.File {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
     const windows = std.os.windows;
-    try rejectReparsePoint(path);
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
 
@@ -599,7 +601,6 @@ fn openLockedStageDirectory(path: []const u8) !std.fs.File {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
     const windows = std.os.windows;
-    try rejectReparsePoint(path);
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
 
@@ -618,17 +619,7 @@ fn openLockedStageDirectory(path: []const u8) !std.fs.File {
     return .{ .handle = handle };
 }
 
-fn rejectReparsePoint(path: []const u8) !void {
-    const windows = std.os.windows;
-    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
-    defer std.heap.page_allocator.free(path_w);
-    const attrs = try windows.GetFileAttributesW(path_w.ptr);
-    if ((attrs & windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return error.StagedInstallerReparsePoint;
-    }
-}
-
-fn lockedFileMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
+fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
     var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
     const final_w = try std.os.windows.GetFinalPathNameByHandle(
         handle,
