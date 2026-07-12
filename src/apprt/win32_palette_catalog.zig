@@ -43,6 +43,9 @@ pub const HelpTarget = enum {
 pub const ThemeEntry = struct {
     /// Installed theme name from a caller-owned snapshot.
     name: []const u8,
+    /// Optional bounded label for display. Identity and invocation always use
+    /// the exact `name` above.
+    display_name: ?[]const u8 = null,
     description: []const u8 = "Theme",
     enabled: bool = true,
     disabled_reason: ?[]const u8 = null,
@@ -199,7 +202,7 @@ pub const Catalog = struct {
         for (selected) |theme| {
             self.item_storage[self.count] = .{
                 .id = stableStringId(.theme, theme.name),
-                .title = theme.name,
+                .title = theme.display_name orelse theme.name,
                 .subtitle = theme.description,
                 .keywords = "theme appearance colors",
                 .enabled = theme.enabled,
@@ -492,6 +495,24 @@ test "installed theme snapshot and reviewed help produce typed payloads" {
     try std.testing.expectEqualStrings("Winghostty Dark", catalog.payloadFor(theme_results[0]).?.theme);
     const help_results = catalog.rank("?keyboard", .{}, &ranked_storage);
     try std.testing.expectEqual(HelpTarget.keyboard_shortcuts, catalog.payloadFor(help_results[0]).?.help);
+}
+
+test "theme display labels do not truncate identity or invocation payloads" {
+    const exact_name = "A theme name long enough to require a separately bounded display label";
+    const themes = [_]ThemeEntry{.{
+        .name = exact_name,
+        .display_name = exact_name[0..16],
+    }};
+    var item_storage: [1]Item = undefined;
+    var payload_storage: [1]Payload = undefined;
+    var catalog = try Catalog.init(&item_storage, &payload_storage);
+    try catalog.appendThemes(&themes);
+
+    try std.testing.expectEqualStrings(exact_name[0..16], catalog.items()[0].title);
+    var ranked_storage: [1]Ranked = undefined;
+    const ranked = catalog.rank("%theme", .{}, &ranked_storage);
+    try std.testing.expectEqualStrings(exact_name, catalog.payloadFor(ranked[0]).?.theme);
+    try std.testing.expect(catalog.items()[0].id.eql(stableStringId(.theme, exact_name)));
 }
 
 test "bounded theme append keeps deterministic prefix under storage pressure" {

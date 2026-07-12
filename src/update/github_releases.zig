@@ -867,6 +867,19 @@ const CryptProviderSgnr = extern struct {
 const CryptProviderCert = extern struct {
     cbStruct: u32,
     pCert: ?*const CertContext,
+    fCommercial: i32,
+    fTrustedRoot: i32,
+    fSelfSigned: i32,
+    fTestCert: i32,
+    dwRevokedReason: u32,
+    dwConfidence: u32,
+    dwError: u32,
+    pTrustListContext: ?*anyopaque,
+    fTrustListSignerCert: i32,
+    pCtlContext: ?*const anyopaque,
+    dwCtlError: u32,
+    fIsCyclic: i32,
+    pChainElement: ?*const anyopaque,
 };
 
 fn shouldCheckNetwork(last_checked_at: i64, now: i64) bool {
@@ -1540,6 +1553,16 @@ test "windows updater publisher SPKI pin allowlist is fail closed" {
     var rejected = allowed;
     rejected[0] ^= 0xff;
     try std.testing.expect(!publisherSpkiHashAllowed(&rejected));
+}
+
+test "WinTrust certificate chain entry matches SDK ABI" {
+    const expected_size: usize = if (@sizeOf(usize) == 8) 88 else 60;
+    const expected_cert_offset: usize = if (@sizeOf(usize) == 8) 8 else 4;
+    const expected_chain_offset: usize = if (@sizeOf(usize) == 8) 80 else 56;
+
+    try std.testing.expectEqual(expected_size, @sizeOf(CryptProviderCert));
+    try std.testing.expectEqual(expected_cert_offset, @offsetOf(CryptProviderCert, "pCert"));
+    try std.testing.expectEqual(expected_chain_offset, @offsetOf(CryptProviderCert, "pChainElement"));
 }
 
 test "windows updater publisher pin only overrides untrusted root" {

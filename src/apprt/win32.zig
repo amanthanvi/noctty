@@ -8109,6 +8109,8 @@ const Host = struct {
     palette_catalog: ?PaletteCatalog = null,
     palette_catalog_labels: [palette_catalog_label_capacity][palette_catalog_label_bytes]u8 = undefined,
     palette_catalog_label_count: usize = 0,
+    /// Owned installed-theme snapshot backing exact catalog payload names.
+    palette_installed_themes: ?[]themepkg.Entry = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     palette_list_scroll: usize = 0,
@@ -9302,6 +9304,7 @@ const Host = struct {
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         catalog.reset();
+        self.clearPaletteInstalledThemes();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
             error.StorageTooSmall
@@ -9665,7 +9668,7 @@ const Host = struct {
             log.warn("palette theme enumeration failed err={}", .{err});
             return;
         };
-        defer themepkg.freeList(alloc, installed);
+        self.palette_installed_themes = installed;
         if (installed.len == 0) return;
 
         const reserve_items: usize = win32_palette.catalog.reviewed_help.len + self.app.palette_mru.len;
@@ -9684,7 +9687,8 @@ const Host = struct {
         };
         for (installed[0..theme_limit]) |theme| {
             entries.appendAssumeCapacity(.{
-                .name = self.storePaletteCatalogLabel(theme.name),
+                .name = theme.name,
+                .display_name = self.storePaletteCatalogLabel(theme.name),
                 .description = switch (theme.location) {
                     .user => "User theme",
                     .resources => "Bundled theme",
@@ -9695,6 +9699,12 @@ const Host = struct {
         _ = catalog.appendThemesBounded(entries.items, theme_limit) catch |err| {
             log.warn("palette theme batch rejected err={}", .{err});
         };
+    }
+
+    fn clearPaletteInstalledThemes(self: *Host) void {
+        const installed = self.palette_installed_themes orelse return;
+        self.palette_installed_themes = null;
+        themepkg.freeList(self.app.core_app.alloc, installed);
     }
 
     fn selectedPaletteThemeName(self: *Host) ?[]const u8 {
@@ -10069,6 +10079,7 @@ const Host = struct {
         self.tween_sched.deinit();
 
         self.revertPaletteThemePreview();
+        self.clearPaletteInstalledThemes();
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
