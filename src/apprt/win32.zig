@@ -2716,6 +2716,7 @@ pub const App = struct {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
             }
+            self.startup_profile_picker = false;
         } else {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
@@ -2898,7 +2899,7 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return self.sessionRestoreEligible();
+        return sessionStatePolicyAllows(self.safe_mode, self.config.@"window-save-state");
     }
 
     fn sessionRestoreEligible(self: *const App) bool {
@@ -31340,6 +31341,11 @@ test "win32 explicit startup flows bypass session restore" {
     try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
     try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
+
+    // Explicit startup flows suppress restore only. Once running, their
+    // windows still participate in normal session persistence.
+    try std.testing.expect(sessionStatePolicyAllows(false, .default));
+    try std.testing.expect(sessionStatePolicyAllows(false, .always));
 }
 
 test "win32 session state window rect requires complete geometry" {
