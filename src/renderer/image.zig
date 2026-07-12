@@ -99,15 +99,14 @@ pub const State = struct {
 
     /// Draw the given named set of placements.
     ///
-    /// Any placements that have non-uploaded images are ignored. Any
-    /// graphics API errors during drawing are also ignored.
+    /// Any placements that have non-uploaded images are ignored.
     pub fn draw(
         self: *State,
         api: *GraphicsAPI,
         pipeline: GraphicsAPI.Pipeline,
         pass: *GraphicsAPI.RenderPass,
         placement_type: DrawPlacements,
-    ) void {
+    ) !void {
         const placements: []const Placement = switch (placement_type) {
             .kitty_below_bg => self.kitty_placements.items[0..self.kitty_bg_end],
             .kitty_below_text => self.kitty_placements.items[self.kitty_bg_end..self.kitty_text_end],
@@ -166,7 +165,7 @@ pub const State = struct {
             };
             defer buf.deinit();
 
-            pass.step(.{
+            try pass.step(.{
                 .pipeline = pipeline,
                 .buffers = &.{buf.buffer},
                 .textures = &.{texture},
