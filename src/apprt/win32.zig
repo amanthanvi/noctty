@@ -1126,8 +1126,6 @@ extern "kernel32" fn ConnectNamedPipe(
     hNamedPipe: windows.HANDLE,
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
-extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: windows.HANDLE) callconv(.winapi) BOOL;
-extern "kernel32" fn FlushFileBuffers(hFile: windows.HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;
 extern "kernel32" fn SetCurrentDirectoryW(lpPathName: LPCWSTR) callconv(.winapi) BOOL;
@@ -2047,19 +2045,14 @@ fn ipcServerMain(app: *App) void {
             break;
         }
 
-        const handled_kind: ?win32_ipc.RequestKind = handleIpcClient(app, pipe) catch |err| failed: {
+        _ = handleIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 IPC client err={}", .{err});
-            break :failed null;
-        };
-        // DisconnectNamedPipe discards unread response bytes. Closing only the
-        // server handle keeps the pipe object alive through the client's handle
-        // so the exact-length list response can be drained safely.
-        if (handled_kind == .list_windows) {
             _ = windows.CloseHandle(pipe);
             continue :server;
-        }
-
-        _ = DisconnectNamedPipe(pipe);
+        };
+        // Each pipe instance serves one request. Closing only the server handle
+        // keeps unread response bytes available through the client's handle;
+        // DisconnectNamedPipe would discard them.
         _ = windows.CloseHandle(pipe);
     }
 }
@@ -9820,13 +9813,12 @@ const Host = struct {
 
         self.app.settingsSaveAndReload(&pending, &original) catch |err| {
             log.warn("palette theme save failed theme={s} err={}", .{ name, err });
-            var restored = original.clone(self.app.core_app.alloc) catch {
+            const restored = original.clone(self.app.core_app.alloc) catch {
                 try self.setBanner(.err, "Theme save failed; restart or reload config to clear the preview.");
                 return;
             };
-            errdefer restored.deinit();
             self.replaceRuntimeConfigFromPalette(restored);
-            try self.setBanner(.err, "Theme save failed; reverted preview.");
+            self.setBanner(.err, "Theme save failed; reverted preview.") catch {};
             return;
         };
 

@@ -140,6 +140,7 @@ pub fn evictOldest(
     ctx: anytype,
     disposeFn: anytype,
 ) !void {
+    if (list.items.len == 0) return;
     try disposeFn(ctx, &list.items[0]);
     _ = list.orderedRemove(0);
 }
@@ -164,6 +165,12 @@ test "structural history ordering uses sequence when timestamps tie" {
     try std.testing.expect(!sortsAfter(10, 1, 10, 2));
     try std.testing.expect(sortsAfter(11, 0, 10, 999));
     try std.testing.expect(chooseStructural(20, 5, 20, 4));
+}
+
+test "structural history empty eviction is a no-op" {
+    var list: List(DummyEntry) = .empty;
+    var ctx: DummyCtx = .{};
+    try evictOldest(DummyEntry, &list, &ctx, disposeDummy);
 }
 
 test "structural history move failure rolls entry back before replay" {

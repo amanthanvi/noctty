@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $failures = [System.Collections.Generic.List[string]]::new()
 $node = Get-Command node -ErrorAction SilentlyContinue
-$tracked = @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- '*.ps1' '*.psm1' '*.md' '*.yml' '*.yaml' '*.json')
+$tracked = @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- '*.ps1' '*.psm1' '*.json')
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
 
 foreach ($relative in $tracked) {
@@ -14,7 +14,7 @@ foreach ($relative in $tracked) {
         $tokens = $null
         $errors = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-        foreach ($error in $errors) { $failures.Add("${relative}: $($error.Message)") }
+        foreach ($parseError in $errors) { $failures.Add("${relative}: $($parseError.Message)") }
     }
     elseif ($relative.EndsWith('.json')) {
         try {

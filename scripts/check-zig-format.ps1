@@ -7,9 +7,15 @@ $paths = @('build.zig') + @(& git -C $repoRoot ls-files --cached --others --excl
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed while collecting Zig sources.' }
 $paths = @($paths | Where-Object { $_ -ne 'src/build/uucode_tables.zig' } | Sort-Object -Unique)
 
-for ($offset = 0; $offset -lt $paths.Count; $offset += 100) {
-    $end = [Math]::Min($offset + 99, $paths.Count - 1)
-    & zig fmt --check @($paths[$offset..$end])
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Push-Location $repoRoot
+try {
+    for ($offset = 0; $offset -lt $paths.Count; $offset += 100) {
+        $end = [Math]::Min($offset + 99, $paths.Count - 1)
+        & zig fmt --check @($paths[$offset..$end])
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+}
+finally {
+    Pop-Location
 }
 Write-Host "Zig formatting checks passed ($($paths.Count) tracked sources)." -ForegroundColor Green

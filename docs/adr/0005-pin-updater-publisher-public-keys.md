@@ -21,7 +21,7 @@ release signing moves to the next key; a later release may remove the retired
 key. An empty allowlist or a signer mismatch disables verified download/apply
 and fails visibly while leaving release-page checks available.
 
-The staged installer and its containing stage directory must remain opened
+The staged installer and its containing stage directory must remain open
 without delete sharing from hash and Authenticode verification until the
 elevated launch handoff returns. The verifier rejects reparse points and
 compares the installer's final handle path to the staged state path before

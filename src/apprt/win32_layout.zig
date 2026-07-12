@@ -95,6 +95,13 @@ pub fn splitSurfacePlacement(
         h = @max(1, h);
     }
 
+    // Independent rounding of a slot's origin and span can overshoot the
+    // content edge by one pixel. Keep every child rect inside its host lane.
+    x = std.math.clamp(x, content_rect.left, content_right - 1);
+    y = std.math.clamp(y, content_rect.top, content_bottom - 1);
+    w = @max(1, @min(w, content_right - x));
+    h = @max(1, @min(h, content_bottom - y));
+
     return surfacePlacementFromBaseRect(
         childRect(x, y, w, h),
         search_visible,
@@ -172,7 +179,7 @@ test "multi-pane internal edges receive one pixel gaps" {
         30,
     );
     try std.testing.expectEqual(Rect{ .left = 0, .top = 0, .right = 50, .bottom = 51 }, left.pane_rect);
-    try std.testing.expectEqual(Rect{ .left = 52, .top = 0, .right = 102, .bottom = 51 }, right.pane_rect);
+    try std.testing.expectEqual(Rect{ .left = 52, .top = 0, .right = 101, .bottom = 51 }, right.pane_rect);
 }
 
 test "tiny content suppresses search frame and preserves one pixel pane" {
