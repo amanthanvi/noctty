@@ -115,6 +115,17 @@ function Forbid-CopyText {
     }
 }
 
+$trackedPackageArtifacts = @(& git -C $repoRoot ls-files -- 'dist/artifacts/**')
+if ($LASTEXITCODE -ne 0) {
+    Add-Failure "git ls-files failed while checking generated package artifacts."
+} elseif ($trackedPackageArtifacts.Count -gt 0) {
+    Add-Failure "Generated package output must not be tracked under dist/artifacts/."
+}
+
+if (-not (Test-Path -LiteralPath (Get-RepoPath -RelativePath 'scripts/update-release-copy.ps1') -PathType Leaf)) {
+    Add-Failure 'Missing scripts/update-release-copy.ps1; release-version copy must have one generation path.'
+}
+
 $readme = Get-Text -RelativePath "README.md"
 $latestVersion = $null
 if ($null -eq $readme) {
@@ -134,6 +145,9 @@ $forbiddenRules = @(
     @{ Text = "Current releases are unsigned"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "Unsigned releases are expected"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "code signing lands"; Reason = "Release signing is already part of the public release track." }
+    @{ Text = "Update installation remains manual"; Reason = "Download mode supports a user-initiated verified installer launch." }
+    @{ Text = "notify-only GitHub Releases updater"; Reason = "Download mode stages verified installers for user-initiated apply." }
+    @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the winghostty package identity." }
 )
 
 foreach ($rule in $forbiddenRules) {

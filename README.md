@@ -88,7 +88,7 @@ First public releases: 2026-04-16.
 - Session restore for practical window shape: windows, tabs, splits, profiles,
   working directories, and explicit titles.
 - GitHub Releases updater with check and verified-download modes, gated to one
-  check per 24 hours. Update installation remains manual.
+  check per 24 hours. Update installation remains user-initiated.
 - High-contrast (HC) mode detection and palette switching.
 - `libghostty-vt` as a retained Zig / C library deliverable.
 
@@ -101,7 +101,7 @@ official Ghostty docs, see
 
 Latest stable release:
 **[winghostty 1.3.117](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.117)**,
-published 2026-06-27.
+published 2026-07-11.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
