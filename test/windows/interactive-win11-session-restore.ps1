@@ -23,7 +23,7 @@ $configPath = Join-Path $stateDir 'config.ghostty'; [IO.File]::WriteAllText($con
 $statePath = Join-Path $stateDir 'session-state.json'
 $runs = [Collections.Generic.List[object]]::new()
 $instanceClass = "winghostty-interactive-$($layout.SandboxId)"
-function Get-SessionAutomationSnapshot([string]$Name) {
+function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
     $cli = Join-Path (Split-Path -Parent $exe) 'winghostty.com'
     if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }
     $lastError = ''
@@ -31,7 +31,13 @@ function Get-SessionAutomationSnapshot([string]$Name) {
         $out = Join-Path $layout.Logs "$Name-$attempt.json"
         $err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"
         $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-        $query.WaitForExit(); $query.Refresh()
+        $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if (-not $query.WaitForExit($remainingMs)) {
+            $query.Kill($true); $query.WaitForExit()
+            $lastError = "automation query process did not exit before the story deadline"
+            continue
+        }
+        $query.Refresh()
         if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return Get-Content $out -Raw | ConvertFrom-Json }
         $lastError = if (Test-Path $err) { Get-Content $err -Raw } else { "exit $($query.ExitCode)" }
         Start-Sleep -Milliseconds 250
@@ -62,7 +68,7 @@ try {
     $second = Start-StatefulApp $layout $exe $repoRoot 'session-restore' @('--single-instance=true'); $runs.Add($second)
     $restoredHost = Wait-StatefulHost $second $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'restored tabs' -Process $second.Process -Condition { (Get-StatefulTabCount $restoredHost) -eq 3 }
-    $snapshot = Get-SessionAutomationSnapshot 'session-restore-automation'
+    $snapshot = Get-SessionAutomationSnapshot 'session-restore-automation' $deadline
     if ($snapshot.windows.Count -ne 1 -or $snapshot.windows[0].tabs.Count -ne 3) { throw "Restored automation shape mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)" }
     $activeTabs = @($snapshot.windows[0].tabs | Where-Object active)
     if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[1].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[1].active) {

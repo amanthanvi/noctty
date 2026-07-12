@@ -1886,8 +1886,11 @@ fn sendListWindowsIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    defer win32_ipc.writeAll(pipe, &.{win32_ipc.ack_success}) catch {};
-    return try win32_ipc.readDataResponse(alloc, pipe);
+    return try win32_ipc.readDataResponseWithTimeout(
+        alloc,
+        pipe,
+        win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 fn sendPerformActionIpc(
@@ -1907,7 +1910,7 @@ fn sendPerformActionIpc(
     defer alloc.free(request);
 
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAck(pipe);
+    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
 }
 
 fn applyNewWindowArguments(
@@ -2048,13 +2051,12 @@ fn ipcServerMain(app: *App) void {
             log.warn("failed to process win32 IPC client err={}", .{err});
             break :failed null;
         };
-
-        // Hold list responses until the reader confirms consumption. Without
-        // this bounded handshake, DisconnectNamedPipe can discard bytes that
-        // WriteFile already accepted into the server buffer.
+        // DisconnectNamedPipe discards unread response bytes. Closing only the
+        // server handle keeps the pipe object alive through the client's handle
+        // so the exact-length list response can be drained safely.
         if (handled_kind == .list_windows) {
-            var completion: [1]u8 = undefined;
-            win32_ipc.readExactWithTimeout(pipe, &completion, win32_ipc.io_timeout_ms) catch {};
+            _ = windows.CloseHandle(pipe);
+            continue :server;
         }
 
         _ = DisconnectNamedPipe(pipe);
@@ -2439,6 +2441,10 @@ pub const App = struct {
     /// must not diagnose the intentionally absent per-pane close preflight as
     /// an ordinary-close invariant failure.
     quitting: bool = false,
+    /// Host currently undergoing allocation-free failed-restore teardown.
+    /// Its child WM_DESTROY callbacks remove Surface ownership only; Host
+    /// tree disposal happens once, after the native cascade completes.
+    session_restore_rollback_host: ?*Host = null,
     windows_hidden: bool = false,
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_check_running: std.atomic.Value(bool) = .init(false),
@@ -6044,6 +6050,7 @@ pub const App = struct {
     fn windowDestroyed(self: *App, surface: *Surface) void {
         self.removeWindow(surface);
         if (surface.host) |host| {
+            if (self.session_restore_rollback_host == host) return;
             surface.invalidateStructuralHistoryForDestroy();
             host.discardStructuralEntriesReferencing(surface);
 
@@ -6655,12 +6662,16 @@ pub const App = struct {
         const previous_quitting = self.quitting;
         self.quitting = true;
         defer self.quitting = previous_quitting;
+        self.session_restore_rollback_host = host;
+        defer self.session_restore_rollback_host = null;
+        if (self.shell_runtime_initialized) {
+            if (host.shell_id) |window_id| self.shell_runtime.rollbackWindow(window_id);
+        }
         host.clearStructuralHistory(.normal);
         if (host.hwnd) |hwnd| {
             _ = DestroyWindow(hwnd);
-        } else {
-            self.removeHost(host);
         }
+        self.removeHost(host);
     }
 
     fn sanitizeCurrentDirectory(self: *App) !void {

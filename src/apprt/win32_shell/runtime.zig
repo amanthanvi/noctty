@@ -75,6 +75,59 @@ pub const Runtime = struct {
         try self.state.validate();
         self.bumpRevision();
     }
+
+    /// Remove a just-created window after native session restore fails.
+    /// This path is intentionally allocation-free: the generational IDs are
+    /// retired rather than recycled, and normal Runtime teardown reclaims the
+    /// pool storage later.
+    pub fn rollbackWindow(self: *Runtime, window_id: model.WindowId) void {
+        var tab_i = self.state.tabs.items.len;
+        while (tab_i > 0) {
+            tab_i -= 1;
+            const tab = self.state.tabs.items[tab_i];
+            if (!tab.window.eql(window_id)) continue;
+
+            var pane_i = self.state.panes.items.len;
+            while (pane_i > 0) {
+                pane_i -= 1;
+                if (self.state.panes.items[pane_i].tab.eql(tab.id)) {
+                    _ = self.state.panes.swapRemove(pane_i);
+                }
+            }
+            var node_i = self.state.nodes.items.len;
+            while (node_i > 0) {
+                node_i -= 1;
+                if (self.state.nodes.items[node_i].tab.eql(tab.id)) {
+                    _ = self.state.nodes.swapRemove(node_i);
+                }
+            }
+            var transfer_i = self.state.transfers.items.len;
+            while (transfer_i > 0) {
+                transfer_i -= 1;
+                const transfer = self.state.transfers.items[transfer_i];
+                if (transfer.source_tab.eql(tab.id) or transfer.target_tab.eql(tab.id)) {
+                    _ = self.state.transfers.swapRemove(transfer_i);
+                }
+            }
+            _ = self.state.tabs.swapRemove(tab_i);
+        }
+
+        for (self.state.windows.items, 0..) |*window, i| {
+            if (!window.id.eql(window_id)) continue;
+            var removed = self.state.windows.swapRemove(i);
+            removed.deinit(self.state.allocator);
+            break;
+        }
+        if (self.state.focused_window == null or self.state.focused_window.?.eql(window_id)) {
+            self.state.focused_window = null;
+            for (self.state.windows.items) |window| {
+                if (window.tabs.items.len == 0) continue;
+                self.state.focused_window = window.id;
+                break;
+            }
+        }
+        self.bumpRevision();
+    }
 };
 
 pub const Prepared = struct {
@@ -201,6 +254,31 @@ test "focus pane is allocation free and revisioned" {
     try std.testing.expect(try runtime.focusPane(original));
     try std.testing.expectEqual(revision + 1, runtime.revision);
     try std.testing.expect(!try runtime.focusPane(original));
+}
+
+test "restore rollback removes only the failed window without allocation" {
+    const allocator = std.testing.allocator;
+    var runtime = Runtime.init(allocator);
+    defer runtime.deinit();
+
+    var first = try runtime.prepare(.create_window);
+    defer first.deinit();
+    try first.commit(&runtime);
+    const surviving_window = first.created.window.?;
+
+    var second = try runtime.prepare(.create_window);
+    defer second.deinit();
+    try second.commit(&runtime);
+    const failed_window = second.created.window.?;
+    const failed_tab = second.created.tab.?;
+    const failed_pane = second.created.pane.?;
+
+    runtime.rollbackWindow(failed_window);
+    try runtime.state.validate();
+    try std.testing.expect(runtime.state.window(surviving_window) != null);
+    try std.testing.expect(runtime.state.window(failed_window) == null);
+    try std.testing.expect(runtime.state.tab(failed_tab) == null);
+    try std.testing.expect(runtime.state.pane(failed_pane) == null);
 }
 
 test "close retry preserves interleaved focus and removes pane" {

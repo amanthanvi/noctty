@@ -34,14 +34,19 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
     return $edit.Hwnd
 }
 
-$originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
-if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
+$originalHc = $null
 $hcChanged = $false
 $hcMutex = $null
 $runs = [Collections.Generic.List[object]]::new()
 $draculaRgb = [Convert]::ToInt32('282a36', 16)
 $themeRgb = [Convert]::ToInt32('262427', 16)
 try {
+    if ($ExerciseHighContrast) {
+        $hcMutex = [Threading.Mutex]::new($false, 'Global\WinghosttyHighContrastHarness')
+        if (-not $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))) { throw 'Timed out waiting for the High Contrast harness mutex.' }
+        $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
+        if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $run = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-normal'; $runs.Add($run)
     $hostHwnd = Wait-StatefulHost $run $deadline
@@ -69,8 +74,6 @@ try {
     if ($ExerciseHighContrast) {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         if (($originalHc.dwFlags -band 1) -eq 0) {
-            $hcMutex = [Threading.Mutex]::new($false, 'Global\WinghosttyHighContrastHarness')
-            if (-not $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))) { throw 'Timed out waiting for the High Contrast harness mutex.' }
             $enabled = $originalHc; $enabled.dwFlags = $enabled.dwFlags -bor 1
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
             $hcChanged = $true

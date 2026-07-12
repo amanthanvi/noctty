@@ -9,6 +9,7 @@ const BOOL = std.os.windows.BOOL;
 const PIPE_READMODE_BYTE = 0x00000000;
 pub const pipe_nowait = 0x00000001;
 pub const io_timeout_ms: u64 = 2_000;
+pub const automation_response_timeout_ms: u64 = 10_000;
 const poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
 pub const wire_version: u32 = 1;
 pub const ack_success: u8 = 0;
@@ -224,8 +225,12 @@ pub fn writeAckStatus(pipe: windows.HANDLE, status: u8) !void {
 }
 
 pub fn readAck(pipe: windows.HANDLE) !bool {
+    return readAckWithTimeout(pipe, io_timeout_ms);
+}
+
+pub fn readAckWithTimeout(pipe: windows.HANDLE, timeout_ms: u64) !bool {
     var response: [5]u8 = undefined;
-    try readExact(pipe, &response);
+    try readExactWithTimeout(pipe, &response, timeout_ms);
     if (readU32(response[0..4]) != wire_version) return error.InvalidIpcResponse;
     return switch (response[4]) {
         ack_success => true,
@@ -257,8 +262,17 @@ pub fn readDataResponse(
     alloc: Allocator,
     pipe: windows.HANDLE,
 ) ![]u8 {
+    return readDataResponseWithTimeout(alloc, pipe, io_timeout_ms);
+}
+
+pub fn readDataResponseWithTimeout(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+    timeout_ms: u64,
+) ![]u8 {
+    const deadline_ms = GetTickCount64() +| timeout_ms;
     var header: [5]u8 = undefined;
-    try readExact(pipe, &header);
+    try readExactUntil(pipe, &header, deadline_ms);
     if (readU32(header[0..4]) != wire_version) return error.InvalidIpcResponse;
 
     const success = switch (header[4]) {
@@ -268,7 +282,7 @@ pub fn readDataResponse(
     };
 
     var len_buf: [4]u8 = undefined;
-    readExact(pipe, &len_buf) catch |err| switch (err) {
+    readExactUntil(pipe, &len_buf, deadline_ms) catch |err| switch (err) {
         error.EndOfStream => {
             if (!success) return error.IPCFailed;
             return error.InvalidIpcResponse;
@@ -282,7 +296,7 @@ pub fn readDataResponse(
     if (len > max_data_response_len) return error.InvalidIpcResponse;
     const body = try alloc.alloc(u8, len);
     errdefer alloc.free(body);
-    if (len > 0) try readExact(pipe, body);
+    if (len > 0) try readExactUntil(pipe, body, deadline_ms);
     return body;
 }
 
@@ -302,6 +316,10 @@ fn deadline() u64 {
     return GetTickCount64() +| io_timeout_ms;
 }
 
+fn pipeIoPending(err: windows.Win32Error) bool {
+    return err == .NO_DATA or err == .PIPE_NOT_CONNECTED;
+}
+
 fn readExactUntil(
     pipe: windows.HANDLE,
     dst: []u8,
@@ -319,14 +337,12 @@ fn readExactUntil(
             null,
         ) == 0) {
             const err = windows.kernel32.GetLastError();
-            switch (err) {
-                .BROKEN_PIPE => return error.EndOfStream,
-                .NO_DATA => {
-                    std.Thread.sleep(poll_interval_ns);
-                    continue;
-                },
-                else => return windows.unexpectedError(err),
+            if (err == .BROKEN_PIPE) return error.EndOfStream;
+            if (pipeIoPending(err)) {
+                std.Thread.sleep(poll_interval_ns);
+                continue;
             }
+            return windows.unexpectedError(err);
         }
 
         if (read_len == 0) return error.EndOfStream;
@@ -347,7 +363,7 @@ pub fn writeAll(pipe: windows.HANDLE, src: []const u8) !void {
             null,
         ) == 0) {
             const err = windows.kernel32.GetLastError();
-            if (err == .NO_DATA) {
+            if (pipeIoPending(err)) {
                 if (GetTickCount64() -| started_at >= io_timeout_ms) {
                     return error.IpcTimeout;
                 }
@@ -415,6 +431,12 @@ test "win32 IPC silent client read is bounded" {
         error.IpcTimeout,
         readExactWithTimeout(server, &byte, 10),
     );
+}
+
+test "win32 IPC pending pipe states remain retryable" {
+    try std.testing.expect(pipeIoPending(.NO_DATA));
+    try std.testing.expect(pipeIoPending(.PIPE_NOT_CONNECTED));
+    try std.testing.expect(!pipeIoPending(.BROKEN_PIPE));
 }
 
 test "win32 encodeListWindowsRequest preserves legacy zero-argc trailer" {
