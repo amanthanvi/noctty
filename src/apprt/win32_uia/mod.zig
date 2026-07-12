@@ -23,6 +23,7 @@ pub const OffsetRange = text.OffsetRange;
 pub const TerminalTextSnapshot = text.TerminalTextSnapshot;
 pub const PaletteListProvider = widgets.PaletteListProvider;
 pub const PaletteListState = widgets.PaletteListState;
+pub const PaletteListGeometry = widgets.PaletteListGeometry;
 pub const TerminalProvider = widgets.TerminalProvider;
 pub const TerminalState = widgets.TerminalState;
 pub const handlePaletteListGetObject = widgets.handlePaletteListGetObject;

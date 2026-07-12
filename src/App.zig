@@ -103,6 +103,8 @@ pub fn init(
 }
 
 pub fn deinit(self: *App) void {
+    while (self.mailbox.pop()) |message| message.deinit(self.alloc);
+
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
     self.surfaces.deinit(self.alloc);
@@ -280,14 +282,14 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 try self.newWindow(rt_app, msg);
             },
             .automation_window_list => |request| {
-                defer request.done.set();
                 request.result = rt_app.buildAutomationWindowListJson(request.alloc) catch |err| blk: {
                     request.err = err;
                     break :blk null;
                 };
+                request.completed.store(true, .release);
+                request.release();
             },
             .automation_action => |request| {
-                defer request.done.set();
                 self.performAutomationAction(
                     rt_app,
                     request.target,
@@ -295,6 +297,8 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
                 ) catch |err| {
                     request.err = err;
                 };
+                request.completed.store(true, .release);
+                request.release();
             },
             .close => |surface| self.closeSurface(surface),
             .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
@@ -748,18 +752,81 @@ pub const Message = union(enum) {
     /// message if it needs to.
     redraw_surface: *apprt.Surface,
 
+    pub fn deinit(self: Message, alloc: Allocator) void {
+        switch (self) {
+            .new_window => |message| message.deinit(alloc),
+            .automation_window_list => |request| request.release(),
+            .automation_action => |request| request.release(),
+            .surface_message => |payload| {
+                var message = payload.message;
+                message.deinit();
+            },
+            else => {},
+        }
+    }
+
     pub const AutomationWindowListRequest = struct {
         alloc: Allocator,
-        done: std.Thread.ResetEvent = .{},
+        refs: std.atomic.Value(u32) = .init(1),
+        completed: std.atomic.Value(bool) = .init(false),
         result: ?[]u8 = null,
         err: ?anyerror = null,
+
+        pub fn create(alloc: Allocator) !*@This() {
+            const request = try alloc.create(@This());
+            request.* = .{ .alloc = alloc };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            if (self.result) |result| self.alloc.free(result);
+            self.alloc.destroy(self);
+        }
+
+        pub fn takeResult(self: *@This()) ?[]u8 {
+            const result = self.result;
+            self.result = null;
+            return result;
+        }
     };
 
     pub const AutomationActionRequest = struct {
+        alloc: Allocator,
+        refs: std.atomic.Value(u32) = .init(1),
         target: apprt.ipc.AutomationActionTarget,
         action_text: []const u8,
-        done: std.Thread.ResetEvent = .{},
+        completed: std.atomic.Value(bool) = .init(false),
         err: ?anyerror = null,
+
+        pub fn create(
+            alloc: Allocator,
+            target: apprt.ipc.AutomationActionTarget,
+            action_text: []const u8,
+        ) !*@This() {
+            const request = try alloc.create(@This());
+            errdefer alloc.destroy(request);
+            request.* = .{
+                .alloc = alloc,
+                .target = target,
+                .action_text = try alloc.dupe(u8, action_text),
+            };
+            return request;
+        }
+
+        pub fn retain(self: *@This()) void {
+            _ = self.refs.fetchAdd(1, .monotonic);
+        }
+
+        pub fn release(self: *@This()) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            self.alloc.free(self.action_text);
+            self.alloc.destroy(self);
+        }
     };
 
     const NewWindow = struct {
@@ -777,6 +844,22 @@ pub const Message = union(enum) {
         }
     };
 };
+
+test "queued automation messages release consumer ownership during teardown" {
+    const action_request = try Message.AutomationActionRequest.create(
+        std.testing.allocator,
+        .focused,
+        "new_tab",
+    );
+    action_request.retain();
+    action_request.release();
+    (Message{ .automation_action = action_request }).deinit(std.testing.allocator);
+
+    const list_request = try Message.AutomationWindowListRequest.create(std.testing.allocator);
+    list_request.retain();
+    list_request.release();
+    (Message{ .automation_window_list = list_request }).deinit(std.testing.allocator);
+}
 
 /// Mailbox is the way that other threads send the app thread messages.
 pub const Mailbox = struct {

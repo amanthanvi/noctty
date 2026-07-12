@@ -160,6 +160,32 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-undo.ps1 -ResetState -TimeoutSeconds 35
 ```
 
+## interactive-win11-palette-theme.ps1
+
+Validates Universal Palette theme preview, Escape rollback, Enter commit and
+config persistence, plus suppression of theme preview while Windows High
+Contrast is active. High Contrast mutation is opt-in with
+`-ExerciseHighContrast`; the harness serializes that phase and restores the
+original system setting in `finally`.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-palette-theme.ps1 -ResetState
+```
+
+## interactive-win11-session-restore.ps1
+
+Validates a three-tab session save/restart restore with the second tab selected,
+then injects corrupt state and requires a fresh one-tab launch plus a uniquely
+named quarantine artifact.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-session-restore.ps1 -ResetState
+```
+
 ## ..\..\scripts\interactive-win11.ps1
 
 Generic repo-local Win11 launcher for ad hoc debugging. It uses the

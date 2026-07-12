@@ -58,18 +58,10 @@ pub fn build(b: *std.Build) !void {
 
     // Top-level user-facing build steps.
     const run_step = b.step("run", "Run the app");
-    const run_valgrind_step = b.step(
-        "run-valgrind",
-        "Compatibility stub: valgrind is not supported in the Windows-only fork",
-    );
     const test_step = b.step("test", "Run tests");
     const test_lib_vt_step = b.step(
         "test-lib-vt",
         "Run libghostty-vt tests",
-    );
-    const test_valgrind_step = b.step(
-        "test-valgrind",
-        "Compatibility stub: valgrind is not supported in the Windows-only fork",
     );
     const translations_step = b.step(
         "update-translations",
@@ -161,11 +153,6 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    try run_valgrind_step.addError(
-        "run-valgrind is not supported in the Windows-only fork",
-        .{},
-    );
-
     // Zig module tests
     if (want_lib_vt_graph) {
         const GhosttyZig = @import("src/build/GhosttyZig.zig");
@@ -222,17 +209,9 @@ pub fn build(b: *std.Build) !void {
         // Normal tests always test our libghostty modules
         //test_step.dependOn(test_lib_vt_step);
 
-        try test_valgrind_step.addError(
-            "test-valgrind is not supported in the Windows-only fork",
-            .{},
-        );
     } else {
         try test_step.addError(
             "test requires -Dtest-filter=<name> or -Demit-test-exe=true in the Windows-only fork",
-            .{},
-        );
-        try test_valgrind_step.addError(
-            "test-valgrind is not supported in the Windows-only fork",
             .{},
         );
     }

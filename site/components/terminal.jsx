@@ -37,7 +37,7 @@ function buildScript(v) {
       lines: [
         { kind: 'cmd', text: 'winghostty +show-config --default --docs' },
         { kind: 'out', t: '→ config lives at: %LOCALAPPDATA%\\winghostty\\config.ghostty', c: 'dim' },
-        { kind: 'out', t: '→ updates stay notify-only and check GitHub at most once every 24 hours', c: 'dim' },
+        { kind: 'out', t: '→ download mode stages a verified signed installer; you choose when to run it', c: 'dim' },
         { kind: 'out', t: '→ profile picker: PowerShell, cmd, Git Bash, and opt-in WSL', c: 'dim' },
       ],
     },

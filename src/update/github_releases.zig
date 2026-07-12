@@ -25,6 +25,16 @@ const windows_asset_metadata = switch (builtin.cpu.arch) {
 };
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
+const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
+    // SHA-256(SubjectPublicKeyInfo DER) for CN=winghostty Local Dev Signing,
+    // valid 2026-04-30..2029-04-30. Extracted from v1.3.117 Windows setup asset.
+    .{
+        0x67, 0x1e, 0xc8, 0x22, 0xc4, 0x1f, 0x39, 0xb1,
+        0xd7, 0x9c, 0x31, 0xd2, 0x71, 0x69, 0xb3, 0x74,
+        0x86, 0x33, 0x3c, 0x00, 0x8c, 0x7a, 0x03, 0x82,
+        0x61, 0xb4, 0xfa, 0xe5, 0x38, 0x18, 0xce, 0x2a,
+    },
+};
 
 pub const State = struct {
     last_checked_at: i64 = 0,
@@ -76,8 +86,12 @@ pub const StagedWindowsInstall = struct {
     version_text: []u8,
     installer_path: []u8,
     sha256_hex: []u8,
+    locked_stage_dir: ?std.fs.File = null,
+    locked_file: ?std.fs.File = null,
 
     pub fn deinit(self: *StagedWindowsInstall, alloc: Allocator) void {
+        if (self.locked_file) |file| file.close();
+        if (self.locked_stage_dir) |file| file.close();
         alloc.free(self.version_text);
         alloc.free(self.installer_path);
         alloc.free(self.sha256_hex);
@@ -315,7 +329,7 @@ pub fn stageWindowsInstall(
     if (!std.mem.eql(u8, &expected_digest, &actual_digest)) return error.InstallerChecksumMismatch;
 
     if (builtin.os.tag == .windows) {
-        try verifyAuthenticodeSignature(installer_path);
+        try verifyAuthenticodeSignature(installer_path, null);
     } else {
         return error.AuthenticodeRequiresWindows;
     }
@@ -351,12 +365,25 @@ pub fn verifyStagedWindowsInstall(
     const sha256_hex = state.staged_sha256 orelse return error.NoStagedWindowsInstall;
     if (!std.fs.path.isAbsolute(installer_path)) return error.InvalidStagedInstallerPath;
 
+    const stage_dir = std.fs.path.dirname(installer_path) orelse return error.InvalidStagedInstallerPath;
+    var locked_stage_dir = try openLockedStageDirectory(stage_dir);
+    errdefer locked_stage_dir.close();
+    if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
+        return error.InvalidStagedInstallerPath;
+    }
+
+    var locked_file = try openLockedInstaller(installer_path);
+    errdefer locked_file.close();
+    if (!try lockedHandleMatchesPath(alloc, installer_path, locked_file.handle)) {
+        return error.InvalidStagedInstallerPath;
+    }
+
     const expected_digest = try parseSha256Hex(sha256_hex);
-    const actual_digest = try sha256File(installer_path);
+    const actual_digest = try sha256OpenFile(&locked_file);
     if (!std.mem.eql(u8, &expected_digest, &actual_digest)) return error.InstallerChecksumMismatch;
 
     if (builtin.os.tag == .windows) {
-        try verifyAuthenticodeSignature(installer_path);
+        try verifyAuthenticodeSignature(installer_path, locked_file.handle);
     } else {
         return error.AuthenticodeRequiresWindows;
     }
@@ -365,6 +392,8 @@ pub fn verifyStagedWindowsInstall(
         .version_text = try alloc.dupe(u8, version_text),
         .installer_path = try alloc.dupe(u8, installer_path),
         .sha256_hex = try alloc.dupe(u8, sha256_hex),
+        .locked_stage_dir = locked_stage_dir,
+        .locked_file = locked_file,
     };
 }
 
@@ -526,6 +555,12 @@ fn sha256File(path: []const u8) ![Sha256.digest_length]u8 {
     var file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
 
+    return sha256OpenFile(&file);
+}
+
+fn sha256OpenFile(file: *std.fs.File) ![Sha256.digest_length]u8 {
+    try file.seekTo(0);
+
     var hasher = Sha256.init(.{});
     var buf: [64 * 1024]u8 = undefined;
     while (true) {
@@ -536,19 +571,91 @@ fn sha256File(path: []const u8) ![Sha256.digest_length]u8 {
 
     var digest: [Sha256.digest_length]u8 = undefined;
     hasher.final(&digest);
+    try file.seekTo(0);
     return digest;
 }
 
-fn verifyAuthenticodeSignature(path: []const u8) !void {
+fn openLockedInstaller(path: []const u8) !std.fs.File {
+    if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
+
+    const windows = std.os.windows;
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(path_w);
+
+    const handle = windows.kernel32.CreateFileW(
+        path_w.ptr,
+        windows.GENERIC_READ,
+        windows.FILE_SHARE_READ,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (handle == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    return .{ .handle = handle };
+}
+
+fn openLockedStageDirectory(path: []const u8) !std.fs.File {
+    if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
+
+    const windows = std.os.windows;
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
+    defer std.heap.page_allocator.free(path_w);
+
+    const handle = windows.kernel32.CreateFileW(
+        path_w.ptr,
+        windows.GENERIC_READ,
+        windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_FLAG_BACKUP_SEMANTICS,
+        null,
+    );
+    if (handle == windows.INVALID_HANDLE_VALUE) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    return .{ .handle = handle };
+}
+
+fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.windows.HANDLE) !bool {
+    var final_buf: [std.os.windows.PATH_MAX_WIDE]u16 = undefined;
+    const final_w = try std.os.windows.GetFinalPathNameByHandle(
+        handle,
+        .{ .volume_name = .Dos },
+        &final_buf,
+    );
+    const final_utf8 = try std.unicode.utf16LeToUtf8Alloc(alloc, final_w);
+    defer alloc.free(final_utf8);
+    const final_path = if (std.mem.startsWith(u8, final_utf8, "\\\\?\\")) final_utf8[4..] else final_utf8;
+    return std.ascii.eqlIgnoreCase(final_path, path);
+}
+
+fn verifyAuthenticodeSignature(
+    path: []const u8,
+    file_handle: ?std.os.windows.HANDLE,
+) !void {
     if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
 
     const windows = std.os.windows;
     const WinVerifyTrustFn = *const fn (?windows.HWND, *windows.GUID, *WinTrustData) callconv(.winapi) i32;
+    const WTHelperProvDataFromStateDataFn = *const fn (windows.HANDLE) callconv(.winapi) ?*CryptProviderData;
+    const WTHelperGetProvSignerFromChainFn = *const fn (
+        *CryptProviderData,
+        u32,
+        windows.BOOL,
+        u32,
+    ) callconv(.winapi) ?*CryptProviderSgnr;
     const module = try windows.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("wintrust.dll"));
     defer windows.FreeLibrary(module);
 
     const proc = windows.kernel32.GetProcAddress(module, "WinVerifyTrust") orelse return error.SignatureVerifierUnavailable;
     const winVerifyTrust: WinVerifyTrustFn = @ptrCast(@alignCast(proc));
+    const prov_data_proc = windows.kernel32.GetProcAddress(module, "WTHelperProvDataFromStateData") orelse return error.SignatureVerifierUnavailable;
+    const signer_proc = windows.kernel32.GetProcAddress(module, "WTHelperGetProvSignerFromChain") orelse return error.SignatureVerifierUnavailable;
+    const wtHelperProvDataFromStateData: WTHelperProvDataFromStateDataFn = @ptrCast(@alignCast(prov_data_proc));
+    const wtHelperGetProvSignerFromChain: WTHelperGetProvSignerFromChainFn = @ptrCast(@alignCast(signer_proc));
 
     const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, path);
     defer std.heap.page_allocator.free(path_w);
@@ -557,7 +664,7 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
     var file_info: WinTrustFileInfo = .{
         .cbStruct = @sizeOf(WinTrustFileInfo),
         .pcwszFilePath = path_w.ptr,
-        .hFile = null,
+        .hFile = file_handle,
         .pgKnownSubject = null,
     };
     var data: WinTrustData = .{
@@ -580,7 +687,125 @@ fn verifyAuthenticodeSignature(path: []const u8) !void {
         _ = winVerifyTrust(null, &action, &data);
     }
 
-    if (winVerifyTrust(null, &action, &data) != 0) return error.InvalidAuthenticodeSignature;
+    const trust_status = winVerifyTrust(null, &action, &data);
+    if (!authenticodeStatusAllowsPinnedPublisherCheck(trust_status)) {
+        return error.InvalidAuthenticodeSignature;
+    }
+    try verifyPinnedPublisherIdentityFromState(
+        data.hWVTStateData orelse return error.UpdatePublisherIdentityUnavailable,
+        wtHelperProvDataFromStateData,
+        wtHelperGetProvSignerFromChain,
+    );
+}
+
+fn verifyPinnedPublisherIdentityFromState(
+    state: std.os.windows.HANDLE,
+    wtHelperProvDataFromStateData: *const fn (std.os.windows.HANDLE) callconv(.winapi) ?*CryptProviderData,
+    wtHelperGetProvSignerFromChain: *const fn (
+        *CryptProviderData,
+        u32,
+        std.os.windows.BOOL,
+        u32,
+    ) callconv(.winapi) ?*CryptProviderSgnr,
+) !void {
+    if (pinned_publisher_spki_sha256.len == 0) return error.UpdatePublisherPinUnavailable;
+
+    const provider = wtHelperProvDataFromStateData(state) orelse return error.UpdatePublisherIdentityUnavailable;
+    const signer = wtHelperGetProvSignerFromChain(provider, 0, 0, 0) orelse return error.UpdatePublisherIdentityUnavailable;
+    if (signer.csCertChain == 0 or signer.pasCertChain == null) return error.UpdatePublisherIdentityUnavailable;
+
+    const signer_cert = signer.pasCertChain.?[0].pCert orelse return error.UpdatePublisherIdentityUnavailable;
+    const der = signer_cert.pbCertEncoded[0..signer_cert.cbCertEncoded];
+    const spki_hash = try certificateSpkiSha256(der);
+    if (!publisherSpkiHashAllowed(&spki_hash)) return error.UntrustedUpdatePublisher;
+}
+
+fn publisherSpkiHashAllowed(spki_hash: *const [Sha256.digest_length]u8) bool {
+    for (pinned_publisher_spki_sha256) |pinned| {
+        if (std.mem.eql(u8, &pinned, spki_hash)) return true;
+    }
+    return false;
+}
+
+fn authenticodeStatusAllowsPinnedPublisherCheck(status: i32) bool {
+    return status == 0 or status == cert_e_untrusted_root;
+}
+
+fn certificateSpkiSha256(cert_der: []const u8) ![Sha256.digest_length]u8 {
+    const cert = try readDerElement(cert_der, 0);
+    if (cert.tag != der_tag_sequence) return error.InvalidCertificate;
+
+    const tbs = try readDerElement(cert_der, cert.content_start);
+    if (tbs.tag != der_tag_sequence or tbs.end > cert.content_end) return error.InvalidCertificate;
+
+    var offset = tbs.content_start;
+    if (offset < tbs.content_end and cert_der[offset] == der_tag_context_0) {
+        const version = try readDerElement(cert_der, offset);
+        if (version.end > tbs.content_end) return error.InvalidCertificate;
+        offset = version.end;
+    }
+
+    // TBSCertificate fields before subjectPublicKeyInfo:
+    // serialNumber, signature, issuer, validity, subject.
+    var fields_to_skip: usize = 5;
+    while (fields_to_skip > 0) : (fields_to_skip -= 1) {
+        const field = try readDerElement(cert_der, offset);
+        if (field.end > tbs.content_end) return error.InvalidCertificate;
+        offset = field.end;
+    }
+
+    const spki = try readDerElement(cert_der, offset);
+    if (spki.tag != der_tag_sequence or spki.end > tbs.content_end) return error.InvalidCertificate;
+
+    var hasher = Sha256.init(.{});
+    hasher.update(cert_der[spki.start..spki.end]);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+const DerElement = struct {
+    tag: u8,
+    start: usize,
+    content_start: usize,
+    content_end: usize,
+    end: usize,
+};
+
+const der_tag_sequence: u8 = 0x30;
+const der_tag_context_0: u8 = 0xa0;
+
+fn readDerElement(buf: []const u8, start: usize) !DerElement {
+    if (start > buf.len or buf.len - start < 2) return error.InvalidDer;
+
+    const tag = buf[start];
+    var offset = start + 1;
+    const len_byte = buf[offset];
+    offset += 1;
+
+    var len: usize = 0;
+    if ((len_byte & 0x80) == 0) {
+        len = len_byte;
+    } else {
+        const len_len: usize = len_byte & 0x7f;
+        if (len_len == 0 or len_len > @sizeOf(usize) or len_len > buf.len - offset) {
+            return error.InvalidDer;
+        }
+        for (buf[offset .. offset + len_len]) |b| {
+            len = (len << 8) | b;
+        }
+        offset += len_len;
+    }
+
+    if (len > buf.len - offset) return error.InvalidDer;
+    const end = offset + len;
+    return .{
+        .tag = tag,
+        .start = start,
+        .content_start = offset,
+        .content_end = end,
+        .end = end,
+    };
 }
 
 const WTD_UI_NONE: u32 = 2;
@@ -588,7 +813,7 @@ const WTD_REVOKE_WHOLECHAIN: u32 = 1;
 const WTD_CHOICE_FILE: u32 = 1;
 const WTD_STATEACTION_VERIFY: u32 = 1;
 const WTD_STATEACTION_CLOSE: u32 = 2;
-
+const cert_e_untrusted_root: i32 = @bitCast(@as(u32, 0x800B0109));
 const WinTrustFileInfo = extern struct {
     cbStruct: u32,
     pcwszFilePath: [*:0]const u16,
@@ -610,6 +835,52 @@ const WinTrustData = extern struct {
     dwProvFlags: u32,
     dwUIContext: u32,
     pSignatureSettings: ?*anyopaque,
+};
+
+const CertContext = extern struct {
+    dwCertEncodingType: u32,
+    pbCertEncoded: [*]const u8,
+    cbCertEncoded: u32,
+    pCertInfo: ?*anyopaque,
+    hCertStore: ?*anyopaque,
+};
+
+const FileTime = extern struct {
+    dwLowDateTime: u32,
+    dwHighDateTime: u32,
+};
+
+const CryptProviderData = opaque {};
+
+const CryptProviderSgnr = extern struct {
+    cbStruct: u32,
+    sftVerifyAsOf: FileTime,
+    csCertChain: u32,
+    pasCertChain: ?[*]CryptProviderCert,
+    dwSignerType: u32,
+    psSigner: ?*anyopaque,
+    dwError: u32,
+    csCounterSigners: u32,
+    pasCounterSigners: ?*CryptProviderSgnr,
+    pChainContext: ?*anyopaque,
+};
+
+const CryptProviderCert = extern struct {
+    cbStruct: u32,
+    pCert: ?*const CertContext,
+    fCommercial: i32,
+    fTrustedRoot: i32,
+    fSelfSigned: i32,
+    fTestCert: i32,
+    dwRevokedReason: u32,
+    dwConfidence: u32,
+    dwError: u32,
+    pTrustListContext: ?*anyopaque,
+    fTrustListSignerCert: i32,
+    pCtlContext: ?*const anyopaque,
+    dwCtlError: u32,
+    fIsCyclic: i32,
+    pChainElement: ?*const anyopaque,
 };
 
 fn shouldCheckNetwork(last_checked_at: i64, now: i64) bool {
@@ -1208,4 +1479,139 @@ test "release parser accepts long semver tags for windows install candidate" {
 
     try std.testing.expect(release.windows_install != null);
     try std.testing.expectEqualStrings(installer_name, release.windows_install.?.installer_name);
+}
+
+test "locked staged installer rejects replacement until launch handoff" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("installer.exe", .{});
+    try file.writeAll("test installer bytes");
+    file.close();
+
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "installer.exe");
+    defer std.testing.allocator.free(path);
+    const stage_dir = std.fs.path.dirname(path) orelse return error.InvalidStagedInstallerPath;
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, path);
+    defer std.testing.allocator.free(path_w);
+
+    var locked_stage_dir = try openLockedStageDirectory(stage_dir);
+    var locked_stage_dir_open = true;
+    defer if (locked_stage_dir_open) locked_stage_dir.close();
+
+    var locked = try openLockedInstaller(path);
+    var locked_open = true;
+    defer if (locked_open) locked.close();
+
+    const renamed_stage_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}.renamed", .{stage_dir});
+    defer std.testing.allocator.free(renamed_stage_dir);
+    try std.testing.expectError(
+        error.Unexpected,
+        std.fs.renameAbsolute(stage_dir, renamed_stage_dir),
+    );
+
+    const replacement = std.os.windows.kernel32.CreateFileW(
+        path_w.ptr,
+        std.os.windows.GENERIC_WRITE,
+        std.os.windows.FILE_SHARE_READ |
+            std.os.windows.FILE_SHARE_WRITE |
+            std.os.windows.FILE_SHARE_DELETE,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expectEqual(std.os.windows.INVALID_HANDLE_VALUE, replacement);
+    try std.testing.expectEqual(
+        std.os.windows.Win32Error.SHARING_VIOLATION,
+        std.os.windows.kernel32.GetLastError(),
+    );
+
+    locked.close();
+    locked_open = false;
+    locked_stage_dir.close();
+    locked_stage_dir_open = false;
+    const after_release = std.os.windows.kernel32.CreateFileW(
+        path_w.ptr,
+        std.os.windows.GENERIC_WRITE,
+        std.os.windows.FILE_SHARE_READ |
+            std.os.windows.FILE_SHARE_WRITE |
+            std.os.windows.FILE_SHARE_DELETE,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(after_release != std.os.windows.INVALID_HANDLE_VALUE);
+    _ = std.os.windows.CloseHandle(after_release);
+}
+
+test "windows updater publisher SPKI pin allowlist is fail closed" {
+    var allowed = pinned_publisher_spki_sha256[0];
+    try std.testing.expect(publisherSpkiHashAllowed(&allowed));
+
+    var rejected = allowed;
+    rejected[0] ^= 0xff;
+    try std.testing.expect(!publisherSpkiHashAllowed(&rejected));
+}
+
+test "WinTrust certificate chain entry matches SDK ABI" {
+    const expected_size: usize = if (@sizeOf(usize) == 8) 88 else 60;
+    const expected_cert_offset: usize = if (@sizeOf(usize) == 8) 8 else 4;
+    const expected_chain_offset: usize = if (@sizeOf(usize) == 8) 80 else 56;
+
+    try std.testing.expectEqual(expected_size, @sizeOf(CryptProviderCert));
+    try std.testing.expectEqual(expected_cert_offset, @offsetOf(CryptProviderCert, "pCert"));
+    try std.testing.expectEqual(expected_chain_offset, @offsetOf(CryptProviderCert, "pChainElement"));
+}
+
+test "windows updater publisher pin only overrides untrusted root" {
+    try std.testing.expect(authenticodeStatusAllowsPinnedPublisherCheck(0));
+    try std.testing.expect(authenticodeStatusAllowsPinnedPublisherCheck(cert_e_untrusted_root));
+    try std.testing.expect(!authenticodeStatusAllowsPinnedPublisherCheck(@bitCast(@as(u32, 0x800B0100))));
+}
+
+test "windows updater extracts SPKI hash from certificate DER" {
+    const cert_der = [_]u8{
+        0x30, 0x1d,
+        0x30, 0x15,
+        0x02, 0x01,
+        0x01, 0x30,
+        0x00, 0x30,
+        0x00, 0x30,
+        0x00, 0x30,
+        0x00, 0x30,
+        0x08, 0x30,
+        0x00, 0x03,
+        0x04, 0x00,
+        0xaa, 0xbb,
+        0xcc, 0x30,
+        0x00, 0x03,
+        0x02, 0x00,
+        0x00,
+    };
+    const spki_der = cert_der[15..25];
+
+    var hasher = Sha256.init(.{});
+    hasher.update(spki_der);
+    var expected: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&expected);
+
+    const actual = try certificateSpkiSha256(&cert_der);
+    try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "DER element rejects overflowing offsets and lengths" {
+    const short = [_]u8{ der_tag_sequence, 0 };
+    try std.testing.expectError(error.InvalidDer, readDerElement(&short, std.math.maxInt(usize)));
+
+    const maximal_length = [_]u8{
+        der_tag_sequence, 0x88,
+        0xff,             0xff,
+        0xff,             0xff,
+        0xff,             0xff,
+        0xff,             0xff,
+    };
+    try std.testing.expectError(error.InvalidDer, readDerElement(&maximal_length, 0));
 }

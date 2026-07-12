@@ -21,10 +21,14 @@ pub const E_POINTER: HRESULT = @bitCast(@as(u32, 0x80004003));
 pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
 pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
+pub const UIA_E_ELEMENTNOTAVAILABLE: HRESULT = @bitCast(@as(u32, 0x80040201));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
 pub const IID_IRawElementProviderSimple = GUID.parse("{D6DD68D1-86FD-4332-8666-9ABEDEA2D24C}");
+pub const IID_IRawElementProviderFragment = GUID.parse("{F7063DA8-8359-439C-9297-BBC5299A7D87}");
+pub const IID_IRawElementProviderFragmentRoot = GUID.parse("{620CE2A5-AB8F-40A9-86CB-DE3C75599B58}");
+pub const IID_ISelectionItemProvider = GUID.parse("{2ACAD808-B2D4-452D-A407-91FF1AD167B2}");
 pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 pub const IID_ITextProvider = GUID.parse("{3589C92C-63F3-4367-99BB-ADA653B77CF2}");
 pub const IID_ITextRangeProvider = GUID.parse("{5347AD7B-C355-46F8-AFF5-909033582F63}");
@@ -131,6 +135,67 @@ pub const IRawElementProviderSimpleVtbl = extern struct {
 
 pub const IRawElementProviderSimple = extern struct {
     vtbl: *const IRawElementProviderSimpleVtbl,
+};
+
+// ── Fragment providers ─────────────────────────────────────────────────
+
+pub const NavigateDirection_Parent: i32 = 0;
+pub const NavigateDirection_NextSibling: i32 = 1;
+pub const NavigateDirection_PreviousSibling: i32 = 2;
+pub const NavigateDirection_FirstChild: i32 = 3;
+pub const NavigateDirection_LastChild: i32 = 4;
+pub const UiaAppendRuntimeId: i32 = 3;
+
+pub const UiaRect = extern struct {
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+};
+
+pub const IRawElementProviderFragmentVtbl = extern struct {
+    QueryInterface: *const fn (*IRawElementProviderFragment, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IRawElementProviderFragment) callconv(.winapi) u32,
+    Release: *const fn (*IRawElementProviderFragment) callconv(.winapi) u32,
+    Navigate: *const fn (*IRawElementProviderFragment, i32, *?*IRawElementProviderFragment) callconv(.winapi) HRESULT,
+    GetRuntimeId: *const fn (*IRawElementProviderFragment, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    get_BoundingRectangle: *const fn (*IRawElementProviderFragment, *UiaRect) callconv(.winapi) HRESULT,
+    GetEmbeddedFragmentRoots: *const fn (*IRawElementProviderFragment, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    SetFocus: *const fn (*IRawElementProviderFragment) callconv(.winapi) HRESULT,
+    get_FragmentRoot: *const fn (*IRawElementProviderFragment, *?*IRawElementProviderFragmentRoot) callconv(.winapi) HRESULT,
+};
+
+pub const IRawElementProviderFragment = extern struct {
+    vtbl: *const IRawElementProviderFragmentVtbl,
+};
+
+pub const IRawElementProviderFragmentRootVtbl = extern struct {
+    QueryInterface: *const fn (*IRawElementProviderFragmentRoot, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IRawElementProviderFragmentRoot) callconv(.winapi) u32,
+    Release: *const fn (*IRawElementProviderFragmentRoot) callconv(.winapi) u32,
+    ElementProviderFromPoint: *const fn (*IRawElementProviderFragmentRoot, f64, f64, *?*IRawElementProviderFragment) callconv(.winapi) HRESULT,
+    GetFocus: *const fn (*IRawElementProviderFragmentRoot, *?*IRawElementProviderFragment) callconv(.winapi) HRESULT,
+};
+
+pub const IRawElementProviderFragmentRoot = extern struct {
+    vtbl: *const IRawElementProviderFragmentRootVtbl,
+};
+
+// ── ISelectionItemProvider ─────────────────────────────────────────────
+
+pub const ISelectionItemProviderVtbl = extern struct {
+    QueryInterface: *const fn (*ISelectionItemProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ISelectionItemProvider) callconv(.winapi) u32,
+    Release: *const fn (*ISelectionItemProvider) callconv(.winapi) u32,
+    Select: *const fn (*ISelectionItemProvider) callconv(.winapi) HRESULT,
+    AddToSelection: *const fn (*ISelectionItemProvider) callconv(.winapi) HRESULT,
+    RemoveFromSelection: *const fn (*ISelectionItemProvider) callconv(.winapi) HRESULT,
+    get_IsSelected: *const fn (*ISelectionItemProvider, *BOOL) callconv(.winapi) HRESULT,
+    get_SelectionContainer: *const fn (*ISelectionItemProvider, *?*IRawElementProviderSimple) callconv(.winapi) HRESULT,
+};
+
+pub const ISelectionItemProvider = extern struct {
+    vtbl: *const ISelectionItemProviderVtbl,
 };
 
 // ── IValueProvider ─────────────────────────────────────────────────────

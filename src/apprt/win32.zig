@@ -9,11 +9,13 @@ const CoreSurface = @import("../Surface.zig");
 const cli_args = @import("../cli/args.zig");
 const configpkg = @import("../config.zig");
 const config_edit = @import("../config/edit.zig");
+const themepkg = @import("../config/theme.zig");
 const windows_shell = @import("../config/windows_shell.zig");
 const input = @import("../input.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
+const rendererpkg = @import("../renderer.zig");
 const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
@@ -21,8 +23,10 @@ const win32_theme = @import("win32_theme.zig");
 const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_palette = @import("win32_palette.zig");
+const win32_layout = @import("win32_layout.zig");
 const win32_settings = @import("win32_settings.zig");
 const win32_aumid = @import("win32_aumid.zig");
+const win32_chrome_state = @import("win32_chrome_state.zig");
 const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
 const win32_toast_winrt = @import("win32_toast_winrt.zig");
@@ -46,10 +50,13 @@ const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
 const win32_session_state = @import("win32_session_state.zig");
+const win32_session_persistence = @import("win32_session_persistence.zig");
+const win32_structural_history = @import("win32_structural_history.zig");
 const win32_recovery = @import("win32_recovery.zig");
 const win32_compositor = @import("win32_compositor.zig");
 const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
+const win32_ipc = @import("win32_ipc.zig");
 
 // Re-export types from theme module
 const ThemeColors = win32_theme.ThemeColors;
@@ -590,9 +597,9 @@ const PaletteCatalog = win32_palette.catalog.Catalog;
 const PaletteItem = win32_palette.catalog.Item;
 const PalettePayload = win32_palette.catalog.Payload;
 const PaletteRanked = win32_palette.catalog.Ranked;
-const palette_catalog_capacity: usize = 512;
+const palette_catalog_capacity: usize = 768;
 const palette_action_capacity: usize = 384;
-const palette_catalog_label_capacity: usize = 256;
+const palette_catalog_label_capacity: usize = 768;
 const palette_catalog_label_bytes: usize = 128;
 const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
@@ -776,23 +783,8 @@ const PIPE_READMODE_BYTE = 0x00000000;
 const PIPE_WAIT = 0x00000000;
 const PIPE_ACCESS_DUPLEX = 0x00000003;
 const PIPE_UNLIMITED_INSTANCES = 255;
+const ipc_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
 const ipc_pipe_prefix = "\\\\.\\pipe\\winghostty.";
-const ipc_wire_version: u32 = 1;
-const ipc_ack_success: u8 = 0;
-const ipc_ack_failure: u8 = 1;
-const ipc_ack_invalid_automation_action: u8 = 2;
-const ipc_ack_unsafe_automation_action: u8 = 3;
-const ipc_ack_invalid_automation_target: u8 = 4;
-const ipc_ack_no_automation_target: u8 = 5;
-const ipc_max_data_response_len: u32 = 16 * 1024 * 1024;
-const ipc_max_action_text_len: u32 = 16 * 1024;
-const ipc_max_new_window_argc: u32 = 4096;
-
-const IpcRequestKind = enum(u8) {
-    new_window = 1,
-    list_windows = 2,
-    perform_action = 3,
-};
 
 const POINT = win32_types.POINT;
 const RECT = win32_types.RECT;
@@ -1134,8 +1126,6 @@ extern "kernel32" fn ConnectNamedPipe(
     hNamedPipe: windows.HANDLE,
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
-extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: windows.HANDLE) callconv(.winapi) BOOL;
-extern "kernel32" fn FlushFileBuffers(hFile: windows.HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;
 extern "kernel32" fn SetCurrentDirectoryW(lpPathName: LPCWSTR) callconv(.winapi) BOOL;
@@ -1831,295 +1821,6 @@ fn resolveIpcPipeNameForTarget(
     };
 }
 
-fn appendU32(dst: *std.ArrayList(u8), alloc: Allocator, value: u32) !void {
-    var buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &buf, value, .little);
-    try dst.appendSlice(alloc, &buf);
-}
-
-fn appendU64(dst: *std.ArrayList(u8), alloc: Allocator, value: u64) !void {
-    var buf: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buf, value, .little);
-    try dst.appendSlice(alloc, &buf);
-}
-
-fn readU32(src: []const u8) u32 {
-    return std.mem.readInt(u32, src[0..4], .little);
-}
-
-fn readU64(src: []const u8) u64 {
-    return std.mem.readInt(u64, src[0..8], .little);
-}
-
-fn freeOwnedArguments(alloc: Allocator, arguments: ?[]const [:0]const u8) void {
-    if (arguments) |owned| {
-        for (owned) |arg| alloc.free(arg);
-        alloc.free(owned);
-    }
-}
-
-fn encodeNewWindowIpcRequest(
-    alloc: Allocator,
-    arguments: ?[]const [:0]const u8,
-) ![]u8 {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(alloc);
-
-    try appendU32(&encoded, alloc, ipc_wire_version);
-    try encoded.append(alloc, @intFromEnum(IpcRequestKind.new_window));
-
-    const argc: u32 = if (arguments) |argv| @intCast(argv.len) else 0;
-    try appendU32(&encoded, alloc, argc);
-
-    if (arguments) |argv| {
-        for (argv) |arg| {
-            try appendU32(&encoded, alloc, @intCast(arg.len));
-            try encoded.appendSlice(alloc, arg);
-        }
-    }
-
-    return try encoded.toOwnedSlice(alloc);
-}
-
-fn encodeListWindowsIpcRequest(alloc: Allocator) ![]u8 {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(alloc);
-
-    try appendU32(&encoded, alloc, ipc_wire_version);
-    try encoded.append(alloc, @intFromEnum(IpcRequestKind.list_windows));
-    // Keep the legacy zero-argc trailer so older servers that still decode
-    // through the new-window payload path fail with a bounded ack instead of
-    // blocking on a missing payload length.
-    try appendU32(&encoded, alloc, 0);
-
-    return try encoded.toOwnedSlice(alloc);
-}
-
-fn encodePerformActionIpcRequest(
-    alloc: Allocator,
-    target: apprt.ipc.AutomationActionTarget,
-    action_text: []const u8,
-) ![]u8 {
-    if (action_text.len == 0 or action_text.len > ipc_max_action_text_len) {
-        return error.InvalidAutomationAction;
-    }
-
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(alloc);
-
-    try appendU32(&encoded, alloc, ipc_wire_version);
-    try encoded.append(alloc, @intFromEnum(IpcRequestKind.perform_action));
-    try encoded.append(alloc, switch (target) {
-        .focused => 0,
-        .surface_id => 1,
-    });
-    try appendU64(&encoded, alloc, switch (target) {
-        .focused => 0,
-        .surface_id => |id| id,
-    });
-    try appendU32(&encoded, alloc, @intCast(action_text.len));
-    try encoded.appendSlice(alloc, action_text);
-
-    return try encoded.toOwnedSlice(alloc);
-}
-
-fn decodeIpcRequestKind(
-    pipe: windows.HANDLE,
-) !IpcRequestKind {
-    var header: [5]u8 = undefined;
-    try readExactHandle(pipe, &header);
-
-    if (readU32(header[0..4]) != ipc_wire_version) return error.InvalidIpcRequest;
-    return std.meta.intToEnum(IpcRequestKind, header[4]) catch error.InvalidIpcRequest;
-}
-
-fn decodeNewWindowIpcPayload(
-    alloc: Allocator,
-    pipe: windows.HANDLE,
-) !?[]const [:0]const u8 {
-    var argc_buf: [4]u8 = undefined;
-    try readExactHandle(pipe, &argc_buf);
-
-    const argc = readU32(&argc_buf);
-    if (argc == 0) return null;
-    if (argc > ipc_max_new_window_argc) return error.InvalidIpcRequest;
-
-    const argv = try alloc.alloc([:0]const u8, argc);
-    errdefer freeOwnedArguments(alloc, argv);
-
-    for (argv, 0..) |*slot, i| {
-        _ = i;
-        var len_buf: [4]u8 = undefined;
-        try readExactHandle(pipe, &len_buf);
-        const len = readU32(&len_buf);
-
-        const arg = try alloc.allocSentinel(u8, len, 0);
-        try readExactHandle(pipe, arg[0..len]);
-        slot.* = arg;
-    }
-
-    return argv;
-}
-
-fn decodePerformActionIpcPayload(
-    alloc: Allocator,
-    pipe: windows.HANDLE,
-) !struct {
-    target: apprt.ipc.AutomationActionTarget,
-    action_text: []u8,
-} {
-    var header: [13]u8 = undefined;
-    try readExactHandle(pipe, &header);
-
-    const target: apprt.ipc.AutomationActionTarget = switch (header[0]) {
-        0 => .focused,
-        1 => .{ .surface_id = readU64(header[1..9]) },
-        else => return error.InvalidIpcRequest,
-    };
-    const len = readU32(header[9..13]);
-    if (len == 0 or len > ipc_max_action_text_len) {
-        return error.InvalidAutomationAction;
-    }
-
-    const action_text = try alloc.alloc(u8, len);
-    errdefer alloc.free(action_text);
-    try readExactHandle(pipe, action_text);
-    return .{
-        .target = target,
-        .action_text = action_text,
-    };
-}
-
-fn writeIpcAck(pipe: windows.HANDLE, success: bool) !void {
-    return writeIpcAckStatus(
-        pipe,
-        if (success) ipc_ack_success else ipc_ack_failure,
-    );
-}
-
-fn writeIpcAckStatus(pipe: windows.HANDLE, status: u8) !void {
-    var response: [5]u8 = undefined;
-    std.mem.writeInt(u32, response[0..4], ipc_wire_version, .little);
-    response[4] = status;
-    try writeAllHandle(pipe, &response);
-}
-
-fn readIpcAck(pipe: windows.HANDLE) !bool {
-    var response: [5]u8 = undefined;
-    try readExactHandle(pipe, &response);
-    if (readU32(response[0..4]) != ipc_wire_version) return error.InvalidIpcResponse;
-    return switch (response[4]) {
-        ipc_ack_success => true,
-        ipc_ack_failure => error.IPCFailed,
-        ipc_ack_invalid_automation_action => error.InvalidAutomationAction,
-        ipc_ack_unsafe_automation_action => error.UnsafeAutomationAction,
-        ipc_ack_invalid_automation_target => error.InvalidAutomationTarget,
-        ipc_ack_no_automation_target => error.NoAutomationTarget,
-        else => error.InvalidIpcResponse,
-    };
-}
-
-fn writeIpcDataResponse(
-    pipe: windows.HANDLE,
-    success: bool,
-    body: []const u8,
-) !void {
-    if (body.len > ipc_max_data_response_len) return error.InvalidIpcResponse;
-
-    var header: [9]u8 = undefined;
-    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
-    header[4] = if (success) ipc_ack_success else ipc_ack_failure;
-    std.mem.writeInt(u32, header[5..9], @intCast(body.len), .little);
-    try writeAllHandle(pipe, &header);
-    if (body.len > 0) try writeAllHandle(pipe, body);
-}
-
-fn readIpcDataResponse(
-    alloc: Allocator,
-    pipe: windows.HANDLE,
-) ![]u8 {
-    var header: [5]u8 = undefined;
-    try readExactHandle(pipe, &header);
-    if (readU32(header[0..4]) != ipc_wire_version) return error.InvalidIpcResponse;
-
-    const success = switch (header[4]) {
-        ipc_ack_success => true,
-        ipc_ack_failure => false,
-        else => return error.InvalidIpcResponse,
-    };
-
-    var len_buf: [4]u8 = undefined;
-    readExactHandle(pipe, &len_buf) catch |err| switch (err) {
-        // Older instances only return the legacy 5-byte ack. Treat their
-        // unsupported-request failure as a normal IPC failure instead of
-        // bubbling a raw transport EOF up through the CLI.
-        error.EndOfStream => {
-            if (!success) return error.IPCFailed;
-            return error.InvalidIpcResponse;
-        },
-        else => return err,
-    };
-
-    if (!success) {
-        return error.IPCFailed;
-    }
-
-    const len = readU32(&len_buf);
-    if (len > ipc_max_data_response_len) return error.InvalidIpcResponse;
-    const body = try alloc.alloc(u8, len);
-    errdefer alloc.free(body);
-    if (len > 0) try readExactHandle(pipe, body);
-    return body;
-}
-
-fn historyEntrySortsAfter(
-    lhs_timestamp_ms: u64,
-    lhs_sequence_id: u64,
-    rhs_timestamp_ms: u64,
-    rhs_sequence_id: u64,
-) bool {
-    return lhs_timestamp_ms > rhs_timestamp_ms or
-        (lhs_timestamp_ms == rhs_timestamp_ms and lhs_sequence_id > rhs_sequence_id);
-}
-
-fn readExactHandle(pipe: windows.HANDLE, dst: []u8) !void {
-    var offset: usize = 0;
-    while (offset < dst.len) {
-        var read_len: u32 = 0;
-        if (windows.kernel32.ReadFile(
-            pipe,
-            dst[offset..].ptr,
-            @intCast(dst.len - offset),
-            &read_len,
-            null,
-        ) == 0) {
-            return switch (windows.kernel32.GetLastError()) {
-                .BROKEN_PIPE => error.EndOfStream,
-                else => |err| windows.unexpectedError(err),
-            };
-        }
-
-        if (read_len == 0) return error.EndOfStream;
-        offset += read_len;
-    }
-}
-
-fn writeAllHandle(pipe: windows.HANDLE, src: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < src.len) {
-        var write_len: u32 = 0;
-        if (windows.kernel32.WriteFile(
-            pipe,
-            src[offset..].ptr,
-            @intCast(src.len - offset),
-            &write_len,
-            null,
-        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
-        if (write_len == 0) return error.WriteFailed;
-        offset += write_len;
-    }
-}
-
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
@@ -2161,11 +1862,11 @@ fn sendNewWindowIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try encodeNewWindowIpcRequest(alloc, arguments);
+    const request = try win32_ipc.encodeNewWindowRequest(alloc, arguments);
     defer alloc.free(request);
 
-    try writeAllHandle(pipe, request);
-    return try readIpcAck(pipe);
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAck(pipe);
 }
 
 fn sendListWindowsIpc(
@@ -2179,11 +1880,15 @@ fn sendListWindowsIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try encodeListWindowsIpcRequest(alloc);
+    const request = try win32_ipc.encodeListWindowsRequest(alloc);
     defer alloc.free(request);
 
-    try writeAllHandle(pipe, request);
-    return try readIpcDataResponse(alloc, pipe);
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readDataResponseWithTimeout(
+        alloc,
+        pipe,
+        win32_ipc.automation_response_timeout_ms,
+    );
 }
 
 fn sendPerformActionIpc(
@@ -2199,11 +1904,11 @@ fn sendPerformActionIpc(
     };
     defer _ = windows.CloseHandle(pipe);
 
-    const request = try encodePerformActionIpcRequest(alloc, target, action_text);
+    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
     defer alloc.free(request);
 
-    try writeAllHandle(pipe, request);
-    return try readIpcAck(pipe);
+    try win32_ipc.writeAll(pipe, request);
+    return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
 }
 
 fn applyNewWindowArguments(
@@ -2297,11 +2002,11 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
-    while (!app.ipc_stop_requested.load(.acquire)) {
+    server: while (!app.ipc_stop_requested.load(.acquire)) {
         const pipe = CreateNamedPipeW(
             pipe_name.ptr,
             PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
             PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
             16 * 1024,
@@ -2315,15 +2020,23 @@ fn ipcServerMain(app: *App) void {
             return;
         }
 
-        const connected = ConnectNamedPipe(pipe, null);
-        if (connected == 0) {
+        connect: while (!app.ipc_stop_requested.load(.acquire)) {
+            const connected = ConnectNamedPipe(pipe, null);
+            if (connected != 0) break :connect;
             const err = windows.kernel32.GetLastError();
-            if (err != .PIPE_CONNECTED) {
-                _ = windows.CloseHandle(pipe);
-                if (!app.ipc_stop_requested.load(.acquire)) {
-                    log.warn("failed to connect win32 IPC client err={}", .{err});
-                }
-                continue;
+            switch (err) {
+                .PIPE_CONNECTED => break :connect,
+                .PIPE_LISTENING, .NO_DATA => {
+                    std.Thread.sleep(ipc_poll_interval_ns);
+                    continue;
+                },
+                else => {
+                    _ = windows.CloseHandle(pipe);
+                    if (!app.ipc_stop_requested.load(.acquire)) {
+                        log.warn("failed to connect win32 IPC client err={}", .{err});
+                    }
+                    continue :server;
+                },
             }
         }
 
@@ -2332,63 +2045,68 @@ fn ipcServerMain(app: *App) void {
             break;
         }
 
-        handleIpcClient(app, pipe) catch |err| {
+        _ = handleIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 IPC client err={}", .{err});
+            _ = windows.CloseHandle(pipe);
+            continue :server;
         };
-
-        _ = FlushFileBuffers(pipe);
-        _ = DisconnectNamedPipe(pipe);
+        // Each pipe instance serves one request. Closing only the server handle
+        // keeps unread response bytes available through the client's handle;
+        // DisconnectNamedPipe would discard them.
         _ = windows.CloseHandle(pipe);
     }
 }
 
-fn handleIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const kind = decodeIpcRequestKind(pipe) catch |err| {
-        writeIpcAck(pipe, false) catch {};
+fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
+    const kind = win32_ipc.decodeRequestKind(pipe) catch |err| {
+        win32_ipc.writeAck(pipe, false) catch {};
         return err;
     };
 
     switch (kind) {
         .new_window => handleNewWindowIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 new-window IPC request err={}", .{err});
-            try writeIpcAck(pipe, false);
+            try win32_ipc.writeAck(pipe, false);
         },
         .list_windows => handleListWindowsIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 automation list IPC request err={}", .{err});
-            try writeIpcDataResponse(pipe, false, "");
+            try win32_ipc.writeDataResponse(pipe, false, "");
         },
         .perform_action => handlePerformActionIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 automation action IPC request err={}", .{err});
-            try writeIpcAck(pipe, false);
+            try win32_ipc.writeAck(pipe, false);
         },
     }
+    return kind;
 }
 
 fn handleNewWindowIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const arguments = try decodeNewWindowIpcPayload(app.core_app.alloc, pipe);
-    errdefer freeOwnedArguments(app.core_app.alloc, arguments);
+    const arguments = try win32_ipc.decodeNewWindowPayload(app.core_app.alloc, pipe);
+    errdefer win32_ipc.freeOwnedArguments(app.core_app.alloc, arguments);
 
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    _ = mailbox.push(.{ .new_window = .{
+    if (mailbox.push(.{ .new_window = .{
         .arguments = arguments,
-    } }, .forever);
+    } }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        return error.IPCFailed;
+    }
 
-    try writeIpcAck(pipe, true);
+    try win32_ipc.writeAck(pipe, true);
 }
 
 fn handleListWindowsIpcClient(app: *App, pipe: windows.HANDLE) !void {
     const json = try requestAutomationWindowListJson(app, app.core_app.alloc);
     defer app.core_app.alloc.free(json);
-    try writeIpcDataResponse(pipe, true, json);
+    try win32_ipc.writeDataResponse(pipe, true, json);
 }
 
 fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
-    const payload = decodePerformActionIpcPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
+    const payload = win32_ipc.decodePerformActionPayload(app.core_app.alloc, pipe) catch |err| switch (err) {
         error.InvalidAutomationAction => {
-            try writeIpcAckStatus(pipe, ipc_ack_invalid_automation_action);
+            try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_invalid_automation_action);
             return;
         },
         else => return err,
@@ -2397,33 +2115,34 @@ fn handlePerformActionIpcClient(app: *App, pipe: windows.HANDLE) !void {
 
     requestAutomationAction(app, payload.target, payload.action_text) catch |err| {
         const status: u8 = switch (err) {
-            error.InvalidAutomationAction => ipc_ack_invalid_automation_action,
-            error.UnsafeAutomationAction => ipc_ack_unsafe_automation_action,
-            error.InvalidAutomationTarget => ipc_ack_invalid_automation_target,
-            error.NoAutomationTarget => ipc_ack_no_automation_target,
+            error.InvalidAutomationAction => win32_ipc.ack_invalid_automation_action,
+            error.UnsafeAutomationAction => win32_ipc.ack_unsafe_automation_action,
+            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
+            error.NoAutomationTarget => win32_ipc.ack_no_automation_target,
             else => return err,
         };
-        try writeIpcAckStatus(pipe, status);
+        try win32_ipc.writeAckStatus(pipe, status);
         return;
     };
-    try writeIpcAck(pipe, true);
+    try win32_ipc.writeAck(pipe, true);
 }
 
 fn requestAutomationWindowListJson(app: *App, alloc: Allocator) ![]u8 {
-    var request: CoreApp.Message.AutomationWindowListRequest = .{
-        .alloc = alloc,
-    };
+    const request = try CoreApp.Message.AutomationWindowListRequest.create(alloc);
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    if (mailbox.push(.{ .automation_window_list = &request }, .{ .forever = {} }) == 0) {
+    if (mailbox.push(.{ .automation_window_list = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
         return error.IPCFailed;
     }
 
-    request.done.wait();
+    try waitForAutomationCompletion(app, &request.completed);
     if (request.err) |err| return err;
-    return request.result orelse error.IPCFailed;
+    return request.takeResult() orelse error.IPCFailed;
 }
 
 fn requestAutomationAction(
@@ -2431,24 +2150,37 @@ fn requestAutomationAction(
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
 ) !void {
-    if (action_text.len == 0 or action_text.len > ipc_max_action_text_len) {
+    if (action_text.len == 0 or action_text.len > win32_ipc.max_action_text_len) {
         return error.InvalidAutomationAction;
     }
 
-    var request: CoreApp.Message.AutomationActionRequest = .{
-        .target = target,
-        .action_text = action_text,
-    };
+    const request = try CoreApp.Message.AutomationActionRequest.create(
+        app.core_app.alloc,
+        target,
+        action_text,
+    );
+    defer request.release();
+    request.retain(); // Mailbox-consumer ownership.
     const mailbox: CoreApp.Mailbox = .{
         .rt_app = app,
         .mailbox = &app.core_app.mailbox,
     };
-    if (mailbox.push(.{ .automation_action = &request }, .{ .forever = {} }) == 0) {
+    if (mailbox.push(.{ .automation_action = request }, .{ .ns = win32_ipc.io_timeout_ms * std.time.ns_per_ms }) == 0) {
+        request.release();
         return error.IPCFailed;
     }
 
-    request.done.wait();
+    try waitForAutomationCompletion(app, &request.completed);
     if (request.err) |err| return err;
+}
+
+fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
+    const deadline_ms = GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
+    while (!completed.load(.acquire)) {
+        if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
+        if (GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
@@ -2628,7 +2360,23 @@ fn persistRecoveryRecord(
     defer alloc.free(path);
     const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
     defer alloc.free(encoded);
-    try App.writeSessionStateFile(alloc, path, encoded);
+    try writePersistentFileAlloc(alloc, path, encoded);
+}
+
+fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    const temporary_path = try std.fmt.allocPrint(
+        alloc,
+        "{s}.tmp-{x}-{x}",
+        .{ path, GetCurrentProcessId(), unixMillis() },
+    );
+    defer alloc.free(temporary_path);
+    try win32_session_persistence.writeFileAtomic(path, temporary_path, data);
 }
 
 pub const App = struct {
@@ -2679,11 +2427,19 @@ pub const App = struct {
     undo_prune_timer_id: ?UINT_PTR = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
+    /// A normal last-host close destroys the native/session model before
+    /// `terminate` runs. Preserve the successful pre-close snapshot instead
+    /// of replacing it with an empty snapshot during final teardown.
+    session_state_saved_before_last_host_close: bool = false,
     /// True only while the app is synchronously draining every host during
     /// shutdown. Child HWND teardown still repairs native split trees, but it
     /// must not diagnose the intentionally absent per-pane close preflight as
     /// an ordinary-close invariant failure.
     quitting: bool = false,
+    /// Host currently undergoing allocation-free failed-restore teardown.
+    /// Its child WM_DESTROY callbacks remove Surface ownership only; Host
+    /// tree disposal happens once, after the native cascade completes.
+    session_restore_rollback_host: ?*Host = null,
     windows_hidden: bool = false,
     quick_terminal_keyboard_diagnostic_logged: bool = false,
     update_check_running: std.atomic.Value(bool) = .init(false),
@@ -2953,15 +2709,12 @@ pub const App = struct {
         if (!self.safe_mode) try self.startIpcServer();
 
         if (self.config.@"initial-window") {
-            const restored = if (self.safe_mode) false else try self.restoreSessionState();
+            const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
                 }
-                self.startup_profile_picker = false;
-            } else if (restored) {
-                self.startup_profile_picker = false;
             }
         } else {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
@@ -3071,7 +2824,9 @@ pub const App = struct {
         }
         self.unregisterGlobalHotkeys();
         self.stopIpcServer();
-        self.saveSessionState();
+        if (!self.session_state_saved_before_last_host_close or self.hosts.items.len > 0) {
+            _ = self.saveSessionState();
+        }
         self.destroyAllWindows();
         if (self.shell_runtime_initialized) {
             self.shell_runtime.deinit();
@@ -3143,7 +2898,17 @@ pub const App = struct {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
         // session when the diagnostic run exits.
-        return sessionStatePolicyAllows(self.safe_mode, self.config.@"window-save-state");
+        return self.sessionRestoreEligible();
+    }
+
+    fn sessionRestoreEligible(self: *const App) bool {
+        return sessionRestorePolicyAllows(
+            self.safe_mode,
+            self.config.@"window-save-state",
+            self.config.@"initial-window",
+            self.config.@"initial-command" != null,
+            self.startup_profile_picker,
+        );
     }
 
     /// Populate `palette_mru` from the on-disk file, one action per line
@@ -3215,21 +2980,22 @@ pub const App = struct {
         const path = self.sessionStatePath() orelse return null;
         defer self.core_app.alloc.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return null,
-            else => return err,
-        };
-        defer file.close();
-
-        const raw = try file.readToEndAlloc(self.core_app.alloc, 1024 * 1024);
-        defer self.core_app.alloc.free(raw);
-        return win32_session_state.parseAlloc(self.core_app.alloc, raw) catch |err| {
-            // Only validated payload failures justify moving user state.
-            // Transient open/read/OOM failures remain retryable and leave the
-            // session file untouched.
-            if (err == error.OutOfMemory) return err;
-            self.quarantineInvalidSessionState(err);
-            return null;
+        return switch (win32_session_persistence.loadAlloc(
+            self.core_app.alloc,
+            path,
+            win32_session_persistence.default_max_state_bytes,
+        )) {
+            .missing => null,
+            .oversized => oversized: {
+                log.warn("win32 session restore: state exceeds size limit; leaving file untouched", .{});
+                break :oversized null;
+            },
+            .transient => |err| return err,
+            .corrupt => |err| corrupt: {
+                self.quarantineInvalidSessionState(path, err);
+                break :corrupt null;
+            },
+            .loaded => |parsed| parsed,
         };
     }
 
@@ -3253,26 +3019,16 @@ pub const App = struct {
         return restored;
     }
 
-    fn quarantineInvalidSessionState(self: *App, parse_error: anyerror) void {
-        const path = self.sessionStatePath() orelse {
-            log.warn("win32 session restore: ignored unreadable session state err={}", .{parse_error});
-            return;
-        };
-        defer self.core_app.alloc.free(path);
-        var plan = win32_recovery.quarantinePlanAlloc(
+    fn quarantineInvalidSessionState(self: *App, path: []const u8, parse_error: anyerror) void {
+        const destination = win32_session_persistence.quarantineCorruptFileAlloc(
             self.core_app.alloc,
             path,
-            unixMillis(),
-        ) catch {
-            log.warn("win32 session restore: quarantine planning failed err={}", .{parse_error});
-            return;
-        };
-        defer plan.deinit();
-        std.fs.renameAbsolute(plan.source_path, plan.destination_path) catch |err| {
+        ) catch |err| {
             log.warn("win32 session restore: quarantine failed path={s} parse_err={} move_err={}", .{ path, parse_error, err });
             return;
         };
-        log.warn("win32 session restore: quarantined unreadable state path={s} parse_err={}", .{ plan.destination_path, parse_error });
+        defer self.core_app.alloc.free(destination);
+        log.warn("win32 session restore: quarantined unreadable state path={s} parse_err={}", .{ destination, parse_error });
     }
 
     fn markRecoveryReady(self: *App) void {
@@ -3327,6 +3083,8 @@ pub const App = struct {
         self: *App,
         window: win32_session_state.Window,
     ) !*Surface {
+        var transaction: SessionRestoreTransaction = .{};
+        defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
 
@@ -3335,6 +3093,7 @@ pub const App = struct {
                 saved_tab,
                 host,
                 tab_index,
+                &transaction,
             );
             if (host == null) {
                 host = tab_surface.host;
@@ -3353,7 +3112,9 @@ pub const App = struct {
         if (restored_host.tabs.items.len == 0) return error.EmptyTabs;
         restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
         const active_tab = &restored_host.tabs.items[restored_host.active_tab];
-        return active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+        const selected = active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+        transaction.commit();
+        return selected;
     }
 
     fn restoreSessionTab(
@@ -3361,6 +3122,7 @@ pub const App = struct {
         saved_tab: win32_session_state.Tab,
         existing_host: ?*Host,
         tab_index: usize,
+        transaction: *SessionRestoreTransaction,
     ) !*Surface {
         var tab_surface: ?*Surface = null;
         var created: usize = 0;
@@ -3380,6 +3142,7 @@ pub const App = struct {
                 tab_surface,
                 tab_index,
                 preferredSplitDirection(saved_tab.layout),
+                transaction,
             );
             node_surfaces[node_index] = surface;
             if (tab_surface == null) tab_surface = surface;
@@ -3412,6 +3175,7 @@ pub const App = struct {
         tab_surface: ?*Surface,
         tab_index: usize,
         split_direction: SplitTreeSurface.Split.Direction,
+        transaction: *SessionRestoreTransaction,
     ) !*Surface {
         const host = existing_host orelse if (tab_surface) |source| source.host else null;
         const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
@@ -3440,6 +3204,7 @@ pub const App = struct {
             .clone_state_from = tab_surface,
             .split_direction = split_direction,
         });
+        transaction.noteSurface(surface);
 
         if (pane.profile) |key| try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
         if (pane.title_override) |title| try surface.setTitleOverride(title);
@@ -3489,9 +3254,9 @@ pub const App = struct {
         }
     }
 
-    fn saveSessionState(self: *const App) void {
-        if (!self.sessionStateEnabled()) return;
-        const path = self.sessionStatePath() orelse return;
+    fn saveSessionState(self: *const App) bool {
+        if (!self.sessionStateEnabled()) return false;
+        const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
 
         var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
@@ -3500,22 +3265,27 @@ pub const App = struct {
 
         const state = self.buildSessionState(alloc) catch |err| {
             log.warn("win32 session save: snapshot failed err={}", .{err});
-            return;
+            return false;
         };
         if (state.windows.len == 0) {
-            deleteSessionStateFile(path);
-            return;
+            win32_session_persistence.deleteFileIfPresent(path) catch |err| {
+                log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
+                return false;
+            };
+            return true;
         }
 
         const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
             log.warn("win32 session save: encode failed err={}", .{err});
-            return;
+            return false;
         };
         defer self.core_app.alloc.free(encoded);
 
-        writeSessionStateFile(self.core_app.alloc, path, encoded) catch |err| {
+        writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
             log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
+            return false;
         };
+        return true;
     }
 
     fn buildSessionState(
@@ -3756,51 +3526,6 @@ pub const App = struct {
         };
     }
 
-    fn writeSessionStateFile(alloc: Allocator, path: []const u8, data: []const u8) !void {
-        if (std.fs.path.dirname(path)) |dir| {
-            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
-        }
-
-        const tmp_path = try std.fmt.allocPrint(
-            alloc,
-            "{s}.tmp-{x}-{x}",
-            .{ path, GetCurrentProcessId(), unixMillis() },
-        );
-        defer alloc.free(tmp_path);
-        errdefer std.fs.deleteFileAbsolute(tmp_path) catch {};
-
-        {
-            const file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true });
-            defer file.close();
-            var buf: [4096]u8 = undefined;
-            var writer = file.writer(&buf);
-            try writer.interface.writeAll(data);
-            try writer.interface.flush();
-            try file.sync();
-        }
-
-        const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
-        defer alloc.free(path_w);
-        const tmp_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, tmp_path);
-        defer alloc.free(tmp_w);
-
-        if (ReplaceFileW(path_w, tmp_w, null, 0, null, null) == 0) {
-            if (MoveFileExW(tmp_w, path_w, MOVEFILE_REPLACE_EXISTING) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
-            }
-        }
-    }
-
-    fn deleteSessionStateFile(path: []const u8) void {
-        std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err }),
-        };
-    }
-
     fn sessionWindowRect(host: *Host) ?RECT {
         const hwnd = host.hwnd orelse return null;
         var rect: RECT = undefined;
@@ -3879,7 +3604,7 @@ pub const App = struct {
         if (self.config.@"single-instance" != .true) return false;
 
         const arguments = try collectStartupForwardArguments(self.core_app.alloc);
-        defer freeOwnedArguments(self.core_app.alloc, arguments);
+        defer win32_ipc.freeOwnedArguments(self.core_app.alloc, arguments);
 
         const pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
         defer self.core_app.alloc.free(pipe_name);
@@ -4624,11 +4349,7 @@ pub const App = struct {
                 return true;
             },
 
-            .present_terminal,
-            .renderer_health,
-            .color_change,
-            .mouse_over_link,
-            => {
+            .present_terminal, .color_change, .mouse_over_link => {
                 if (action == .present_terminal) {
                     if (self.findSurfaceForTarget(target)) |surface| {
                         surface.present();
@@ -4637,6 +4358,11 @@ pub const App = struct {
                     return false;
                 }
                 return true;
+            },
+
+            .renderer_health => {
+                const surface = self.findSurfaceForTarget(target) orelse return false;
+                return surface.handleRendererHealth(value);
             },
 
             .quit_timer => {
@@ -5008,7 +4734,7 @@ pub const App = struct {
 
                     if (host_entry == null and local_entry == null) break;
                     const use_host = host_entry != null and
-                        (local_entry == null or historyEntrySortsAfter(
+                        (local_entry == null or win32_structural_history.sortsAfter(
                             host_entry.?.timestamp_ms,
                             host_entry.?.sequence_id,
                             local_entry.?.timestamp_ms,
@@ -5050,7 +4776,7 @@ pub const App = struct {
 
                     if (host_entry == null and local_entry == null) break;
                     const use_host = host_entry != null and
-                        (local_entry == null or historyEntrySortsAfter(
+                        (local_entry == null or win32_structural_history.sortsAfter(
                             host_entry.?.timestamp_ms,
                             host_entry.?.sequence_id,
                             local_entry.?.timestamp_ms,
@@ -5815,8 +5541,8 @@ pub const App = struct {
         if (!self.shell_compositor_initialized or
             self.shell_compositor.status().state != .active) return false;
 
-        self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |err| switch (err) {
-            error.DeviceLost => {
+        self.shell_compositor_driver.renderWindowChromeText(@intFromPtr(hwnd), args) catch |err| switch (win32_chrome_state.shellChromeFallbackAction(err)) {
+            .recover_and_retry => {
                 self.shell_compositor.markDeviceLost();
                 self.shell_compositor.recover() catch |recover_err| {
                     log.warn("shell chrome DWrite recovery failed err={}", .{recover_err});
@@ -5828,13 +5554,14 @@ pub const App = struct {
                     return false;
                 };
             },
-            else => {
+            .use_gdi_fallback => {
                 log.warn("shell chrome DWrite unavailable err={}", .{err});
                 return false;
             },
+            .ignore => return false,
         };
-        self.shell_compositor.commit() catch |err| switch (err) {
-            error.DeviceLost => {
+        self.shell_compositor.commit() catch |err| switch (win32_chrome_state.shellChromeFallbackAction(err)) {
+            .recover_and_retry => {
                 self.shell_compositor.markDeviceLost();
                 self.shell_compositor.recover() catch |recover_err| {
                     log.warn("shell chrome DWrite commit recovery failed err={}", .{recover_err});
@@ -5850,10 +5577,11 @@ pub const App = struct {
                     return false;
                 };
             },
-            else => {
+            .use_gdi_fallback => {
                 log.warn("shell chrome DWrite commit failed err={}", .{err});
                 return false;
             },
+            .ignore => return false,
         };
         return true;
     }
@@ -5990,7 +5718,7 @@ pub const App = struct {
         var best_seq: u64 = 0;
         for (self.hosts.items) |host| {
             const entry = host.peekStructuralUndo() orelse continue;
-            if (best == null or historyEntrySortsAfter(
+            if (best == null or win32_structural_history.sortsAfter(
                 entry.timestamp_ms,
                 entry.sequence_id,
                 best_ts,
@@ -6010,7 +5738,7 @@ pub const App = struct {
         var best_seq: u64 = 0;
         for (self.hosts.items) |host| {
             const entry = host.peekStructuralRedo() orelse continue;
-            if (best == null or historyEntrySortsAfter(
+            if (best == null or win32_structural_history.sortsAfter(
                 entry.timestamp_ms,
                 entry.sequence_id,
                 best_ts,
@@ -6317,6 +6045,7 @@ pub const App = struct {
     fn windowDestroyed(self: *App, surface: *Surface) void {
         self.removeWindow(surface);
         if (surface.host) |host| {
+            if (self.session_restore_rollback_host == host) return;
             surface.invalidateStructuralHistoryForDestroy();
             host.discardStructuralEntriesReferencing(surface);
 
@@ -6924,6 +6653,30 @@ pub const App = struct {
         }
     }
 
+    fn rollbackSessionRestoreHost(self: *App, host: *Host) void {
+        const previous_quitting = self.quitting;
+        self.quitting = true;
+        defer self.quitting = previous_quitting;
+        self.session_restore_rollback_host = host;
+        defer self.session_restore_rollback_host = null;
+        host.clearStructuralHistory(.normal);
+        if (host.hwnd) |hwnd| {
+            if (DestroyWindow(hwnd) == 0) {
+                const destroy_err = windows.kernel32.GetLastError();
+                if (IsWindow(hwnd) != 0) {
+                    log.err("failed to destroy partially restored host; retaining ownership err={}", .{
+                        destroy_err,
+                    });
+                    return;
+                }
+            }
+        }
+        if (self.shell_runtime_initialized) {
+            if (host.shell_id) |window_id| self.shell_runtime.rollbackWindow(window_id);
+        }
+        self.removeHost(host);
+    }
+
     fn sanitizeCurrentDirectory(self: *App) !void {
         const cwd = std.process.getCwdAlloc(self.core_app.alloc) catch null;
         defer if (cwd) |v| self.core_app.alloc.free(v);
@@ -7195,6 +6948,11 @@ pub const App = struct {
                 else => {}, // skip pointer / optional-pointer / array fields
             }
         }
+        const theme_key = ConfigKey.theme;
+        if (original.changed(pending, theme_key)) {
+            user_edited.set(@intFromEnum(theme_key));
+            any_edit = true;
+        }
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -7368,6 +7126,10 @@ pub const App = struct {
                 },
                 else => {},
             }
+        }
+        if (user_edited.isSet(@intFromEnum(theme_key)) and pending.changed(&reloaded, theme_key)) {
+            std.log.warn("settings save: field 'theme' was saved but is masked by a later config-file layer", .{});
+            any_masked = true;
         }
 
         self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
@@ -8181,42 +7943,9 @@ const Tab = struct {
     }
 };
 
-const ChromeTextDirty = packed struct(u8) {
-    overlay: bool = true,
-    inspector: bool = true,
-    banner: bool = true,
-    status: bool = true,
-    _padding: u4 = 0,
-
-    fn markTop(self: *ChromeTextDirty) void {
-        self.overlay = true;
-        self.inspector = true;
-        self.banner = true;
-    }
-
-    fn markAll(self: *ChromeTextDirty) void {
-        self.markTop();
-        self.status = true;
-    }
-};
-
-const ChromeRepaintMask = packed struct(u8) {
-    top: bool = false,
-    content: bool = false,
-    status: bool = false,
-    search_frames: bool = false,
-    _padding: u4 = 0,
-
-    fn markChrome(self: *ChromeRepaintMask) void {
-        self.top = true;
-        self.status = true;
-        self.search_frames = true;
-    }
-
-    fn isEmpty(self: ChromeRepaintMask) bool {
-        return !self.top and !self.content and !self.status and !self.search_frames;
-    }
-};
+const ChromeTextDirty = win32_chrome_state.TextDirty;
+const ChromeRepaintMask = win32_chrome_state.RepaintMask;
+const LayoutChildPaintPlan = win32_chrome_state.LayoutChildPaintPlan;
 
 const QuickTerminalAnimation = struct {
     id: win32_tween.TweenId,
@@ -8380,12 +8109,17 @@ const Host = struct {
     palette_catalog: ?PaletteCatalog = null,
     palette_catalog_labels: [palette_catalog_label_capacity][palette_catalog_label_bytes]u8 = undefined,
     palette_catalog_label_count: usize = 0,
+    /// Owned installed-theme snapshot backing exact catalog payload names.
+    palette_installed_themes: ?[]themepkg.Entry = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     palette_list_scroll: usize = 0,
     /// Currently-selected row (absolute index into ranked). Enter runs
     /// this entry; click overrides both selection and invocation.
     palette_list_selected: usize = 0,
+    /// Original app config while a palette theme row is being previewed.
+    /// Owned by this host until committed or reverted.
+    palette_theme_preview_original: ?configpkg.Config = null,
 
     // Single SetTimer-driven tween scheduler; see Tween scheduler block
     // in the method section. Matches Win32's main-thread-paint model.
@@ -8398,8 +8132,8 @@ const Host = struct {
     resize_settle_repaint_ticks: u8 = 0,
     structural_history_disposing: bool = false,
     destroy_after_structural_dispose: bool = false,
-    structural_undo_entries: std.ArrayListUnmanaged(StructuralUndoEntry) = .empty,
-    structural_redo_entries: std.ArrayListUnmanaged(StructuralUndoEntry) = .empty,
+    structural_undo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
+    structural_redo_entries: win32_structural_history.List(StructuralUndoEntry) = .empty,
 
     const StructuralHistoryDisposeMode = enum {
         normal,
@@ -8561,26 +8295,36 @@ const Host = struct {
         tab.deinit();
     }
 
-    fn discardNewestStructuralUndo(self: *Host) bool {
-        if (self.structural_undo_entries.items.len == 0) return true;
-        const index = self.structural_undo_entries.items.len - 1;
-        self.structural_undo_entries.items[index].dispose(self, .normal) catch |err| {
-            log.err("structural undo disposal deferred err={}", .{err});
-            return false;
+    fn disposeStructuralNormalLogged(self: *Host, entry: *StructuralUndoEntry) !void {
+        entry.dispose(self, .normal) catch |err| {
+            log.err("structural history disposal deferred err={}", .{err});
+            return err;
         };
-        _ = self.structural_undo_entries.pop();
-        return true;
+    }
+
+    fn disposeStructuralHostDestroyLogged(self: *Host, entry: *StructuralUndoEntry) !void {
+        entry.dispose(self, .host_destroy) catch |err| {
+            log.err("structural history host-destroy disposal deferred err={}", .{err});
+            return err;
+        };
+    }
+
+    fn discardNewestStructuralUndo(self: *Host) bool {
+        return win32_structural_history.discardNewest(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            self,
+            disposeStructuralNormalLogged,
+        );
     }
 
     fn discardNewestStructuralRedo(self: *Host) bool {
-        if (self.structural_redo_entries.items.len == 0) return true;
-        const index = self.structural_redo_entries.items.len - 1;
-        self.structural_redo_entries.items[index].dispose(self, .normal) catch |err| {
-            log.err("structural redo disposal deferred err={}", .{err});
-            return false;
-        };
-        _ = self.structural_redo_entries.pop();
-        return true;
+        return win32_structural_history.discardNewest(
+            StructuralUndoEntry,
+            &self.structural_redo_entries,
+            self,
+            disposeStructuralNormalLogged,
+        );
     }
 
     fn clearStructuralRedo(self: *Host) bool {
@@ -8594,26 +8338,35 @@ const Host = struct {
         self: *Host,
         mode: StructuralHistoryDisposeMode,
     ) bool {
-        var complete = true;
-        while (self.structural_undo_entries.items.len > 0) {
-            const index = self.structural_undo_entries.items.len - 1;
-            self.structural_undo_entries.items[index].dispose(self, mode) catch |err| {
-                log.err("structural undo clear deferred err={}", .{err});
-                complete = false;
-                break;
-            };
-            _ = self.structural_undo_entries.pop();
-        }
-        while (self.structural_redo_entries.items.len > 0) {
-            const index = self.structural_redo_entries.items.len - 1;
-            self.structural_redo_entries.items[index].dispose(self, mode) catch |err| {
-                log.err("structural redo clear deferred err={}", .{err});
-                complete = false;
-                break;
-            };
-            _ = self.structural_redo_entries.pop();
-        }
-        return complete;
+        const undo_complete = switch (mode) {
+            .normal => win32_structural_history.clear(
+                StructuralUndoEntry,
+                &self.structural_undo_entries,
+                self,
+                disposeStructuralNormalLogged,
+            ),
+            .host_destroy => win32_structural_history.clear(
+                StructuralUndoEntry,
+                &self.structural_undo_entries,
+                self,
+                disposeStructuralHostDestroyLogged,
+            ),
+        };
+        const redo_complete = switch (mode) {
+            .normal => win32_structural_history.clear(
+                StructuralUndoEntry,
+                &self.structural_redo_entries,
+                self,
+                disposeStructuralNormalLogged,
+            ),
+            .host_destroy => win32_structural_history.clear(
+                StructuralUndoEntry,
+                &self.structural_redo_entries,
+                self,
+                disposeStructuralHostDestroyLogged,
+            ),
+        };
+        return undo_complete and redo_complete;
     }
 
     fn clearStructuralHistory(
@@ -8625,41 +8378,32 @@ const Host = struct {
 
     fn discardExpiredStructuralEntries(
         self: *Host,
-        list: *std.ArrayListUnmanaged(StructuralUndoEntry),
+        list: *win32_structural_history.List(StructuralUndoEntry),
         min_timestamp_ms: u64,
     ) bool {
-        var complete = true;
-        var i: usize = 0;
-        while (i < list.items.len) {
-            if (list.items[i].timestamp_ms >= min_timestamp_ms) {
-                i += 1;
-                continue;
-            }
-
-            list.items[i].dispose(self, .normal) catch |err| {
-                log.err("expired structural history disposal deferred err={}", .{err});
-                complete = false;
-                i += 1;
-                continue;
-            };
-            _ = list.orderedRemove(i);
-        }
-        return complete;
+        return win32_structural_history.pruneExpired(
+            StructuralUndoEntry,
+            list,
+            min_timestamp_ms,
+            self,
+            disposeStructuralNormalLogged,
+        );
     }
 
     fn oldestStructuralTimestamp(self: *const Host) ?u64 {
-        var oldest: ?u64 = null;
-        for (self.structural_undo_entries.items) |entry| {
-            if (oldest == null or entry.timestamp_ms < oldest.?) oldest = entry.timestamp_ms;
-        }
-        for (self.structural_redo_entries.items) |entry| {
-            if (oldest == null or entry.timestamp_ms < oldest.?) oldest = entry.timestamp_ms;
-        }
-        return oldest;
+        return win32_structural_history.oldestTimestamp(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            &self.structural_redo_entries,
+        );
     }
 
     fn hasStructuralHistory(self: *const Host) bool {
-        return self.structural_undo_entries.items.len > 0 or self.structural_redo_entries.items.len > 0;
+        return win32_structural_history.hasHistory(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            &self.structural_redo_entries,
+        );
     }
 
     fn pruneStructuralHistoryBefore(self: *Host, min_timestamp_ms: u64) bool {
@@ -8682,53 +8426,67 @@ const Host = struct {
         try self.structural_undo_entries.ensureUnusedCapacity(self.app.core_app.alloc, 1);
         if (!self.clearStructuralRedo()) return error.HistoryDisposalDeferred;
         while (self.structural_undo_entries.items.len >= win32_undo.max_entries) {
-            try self.structural_undo_entries.items[0].dispose(self, .normal);
-            _ = self.structural_undo_entries.orderedRemove(0);
+            try win32_structural_history.evictOldest(
+                StructuralUndoEntry,
+                &self.structural_undo_entries,
+                self,
+                disposeStructuralNormalLogged,
+            );
         }
     }
 
     fn appendStructuralUndoAssumeCapacity(self: *Host, entry: StructuralUndoEntry) *StructuralUndoEntry {
-        self.structural_undo_entries.appendAssumeCapacity(entry);
+        const stored = win32_structural_history.appendAssumeCapacity(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            entry,
+        );
         self.app.scheduleUndoPruneTimer();
-        return &self.structural_undo_entries.items[self.structural_undo_entries.items.len - 1];
+        return stored;
     }
 
     fn peekStructuralUndo(self: *const Host) ?*const StructuralUndoEntry {
-        if (self.structural_undo_entries.items.len == 0) return null;
-        return &self.structural_undo_entries.items[self.structural_undo_entries.items.len - 1];
+        return win32_structural_history.peek(StructuralUndoEntry, &self.structural_undo_entries);
     }
 
     fn peekStructuralRedo(self: *const Host) ?*const StructuralUndoEntry {
-        if (self.structural_redo_entries.items.len == 0) return null;
-        return &self.structural_redo_entries.items[self.structural_redo_entries.items.len - 1];
+        return win32_structural_history.peek(StructuralUndoEntry, &self.structural_redo_entries);
     }
 
     fn popStructuralUndo(self: *Host) Allocator.Error!?*StructuralUndoEntry {
-        const entry = self.structural_undo_entries.pop() orelse return null;
-        self.structural_redo_entries.append(self.app.core_app.alloc, entry) catch |err| {
-            self.structural_undo_entries.append(self.app.core_app.alloc, entry) catch unreachable;
-            return err;
-        };
-        return &self.structural_redo_entries.items[self.structural_redo_entries.items.len - 1];
+        return win32_structural_history.moveNewest(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            &self.structural_redo_entries,
+            self.app.core_app.alloc,
+        );
     }
 
     fn popStructuralRedo(self: *Host) Allocator.Error!?*StructuralUndoEntry {
-        const entry = self.structural_redo_entries.pop() orelse return null;
-        self.structural_undo_entries.append(self.app.core_app.alloc, entry) catch |err| {
-            self.structural_redo_entries.append(self.app.core_app.alloc, entry) catch unreachable;
-            return err;
-        };
-        return &self.structural_undo_entries.items[self.structural_undo_entries.items.len - 1];
+        return win32_structural_history.moveNewest(
+            StructuralUndoEntry,
+            &self.structural_redo_entries,
+            &self.structural_undo_entries,
+            self.app.core_app.alloc,
+        );
     }
 
     fn restoreLastStructuralUndoPop(self: *Host) void {
-        const entry = self.structural_redo_entries.pop() orelse return;
-        self.structural_undo_entries.append(self.app.core_app.alloc, entry) catch unreachable;
+        win32_structural_history.restoreNewestMove(
+            StructuralUndoEntry,
+            &self.structural_redo_entries,
+            &self.structural_undo_entries,
+            self.app.core_app.alloc,
+        );
     }
 
     fn restoreLastStructuralRedoPop(self: *Host) void {
-        const entry = self.structural_undo_entries.pop() orelse return;
-        self.structural_redo_entries.append(self.app.core_app.alloc, entry) catch unreachable;
+        win32_structural_history.restoreNewestMove(
+            StructuralUndoEntry,
+            &self.structural_undo_entries,
+            &self.structural_redo_entries,
+            self.app.core_app.alloc,
+        );
     }
 
     fn discardStructuralEntriesReferencing(self: *Host, surface: *Surface) void {
@@ -9155,8 +8913,11 @@ const Host = struct {
     }
 
     fn effectiveTweenDuration(self: *Host, duration_ms: u16) u16 {
-        _ = self;
-        return if (!clientAnimationsEnabled() or isHighContrastActive()) 0 else duration_ms;
+        return (win32_chrome_state.HighContrastDpiState{
+            .high_contrast = isHighContrastActive(),
+            .client_animations_enabled = clientAnimationsEnabled(),
+            .dpi = self.current_dpi,
+        }).effectiveAnimationDuration(duration_ms);
     }
 
     fn cancelQuickTerminalAnimation(self: *Host) void {
@@ -9543,6 +9304,7 @@ const Host = struct {
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         catalog.reset();
+        self.clearPaletteInstalledThemes();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
             error.StorageTooSmall
@@ -9679,6 +9441,8 @@ const Host = struct {
             });
         }
 
+        self.appendInstalledThemesToPalette(catalog);
+
         catalog.appendReviewedHelp() catch |err| {
             log.warn("palette help batch rejected err={}", .{err});
         };
@@ -9710,6 +9474,26 @@ const Host = struct {
 
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
         self.announcePaletteSelection();
+        self.previewSelectedPaletteTheme();
+    }
+
+    fn setPaletteListSelection(self: *Host, next: usize) bool {
+        if (self.overlay_mode != .command_palette) return false;
+        if (next >= self.palette_list_ranked_count) return false;
+
+        const changed = self.palette_list_selected != next;
+        self.palette_list_selected = next;
+        if (next < self.palette_list_scroll) {
+            self.palette_list_scroll = next;
+        } else if (next >= self.palette_list_scroll + palette_max_visible_rows) {
+            self.palette_list_scroll = next - palette_max_visible_rows + 1;
+        }
+        if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (changed) {
+            self.announcePaletteSelection();
+            self.previewSelectedPaletteTheme();
+        }
+        return changed;
     }
 
     /// Move the list selection up/down one row, scrolling if the new
@@ -9728,15 +9512,7 @@ const Host = struct {
             next += 1;
             if (next >= self.palette_list_ranked_count) next = 0;
         }
-        self.palette_list_selected = next;
-        // Keep the selected row inside the visible window.
-        if (next < self.palette_list_scroll) {
-            self.palette_list_scroll = next;
-        } else if (next >= self.palette_list_scroll + palette_max_visible_rows) {
-            self.palette_list_scroll = next - palette_max_visible_rows + 1;
-        }
-        if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
-        self.announcePaletteSelection();
+        _ = self.setPaletteListSelection(next);
         return true;
     }
 
@@ -9774,16 +9550,43 @@ const Host = struct {
         ) catch "Command palette";
     }
 
+    fn buildPaletteRowName(self: *const Host, index: usize, buf: []u8) []const u8 {
+        if (index >= self.palette_list_ranked_count) return "Command palette row";
+        const catalog = if (self.palette_catalog) |*value| value else return "Command palette row";
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[index]) orelse return "Command palette row";
+        return std.fmt.bufPrint(
+            buf,
+            "{d} of {d}: {s} — {s}",
+            .{
+                index + 1,
+                self.palette_list_ranked_count,
+                descriptor.item.title,
+                if (descriptor.item.enabled)
+                    descriptor.item.subtitle
+                else
+                    descriptor.item.disabled_reason orelse "Unavailable",
+            },
+        ) catch "Command palette row";
+    }
+
     fn paletteListUiaState(self: *const Host) win32_uia.PaletteListState {
         return .{
             .ctx = @ptrCast(@constCast(self)),
             .name = &paletteListNameThunk,
+            .row_count = &paletteListRowCountThunk,
+            .selected_index = &paletteListSelectedIndexThunk,
+            .row_name = &paletteListRowNameThunk,
+            .select_row = &paletteListSelectRowThunk,
+            .geometry = &paletteListGeometryThunk,
         };
     }
 
     fn announcePaletteSelection(self: *const Host) void {
         const provider = self.palette_list_uia_provider orelse return;
         win32_uia.events.raiseNameChanged(&provider.base);
+        if (self.palette_list_ranked_count > 0) {
+            provider.raiseSelectionChanged(@min(self.palette_list_selected, self.palette_list_ranked_count - 1));
+        }
     }
 
     /// Translate a y coordinate (client-area) into an absolute rank
@@ -9838,8 +9641,8 @@ const Host = struct {
                 self.hideOverlay();
                 try self.app.settings_window.openField(field);
             },
-            .theme => |_| {
-                try self.setBanner(.err, "Theme selection is not available from this build.");
+            .theme => |name| {
+                try self.commitPaletteTheme(name);
             },
             .help => |target| switch (target) {
                 .settings => {
@@ -9854,6 +9657,185 @@ const Host = struct {
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),
         }
+    }
+
+    fn appendInstalledThemesToPalette(self: *Host, catalog: *PaletteCatalog) void {
+        const alloc = self.app.core_app.alloc;
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+
+        const installed = themepkg.list(alloc, arena.allocator()) catch |err| {
+            log.warn("palette theme enumeration failed err={}", .{err});
+            return;
+        };
+        self.palette_installed_themes = installed;
+        if (installed.len == 0) return;
+
+        const reserve_items: usize = win32_palette.catalog.reviewed_help.len + self.app.palette_mru.len;
+        const used_items = catalog.items().len;
+        const free_items = catalog.capacity() -| used_items;
+        const theme_item_limit = free_items -| reserve_items;
+        const theme_label_limit = self.palette_catalog_labels.len -| self.palette_catalog_label_count;
+        const theme_limit = @min(installed.len, @min(theme_item_limit, theme_label_limit));
+        if (theme_limit == 0) return;
+
+        var entries = std.ArrayList(win32_palette.catalog.ThemeEntry).empty;
+        defer entries.deinit(alloc);
+        entries.ensureTotalCapacity(alloc, theme_limit) catch |err| {
+            log.warn("palette theme capacity failed err={}", .{err});
+            return;
+        };
+        for (installed[0..theme_limit]) |theme| {
+            entries.appendAssumeCapacity(.{
+                .name = theme.name,
+                .display_name = self.storePaletteCatalogLabel(theme.name),
+                .description = switch (theme.location) {
+                    .user => "User theme",
+                    .resources => "Bundled theme",
+                },
+                .enabled = true,
+            });
+        }
+        _ = catalog.appendThemesBounded(entries.items, theme_limit) catch |err| {
+            log.warn("palette theme batch rejected err={}", .{err});
+        };
+    }
+
+    fn clearPaletteInstalledThemes(self: *Host) void {
+        const installed = self.palette_installed_themes orelse return;
+        self.palette_installed_themes = null;
+        themepkg.freeList(self.app.core_app.alloc, installed);
+    }
+
+    fn selectedPaletteThemeName(self: *Host) ?[]const u8 {
+        if (self.overlay_mode != .command_palette) return null;
+        if (self.palette_list_ranked_count == 0) return null;
+        const row = @min(self.palette_list_selected, self.palette_list_ranked_count - 1);
+        const catalog = if (self.palette_catalog) |*value| value else return null;
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return null;
+        return switch (descriptor.payload) {
+            .theme => |name| name,
+            else => null,
+        };
+    }
+
+    fn setConfigTheme(config: *configpkg.Config, name: []const u8) !void {
+        const arena = config._arena.?.allocator();
+        const owned = try arena.dupeZ(u8, name);
+        config.theme = .{
+            .light = owned,
+            .dark = owned,
+        };
+    }
+
+    fn loadPaletteThemeConfig(self: *Host, name: []const u8) !configpkg.Config {
+        const alloc = self.app.core_app.alloc;
+        const cwd_before = try std.process.getCwdAlloc(alloc);
+        defer alloc.free(cwd_before);
+
+        var changed_cwd = false;
+        if (self.app.startup_cwd) |cwd| {
+            try std.process.changeCurDir(cwd);
+            changed_cwd = true;
+        }
+        defer if (changed_cwd) std.process.changeCurDir(cwd_before) catch |err| {
+            log.warn("palette theme cwd restore failed path={s} err={}", .{ cwd_before, err });
+        };
+
+        var preview = try configpkg.Config.default(alloc);
+        errdefer preview.deinit();
+        try preview.loadDefaultFiles(alloc);
+        try preview.loadCliArgs(alloc);
+        try preview.loadRecursiveFiles(alloc);
+        preview._conditional_state = self.app.config._conditional_state;
+        try setConfigTheme(&preview, name);
+        try preview.finalize();
+        return preview;
+    }
+
+    fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
+        var old = self.app.config;
+        self.app.config = new_config;
+        old.deinit();
+        self.app.config_revision +%= 1;
+        if (self.app.config_revision == 0) self.app.config_revision = 1;
+        self.app.reconfigureTheme();
+        for (self.app.windows.items) |surface| {
+            surface.core().updateConfig(&self.app.config) catch |err| {
+                log.warn("palette theme core apply failed err={}", .{err});
+            };
+            surface.applyRuntimeConfig(&self.app.config) catch |err| {
+                log.warn("palette theme runtime apply failed err={}", .{err});
+            };
+        }
+        for (self.app.hosts.items) |host| {
+            host.refreshChrome() catch |err| {
+                log.warn("palette theme chrome refresh failed err={}", .{err});
+            };
+        }
+    }
+
+    fn previewSelectedPaletteTheme(self: *Host) void {
+        if (isHighContrastActive()) {
+            self.revertPaletteThemePreview();
+            return;
+        }
+
+        const name = self.selectedPaletteThemeName() orelse {
+            self.revertPaletteThemePreview();
+            return;
+        };
+        self.previewPaletteTheme(name) catch |err| {
+            log.warn("palette theme preview failed theme={s} err={}", .{ name, err });
+            self.revertPaletteThemePreview();
+            self.setBanner(.err, "Theme preview failed; selection was not applied.") catch {};
+        };
+    }
+
+    fn previewPaletteTheme(self: *Host, name: []const u8) !void {
+        if (self.app.config.theme) |current| {
+            if (std.mem.eql(u8, current.light, name) and std.mem.eql(u8, current.dark, name)) return;
+        }
+
+        if (self.palette_theme_preview_original == null) {
+            self.palette_theme_preview_original = try self.app.config.clone(self.app.core_app.alloc);
+        }
+
+        var preview = try self.loadPaletteThemeConfig(name);
+        errdefer preview.deinit();
+        self.replaceRuntimeConfigFromPalette(preview);
+    }
+
+    fn revertPaletteThemePreview(self: *Host) void {
+        const original = self.palette_theme_preview_original orelse return;
+        self.palette_theme_preview_original = null;
+        self.replaceRuntimeConfigFromPalette(original);
+    }
+
+    fn commitPaletteTheme(self: *Host, name: []const u8) !void {
+        var original = if (self.palette_theme_preview_original) |value| blk: {
+            self.palette_theme_preview_original = null;
+            break :blk value;
+        } else try self.app.config.clone(self.app.core_app.alloc);
+        defer original.deinit();
+
+        var pending = try original.clone(self.app.core_app.alloc);
+        defer pending.deinit();
+        try setConfigTheme(&pending, name);
+
+        self.app.settingsSaveAndReload(&pending, &original) catch |err| {
+            log.warn("palette theme save failed theme={s} err={}", .{ name, err });
+            const restored = original.clone(self.app.core_app.alloc) catch {
+                try self.setBanner(.err, "Theme save failed; restart or reload config to clear the preview.");
+                return;
+            };
+            self.replaceRuntimeConfigFromPalette(restored);
+            self.setBanner(.err, "Theme save failed; reverted preview.") catch {};
+            return;
+        };
+
+        self.hideOverlay();
+        try self.layout();
     }
 
     fn invokePaletteAction(
@@ -9944,6 +9926,7 @@ const Host = struct {
         // Enter invokes whatever row the selection *used* to point at —
         // possibly an off-screen action the user has no idea they're
         // launching. UIA Name updates follow from the reassignment.
+        const previous_selection = self.palette_list_selected;
         const visible_end = new_scroll + palette_max_visible_rows;
         if (self.palette_list_selected < new_scroll) {
             self.palette_list_selected = new_scroll;
@@ -9951,6 +9934,10 @@ const Host = struct {
             self.palette_list_selected = visible_end - 1;
         }
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_selected != previous_selection) {
+            self.announcePaletteSelection();
+            self.previewSelectedPaletteTheme();
+        }
     }
 
     /// BeginPaint/EndPaint over the list child HWND. Each row shows
@@ -10091,6 +10078,8 @@ const Host = struct {
         }
         self.tween_sched.deinit();
 
+        self.revertPaletteThemePreview();
+        self.clearPaletteInstalledThemes();
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
@@ -10495,8 +10484,12 @@ const Host = struct {
         }
         self.tabs.items[self.active_tab].clearRedoHistory();
         while (self.structural_undo_entries.items.len > win32_undo.max_entries) {
-            self.structural_undo_entries.items[0].dispose(self, .normal) catch break;
-            _ = self.structural_undo_entries.orderedRemove(0);
+            win32_structural_history.evictOldest(
+                StructuralUndoEntry,
+                &self.structural_undo_entries,
+                self,
+                disposeStructuralNormalLogged,
+            ) catch break;
         }
         source_surface.host_active = true;
         source_surface.setVisible(true);
@@ -10843,9 +10836,11 @@ const Host = struct {
     }
 
     fn titlebarHoverFadeDuration(self: *Host) u16 {
-        _ = self;
-        if (!clientAnimationsEnabled() or isHighContrastActive()) return 0;
-        return titlebar_hover_fade_ms;
+        return (win32_chrome_state.HighContrastDpiState{
+            .high_contrast = isHighContrastActive(),
+            .client_animations_enabled = clientAnimationsEnabled(),
+            .dpi = self.current_dpi,
+        }).effectiveAnimationDuration(titlebar_hover_fade_ms);
     }
 
     fn invalidateTitlebarButtonRole(self: *Host, role: TitlebarButtonRole) void {
@@ -11334,6 +11329,7 @@ const Host = struct {
 
     fn hideOverlay(self: *Host) void {
         const was_confirm = self.overlay_mode == .confirm;
+        self.revertPaletteThemePreview();
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
         self.setBanner(.none, null) catch {};
@@ -13082,14 +13078,12 @@ const Host = struct {
     }
 
     fn scaled(self: *const Host, base: i32) i32 {
-        if (self.current_dpi <= 96) return base;
-        return @divTrunc(base * @as(i32, @intCast(self.current_dpi)), 96);
+        return win32_chrome_state.scaled(base, self.current_dpi);
     }
 
     /// DPI-scale helper usable from free functions that lack a Host pointer.
     fn scaledBy(base: i32, dpi: u32) i32 {
-        if (dpi <= 96) return base;
-        return @divTrunc(base * @as(i32, @intCast(dpi)), 96);
+        return win32_chrome_state.scaled(base, dpi);
     }
 
     fn hasVisibleStatus(self: *const Host) bool {
@@ -13184,6 +13178,9 @@ const Host = struct {
             if (fallback_hwnd) |hwnd| _ = DestroyWindow(hwnd);
             self.app.removeHost(self);
             return;
+        }
+        if (self.app.hosts.items.len == 1) {
+            self.app.session_state_saved_before_last_host_close = self.app.saveSessionState();
         }
         for (surfaces.items) |surface| surface.close(false);
     }
@@ -13405,7 +13402,7 @@ const Host = struct {
     fn queueChromeRepaint(self: *Host, mask: ChromeRepaintMask) void {
         self.chrome_repaint_dirty = true;
         const hwnd = self.hwnd orelse return;
-        const added = mergeChromeRepaintMask(&self.chrome_paint_mask, mask);
+        const added = win32_chrome_state.mergeRepaintMask(&self.chrome_paint_mask, mask);
         if (added.isEmpty()) return;
         self.chrome_paint_pending = true;
         self.invalidateChromeMask(hwnd, added);
@@ -13946,9 +13943,13 @@ const Host = struct {
         if (!self.layoutChromeForRect(rect, &chrome_layout_changed)) return;
 
         const content_rect = try self.contentRect();
-        const content_y = content_rect.top;
-        const content_width = @max(1, content_rect.right - content_rect.left);
-        const content_height = @max(1, content_rect.bottom - content_rect.top);
+        const layout_content_rect: win32_layout.Rect = .{
+            .left = content_rect.left,
+            .top = content_rect.top,
+            .right = content_rect.right,
+            .bottom = content_rect.bottom,
+        };
+        const search_bar_height = self.scaled(host_search_bar_height);
         const active_tab = self.activeTab() orelse return;
         var content_layout_changed = false;
 
@@ -13965,24 +13966,20 @@ const Host = struct {
                 content_layout_changed = content_layout_changed or visibility_changed;
                 entry.view.setVisible(visible);
                 if (visible) {
-                    const frame_h: i32 = if (entry.view.search_bar.visible)
-                        @min(self.scaled(host_search_bar_height), @max(0, content_height - 1))
-                    else
-                        0;
-                    if (frame_h > 0) {
+                    const placement = win32_layout.zoomedSurfacePlacement(
+                        layout_content_rect,
+                        entry.view.search_bar.visible,
+                        search_bar_height,
+                    );
+                    if (placement.search_frame_rect) |search_frame_rect| {
                         content_layout_changed = (try entry.view.layoutSearchBarControls(
-                            childRect(content_rect.left, content_y, content_width, frame_h),
+                            layoutRectToWin32(search_frame_rect),
                             true,
                         )) or content_layout_changed;
                     } else {
                         content_layout_changed = entry.view.hideSearchBarControls() or content_layout_changed;
                     }
-                    const pane_rect = childRect(
-                        content_rect.left,
-                        content_y + frame_h,
-                        content_width,
-                        @max(1, content_height - frame_h),
-                    );
+                    const pane_rect = layoutRectToWin32(placement.pane_rect);
                     var pane_rect_changed = false;
                     if (entry.view.hwnd) |surface_hwnd| {
                         pane_rect_changed = applyChildRect(
@@ -14018,6 +14015,7 @@ const Host = struct {
         } else {
             var spatial = try active_tab.tree.spatial(self.app.core_app.alloc);
             defer spatial.deinit(self.app.core_app.alloc);
+            const has_multi_panes = active_tab.leafCount() > 1;
             var it = active_tab.tree.iterator();
             while (it.next()) |entry| {
                 const visibility_changed = !entry.view.window_visible;
@@ -14025,43 +14023,27 @@ const Host = struct {
                 entry.view.setVisible(true);
                 if (entry.view.hwnd) |surface_hwnd| {
                     const slot = spatial.slots[entry.handle.idx()];
-                    var x: i32 = content_rect.left + @as(i32, @intFromFloat(@round(slot.x * @as(f16, @floatFromInt(content_width)))));
-                    var y: i32 = content_y + @as(i32, @intFromFloat(@round(slot.y * @as(f16, @floatFromInt(content_height)))));
-                    var w: i32 = @max(1, @as(i32, @intFromFloat(@round(slot.width * @as(f16, @floatFromInt(content_width))))));
-                    var h: i32 = @max(1, @as(i32, @intFromFloat(@round(slot.height * @as(f16, @floatFromInt(content_height))))));
-                    // Pane divider gap: inset internal edges only (pixel-space detection)
-                    const has_multi_panes = active_tab.leafCount() > 1;
-                    if (has_multi_panes) {
-                        if (x > content_rect.left) {
-                            x += 1;
-                            w -= 1;
-                        }
-                        if (x + w < content_rect.left + content_width) {
-                            w -= 1;
-                        }
-                        if (y > content_y) {
-                            y += 1;
-                            h -= 1;
-                        }
-                        if (y + h < content_y + content_height) {
-                            h -= 1;
-                        }
-                        w = @max(1, w);
-                        h = @max(1, h);
-                    }
-                    const frame_h: i32 = if (entry.view.search_bar.visible)
-                        @min(self.scaled(host_search_bar_height), @max(0, h - 1))
-                    else
-                        0;
-                    if (frame_h > 0) {
+                    const placement = win32_layout.splitSurfacePlacement(
+                        layout_content_rect,
+                        .{
+                            .x = @floatCast(slot.x),
+                            .y = @floatCast(slot.y),
+                            .width = @floatCast(slot.width),
+                            .height = @floatCast(slot.height),
+                        },
+                        has_multi_panes,
+                        entry.view.search_bar.visible,
+                        search_bar_height,
+                    );
+                    if (placement.search_frame_rect) |search_frame_rect| {
                         content_layout_changed = (try entry.view.layoutSearchBarControls(
-                            childRect(x, y, w, frame_h),
+                            layoutRectToWin32(search_frame_rect),
                             true,
                         )) or content_layout_changed;
                     } else {
                         content_layout_changed = entry.view.hideSearchBarControls() or content_layout_changed;
                     }
-                    const pane_rect = childRect(x, y + frame_h, w, @max(1, h - frame_h));
+                    const pane_rect = layoutRectToWin32(placement.pane_rect);
                     const pane_rect_changed = applyChildRect(
                         surface_hwnd,
                         &entry.view.placement,
@@ -15659,6 +15641,24 @@ fn childRect(x: i32, y: i32, width: i32, height: i32) RECT {
     };
 }
 
+fn layoutRectFromWin32(rect: RECT) win32_layout.Rect {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
+fn layoutRectToWin32(rect: win32_layout.Rect) RECT {
+    return .{
+        .left = rect.left,
+        .top = rect.top,
+        .right = rect.right,
+        .bottom = rect.bottom,
+    };
+}
+
 fn centeredRect(rect: RECT, width: i32, height: i32) RECT {
     const outer_w = rect.right - rect.left;
     const outer_h = rect.bottom - rect.top;
@@ -15760,6 +15760,11 @@ const ResizeSettleSurfaceAction = enum {
     present_renderer,
 };
 
+const RendererHealthSurfaceAction = enum {
+    clear_recovery,
+    recover_with_followup_repaint,
+};
+
 fn surfaceRepaintRequestMode(host: ?*const Host) SurfaceRepaintRequestMode {
     const h = host orelse return .queue;
     if (h.is_live_resize.load(.acquire)) return .defer_until_flush;
@@ -15784,6 +15789,13 @@ fn surfaceSizeChangePrimesRenderer(repaint_mode: SurfaceRepaintRequestMode) bool
 
 fn resizeSettleSurfaceAction(renderer_repaint_requested: bool) ResizeSettleSurfaceAction {
     return if (renderer_repaint_requested) .present_renderer else .wake_renderer;
+}
+
+fn rendererHealthSurfaceAction(health: rendererpkg.Health) RendererHealthSurfaceAction {
+    return switch (health) {
+        .healthy => .clear_recovery,
+        .unhealthy => .recover_with_followup_repaint,
+    };
 }
 
 fn surfacePixelSizeChanged(previous: apprt.SurfaceSize, next: apprt.SurfaceSize) bool {
@@ -15843,7 +15855,7 @@ fn surfaceFocusStateChanged(
 }
 
 fn hostChromeNeedsFocusRepaint(pane_count: usize) bool {
-    return pane_count > 1;
+    return win32_chrome_state.focusRepaintNeeded(pane_count);
 }
 
 fn scrollbarNeedsHeartbeatForState(
@@ -16172,6 +16184,48 @@ fn getPaletteListHost(hwnd: HWND) ?*Host {
 fn paletteListNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     return host.buildPaletteListName(buf);
+}
+
+fn paletteListRowCountThunk(ctx: *anyopaque) usize {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    return host.palette_list_ranked_count;
+}
+
+fn paletteListSelectedIndexThunk(ctx: *anyopaque) ?usize {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    if (host.palette_list_ranked_count == 0) return null;
+    return @min(host.palette_list_selected, host.palette_list_ranked_count - 1);
+}
+
+fn paletteListRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    return host.buildPaletteRowName(index, buf);
+}
+
+fn paletteListSelectRowThunk(ctx: *anyopaque, index: usize) void {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    _ = host.setPaletteListSelection(index);
+}
+
+fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.palette_list_hwnd orelse return null;
+    var rect: RECT = undefined;
+    if (GetWindowRect(hwnd, &rect) == 0) return null;
+    const row_height = host.scaled(palette_row_height);
+    if (row_height <= 0 or rect.right <= rect.left or rect.bottom <= rect.top) return null;
+    const remaining = host.palette_list_ranked_count -| host.palette_list_scroll;
+    return .{
+        .bounds = .{
+            .left = @floatFromInt(rect.left),
+            .top = @floatFromInt(rect.top),
+            .width = @floatFromInt(rect.right - rect.left),
+            .height = @floatFromInt(rect.bottom - rect.top),
+        },
+        .first_visible = host.palette_list_scroll,
+        .visible_count = @min(remaining, palette_max_visible_rows),
+        .row_height = @floatFromInt(row_height),
+    };
 }
 
 /// Thunks adapting `*App` into the `AppHandle` callback shape used by
@@ -16902,6 +16956,28 @@ fn patchOrAppendEdits(
     }
 }
 
+test "win32 settings patch persists a palette theme selection" {
+    const testing = std.testing;
+    const ConfigKey = @import("../config/key.zig").Key;
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+    try Host.setConfigTheme(&pending, "0x96f");
+
+    var edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
+    edited.set(@intFromEnum(ConfigKey.theme));
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(
+        testing.allocator,
+        "theme = Dracula\nwindow-save-state = never\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "theme = 0x96f") != null);
+    try testing.expect(std.mem.indexOf(u8, patched.items, "window-save-state = never") != null);
+}
+
 /// Strip HTML tags for the CF_UNICODETEXT fallback when core only
 /// supplies `text/html`. Plain consumers get readable text; entity
 /// references are preserved verbatim.
@@ -17007,96 +17083,6 @@ test "win32 appendOwnedString leaves target untouched on OOM" {
     try testing.expect(target != null);
     try testing.expect(target.?.ptr == before);
     try testing.expectEqualStrings("warm-up", target.?);
-}
-
-test "win32 ChromeTextDirty splits top and status cache invalidation" {
-    const testing = std.testing;
-
-    var dirty: ChromeTextDirty = .{
-        .overlay = false,
-        .inspector = false,
-        .banner = false,
-        .status = false,
-    };
-    dirty.markTop();
-    try testing.expect(dirty.overlay);
-    try testing.expect(dirty.inspector);
-    try testing.expect(dirty.banner);
-    try testing.expect(!dirty.status);
-
-    dirty = .{
-        .overlay = false,
-        .inspector = false,
-        .banner = false,
-        .status = false,
-    };
-    dirty.status = true;
-    try testing.expect(!dirty.overlay);
-    try testing.expect(!dirty.inspector);
-    try testing.expect(!dirty.banner);
-    try testing.expect(dirty.status);
-
-    dirty = .{
-        .overlay = false,
-        .inspector = false,
-        .banner = false,
-        .status = false,
-    };
-    dirty.markAll();
-    try testing.expect(dirty.overlay);
-    try testing.expect(dirty.inspector);
-    try testing.expect(dirty.banner);
-    try testing.expect(dirty.status);
-}
-
-test "win32 mergeChromeRepaintMask only returns newly requested regions" {
-    const testing = std.testing;
-
-    var current: ChromeRepaintMask = .{};
-    var added = mergeChromeRepaintMask(&current, .{ .top = true });
-    try testing.expect(std.meta.eql(current, ChromeRepaintMask{ .top = true }));
-    try testing.expect(std.meta.eql(added, ChromeRepaintMask{ .top = true }));
-
-    added = mergeChromeRepaintMask(&current, .{ .top = true });
-    try testing.expect(added.isEmpty());
-    try testing.expect(std.meta.eql(current, ChromeRepaintMask{ .top = true }));
-
-    added = mergeChromeRepaintMask(&current, .{ .status = true, .search_frames = true });
-    try testing.expect(std.meta.eql(current, ChromeRepaintMask{
-        .top = true,
-        .status = true,
-        .search_frames = true,
-    }));
-    try testing.expect(std.meta.eql(added, ChromeRepaintMask{
-        .status = true,
-        .search_frames = true,
-    }));
-
-    added = mergeChromeRepaintMask(&current, .{ .content = true, .search_frames = true });
-    try testing.expect(std.meta.eql(current, ChromeRepaintMask{
-        .top = true,
-        .content = true,
-        .status = true,
-        .search_frames = true,
-    }));
-    try testing.expect(std.meta.eql(added, ChromeRepaintMask{ .content = true }));
-}
-
-test "win32 layoutChildPaintPlan keeps chrome and content invalidation separate" {
-    const testing = std.testing;
-
-    try testing.expectEqualDeep(
-        LayoutChildPaintPlan{ .chrome = true, .content = false, .native_content_controls = false },
-        layoutChildPaintPlan(true, false),
-    );
-    try testing.expectEqualDeep(
-        LayoutChildPaintPlan{ .chrome = false, .content = true, .native_content_controls = true },
-        layoutChildPaintPlan(false, true),
-    );
-    try testing.expectEqualDeep(
-        LayoutChildPaintPlan{ .chrome = true, .content = true, .native_content_controls = true },
-        layoutChildPaintPlan(true, true),
-    );
 }
 
 fn rectIntersects(a: RECT, b: RECT) bool {
@@ -17362,15 +17348,15 @@ fn searchBarDisplayStateChanged(
 }
 
 fn profileChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return overlay_mode == .profile or status_bar_height > 0;
+    return win32_chrome_state.profileVisible(overlay_mode, status_bar_height);
 }
 
 fn profileChromeNeedsFullTextInvalidation(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return overlay_mode != .profile and status_bar_height > 0;
+    return win32_chrome_state.profileNeedsFullTextInvalidation(overlay_mode, status_bar_height);
 }
 
 fn chromeTextNeedsFullInvalidation(status_bar_height: i32) bool {
-    return status_bar_height > 0;
+    return win32_chrome_state.textNeedsFullInvalidation(status_bar_height);
 }
 
 fn inspectorVisibilityChangeNeedsHostRelayout(changed: bool) bool {
@@ -17381,34 +17367,8 @@ fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_i
     return overlay_mode == .none and active_tab_has_inspector;
 }
 
-fn mergeChromeRepaintMask(current: *ChromeRepaintMask, next: ChromeRepaintMask) ChromeRepaintMask {
-    const added: ChromeRepaintMask = .{
-        .top = next.top and !current.top,
-        .content = next.content and !current.content,
-        .status = next.status and !current.status,
-        .search_frames = next.search_frames and !current.search_frames,
-    };
-    current.* = .{
-        .top = current.top or next.top,
-        .content = current.content or next.content,
-        .status = current.status or next.status,
-        .search_frames = current.search_frames or next.search_frames,
-    };
-    return added;
-}
-
-const LayoutChildPaintPlan = struct {
-    chrome: bool,
-    content: bool,
-    native_content_controls: bool,
-};
-
 fn layoutChildPaintPlan(chrome_changed: bool, content_changed: bool) LayoutChildPaintPlan {
-    return .{
-        .chrome = chrome_changed,
-        .content = content_changed,
-        .native_content_controls = content_changed,
-    };
+    return win32_chrome_state.layoutChildPaintPlan(chrome_changed, content_changed);
 }
 
 fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
@@ -17416,7 +17376,7 @@ fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
 }
 
 fn inspectorChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return overlay_mode == .none or status_bar_height > 0;
+    return win32_chrome_state.inspectorVisible(overlay_mode, status_bar_height);
 }
 
 fn inspectorBannerStateChanged(
@@ -18440,10 +18400,13 @@ fn overlayPaintCacheDirty(
     cached_feedback_w: ?[:0]const u16,
     cached_badge_w: ?[:0]const u16,
 ) bool {
-    return overlay_text_dirty or
-        cached_label_w == null or
-        cached_feedback_w == null or
-        (overlay_mode == .profile and cached_badge_w == null);
+    return win32_chrome_state.overlayPaintCacheDirty(
+        overlay_text_dirty,
+        overlay_mode,
+        cached_label_w != null,
+        cached_feedback_w != null,
+        cached_badge_w != null,
+    );
 }
 
 fn buildInspectorBannerText(
@@ -22978,6 +22941,25 @@ pub const Surface = struct {
         };
     }
 
+    fn handleRendererHealth(self: *Surface, health: rendererpkg.Health) bool {
+        switch (rendererHealthSurfaceAction(health)) {
+            .clear_recovery => {
+                self.cancelRendererRepaintRequest();
+                return true;
+            },
+            .recover_with_followup_repaint => {
+                _ = self.beginRendererRepaintRequest();
+                self.renderer_repaint_retry_pending.store(true, .release);
+                self.requestRepaintWithMode(rendererRepaintRequestMode(self.host)) catch |err| {
+                    log.warn("win32 renderer health repaint request failed err={}", .{err});
+                    return false;
+                };
+                self.requestRendererFrameNow();
+                return true;
+            },
+        }
+    }
+
     fn markLiveResizeRepaintDeferred(self: *Surface) void {
         self.live_resize_repaint_deferred = true;
     }
@@ -25970,9 +25952,9 @@ fn pushUndoAndRedoBranch(
 }
 
 test "win32 undo history ordering uses sequence when timestamps tie" {
-    try std.testing.expect(historyEntrySortsAfter(10, 2, 10, 1));
-    try std.testing.expect(!historyEntrySortsAfter(10, 1, 10, 2));
-    try std.testing.expect(historyEntrySortsAfter(11, 1, 10, 99));
+    try std.testing.expect(win32_structural_history.sortsAfter(10, 2, 10, 1));
+    try std.testing.expect(!win32_structural_history.sortsAfter(10, 1, 10, 2));
+    try std.testing.expect(win32_structural_history.sortsAfter(11, 1, 10, 99));
 }
 
 test "win32 undo prune expires local and structural histories" {
@@ -30578,64 +30560,133 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     );
 }
 
-test "win32 encodeListWindowsIpcRequest preserves legacy zero-argc trailer" {
+test "win32 timed out automation request remains owned until consumption" {
+    const request = try CoreApp.Message.AutomationActionRequest.create(
+        std.testing.allocator,
+        .focused,
+        "new_tab",
+    );
+    request.retain();
+    request.release(); // Producer times out and drops its ownership.
+    try std.testing.expectEqualStrings("new_tab", request.action_text);
+    request.completed.store(true, .release);
+    request.release(); // Delayed mailbox consumer owns the final reference.
+}
+
+test "win32 IPC silent client read is bounded" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try encodeListWindowsIpcRequest(std.testing.allocator);
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "\\\\.\\pipe\\winghostty-ipc-timeout-{d}",
+        .{GetTickCount64()},
+        0,
+    );
+    defer std.testing.allocator.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        pipe_name_utf8,
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    const server = CreateNamedPipeW(
+        pipe_name.ptr,
+        PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        1,
+        1024,
+        1024,
+        0,
+        null,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    try std.testing.expectEqual(@as(BOOL, 0), ConnectNamedPipe(server, null));
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+
+    const client = windows.kernel32.CreateFileW(
+        pipe_name.ptr,
+        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(client);
+
+    const connected = ConnectNamedPipe(server, null);
+    if (connected == 0) {
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+    }
+
+    var byte: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.IpcTimeout,
+        win32_ipc.readExactWithTimeout(server, &byte, 10),
+    );
+}
+
+test "win32 win32_ipc.encodeListWindowsRequest preserves legacy zero-argc trailer" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const request = try win32_ipc.encodeListWindowsRequest(std.testing.allocator);
     defer std.testing.allocator.free(request);
 
     try std.testing.expectEqual(@as(usize, 9), request.len);
-    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
-    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.list_windows), request[4]);
-    try std.testing.expectEqual(@as(u32, 0), readU32(request[5..9]));
+    try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.list_windows), request[4]);
+    try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, request[5..9], .little));
 }
 
 test "automation-action win32 ipc encodes focused action request" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try encodePerformActionIpcRequest(
+    const request = try win32_ipc.encodePerformActionRequest(
         std.testing.allocator,
         .focused,
         "new_tab",
     );
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
-    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
     try std.testing.expectEqual(@as(u8, 0), request[5]);
-    try std.testing.expectEqual(@as(u64, 0), readU64(request[6..14]));
-    try std.testing.expectEqual(@as(u32, 7), readU32(request[14..18]));
+    try std.testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, request[6..14], .little));
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, request[14..18], .little));
     try std.testing.expectEqualStrings("new_tab", request[18..]);
 }
 
 test "automation-action win32 ipc encodes surface action request" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const request = try encodePerformActionIpcRequest(
+    const request = try win32_ipc.encodePerformActionRequest(
         std.testing.allocator,
         .{ .surface_id = 42 },
         "toggle_fullscreen",
     );
     defer std.testing.allocator.free(request);
 
-    try std.testing.expectEqual(ipc_wire_version, readU32(request[0..4]));
-    try std.testing.expectEqual(@intFromEnum(IpcRequestKind.perform_action), request[4]);
+    try std.testing.expectEqual(win32_ipc.wire_version, std.mem.readInt(u32, request[0..4], .little));
+    try std.testing.expectEqual(@intFromEnum(win32_ipc.RequestKind.perform_action), request[4]);
     try std.testing.expectEqual(@as(u8, 1), request[5]);
-    try std.testing.expectEqual(@as(u64, 42), readU64(request[6..14]));
-    try std.testing.expectEqual(@as(u32, 17), readU32(request[14..18]));
+    try std.testing.expectEqual(@as(u64, 42), std.mem.readInt(u64, request[6..14], .little));
+    try std.testing.expectEqual(@as(u32, 17), std.mem.readInt(u32, request[14..18], .little));
     try std.testing.expectEqualStrings("toggle_fullscreen", request[18..]);
 }
 
 test "automation-action win32 ipc rejects oversized action before encode" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const action_text = try std.testing.allocator.alloc(u8, ipc_max_action_text_len + 1);
+    const action_text = try std.testing.allocator.alloc(u8, win32_ipc.max_action_text_len + 1);
     defer std.testing.allocator.free(action_text);
     @memset(action_text, 'x');
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        encodePerformActionIpcRequest(std.testing.allocator, .focused, action_text),
+        win32_ipc.encodePerformActionRequest(std.testing.allocator, .focused, action_text),
     );
 }
 
@@ -30654,13 +30705,13 @@ test "automation-action win32 ipc rejects oversized decoded action" {
     var header: [13]u8 = undefined;
     header[0] = 0;
     std.mem.writeInt(u64, header[1..9], 0, .little);
-    std.mem.writeInt(u32, header[9..13], ipc_max_action_text_len + 1, .little);
+    std.mem.writeInt(u32, header[9..13], win32_ipc.max_action_text_len + 1, .little);
     try file.writeAll(&header);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        decodePerformActionIpcPayload(std.testing.allocator, file.handle),
+        win32_ipc.decodePerformActionPayload(std.testing.allocator, file.handle),
     );
 }
 
@@ -30676,16 +30727,16 @@ test "automation-action win32 ipc maps specific failure ack" {
     });
     defer file.close();
 
-    try writeIpcAckStatus(file.handle, ipc_ack_invalid_automation_target);
+    try win32_ipc.writeAckStatus(file.handle, win32_ipc.ack_invalid_automation_target);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidAutomationTarget,
-        readIpcAck(file.handle),
+        win32_ipc.readAck(file.handle),
     );
 }
 
-test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
+test "win32 win32_ipc.readDataResponse treats legacy failure ack as IPCFailed" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
@@ -30698,18 +30749,18 @@ test "win32 readIpcDataResponse treats legacy failure ack as IPCFailed" {
     defer file.close();
 
     var header: [5]u8 = undefined;
-    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
-    header[4] = ipc_ack_failure;
+    std.mem.writeInt(u32, header[0..4], win32_ipc.wire_version, .little);
+    header[4] = win32_ipc.ack_failure;
     try file.writeAll(&header);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.IPCFailed,
-        readIpcDataResponse(std.testing.allocator, file.handle),
+        win32_ipc.readDataResponse(std.testing.allocator, file.handle),
     );
 }
 
-test "win32 readIpcDataResponse rejects oversized body length" {
+test "win32 win32_ipc.readDataResponse rejects oversized body length" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
@@ -30722,19 +30773,19 @@ test "win32 readIpcDataResponse rejects oversized body length" {
     defer file.close();
 
     var header: [9]u8 = undefined;
-    std.mem.writeInt(u32, header[0..4], ipc_wire_version, .little);
-    header[4] = ipc_ack_success;
-    std.mem.writeInt(u32, header[5..9], ipc_max_data_response_len + 1, .little);
+    std.mem.writeInt(u32, header[0..4], win32_ipc.wire_version, .little);
+    header[4] = win32_ipc.ack_success;
+    std.mem.writeInt(u32, header[5..9], win32_ipc.max_data_response_len + 1, .little);
     try file.writeAll(&header);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidIpcResponse,
-        readIpcDataResponse(std.testing.allocator, file.handle),
+        win32_ipc.readDataResponse(std.testing.allocator, file.handle),
     );
 }
 
-test "win32 decodeNewWindowIpcPayload rejects oversized argc" {
+test "win32 win32_ipc.decodeNewWindowPayload rejects oversized argc" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
@@ -30747,17 +30798,105 @@ test "win32 decodeNewWindowIpcPayload rejects oversized argc" {
     defer file.close();
 
     var argc_buf: [4]u8 = undefined;
-    std.mem.writeInt(u32, &argc_buf, ipc_max_new_window_argc + 1, .little);
+    std.mem.writeInt(u32, &argc_buf, win32_ipc.max_new_window_argc + 1, .little);
     try file.writeAll(&argc_buf);
     try file.seekTo(0);
 
     try std.testing.expectError(
         error.InvalidIpcRequest,
-        decodeNewWindowIpcPayload(std.testing.allocator, file.handle),
+        win32_ipc.decodeNewWindowPayload(std.testing.allocator, file.handle),
     );
 }
 
-test "win32 writeIpcDataResponse rejects oversized body" {
+test "win32 win32_ipc.decodeNewWindowPayload rejects oversized argument length before allocation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-request-arg-too-large.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], 1, .little);
+    std.mem.writeInt(u32, buf[4..8], win32_ipc.max_new_window_arg_len + 1, .little);
+    try file.writeAll(&buf);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidIpcRequest,
+        win32_ipc.decodeNewWindowPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 win32_ipc.decodeNewWindowPayload rejects aggregate argument bytes before allocation" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-request-args-too-large.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var buf: [12]u8 = undefined;
+    std.mem.writeInt(u32, buf[0..4], 2, .little);
+    std.mem.writeInt(u32, buf[4..8], win32_ipc.max_new_window_args_bytes, .little);
+    std.mem.writeInt(u32, buf[8..12], 1, .little);
+    try file.writeAll(&buf);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.InvalidIpcRequest,
+        win32_ipc.decodeNewWindowPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 win32_ipc.decodeNewWindowPayload cleans up initialized args on partial EOF" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("ipc-request-partial-eof.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    var header: [13]u8 = undefined;
+    std.mem.writeInt(u32, header[0..4], 2, .little);
+    std.mem.writeInt(u32, header[4..8], 1, .little);
+    header[8] = 'x';
+    std.mem.writeInt(u32, header[9..13], 1, .little);
+    try file.writeAll(&header);
+    try file.seekTo(0);
+
+    try std.testing.expectError(
+        error.EndOfStream,
+        win32_ipc.decodeNewWindowPayload(std.testing.allocator, file.handle),
+    );
+}
+
+test "win32 win32_ipc.encodeNewWindowRequest rejects oversized forwarded arguments" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const oversized = try std.testing.allocator.allocSentinel(u8, win32_ipc.max_new_window_arg_len + 1, 0);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized[0 .. win32_ipc.max_new_window_arg_len + 1], 'x');
+
+    try std.testing.expectError(
+        error.InvalidIpcRequest,
+        win32_ipc.encodeNewWindowRequest(std.testing.allocator, &.{oversized}),
+    );
+}
+
+test "win32 win32_ipc.writeDataResponse rejects oversized body" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var tmp = std.testing.tmpDir(.{});
@@ -30769,12 +30908,12 @@ test "win32 writeIpcDataResponse rejects oversized body" {
     });
     defer file.close();
 
-    const body = try std.testing.allocator.alloc(u8, ipc_max_data_response_len + 1);
+    const body = try std.testing.allocator.alloc(u8, win32_ipc.max_data_response_len + 1);
     defer std.testing.allocator.free(body);
 
     try std.testing.expectError(
         error.InvalidIpcResponse,
-        writeIpcDataResponse(file.handle, true, body),
+        win32_ipc.writeDataResponse(file.handle, true, body),
     );
 }
 
@@ -30791,7 +30930,7 @@ test "win32 handleIpcClient bounds truncated request failures with an ack" {
     defer file.close();
 
     var request: [4]u8 = undefined;
-    std.mem.writeInt(u32, request[0..4], ipc_wire_version, .little);
+    std.mem.writeInt(u32, request[0..4], win32_ipc.wire_version, .little);
     try file.writeAll(&request);
     try file.seekTo(0);
 
@@ -30801,7 +30940,7 @@ test "win32 handleIpcClient bounds truncated request failures with an ack" {
     try file.seekTo(request.len);
     try std.testing.expectError(
         error.IPCFailed,
-        readIpcDataResponse(std.testing.allocator, file.handle),
+        win32_ipc.readDataResponse(std.testing.allocator, file.handle),
     );
 }
 
@@ -31088,10 +31227,10 @@ test "win32 session save deletes stale state file for empty snapshot" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
     defer std.testing.allocator.free(path);
 
-    App.deleteSessionStateFile(path);
+    try win32_session_persistence.deleteFileIfPresent(path);
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json", .{}));
 
-    App.deleteSessionStateFile(path);
+    try win32_session_persistence.deleteFileIfPresent(path);
 }
 
 test "win32 session save skips quick terminal tabs" {
@@ -31146,6 +31285,43 @@ fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSave
     return !safe_mode and policy != .never;
 }
 
+const SessionRestoreTransaction = struct {
+    app: ?*App = null,
+    host: ?*Host = null,
+    committed: bool = false,
+
+    fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
+        if (self.host == null) {
+            self.app = surface.app;
+            self.host = surface.host;
+        }
+    }
+
+    fn commit(self: *SessionRestoreTransaction) void {
+        self.committed = true;
+    }
+
+    fn rollback(self: *SessionRestoreTransaction) void {
+        if (self.committed) return;
+        const app = self.app orelse return;
+        const host = self.host orelse return;
+        app.rollbackSessionRestoreHost(host);
+    }
+};
+
+fn sessionRestorePolicyAllows(
+    safe_mode: bool,
+    policy: configpkg.Config.WindowSaveState,
+    initial_window: bool,
+    has_initial_command: bool,
+    startup_profile_picker: bool,
+) bool {
+    return sessionStatePolicyAllows(safe_mode, policy) and
+        initial_window and
+        !has_initial_command and
+        !startup_profile_picker;
+}
+
 test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(!sessionStatePolicyAllows(true, .default));
     try std.testing.expect(!sessionStatePolicyAllows(true, .always));
@@ -31153,6 +31329,17 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(sessionStatePolicyAllows(false, .default));
     try std.testing.expect(sessionStatePolicyAllows(false, .always));
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
+}
+
+test "win32 explicit startup flows bypass session restore" {
+    try std.testing.expect(sessionRestorePolicyAllows(false, .default, true, false, false));
+    try std.testing.expect(sessionRestorePolicyAllows(false, .always, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, true, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .default, true, false, true));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(true, .always, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .never, true, false, false));
+    try std.testing.expect(!sessionRestorePolicyAllows(false, .always, false, true, true));
 }
 
 test "win32 session state window rect requires complete geometry" {
@@ -31195,12 +31382,17 @@ test "win32 session state file write replaces through temp file" {
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
     defer std.testing.allocator.free(path);
 
-    try App.writeSessionStateFile(std.testing.allocator, path, "new");
+    try writePersistentFileAlloc(std.testing.allocator, path, "new");
 
     const contents = try tmp.dir.readFileAlloc(std.testing.allocator, "session-state.json", 1024);
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqualStrings("new", contents);
-    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile("session-state.json.tmp", .{}));
+    var iterable_dir = try tmp.dir.openDir(".", .{ .iterate = true });
+    defer iterable_dir.close();
+    var entries = iterable_dir.iterate();
+    while (try entries.next()) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, "session-state.json.tmp-"));
+    }
 }
 
 test "win32 session restore rebuilds saved split tree shape" {
@@ -32890,6 +33082,17 @@ test "win32 rendererRepaintRequestMode prefers synchronous paints outside live r
     try std.testing.expectEqual(SurfaceRepaintRequestMode.defer_until_flush, rendererRepaintRequestMode(&host));
 }
 
+test "win32 renderer health policy recovers unhealthy frames and clears healthy state" {
+    try std.testing.expectEqual(
+        RendererHealthSurfaceAction.clear_recovery,
+        rendererHealthSurfaceAction(.healthy),
+    );
+    try std.testing.expectEqual(
+        RendererHealthSurfaceAction.recover_with_followup_repaint,
+        rendererHealthSurfaceAction(.unhealthy),
+    );
+}
+
 test "win32 resize settle presents pending renderer frames before waking renderer" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -32901,6 +33104,37 @@ test "win32 resize settle presents pending renderer frames before waking rendere
         ResizeSettleSurfaceAction.present_renderer,
         resizeSettleSurfaceAction(true),
     );
+}
+
+test "win32 palette UIA state exposes rows and can select a row" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var host: Host = undefined;
+    host.overlay_mode = .command_palette;
+    host.palette_list_ranked_count = 4;
+    host.palette_list_selected = 1;
+    host.palette_list_scroll = 0;
+    host.palette_list_hwnd = null;
+    host.palette_list_uia_provider = null;
+    host.palette_catalog = null;
+    host.palette_theme_preview_original = null;
+
+    const state = host.paletteListUiaState();
+    try std.testing.expectEqual(@as(usize, 4), state.row_count.?(state.ctx));
+    try std.testing.expectEqual(@as(?usize, 1), state.selected_index.?(state.ctx));
+
+    var name_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Command palette", state.name(state.ctx, &name_buf));
+
+    var row_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Command palette row", state.row_name.?(state.ctx, 2, &row_buf));
+
+    state.select_row.?(state.ctx, 3);
+    try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
+    try std.testing.expectEqual(@as(?usize, 3), state.selected_index.?(state.ctx));
+
+    state.select_row.?(state.ctx, 9);
+    try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
 }
 
 test "win32 surface size-change repaint stays synchronous during live resize" {
@@ -33983,6 +34217,35 @@ test "win32 buildInspectorButtonLabel reflects inspector and pane state" {
     const idle = try buildInspectorButtonLabel(std.testing.allocator, false, 1);
     defer std.testing.allocator.free(idle);
     try std.testing.expectEqualStrings("Inspect", idle);
+}
+
+test "win32 palette theme preview can restore original config clone" {
+    var original = try configpkg.Config.default(std.testing.allocator);
+    defer original.deinit();
+    try Host.setConfigTheme(&original, "Original Theme");
+
+    var preview = try original.clone(std.testing.allocator);
+    defer preview.deinit();
+    try Host.setConfigTheme(&preview, "Preview Theme");
+    try std.testing.expectEqualStrings("Preview Theme", preview.theme.?.light);
+    try std.testing.expectEqualStrings("Original Theme", original.theme.?.light);
+
+    var restored = try original.clone(std.testing.allocator);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("Original Theme", restored.theme.?.light);
+}
+
+test "win32 palette theme commit mutates pending without losing rollback source" {
+    var original = try configpkg.Config.default(std.testing.allocator);
+    defer original.deinit();
+    try Host.setConfigTheme(&original, "Original Theme");
+
+    var pending = try original.clone(std.testing.allocator);
+    defer pending.deinit();
+    try Host.setConfigTheme(&pending, "Committed Theme");
+
+    try std.testing.expectEqualStrings("Original Theme", original.theme.?.light);
+    try std.testing.expectEqualStrings("Committed Theme", pending.theme.?.light);
 }
 
 test "win32 buildCommandPaletteOverlayLabel reflects palette state" {

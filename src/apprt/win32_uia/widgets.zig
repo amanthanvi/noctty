@@ -14,11 +14,9 @@
 //!     ControlType=Document and exposes the plain terminal buffer
 //!     through the read-only Value pattern.
 //!
-//! Item-level providers (`IRawElementProviderFragment` hierarchy, per-
-//! row `ISelectionItemProvider`) are planned but not in this pass —
-//! they require significantly more surface (runtime-ids, navigation,
-//! bounding rects). The widget-level provider is the floor that keeps
-//! us honest about the mandate.
+//! The owner-drawn palette list is a fragment root. Its rows are ephemeral
+//! fragment/SelectionItem providers backed by live widget state; native HWND
+//! controls continue to use the system provider.
 
 const std = @import("std");
 const com = @import("com.zig");
@@ -50,6 +48,18 @@ pub const PaletteListState = struct {
     /// the slice actually written. A typical implementation writes
     /// something like "Command palette: 3 of 87 — New Tab".
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
+    row_count: ?*const fn (ctx: *anyopaque) usize = null,
+    selected_index: ?*const fn (ctx: *anyopaque) ?usize = null,
+    row_name: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
+    select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
+    geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+};
+
+pub const PaletteListGeometry = struct {
+    bounds: com.UiaRect,
+    first_visible: usize,
+    visible_count: usize,
+    row_height: f64,
 };
 
 pub const TerminalState = struct {
@@ -72,6 +82,8 @@ pub const TerminalSnapshot = struct {
 
 pub const PaletteListProvider = struct {
     base: com.IRawElementProviderSimple,
+    fragment: com.IRawElementProviderFragment,
+    fragment_root: com.IRawElementProviderFragmentRoot,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
@@ -88,6 +100,26 @@ pub const PaletteListProvider = struct {
         .get_HostRawElementProvider = PaletteListProvider.get_HostRawElementProvider,
     };
 
+    const fragment_vtbl: com.IRawElementProviderFragmentVtbl = .{
+        .QueryInterface = FragmentQueryInterface,
+        .AddRef = FragmentAddRef,
+        .Release = FragmentRelease,
+        .Navigate = FragmentNavigate,
+        .GetRuntimeId = FragmentGetRuntimeId,
+        .get_BoundingRectangle = FragmentGetBoundingRectangle,
+        .GetEmbeddedFragmentRoots = FragmentGetEmbeddedFragmentRoots,
+        .SetFocus = FragmentSetFocus,
+        .get_FragmentRoot = FragmentGetFragmentRoot,
+    };
+
+    const fragment_root_vtbl: com.IRawElementProviderFragmentRootVtbl = .{
+        .QueryInterface = FragmentRootQueryInterface,
+        .AddRef = FragmentRootAddRef,
+        .Release = FragmentRootRelease,
+        .ElementProviderFromPoint = FragmentRootElementProviderFromPoint,
+        .GetFocus = FragmentRootGetFocus,
+    };
+
     pub fn create(
         alloc: std.mem.Allocator,
         hwnd: com.HWND,
@@ -96,6 +128,8 @@ pub const PaletteListProvider = struct {
         const self = try alloc.create(PaletteListProvider);
         self.* = .{
             .base = .{ .vtbl = &vtbl },
+            .fragment = .{ .vtbl = &fragment_vtbl },
+            .fragment_root = .{ .vtbl = &fragment_root_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .hwnd = hwnd,
@@ -111,8 +145,75 @@ pub const PaletteListProvider = struct {
         self.detached.store(true, .release);
     }
 
+    /// Raise the item-level selection event for a row after the owner has
+    /// updated its live selected-index state. The row exists only for the
+    /// duration of the raise; UIA retains it if a client needs it longer.
+    pub fn raiseSelectionChanged(self: *PaletteListProvider, index: usize) void {
+        if (com.UiaClientsAreListening() == 0) return;
+        const row = self.createRow(index) orelse return;
+        defer _ = PaletteRowProvider.Release(&row.base);
+        const hr = com.UiaRaiseAutomationEvent(
+            &row.base,
+            constants.UIA_SelectionItem_ElementSelectedEventId,
+        );
+        if (hr < 0) std.log.warn("uia: palette row selection event failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    }
+
     fn fromBase(p: *com.IRawElementProviderSimple) *PaletteListProvider {
         return @fieldParentPtr("base", p);
+    }
+
+    fn fromFragmentRoot(p: *com.IRawElementProviderFragmentRoot) *PaletteListProvider {
+        return @fieldParentPtr("fragment_root", p);
+    }
+
+    fn fromFragment(p: *com.IRawElementProviderFragment) *PaletteListProvider {
+        return @fieldParentPtr("fragment", p);
+    }
+
+    fn isAvailable(self: *const PaletteListProvider) bool {
+        return !self.detached.load(.acquire);
+    }
+
+    fn rowCount(self: *const PaletteListProvider) usize {
+        if (!self.isAvailable()) return 0;
+        const callback = self.state.row_count orelse return 0;
+        return callback(self.state.ctx);
+    }
+
+    fn selectedIndex(self: *const PaletteListProvider) ?usize {
+        if (!self.isAvailable()) return null;
+        const callback = self.state.selected_index orelse return null;
+        const index = callback(self.state.ctx) orelse return null;
+        return if (index < self.rowCount()) index else null;
+    }
+
+    fn createRow(self: *PaletteListProvider, index: usize) ?*PaletteRowProvider {
+        if (index >= self.rowCount()) return null;
+        return PaletteRowProvider.create(self.alloc, self, index) catch null;
+    }
+
+    fn geometry(self: *const PaletteListProvider) ?PaletteListGeometry {
+        if (!self.isAvailable()) return null;
+        const callback = self.state.geometry orelse return null;
+        const value = callback(self.state.ctx) orelse return null;
+        if (value.bounds.width <= 0 or value.bounds.height <= 0 or value.row_height <= 0) return null;
+        return value;
+    }
+
+    fn rowBounds(self: *const PaletteListProvider, index: usize) ?com.UiaRect {
+        const snapshot = self.geometry() orelse return null;
+        if (index < snapshot.first_visible or index >= snapshot.first_visible + snapshot.visible_count) return null;
+        const offset: f64 = @floatFromInt(index - snapshot.first_visible);
+        const top = snapshot.bounds.top + offset * snapshot.row_height;
+        const remaining = snapshot.bounds.top + snapshot.bounds.height - top;
+        if (remaining <= 0) return null;
+        return .{
+            .left = snapshot.bounds.left,
+            .top = top,
+            .width = snapshot.bounds.width,
+            .height = @min(snapshot.row_height, remaining),
+        };
     }
 
     pub fn QueryInterface(
@@ -126,6 +227,16 @@ pub const PaletteListProvider = struct {
             iidEqual(iid, &com.IID_IRawElementProviderSimple))
         {
             out.* = @ptrCast(&self.base);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+            return com.S_OK;
+        }
+        if (iidEqual(iid, &com.IID_IRawElementProviderFragmentRoot)) {
+            out.* = @ptrCast(&self.fragment_root);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+            return com.S_OK;
+        }
+        if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) {
+            out.* = @ptrCast(&self.fragment);
             _ = self.refcount.fetchAdd(1, .monotonic);
             return com.S_OK;
         }
@@ -219,6 +330,368 @@ pub const PaletteListProvider = struct {
             return @bitCast(@as(u32, 0x80040201));
         }
         return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
+
+    fn FragmentQueryInterface(
+        self_fragment: *com.IRawElementProviderFragment,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromFragment(self_fragment).base, iid, out);
+    }
+
+    fn FragmentAddRef(self_fragment: *com.IRawElementProviderFragment) callconv(.winapi) u32 {
+        return AddRef(&fromFragment(self_fragment).base);
+    }
+
+    fn FragmentRelease(self_fragment: *com.IRawElementProviderFragment) callconv(.winapi) u32 {
+        return Release(&fromFragment(self_fragment).base);
+    }
+
+    fn FragmentRootQueryInterface(
+        self_root: *com.IRawElementProviderFragmentRoot,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromFragmentRoot(self_root).base, iid, out);
+    }
+
+    fn FragmentRootAddRef(self_root: *com.IRawElementProviderFragmentRoot) callconv(.winapi) u32 {
+        return AddRef(&fromFragmentRoot(self_root).base);
+    }
+
+    fn FragmentRootRelease(self_root: *com.IRawElementProviderFragmentRoot) callconv(.winapi) u32 {
+        return Release(&fromFragmentRoot(self_root).base);
+    }
+
+    fn FragmentNavigate(
+        self_fragment: *com.IRawElementProviderFragment,
+        direction: i32,
+        out: *?*com.IRawElementProviderFragment,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(self_fragment);
+        out.* = null;
+        const count = self.rowCount();
+        if (count == 0) return com.S_OK;
+        const index = switch (direction) {
+            com.NavigateDirection_FirstChild => 0,
+            com.NavigateDirection_LastChild => count - 1,
+            else => return com.S_OK,
+        };
+        const row = self.createRow(index) orelse return com.E_OUTOFMEMORY;
+        out.* = &row.fragment;
+        return com.S_OK;
+    }
+
+    fn FragmentGetRuntimeId(
+        _: *com.IRawElementProviderFragment,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.S_OK;
+    }
+
+    fn FragmentGetBoundingRectangle(
+        self_fragment: *com.IRawElementProviderFragment,
+        out: *com.UiaRect,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(self_fragment);
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = if (self.geometry()) |value| value.bounds else .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+        return com.S_OK;
+    }
+
+    fn FragmentGetEmbeddedFragmentRoots(
+        _: *com.IRawElementProviderFragment,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.S_OK;
+    }
+
+    fn FragmentSetFocus(_: *com.IRawElementProviderFragment) callconv(.winapi) com.HRESULT {
+        return com.S_OK;
+    }
+
+    fn FragmentGetFragmentRoot(
+        self_fragment: *com.IRawElementProviderFragment,
+        out: *?*com.IRawElementProviderFragmentRoot,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(self_fragment);
+        out.* = &self.fragment_root;
+        _ = AddRef(&self.base);
+        return com.S_OK;
+    }
+
+    fn FragmentRootElementProviderFromPoint(
+        self_root: *com.IRawElementProviderFragmentRoot,
+        x: f64,
+        y: f64,
+        out: *?*com.IRawElementProviderFragment,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        const self = fromFragmentRoot(self_root);
+        if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return com.S_OK;
+        const snapshot = self.geometry() orelse return com.S_OK;
+        if (x < snapshot.bounds.left or x >= snapshot.bounds.left + snapshot.bounds.width or
+            y < snapshot.bounds.top or y >= snapshot.bounds.top + snapshot.bounds.height)
+        {
+            return com.S_OK;
+        }
+        const offset: usize = @intFromFloat(@floor((y - snapshot.bounds.top) / snapshot.row_height));
+        if (offset >= snapshot.visible_count) return com.S_OK;
+        const index = snapshot.first_visible + offset;
+        const row = self.createRow(index) orelse return com.S_OK;
+        out.* = &row.fragment;
+        return com.S_OK;
+    }
+
+    fn FragmentRootGetFocus(
+        self_root: *com.IRawElementProviderFragmentRoot,
+        out: *?*com.IRawElementProviderFragment,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromFragmentRoot(self_root);
+        out.* = null;
+        const index = self.selectedIndex() orelse return com.S_OK;
+        const row = self.createRow(index) orelse return com.E_OUTOFMEMORY;
+        out.* = &row.fragment;
+        return com.S_OK;
+    }
+};
+
+const PaletteRowProvider = struct {
+    base: com.IRawElementProviderSimple,
+    fragment: com.IRawElementProviderFragment,
+    selection_item: com.ISelectionItemProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    parent: *PaletteListProvider,
+    index: usize,
+
+    const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = getProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = getHostRawElementProvider,
+    };
+    const fragment_vtbl: com.IRawElementProviderFragmentVtbl = .{
+        .QueryInterface = FragmentQueryInterface,
+        .AddRef = FragmentAddRef,
+        .Release = FragmentRelease,
+        .Navigate = Navigate,
+        .GetRuntimeId = GetRuntimeId,
+        .get_BoundingRectangle = GetBoundingRectangle,
+        .GetEmbeddedFragmentRoots = GetEmbeddedFragmentRoots,
+        .SetFocus = SetFocus,
+        .get_FragmentRoot = GetFragmentRoot,
+    };
+    const selection_vtbl: com.ISelectionItemProviderVtbl = .{
+        .QueryInterface = SelectionQueryInterface,
+        .AddRef = SelectionAddRef,
+        .Release = SelectionRelease,
+        .Select = Select,
+        .AddToSelection = AddToSelection,
+        .RemoveFromSelection = RemoveFromSelection,
+        .get_IsSelected = GetIsSelected,
+        .get_SelectionContainer = GetSelectionContainer,
+    };
+
+    fn create(alloc: std.mem.Allocator, parent: *PaletteListProvider, index: usize) !*PaletteRowProvider {
+        const self = try alloc.create(PaletteRowProvider);
+        _ = PaletteListProvider.AddRef(&parent.base);
+        self.* = .{
+            .base = .{ .vtbl = &simple_vtbl },
+            .fragment = .{ .vtbl = &fragment_vtbl },
+            .selection_item = .{ .vtbl = &selection_vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .parent = parent,
+            .index = index,
+        };
+        return self;
+    }
+
+    fn fromBase(p: *com.IRawElementProviderSimple) *PaletteRowProvider {
+        return @fieldParentPtr("base", p);
+    }
+    fn fromFragment(p: *com.IRawElementProviderFragment) *PaletteRowProvider {
+        return @fieldParentPtr("fragment", p);
+    }
+    fn fromSelection(p: *com.ISelectionItemProvider) *PaletteRowProvider {
+        return @fieldParentPtr("selection_item", p);
+    }
+    fn available(self: *const PaletteRowProvider) bool {
+        return self.parent.isAvailable() and self.index < self.parent.rowCount();
+    }
+
+    fn query(self: *PaletteRowProvider, iid: *const com.GUID, out: *?*anyopaque) com.HRESULT {
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) out.* = @ptrCast(&self.base) else if (iidEqual(iid, &com.IID_IRawElementProviderFragment)) out.* = @ptrCast(&self.fragment) else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) out.* = @ptrCast(&self.selection_item) else return com.E_NOINTERFACE;
+        _ = self.refcount.fetchAdd(1, .monotonic);
+        return com.S_OK;
+    }
+    fn QueryInterface(p: *com.IRawElementProviderSimple, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return fromBase(p).query(iid, out);
+    }
+    fn FragmentQueryInterface(p: *com.IRawElementProviderFragment, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return fromFragment(p).query(iid, out);
+    }
+    fn SelectionQueryInterface(p: *com.ISelectionItemProvider, iid: *const com.GUID, out: *?*anyopaque) callconv(.winapi) com.HRESULT {
+        return fromSelection(p).query(iid, out);
+    }
+    fn addRef(self: *PaletteRowProvider) u32 {
+        return self.refcount.fetchAdd(1, .monotonic) + 1;
+    }
+    fn AddRef(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(p).addRef();
+    }
+    fn FragmentAddRef(p: *com.IRawElementProviderFragment) callconv(.winapi) u32 {
+        return fromFragment(p).addRef();
+    }
+    fn SelectionAddRef(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return fromSelection(p).addRef();
+    }
+    fn release(self: *PaletteRowProvider) u32 {
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            _ = PaletteListProvider.Release(&self.parent.base);
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+    fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(p).release();
+    }
+    fn FragmentRelease(p: *com.IRawElementProviderFragment) callconv(.winapi) u32 {
+        return fromFragment(p).release();
+    }
+    fn SelectionRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return fromSelection(p).release();
+    }
+    fn getProviderOptions(_: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
+        out.* = com.ProviderOptions_ServerSideProvider;
+        return com.S_OK;
+    }
+    fn GetPatternProvider(p: *com.IRawElementProviderSimple, pattern: i32, out: *?*com.IUnknown) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (pattern == constants.UIA_SelectionItemPatternId) {
+            out.* = @ptrCast(&self.selection_item);
+            _ = self.addRef();
+        }
+        return com.S_OK;
+    }
+    fn GetPropertyValue(p: *com.IRawElementProviderSimple, property: i32, out: *com.VARIANT) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = com.VARIANT.empty();
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        switch (property) {
+            constants.UIA_ControlTypePropertyId => out.* = com.VARIANT.fromI4(constants.UIA_ListItemControlTypeId),
+            constants.UIA_NamePropertyId => {
+                var buf: [512]u8 = undefined;
+                const callback = self.parent.state.row_name orelse return com.S_OK;
+                out.* = com.VARIANT.fromBstr(allocBstrFromUtf8(self.alloc, callback(self.parent.state.ctx, self.index, &buf)));
+            },
+            constants.UIA_SelectionItemIsSelectedPropertyId => out.* = com.VARIANT.fromBool(self.parent.selectedIndex() == self.index),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(self.parent.rowBounds(self.index) == null),
+            constants.UIA_IsControlElementPropertyId, constants.UIA_IsContentElementPropertyId, constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(true),
+            else => {},
+        }
+        return com.S_OK;
+    }
+    fn getHostRawElementProvider(_: *com.IRawElementProviderSimple, out: *?*com.IRawElementProviderSimple) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.S_OK;
+    }
+    fn Navigate(p: *com.IRawElementProviderFragment, direction: i32, out: *?*com.IRawElementProviderFragment) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (direction == com.NavigateDirection_Parent) {
+            out.* = &self.parent.fragment;
+            _ = PaletteListProvider.AddRef(&self.parent.base);
+            return com.S_OK;
+        }
+        const next: ?usize = switch (direction) {
+            com.NavigateDirection_NextSibling => if (self.index + 1 < self.parent.rowCount()) self.index + 1 else null,
+            com.NavigateDirection_PreviousSibling => if (self.index > 0) self.index - 1 else null,
+            else => null,
+        };
+        const index = next orelse return com.S_OK;
+        const row = self.parent.createRow(index) orelse return com.E_OUTOFMEMORY;
+        out.* = &row.fragment;
+        return com.S_OK;
+    }
+    fn GetRuntimeId(p: *com.IRawElementProviderFragment, out: *?*com.SAFEARRAY) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const array = com.SafeArrayCreateVector(com.VT_I4, 0, 2) orelse return com.E_OUTOFMEMORY;
+        var first: i32 = com.UiaAppendRuntimeId;
+        var second: i32 = @intCast(self.index + 1);
+        var i: i32 = 0;
+        if (com.SafeArrayPutElement(array, &i, &first) != com.S_OK) {
+            _ = com.SafeArrayDestroy(array);
+            return com.E_OUTOFMEMORY;
+        }
+        i = 1;
+        if (com.SafeArrayPutElement(array, &i, &second) != com.S_OK) {
+            _ = com.SafeArrayDestroy(array);
+            return com.E_OUTOFMEMORY;
+        }
+        out.* = array;
+        return com.S_OK;
+    }
+    fn GetBoundingRectangle(p: *com.IRawElementProviderFragment, out: *com.UiaRect) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = self.parent.rowBounds(self.index) orelse .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+        return com.S_OK;
+    }
+    fn GetEmbeddedFragmentRoots(_: *com.IRawElementProviderFragment, out: *?*com.SAFEARRAY) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return com.S_OK;
+    }
+    fn SetFocus(p: *com.IRawElementProviderFragment) callconv(.winapi) com.HRESULT {
+        return fromFragment(p).select();
+    }
+    fn GetFragmentRoot(p: *com.IRawElementProviderFragment, out: *?*com.IRawElementProviderFragmentRoot) callconv(.winapi) com.HRESULT {
+        const self = fromFragment(p);
+        out.* = &self.parent.fragment_root;
+        _ = PaletteListProvider.AddRef(&self.parent.base);
+        return com.S_OK;
+    }
+    fn select(self: *PaletteRowProvider) com.HRESULT {
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        const callback = self.parent.state.select_row orelse return com.S_OK;
+        callback(self.parent.state.ctx, self.index);
+        return com.S_OK;
+    }
+    fn Select(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        return fromSelection(p).select();
+    }
+    fn AddToSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        return fromSelection(p).select();
+    }
+    fn RemoveFromSelection(_: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        return com.E_INVALIDARG;
+    }
+    fn GetIsSelected(p: *com.ISelectionItemProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = if (self.parent.selectedIndex() == self.index) 1 else 0;
+        return com.S_OK;
+    }
+    fn GetSelectionContainer(p: *com.ISelectionItemProvider, out: *?*com.IRawElementProviderSimple) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = &self.parent.base;
+        _ = PaletteListProvider.AddRef(&self.parent.base);
+        return com.S_OK;
     }
 };
 
@@ -1260,6 +1733,184 @@ test "PaletteListProvider QueryInterface accepts IUnknown" {
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(out != null);
     _ = PaletteListProvider.Release(&p.base); // Drop the QI ref.
+}
+
+const TestPaletteState = struct {
+    count: usize = 3,
+    selected: ?usize = 1,
+    selected_by_provider: ?usize = null,
+    reentrant_provider: ?*PaletteListProvider = null,
+    reentrant_queries: u32 = 0,
+    list_geometry: ?PaletteListGeometry = null,
+
+    fn name(_: *anyopaque, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "palette", .{}) catch "";
+    }
+
+    fn rowCount(ctx: *anyopaque) usize {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        return self.count;
+    }
+
+    fn selectedIndex(ctx: *anyopaque) ?usize {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        return self.selected;
+    }
+
+    fn rowName(_: *anyopaque, index: usize, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "row {d}", .{index}) catch "";
+    }
+
+    fn selectRow(ctx: *anyopaque, index: usize) void {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        self.selected_by_provider = index;
+        if (self.reentrant_provider) |provider| {
+            var value = com.VARIANT.empty();
+            if (PaletteListProvider.GetPropertyValue(
+                &provider.base,
+                constants.UIA_ControlTypePropertyId,
+                &value,
+            ) == com.S_OK) self.reentrant_queries += 1;
+        }
+    }
+
+    fn geometry(ctx: *anyopaque) ?PaletteListGeometry {
+        const self: *TestPaletteState = @ptrCast(@alignCast(ctx));
+        return self.list_geometry;
+    }
+
+    fn state(self: *TestPaletteState) PaletteListState {
+        return .{
+            .ctx = self,
+            .name = name,
+            .row_count = rowCount,
+            .selected_index = selectedIndex,
+            .row_name = rowName,
+            .select_row = selectRow,
+            .geometry = geometry,
+        };
+    }
+};
+
+test "Palette geometry maps scrolled rows and hit testing" {
+    var state_data = TestPaletteState{
+        .count = 10,
+        .selected = 5,
+        .list_geometry = .{
+            .bounds = .{ .left = 100, .top = 200, .width = 300, .height = 108 },
+            .first_visible = 4,
+            .visible_count = 3,
+            .row_height = 36,
+        },
+    };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    const visible = provider.rowBounds(5).?;
+    try std.testing.expectEqual(@as(f64, 100), visible.left);
+    try std.testing.expectEqual(@as(f64, 236), visible.top);
+    try std.testing.expectEqual(@as(f64, 300), visible.width);
+    try std.testing.expectEqual(@as(f64, 36), visible.height);
+    try std.testing.expect(provider.rowBounds(3) == null);
+    try std.testing.expect(provider.rowBounds(7) == null);
+
+    var hit: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootElementProviderFromPoint(
+        &provider.fragment_root,
+        150,
+        218,
+        &hit,
+    ));
+    defer if (hit) |row| {
+        _ = PaletteRowProvider.FragmentRelease(row);
+    };
+    try std.testing.expect(hit != null);
+    try std.testing.expectEqual(@as(usize, 4), PaletteRowProvider.fromFragment(hit.?).index);
+
+    var outside: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootElementProviderFromPoint(
+        &provider.fragment_root,
+        400,
+        218,
+        &outside,
+    ));
+    try std.testing.expectEqual(@as(?*com.IRawElementProviderFragment, null), outside);
+}
+
+test "PaletteListProvider fragment navigation reaches rows and parent" {
+    var state_data = TestPaletteState{};
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    var first: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        PaletteListProvider.FragmentNavigate(
+            &provider.fragment,
+            com.NavigateDirection_FirstChild,
+            &first,
+        ),
+    );
+    defer _ = PaletteRowProvider.FragmentRelease(first.?);
+    try std.testing.expectEqual(@as(usize, 0), PaletteRowProvider.fromFragment(first.?).index);
+
+    var next: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Navigate(first.?, com.NavigateDirection_NextSibling, &next));
+    defer _ = PaletteRowProvider.FragmentRelease(next.?);
+    try std.testing.expectEqual(@as(usize, 1), PaletteRowProvider.fromFragment(next.?).index);
+
+    var parent: ?*com.IRawElementProviderFragment = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Navigate(next.?, com.NavigateDirection_Parent, &parent));
+    try std.testing.expect(parent != null);
+    try std.testing.expectEqual(@as(u32, 3), PaletteListProvider.FragmentRelease(parent.?));
+}
+
+test "Palette row retains its parent and balances QueryInterface refs" {
+    var state_data = TestPaletteState{ .count = 1 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    const row = provider.createRow(0).?;
+    try std.testing.expectEqual(@as(u32, 1), PaletteListProvider.Release(&provider.base));
+
+    var selection: ?*anyopaque = null;
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.QueryInterface(&row.base, &com.IID_ISelectionItemProvider, &selection));
+    try std.testing.expectEqual(@as(u32, 1), PaletteRowProvider.SelectionRelease(@ptrCast(@alignCast(selection.?))));
+    try std.testing.expectEqual(@as(u32, 0), PaletteRowProvider.Release(&row.base));
+}
+
+test "Palette row late query reports unavailable after removal and detach" {
+    var state_data = TestPaletteState{ .count = 1 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const row = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    state_data.count = 0;
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteRowProvider.GetPropertyValue(&row.base, constants.UIA_NamePropertyId, &value),
+    );
+
+    state_data.count = 1;
+    provider.detach();
+    var selected: com.BOOL = 0;
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteRowProvider.GetIsSelected(&row.selection_item, &selected),
+    );
+}
+
+test "Palette row selection callback may reenter provider" {
+    var state_data = TestPaletteState{ .count = 2 };
+    var provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state_data.state());
+    defer _ = PaletteListProvider.Release(&provider.base);
+    state_data.reentrant_provider = provider;
+    const row = provider.createRow(1).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.Select(&row.selection_item));
+    try std.testing.expectEqual(@as(?usize, 1), state_data.selected_by_provider);
+    try std.testing.expectEqual(@as(u32, 1), state_data.reentrant_queries);
 }
 
 test "TerminalProvider QueryInterface accepts ValueProvider" {
