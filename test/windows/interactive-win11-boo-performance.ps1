@@ -144,7 +144,8 @@ $requiredRenderTraceFields = @(
     'max_sustained_paint_gap_ms',
     'max_sustained_paint_gap_ended_at_ms',
     'max_paint_draw_duration_ms',
-    'max_paint_draw_duration_at_ms'
+    'max_paint_draw_duration_at_ms',
+    'first_paint_at_ms'
 )
 foreach ($field in $requiredRenderTraceFields) {
     if ($null -eq $renderTrace.PSObject.Properties[$field]) {
@@ -153,10 +154,14 @@ foreach ($field in $requiredRenderTraceFields) {
 }
 
 $startupWindowMs = 1000
+$startupDrawLeadMs = 250
+$startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
 $startupPaintGap =
     $renderTrace.max_paint_gap_ended_at_ms -le $startupWindowMs -and
     $renderTrace.max_paint_gap_ms -eq $renderTrace.max_paint_draw_duration_ms -and
-    $renderTrace.max_paint_gap_ended_at_ms -eq $renderTrace.max_paint_draw_duration_at_ms
+    $renderTrace.max_paint_gap_ended_at_ms -eq $renderTrace.max_paint_draw_duration_at_ms -and
+    $startupPaintStartMs -ge $renderTrace.first_paint_at_ms -and
+    $startupPaintStartMs - $renderTrace.first_paint_at_ms -le $startupDrawLeadMs
 if ($renderTrace.max_paint_gap_ms -gt 300 -and -not $startupPaintGap) {
     throw "Expected visible paint gaps to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_paint_gap_ms))"
 }
