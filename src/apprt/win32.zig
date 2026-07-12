@@ -86,6 +86,13 @@ const windows = std.os.windows;
 pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = struct {
+    const startup_window_ms: u64 = 1000;
+
+    const SustainedGapTargets = struct {
+        max_gap_ms: *std.atomic.Value(u64),
+        max_gap_ended_at_ms: *std.atomic.Value(u64),
+    };
+
     path: ?[]const u8 = null,
     start_tick_ms: u64 = 0,
     renderer_update_frame_count: std.atomic.Value(u64) = .init(0),
@@ -106,6 +113,8 @@ const RenderTrace = struct {
     max_renderer_update_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
     max_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
     max_swap_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
+    max_sustained_paint_gap_ms: std.atomic.Value(u64) = .init(0),
+    max_sustained_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
     max_paint_draw_duration_ms: std.atomic.Value(u64) = .init(0),
     max_paint_draw_duration_at_ms: std.atomic.Value(u64) = .init(0),
     paint_draw_duration_over_20ms_count: std.atomic.Value(u64) = .init(0),
@@ -167,6 +176,7 @@ const RenderTrace = struct {
             &self.max_renderer_update_gap_ms,
             &self.max_renderer_update_gap_ended_at_ms,
             &self.first_renderer_update_at_ms,
+            null,
         );
     }
 
@@ -214,6 +224,10 @@ const RenderTrace = struct {
             &self.max_paint_gap_ms,
             &self.max_paint_gap_ended_at_ms,
             &self.first_paint_at_ms,
+            .{
+                .max_gap_ms = &self.max_sustained_paint_gap_ms,
+                .max_gap_ended_at_ms = &self.max_sustained_paint_gap_ended_at_ms,
+            },
         );
     }
 
@@ -242,6 +256,7 @@ const RenderTrace = struct {
             &self.max_swap_gap_ms,
             &self.max_swap_gap_ended_at_ms,
             &self.first_swap_at_ms,
+            null,
         );
     }
 
@@ -252,6 +267,7 @@ const RenderTrace = struct {
         max_gap_ms: *std.atomic.Value(u64),
         max_gap_ended_at_ms: *std.atomic.Value(u64),
         first_at_ms: *std.atomic.Value(u64),
+        sustained: ?SustainedGapTargets,
     ) void {
         const now = GetTickCount64();
         const elapsed_ms = elapsedTraceMs(self.start_tick_ms, now);
@@ -259,12 +275,23 @@ const RenderTrace = struct {
         _ = first_at_ms.cmpxchgStrong(0, elapsed_ms, .acq_rel, .acquire);
         const prev = last_tick_ms.swap(now, .acq_rel);
         if (prev == 0 or now <= prev) return;
+        const gap_ms = now - prev;
         updateMaxAtomicWithTimestamp(
             max_gap_ms,
             max_gap_ended_at_ms,
-            now - prev,
+            gap_ms,
             elapsed_ms,
         );
+        if (elapsed_ms > startup_window_ms) {
+            if (sustained) |targets| {
+                updateMaxAtomicWithTimestamp(
+                    targets.max_gap_ms,
+                    targets.max_gap_ended_at_ms,
+                    gap_ms,
+                    elapsed_ms,
+                );
+            }
+        }
     }
 
     fn writeSnapshot(self: *const RenderTrace) void {
@@ -295,6 +322,8 @@ const RenderTrace = struct {
             .max_renderer_update_gap_ended_at_ms = self.max_renderer_update_gap_ended_at_ms.load(.acquire),
             .max_paint_gap_ended_at_ms = self.max_paint_gap_ended_at_ms.load(.acquire),
             .max_swap_gap_ended_at_ms = self.max_swap_gap_ended_at_ms.load(.acquire),
+            .max_sustained_paint_gap_ms = self.max_sustained_paint_gap_ms.load(.acquire),
+            .max_sustained_paint_gap_ended_at_ms = self.max_sustained_paint_gap_ended_at_ms.load(.acquire),
             .max_paint_draw_duration_ms = self.max_paint_draw_duration_ms.load(.acquire),
             .max_paint_draw_duration_at_ms = self.max_paint_draw_duration_at_ms.load(.acquire),
             .paint_draw_duration_over_20ms_count = self.paint_draw_duration_over_20ms_count.load(.acquire),

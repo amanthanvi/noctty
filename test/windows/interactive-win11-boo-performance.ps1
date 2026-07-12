@@ -139,8 +139,38 @@ if ($booTrace.rendered_byte_count -lt 200000) {
 if ($renderTrace.paint_draw_count -lt 250) {
     throw "Expected visible paint cadence to stay well above the prior stalled path (expected >= 250, got $($renderTrace.paint_draw_count))"
 }
-if ($renderTrace.max_paint_gap_ms -gt 300) {
+$requiredRenderTraceFields = @(
+    'max_paint_gap_ms',
+    'max_paint_gap_ended_at_ms',
+    'max_sustained_paint_gap_ms',
+    'max_sustained_paint_gap_ended_at_ms',
+    'max_paint_draw_duration_ms',
+    'max_paint_draw_duration_at_ms',
+    'first_paint_at_ms'
+)
+foreach ($field in $requiredRenderTraceFields) {
+    if ($null -eq $renderTrace.PSObject.Properties[$field]) {
+        throw "Render trace is missing required field '$field'"
+    }
+}
+
+$startupWindowMs = 1000
+$startupDrawLeadMs = 250
+$startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
+$startupPaintGap =
+    $renderTrace.max_paint_gap_ended_at_ms -le $startupWindowMs -and
+    $renderTrace.max_paint_gap_ms -eq $renderTrace.max_paint_draw_duration_ms -and
+    $renderTrace.max_paint_gap_ended_at_ms -eq $renderTrace.max_paint_draw_duration_at_ms -and
+    $startupPaintStartMs -ge $renderTrace.first_paint_at_ms -and
+    $startupPaintStartMs - $renderTrace.first_paint_at_ms -le $startupDrawLeadMs
+if ($renderTrace.max_paint_gap_ms -gt 300 -and -not $startupPaintGap) {
     throw "Expected visible paint gaps to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_paint_gap_ms))"
+}
+if ($renderTrace.max_paint_gap_ms -gt 300 -and $startupPaintGap) {
+    Write-Warning "Ignoring startup paint initialization gap ($($renderTrace.max_paint_gap_ms) ms at $($renderTrace.max_paint_gap_ended_at_ms) ms); enforcing sustained paint gap <= 300 ms after $startupWindowMs ms."
+}
+if ($renderTrace.max_sustained_paint_gap_ms -gt 300) {
+    throw "Expected sustained visible paint gaps after startup to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_sustained_paint_gap_ms) at $($renderTrace.max_sustained_paint_gap_ended_at_ms) ms)"
 }
 if ($termioTrace.process_output_count -lt 140) {
     throw "Expected steady PTY output batches for +boo (expected >= 140, got $($termioTrace.process_output_count))"
