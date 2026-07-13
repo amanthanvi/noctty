@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string] $OutputPath
+    [string] $OutputPath,
+    [version] $MinimumRunnerVersion = '2.327.1'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,17 @@ if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Interactive runner preflight must r
 if ($env:RUNNER_OS -ne 'Windows') { throw "Interactive runner OS must be Windows; got '$($env:RUNNER_OS)'." }
 if ($env:RUNNER_ARCH -ne 'X64') { throw "Interactive runner architecture must be X64; got '$($env:RUNNER_ARCH)'." }
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_NAME)) { throw 'RUNNER_NAME is required for provenance.' }
+if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required for runner version validation.' }
+
+$runnerRoot = Split-Path -Parent (Split-Path -Parent $env:RUNNER_TEMP)
+$runnerWorkerPath = Join-Path $runnerRoot 'bin\Runner.Worker.exe'
+if (-not (Test-Path -LiteralPath $runnerWorkerPath -PathType Leaf)) {
+    throw "Runner.Worker.exe was not found at the expected runner root: $runnerWorkerPath"
+}
+$runnerVersion = [version](Get-Item -LiteralPath $runnerWorkerPath).VersionInfo.FileVersion
+if ($runnerVersion -lt $MinimumRunnerVersion) {
+    throw "Interactive runner $runnerVersion is older than required version $MinimumRunnerVersion."
+}
 
 Add-Type -TypeDefinition @'
 using System;
@@ -77,6 +89,7 @@ try {
         runner_name = $env:RUNNER_NAME
         runner_os = $env:RUNNER_OS
         runner_arch = $env:RUNNER_ARCH
+        runner_version = $runnerVersion.ToString()
         windows_build = $windowsBuild
         input_desktop = $inputDesktop
         runner_environment = $env:RUNNER_ENVIRONMENT
@@ -95,7 +108,7 @@ try {
         if ($parent) { [System.IO.Directory]::CreateDirectory($parent) | Out-Null }
         $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $OutputPath -Encoding utf8NoBOM
     }
-    Write-Host "Interactive runner provenance: PASS ($($env:RUNNER_NAME), session $processSession, $($identity.Name))"
+    Write-Host "Interactive runner provenance: PASS ($($env:RUNNER_NAME), runner $runnerVersion, session $processSession, $($identity.Name))"
 }
 finally {
     $identity.Dispose()

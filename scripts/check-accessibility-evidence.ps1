@@ -117,9 +117,15 @@ try {
     catch {
         throw "Interactive runner provenance for run $runId is malformed: $($_.Exception.Message)"
     }
+    $minimumRunnerVersion = [version]'2.327.1'
+    [version]$provenanceRunnerVersion = $null
+    if (-not [version]::TryParse([string]$provenance.runner_version, [ref]$provenanceRunnerVersion)) {
+        throw "Interactive runner provenance for run $runId lacks a valid runner version."
+    }
     if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1' -or
         $provenance.runner_os -ne 'Windows' -or
         $provenance.runner_arch -ne 'X64' -or
+        $provenanceRunnerVersion -lt $minimumRunnerVersion -or
         $provenance.runner_environment -ne 'self-hosted' -or
         $provenance.input_desktop -ne 'Default' -or
         [string]::IsNullOrWhiteSpace([string]$provenance.runner_name) -or

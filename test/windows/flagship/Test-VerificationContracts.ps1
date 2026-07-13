@@ -182,6 +182,7 @@ $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
+$runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
@@ -240,6 +241,14 @@ Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[string\]\$provenance\.user -match .*SYSTEM' `
     -Description 'service-account runner provenance is rejected'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
+    -Pattern "MinimumRunnerVersion = '2\.327\.1'" `
+    -Description 'interactive evidence enforces the upload-artifact runner floor'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenanceRunnerVersion -lt \$minimumRunnerVersion' `
+    -Description 'accessibility evidence rejects outdated interactive runners'
 Assert-WorkflowContract `
     -Path $releaseCopyChecker `
     -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `
