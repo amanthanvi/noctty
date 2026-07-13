@@ -43,27 +43,6 @@ public static class Win11KeyInputNative {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct INPUT {
-        public uint type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct InputUnion {
-        [FieldOffset(0)]
-        public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KEYBDINPUT {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
         public int Top;
@@ -108,17 +87,12 @@ public static class Win11KeyInputNative {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
     [DllImport("user32.dll")]
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 }
 '@
 Add-Type -AssemblyName Microsoft.VisualBasic
 
-$INPUT_KEYBOARD = 1
-$KEYEVENTF_KEYUP = 0x0002
 $MAPVK_VK_TO_VSC = 0
 $SW_RESTORE = 9
 $VK_A = 0x41
@@ -224,39 +198,6 @@ function New-KeyLParam {
     }
 
     return [IntPtr] $bits
-}
-
-function Send-VirtualKey {
-    param(
-        [Parameter(Mandatory)] [UInt16] $VirtualKey
-    )
-
-    $scanCode = [Win11KeyInputNative]::MapVirtualKeyW([uint32] $VirtualKey, [uint32] $MAPVK_VK_TO_VSC)
-    if ($scanCode -eq 0) {
-        throw "MapVirtualKeyW returned 0 for VK=$VirtualKey"
-    }
-
-    $inputs = [Win11KeyInputNative+INPUT[]]::new(2)
-
-    $inputs[0].type = $INPUT_KEYBOARD
-    $inputs[0].U.ki.wVk = $VirtualKey
-    $inputs[0].U.ki.wScan = [uint16] $scanCode
-    $inputs[0].U.ki.dwFlags = 0
-
-    $inputs[1].type = $INPUT_KEYBOARD
-    $inputs[1].U.ki.wVk = $VirtualKey
-    $inputs[1].U.ki.wScan = [uint16] $scanCode
-    $inputs[1].U.ki.dwFlags = $KEYEVENTF_KEYUP
-
-    $sent = [Win11KeyInputNative]::SendInput(
-        [uint32] $inputs.Length,
-        $inputs,
-        [Runtime.InteropServices.Marshal]::SizeOf([type] [Win11KeyInputNative+INPUT])
-    )
-    if ($sent -ne $inputs.Length) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendInput sent $sent/$($inputs.Length) events (Win32 error $lastError)"
-    }
 }
 
 function Send-VirtualKeyMessage {

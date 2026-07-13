@@ -16,45 +16,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not ('CliShellCommandNative' -as [type])) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class CliShellCommandNative {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-}
-"@
-}
-
-function Get-CliShellExitCode {
-    param(
-        [System.Diagnostics.Process] $Process,
-        [IntPtr] $ProcessHandle
-    )
-
-    try {
-        $Process.Refresh()
-        if ($Process.HasExited) {
-            return [int] $Process.ExitCode
-        }
-    }
-    catch {
-        # Fall through to the native lookup.
-    }
-
-    [uint32] $nativeExitCode = 0
-    if (-not [CliShellCommandNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
-        throw "Unable to read exit code for pid=$($Process.Id): $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
-    if ($nativeExitCode -eq 259) {
-        throw "Process has not exited yet for pid=$($Process.Id)"
-    }
-
-    return [int] $nativeExitCode
-}
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 
 function Format-CmdArgument {
     param(
@@ -85,7 +48,6 @@ function Format-PowerShellLiteral {
     return "'" + $Argument.Replace("'", "''") + "'"
 }
 
-$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $binDir = if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }
 $guiExe = Join-Path $binDir 'winghostty.exe'
 $commandExe = Join-Path $binDir 'winghostty.com'
@@ -168,7 +130,7 @@ switch ($Shell) {
                     }
                 }
 
-                $exitCode = Get-CliShellExitCode -Process $process -ProcessHandle $processHandle
+                $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
                 $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
                     Get-Content -LiteralPath $stdoutPath -Raw
                 } else {

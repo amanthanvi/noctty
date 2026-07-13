@@ -29,6 +29,9 @@ if (-not ('WinghosttyAccessibilityNative' -as [type])) {
 using System;
 using System.Runtime.InteropServices;
 public static class WinghosttyAccessibilityNative {
+    [StructLayout(LayoutKind.Sequential)] public struct POINT {
+        public int x; public int y;
+    }
     [StructLayout(LayoutKind.Sequential)] public struct HIGHCONTRAST {
         public uint cbSize; public uint dwFlags; public IntPtr lpszDefaultScheme;
     }
@@ -38,12 +41,12 @@ public static class WinghosttyAccessibilityNative {
     public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")]
-    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+    public static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll", SetLastError=true)]
-    public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
+    public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
 }
 '@
 }
@@ -130,20 +133,49 @@ try {
                 )
                 $x = [int][Math]::Round($bounds.Left + ($bounds.Width / 2))
                 $y = [int][Math]::Round($bounds.Top + ($bounds.Height / 2))
-                if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
-                    [WinghosttyAccessibilityNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-                    [WinghosttyAccessibilityNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-                    [void][WinghosttyAccessibilityNative]::SetWindowPos(
-                        $process.MainWindowHandle,
-                        [IntPtr](-2),
-                        0,
-                        0,
-                        0,
-                        0,
-                        $noMoveNoSizeShow
-                    )
-                    $clickedDocument = $true
+                $point = [WinghosttyAccessibilityNative+POINT]::new()
+                $point.x = $x
+                $point.y = $y
+                $targetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($point)
+                [uint32] $targetProcessId = 0
+                $targetThreadId = [WinghosttyAccessibilityNative]::GetWindowThreadProcessId(
+                    $targetHwnd,
+                    [ref] $targetProcessId
+                )
+                if ($targetHwnd -eq [IntPtr]::Zero -or $targetThreadId -eq 0 -or $targetProcessId -ne [uint32]$process.Id) {
+                    throw "Refusing accessibility click outside winghostty (hwnd=$targetHwnd, owner=$targetProcessId, expected=$($process.Id))."
                 }
+                $clientPoint = $point
+                if (-not [WinghosttyAccessibilityNative]::ScreenToClient($targetHwnd, [ref] $clientPoint)) {
+                    throw "ScreenToClient failed for accessibility click hwnd=${targetHwnd}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                }
+                [int32] $clickCoordinates = ($clientPoint.x -band 0xffff) -bor (($clientPoint.y -band 0xffff) -shl 16)
+                [void](Invoke-InteractiveWin11Message `
+                    -Hwnd $targetHwnd `
+                    -Message 0x0201 `
+                    -WParam ([UIntPtr]1) `
+                    -LParam ([IntPtr]$clickCoordinates) `
+                    -Deadline $focusDeadline `
+                    -Process $process `
+                    -Description 'accessibility document mouse-down')
+                [void](Invoke-InteractiveWin11Message `
+                    -Hwnd $targetHwnd `
+                    -Message 0x0202 `
+                    -WParam ([UIntPtr]::Zero) `
+                    -LParam ([IntPtr]$clickCoordinates) `
+                    -Deadline $focusDeadline `
+                    -Process $process `
+                    -Description 'accessibility document mouse-up')
+                [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                    $process.MainWindowHandle,
+                    [IntPtr](-2),
+                    0,
+                    0,
+                    0,
+                    0,
+                    $noMoveNoSizeShow
+                )
+                $clickedDocument = $true
             }
         }
         Start-Sleep -Milliseconds 100
@@ -156,10 +188,15 @@ try {
         }
         throw "UIA focus did not resolve to an element owned by winghostty (focused=$focusedSummary, document_set_focus_error='$documentFocusError', clicked_document=$clickedDocument)."
     }
-    if (-not [WinghosttyAccessibilityNative]::PostMessage($process.MainWindowHandle, 0x0111, [UIntPtr]([uint64]1901), [IntPtr]::Zero)) {
-        throw "Failed to open command palette: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
     $paletteDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $process.MainWindowHandle `
+        -Message 0x0111 `
+        -WParam ([UIntPtr]([uint64]1901)) `
+        -LParam ([IntPtr]::Zero) `
+        -Deadline $paletteDeadline `
+        -Process $process `
+        -Description 'open accessibility command palette')
     $palette = $null
     do {
         Start-Sleep -Milliseconds 100
@@ -195,7 +232,14 @@ try {
         $selectedBounds.Right -gt $paletteBounds.Right -or $selectedBounds.Bottom -gt $paletteBounds.Bottom) {
         throw 'Selected command palette row bounds escape the List bounds.'
     }
-    [void][WinghosttyAccessibilityNative]::PostMessage($process.MainWindowHandle, 0x0111, [UIntPtr]([uint64]2004), [IntPtr]::Zero)
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $process.MainWindowHandle `
+        -Message 0x0111 `
+        -WParam ([UIntPtr]([uint64]2004)) `
+        -LParam ([IntPtr]::Zero) `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Process $process `
+        -Description 'dismiss accessibility command palette')
     $hc = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
     if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(0x42, $hc.cbSize, [ref]$hc, 0)) {
