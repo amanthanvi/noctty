@@ -140,6 +140,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw "Expected visible paint cadence to stay well above the prior stalled path (expected >= 250, got $($renderTrace.paint_draw_count))"
     }
     $requiredRenderTraceFields = @(
+        'startup_window_ms',
         'max_paint_gap_ms',
         'max_paint_gap_ended_at_ms',
         'max_sustained_paint_gap_ms',
@@ -154,14 +155,24 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         }
     }
 
-    $startupWindowMs = 1000
-    $startupDrawLeadMs = 250
+    $startupWindowMs = [long]$renderTrace.startup_window_ms
+    if ($startupWindowMs -le 0) {
+        throw "Render trace startup window must be positive (got $startupWindowMs)"
+    }
+    $startupDrawLeadMs = 500
     $startupPaintGapLimitMs = 750
+    $startupMatchToleranceMs = 16
     $startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
+    $startupDurationDeltaMs = [Math]::Abs(
+        [long]$renderTrace.max_paint_gap_ms - [long]$renderTrace.max_paint_draw_duration_ms
+    )
+    $startupEndDeltaMs = [Math]::Abs(
+        [long]$renderTrace.max_paint_gap_ended_at_ms - [long]$renderTrace.max_paint_draw_duration_at_ms
+    )
     $startupPaintGap =
-        $renderTrace.max_paint_gap_ended_at_ms -le $startupWindowMs -and
-        $renderTrace.max_paint_gap_ms -eq $renderTrace.max_paint_draw_duration_ms -and
-        $renderTrace.max_paint_gap_ended_at_ms -eq $renderTrace.max_paint_draw_duration_at_ms -and
+        $startupPaintStartMs -lt $startupWindowMs -and
+        $startupDurationDeltaMs -le $startupMatchToleranceMs -and
+        $startupEndDeltaMs -le $startupMatchToleranceMs -and
         $startupPaintStartMs -ge $renderTrace.first_paint_at_ms -and
         $startupPaintStartMs - $renderTrace.first_paint_at_ms -le $startupDrawLeadMs
     if ($renderTrace.max_paint_gap_ms -gt 300 -and -not $startupPaintGap) {

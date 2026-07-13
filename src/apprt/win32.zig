@@ -282,7 +282,7 @@ const RenderTrace = struct {
             gap_ms,
             elapsed_ms,
         );
-        if (elapsed_ms > startup_window_ms) {
+        if (gapIsSustained(elapsed_ms, gap_ms)) {
             if (sustained) |targets| {
                 updateMaxAtomicWithTimestamp(
                     targets.max_gap_ms,
@@ -292,6 +292,10 @@ const RenderTrace = struct {
                 );
             }
         }
+    }
+
+    fn gapIsSustained(elapsed_ms: u64, gap_ms: u64) bool {
+        return elapsed_ms -| gap_ms >= startup_window_ms;
     }
 
     fn writeSnapshot(self: *const RenderTrace) void {
@@ -304,6 +308,7 @@ const RenderTrace = struct {
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = GetTickCount64() - self.start_tick_ms,
+            .startup_window_ms = startup_window_ms,
             .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
             .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
             .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
@@ -2316,6 +2321,13 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
     const max_config_size = 16 * 1024 * 1024;
     if (size > max_config_size) return error.SerializeFailed;
     return @intCast(size);
+}
+
+test "win32 render trace classifies gaps by start time" {
+    try std.testing.expect(!RenderTrace.gapIsSustained(1250, 578));
+    try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
+    try std.testing.expect(RenderTrace.gapIsSustained(1300, 300));
+    try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
 }
 
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
