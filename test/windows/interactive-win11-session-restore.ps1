@@ -50,9 +50,11 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $first = Start-StatefulApp $layout $exe $repoRoot 'session-save' @('--single-instance=true'); $runs.Add($first)
     $hostHwnd = Wait-StatefulHost $first $deadline
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial session-save tab' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 1 }
+    $null = Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description 'initial session-save host readiness barrier' -Process $first.Process
     foreach ($targetTabCount in 2..3) {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-        Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process
+        Invoke-StatefulPostedCommand $hostHwnd 1904 $deadline $first.Process
         Wait-InteractiveWin11Until -Deadline $deadline -Description "live tab count $targetTabCount" -Process $first.Process -Condition {
             (Get-StatefulTabCount $hostHwnd) -eq $targetTabCount
         }
@@ -72,9 +74,9 @@ try {
     $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
     $explicitHost = Wait-StatefulHost $explicit $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
-    Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process
-    Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-StatefulPostedCommand $explicitHost 1904 $deadline $explicit.Process
+    Invoke-StatefulPostedCommand $explicitHost 1904 $deadline $explicit.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'asynchronous burst-created tabs' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 3 }
     $null = Invoke-InteractiveWin11Message -Hwnd $explicitHost -Message 0 -Deadline $deadline -Description 'asynchronous tab burst readiness barrier' -Process $explicit.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

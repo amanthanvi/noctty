@@ -24,7 +24,7 @@ $configPath = Join-Path $configDir 'config.ghostty'
 [IO.File]::WriteAllText($configPath, "theme = Dracula`r`nwindow-save-state = never`r`n", [Text.UTF8Encoding]::new($false))
 
 function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline, $Process) {
-    Invoke-StatefulCommand $HostHwnd 1901 $Deadline $Process
+    Invoke-StatefulPostedCommand $HostHwnd 1901 $Deadline $Process
     $script:PaletteThemeHost = $HostHwnd
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'palette query edit' -Process $Process -Condition {
         @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2002).Count -gt 0
@@ -63,7 +63,10 @@ try {
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $recoveryHc.cbSize, [ref]$recoveryHc, 0)) { throw 'SPI_GETHIGHCONTRAST recovery failed.' }
             $recoveryHc.dwFlags = $recoveryHc.dwFlags -band (-bnot 1)
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $recoveryHc.cbSize, [ref]$recoveryHc, 2)) { throw 'SPI_SETHIGHCONTRAST recovery failed.' }
-            Remove-Item -LiteralPath $hcRecoveryPath -Force
+            $recoveryReadback = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $recoveryReadback.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryReadback)
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $recoveryReadback.cbSize, [ref]$recoveryReadback, 0)) { throw 'SPI_GETHIGHCONTRAST recovery verification failed.' }
+            if (($recoveryReadback.dwFlags -band 1) -ne 0) { throw 'High Contrast remained enabled after interrupted-run recovery.' }
+            Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop
             Write-Warning 'Restored High Contrast state left behind by an interrupted harness run.'
         }
         $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
@@ -127,7 +130,17 @@ finally {
                 [void]$cleanupErrors.Add('Failed to restore the original High Contrast setting.')
             }
             else {
-                $hcRestored = $true
+                $restoredHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new()
+                $restoredHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($restoredHc)
+                if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $restoredHc.cbSize, [ref]$restoredHc, 0)) {
+                    [void]$cleanupErrors.Add('Failed to verify the restored High Contrast setting.')
+                }
+                elseif (($restoredHc.dwFlags -band 1) -ne ($originalHc.dwFlags -band 1)) {
+                    [void]$cleanupErrors.Add('High Contrast remained enabled after restoration.')
+                }
+                else {
+                    $hcRestored = $true
+                }
             }
         }
         catch {

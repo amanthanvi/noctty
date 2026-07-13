@@ -1,4 +1,4 @@
-#requires -Version 7.1
+#requires -Version 7.3
 
 [CmdletBinding()]
 param()
@@ -147,6 +147,222 @@ function Test-DirectStatementBlockChild {
     [object]::ReferenceEquals($ancestor, $StatementBlock)
 }
 
+function Get-DirectStatementBlockChild {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.StatementBlockAst] $StatementBlock
+    )
+
+    $statement = $Node
+    $ancestor = $Node.Parent
+    while ($null -ne $ancestor -and $ancestor -isnot [System.Management.Automation.Language.StatementBlockAst]) {
+        $statement = $ancestor
+        $ancestor = $ancestor.Parent
+    }
+    if (-not [object]::ReferenceEquals($ancestor, $StatementBlock)) { return $null }
+    return $statement
+}
+
+function Get-MemberExpressionName {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.MemberExpressionAst] $Node)
+
+    return ([string] $Node.Member.Value).Trim()
+}
+
+function Test-DynamicScriptTypeName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
+
+    $typeName = (($TypeName -split ',', 2)[0] -replace '\s', '')
+    return $typeName -in @(
+        'ScriptBlock',
+        'System.Management.Automation.ScriptBlock',
+        'PowerShell',
+        'System.Management.Automation.PowerShell'
+    )
+}
+
+function Test-DynamicScriptTypeExpression {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    return $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (Test-DynamicScriptTypeName -TypeName $Node.TypeName.FullName)
+}
+
+function Test-ExecutionContextRoot {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    while ($Node -is [System.Management.Automation.Language.ParenExpressionAst] -or
+        $Node -is [System.Management.Automation.Language.SubExpressionAst]) {
+        $pipeline = if ($Node -is [System.Management.Automation.Language.ParenExpressionAst]) {
+            $Node.Pipeline
+        } else {
+            $statements = @($Node.SubExpression.Statements)
+            if ($Node.SubExpression.Traps.Count -ne 0 -or $statements.Count -ne 1 -or
+                $statements[0] -isnot [System.Management.Automation.Language.PipelineAst]) {
+                return $false
+            }
+            $statements[0]
+        }
+        $elements = @($pipeline.PipelineElements)
+        if ($elements.Count -ne 1 -or $elements[0] -isnot [System.Management.Automation.Language.CommandExpressionAst]) {
+            return $false
+        }
+        $Node = $elements[0].Expression
+    }
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) { return $false }
+    return (($Node.VariablePath.UserPath -split ':')[-1] -eq 'ExecutionContext')
+}
+
+function Test-ExecutionContextMemberChain {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [string[]] $Members
+    )
+
+    if ($Node -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+        (Get-MemberExpressionName -Node $Node) -ne $Members[-1]) {
+        return $false
+    }
+    if ($Members.Count -eq 1) { return Test-ExecutionContextRoot -Node $Node.Expression }
+    return Test-ExecutionContextMemberChain -Node $Node.Expression -Members @($Members[0..($Members.Count - 2)])
+}
+
+function Test-CommandResolutionMutationNode {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        (Test-DynamicScriptTypeName -TypeName $Node.Value)) {
+        $isTypeConversion = $Node.Parent -is [System.Management.Automation.Language.ConvertExpressionAst] -and
+            (($Node.Parent.Type.TypeName.FullName -replace '\s', '') -in @('type', 'System.Type'))
+        $isGetTypeArgument = $Node.Parent -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            (Get-MemberExpressionName -Node $Node.Parent) -eq 'GetType' -and
+            @($Node.Parent.Arguments | Where-Object { [object]::ReferenceEquals($_, $Node) }).Count -eq 1
+        if ($isTypeConversion -or $isGetTypeArgument) { return $true }
+    }
+    if ($Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        (($Node.VariablePath.UserPath -split ':')[-1] -eq 'ExecutionContext')) {
+        $ancestor = $Node.Parent
+        while ($null -ne $ancestor -and $ancestor -isnot [System.Management.Automation.Language.AssignmentStatementAst]) {
+            $ancestor = $ancestor.Parent
+        }
+        if ($ancestor -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $ancestor.Right -is [System.Management.Automation.Language.CommandExpressionAst] -and
+            (Test-ExecutionContextRoot -Node $ancestor.Right.Expression)) {
+            return $true
+        }
+    }
+    if ($Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (Test-DynamicScriptTypeExpression -Node $Node) -and
+        $Node.Parent -isnot [System.Management.Automation.Language.MemberExpressionAst]) {
+        return $true
+    }
+    if ($Node -is [System.Management.Automation.Language.MemberExpressionAst]) {
+        $memberName = Get-MemberExpressionName -Node $Node
+        if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ((Test-DynamicScriptTypeExpression -Node $Node.Expression) -and
+            $memberName -in @('Create', 'GetMethod', 'GetMethods')) {
+            return $true
+        }
+        if ($memberName -in @('InvokeScript', 'NewScriptBlock') -and
+            ((Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('InvokeCommand')) -or
+                (Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('SessionState', 'InvokeCommand')))) {
+            return $true
+        }
+        if ($memberName -eq 'InvokeProvider' -and
+            ((Test-ExecutionContextRoot -Node $Node.Expression) -or
+                (Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('SessionState')))) {
+            return $true
+        }
+    }
+    if ($Node -is [System.Management.Automation.Language.CommandAst]) {
+        $name = $Node.GetCommandName()
+        $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Invoke-Expression', 'iex') -or
+            $Node.Extent.Text -match '(?i)(?:alias|function):'
+    }
+    if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
+        return $Node.Left.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function):'
+    }
+    return $false
+}
+
+function Assert-CommandResolutionContract {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Context,
+        [string[]] $ExpectedDotSources = @(),
+        [string[]] $ExpectedAmpersandCommands = @()
+    )
+
+    $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
+    if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
+    $dotSources = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot
+    }, $true))
+    if ($dotSources.Count -ne $ExpectedDotSources.Count) { throw "Unexpected dot-source count: $Context" }
+    for ($i = 0; $i -lt $ExpectedDotSources.Count; $i++) {
+        if ($dotSources[$i].Extent.Text.Trim() -ne $ExpectedDotSources[$i]) {
+            throw "Unexpected dot-source command: $Context"
+        }
+    }
+    $ampersandCommands = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Ampersand
+    }, $true))
+    if ($ampersandCommands.Count -ne $ExpectedAmpersandCommands.Count) { throw "Unexpected call-operator count: $Context" }
+    for ($i = 0; $i -lt $ExpectedAmpersandCommands.Count; $i++) {
+        if ($ampersandCommands[$i].Extent.Text.Trim() -ne $ExpectedAmpersandCommands[$i]) {
+            throw "Unexpected call-operator command: $Context"
+        }
+    }
+}
+
+function Assert-NoProtectedFunctionDefinitions {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $protectedNames = @('Get-InteractiveWin11MessageTimeoutMs', 'Assert-InteractiveWin11WindowOwner', 'Invoke-InteractiveWin11PostMessage', 'Invoke-StatefulPostedCommand')
+    $definitions = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            (($node.Name -replace '^(?i)(?:global|script|local|private):', '') -in $protectedNames)
+    }, $true))
+    if ($definitions.Count -ne 0) { throw "Harness must not redefine protected interactive functions: $Context" }
+}
+
+$commandResolutionProbes = @(
+    [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock]::' + [Environment]::NewLine + '''Create''("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '[ System.Management.Automation.ScriptBlock, System.Management.Automation ]::Create("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '[PowerShell]::Create()' }
+    [pscustomobject]@{ Reject = $true; Text = '$ExecutionContext.' + [Environment]::NewLine + 'InvokeCommand.' + [Environment]::NewLine + 'InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '${ExecutionContext}.SessionState.InvokeCommand.''InvokeScript''("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$($ExecutionContext).InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ec = $($ExecutionContext)' }
+    [pscustomobject]@{ Reject = $true; Text = '$factory = [ScriptBlock]' }
+    [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock].GetMethod("Create")' }
+    [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation.ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = '$factory = [type]"System.Management.Automation.ScriptBlock"' }
+    [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
+    [pscustomobject]@{ Reject = $false; Text = '$ExecutionContext.InvokeCommand.InvokeScriptBlock("x")' }
+    [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
+    [pscustomobject]@{ Reject = $false; Text = 'Write-Host "ScriptBlock"' }
+    [pscustomobject]@{ Reject = $false; Text = '$list.Add("System.Management.Automation.ScriptBlock")' }
+)
+foreach ($probe in $commandResolutionProbes) {
+    $probeTokens = $null
+    $probeErrors = $null
+    $probeAst = [System.Management.Automation.Language.Parser]::ParseInput($probe.Text, [ref] $probeTokens, [ref] $probeErrors)
+    if ($probeErrors.Count -ne 0) { throw "Command-resolution probe does not parse: $($probe.Text)" }
+    $probeRejected = @($probeAst.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true)).Count -ne 0
+    if ($probeRejected -ne $probe.Reject) { throw "Command-resolution probe contract failed: $($probe.Text)" }
+}
+
 $stepBoundaryProbe = @'
       - name: Target
         run: inside-step
@@ -217,13 +433,218 @@ $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.ym
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
+$interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
+$statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
+$paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
+$interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
+$statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
+$paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
+$resolutionSourceAsts = foreach ($source in @(
+    [pscustomobject]@{ Path = $interactiveWin11Lib; Text = $interactiveWin11LibText },
+    [pscustomobject]@{ Path = $statefulWin11Lib; Text = $statefulWin11LibText }
+)) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($source.Text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw "PowerShell resolution source does not parse: $($source.Path) ($($errors[0].Message))" }
+    [pscustomobject]@{ Path = $source.Path; Ast = $ast }
+}
+foreach ($source in $resolutionSourceAsts) {
+    $expectedAmpersands = if ($source.Path -eq $interactiveWin11Lib) {
+        @(
+            '& $bootstrapCmd powershell.exe -ExecutionPolicy Bypass -File $LauncherPath @ArgumentList',
+            '& cmd /c $devWindowsCmd zig build -Demit-exe=true',
+            '& $Condition',
+            '& taskkill.exe /PID $Process.Id /T /F *> $null'
+        )
+    } else { @() }
+    Assert-CommandResolutionContract -Ast $source.Ast -Context $source.Path -ExpectedAmpersandCommands $expectedAmpersands
+    $definitions = @($source.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+    foreach ($name in @('Get-InteractiveWin11MessageTimeoutMs', 'Assert-InteractiveWin11WindowOwner', 'Invoke-InteractiveWin11PostMessage', 'Invoke-StatefulPostedCommand')) {
+        $expected = if ($source.Path -eq $interactiveWin11Lib) {
+            if ($name -eq 'Invoke-StatefulPostedCommand') { 0 } else { 1 }
+        } else {
+            if ($name -eq 'Invoke-StatefulPostedCommand') { 1 } else { 0 }
+        }
+        if (@($definitions | Where-Object { ($_.Name -replace '^(?i)(?:global|script|local|private):', '') -eq $name }).Count -ne $expected) {
+            throw "Interactive library has the wrong ownership count for protected function $name`: $($source.Path)"
+        }
+    }
+}
+$timeoutFunctions = @($resolutionSourceAsts[0].Ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-InteractiveWin11MessageTimeoutMs'
+}, $true))
+$timeoutParameters = @($timeoutFunctions[0].Body.ParamBlock.Parameters)
+$timeoutStatements = @($timeoutFunctions[0].Body.EndBlock.Statements)
+$timeoutTraps = @($timeoutFunctions[0].Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.TrapStatementAst] }, $true))
+if ($timeoutFunctions.Count -ne 1 -or $timeoutParameters.Count -ne 2 -or
+    $timeoutParameters[0].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [DateTime] $Deadline' -or
+    $timeoutParameters[1].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [string] $Description' -or
+    $null -ne $timeoutFunctions[0].Body.DynamicParamBlock -or $null -ne $timeoutFunctions[0].Body.BeginBlock -or
+    $null -ne $timeoutFunctions[0].Body.ProcessBlock -or $null -ne $timeoutFunctions[0].Body.CleanBlock -or
+    $timeoutTraps.Count -ne 0 -or $timeoutStatements.Count -ne 3 -or
+    $timeoutStatements[0].Extent.Text.Trim() -ne '$remainingMs = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds' -or
+    $timeoutStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$remainingMs -le 0\) \{\s*throw "Deadline elapsed before sending \$Description\."\s*\}$' -or
+    $timeoutStatements[2].Extent.Text.Trim() -ne 'return [uint32][Math]::Min([double][uint32]::MaxValue, [Math]::Ceiling($remainingMs))') {
+    throw 'Message timeout helper must preserve its exact direct elapsed-deadline calculation and bounded return.'
+}
+$postMessageWrapperText = Get-PowerShellBlockText `
+    -Content $interactiveWin11LibText `
+    -HeaderPattern '^function Invoke-InteractiveWin11PostMessage'
+$statefulPostedCommandText = Get-PowerShellBlockText `
+    -Content $statefulWin11LibText `
+    -HeaderPattern '^function Invoke-StatefulPostedCommand'
+$postWrapperTokens = $null
+$postWrapperErrors = $null
+$postWrapperAst = [System.Management.Automation.Language.Parser]::ParseInput($postMessageWrapperText, [ref]$postWrapperTokens, [ref]$postWrapperErrors)
+$postWrapperFunctions = @($postWrapperAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+if ($postWrapperErrors.Count -ne 0 -or $postWrapperFunctions.Count -ne 1 -or
+    $postWrapperFunctions[0].Name -ne 'Invoke-InteractiveWin11PostMessage') {
+    throw 'Posted-message wrapper contract does not parse to the exact named function.'
+}
+$postWrapperFunction = $postWrapperFunctions[0]
+$postWrapperParameters = @($postWrapperFunction.Body.ParamBlock.Parameters)
+$postWrapperStatements = @($postWrapperFunction.Body.EndBlock.Statements)
+$postWrapperTraps = @($postWrapperFunction.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.TrapStatementAst] }, $true))
+if ($postWrapperParameters.Count -ne 7 -or
+    $postWrapperParameters[0].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [IntPtr] $Hwnd' -or
+    $postWrapperParameters[1].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [uint32] $Message' -or
+    $postWrapperParameters[2].Extent.Text.Trim() -ne '[UIntPtr] $WParam = [UIntPtr]::Zero' -or
+    $postWrapperParameters[3].Extent.Text.Trim() -ne '[IntPtr] $LParam = [IntPtr]::Zero' -or
+    $postWrapperParameters[4].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [DateTime] $Deadline' -or
+    $postWrapperParameters[5].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [string] $Description' -or
+    $postWrapperParameters[6].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [System.Diagnostics.Process] $Process' -or
+    $null -ne $postWrapperFunction.Body.DynamicParamBlock -or $null -ne $postWrapperFunction.Body.BeginBlock -or
+    $null -ne $postWrapperFunction.Body.ProcessBlock -or $null -ne $postWrapperFunction.Body.CleanBlock -or
+    $postWrapperTraps.Count -ne 0 -or $postWrapperStatements.Count -ne 6 -or
+    $postWrapperStatements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
+    $postWrapperStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$Process\.HasExited\) \{\s*throw "Refusing to post \$Description because winghostty already exited \(exit code \$\(\$Process\.ExitCode\)\)\."\s*\}$' -or
+    $postWrapperStatements[2].Extent.Text.Trim() -ne '[void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb ''post'')' -or
+    $postWrapperStatements[3].Extent.Text.Trim() -ne '$lastError = 0' -or
+    $postWrapperStatements[4].Extent.Text.Trim() -ne 'if ($Deadline -le [DateTime]::UtcNow) { throw "Timed out waiting for $Description." }' -or
+    $postWrapperStatements[5].Extent.Text.Trim() -notmatch '(?s)^if \(-not \[InteractiveWin11MessageNativeV2\]::PostMessageWithError\(\$Hwnd, \$Message, \$WParam, \$LParam, \[ref\] \$lastError\)\) \{\s*\$detail = if \(\$lastError -eq 0\) \{ ''without a Win32 error'' \} else \{ "with Win32 error \$lastError" \}\s*throw "PostMessageW failed for \$Description hwnd=\$Hwnd \$detail\."\s*\}$') {
+    throw 'Posted-message wrapper must preserve its exact direct process, ownership, deadline, and native-post sequence.'
+}
+$statefulPostTokens = $null
+$statefulPostErrors = $null
+$statefulPostAst = [System.Management.Automation.Language.Parser]::ParseInput($statefulPostedCommandText, [ref]$statefulPostTokens, [ref]$statefulPostErrors)
+$statefulPostFunctions = @($statefulPostAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+if ($statefulPostErrors.Count -ne 0 -or $statefulPostFunctions.Count -ne 1 -or
+    $statefulPostFunctions[0].Name -ne 'Invoke-StatefulPostedCommand') {
+    throw 'Stateful posted-command contract does not parse to the exact named function.'
+}
+$statefulPostParameters = @($statefulPostFunctions[0].Parameters)
+$statefulPostStatements = @($statefulPostFunctions[0].Body.EndBlock.Statements)
+$statefulPostTraps = @($statefulPostFunctions[0].Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.TrapStatementAst] }, $true))
+if ($statefulPostParameters.Count -ne 4 -or
+    $statefulPostParameters[0].Extent.Text.Trim() -ne '[IntPtr] $Hwnd' -or
+    $statefulPostParameters[1].Extent.Text.Trim() -ne '[int] $Id' -or
+    $statefulPostParameters[2].Extent.Text.Trim() -ne '[DateTime] $Deadline' -or
+    $statefulPostParameters[3].Extent.Text.Trim() -ne '[Parameter(Mandatory)] [System.Diagnostics.Process] $Process' -or
+    $null -ne $statefulPostFunctions[0].Body.DynamicParamBlock -or $null -ne $statefulPostFunctions[0].Body.BeginBlock -or
+    $null -ne $statefulPostFunctions[0].Body.ProcessBlock -or $null -ne $statefulPostFunctions[0].Body.CleanBlock -or
+    $statefulPostTraps.Count -ne 0 -or
+    $statefulPostStatements.Count -ne 1 -or
+    $statefulPostStatements[0].Extent.Text.Trim() -notmatch '(?s)^Invoke-InteractiveWin11PostMessage\s+`\s*-Hwnd \$Hwnd\s+`\s*-Message 0x0111\s+`\s*-WParam \(\[UIntPtr\]::new\(\[uint64\]\$Id\)\)\s+`\s*-Deadline \$Deadline\s+`\s*-Description "WM_COMMAND id=\$Id"\s+`\s*-Process \$Process$') {
+    throw 'Stateful posted-command wrapper must require and forward its exact deadline and process.'
+}
+$paletteThemeTokens = $null
+$paletteThemeErrors = $null
+$paletteThemeAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $paletteThemeHarnessText,
+    [ref]$paletteThemeTokens,
+    [ref]$paletteThemeErrors
+)
+if ($paletteThemeErrors.Count -ne 0) { throw "Palette theme harness does not parse: $($paletteThemeErrors[0].Message)" }
+Assert-CommandResolutionContract -Ast $paletteThemeAst -Context $paletteThemeHarness -ExpectedDotSources @(
+    ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
+    ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
+)
+Assert-NoProtectedFunctionDefinitions -Ast $paletteThemeAst -Context $paletteThemeHarness
+$paletteThemeTraps = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.TrapStatementAst]
+}, $true))
+$paletteThemeFunctions = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $true))
+$openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
+if ($paletteThemeFunctions.Count -ne 1 -or $openThemeQueryFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only the exact Open-ThemeQuery function.'
+}
+$openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
+if ($openThemeQueryParameters.Count -ne 4 -or
+    $openThemeQueryParameters[0].Extent.Text.Trim() -ne '[IntPtr]$HostHwnd' -or
+    $openThemeQueryParameters[1].Extent.Text.Trim() -ne '[string]$Query' -or
+    $openThemeQueryParameters[2].Extent.Text.Trim() -ne '[DateTime]$Deadline' -or
+    $openThemeQueryParameters[3].Extent.Text.Trim() -ne '$Process') {
+    throw 'Palette query opening must preserve its exact non-executable parameter contract.'
+}
+$openThemeQueryBody = $openThemeQueryFunctions[0].Body
+if ($null -ne $openThemeQueryBody.DynamicParamBlock -or $null -ne $openThemeQueryBody.BeginBlock -or
+    $null -ne $openThemeQueryBody.ProcessBlock -or
+    $null -ne $openThemeQueryBody.CleanBlock -or $paletteThemeTraps.Count -ne 0) {
+    throw 'Palette query opening must not use alternate named blocks or traps that can bypass fail-closed deadline errors.'
+}
+$openThemeQueryStatements = @($openThemeQueryBody.EndBlock.Statements)
+if ($openThemeQueryStatements.Count -ne 6 -or
+    $openThemeQueryStatements[0].Extent.Text.Trim() -ne 'Invoke-StatefulPostedCommand $HostHwnd 1901 $Deadline $Process' -or
+    $openThemeQueryStatements[1].Extent.Text.Trim() -ne '$script:PaletteThemeHost = $HostHwnd' -or
+    $openThemeQueryStatements[2].Extent.Text.Trim() -notmatch '(?s)^Wait-InteractiveWin11Until -Deadline \$Deadline -Description ''palette query edit'' -Process \$Process -Condition \{\s*@\(Get-StatefulChildren \$script:PaletteThemeHost \| Where-Object Id -eq 2002\)\.Count -gt 0\s*\}$' -or
+    $openThemeQueryStatements[3].Extent.Text.Trim() -ne '$edit = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2002 | Select-Object -First 1' -or
+    $openThemeQueryStatements[4].Extent.Text.Trim() -ne 'Set-StatefulEditText $HostHwnd $edit.Hwnd $Query $Deadline $Process' -or
+    $openThemeQueryStatements[5].Extent.Text.Trim() -ne 'return $edit.Hwnd') {
+    throw 'Palette query opening must preserve its complete fail-closed command, wait, edit, and return sequence.'
+}
+$paletteMainTries = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.TryStatementAst] -and
+        $node.Parent -is [System.Management.Automation.Language.NamedBlockAst]
+}, $true))
+$paletteOpenCalls = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Open-ThemeQuery'
+}, $true))
+$paletteNormalOpenCalls = @($paletteOpenCalls | Where-Object {
+    $_.Extent.Text.Trim() -eq "Open-ThemeQuery `$hostHwnd '0x96f' `$deadline `$run.Process"
+})
+$paletteHighContrastOpenCalls = @($paletteOpenCalls | Where-Object {
+    $_.Extent.Text.Trim() -eq "Open-ThemeQuery `$hcHost 'Dracula' `$deadline `$hcRun.Process"
+})
+if ($paletteMainTries.Count -ne 1 -or $paletteOpenCalls.Count -ne 3 -or
+    $paletteNormalOpenCalls.Count -ne 2 -or $paletteHighContrastOpenCalls.Count -ne 1) {
+    throw 'Palette theme harness must preserve its three exact Open-ThemeQuery calls.'
+}
+foreach ($call in $paletteNormalOpenCalls) {
+    if (-not (Test-DirectStatementBlockChild -Node $call -StatementBlock $paletteMainTries[0].Body)) {
+        throw 'Normal palette query calls must be direct statements in the main try body.'
+    }
+}
+$paletteHighContrastCallIf = $null
+foreach ($candidate in @($paletteThemeAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.IfStatementAst] }, $true))) {
+    foreach ($clause in $candidate.Clauses) {
+        if ($clause.Item1.Extent.Text.Trim() -eq '$ExerciseHighContrast' -and
+            (Test-DirectStatementBlockChild -Node $paletteHighContrastOpenCalls[0] -StatementBlock $clause.Item2)) {
+            if ($null -ne $paletteHighContrastCallIf) { throw 'High Contrast palette query call appears in multiple control-flow blocks.' }
+            $paletteHighContrastCallIf = $candidate
+        }
+    }
+}
+if ($null -eq $paletteHighContrastCallIf -or
+    -not (Test-DirectStatementBlockChild -Node $paletteHighContrastCallIf -StatementBlock $paletteMainTries[0].Body)) {
+    throw 'High Contrast palette query call must be direct in its main-try ExerciseHighContrast block.'
+}
 $sessionRestoreTabSeedLoop = Get-PowerShellBlockText `
     -Content $sessionRestoreHarnessText `
     -HeaderPattern '^foreach \(\$targetTabCount in 2\.\.3\)'
@@ -242,7 +663,7 @@ $sessionDeadlineNodes = @($sessionLoopNodes | Where-Object {
 })
 $sessionCommandNodes = @($sessionLoopNodes | Where-Object {
     $_ -is [System.Management.Automation.Language.CommandAst] -and
-    $_.Extent.Text.Trim() -eq 'Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process'
+    $_.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $hostHwnd 1904 $deadline $first.Process'
 })
 $sessionWaitNodes = @($sessionLoopNodes | Where-Object {
     $_ -is [System.Management.Automation.Language.CommandAst] -and
@@ -259,7 +680,7 @@ $sessionReadyNodes = @($sessionLoopNodes | Where-Object {
 if ($sessionDeadlineNodes.Count -ne 1 -or $sessionCommandNodes.Count -ne 1 -or
     $sessionWaitNodes.Count -ne 1 -or $sessionBarrierNodes.Count -ne 1 -or
     $sessionReadyNodes.Count -ne 1) {
-    throw 'Session restore tab-seed loop must contain one exact deadline, send, count wait, equality barrier, and pump-readiness barrier per iteration.'
+    throw 'Session restore tab-seed loop must contain one exact deadline, queued command, count wait, equality barrier, and pump-readiness barrier per iteration.'
 }
 $sessionParsedSeedLoops = @($sessionLoopNodes | Where-Object {
     $_ -is [System.Management.Automation.Language.ForEachStatementAst] -and
@@ -293,6 +714,13 @@ $sessionHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$sessionHarnessErrors
 )
 if ($sessionHarnessErrors.Count -ne 0) { throw "Session restore harness does not parse: $($sessionHarnessErrors[0].Message)" }
+Assert-CommandResolutionContract -Ast $sessionHarnessAst -Context $sessionRestoreHarness -ExpectedDotSources @(
+    ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
+    ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
+)
+Assert-NoProtectedFunctionDefinitions -Ast $sessionHarnessAst -Context $sessionRestoreHarness
+$sessionTraps = @($sessionHarnessAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.TrapStatementAst] }, $true))
+if ($sessionTraps.Count -ne 0) { throw 'Session restore harness must not use traps that swallow validation failures.' }
 $sessionMainTries = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.TryStatementAst] -and
@@ -307,10 +735,50 @@ if ($sessionMainTries.Count -ne 1 -or $sessionSeedLoops.Count -ne 1 -or
     -not (Test-DirectStatementBlockChild -Node $sessionSeedLoops[0] -StatementBlock $sessionMainTries[0].Body)) {
     throw 'Session restore tab seeding must be one direct, executable loop in the main try body.'
 }
+$sessionInitialHostWaits = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$hostHwnd = Wait-StatefulHost $first $deadline'
+}, $true))
+$sessionInitialTabWaits = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Wait-InteractiveWin11Until -Deadline $deadline -Description ''initial session-save tab'' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 1 }'
+}, $true))
+$sessionInitialReadyBarriers = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$null = Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description ''initial session-save host readiness barrier'' -Process $first.Process'
+}, $true))
+if ($sessionInitialHostWaits.Count -ne 1 -or $sessionInitialTabWaits.Count -ne 1 -or
+    $sessionInitialReadyBarriers.Count -ne 1) {
+    throw 'Session restore must contain one exact initial host wait, exact tab-count wait, and nonmutating pump-readiness barrier.'
+}
+foreach ($node in @($sessionInitialHostWaits[0], $sessionInitialTabWaits[0], $sessionInitialReadyBarriers[0])) {
+    if (-not (Test-DirectStatementBlockChild -Node $node -StatementBlock $sessionMainTries[0].Body)) {
+        throw 'Session restore initial host, tab-count, and readiness waits must be direct, executable statements in the main try body.'
+    }
+}
+$sessionInitialStatements = @($sessionMainTries[0].Body.Statements)
+$sessionInitialWaitIndex = -1
+$sessionInitialTabIndex = -1
+$sessionInitialReadyIndex = -1
+$sessionInitialSeedIndex = -1
+for ($i = 0; $i -lt $sessionInitialStatements.Count; $i++) {
+    if ([object]::ReferenceEquals($sessionInitialStatements[$i], $sessionInitialHostWaits[0])) { $sessionInitialWaitIndex = $i }
+    if ([object]::ReferenceEquals($sessionInitialStatements[$i], $sessionInitialTabWaits[0].Parent)) { $sessionInitialTabIndex = $i }
+    if ([object]::ReferenceEquals($sessionInitialStatements[$i], $sessionInitialReadyBarriers[0])) { $sessionInitialReadyIndex = $i }
+    if ([object]::ReferenceEquals($sessionInitialStatements[$i], $sessionSeedLoops[0])) { $sessionInitialSeedIndex = $i }
+}
+if ($sessionInitialTabIndex -ne ($sessionInitialWaitIndex + 1) -or
+    $sessionInitialReadyIndex -ne ($sessionInitialTabIndex + 1) -or
+    $sessionInitialSeedIndex -ne ($sessionInitialReadyIndex + 1)) {
+    throw 'Session restore must prove initial tab creation and host pump readiness on the startup deadline immediately before tab seeding.'
+}
 $sessionBurstCommands = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process'
+        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $explicitHost 1904 $deadline $explicit.Process'
 }, $true))
 $sessionExplicitStarts = @($sessionHarnessAst.FindAll({
     param($node)
@@ -321,6 +789,16 @@ $sessionBurstWaits = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
         $node.Extent.Text.Trim() -eq "Wait-InteractiveWin11Until -Deadline `$deadline -Description 'asynchronous burst-created tabs' -Process `$explicit.Process -Condition { (Get-StatefulTabCount `$explicitHost) -eq 3 }"
+}, $true))
+$sessionExplicitTabWaits = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq "Wait-InteractiveWin11Until -Deadline `$deadline -Description 'fresh explicit-command tab' -Process `$explicit.Process -Condition { (Get-StatefulTabCount `$explicitHost) -eq 1 }"
+}, $true))
+$sessionExplicitHostWaits = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$explicitHost = Wait-StatefulHost $explicit $deadline'
 }, $true))
 $sessionBurstReady = @($sessionHarnessAst.FindAll({
     param($node)
@@ -343,15 +821,16 @@ $sessionInvariantLoops = @($sessionHarnessAst.FindAll({
         $node.Parent -is [System.Management.Automation.Language.NamedBlockAst] -and
         $node.Extent.Text.Trim() -match '(?s)^foreach \(\$run in \$runs\) \{\s*if \(Select-String -LiteralPath \$run\.Stderr -SimpleMatch ''shell/native invariant failed'' -Quiet\) \{\s*throw "Shell/native invariant failure reported by \$\(\$run\.Stderr\)\."\s*\}\s*\}$'
 }, $true))
-if ($sessionExplicitStarts.Count -ne 1 -or $sessionBurstCommands.Count -ne 2 -or
+if ($sessionExplicitStarts.Count -ne 1 -or $sessionExplicitHostWaits.Count -ne 1 -or
+    $sessionExplicitTabWaits.Count -ne 1 -or $sessionBurstCommands.Count -ne 2 -or
     $sessionBurstWaits.Count -ne 1 -or $sessionBurstReady.Count -ne 1 -or
     $sessionExplicitCloses.Count -ne 1 -or $sessionInvariantLoops.Count -ne 1) {
     throw 'Session restore validation must preserve the explicit-process burst phase, its exact-count/pump barriers, and invariant-log rejection.'
 }
 $sessionBurstDeadlines = @($sessionExactDeadlines | Where-Object {
     (Test-DirectStatementBlockChild -Node $_ -StatementBlock $sessionMainTries[0].Body) -and
-    $_.Extent.StartOffset -gt $sessionBurstCommands[1].Extent.EndOffset -and
-    $_.Extent.EndOffset -lt $sessionBurstWaits[0].Extent.StartOffset
+    $_.Extent.StartOffset -gt $sessionExplicitTabWaits[0].Extent.EndOffset -and
+    $_.Extent.EndOffset -lt $sessionBurstCommands[0].Extent.StartOffset
 })
 $sessionCloseDeadlines = @($sessionExactDeadlines | Where-Object {
     (Test-DirectStatementBlockChild -Node $_ -StatementBlock $sessionMainTries[0].Body) -and
@@ -363,9 +842,10 @@ if ($sessionBurstDeadlines.Count -ne 1 -or $sessionCloseDeadlines.Count -ne 1) {
 }
 $sessionDirectBurstNodes = @(
     $sessionExplicitStarts[0],
+    $sessionExplicitTabWaits[0],
+    $sessionBurstDeadlines[0],
     $sessionBurstCommands[0],
     $sessionBurstCommands[1],
-    $sessionBurstDeadlines[0],
     $sessionBurstWaits[0],
     $sessionBurstReady[0],
     $sessionCloseDeadlines[0],
@@ -594,6 +1074,24 @@ if ($sessionStartAssignments.Count -eq $sessionExpectedStartAssignments.Count -a
         if ($addIndex -ne ($startIndex + 1)) {
             throw 'Session restore must register each launched process immediately for cleanup and invariant scanning.'
         }
+        if ($i -eq 0 -and (
+            $startIndex -le 0 -or
+            $sessionMainTryStatements[$startIndex - 1].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+            $sessionInitialWaitIndex -ne ($addIndex + 1))) {
+            throw 'Session restore initial launch, evidence registration, and host wait must share one original startup deadline without intervening work.'
+        }
+        if ($i -eq 1) {
+            $explicitHostStatement = Get-DirectStatementBlockChild -Node $sessionExplicitHostWaits[0] -StatementBlock $sessionMainTries[0].Body
+            $explicitTabStatement = Get-DirectStatementBlockChild -Node $sessionExplicitTabWaits[0] -StatementBlock $sessionMainTries[0].Body
+            $burstDeadlineStatement = Get-DirectStatementBlockChild -Node $sessionBurstDeadlines[0] -StatementBlock $sessionMainTries[0].Body
+            $explicitHostIndex = [Array]::IndexOf($sessionMainTryStatements, $explicitHostStatement)
+            $explicitTabIndex = [Array]::IndexOf($sessionMainTryStatements, $explicitTabStatement)
+            $burstDeadlineIndex = [Array]::IndexOf($sessionMainTryStatements, $burstDeadlineStatement)
+            if ($explicitHostIndex -ne ($addIndex + 1) -or $explicitTabIndex -ne ($explicitHostIndex + 1) -or
+                $burstDeadlineIndex -ne ($explicitTabIndex + 1)) {
+                throw 'Session explicit launch must proceed directly through host/tab readiness into the fresh burst deadline.'
+            }
+        }
     }
 }
 if ($sessionInvariantIfs.Count -ne 1 -or $sessionInvariantThrows.Count -ne 1 -or
@@ -623,25 +1121,33 @@ if ($sessionInvariantIfs.Count -ne 1 -or $sessionInvariantThrows.Count -ne 1 -or
 }
 $sessionBurstOffsets = @(
     $sessionExplicitStarts[0].Extent.StartOffset,
-    $sessionBurstCommands[0].Extent.StartOffset,
-    $sessionBurstCommands[1].Extent.StartOffset,
-    $sessionBurstDeadlines[0].Extent.StartOffset,
-    $sessionBurstWaits[0].Extent.StartOffset,
-    $sessionBurstReady[0].Extent.StartOffset,
-    $sessionCloseDeadlines[0].Extent.StartOffset,
-    $sessionExplicitCloses[0].Extent.StartOffset
+    $sessionExplicitTabWaits[0].Extent.StartOffset,
+    $sessionBurstDeadlines[0].Extent.StartOffset
 )
 for ($i = 1; $i -lt $sessionBurstOffsets.Count; $i++) {
     if ($sessionBurstOffsets[$i - 1] -ge $sessionBurstOffsets[$i]) {
         throw 'Session restore asynchronous burst operations are not in fail-closed causal order.'
     }
 }
-$betweenBurstPosts = $sessionRestoreHarnessText.Substring(
-    $sessionBurstCommands[0].Extent.EndOffset,
-    $sessionBurstCommands[1].Extent.StartOffset - $sessionBurstCommands[0].Extent.EndOffset
+$sessionBurstSequenceNodes = @(
+    $sessionBurstDeadlines[0],
+    $sessionBurstCommands[0],
+    $sessionBurstCommands[1],
+    $sessionBurstWaits[0],
+    $sessionBurstReady[0],
+    $sessionCloseDeadlines[0],
+    $sessionExplicitCloses[0]
 )
-if ($betweenBurstPosts -notmatch '^\s*$') {
-    throw 'Session restore asynchronous new-tab posts must remain adjacent.'
+$sessionBurstMainStatements = @($sessionMainTries[0].Body.Statements)
+$sessionBurstStatementIndices = foreach ($node in $sessionBurstSequenceNodes) {
+    $statement = Get-DirectStatementBlockChild -Node $node -StatementBlock $sessionMainTries[0].Body
+    if ($null -eq $statement) { throw 'Session restore burst sequence contains a nested operation.' }
+    [Array]::IndexOf($sessionBurstMainStatements, $statement)
+}
+for ($i = 1; $i -lt $sessionBurstStatementIndices.Count; $i++) {
+    if ($sessionBurstStatementIndices[$i] -ne ($sessionBurstStatementIndices[$i - 1] + 1)) {
+        throw 'Session restore burst deadline, posts, proof barriers, and close must remain adjacent statements.'
+    }
 }
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Release preflight' -Source $releaseWorkflow) `

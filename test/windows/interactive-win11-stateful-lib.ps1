@@ -173,11 +173,17 @@ function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId, [DateTime] 
     [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) $Deadline $Process "BM_CLICK id=$ControlId")
 }
 
-function Invoke-StatefulPostedCommand([IntPtr]$Hwnd, [int]$Id, [System.Diagnostics.Process]$Process) {
+function Invoke-StatefulPostedCommand(
+    [IntPtr] $Hwnd,
+    [int] $Id,
+    [DateTime] $Deadline,
+    [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+) {
     Invoke-InteractiveWin11PostMessage `
         -Hwnd $Hwnd `
         -Message 0x0111 `
         -WParam ([UIntPtr]::new([uint64]$Id)) `
+        -Deadline $Deadline `
         -Description "WM_COMMAND id=$Id" `
         -Process $Process
 }

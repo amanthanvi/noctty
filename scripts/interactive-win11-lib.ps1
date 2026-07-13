@@ -279,6 +279,7 @@ function Invoke-InteractiveWin11PostMessage {
         [Parameter(Mandatory)] [uint32] $Message,
         [UIntPtr] $WParam = [UIntPtr]::Zero,
         [IntPtr] $LParam = [IntPtr]::Zero,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
         [Parameter(Mandatory)] [string] $Description,
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
@@ -289,8 +290,8 @@ function Invoke-InteractiveWin11PostMessage {
     }
 
     [void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb 'post')
-
     $lastError = 0
+    if ($Deadline -le [DateTime]::UtcNow) { throw "Timed out waiting for $Description." }
     if (-not [InteractiveWin11MessageNativeV2]::PostMessageWithError($Hwnd, $Message, $WParam, $LParam, [ref] $lastError)) {
         $detail = if ($lastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $lastError" }
         throw "PostMessageW failed for $Description hwnd=$Hwnd $detail."
