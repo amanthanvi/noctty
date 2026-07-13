@@ -51,4 +51,5 @@ jobs:
             $scriptArgs += "-RequirePackageManagers"
           }
           ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/release-preflight.ps1 @scriptArgs

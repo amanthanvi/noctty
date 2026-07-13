@@ -39,6 +39,19 @@ function Assert-PassArtifactsBound {
     }
 }
 
+function Assert-WorkflowContract {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Pattern,
+        [Parameter(Mandatory)] [string] $Description
+    )
+
+    $content = Get-Content -LiteralPath $Path -Raw
+    if ($content -notmatch $Pattern) {
+        throw "Workflow contract missing: $Description ($Path)"
+    }
+}
+
 $schemaPaths = @(
     'scenario.schema.json'
     'result.schema.json'
@@ -74,6 +87,26 @@ foreach ($resultPath in Get-ChildItem -LiteralPath (Join-Path $root 'artifacts')
 Assert-JsonDocument `
     -Path (Join-Path $root 'examples\baseline-manifest.json') `
     -SchemaPath (Join-Path $root 'baseline-manifest.schema.json')
+
+$releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
+$readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
+$testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
+Assert-WorkflowContract `
+    -Path $releaseWorkflow `
+    -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
+    -Description 'release preflight propagates release-copy failures'
+Assert-WorkflowContract `
+    -Path $readinessWorkflow `
+    -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
+    -Description 'release readiness propagates release-copy failures'
+Assert-WorkflowContract `
+    -Path $releaseWorkflow `
+    -Pattern '(?ms)- name: Verify published release copy and assets.*?env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
+    -Description 'post-publish remote verification authenticates gh'
+Assert-WorkflowContract `
+    -Path $testWorkflow `
+    -Pattern '(?ms)- name: Remote release copy checks.*?env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
+    -Description 'scheduled remote verification authenticates gh'
 
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `

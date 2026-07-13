@@ -215,6 +215,7 @@ jobs:
           )
           if ('${{ steps.meta.outputs.prerelease }}' -ne 'true') {
             ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $preflightArgs += '-RequireAccessibilityEvidence'
           }
           ./scripts/release-preflight.ps1 @preflightArgs
@@ -403,6 +404,8 @@ jobs:
       - name: Verify published release copy and assets
         if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}' -CheckRemoteLatest
 
       - name: Publish Scoop manifest
