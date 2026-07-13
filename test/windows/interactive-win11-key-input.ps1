@@ -335,6 +335,7 @@ $process = Start-Process -FilePath $exePath `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -PassThru
+$keyInputProcessHandle = $process.Handle
 
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -390,11 +391,42 @@ try {
 
     Send-VirtualKeyMessage -Hwnd $messageTargetHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode) -Deadline $deadline -Process $process
 
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'key input result file' -Process $process -Condition {
-        Test-Path -LiteralPath $resultPath
+    $resultRef = [ref]$null
+    $lastResultReadError = [ref]'result file has not appeared'
+    $lastResultContent = [ref]'<missing>'
+    $keyInputProcess = $process
+    try {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description 'key input result file' -Condition {
+            if (Test-Path -LiteralPath $resultPath) {
+                try {
+                    $content = Get-Content -LiteralPath $resultPath -Raw
+                    $contentText = if ($null -eq $content) { '' } else { [string]$content }
+                    $contentText = $contentText -replace '\s+', ' '
+                    $lastResultContent.Value = if ($contentText.Length -gt 240) { $contentText.Substring(0, 240) + '...' } elseif ($contentText.Length -eq 0) { '<empty>' } else { $contentText }
+                    $parsed = $content | ConvertFrom-Json
+                    if ($null -ne $parsed) {
+                        $resultRef.Value = $parsed
+                        return $true
+                    }
+                    $lastResultReadError.Value = 'JSON parsed to null'
+                }
+                catch {
+                    $lastResultReadError.Value = $_.Exception.Message
+                }
+            }
+            $keyInputProcess.Refresh()
+            if ($keyInputProcess.HasExited) {
+                $exitCode = Get-InteractiveWin11ProcessExitCode -Process $keyInputProcess -ProcessHandle $keyInputProcessHandle
+                throw "winghostty exited while waiting for key input result file (exit code $exitCode)"
+            }
+            return $false
+        }
+    }
+    catch {
+        throw "$($_.Exception.Message) (last result read error='$($lastResultReadError.Value)', content='$($lastResultContent.Value)')"
     }
 
-    $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    $result = $resultRef.Value
     if ($result.keyCharCode -ne $expectedKeyCharCode -or $result.key -ne $expectedKeyName) {
         throw "unexpected key input result (mode=$deliveryMode): $($result | ConvertTo-Json -Compress)"
     }

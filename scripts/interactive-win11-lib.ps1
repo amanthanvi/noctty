@@ -128,7 +128,7 @@ using System;
 using System.Runtime.InteropServices;
 public static class InteractiveWin11MessageNative {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("kernel32.dll")] private static extern void SetLastError(uint errorCode);
 
     public static IntPtr SendMessageTimeoutWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result, out int lastError) {
@@ -171,8 +171,14 @@ function Invoke-InteractiveWin11Message {
         [Parameter(Mandatory)] [string] $Description,
         [uint32] $Flags = $script:InteractiveWin11SmtoNormal,
         [int[]] $ToleratedErrors = @(),
+        [ref] $ObservedToleratedError,
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
+
+    if ($ToleratedErrors.Count -gt 0) {
+        if ($null -eq $ObservedToleratedError) { throw 'ToleratedErrors requires an ObservedToleratedError output reference.' }
+        $ObservedToleratedError.Value = 0
+    }
 
     $Process.Refresh()
     if ($Process.HasExited) {
@@ -184,7 +190,17 @@ function Invoke-InteractiveWin11Message {
     # phase work cannot turn a stale HWND into a cross-process message.
     $windowProcessId = [uint32]0
     $windowThreadId = [InteractiveWin11MessageNative]::GetWindowThreadProcessId($Hwnd, [ref] $windowProcessId)
-    if ($windowThreadId -eq 0 -or $windowProcessId -ne [uint32]$Process.Id) {
+    $windowLastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    if ($windowThreadId -eq 0) {
+        if ($windowLastError -in $ToleratedErrors) {
+            $ObservedToleratedError.Value = $windowLastError
+            Write-Warning "GetWindowThreadProcessId returned tolerated Win32 error $windowLastError for $Description hwnd=$Hwnd."
+            return [UIntPtr]::Zero
+        }
+        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
+        throw "Refusing to send $Description to invalid hwnd=$Hwnd $detail."
+    }
+    if ($windowProcessId -ne [uint32]$Process.Id) {
         throw "Refusing to send $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
     }
 
@@ -205,6 +221,7 @@ function Invoke-InteractiveWin11Message {
             throw "SendMessageTimeoutW timed out for $Description hwnd=$Hwnd error=$lastError"
         }
         if ($lastError -in $ToleratedErrors) {
+            $ObservedToleratedError.Value = $lastError
             Write-Warning "SendMessageTimeoutW returned tolerated Win32 error $lastError for $Description hwnd=$Hwnd."
             return $sendResult
         }

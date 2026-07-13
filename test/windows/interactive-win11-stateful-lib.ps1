@@ -193,6 +193,8 @@ function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
 
 function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $processHandle = $Run.Process.Handle
+    $toleratedCloseError = [ref]0
+    $closeSkipDetail = $null
     try {
         [void](Invoke-InteractiveWin11Message `
             -Hwnd $HostHwnd `
@@ -201,7 +203,11 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
             -Description 'WM_CLOSE to winghostty' `
             -Flags $script:InteractiveWin11SmtoBlock `
             -ToleratedErrors @($script:InteractiveWin11ErrorInvalidWindowHandle) `
+            -ObservedToleratedError $toleratedCloseError `
             -Process $Run.Process)
+        if ($toleratedCloseError.Value -ne 0) {
+            $closeSkipDetail = "WM_CLOSE was skipped after tolerated Win32 error $($toleratedCloseError.Value) for hwnd=$HostHwnd"
+        }
     }
     catch {
         $sendError = $_
@@ -211,7 +217,16 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         }
         Write-Warning "WM_CLOSE send raced winghostty exit: $sendError"
     }
-    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+    try {
+        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+    }
+    catch {
+        if ($null -ne $closeSkipDetail) { throw "$($_.Exception.Message) ($closeSkipDetail)" }
+        throw
+    }
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
-    if ($exitCode -ne 0) { throw "winghostty exited with code $exitCode during graceful-close validation" }
+    if ($exitCode -ne 0) {
+        $suffix = if ($null -ne $closeSkipDetail) { " ($closeSkipDetail)" } else { '' }
+        throw "winghostty exited with code $exitCode during graceful-close validation$suffix"
+    }
 }
