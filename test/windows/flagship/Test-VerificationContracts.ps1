@@ -268,7 +268,11 @@ Assert-WorkflowContract `
     -Description 'accessibility evidence pins the upload-artifact runner floor'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern 'ConvertFrom-Json -NoEnumerate' `
+    -Pattern '(?m)^#requires -Version 7\.1\s*$' `
+    -Description 'accessibility evidence requires PowerShell 7.1 or newer'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance = Get-Content -LiteralPath \$provenancePaths\[0\]\.FullName -Raw \| ConvertFrom-Json -NoEnumerate' `
     -Description 'accessibility evidence preserves the JSON root kind'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `

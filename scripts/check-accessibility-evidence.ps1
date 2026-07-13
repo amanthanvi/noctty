@@ -1,3 +1,5 @@
+#requires -Version 7.1
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
