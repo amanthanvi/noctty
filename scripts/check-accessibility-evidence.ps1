@@ -117,6 +117,9 @@ try {
     catch {
         throw "Interactive runner provenance for run $runId is malformed: $($_.Exception.Message)"
     }
+    if ($provenance -isnot [pscustomobject]) {
+        throw "Interactive runner provenance for run $runId must be a JSON object."
+    }
     if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1') {
         throw "Interactive runner provenance for run $runId has unsupported schema '$($provenance.schema_version)'."
     }
@@ -124,6 +127,16 @@ try {
     [version]$provenanceRunnerVersion = $null
     if (-not [version]::TryParse([string]$provenance.runner_version, [ref]$provenanceRunnerVersion)) {
         throw "Interactive runner provenance for run $runId lacks a valid runner version."
+    }
+    [int]$provenanceWindowsBuild = 0
+    [int]$provenanceProcessSession = 0
+    [int]$provenanceActiveSession = 0
+    [int]$provenanceRunAttempt = 0
+    if (-not [int]::TryParse([string]$provenance.windows_build, [ref]$provenanceWindowsBuild) -or
+        -not [int]::TryParse([string]$provenance.process_session_id, [ref]$provenanceProcessSession) -or
+        -not [int]::TryParse([string]$provenance.active_console_session_id, [ref]$provenanceActiveSession) -or
+        -not [int]::TryParse([string]$provenance.run_attempt, [ref]$provenanceRunAttempt)) {
+        throw "Interactive runner provenance for run $runId lacks valid numeric environment fields."
     }
     if ($provenance.runner_os -ne 'Windows' -or
         $provenance.runner_arch -ne 'X64' -or
@@ -134,15 +147,15 @@ try {
         $provenance.runner_name -ne $result.environment.runner_name -or
         $provenance.runner_name -ne $interactiveJob[0].runner_name -or
         [string]$provenance.user -match '(?i)(^|\\)SYSTEM$' -or
-        [int]$provenance.windows_build -lt 22000 -or
-        [int]$provenance.process_session_id -le 0 -or
-        [int]$provenance.process_session_id -ne [int]$provenance.active_console_session_id -or
+        $provenanceWindowsBuild -lt 22000 -or
+        $provenanceProcessSession -le 0 -or
+        $provenanceProcessSession -ne $provenanceActiveSession -or
         $provenance.repository -ne 'amanthanvi/winghostty' -or
         $provenance.workflow -ne 'Test' -or
         [string]$provenance.run_id -ne [string]$runId -or
-        [int]$provenance.run_attempt -lt 1 -or
-        [int]$provenance.run_attempt -ne [int]$run.run_attempt -or
-        [int]$provenance.run_attempt -ne [int]$result.workflow_run_attempt -or
+        $provenanceRunAttempt -lt 1 -or
+        $provenanceRunAttempt -ne [int]$run.run_attempt -or
+        $provenanceRunAttempt -ne [int]$result.workflow_run_attempt -or
         $provenance.commit -ne $evidence.tested_commit) {
         throw "Interactive runner provenance does not satisfy the release contract for run $runId."
     }

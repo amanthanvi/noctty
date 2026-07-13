@@ -52,6 +52,19 @@ function Assert-WorkflowContract {
     }
 }
 
+function Assert-WorkflowContractAbsent {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Pattern,
+        [Parameter(Mandatory)] [string] $Description
+    )
+
+    $content = Get-Content -LiteralPath $Path -Raw
+    if ($content -match $Pattern) {
+        throw "Workflow contract forbidden: $Description ($Path)"
+    }
+}
+
 function Assert-TextContract {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -235,7 +248,7 @@ Assert-WorkflowContract `
     -Description 'runner provenance is bound to the GitHub job'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern '\$provenance\.run_attempt -ne \[int\]\$run\.run_attempt' `
+    -Pattern '\$provenanceRunAttempt -ne \[int\]\$run\.run_attempt' `
     -Description 'runner provenance is bound to the GitHub run attempt'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
@@ -243,12 +256,28 @@ Assert-WorkflowContract `
     -Description 'service-account runner provenance is rejected'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
-    -Pattern "minimumRunnerVersion = \[version\]'2\.327\.1'" `
+    -Pattern "(?m)^\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$" `
     -Description 'interactive evidence enforces the upload-artifact runner floor'
+Assert-WorkflowContractAbsent `
+    -Path $runnerProvenanceChecker `
+    -Pattern 'param\([\s\S]*MinimumRunnerVersion' `
+    -Description 'interactive runner floor cannot be lowered by a parameter'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern "minimumRunnerVersion = \[version\]'2\.327\.1'" `
+    -Pattern "(?m)^\s*\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$" `
     -Description 'accessibility evidence pins the upload-artifact runner floor'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance -isnot \[pscustomobject\]' `
+    -Description 'accessibility evidence requires runner provenance to be a JSON object'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern "schema_version -ne 'winghostty\.interactive-runner-provenance\.v1'" `
+    -Description 'accessibility evidence rejects unsupported runner provenance schemas'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
+    -Pattern '\$runnerVersion -lt \$minimumRunnerVersion' `
+    -Description 'interactive evidence rejects outdated runners'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\$provenanceRunnerVersion -lt \$minimumRunnerVersion' `
