@@ -37,13 +37,22 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
 $originalHc = $null
 $hcChanged = $false
 $hcMutex = $null
+$hcMutexAcquired = $false
+$primaryError = $null
 $runs = [Collections.Generic.List[object]]::new()
 $draculaRgb = [Convert]::ToInt32('282a36', 16)
 $themeRgb = [Convert]::ToInt32('262427', 16)
 try {
     if ($ExerciseHighContrast) {
         $hcMutex = [Threading.Mutex]::new($false, 'Global\WinghosttyHighContrastHarness')
-        if (-not $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))) { throw 'Timed out waiting for the High Contrast harness mutex.' }
+        try {
+            $hcMutexAcquired = $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))
+        }
+        catch [Threading.AbandonedMutexException] {
+            $hcMutexAcquired = $true
+            throw
+        }
+        if (-not $hcMutexAcquired) { throw 'Timed out waiting for the High Contrast harness mutex.' }
         $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
         if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
     }
@@ -91,6 +100,9 @@ try {
         Close-StatefulHost $hcHost $hcRun $deadline
     }
 }
+catch {
+    $primaryError = $_
+}
 finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
     if ($hcChanged) {
@@ -104,7 +116,9 @@ finally {
         }
     }
     if ($null -ne $hcMutex) {
-        try { $hcMutex.ReleaseMutex() } catch { [void]$cleanupErrors.Add("High Contrast mutex release failed: $($_.Exception.Message)") }
+        if ($hcMutexAcquired) {
+            try { $hcMutex.ReleaseMutex() } catch { [void]$cleanupErrors.Add("High Contrast mutex release failed: $($_.Exception.Message)") }
+        }
         try { $hcMutex.Dispose() } catch { [void]$cleanupErrors.Add("High Contrast mutex disposal failed: $($_.Exception.Message)") }
     }
     foreach ($run in $runs) {
@@ -115,6 +129,16 @@ finally {
             [void]$cleanupErrors.Add("winghostty process cleanup failed: $($_.Exception.Message)")
         }
     }
-    if ($cleanupErrors.Count -gt 0) { throw "Palette/theme cleanup failed: $($cleanupErrors -join '; ')" }
+    if ($cleanupErrors.Count -gt 0) {
+        $cleanupMessage = "Palette/theme cleanup failed: $($cleanupErrors -join '; ')"
+        if ($null -ne $primaryError) {
+            $primaryError.Exception.Data['WinghosttyCleanupErrors'] = $cleanupMessage
+            Write-Error $cleanupMessage -ErrorAction Continue
+        }
+        else {
+            throw $cleanupMessage
+        }
+    }
 }
+if ($null -ne $primaryError) { throw $primaryError }
 Write-Host "interactive-win11 palette-theme validation: PASS (config=$configPath)"
