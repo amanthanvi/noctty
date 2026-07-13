@@ -267,7 +267,7 @@ Write-Status -Label "First fork patch" -Value $firstForkPatch
 
 if ($RequireAccessibilityEvidence) {
     & (Join-Path $PSScriptRoot 'check-accessibility-evidence.ps1') -Version $Version
-    if ($LASTEXITCODE -ne 0) { throw 'Accessibility evidence validation failed.' }
+    if (-not $?) { throw 'Accessibility evidence validation failed.' }
 }
 
 if ($RequireSigning) {

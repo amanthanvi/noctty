@@ -205,16 +205,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
           WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
         run: |
           $preflightArgs = @(
             '-Version'
-            '${{ steps.meta.outputs.version }}'
+            $env:RELEASE_VERSION
             '-RequireSigning'
             '-RequirePackageManagers'
           )
-          if ('${{ steps.meta.outputs.prerelease }}' -ne 'true') {
-            ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}'
+          if ($env:RELEASE_PRERELEASE -ne 'true') {
+            ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $preflightArgs += '-RequireAccessibilityEvidence'
           }
@@ -406,7 +408,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}' -CheckRemoteLatest
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
 
       - name: Publish Scoop manifest
         shell: pwsh

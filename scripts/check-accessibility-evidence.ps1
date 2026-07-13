@@ -101,6 +101,29 @@ try {
     }
     $uiaTrees = @(Get-ChildItem -LiteralPath $downloadRoot -Filter uia-tree.json -Recurse)
     if ($uiaTrees.Count -lt 1) { throw "Interactive artifact for run $runId lacks automated UIA evidence." }
+    $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter winghostty-runner-provenance.json -Recurse)
+    if ($provenancePaths.Count -ne 1) { throw "Interactive artifact for run $runId lacks exactly one runner provenance file." }
+    try {
+        $provenance = Get-Content -LiteralPath $provenancePaths[0].FullName -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Interactive runner provenance for run $runId is malformed: $($_.Exception.Message)"
+    }
+    if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1' -or
+        $provenance.runner_os -ne 'Windows' -or
+        $provenance.runner_arch -ne 'X64' -or
+        $provenance.runner_environment -ne 'self-hosted' -or
+        $provenance.input_desktop -ne 'Default' -or
+        [string]::IsNullOrWhiteSpace([string]$provenance.runner_name) -or
+        [int]$provenance.windows_build -lt 22000 -or
+        [int]$provenance.process_session_id -le 0 -or
+        [int]$provenance.process_session_id -ne [int]$provenance.active_console_session_id -or
+        $provenance.repository -ne 'amanthanvi/winghostty' -or
+        $provenance.workflow -ne 'Test' -or
+        [string]$provenance.run_id -ne [string]$runId -or
+        $provenance.commit -ne $evidence.tested_commit) {
+        throw "Interactive runner provenance does not satisfy the release contract for run $runId."
+    }
 }
 finally {
     $resolvedTemp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
@@ -111,4 +134,5 @@ finally {
     }
 }
 
+$global:LASTEXITCODE = 0
 Write-Host "Accessibility evidence: PASS (v$Version, $($evidence.tested_commit), $($evidence.workflow_run_url))" -ForegroundColor Green

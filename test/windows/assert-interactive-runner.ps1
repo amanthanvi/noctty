@@ -49,7 +49,8 @@ public static class WinghosttyRunnerNative {
 '@
 
 $processSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-$activeSession = [int][WinghosttyRunnerNative]::WTSGetActiveConsoleSessionId()
+$activeSessionRaw = [WinghosttyRunnerNative]::WTSGetActiveConsoleSessionId()
+$activeSession = if ($activeSessionRaw -eq [uint32]::MaxValue) { -1 } else { [int]$activeSessionRaw }
 $inputDesktop = [WinghosttyRunnerNative]::GetInputDesktopName()
 $windowsBuild = [Environment]::OSVersion.Version.Build
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
