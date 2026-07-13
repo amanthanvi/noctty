@@ -108,9 +108,6 @@ public static class Win11KeyInputNative {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
@@ -123,7 +120,6 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 $INPUT_KEYBOARD = 1
 $KEYEVENTF_KEYUP = 0x0002
 $MAPVK_VK_TO_VSC = 0
-$SMTO_ABORTIFHUNG = 0x0002
 $SW_RESTORE = 9
 $VK_A = 0x41
 $VK_ESCAPE = 0x1B
@@ -189,29 +185,6 @@ function Find-SurfaceWindow {
 
     [void] [Win11KeyInputNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:Win11KeyInputFoundSurface
-}
-
-function Wait-Until {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Condition,
-        [Parameter(Mandatory)] [string] $Description,
-        [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
-    )
-
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
 }
 
 function Get-GuiThreadInfo {
@@ -290,7 +263,9 @@ function Send-VirtualKeyMessage {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
         [Parameter(Mandatory)] [UInt16] $VirtualKey,
-        [UInt16] $CharCode = 0
+        [UInt16] $CharCode = 0,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $scanCode = [Win11KeyInputNative]::MapVirtualKeyW([uint32] $VirtualKey, [uint32] $MAPVK_VK_TO_VSC)
@@ -298,51 +273,32 @@ function Send-VirtualKeyMessage {
         throw "MapVirtualKeyW returned 0 for VK=$VirtualKey"
     }
 
-    $sendTimeoutMs = 1000
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $WM_KEYDOWN,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode ([uint16] $scanCode)),
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $sendTimeoutMs,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for WM_KEYDOWN (hwnd=$Hwnd, vk=$VirtualKey, error=$lastError)"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $WM_KEYDOWN `
+        -WParam ([UIntPtr]([uint64] $VirtualKey)) `
+        -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode)) `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description "WM_KEYDOWN vk=$VirtualKey")
     if ($CharCode -ne 0) {
-        $sendResult = [UIntPtr]::Zero
-        $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-            $Hwnd,
-            $WM_CHAR,
-            [UIntPtr]([uint64] $CharCode),
-            (New-KeyLParam -ScanCode ([uint16] $scanCode)),
-            [uint32] $SMTO_ABORTIFHUNG,
-            [uint32] $sendTimeoutMs,
-            [ref] $sendResult
-        )
-        if ($sendStatus -eq [IntPtr]::Zero) {
-            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            throw "SendMessageTimeoutW failed for WM_CHAR (hwnd=$Hwnd, char=$CharCode, error=$lastError)"
-        }
+        [void](Invoke-InteractiveWin11Message `
+            -Hwnd $Hwnd `
+            -Message $WM_CHAR `
+            -WParam ([UIntPtr]([uint64] $CharCode)) `
+            -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode)) `
+            -Deadline $Deadline `
+            -Process $Process `
+            -Description "WM_CHAR char=$CharCode")
     }
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $WM_KEYUP,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp),
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $sendTimeoutMs,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for WM_KEYUP (hwnd=$Hwnd, vk=$VirtualKey, error=$lastError)"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $WM_KEYUP `
+        -WParam ([UIntPtr]([uint64] $VirtualKey)) `
+        -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp) `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description "WM_KEYUP vk=$VirtualKey")
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'key-input' -ResetState:$ResetState -IncludeResourcesDir
@@ -442,7 +398,7 @@ $process = Start-Process -FilePath $exePath `
 
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
         (Find-HostWindow -ProcessId $process.Id) -ne [IntPtr]::Zero
     }
 
@@ -450,7 +406,7 @@ try {
     [void] [Win11KeyInputNative]::ShowWindow($hostHwnd, $SW_RESTORE)
     [void] [Win11KeyInputNative]::SetForegroundWindow($hostHwnd)
 
-    Wait-Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
 
@@ -461,7 +417,7 @@ try {
 
     if ($RunBooFirst) {
         try {
-            Wait-Until -Deadline $deadline -Description 'post-boo readiness file' -Process $process -Condition {
+            Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-boo readiness file' -Process $process -Condition {
                 Test-Path -LiteralPath $preReadKeyReadyPath
             }
         }
@@ -492,9 +448,9 @@ try {
         Start-Sleep -Milliseconds 300
     }
 
-    Send-VirtualKeyMessage -Hwnd $messageTargetHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode)
+    Send-VirtualKeyMessage -Hwnd $messageTargetHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode) -Deadline $deadline -Process $process
 
-    Wait-Until -Deadline $deadline -Description 'key input result file' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'key input result file' -Process $process -Condition {
         Test-Path -LiteralPath $resultPath
     }
 

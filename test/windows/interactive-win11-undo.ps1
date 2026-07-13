@@ -246,19 +246,7 @@ function Wait-Until {
         [System.Diagnostics.Process] $Process
     )
 
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
+    Wait-InteractiveWin11Until @PSBoundParameters
 }
 
 function Invoke-HostCommand {

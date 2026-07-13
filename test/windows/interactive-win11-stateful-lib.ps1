@@ -208,17 +208,17 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         } else {
             $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description 'WM_CLOSE to winghostty'
             $sendResult = [UIntPtr]::Zero
-            [InteractiveWin11MessageNative]::SetLastError($script:InteractiveWin11ErrorSuccess)
-            $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutW(
+            $lastError = 0
+            $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutWithError(
                 $HostHwnd,
                 0x0010,
                 [UIntPtr]::Zero,
                 [IntPtr]::Zero,
                 $script:InteractiveWin11SmtoBlock,
                 $sendTimeoutMs,
-                [ref] $sendResult
+                [ref] $sendResult,
+                [ref] $lastError
             )
-            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
             if ($sendStatus -eq [IntPtr]::Zero) {
                 $Run.Process.Refresh()
                 if (-not $Run.Process.HasExited) {

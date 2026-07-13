@@ -127,9 +127,16 @@ if (-not ('InteractiveWin11MessageNative' -as [type])) {
 using System;
 using System.Runtime.InteropServices;
 public static class InteractiveWin11MessageNative {
-    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
-    [DllImport("kernel32.dll")] public static extern void SetLastError(uint errorCode);
+    [DllImport("kernel32.dll")] private static extern void SetLastError(uint errorCode);
+
+    public static IntPtr SendMessageTimeoutWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result, out int lastError) {
+        SetLastError(0);
+        IntPtr status = SendMessageTimeoutW(hwnd, message, wparam, lparam, flags, timeout, out result);
+        lastError = Marshal.GetLastWin32Error();
+        return status;
+    }
 }
 '@
 }
@@ -180,18 +187,17 @@ function Invoke-InteractiveWin11Message {
     }
 
     $sendResult = [UIntPtr]::Zero
-    # SendMessageTimeoutW does not guarantee setting last-error on failure.
-    [InteractiveWin11MessageNative]::SetLastError($script:InteractiveWin11ErrorSuccess)
-    $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutW(
+    $lastError = 0
+    $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutWithError(
         $Hwnd,
         $Message,
         $WParam,
         $LParam,
         $Flags,
         $sendTimeoutMs,
-        [ref] $sendResult
+        [ref] $sendResult,
+        [ref] $lastError
     )
-    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
     if ($sendStatus -eq [IntPtr]::Zero) {
         if ($lastError -eq $script:InteractiveWin11ErrorTimeout) {
             throw "SendMessageTimeoutW timed out for $Description hwnd=$Hwnd error=$lastError"
@@ -488,13 +494,17 @@ function Wait-InteractiveWin11Until {
         [System.Diagnostics.Process] $Process
     )
 
-    while ([DateTime]::UtcNow -lt $Deadline) {
+    while ($true) {
         if ($null -ne $Process -and $Process.HasExited) {
             throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
         }
 
         if (& $Condition) {
             return
+        }
+
+        if ([DateTime]::UtcNow -ge $Deadline) {
+            break
         }
 
         Start-Sleep -Milliseconds 100
@@ -655,8 +665,15 @@ function Get-InteractiveWin11ProcessExitCode {
     }
 
     $Process.Refresh()
-    if ($nativeExitCode -eq 259 -and -not $Process.HasExited) {
-        throw "Process has not exited yet for pid=$($Process.Id)"
+    if ($nativeExitCode -eq 259) {
+        if (-not $Process.HasExited) {
+            throw "Process has not exited yet for pid=$($Process.Id)"
+        }
+
+        if (-not [InteractiveWin11ProcessNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
+            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Exit code could not be re-read for pid=$($Process.Id): $lastError"
+        }
     }
 
     return [BitConverter]::ToInt32([BitConverter]::GetBytes($nativeExitCode), 0)
