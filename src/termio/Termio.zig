@@ -24,6 +24,8 @@ const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.io_exec);
 
+var output_trace_file_claimed = std.atomic.Value(bool).init(false);
+
 const OutputTrace = struct {
     path: ?[]const u8 = null,
     start_time: ?std.time.Instant = null,
@@ -46,8 +48,15 @@ const OutputTrace = struct {
             "WINGHOSTTY_TERMIO_TRACE_FILE",
         ) catch return .{}) orelse return .{};
 
+        // The configured path is a single JSON document. The interactive
+        // harness waits for the initial terminal before seeding tabs, so the
+        // first claimant is deterministic. Retaining the process-lifetime
+        // claim prevents later tab teardown from replacing its evidence.
+        const trace_path = claimTracePath(alloc, &output_trace_file_claimed, owned) orelse
+            return .{};
+
         return .{
-            .path = owned,
+            .path = trace_path,
             .start_time = std.time.Instant.now() catch null,
         };
     }
@@ -139,6 +148,31 @@ const OutputTrace = struct {
         };
     }
 };
+
+fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
+    return !claimed.swap(true, .acq_rel);
+}
+
+fn claimTracePath(
+    alloc: Allocator,
+    claimed: *std.atomic.Value(bool),
+    owned: []const u8,
+) ?[]const u8 {
+    if (claimTraceFile(claimed)) return owned;
+    log.debug("termio trace path already has a process owner; tracing disabled for this terminal", .{});
+    alloc.free(owned);
+    return null;
+}
+
+test "termio output trace path rejects and frees a second process owner" {
+    var claimed = std.atomic.Value(bool).init(false);
+    const first = try std.testing.allocator.dupe(u8, "first.json");
+    const first_owned = claimTracePath(std.testing.allocator, &claimed, first).?;
+    defer std.testing.allocator.free(first_owned);
+
+    const second = try std.testing.allocator.dupe(u8, "second.json");
+    try std.testing.expect(claimTracePath(std.testing.allocator, &claimed, second) == null);
+}
 
 /// Mutex state argument for queueMessage.
 pub const MutexState = enum { locked, unlocked };

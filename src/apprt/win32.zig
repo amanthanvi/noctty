@@ -83,6 +83,8 @@ const rgb = win32_theme.rgb;
 const log = std.log.scoped(.win32);
 const windows = std.os.windows;
 
+var render_trace_file_claimed = std.atomic.Value(bool).init(false);
+
 pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = struct {
@@ -148,8 +150,15 @@ const RenderTrace = struct {
             };
         if (trimmed.len != raw.len) alloc.free(raw);
 
+        // A trace path names one JSON document. The interactive harness waits
+        // for the initial surface before seeding tabs, so the first claimant
+        // is deterministic. Keeping that claim for the process lifetime stops
+        // later tab teardown from overwriting the initial surface's evidence.
+        const trace_path = claimTracePath(alloc, &render_trace_file_claimed, owned) orelse
+            return .{};
+
         return .{
-            .path = owned,
+            .path = trace_path,
             .start_tick_ms = GetTickCount64(),
         };
     }
@@ -340,6 +349,21 @@ const RenderTrace = struct {
         stream.flush() catch return;
     }
 };
+
+fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
+    return !claimed.swap(true, .acq_rel);
+}
+
+fn claimTracePath(
+    alloc: Allocator,
+    claimed: *std.atomic.Value(bool),
+    owned: []const u8,
+) ?[]const u8 {
+    if (claimTraceFile(claimed)) return owned;
+    log.debug("render trace path already has a process owner; tracing disabled for this surface", .{});
+    alloc.free(owned);
+    return null;
+}
 
 fn elapsedTraceMs(start_tick_ms: u64, now_tick_ms: u64) u64 {
     if (now_tick_ms <= start_tick_ms) return 0;
@@ -2328,6 +2352,16 @@ test "win32 render trace classifies gaps by start time" {
     try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
     try std.testing.expect(RenderTrace.gapIsSustained(1300, 300));
     try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
+}
+
+test "win32 render trace path rejects and frees a second process owner" {
+    var claimed = std.atomic.Value(bool).init(false);
+    const first = try std.testing.allocator.dupe(u8, "first.json");
+    const first_owned = claimTracePath(std.testing.allocator, &claimed, first).?;
+    defer std.testing.allocator.free(first_owned);
+
+    const second = try std.testing.allocator.dupe(u8, "second.json");
+    try std.testing.expect(claimTracePath(std.testing.allocator, &claimed, second) == null);
 }
 
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
