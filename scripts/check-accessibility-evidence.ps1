@@ -112,12 +112,13 @@ try {
     $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter winghostty-runner-provenance.json -Recurse)
     if ($provenancePaths.Count -ne 1) { throw "Interactive artifact for run $runId lacks exactly one runner provenance file." }
     try {
-        $provenance = Get-Content -LiteralPath $provenancePaths[0].FullName -Raw | ConvertFrom-Json
+        $provenance = Get-Content -LiteralPath $provenancePaths[0].FullName -Raw | ConvertFrom-Json -NoEnumerate
     }
     catch {
         throw "Interactive runner provenance for run $runId is malformed: $($_.Exception.Message)"
     }
-    if ($provenance -isnot [pscustomobject]) {
+    if ($null -eq $provenance -or
+        $provenance.GetType() -ne [System.Management.Automation.PSCustomObject]) {
         throw "Interactive runner provenance for run $runId must be a JSON object."
     }
     if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1') {

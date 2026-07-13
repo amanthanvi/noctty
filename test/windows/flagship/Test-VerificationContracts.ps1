@@ -268,7 +268,11 @@ Assert-WorkflowContract `
     -Description 'accessibility evidence pins the upload-artifact runner floor'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern '\$provenance -isnot \[pscustomobject\]' `
+    -Pattern 'ConvertFrom-Json -NoEnumerate' `
+    -Description 'accessibility evidence preserves the JSON root kind'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance\.GetType\(\) -ne \[System\.Management\.Automation\.PSCustomObject\]' `
     -Description 'accessibility evidence requires runner provenance to be a JSON object'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
@@ -282,6 +286,12 @@ Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\$provenanceRunnerVersion -lt \$minimumRunnerVersion' `
     -Description 'accessibility evidence rejects outdated interactive runners'
+$objectRoot = ConvertFrom-Json -InputObject '{"value":1}' -NoEnumerate
+$arrayRoot = ConvertFrom-Json -InputObject '[{"value":1}]' -NoEnumerate
+if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
+    $arrayRoot.GetType() -eq [System.Management.Automation.PSCustomObject]) {
+    throw 'PowerShell JSON root-kind preservation does not satisfy the evidence contract.'
+}
 Assert-WorkflowContract `
     -Path $releaseCopyChecker `
     -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `
