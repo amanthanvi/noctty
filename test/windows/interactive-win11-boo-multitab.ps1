@@ -277,18 +277,18 @@ function Invoke-HostCommand {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [int] $CommandId,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message 0x0111 -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
 }
 
-function Activate-TabButton {
+function Invoke-TabButtonActivation {
     param(
         [Parameter(Mandatory)] [InteractiveWin11BooMultiTabChildControl] $Tab,
         [Parameter(Mandatory)] [IntPtr] $ExpectedParent,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     if (
@@ -318,7 +318,7 @@ function Send-TextKeyMessage {
         [Parameter(Mandatory)] [uint16] $CharCode,
         [uint16] $ScanCode = 0x1E,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode) -Deadline $Deadline -Description "WM_KEYDOWN vk=$VirtualKey" -Process $Process)
@@ -332,7 +332,7 @@ function Send-KeyPressMessage {
         [Parameter(Mandatory)] [uint16] $VirtualKey,
         [Parameter(Mandatory)] [uint16] $ScanCode,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode) -Deadline $Deadline -Description "WM_KEYDOWN vk=$VirtualKey" -Process $Process)
@@ -484,7 +484,7 @@ try {
         }
     }
 
-    Activate-TabButton -Tab $initialTabButton -ExpectedParent $hostHwnd -Deadline $deadline -Process $process
+    Invoke-TabButtonActivation -Tab $initialTabButton -ExpectedParent $hostHwnd -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial surface reactivation' -Process $process -Condition {
         Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd
     }

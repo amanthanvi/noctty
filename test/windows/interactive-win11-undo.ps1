@@ -254,7 +254,7 @@ function Invoke-HostCommand {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [int] $CommandId,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message 0x0111 -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
@@ -265,7 +265,7 @@ function Invoke-CommandPaletteAction {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [Win11UndoPaletteAction] $Action,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901 -Deadline $Deadline -Process $Process
@@ -292,7 +292,7 @@ function Invoke-CloseSecondTab {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $tab = Get-VisibleTabButtons -Parent $HostHwnd |
@@ -318,7 +318,7 @@ function Invoke-DragFirstTabIntoActiveSurface {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $sourceTab = Get-VisibleTabButtons -Parent $HostHwnd |

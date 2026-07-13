@@ -140,6 +140,7 @@ try {
         if (-not $process.HasExited) {
             throw $sendError
         }
+        Write-Warning "WM_CLOSE send raced detached CLI process exit: $sendError"
     }
     $closeProcess = $process
     Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'detached CLI action exit' -Condition {

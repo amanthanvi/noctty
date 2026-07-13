@@ -15,7 +15,6 @@ public static class WinghosttyStatefulNative {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr data);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hwnd, StringBuilder value, int capacity);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
@@ -27,15 +26,13 @@ public static class WinghosttyStatefulNative {
 '@
 }
 
-$script:ErrorInvalidWindowHandle = 1400
-
 function Send-StatefulMessage(
     [IntPtr] $Hwnd,
     [uint32] $Message,
     [UIntPtr] $WParam,
     [IntPtr] $LParam,
     [DateTime] $Deadline,
-    [System.Diagnostics.Process] $Process,
+    [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
     [string] $Description
 ) {
     return Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message $Message -WParam $WParam -LParam $LParam -Deadline $Deadline -Process $Process -Description $Description
@@ -53,7 +50,7 @@ function Find-StatefulHost([int] $ProcessId) {
     $callback = [WinghosttyStatefulNative+EnumProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
-        [void][WinghosttyStatefulNative]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
+        [void][InteractiveWin11MessageNative]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
         if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'winghostty.win32.host') {
             $script:StatefulHost = $hwnd
             return $false
@@ -95,11 +92,11 @@ function Get-StatefulWindowRect([IntPtr] $Hwnd) {
     return $rect
 }
 
-function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId, [DateTime] $Deadline, [System.Diagnostics.Process] $Process) {
+function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
     [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]([uint64]$CommandId)) ([IntPtr]::Zero) $Deadline $Process "WM_COMMAND id=$CommandId")
 }
 
-function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text, [DateTime] $Deadline, [System.Diagnostics.Process] $Process) {
+function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
     $textPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
     try {
         $result = Send-StatefulMessage $Hwnd 0x000C ([UIntPtr]::Zero) $textPointer $Deadline $Process 'WM_SETTEXT'
@@ -170,13 +167,13 @@ function Wait-StatefulHost($Run, [DateTime] $Deadline) {
     return Find-StatefulHost $Run.Process.Id
 }
 
-function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId, [DateTime] $Deadline, [System.Diagnostics.Process] $Process) {
+function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
     $button = Get-StatefulChildren $HostHwnd | Where-Object Id -eq $ControlId | Select-Object -First 1
     if ($null -eq $button) { throw "No visible button with control ID $ControlId." }
     [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) $Deadline $Process "BM_CLICK id=$ControlId")
 }
 
-function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd, [DateTime] $Deadline, [System.Diagnostics.Process] $Process) {
+function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
     $list = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
     if ($null -eq $list) { throw 'No visible command-palette list.' }
     $coordinates = [IntPtr](4 -bor (4 -shl 16))
@@ -196,45 +193,23 @@ function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
 
 function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $processHandle = $Run.Process.Handle
-    $Run.Process.Refresh()
-    if (-not $Run.Process.HasExited) {
-        $windowProcessId = [uint32]0
-        $windowThreadId = [WinghosttyStatefulNative]::GetWindowThreadProcessId($HostHwnd, [ref]$windowProcessId)
-        if ($windowThreadId -eq 0 -or $windowProcessId -ne [uint32]$Run.Process.Id) {
-            $Run.Process.Refresh()
-            if (-not $Run.Process.HasExited) {
-                throw "Refusing WM_CLOSE for hwnd=$HostHwnd because owner pid=$windowProcessId does not match winghostty pid=$($Run.Process.Id)."
-            }
-        } else {
-            $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description 'WM_CLOSE to winghostty'
-            $sendResult = [UIntPtr]::Zero
-            $lastError = 0
-            $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutWithError(
-                $HostHwnd,
-                0x0010,
-                [UIntPtr]::Zero,
-                [IntPtr]::Zero,
-                $script:InteractiveWin11SmtoBlock,
-                $sendTimeoutMs,
-                [ref] $sendResult,
-                [ref] $lastError
-            )
-            if ($sendStatus -eq [IntPtr]::Zero) {
-                $Run.Process.Refresh()
-                if (-not $Run.Process.HasExited) {
-                    if ($lastError -eq $script:InteractiveWin11ErrorTimeout) {
-                        throw "SendMessageTimeoutW timed out for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
-                    }
-                    if ($lastError -ne $script:ErrorInvalidWindowHandle) {
-                        $detail = if ($lastError -eq $script:InteractiveWin11ErrorSuccess) { 'generic failure without a Win32 error' } else { "Win32 error $lastError" }
-                        throw "SendMessageTimeoutW failed for winghostty WM_CLOSE hwnd=$HostHwnd ($detail)."
-                    }
-                    # A destroyed host HWND can race process teardown; the bounded exit
-                    # wait and mandatory zero exit-code check below still fail closed.
-                    Write-Warning "WM_CLOSE raced a destroyed hwnd=$HostHwnd; waiting for winghostty to exit."
-                }
-            }
+    try {
+        [void](Invoke-InteractiveWin11Message `
+            -Hwnd $HostHwnd `
+            -Message 0x0010 `
+            -Deadline $Deadline `
+            -Description 'WM_CLOSE to winghostty' `
+            -Flags $script:InteractiveWin11SmtoBlock `
+            -ToleratedErrors @($script:InteractiveWin11ErrorInvalidWindowHandle) `
+            -Process $Run.Process)
+    }
+    catch {
+        $sendError = $_
+        $Run.Process.Refresh()
+        if (-not $Run.Process.HasExited) {
+            throw $sendError
         }
+        Write-Warning "WM_CLOSE send raced winghostty exit: $sendError"
     }
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle

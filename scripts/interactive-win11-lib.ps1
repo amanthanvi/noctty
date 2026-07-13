@@ -144,6 +144,7 @@ public static class InteractiveWin11MessageNative {
 $script:InteractiveWin11SmtoNormal = [uint32]0
 $script:InteractiveWin11SmtoBlock = [uint32]0x0001
 $script:InteractiveWin11ErrorSuccess = 0
+$script:InteractiveWin11ErrorInvalidWindowHandle = 1400
 $script:InteractiveWin11ErrorTimeout = 1460
 
 function Get-InteractiveWin11MessageTimeoutMs {
@@ -169,6 +170,7 @@ function Invoke-InteractiveWin11Message {
         [Parameter(Mandatory)] [DateTime] $Deadline,
         [Parameter(Mandatory)] [string] $Description,
         [uint32] $Flags = $script:InteractiveWin11SmtoNormal,
+        [int[]] $ToleratedErrors = @(),
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
@@ -201,6 +203,10 @@ function Invoke-InteractiveWin11Message {
     if ($sendStatus -eq [IntPtr]::Zero) {
         if ($lastError -eq $script:InteractiveWin11ErrorTimeout) {
             throw "SendMessageTimeoutW timed out for $Description hwnd=$Hwnd error=$lastError"
+        }
+        if ($lastError -in $ToleratedErrors) {
+            Write-Warning "SendMessageTimeoutW returned tolerated Win32 error $lastError for $Description hwnd=$Hwnd."
+            return $sendResult
         }
         $detail = if ($lastError -eq $script:InteractiveWin11ErrorSuccess) { 'generic failure without a Win32 error' } else { "Win32 error $lastError" }
         throw "SendMessageTimeoutW failed for $Description hwnd=$Hwnd ($detail)."

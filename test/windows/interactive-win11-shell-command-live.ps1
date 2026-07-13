@@ -323,7 +323,7 @@ function Invoke-SendMessageTimeoutOrThrow {
         -Description $Description)
 }
 
-function Activate-TabIndex {
+function Invoke-TabIndexActivation {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [int] $TabIndex,
@@ -661,7 +661,7 @@ try {
         }
     }
 
-    Activate-TabIndex -HostHwnd $hostHwnd -TabIndex 0 -Deadline $deadline -Process $process
+    Invoke-TabIndexActivation -HostHwnd $hostHwnd -TabIndex 0 -Deadline $deadline -Process $process
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'shell ready file' -Process $process -Condition {
         Test-Path -LiteralPath $readyPath

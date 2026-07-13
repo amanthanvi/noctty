@@ -226,7 +226,7 @@ function Invoke-HostCommand {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [int] $CommandId,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message $wmCommand -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
@@ -237,7 +237,7 @@ function Invoke-CommandPaletteAction {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [string] $Action,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $hostCommandPaletteCommandId -Deadline $Deadline -Process $Process
