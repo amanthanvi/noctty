@@ -174,6 +174,36 @@ function Get-InteractiveWin11MessageTimeoutMs {
     return [uint32][Math]::Min([double][uint32]::MaxValue, [Math]::Ceiling($remainingMs))
 }
 
+function Assert-InteractiveWin11WindowOwner {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)] [string] $Description,
+        [Parameter(Mandatory)] [ValidateSet('send', 'post')] [string] $Verb,
+        [int[]] $ToleratedErrors = @(),
+        [ref] $ObservedToleratedError
+    )
+
+    $windowProcessId = [uint32]0
+    $windowLastError = 0
+    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
+    if ($windowThreadId -eq 0) {
+        if ($windowLastError -in $ToleratedErrors) {
+            if ($null -eq $ObservedToleratedError) { throw 'ToleratedErrors requires an ObservedToleratedError output reference.' }
+            $ObservedToleratedError.Value = $windowLastError
+            Write-Warning "GetWindowThreadProcessId returned tolerated Win32 error $windowLastError for $Description hwnd=$Hwnd."
+            return $false
+        }
+        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
+        throw "Refusing to $Verb $Description to invalid hwnd=$Hwnd $detail."
+    }
+    if ($windowProcessId -ne [uint32]$Process.Id) {
+        throw "Refusing to $Verb $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
+    }
+
+    return $true
+}
+
 function Invoke-InteractiveWin11Message {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
@@ -201,20 +231,18 @@ function Invoke-InteractiveWin11Message {
     $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description "$Description hwnd=$Hwnd"
     # Keep ownership validation immediately adjacent to the send so lengthy
     # phase work cannot turn a stale HWND into a cross-process message.
-    $windowProcessId = [uint32]0
-    $windowLastError = 0
-    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
-    if ($windowThreadId -eq 0) {
-        if ($windowLastError -in $ToleratedErrors) {
-            $ObservedToleratedError.Value = $windowLastError
-            Write-Warning "GetWindowThreadProcessId returned tolerated Win32 error $windowLastError for $Description hwnd=$Hwnd."
-            return [UIntPtr]::Zero
-        }
-        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
-        throw "Refusing to send $Description to invalid hwnd=$Hwnd $detail."
+    $ownershipArgs = @{
+        Hwnd = $Hwnd
+        Process = $Process
+        Description = $Description
+        Verb = 'send'
+        ToleratedErrors = $ToleratedErrors
     }
-    if ($windowProcessId -ne [uint32]$Process.Id) {
-        throw "Refusing to send $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
+    if ($null -ne $ObservedToleratedError) {
+        $ownershipArgs.ObservedToleratedError = $ObservedToleratedError
+    }
+    if (-not (Assert-InteractiveWin11WindowOwner @ownershipArgs)) {
+        return [UIntPtr]::Zero
     }
 
     $sendResult = [UIntPtr]::Zero
@@ -260,16 +288,7 @@ function Invoke-InteractiveWin11PostMessage {
         throw "Refusing to post $Description because winghostty already exited (exit code $($Process.ExitCode))."
     }
 
-    $windowProcessId = [uint32]0
-    $windowLastError = 0
-    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
-    if ($windowThreadId -eq 0) {
-        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
-        throw "Refusing to post $Description to invalid hwnd=$Hwnd $detail."
-    }
-    if ($windowProcessId -ne [uint32]$Process.Id) {
-        throw "Refusing to post $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
-    }
+    [void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb 'post')
 
     $lastError = 0
     if (-not [InteractiveWin11MessageNativeV2]::PostMessageWithError($Hwnd, $Message, $WParam, $LParam, [ref] $lastError)) {
