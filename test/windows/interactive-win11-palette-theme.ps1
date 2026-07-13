@@ -38,21 +38,34 @@ $originalHc = $null
 $hcChanged = $false
 $hcMutex = $null
 $hcMutexAcquired = $false
+$hcRecoveryPath = $null
 $primaryError = $null
 $runs = [Collections.Generic.List[object]]::new()
 $draculaRgb = [Convert]::ToInt32('282a36', 16)
 $themeRgb = [Convert]::ToInt32('262427', 16)
 try {
     if ($ExerciseHighContrast) {
-        $hcMutex = [Threading.Mutex]::new($false, 'Global\WinghosttyHighContrastHarness')
+        $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $hcMutex = [Threading.Mutex]::new($false, "Global\WinghosttyHighContrastHarness-$currentUserSid")
+        $hostLocalAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        if ([string]::IsNullOrWhiteSpace($hostLocalAppData)) { throw 'Unable to resolve the host LocalAppData directory for High Contrast recovery.' }
+        $hcRecoveryPath = Join-Path $hostLocalAppData 'winghostty\harness-state\high-contrast-restore-off.marker'
         try {
             $hcMutexAcquired = $hcMutex.WaitOne([TimeSpan]::FromSeconds(10))
         }
         catch [Threading.AbandonedMutexException] {
             $hcMutexAcquired = $true
-            throw
+            Write-Warning 'Recovered ownership of an abandoned High Contrast harness mutex.'
         }
         if (-not $hcMutexAcquired) { throw 'Timed out waiting for the High Contrast harness mutex.' }
+        if (Test-Path -LiteralPath $hcRecoveryPath) {
+            $recoveryHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $recoveryHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryHc)
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $recoveryHc.cbSize, [ref]$recoveryHc, 0)) { throw 'SPI_GETHIGHCONTRAST recovery failed.' }
+            $recoveryHc.dwFlags = $recoveryHc.dwFlags -band (-bnot 1)
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $recoveryHc.cbSize, [ref]$recoveryHc, 2)) { throw 'SPI_SETHIGHCONTRAST recovery failed.' }
+            Remove-Item -LiteralPath $hcRecoveryPath -Force
+            Write-Warning 'Restored High Contrast state left behind by an interrupted harness run.'
+        }
         $originalHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
         if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
     }
@@ -85,8 +98,10 @@ try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         if (($originalHc.dwFlags -band 1) -eq 0) {
             $enabled = $originalHc; $enabled.dwFlags = $enabled.dwFlags -bor 1
-            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
+            [IO.Directory]::CreateDirectory((Split-Path -Parent $hcRecoveryPath)) | Out-Null
+            [IO.File]::WriteAllText($hcRecoveryPath, 'restore-high-contrast-off', [Text.UTF8Encoding]::new($false))
             $hcChanged = $true
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
         }
         $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
         $hcHost = Wait-StatefulHost $hcRun $deadline
@@ -105,15 +120,22 @@ catch {
 }
 finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
+    $hcRestored = $false
     if ($hcChanged) {
         try {
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) {
                 [void]$cleanupErrors.Add('Failed to restore the original High Contrast setting.')
             }
+            else {
+                $hcRestored = $true
+            }
         }
         catch {
             [void]$cleanupErrors.Add("High Contrast restoration threw: $($_.Exception.Message)")
         }
+    }
+    if ($hcRestored) {
+        try { Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop } catch { [void]$cleanupErrors.Add("High Contrast recovery marker cleanup failed: $($_.Exception.Message)") }
     }
     if ($null -ne $hcMutex) {
         if ($hcMutexAcquired) {
