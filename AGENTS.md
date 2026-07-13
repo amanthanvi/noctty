@@ -6,9 +6,9 @@ Windows-only Ghostty fork.
 ## Commands
 
 - **Build:** `zig build`
-- **Test (Zig):** `zig build test`
-  - Prefer targeted runs with `-Dtest-filter=<test name>`; the full suite
-    is slow.
+- **Test (Zig):** `zig build test -Dtest-filter=<test name>`
+  - Bare `zig build test` errors in this fork; run the full suite with
+    `zig build test -Demit-test-exe=true` (slow).
 - **Formatting (Zig):** `zig fmt .`
 - **Formatting (other):** `prettier -w .`
 

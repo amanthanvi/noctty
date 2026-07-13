@@ -16,7 +16,8 @@ responsible for the result.
 
 Issues, discussions, and pull requests are reviewed by humans. Low-signal,
 unverified, or obviously unreviewed AI output is likely to be closed or sent
-back for revision.
+back for revision. The problem is not AI tooling itself; the problem is
+submitting work that the author does not understand.
 
 ## Practical Rule
 

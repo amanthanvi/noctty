@@ -17,7 +17,7 @@ coverage validated on the Win32 runtime, see
 
 ## Install Modes
 
-Each release publishes signed Windows artifacts for x64 and arm64:
+Each release publishes signed Windows artifacts for x64 and ARM64:
 
 - `winghostty-<version>-windows-<arch>-setup.exe` — a normal installed app
   with Start menu shortcuts and app identity metadata.

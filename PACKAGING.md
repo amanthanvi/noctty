@@ -157,6 +157,12 @@ If you prefer a different RFC 3161/Authenticode timestamp service, set
 `WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script defaults
 to DigiCert when the variable is absent.
 
+> **Security note:** set `WINDOWS_CODESIGN_TRUST_SELF_SIGNED` in the
+> `release` environment only while the release identity is intentionally
+> self-signed, and remove it as soon as a publicly trusted certificate is in
+> use — with the variable unset, signature validation fails closed on
+> untrusted roots instead of accepting them.
+
 When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps

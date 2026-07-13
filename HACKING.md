@@ -18,14 +18,17 @@ Use the standard Zig workflow from the repository root:
 | -------------------------------------- | ------------------------------------------ |
 | `zig build`                            | Build the Win32 app and bundled resources  |
 | `zig build -Demit-exe=true`            | Force-install `zig-out/bin/winghostty.exe` |
-| `zig build test`                       | Run the full Zig test suite                |
+| `zig build test -Dtest-filter=<name>`  | Run targeted tests (preferred)             |
+| `zig build test -Demit-test-exe=true`  | Run the full test suite (slow)             |
 | `zig build test -Dtest-filter=win32`   | Run Win32-focused tests                    |
 | `zig build test -Dtest-filter=scroll`  | Run scroll/input regression tests          |
 | `zig build test -Dtest-filter=keybind` | Run keybinding/default-behavior tests      |
 | `zig build -Demit-lib-vt`              | Build the retained `libghostty-vt` library |
 
-For normal development, prefer the narrowest verification that covers your
-change, then run `zig build` before you finish.
+Bare `zig build test` errors in this fork — pass `-Dtest-filter=<name>` or
+`-Demit-test-exe=true` (enforced in `build.zig`). For normal development,
+prefer the narrowest verification that covers your change, then run
+`zig build` before you finish.
 
 ## Toolchain
 
@@ -78,6 +81,10 @@ verify:
 4. Keybindings affected by the change.
 5. Launch `scripts/interactive-win11.ps1 -Rebuild`; add `-ResetState` when
    validating first-run behavior.
+6. For UI or chrome changes, also check the accessibility targets in
+   [DESIGN.md](DESIGN.md#accessibility-targets): keyboard traversal, High
+   Contrast, reduced motion, DPI scaling, and a Narrator or NVDA
+   spot-check.
 
 ## Runtime Notes
 

@@ -97,10 +97,11 @@ scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
 scoop install winghostty/winghostty
 ```
 
-Releases are Authenticode-signed, but SmartScreen may still warn on first run
-while publisher reputation builds — the full walkthrough (installer,
-portable, SmartScreen, uninstall) is in
-**[docs/getting-started.md](docs/getting-started.md)**.
+Release installers and the Windows binaries inside the portable ZIP are
+Authenticode-signed (the ZIP container itself is checksummed, not signed),
+but SmartScreen may still warn on first run while publisher reputation
+builds. The full walkthrough — installer, portable, SmartScreen, uninstall —
+is in **[docs/getting-started.md](docs/getting-started.md)**.
 
 ## First run
 
