@@ -565,7 +565,7 @@ jobs:
           # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
           $installerUrlArgs = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
           $installerArchitectures = @($installerUrlArgs | ForEach-Object {
-            if ($_ -notmatch '\|(?<architecture>x64|arm64)$') {
+            if ($_ -cnotmatch '\|(?<architecture>x64|arm64)$') {
               throw "WinGet installer URL must end with an explicit |x64 or |arm64 architecture: $_"
             }
             $Matches.architecture

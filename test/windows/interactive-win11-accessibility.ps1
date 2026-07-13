@@ -133,6 +133,15 @@ try {
                 if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
                     [WinghosttyAccessibilityNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
                     [WinghosttyAccessibilityNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                    [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                        $process.MainWindowHandle,
+                        [IntPtr](-2),
+                        0,
+                        0,
+                        0,
+                        0,
+                        $noMoveNoSizeShow
+                    )
                     $clickedDocument = $true
                 }
             }

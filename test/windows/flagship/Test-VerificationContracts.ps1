@@ -92,6 +92,7 @@ $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
+$releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 Assert-WorkflowContract `
     -Path $releaseWorkflow `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
@@ -128,6 +129,10 @@ Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[string\]\$provenance\.user -match .*SYSTEM' `
     -Description 'service-account runner provenance is rejected'
+Assert-WorkflowContract `
+    -Path $releaseCopyChecker `
+    -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `
+    -Description 'release-copy success explicitly clears native exit state'
 
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `

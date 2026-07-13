@@ -275,3 +275,4 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host "Release copy checks passed." -ForegroundColor Green
+$global:LASTEXITCODE = 0
