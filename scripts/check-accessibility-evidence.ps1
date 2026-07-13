@@ -14,8 +14,9 @@ if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
 }
 
 $json = Get-Content -LiteralPath $evidencePath -Raw
-if (-not (Get-Command Test-Json -ErrorAction SilentlyContinue)) {
-    throw 'Test-Json is required to validate accessibility release evidence; run this check with PowerShell 7.'
+$testJson = Get-Command Test-Json -ErrorAction SilentlyContinue
+if ($null -eq $testJson -or -not $testJson.Parameters.ContainsKey('SchemaFile')) {
+    throw 'Test-Json -SchemaFile is required to validate accessibility release evidence; run this check with PowerShell 7.1 or newer.'
 }
 if (-not ($json | Test-Json -SchemaFile $schemaPath -ErrorAction Stop)) {
     throw "Accessibility evidence failed schema validation: $evidencePath"
@@ -60,12 +61,15 @@ $runId = [regex]::Match($evidence.workflow_run_url, '/actions/runs/(?<id>[0-9]+)
 if ([string]::IsNullOrWhiteSpace($runId) -or -not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'Accessibility evidence requires a valid GitHub Actions run URL and the gh CLI.'
 }
+$repo = & gh api 'repos/amanthanvi/winghostty' | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Could not load repository metadata for accessibility evidence validation.' }
+$defaultBranch = $repo.default_branch
 $run = & gh api "repos/amanthanvi/winghostty/actions/runs/$runId" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow run $runId." }
 if ($run.name -ne 'Test' -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
-    $run.head_sha -ne $evidence.tested_commit -or $run.head_branch -ne 'main' -or
+    $run.head_sha -ne $evidence.tested_commit -or $run.head_branch -ne $defaultBranch -or
     $run.event -notin @('push', 'workflow_dispatch', 'schedule')) {
-    throw "Accessibility workflow run $runId is not a successful Test run for $($evidence.tested_commit)."
+    throw "Accessibility workflow run $runId is not a successful Test run for $($evidence.tested_commit) on default branch '$defaultBranch'."
 }
 $jobs = & gh api "repos/amanthanvi/winghostty/actions/runs/$runId/jobs?per_page=100" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow jobs for run $runId." }

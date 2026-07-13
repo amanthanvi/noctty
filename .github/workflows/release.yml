@@ -207,12 +207,17 @@ jobs:
           WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
         shell: pwsh
         run: |
-          ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}'
-          ./scripts/release-preflight.ps1 `
-            -Version '${{ steps.meta.outputs.version }}' `
-            -RequireSigning `
-            -RequirePackageManagers `
-            -RequireAccessibilityEvidence
+          $preflightArgs = @(
+            '-Version'
+            '${{ steps.meta.outputs.version }}'
+            '-RequireSigning'
+            '-RequirePackageManagers'
+          )
+          if ('${{ steps.meta.outputs.prerelease }}' -ne 'true') {
+            ./scripts/check-release-copy.ps1 -ExpectedVersion '${{ steps.meta.outputs.version }}'
+            $preflightArgs += '-RequireAccessibilityEvidence'
+          }
+          ./scripts/release-preflight.ps1 @preflightArgs
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1

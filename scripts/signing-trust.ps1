@@ -84,7 +84,7 @@ function Import-CodeSigningCertificate {
             'System.Security.Cryptography.X509Certificates.X509CertificateLoader, System.Security.Cryptography'
         )
         if ($null -eq $loaderType) {
-            throw 'X509CertificateLoader is required; run release preflight with the current PowerShell 7 runtime.'
+            throw 'X509CertificateLoader is required; run release preflight with PowerShell 7.5 / .NET 9 or newer.'
         }
         return [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadPkcs12(
             $bytes,
