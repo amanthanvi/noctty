@@ -52,6 +52,19 @@ function Assert-WorkflowContract {
     }
 }
 
+function Assert-WorkflowContractAbsent {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Pattern,
+        [Parameter(Mandatory)] [string] $Description
+    )
+
+    $content = Get-Content -LiteralPath $Path -Raw
+    if ($content -match $Pattern) {
+        throw "Workflow contract forbidden: $Description ($Path)"
+    }
+}
+
 function Assert-TextContract {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -182,6 +195,7 @@ $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
+$runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
@@ -215,6 +229,11 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
+    -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
+    -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
+    -Context "$testWorkflow :: Upload interactive evidence"
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `
@@ -229,12 +248,54 @@ Assert-WorkflowContract `
     -Description 'runner provenance is bound to the GitHub job'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern '\$provenance\.run_attempt -ne \[int\]\$run\.run_attempt' `
+    -Pattern '\$provenanceRunAttempt -ne \[int\]\$run\.run_attempt' `
     -Description 'runner provenance is bound to the GitHub run attempt'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[string\]\$provenance\.user -match .*SYSTEM' `
     -Description 'service-account runner provenance is rejected'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
+    -Pattern "(?m)^\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$" `
+    -Description 'interactive evidence enforces the upload-artifact runner floor'
+Assert-WorkflowContractAbsent `
+    -Path $runnerProvenanceChecker `
+    -Pattern '(?m)^\s*\[version\]\s+\$MinimumRunnerVersion\b' `
+    -Description 'interactive runner floor cannot be lowered by a parameter'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern "(?m)^\s*\`$minimumRunnerVersion = \[version\]'2\.327\.1'\s*$" `
+    -Description 'accessibility evidence pins the upload-artifact runner floor'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '(?m)^#requires -Version 7\.1\s*$' `
+    -Description 'accessibility evidence requires PowerShell 7.1 or newer'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance = Get-Content -LiteralPath \$provenancePaths\[0\]\.FullName -Raw \| ConvertFrom-Json -NoEnumerate' `
+    -Description 'accessibility evidence preserves the JSON root kind'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance\.GetType\(\) -ne \[System\.Management\.Automation\.PSCustomObject\]' `
+    -Description 'accessibility evidence requires runner provenance to be a JSON object'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern "schema_version -ne 'winghostty\.interactive-runner-provenance\.v1'" `
+    -Description 'accessibility evidence rejects unsupported runner provenance schemas'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
+    -Pattern '\$runnerVersion -lt \$minimumRunnerVersion' `
+    -Description 'interactive evidence rejects outdated runners'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenanceRunnerVersion -lt \$minimumRunnerVersion' `
+    -Description 'accessibility evidence rejects outdated interactive runners'
+$objectRoot = ConvertFrom-Json -InputObject '{"value":1}' -NoEnumerate
+$arrayRoot = ConvertFrom-Json -InputObject '[{"value":1}]' -NoEnumerate
+if ($objectRoot.GetType() -ne [System.Management.Automation.PSCustomObject] -or
+    $arrayRoot.GetType() -eq [System.Management.Automation.PSCustomObject]) {
+    throw 'PowerShell JSON root-kind preservation does not satisfy the evidence contract.'
+}
 Assert-WorkflowContract `
     -Path $releaseCopyChecker `
     -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `

@@ -79,7 +79,13 @@ public static class InteractiveWin11BooMultiTabNative {
     public static extern int GetDlgCtrlID(IntPtr hwndCtl);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetParent(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
@@ -185,7 +191,11 @@ function Find-SurfaceWindow {
     $callback = [InteractiveWin11BooMultiTabNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32') {
+        if (
+            (Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32' -and
+            [InteractiveWin11BooMultiTabNative]::GetParent($hwnd) -eq $Parent -and
+            [InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)
+        ) {
             $script:InteractiveWin11BooMultiTabFoundSurface = $hwnd
             return $false
         }
@@ -195,6 +205,31 @@ function Find-SurfaceWindow {
 
     [void] [InteractiveWin11BooMultiTabNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:InteractiveWin11BooMultiTabFoundSurface
+}
+
+function Test-SurfaceWindow {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [IntPtr] $ExpectedParent
+    )
+
+    if (-not [InteractiveWin11BooMultiTabNative]::IsWindow($Hwnd)) {
+        return $false
+    }
+
+    if ((Get-WindowClassName -Hwnd $Hwnd) -ne 'winghostty.win32') {
+        return $false
+    }
+
+    if ([InteractiveWin11BooMultiTabNative]::GetParent($Hwnd) -ne $ExpectedParent) {
+        return $false
+    }
+
+    if (-not [InteractiveWin11BooMultiTabNative]::IsWindowVisible($Hwnd)) {
+        return $false
+    }
+
+    return $true
 }
 
 function Get-VisibleChildControls {
@@ -248,28 +283,30 @@ function Invoke-HostCommand {
     [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($HostHwnd, 0x0111, (New-WParam -Low $CommandId), [IntPtr]::Zero)
 }
 
-function Activate-TabIndex {
+function Activate-TabButton {
     param(
-        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $TabIndex
+        [Parameter(Mandatory)] [InteractiveWin11BooMultiTabChildControl] $Tab,
+        [Parameter(Mandatory)] [IntPtr] $ExpectedParent
     )
 
-    $tab = Get-VisibleTabButtons -Parent $HostHwnd |
-        Select-Object -Index $TabIndex
-    if ($null -eq $tab) {
-        throw "tab index $TabIndex was not visible"
+    if (
+        -not [InteractiveWin11BooMultiTabNative]::IsWindow($Tab.Hwnd) -or
+        [InteractiveWin11BooMultiTabNative]::GetParent($Tab.Hwnd) -ne $ExpectedParent -or
+        [InteractiveWin11BooMultiTabNative]::GetDlgCtrlID($Tab.Hwnd) -ne $Tab.Id
+    ) {
+        throw "initial tab button handle is stale or was recycled; control=$($Tab.Id)"
     }
 
     $rect = [InteractiveWin11BooMultiTabNative+RECT]::new()
-    if (-not [InteractiveWin11BooMultiTabNative]::GetClientRect($tab.Hwnd, [ref] $rect)) {
-        throw "failed to read tab button client rect for tab index $TabIndex"
+    if (-not [InteractiveWin11BooMultiTabNative]::GetClientRect($Tab.Hwnd, [ref] $rect)) {
+        throw "failed to read tab button client rect for control $($Tab.Id)"
     }
 
     $x = [Math]::Max(1, [int] (($rect.Right - $rect.Left) / 2))
     $y = [Math]::Max(1, [int] (($rect.Bottom - $rect.Top) / 2))
     $lParam = New-LParam -X $x -Y $y
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($tab.Hwnd, 0x0201, [UIntPtr]::Zero, $lParam)
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($tab.Hwnd, 0x0202, [UIntPtr]::Zero, $lParam)
+    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($Tab.Hwnd, 0x0201, [UIntPtr]::Zero, $lParam)
+    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($Tab.Hwnd, 0x0202, [UIntPtr]::Zero, $lParam)
 }
 
 function Send-TextKeyMessage {
@@ -446,6 +483,17 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
+    $initialSurfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
+    if ($initialSurfaceHwnd -eq [IntPtr]::Zero) {
+        throw 'initial surface disappeared after discovery'
+    }
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial tab button' -Process $process -Condition {
+        (Get-VisibleTabCount -Parent $hostHwnd) -ge 1
+    }
+    $initialTabButton = Get-VisibleTabButtons -Parent $hostHwnd | Select-Object -First 1
+    if ($null -eq $initialTabButton) {
+        throw 'initial tab button was not visible before seeding tabs'
+    }
 
     while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
         $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
@@ -455,13 +503,12 @@ try {
         }
     }
 
-    Activate-TabIndex -HostHwnd $hostHwnd -TabIndex 0
-    Start-Sleep -Milliseconds 300
-
-    $surfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
-    if ($surfaceHwnd -eq [IntPtr]::Zero) {
-        throw 'surface child window disappeared before starting +boo'
+    Activate-TabButton -Tab $initialTabButton -ExpectedParent $hostHwnd
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial surface reactivation' -Process $process -Condition {
+        Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd
     }
+    $surfaceHwnd = $initialSurfaceHwnd
+    Start-Sleep -Milliseconds 300
 
     'go' | Set-Content -LiteralPath $goPath -Encoding ASCII
 
@@ -500,12 +547,13 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw "Expected +boo to respond to Escape before auto-exit; elapsedMs=$($state.elapsedMs)"
     }
 
-    $surfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
-    if ($surfaceHwnd -eq [IntPtr]::Zero) {
-        throw 'surface child window disappeared after +boo'
+    if (
+        -not (Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd)
+    ) {
+        throw 'initial surface disappeared or became hidden after +boo'
     }
 
-    Send-TextKeyMessage -Hwnd $surfaceHwnd -VirtualKey 0x41 -CharCode 97
+    Send-TextKeyMessage -Hwnd $initialSurfaceHwnd -VirtualKey 0x41 -CharCode 97
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-boo key result file' -Process $process -Condition {
         Test-Path -LiteralPath $resultPath
     }

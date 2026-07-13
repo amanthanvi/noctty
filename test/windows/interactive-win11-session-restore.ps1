@@ -19,7 +19,9 @@ $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInputs (Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot)) -eq 'build') { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }
 Assert-InteractiveWin11ExeExists -ExePath $exe
 $stateDir = Join-Path $layout.LocalAppData 'winghostty'; New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-$configPath = Join-Path $stateDir 'config.ghostty'; [IO.File]::WriteAllText($configPath, "window-save-state = always`r`n", [Text.UTF8Encoding]::new($false))
+$configPath = Join-Path $stateDir 'config.ghostty'
+$config = "window-save-state = always`r`nconfirm-close-surface = false`r`n"
+[IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
 $statePath = Join-Path $stateDir 'session-state.json'
 $runs = [Collections.Generic.List[object]]::new()
 $instanceClass = "winghostty-interactive-$($layout.SandboxId)"
