@@ -141,6 +141,8 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     }
     $requiredRenderTraceFields = @(
         'startup_window_ms',
+        'paint_gap_limit_ms',
+        'paint_gap_over_limit_count',
         'max_paint_gap_ms',
         'max_paint_gap_ended_at_ms',
         'max_sustained_paint_gap_ms',
@@ -159,8 +161,12 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     if ($startupWindowMs -le 0) {
         throw "Render trace startup window must be positive (got $startupWindowMs)"
     }
+    $paintGapLimitMs = [long]$renderTrace.paint_gap_limit_ms
+    if ($paintGapLimitMs -le 0) {
+        throw "Render trace paint gap limit must be positive (got $paintGapLimitMs)"
+    }
     $startupDrawLeadMs = 500
-    $startupPaintGapLimitMs = 1000
+    $startupPaintGapLimitMs = $startupWindowMs
     $startupMatchToleranceMs = 16
     $startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
     $startupDurationDeltaMs = [Math]::Abs(
@@ -175,17 +181,25 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         $startupEndDeltaMs -le $startupMatchToleranceMs -and
         $startupPaintStartMs -ge $renderTrace.first_paint_at_ms -and
         $startupPaintStartMs - $renderTrace.first_paint_at_ms -le $startupDrawLeadMs
-    if ($renderTrace.max_paint_gap_ms -gt 300 -and -not $startupPaintGap) {
-        throw "Expected visible paint gaps to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_paint_gap_ms))"
+    if ($renderTrace.max_paint_gap_ms -gt $paintGapLimitMs -and -not $startupPaintGap) {
+        throw "Expected visible paint gaps to stay below the prior choppy path (expected <= $paintGapLimitMs, got $($renderTrace.max_paint_gap_ms))"
     }
     if ($startupPaintGap -and $renderTrace.max_paint_gap_ms -gt $startupPaintGapLimitMs) {
         throw "Startup paint initialization gap exceeded the hard ceiling (expected <= $startupPaintGapLimitMs, got $($renderTrace.max_paint_gap_ms))"
     }
-    if ($renderTrace.max_paint_gap_ms -gt 300 -and $startupPaintGap) {
-        Write-Warning "Ignoring startup paint initialization gap ($($renderTrace.max_paint_gap_ms) ms at $($renderTrace.max_paint_gap_ended_at_ms) ms); enforcing sustained paint gap <= 300 ms after $startupWindowMs ms."
+    $hasOverLimitMaximum = $renderTrace.max_paint_gap_ms -gt $paintGapLimitMs
+    $hasOverLimitCount = $renderTrace.paint_gap_over_limit_count -gt 0
+    if ($hasOverLimitMaximum -ne $hasOverLimitCount) {
+        throw "Render trace paint gap maximum and over-limit count are inconsistent"
     }
-    if ($renderTrace.max_sustained_paint_gap_ms -gt 300) {
-        throw "Expected sustained visible paint gaps after startup to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_sustained_paint_gap_ms) at $($renderTrace.max_sustained_paint_gap_ended_at_ms) ms)"
+    if ($startupPaintGap -and $renderTrace.paint_gap_over_limit_count -gt 1) {
+        throw "Expected at most one startup initialization paint gap above $paintGapLimitMs ms (got $($renderTrace.paint_gap_over_limit_count))"
+    }
+    if ($renderTrace.max_paint_gap_ms -gt $paintGapLimitMs -and $startupPaintGap) {
+        Write-Warning "Accepted one startup paint initialization gap ($($renderTrace.max_paint_gap_ms) ms at $($renderTrace.max_paint_gap_ended_at_ms) ms); enforcing every other paint gap <= $paintGapLimitMs ms and the startup ceiling <= $startupPaintGapLimitMs ms."
+    }
+    if ($renderTrace.max_sustained_paint_gap_ms -gt $paintGapLimitMs) {
+        throw "Expected sustained visible paint gaps after startup to stay below the prior choppy path (expected <= $paintGapLimitMs, got $($renderTrace.max_sustained_paint_gap_ms) at $($renderTrace.max_sustained_paint_gap_ended_at_ms) ms)"
     }
     if ($termioTrace.process_output_count -lt 140) {
         throw "Expected steady PTY output batches for +boo (expected >= 140, got $($termioTrace.process_output_count))"

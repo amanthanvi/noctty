@@ -89,10 +89,12 @@ pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = struct {
     const startup_window_ms: u64 = 1000;
+    const paint_gap_limit_ms: u64 = 300;
 
-    const SustainedGapTargets = struct {
+    const PaintGapTargets = struct {
         max_gap_ms: *std.atomic.Value(u64),
         max_gap_ended_at_ms: *std.atomic.Value(u64),
+        over_limit_count: *std.atomic.Value(u64),
     };
 
     path: ?[]const u8 = null,
@@ -117,6 +119,7 @@ const RenderTrace = struct {
     max_swap_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
     max_sustained_paint_gap_ms: std.atomic.Value(u64) = .init(0),
     max_sustained_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
+    paint_gap_over_limit_count: std.atomic.Value(u64) = .init(0),
     max_paint_draw_duration_ms: std.atomic.Value(u64) = .init(0),
     max_paint_draw_duration_at_ms: std.atomic.Value(u64) = .init(0),
     paint_draw_duration_over_20ms_count: std.atomic.Value(u64) = .init(0),
@@ -243,6 +246,7 @@ const RenderTrace = struct {
             .{
                 .max_gap_ms = &self.max_sustained_paint_gap_ms,
                 .max_gap_ended_at_ms = &self.max_sustained_paint_gap_ended_at_ms,
+                .over_limit_count = &self.paint_gap_over_limit_count,
             },
         );
     }
@@ -283,7 +287,7 @@ const RenderTrace = struct {
         max_gap_ms: *std.atomic.Value(u64),
         max_gap_ended_at_ms: *std.atomic.Value(u64),
         first_at_ms: *std.atomic.Value(u64),
-        sustained: ?SustainedGapTargets,
+        paint_gaps: ?PaintGapTargets,
     ) void {
         const now = GetTickCount64();
         const elapsed_ms = elapsedTraceMs(self.start_tick_ms, now);
@@ -298,8 +302,11 @@ const RenderTrace = struct {
             gap_ms,
             elapsed_ms,
         );
-        if (gapIsSustained(elapsed_ms, gap_ms)) {
-            if (sustained) |targets| {
+        if (paint_gaps) |targets| {
+            if (gapExceedsPaintLimit(gap_ms)) {
+                _ = targets.over_limit_count.fetchAdd(1, .acq_rel);
+            }
+            if (gapIsSustained(elapsed_ms, gap_ms)) {
                 updateMaxAtomicWithTimestamp(
                     targets.max_gap_ms,
                     targets.max_gap_ended_at_ms,
@@ -314,6 +321,10 @@ const RenderTrace = struct {
         return elapsed_ms -| gap_ms >= startup_window_ms;
     }
 
+    fn gapExceedsPaintLimit(gap_ms: u64) bool {
+        return gap_ms > paint_gap_limit_ms;
+    }
+
     fn writeSnapshot(self: *const RenderTrace) void {
         const trace_path = self.path orelse return;
         const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
@@ -325,6 +336,7 @@ const RenderTrace = struct {
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = GetTickCount64() - self.start_tick_ms,
             .startup_window_ms = startup_window_ms,
+            .paint_gap_limit_ms = paint_gap_limit_ms,
             .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
             .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
             .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
@@ -345,6 +357,7 @@ const RenderTrace = struct {
             .max_swap_gap_ended_at_ms = self.max_swap_gap_ended_at_ms.load(.acquire),
             .max_sustained_paint_gap_ms = self.max_sustained_paint_gap_ms.load(.acquire),
             .max_sustained_paint_gap_ended_at_ms = self.max_sustained_paint_gap_ended_at_ms.load(.acquire),
+            .paint_gap_over_limit_count = self.paint_gap_over_limit_count.load(.acquire),
             .max_paint_draw_duration_ms = self.max_paint_draw_duration_ms.load(.acquire),
             .max_paint_draw_duration_at_ms = self.max_paint_draw_duration_at_ms.load(.acquire),
             .paint_draw_duration_over_20ms_count = self.paint_draw_duration_over_20ms_count.load(.acquire),
@@ -2359,6 +2372,11 @@ test "win32 render trace classifies gaps by start time" {
     try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
     try std.testing.expect(RenderTrace.gapIsSustained(1300, 300));
     try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
+}
+
+test "win32 render trace classifies visible paint gaps" {
+    try std.testing.expect(!RenderTrace.gapExceedsPaintLimit(300));
+    try std.testing.expect(RenderTrace.gapExceedsPaintLimit(301));
 }
 
 test "win32 render trace init rejects and frees a second process owner" {
