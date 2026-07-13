@@ -270,6 +270,54 @@ if ($RequireAccessibilityEvidence) {
     if (-not $?) { throw 'Accessibility evidence validation failed.' }
 }
 
+function Assert-WingetArchitectureCoverage {
+    param(
+        [string]$ManifestPath,
+        [string]$Token
+    )
+
+    $headers = @{
+        "Accept" = "application/vnd.github+json"
+        "User-Agent" = "winghostty-release-preflight"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        $headers["Authorization"] = "Bearer $Token"
+    }
+
+    $apiRoot = "https://api.github.com/repos/microsoft/winget-pkgs/contents/$ManifestPath"
+    $versionListing = Invoke-RestMethod -Uri $apiRoot -Headers $headers -ErrorAction Stop
+    $versions = @($versionListing | ForEach-Object {
+        $parsed = [version]::new()
+        if ($_.type -eq 'dir' -and [version]::TryParse([string]$_.name, [ref]$parsed)) {
+            [pscustomobject]@{ Name = [string]$_.name; Version = $parsed }
+        }
+    })
+    $latest = $versions | Sort-Object Version -Descending | Select-Object -First 1
+    if ($null -eq $latest) {
+        throw "No versioned WinGet manifests were found at $ManifestPath."
+    }
+
+    $versionFiles = Invoke-RestMethod -Uri "$apiRoot/$($latest.Name)" -Headers $headers -ErrorAction Stop
+    $installerFiles = @($versionFiles | Where-Object { $_.name -like '*.installer.yaml' })
+    if ($installerFiles.Count -ne 1) {
+        throw "Expected exactly one WinGet installer manifest for $($latest.Name), found $($installerFiles.Count)."
+    }
+
+    $manifestResponse = Invoke-RestMethod -Uri $installerFiles[0].url -Headers $headers -ErrorAction Stop
+    $manifestText = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String(([string]$manifestResponse.content -replace '\s', ''))
+    )
+    $architectures = @([regex]::Matches($manifestText, '(?im)^\s*-\s*Architecture:\s*(?<architecture>[A-Za-z0-9]+)\s*$') |
+        ForEach-Object { $_.Groups['architecture'].Value.ToLowerInvariant() } |
+        Sort-Object -Unique)
+    if (($architectures -join ',') -ne 'arm64,x64') {
+        throw "Latest public WinGet manifest $($latest.Name) must contain x64 and arm64 before a stable release (found: $($architectures -join ', '))."
+    }
+
+    Write-Status -Label 'WinGet architectures' -Value "x64 + arm64 ($($latest.Name))"
+}
+
 if ($RequireSigning) {
     $hasPfxBase64 = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_BASE64"
     $hasPfxPath = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PATH"
@@ -288,8 +336,8 @@ if ($RequireSigning) {
     Assert-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PASSWORD"
     $minimumValidityDays = 180
     if (Test-EnvPresent -Name 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS') {
-        if (-not [int]::TryParse((Get-EnvValue -Name 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS'), [ref]$minimumValidityDays) -or $minimumValidityDays -lt 1) {
-            throw 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS must be a positive integer.'
+        if (-not [int]::TryParse((Get-EnvValue -Name 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS'), [ref]$minimumValidityDays) -or $minimumValidityDays -lt 180) {
+            throw 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS must be an integer of at least 180.'
         }
     }
     $certificate = Import-CodeSigningCertificate `
@@ -347,6 +395,9 @@ if ($RequirePackageManagers) {
     if (-not $wingetReady) {
         throw "RequirePackageManagers was set, but $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs."
     }
+    Assert-WingetArchitectureCoverage `
+        -ManifestPath $wingetManifestPath `
+        -Token (Get-GitHubApiToken -Names @("WINGETCREATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"))
 }
 
 Write-Host "Release preflight passed."

@@ -93,6 +93,7 @@ $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.ym
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
+$releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 Assert-WorkflowContract `
     -Path $releaseWorkflow `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
@@ -133,6 +134,14 @@ Assert-WorkflowContract `
     -Path $releaseCopyChecker `
     -Pattern '\$global:LASTEXITCODE\s*=\s*0\s*$' `
     -Description 'release-copy success explicitly clears native exit state'
+Assert-WorkflowContract `
+    -Path $releasePreflight `
+    -Pattern '\$minimumValidityDays -lt 180' `
+    -Description 'signer-validity overrides cannot lower the 180-day floor'
+Assert-WorkflowContract `
+    -Path $releasePreflight `
+    -Pattern '(?ms)Assert-WingetArchitectureCoverage.*?Architecture:.*?arm64,x64' `
+    -Description 'stable preflight requires public WinGet x64 and arm64 bootstrap'
 
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `
