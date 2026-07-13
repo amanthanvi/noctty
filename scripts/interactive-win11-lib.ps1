@@ -745,6 +745,7 @@ function Get-InteractiveWin11ProcessExitCode {
         }
     }
     catch {
+        Write-Verbose "Managed exit-code fast path failed for pid=$($Process.Id); falling back to native GetExitCodeProcess: $($_.Exception.Message)"
     }
 
     [uint32] $nativeExitCode = 0

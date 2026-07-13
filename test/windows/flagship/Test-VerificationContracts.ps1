@@ -579,8 +579,9 @@ $paletteThemeFunctions = @($paletteThemeAst.FindAll({
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
 }, $true))
 $openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
-if ($paletteThemeFunctions.Count -ne 1 -or $openThemeQueryFunctions.Count -ne 1) {
-    throw 'Palette theme harness must define only the exact Open-ThemeQuery function.'
+$postHighContrastFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Invoke-PostHighContrastPresentationCanary')
+if ($paletteThemeFunctions.Count -ne 2 -or $openThemeQueryFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only its exact query and post-High-Contrast presentation functions.'
 }
 $openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
 if ($openThemeQueryParameters.Count -ne 4 -or
@@ -606,11 +607,253 @@ if ($openThemeQueryStatements.Count -ne 6 -or
     $openThemeQueryStatements[5].Extent.Text.Trim() -ne 'return $edit.Hwnd') {
     throw 'Palette query opening must preserve its complete fail-closed command, wait, edit, and return sequence.'
 }
+$postHighContrastParameters = @($postHighContrastFunctions[0].Parameters)
+$postHighContrastBody = $postHighContrastFunctions[0].Body
+$postHighContrastStatements = @($postHighContrastBody.EndBlock.Statements)
+$postHighContrastTraps = @($postHighContrastBody.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.TrapStatementAst]
+}, $true))
+if ($postHighContrastParameters.Count -ne 2 -or
+    $postHighContrastParameters[0].Extent.Text.Trim() -ne '[string]$Name' -or
+    $postHighContrastParameters[1].Extent.Text.Trim() -ne '[int]$ExpectedRgb' -or
+    $null -ne $postHighContrastBody.DynamicParamBlock -or $null -ne $postHighContrastBody.BeginBlock -or
+    $null -ne $postHighContrastBody.ProcessBlock -or $null -ne $postHighContrastBody.CleanBlock -or
+    $postHighContrastTraps.Count -ne 0 -or $postHighContrastStatements.Count -ne 3 -or
+    $postHighContrastStatements[0].Extent.Text.Trim() -ne '$lastError = $null' -or
+    $postHighContrastStatements[2].Extent.Text.Trim() -ne 'throw "Post-High-Contrast presentation did not recover after two fresh processes: $($lastError.Exception.Message)"') {
+    throw 'Post-High-Contrast presentation must preserve its exact canary parameter contract.'
+}
+$postHighContrastLoops = @($postHighContrastBody.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForEachStatementAst]
+}, $true))
+if ($postHighContrastLoops.Count -ne 1 -or
+    -not [object]::ReferenceEquals($postHighContrastStatements[1], $postHighContrastLoops[0]) -or
+    $postHighContrastLoops[0].Variable.VariablePath.UserPath -ne 'attempt' -or
+    $postHighContrastLoops[0].Condition.Extent.Text.Trim() -ne '1..2') {
+    throw 'Post-High-Contrast presentation must use one exact two-attempt loop.'
+}
+$postHighContrastLoopStatements = @($postHighContrastLoops[0].Body.Statements)
+if ($postHighContrastLoopStatements.Count -ne 2 -or
+    $postHighContrastLoopStatements[0].Extent.Text.Trim() -ne '$canary = $null' -or
+    $postHighContrastLoopStatements[1] -isnot [System.Management.Automation.Language.TryStatementAst]) {
+    throw 'Post-High-Contrast presentation must guard each complete canary lifecycle with one try/catch.'
+}
+$postHighContrastTry = $postHighContrastLoopStatements[1]
+$postHighContrastTryStatements = @($postHighContrastTry.Body.Statements)
+if ($postHighContrastTry.CatchClauses.Count -ne 1 -or $null -ne $postHighContrastTry.Finally -or
+    $postHighContrastTryStatements.Count -ne 13 -or
+    $postHighContrastTryStatements[0].Extent.Text.Trim() -ne '$canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"' -or
+    $postHighContrastTryStatements[1].Extent.Text.Trim() -ne '$runs.Add($canary)' -or
+    $postHighContrastTryStatements[2].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $postHighContrastTryStatements[3].Extent.Text.Trim() -ne '$canaryHost = Wait-StatefulHost $canary $deadline' -or
+    $postHighContrastTryStatements[4].Extent.Text.Trim() -notmatch '(?s)^Wait-InteractiveWin11Until -Deadline \$deadline -Description ''post-High-Contrast canary tab'' -Process \$canary\.Process -Condition \{\s*\(Get-StatefulTabCount \$canaryHost\) -eq 1\s*\}$' -or
+    $postHighContrastTryStatements[5].Extent.Text.Trim() -ne '$canarySurface = Wait-StatefulSurface $canaryHost $canary $deadline' -or
+    $postHighContrastTryStatements[6].Extent.Text.Trim() -ne 'Show-StatefulHost $canaryHost' -or
+    $postHighContrastTryStatements[7].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $postHighContrastTryStatements[8].Extent.Text.Trim() -ne '$stablePresentation = [Diagnostics.Stopwatch]::new()' -or
+    $postHighContrastTryStatements[9].Extent.Text.Trim() -notmatch '(?s)^Wait-InteractiveWin11Until -Deadline \$deadline -Description ''post-High-Contrast canary framebuffer'' -Process \$canary\.Process -Condition \{\s*if \(\(\(Get-StatefulPixel \$canarySurface\.Hwnd\) -band 0xFFFFFF\) -ne \$ExpectedRgb\) \{\s*\$stablePresentation\.Reset\(\)\s*return \$false\s*\}\s*if \(-not \$stablePresentation\.IsRunning\) \{ \$stablePresentation\.Start\(\) \}\s*return \$stablePresentation\.Elapsed -ge \[TimeSpan\]::FromSeconds\(2\)\s*\}$' -or
+    $postHighContrastTryStatements[10].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $postHighContrastTryStatements[11].Extent.Text.Trim() -ne 'Close-StatefulHost $canaryHost $canary $deadline' -or
+    $postHighContrastTryStatements[12].Extent.Text.Trim() -ne 'return') {
+    throw 'Post-High-Contrast presentation must preserve its exact launch, readiness, framebuffer, and close sequence with three fresh deadlines.'
+}
+$postHighContrastCatchStatements = @($postHighContrastTry.CatchClauses[0].Body.Statements)
+if ($postHighContrastCatchStatements.Count -ne 3 -or
+    $postHighContrastCatchStatements[0].Extent.Text.Trim() -ne '$lastError = $_' -or
+    $postHighContrastCatchStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$null -ne \$canary -and -not \$canary\.Process\.HasExited\) \{\s*try \{ Stop-InteractiveWin11Process -Process \$canary\.Process \}\s*catch \{\s*throw "Post-High-Contrast presentation attempt \$attempt failed: \$\(\$lastError\.Exception\.Message\); process cleanup also failed: \$\(\$_\.Exception\.Message\)"\s*\}\s*\}$' -or
+    $postHighContrastCatchStatements[2].Extent.Text.Trim() -ne 'if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }') {
+    throw 'Post-High-Contrast presentation must preserve nullable failed-attempt cleanup and bounded retry reporting.'
+}
+$postHighContrastCalls = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Invoke-PostHighContrastPresentationCanary'
+}, $true))
 $paletteMainTries = @($paletteThemeAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.TryStatementAst] -and
         $node.Parent -is [System.Management.Automation.Language.NamedBlockAst]
 }, $true))
+$recoveryCanaryCalls = @($postHighContrastCalls | Where-Object {
+    $_.Extent.Text.Trim() -eq "Invoke-PostHighContrastPresentationCanary 'palette-theme-recovery-canary' `$draculaRgb"
+})
+$restoreCanaryCalls = @($postHighContrastCalls | Where-Object {
+    $_.Extent.Text.Trim() -eq "Invoke-PostHighContrastPresentationCanary 'palette-theme-restore-canary' `$themeRgb"
+})
+$markerRemoveCommands = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop'
+}, $true))
+if ($paletteMainTries.Count -ne 1 -or $postHighContrastCalls.Count -ne 2 -or
+    $recoveryCanaryCalls.Count -ne 1 -or $restoreCanaryCalls.Count -ne 1 -or
+    $markerRemoveCommands.Count -ne 2) {
+    throw 'High Contrast recovery marker removal must follow one successful fresh-process presentation canary.'
+}
+$recoveryCallStatement = Get-DirectStatementBlockChild -Node $recoveryCanaryCalls[0] -StatementBlock $recoveryCanaryCalls[0].Parent.Parent
+$recoveryRemoveCommands = @($markerRemoveCommands | Where-Object {
+    [object]::ReferenceEquals($_.Parent.Parent, $recoveryCanaryCalls[0].Parent.Parent)
+})
+$recoveryBlockStatements = @($recoveryCanaryCalls[0].Parent.Parent.Statements)
+if ($null -eq $recoveryCallStatement -or $recoveryRemoveCommands.Count -ne 1 -or
+    [Array]::IndexOf($recoveryBlockStatements, $recoveryRemoveCommands[0].Parent) -ne
+        ([Array]::IndexOf($recoveryBlockStatements, $recoveryCallStatement) + 1)) {
+    throw 'Interrupted High Contrast recovery must delete its marker immediately after a direct successful canary call.'
+}
+$hcRestoredIfs = @($paletteMainTries[0].Finally.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses.Count -eq 1 -and $_.Clauses[0].Item1.Extent.Text.Trim() -eq '$hcRestored'
+})
+$hcPresentationReadyIfs = @($paletteMainTries[0].Finally.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses.Count -eq 1 -and $_.Clauses[0].Item1.Extent.Text.Trim() -eq '$hcPresentationReady'
+})
+$presentationReadyAssignments = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -eq 'hcPresentationReady'
+}, $true))
+$presentationReadyFalse = @($presentationReadyAssignments | Where-Object {
+    $_.Right.Extent.Text.Trim() -eq '$false'
+})
+$presentationReadyTrue = @($presentationReadyAssignments | Where-Object {
+    $_.Right.Extent.Text.Trim() -eq '$true'
+})
+$presentationReadyMutationCommands = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -match '(^|\\)((Set|New|Remove|Clear)-Variable|sv|nv|rv|clv)$' -and
+        $node.Extent.Text -match '(?i)hcPresentationReady'
+}, $true))
+if ($hcRestoredIfs.Count -ne 1 -or $hcPresentationReadyIfs.Count -ne 1 -or
+    $presentationReadyAssignments.Count -ne 2 -or $presentationReadyMutationCommands.Count -ne 0 -or
+    $presentationReadyFalse.Count -ne 1 -or $presentationReadyTrue.Count -ne 1 -or
+    -not [object]::ReferenceEquals($presentationReadyFalse[0], $paletteMainTries[0].Finally.Statements[2]) -or
+    $hcRestoredIfs[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $hcRestoredIfs[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.TryStatementAst]) {
+    throw 'High Contrast cleanup must initialize and gate one exact post-restore presentation proof.'
+}
+$restoreCanaryTry = $hcRestoredIfs[0].Clauses[0].Item2.Statements[0]
+if ($restoreCanaryTry.Body.Statements.Count -ne 2 -or
+    -not [object]::ReferenceEquals($restoreCanaryTry.Body.Statements[0], $restoreCanaryCalls[0].Parent) -or
+    -not [object]::ReferenceEquals($restoreCanaryTry.Body.Statements[1], $presentationReadyTrue[0]) -or
+    $restoreCanaryTry.CatchClauses.Count -ne 1 -or $null -ne $restoreCanaryTry.Finally -or
+    $restoreCanaryTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
+    $restoreCanaryTry.CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne '[void]$cleanupErrors.Add("High Contrast post-restore presentation failed: $($_.Exception.Message)")') {
+    throw 'Restored High Contrast state must become presentation-ready only after the direct canary succeeds.'
+}
+$markerCleanupBody = $hcPresentationReadyIfs[0].Clauses[0].Item2
+if ($markerCleanupBody.Statements.Count -ne 1 -or
+    $markerCleanupBody.Statements[0] -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $markerCleanupBody.Statements[0].Body.Statements.Count -ne 1 -or
+    -not [object]::ReferenceEquals($markerCleanupBody.Statements[0].Body.Statements[0],
+        @($markerRemoveCommands | Where-Object { -not [object]::ReferenceEquals($_, $recoveryRemoveCommands[0]) })[0].Parent) -or
+    $markerCleanupBody.Statements[0].CatchClauses.Count -ne 1 -or
+    $markerCleanupBody.Statements[0].CatchClauses[0].Body.Statements.Count -ne 1 -or
+    $markerCleanupBody.Statements[0].CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne '[void]$cleanupErrors.Add("High Contrast recovery marker cleanup failed: $($_.Exception.Message)")') {
+    throw 'High Contrast recovery marker cleanup must be directly and exclusively gated by successful presentation.'
+}
+$testCanaryMutationShape = {
+    param([string] $Content)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Content, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { return $false }
+    $functions = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Invoke-PostHighContrastPresentationCanary'
+    }, $true))
+    if ($functions.Count -ne 1) { return $false }
+    $loops = @($functions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.ForEachStatementAst]
+    }, $true))
+    if ($loops.Count -ne 1 -or $loops[0].Body.Statements.Count -ne 2 -or
+        $loops[0].Body.Statements[1] -isnot [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $statements = @($loops[0].Body.Statements[1].Body.Statements)
+    return $statements.Count -eq 13 -and
+        $statements[0].Extent.Text.Trim() -eq '$canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"' -and
+        $statements[1].Extent.Text.Trim() -eq '$runs.Add($canary)' -and
+        $statements[2].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
+        $statements[7].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
+        $statements[8].Extent.Text.Trim() -eq '$stablePresentation = [Diagnostics.Stopwatch]::new()' -and
+        $statements[10].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
+        $statements[11].Extent.Text.Trim() -eq 'Close-StatefulHost $canaryHost $canary $deadline' -and
+        $statements[12].Extent.Text.Trim() -eq 'return'
+}
+$testMarkerMutationShape = {
+    param([string] $Content)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Content, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { return $false }
+    $assignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -eq 'hcPresentationReady'
+    }, $true))
+    $trueAssignments = @($assignments | Where-Object { $_.Right.Extent.Text.Trim() -eq '$true' })
+    $falseAssignments = @($assignments | Where-Object { $_.Right.Extent.Text.Trim() -eq '$false' })
+    $mutationCommands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -match '(^|\\)((Set|New|Remove|Clear)-Variable|sv|nv|rv|clv)$' -and
+            $node.Extent.Text -match '(?i)hcPresentationReady'
+    }, $true))
+    return $assignments.Count -eq 2 -and $trueAssignments.Count -eq 1 -and
+        $falseAssignments.Count -eq 1 -and $mutationCommands.Count -eq 0
+}
+if (-not (& $testCanaryMutationShape $paletteThemeHarnessText) -or
+    -not (& $testMarkerMutationShape $paletteThemeHarnessText)) {
+    throw 'High Contrast mutation probes do not recognize the protected production shape.'
+}
+$deadlineMutationPattern = [regex]::new(
+    '(?m)^(\s*Show-StatefulHost \$canaryHost\r?\n)\s*\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\r?\n'
+)
+$missingDeadlineMutation = $deadlineMutationPattern.Replace($paletteThemeHarnessText, '$1', 1)
+$earlyReturnPattern = [regex]::new(
+    '(?s)(function Invoke-PostHighContrastPresentationCanary.*?foreach \(\$attempt in 1\.\.2\).*?try \{\r?\n)'
+)
+$earlyReturnMutation = $earlyReturnPattern.Replace($paletteThemeHarnessText, '$1            return' + [Environment]::NewLine, 1)
+$failOpenMarkerPattern = [regex]::new(
+    '(\[void\]\$cleanupErrors\.Add\("High Contrast post-restore presentation failed: \$\(\$_\.Exception\.Message\)"\))'
+)
+$failOpenMarkerMutation = $failOpenMarkerPattern.Replace(
+    $paletteThemeHarnessText,
+    '$hcPresentationReady = $true' + [Environment]::NewLine + '            $1',
+    1
+)
+$moduleMutatorMarkerMutation = $failOpenMarkerPattern.Replace(
+    $paletteThemeHarnessText,
+    'Microsoft.PowerShell.Utility\Set-Variable hcPresentationReady $true' + [Environment]::NewLine + '            $1',
+    1
+)
+$aliasMutatorMarkerMutation = $failOpenMarkerPattern.Replace(
+    $paletteThemeHarnessText,
+    'sv hcPresentationReady $true' + [Environment]::NewLine + '            $1',
+    1
+)
+if ($missingDeadlineMutation -eq $paletteThemeHarnessText -or
+    $earlyReturnMutation -eq $paletteThemeHarnessText -or
+    $failOpenMarkerMutation -eq $paletteThemeHarnessText -or
+    $moduleMutatorMarkerMutation -eq $paletteThemeHarnessText -or
+    $aliasMutatorMarkerMutation -eq $paletteThemeHarnessText -or
+    (& $testCanaryMutationShape $missingDeadlineMutation) -or
+    (& $testCanaryMutationShape $earlyReturnMutation) -or
+    (& $testMarkerMutationShape $failOpenMarkerMutation) -or
+    (& $testMarkerMutationShape $moduleMutatorMarkerMutation) -or
+    (& $testMarkerMutationShape $aliasMutatorMarkerMutation)) {
+    throw 'High Contrast contract failed to reject a deadline, dead-code, or fail-open marker mutation.'
+}
 $paletteOpenCalls = @($paletteThemeAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
@@ -905,10 +1148,16 @@ $sessionSnapshotOutputIfs = @($sessionSnapshotFunctions[0].FindAll({
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
         $node.Extent.Text -match '^if \(\(Test-Path \$out\) -and \(Get-Item \$out\)\.Length -gt 0\)'
 }, $true))
+$sessionSnapshotExitIfs = @($sessionSnapshotFunctions[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(\$queryExitCode -ne 0\)'
+}, $true))
 if ($sessionSnapshotRetryLoops.Count -ne 1 -or $sessionSnapshotWaitIfs.Count -ne 1 -or
-    $sessionSnapshotOutputIfs.Count -ne 1 -or
+    $sessionSnapshotExitIfs.Count -ne 1 -or $sessionSnapshotOutputIfs.Count -ne 1 -or
     -not [object]::ReferenceEquals($sessionSnapshotRetryLoops[0].Parent, $sessionSnapshotFunctions[0].Body.EndBlock) -or
     -not (Test-DirectStatementBlockChild -Node $sessionSnapshotWaitIfs[0] -StatementBlock $sessionSnapshotRetryLoops[0].Body) -or
+    -not (Test-DirectStatementBlockChild -Node $sessionSnapshotExitIfs[0] -StatementBlock $sessionSnapshotRetryLoops[0].Body) -or
     -not (Test-DirectStatementBlockChild -Node $sessionSnapshotOutputIfs[0] -StatementBlock $sessionSnapshotRetryLoops[0].Body)) {
     throw 'Session restore automation snapshot control flow must remain directly inside one retry loop.'
 }
@@ -926,9 +1175,10 @@ $sessionSnapshotCausalPrefix = @(
     '$out = Join-Path $layout.Logs "$Name-$attempt.json"',
     '$err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"',
     '$query = Start-Process -FilePath $cli -ArgumentList @(''+list-windows'', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru',
+    '$queryHandle = $query.Handle',
     '$remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)'
 )
-if ($sessionSnapshotLoopStatements.Count -lt 7) {
+if ($sessionSnapshotLoopStatements.Count -ne 12) {
     throw 'Session restore automation snapshot retry loop is missing causal statements.'
 }
 for ($i = 0; $i -lt $sessionSnapshotCausalPrefix.Count; $i++) {
@@ -936,10 +1186,18 @@ for ($i = 0; $i -lt $sessionSnapshotCausalPrefix.Count; $i++) {
         throw 'Session restore automation snapshot path, launch, and deadline statements are not in causal order.'
     }
 }
-if (-not [object]::ReferenceEquals($sessionSnapshotLoopStatements[4], $sessionSnapshotWaitIfs[0]) -or
-    $sessionSnapshotLoopStatements[5].Extent.Text.Trim() -ne '$query.Refresh()' -or
-    -not [object]::ReferenceEquals($sessionSnapshotLoopStatements[6], $sessionSnapshotOutputIfs[0])) {
-    throw 'Session restore automation snapshot must wait, refresh, then inspect fresh output.'
+if (-not [object]::ReferenceEquals($sessionSnapshotLoopStatements[5], $sessionSnapshotWaitIfs[0]) -or
+    $sessionSnapshotLoopStatements[6].Extent.Text.Trim() -ne '$query.Refresh()' -or
+    $sessionSnapshotLoopStatements[7].Extent.Text.Trim() -ne '$queryExitCode = Get-InteractiveWin11ProcessExitCode -Process $query -ProcessHandle $queryHandle' -or
+    -not [object]::ReferenceEquals($sessionSnapshotLoopStatements[8], $sessionSnapshotExitIfs[0]) -or
+    $sessionSnapshotExitIfs[0].Clauses[0].Item2.Statements.Count -ne 3 -or
+    $sessionSnapshotExitIfs[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne '$lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { "exit ${queryExitCode}: $(Get-Content $err -Raw)" } else { "exit $queryExitCode" }' -or
+    $sessionSnapshotExitIfs[0].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'Start-Sleep -Milliseconds 250' -or
+    $sessionSnapshotExitIfs[0].Clauses[0].Item2.Statements[2].Extent.Text.Trim() -ne 'continue' -or
+    -not [object]::ReferenceEquals($sessionSnapshotLoopStatements[9], $sessionSnapshotOutputIfs[0]) -or
+    $sessionSnapshotLoopStatements[10].Extent.Text.Trim() -ne '$lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { Get-Content $err -Raw } else { ''empty stdout'' }' -or
+    $sessionSnapshotLoopStatements[11].Extent.Text.Trim() -ne 'Start-Sleep -Milliseconds 250') {
+    throw 'Session restore automation snapshot must wait, refresh, require a zero signed exit code, then parse fresh output.'
 }
 $sessionRunsAssignments = @($sessionHarnessAst.FindAll({
     param($node)
@@ -1027,6 +1285,7 @@ $sessionForbiddenTermination = @($sessionHarnessAst.FindAll({
 }, $true))
 $sessionBootstrapBody = $sessionBootstrapIfs[0].Clauses[0].Item2
 $sessionSnapshotWaitBody = $sessionSnapshotWaitIfs[0].Clauses[0].Item2
+$sessionSnapshotExitBody = $sessionSnapshotExitIfs[0].Clauses[0].Item2
 $sessionSnapshotOutputBody = $sessionSnapshotOutputIfs[0].Clauses[0].Item2
 $sessionBootstrapExits = @($sessionControlTransfers | Where-Object {
     $_ -is [System.Management.Automation.Language.ExitStatementAst] -and
@@ -1037,8 +1296,10 @@ $sessionBootstrapExits = @($sessionControlTransfers | Where-Object {
 $sessionSnapshotContinues = @($sessionControlTransfers | Where-Object {
     $_ -is [System.Management.Automation.Language.ContinueStatementAst] -and
     $_.Extent.Text.Trim() -eq 'continue' -and
-    [object]::ReferenceEquals($_.Parent, $sessionSnapshotWaitBody) -and
-    [object]::ReferenceEquals($_, $sessionSnapshotWaitBody.Statements[-1])
+    (([object]::ReferenceEquals($_.Parent, $sessionSnapshotWaitBody) -and
+        [object]::ReferenceEquals($_, $sessionSnapshotWaitBody.Statements[-1])) -or
+     ([object]::ReferenceEquals($_.Parent, $sessionSnapshotExitBody) -and
+        [object]::ReferenceEquals($_, $sessionSnapshotExitBody.Statements[-1])))
 })
 $sessionSnapshotReturns = @($sessionControlTransfers | Where-Object {
     $_ -is [System.Management.Automation.Language.ReturnStatementAst] -and
@@ -1107,8 +1368,8 @@ if ($sessionInvariantIfs.Count -ne 1 -or $sessionInvariantThrows.Count -ne 1 -or
     $sessionEapAssignments[0].Extent.Text.Trim() -ne '$ErrorActionPreference = ''Stop''' -or
     -not [object]::ReferenceEquals($sessionEapAssignments[0], $sessionTopLevelStatements[0]) -or
     $sessionForbiddenTermination.Count -ne 0 -or
-    $sessionControlTransfers.Count -ne 3 -or $sessionBootstrapExits.Count -ne 1 -or
-    $sessionSnapshotContinues.Count -ne 1 -or $sessionSnapshotReturns.Count -ne 1 -or
+    $sessionControlTransfers.Count -ne 4 -or $sessionBootstrapExits.Count -ne 1 -or
+    $sessionSnapshotContinues.Count -ne 2 -or $sessionSnapshotReturns.Count -ne 1 -or
     $sessionInstanceClassIndex -ne ($sessionRunsInitializationIndex + 1) -or
     $sessionSnapshotFunctionIndex -ne ($sessionInstanceClassIndex + 1) -or
     $sessionMainTryIndex -ne ($sessionSnapshotFunctionIndex + 1) -or

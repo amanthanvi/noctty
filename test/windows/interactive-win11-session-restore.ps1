@@ -33,6 +33,7 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
         $out = Join-Path $layout.Logs "$Name-$attempt.json"
         $err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"
         $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+        $queryHandle = $query.Handle
         $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $query.WaitForExit($remainingMs)) {
             Stop-InteractiveWin11Process -Process $query
@@ -40,8 +41,14 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
             continue
         }
         $query.Refresh()
+        $queryExitCode = Get-InteractiveWin11ProcessExitCode -Process $query -ProcessHandle $queryHandle
+        if ($queryExitCode -ne 0) {
+            $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { "exit ${queryExitCode}: $(Get-Content $err -Raw)" } else { "exit $queryExitCode" }
+            Start-Sleep -Milliseconds 250
+            continue
+        }
         if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return Get-Content $out -Raw | ConvertFrom-Json }
-        $lastError = if (Test-Path $err) { Get-Content $err -Raw } else { "exit $($query.ExitCode)" }
+        $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { Get-Content $err -Raw } else { 'empty stdout' }
         Start-Sleep -Milliseconds 250
     }
     throw "Session automation query failed after three attempts: $lastError"

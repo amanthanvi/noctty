@@ -34,6 +34,48 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
     return $edit.Hwnd
 }
 
+function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$ExpectedRgb) {
+    $lastError = $null
+    foreach ($attempt in 1..2) {
+        $canary = $null
+        try {
+            $canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"
+            $runs.Add($canary)
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            $canaryHost = Wait-StatefulHost $canary $deadline
+            Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-High-Contrast canary tab' -Process $canary.Process -Condition {
+                (Get-StatefulTabCount $canaryHost) -eq 1
+            }
+            $canarySurface = Wait-StatefulSurface $canaryHost $canary $deadline
+            Show-StatefulHost $canaryHost
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            $stablePresentation = [Diagnostics.Stopwatch]::new()
+            Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-High-Contrast canary framebuffer' -Process $canary.Process -Condition {
+                if (((Get-StatefulPixel $canarySurface.Hwnd) -band 0xFFFFFF) -ne $ExpectedRgb) {
+                    $stablePresentation.Reset()
+                    return $false
+                }
+                if (-not $stablePresentation.IsRunning) { $stablePresentation.Start() }
+                return $stablePresentation.Elapsed -ge [TimeSpan]::FromSeconds(2)
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            Close-StatefulHost $canaryHost $canary $deadline
+            return
+        }
+        catch {
+            $lastError = $_
+            if ($null -ne $canary -and -not $canary.Process.HasExited) {
+                try { Stop-InteractiveWin11Process -Process $canary.Process }
+                catch {
+                    throw "Post-High-Contrast presentation attempt $attempt failed: $($lastError.Exception.Message); process cleanup also failed: $($_.Exception.Message)"
+                }
+            }
+            if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }
+        }
+    }
+    throw "Post-High-Contrast presentation did not recover after two fresh processes: $($lastError.Exception.Message)"
+}
+
 $originalHc = $null
 $hcChanged = $false
 $hcMutex = $null
@@ -66,6 +108,7 @@ try {
             $recoveryReadback = [WinghosttyStatefulNative+HIGHCONTRAST]::new(); $recoveryReadback.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryReadback)
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $recoveryReadback.cbSize, [ref]$recoveryReadback, 0)) { throw 'SPI_GETHIGHCONTRAST recovery verification failed.' }
             if (($recoveryReadback.dwFlags -band 1) -ne 0) { throw 'High Contrast remained enabled after interrupted-run recovery.' }
+            Invoke-PostHighContrastPresentationCanary 'palette-theme-recovery-canary' $draculaRgb
             Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop
             Write-Warning 'Restored High Contrast state left behind by an interrupted harness run.'
         }
@@ -78,6 +121,7 @@ try {
     $surface = Wait-StatefulSurface $hostHwnd $run $deadline
     Show-StatefulHost $hostHwnd
     Write-Host ('theme initial framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula background render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
     Start-Sleep -Milliseconds 750
@@ -124,6 +168,7 @@ catch {
 finally {
     $cleanupErrors = [Collections.Generic.List[string]]::new()
     $hcRestored = $false
+    $hcPresentationReady = $false
     if ($hcChanged) {
         try {
             if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) {
@@ -148,6 +193,15 @@ finally {
         }
     }
     if ($hcRestored) {
+        try {
+            Invoke-PostHighContrastPresentationCanary 'palette-theme-restore-canary' $themeRgb
+            $hcPresentationReady = $true
+        }
+        catch {
+            [void]$cleanupErrors.Add("High Contrast post-restore presentation failed: $($_.Exception.Message)")
+        }
+    }
+    if ($hcPresentationReady) {
         try { Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop } catch { [void]$cleanupErrors.Add("High Contrast recovery marker cleanup failed: $($_.Exception.Message)") }
     }
     if ($null -ne $hcMutex) {
