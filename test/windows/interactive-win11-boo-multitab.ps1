@@ -44,8 +44,6 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_BOO_MULTITAB_BOOTSTRAPPED) {
     exit $bootstrapExitCode
 }
 
-Add-Type -AssemblyName Microsoft.VisualBasic
-
 if (-not ('InteractiveWin11BooMultiTabNative' -as [type])) {
     Add-Type @"
 using System;
@@ -497,8 +495,13 @@ try {
         if (-not (Test-Path -LiteralPath $booTracePath)) {
             return $false
         }
-        $booTraceProbe = Get-Content -LiteralPath $booTracePath -Raw | ConvertFrom-Json
-        return $booTraceProbe.phase -eq 'before_app_run'
+        try {
+            $booTraceProbe = Get-Content -LiteralPath $booTracePath -Raw | ConvertFrom-Json
+            return $booTraceProbe.phase -eq 'before_app_run'
+        }
+        catch {
+            return $false
+        }
     }
 
     Start-Sleep -Milliseconds $EscapeAfterMs
@@ -508,8 +511,13 @@ try {
         if (-not (Test-Path -LiteralPath $statePath)) {
             return $false
         }
-        $stateProbe = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        return $stateProbe.phase -eq 'after-boo'
+        try {
+            $stateProbe = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            return $stateProbe.phase -eq 'after-boo'
+        }
+        catch {
+            return $false
+        }
     }
 
     $state = Get-InteractiveWin11RequiredJsonFile -Path $statePath

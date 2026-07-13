@@ -35,7 +35,7 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
         $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
         $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $query.WaitForExit($remainingMs)) {
-            $query.Kill($true); $query.WaitForExit()
+            Stop-InteractiveWin11Process -Process $query
             $lastError = "automation query process did not exit before the story deadline"
             continue
         }

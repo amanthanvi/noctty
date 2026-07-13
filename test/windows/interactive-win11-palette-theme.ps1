@@ -92,8 +92,9 @@ try {
     }
 }
 finally {
-    if ($hcChanged -and -not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) { Write-Error 'Failed to restore the original High Contrast setting.' }
+    $hcRestoreFailed = $hcChanged -and -not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)
     if ($null -ne $hcMutex) { try { $hcMutex.ReleaseMutex() } catch { }; $hcMutex.Dispose() }
     foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
+    if ($hcRestoreFailed) { throw 'Failed to restore the original High Contrast setting.' }
 }
 Write-Host "interactive-win11 palette-theme validation: PASS (config=$configPath)"

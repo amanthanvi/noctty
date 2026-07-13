@@ -91,7 +91,6 @@ public static class Win11KeyInputNative {
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 }
 '@
-Add-Type -AssemblyName Microsoft.VisualBasic
 
 $MAPVK_VK_TO_VSC = 0
 $SW_RESTORE = 9
