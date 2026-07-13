@@ -98,8 +98,6 @@ public static class InteractiveWin11BooMultiTabNative {
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
 }
 
 public sealed class InteractiveWin11BooMultiTabChildControl {
@@ -277,16 +275,20 @@ function Get-VisibleTabCount {
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $CommandId
+        [Parameter(Mandatory)] [int] $CommandId,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
     )
 
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($HostHwnd, 0x0111, (New-WParam -Low $CommandId), [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message 0x0111 -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
 }
 
 function Activate-TabButton {
     param(
         [Parameter(Mandatory)] [InteractiveWin11BooMultiTabChildControl] $Tab,
-        [Parameter(Mandatory)] [IntPtr] $ExpectedParent
+        [Parameter(Mandatory)] [IntPtr] $ExpectedParent,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
     )
 
     if (
@@ -305,8 +307,8 @@ function Activate-TabButton {
     $x = [Math]::Max(1, [int] (($rect.Right - $rect.Left) / 2))
     $y = [Math]::Max(1, [int] (($rect.Bottom - $rect.Top) / 2))
     $lParam = New-LParam -X $x -Y $y
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($Tab.Hwnd, 0x0201, [UIntPtr]::Zero, $lParam)
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW($Tab.Hwnd, 0x0202, [UIntPtr]::Zero, $lParam)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Tab.Hwnd -Message 0x0201 -LParam $lParam -Deadline $Deadline -Description "tab button mouse down control=$($Tab.Id)" -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Tab.Hwnd -Message 0x0202 -LParam $lParam -Deadline $Deadline -Description "tab button mouse up control=$($Tab.Id)" -Process $Process)
 }
 
 function Send-TextKeyMessage {
@@ -314,48 +316,27 @@ function Send-TextKeyMessage {
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
         [Parameter(Mandatory)] [uint16] $VirtualKey,
         [Parameter(Mandatory)] [uint16] $CharCode,
-        [uint16] $ScanCode = 0x1E
+        [uint16] $ScanCode = 0x1E,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
     )
 
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW(
-        $Hwnd,
-        0x0100,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode $ScanCode)
-    )
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW(
-        $Hwnd,
-        0x0102,
-        [UIntPtr]([uint64] $CharCode),
-        (New-KeyLParam -ScanCode $ScanCode)
-    )
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW(
-        $Hwnd,
-        0x0101,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode $ScanCode -KeyUp)
-    )
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode) -Deadline $Deadline -Description "WM_KEYDOWN vk=$VirtualKey" -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64] $CharCode)) -LParam (New-KeyLParam -ScanCode $ScanCode) -Deadline $Deadline -Description "WM_CHAR char=$CharCode" -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0101 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode -KeyUp) -Deadline $Deadline -Description "WM_KEYUP vk=$VirtualKey" -Process $Process)
 }
 
 function Send-KeyPressMessage {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
         [Parameter(Mandatory)] [uint16] $VirtualKey,
-        [Parameter(Mandatory)] [uint16] $ScanCode
+        [Parameter(Mandatory)] [uint16] $ScanCode,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
     )
 
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW(
-        $Hwnd,
-        0x0100,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode $ScanCode)
-    )
-    [void] [InteractiveWin11BooMultiTabNative]::SendMessageW(
-        $Hwnd,
-        0x0101,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode $ScanCode -KeyUp)
-    )
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0100 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode) -Deadline $Deadline -Description "WM_KEYDOWN vk=$VirtualKey" -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $Hwnd -Message 0x0101 -WParam ([UIntPtr]([uint64] $VirtualKey)) -LParam (New-KeyLParam -ScanCode $ScanCode -KeyUp) -Deadline $Deadline -Description "WM_KEYUP vk=$VirtualKey" -Process $Process)
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'boo-multitab' -ResetState:$ResetState
@@ -497,13 +478,13 @@ try {
 
     while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
         $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
-        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904
+        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904 -Deadline $deadline -Process $process
         Wait-InteractiveWin11Until -Deadline $deadline -Description "seed tabs ($targetTabCount/$SeedTabs)" -Process $process -Condition {
             (Get-VisibleTabCount -Parent $hostHwnd) -ge $targetTabCount
         }
     }
 
-    Activate-TabButton -Tab $initialTabButton -ExpectedParent $hostHwnd
+    Activate-TabButton -Tab $initialTabButton -ExpectedParent $hostHwnd -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial surface reactivation' -Process $process -Condition {
         Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd
     }
@@ -521,7 +502,7 @@ try {
     }
 
     Start-Sleep -Milliseconds $EscapeAfterMs
-    Send-KeyPressMessage -Hwnd $surfaceHwnd -VirtualKey 0x1B -ScanCode 0x01
+    Send-KeyPressMessage -Hwnd $surfaceHwnd -VirtualKey 0x1B -ScanCode 0x01 -Deadline $deadline -Process $process
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-boo state file' -Process $process -Condition {
         if (-not (Test-Path -LiteralPath $statePath)) {
@@ -553,7 +534,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw 'initial surface disappeared or became hidden after +boo'
     }
 
-    Send-TextKeyMessage -Hwnd $initialSurfaceHwnd -VirtualKey 0x41 -CharCode 97
+    Send-TextKeyMessage -Hwnd $initialSurfaceHwnd -VirtualKey 0x41 -CharCode 97 -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-boo key result file' -Process $process -Condition {
         Test-Path -LiteralPath $resultPath
     }

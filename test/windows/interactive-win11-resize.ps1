@@ -81,9 +81,6 @@ public static class WinghosttyResizeWin32 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr FindWindowExW(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
-
 }
 '@
 
@@ -227,10 +224,12 @@ function New-WParam {
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $CommandId
+        [Parameter(Mandatory)] [int] $CommandId,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [System.Diagnostics.Process] $Process
     )
 
-    [void] [WinghosttyResizeWin32]::SendMessageW($HostHwnd, $wmCommand, (New-WParam -Low $CommandId), [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message $wmCommand -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
 }
 
 function Invoke-CommandPaletteAction {
@@ -241,22 +240,17 @@ function Invoke-CommandPaletteAction {
         [System.Diagnostics.Process] $Process
     )
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $hostCommandPaletteCommandId
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $hostCommandPaletteCommandId -Deadline $Deadline -Process $Process
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
         $null -ne (Get-VisibleChildById -Parent $HostHwnd -Id $paletteEditControlId)
     }
 
     $edit = Get-VisibleChildById -Parent $HostHwnd -Id $paletteEditControlId
     foreach ($ch in $Action.ToCharArray()) {
-        [void] [WinghosttyResizeWin32]::SendMessageW(
-            $edit.Hwnd,
-            $wmChar,
-            ([UIntPtr]([uint64]([int][char]$ch))),
-            [IntPtr]::Zero
-        )
+        [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message $wmChar -WParam ([UIntPtr]([uint64]([int][char]$ch))) -Deadline $Deadline -Description "palette WM_CHAR '$ch'" -Process $Process)
     }
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $paletteConfirmCommandId
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $paletteConfirmCommandId -Deadline $Deadline -Process $Process
 }
 
 function Show-ResizeHarnessWindow {
@@ -585,7 +579,7 @@ try {
     Start-Sleep -Milliseconds 600
 
     $scenarioDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Invoke-HostCommand -HostHwnd $process.MainWindowHandle -CommandId $hostNewTabCommandId
+    Invoke-HostCommand -HostHwnd $process.MainWindowHandle -CommandId $hostNewTabCommandId -Deadline $scenarioDeadline -Process $process
     Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description 'second tab for resize repro' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $process.MainWindowHandle) -ge 2
     }
@@ -595,7 +589,7 @@ try {
     }
     $initialUnion = Assert-VisibleSurfaceUnionFillsHostContent -HostHwnd $process.MainWindowHandle -ExpectedSurfaceCount 2 -Label 'initial split layout'
 
-    [void] [WinghosttyResizeWin32]::SendMessageW($process.MainWindowHandle, $wmEnterSizeMove, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmEnterSizeMove -Deadline $scenarioDeadline -Description 'WM_ENTERSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
     $enteredSizeMove = $true
     Assert-Win32CallSucceeded `
         -Succeeded ([WinghosttyResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $grownWidth, $grownHeight, $true)) `
@@ -608,7 +602,7 @@ try {
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds 700
 
-    [void] [WinghosttyResizeWin32]::SendMessageW($process.MainWindowHandle, $wmExitSizeMove, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmExitSizeMove -Deadline $scenarioDeadline -Description 'WM_EXITSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
     $enteredSizeMove = $false
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds 700
@@ -632,7 +626,12 @@ try {
 }
 finally {
     if ($enteredSizeMove -and $process.MainWindowHandle -ne 0) {
-        [void] [WinghosttyResizeWin32]::SendMessageW($process.MainWindowHandle, $wmExitSizeMove, [UIntPtr]::Zero, [IntPtr]::Zero)
+        try {
+            [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmExitSizeMove -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'cleanup WM_EXITSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
+        }
+        catch {
+            Write-Warning "cleanup WM_EXITSIZEMOVE failed: $($_.Exception.Message)"
+        }
     }
     Stop-InteractiveWin11Process -Process $process
 }

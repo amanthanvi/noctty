@@ -24,13 +24,13 @@ $configPath = Join-Path $configDir 'config.ghostty'
 [IO.File]::WriteAllText($configPath, "theme = Dracula`r`nwindow-save-state = never`r`n", [Text.UTF8Encoding]::new($false))
 
 function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline, $Process) {
-    Invoke-StatefulCommand $HostHwnd 1901 $Deadline
+    Invoke-StatefulCommand $HostHwnd 1901 $Deadline $Process
     $script:PaletteThemeHost = $HostHwnd
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'palette query edit' -Process $Process -Condition {
         @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2002).Count -gt 0
     }
     $edit = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2002 | Select-Object -First 1
-    Set-StatefulEditText $HostHwnd $edit.Hwnd $Query $Deadline
+    Set-StatefulEditText $HostHwnd $edit.Hwnd $Query $Deadline $Process
     return $edit.Hwnd
 }
 
@@ -59,7 +59,7 @@ try {
     Write-Host ('theme preview framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f preview render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
     if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*Dracula') { throw 'Preview mutated config before commit.' }
-    Invoke-StatefulCommand $hostHwnd 2004 $deadline
+    Invoke-StatefulCommand $hostHwnd 2004 $deadline $run.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula preview rollback' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f commit preview' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
@@ -67,7 +67,7 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme palette result list' -Process $run.Process -Condition {
         @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2006).Count -gt 0
     }
-    Invoke-StatefulPaletteFirstRow $hostHwnd $deadline
+    Invoke-StatefulPaletteFirstRow $hostHwnd $deadline $run.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme config persistence' -Process $run.Process -Condition { (Get-Content $configPath -Raw) -match 'theme\s*=\s*0x96f' }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $hostHwnd $run $deadline
@@ -86,7 +86,7 @@ try {
         Start-Sleep -Milliseconds 500
         if ((Get-StatefulPixel $hcSurface.Hwnd) -ne $hcPixel) { throw 'Theme preview changed terminal colors while High Contrast was active.' }
         if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
-        Invoke-StatefulCommand $hcHost 2004 $deadline
+        Invoke-StatefulCommand $hcHost 2004 $deadline $hcRun.Process
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         Close-StatefulHost $hcHost $hcRun $deadline
     }

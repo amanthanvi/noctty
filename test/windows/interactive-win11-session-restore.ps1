@@ -50,9 +50,9 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $first = Start-StatefulApp $layout $exe $repoRoot 'session-save' @('--single-instance=true'); $runs.Add($first)
     $hostHwnd = Wait-StatefulHost $first $deadline
-    Invoke-StatefulCommand $hostHwnd 1904 $deadline; Invoke-StatefulCommand $hostHwnd 1904 $deadline
+    Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process; Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
-    Invoke-StatefulButton $hostHwnd 1001 $deadline
+    Invoke-StatefulButton $hostHwnd 1001 $deadline $first.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $hostHwnd $first $deadline
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
