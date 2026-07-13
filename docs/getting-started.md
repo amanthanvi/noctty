@@ -45,9 +45,10 @@ point at the same GitHub Release assets and checksums.
 ### Option B — Installer
 
 1. Double-click `winghostty-<version>-windows-<arch>-setup.exe`.
-2. Current release builds are Authenticode-signed. SmartScreen can still warn
-   on a new publisher reputation, but the installer signature should be present
-   and valid.
+2. If SmartScreen says _"Windows protected your PC"_, click **More info** →
+   **Run anyway**. Release builds are Authenticode-signed, but SmartScreen
+   reputation can lag behind signing for a new publisher, so the warning may
+   appear even though the signature is present and valid.
 3. Accept the MIT license and install.
 4. Launch **winghostty** from the Start menu.
 
@@ -56,15 +57,15 @@ point at the same GitHub Release assets and checksums.
 1. Extract the ZIP anywhere (for example, `C:\Tools\winghostty\`).
 2. Run `winghostty.exe`.
 3. The Windows binaries inside the ZIP are Authenticode-signed. The ZIP
-   container itself is checksummed, not Authenticode-signed, and SmartScreen may
-   show the same warning.
+   container itself is checksummed, not Authenticode-signed, so SmartScreen
+   may show the same warning.
 
 ## 3. First launch
 
 On first launch, winghostty creates `%LOCALAPPDATA%\winghostty\` and writes a
 config template at `%LOCALAPPDATA%\winghostty\config.ghostty` with inline
-syntax notes. It then picks a conservative default shell. You can override
-with `command = <path>` in your config (see below).
+syntax notes. It then picks a conservative default shell; you can override
+that with `command = <path>` in your config (see below).
 
 ## 4. Set a font and theme
 
@@ -84,7 +85,7 @@ font-size   = 12
 theme       = Dracula
 ```
 
-Save. Reload config without restarting with **Ctrl + Shift + ,**.
+Save, then reload config without restarting: **Ctrl + Shift + ,**
 
 See every option with inline docs:
 
@@ -100,19 +101,19 @@ Default keybindings follow Windows conventions. Full list:
 winghostty +list-keybinds
 ```
 
-Verified defaults you'll reach for daily:
+The defaults you'll reach for daily:
 
-| Action | Binding |
-| --- | --- |
-| Copy | `Ctrl+Shift+C` |
-| Paste | `Ctrl+Shift+V` |
-| New tab | `Ctrl+Shift+T` |
-| Close tab | `Ctrl+Shift+W` |
-| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Split right / down | `Ctrl+Shift+O` / `Ctrl+Shift+E` |
-| Start search | `Ctrl+Shift+F` |
-| Increase / decrease font | `Ctrl+=` / `Ctrl+-` |
-| Reload config | `Ctrl+Shift+,` |
+| Action                   | Binding                         |
+| ------------------------ | ------------------------------- |
+| Copy                     | `Ctrl+Shift+C`                  |
+| Paste                    | `Ctrl+Shift+V`                  |
+| New tab                  | `Ctrl+Shift+T`                  |
+| Close tab                | `Ctrl+Shift+W`                  |
+| Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab`   |
+| Split right / down       | `Ctrl+Shift+O` / `Ctrl+Shift+E` |
+| Start search             | `Ctrl+Shift+F`                  |
+| Increase / decrease font | `Ctrl+=` / `Ctrl+-`             |
+| Reload config            | `Ctrl+Shift+,`                  |
 
 Rebind anything:
 
@@ -124,110 +125,63 @@ keybind = ctrl+shift+r>reload_config
 Keybind grammar (chords, `catch_all`, modifiers) is documented inline in
 `+show-config --default --docs`.
 
-## 6. Use WSL as your shell
+## 6. Pick your shell
 
-winghostty supports WSL as a launched shell but does not pick it implicitly.
-Opt in explicitly:
+winghostty auto-detects installed Windows shells (PowerShell, `cmd`, Git
+Bash, opt-in WSL) and exposes them through an in-app profile picker. To pin a
+specific shell instead, set it in your config:
+
+```ini
+command = <path>
+```
+
+WSL works as a launched shell, but you have to opt in explicitly:
 
 ```ini
 command = wsl.exe
 ```
 
-## 7. In-app profile picker
+Why WSL is never picked implicitly — and other shell behavior details — is
+covered in [windows.md](windows.md#shells).
 
-winghostty auto-detects installed Windows shells (PowerShell, `cmd`, Git
-Bash, opt-in WSL) and exposes them through an in-app profile picker.
-Profile selection is an in-app runtime feature; there is no user-facing
-config option to control it today. If you need to override the launched
-shell, set `command = <path>` in your config.
+## 7. Updates
 
-## 8. Updates
+Turn on update checks in your config:
 
 ```ini
 auto-update = check
 ```
 
-The updater hits GitHub's public releases API at most once every 24 hours,
-opens the release page if a newer stable version is available, and never
-replaces binaries silently. `auto-update = download` downloads only stable
-Windows installer releases that include architecture-specific SHA256 metadata,
-verifies the installer SHA-256 against that manifest, requires a valid Windows
-Authenticode signature, and stages the installer under the local winghostty
-state directory.
-For installer-managed installs, the update notice can launch the verified
-staged installer with an explicit user action. UAC may prompt. Portable ZIP
-auto-apply is not implemented yet. No telemetry or analytics are sent.
+The updater checks GitHub Releases at most once every 24 hours and never
+replaces binaries silently. `auto-update = download` additionally stages
+verified installers for a user-initiated apply. Verification details and
+`download`-mode behavior are in [windows.md](windows.md#updates).
 
-## 9. Crash reports
+## 8. If something goes wrong
 
-winghostty keeps a local crash directory at:
-
-```
-%LOCALAPPDATA%\winghostty\crash
-```
-
-Nothing in this directory is ever uploaded. On Windows, winghostty writes local
-`.dmp` minidumps for process-level unhandled exceptions when Windows can
-deliver one. Inspect what is there with:
-
-```powershell
-winghostty +crash-report
-```
-
-For a recovery launch that ignores user config and saved workspace state for
-that process only:
+If configuration or saved session state prevents a normal launch, start once
+with built-in defaults and no session restore:
 
 ```powershell
 winghostty --safe-mode
 ```
 
-Create a redacted, local-only diagnostic directory:
+Crash dumps, if any, stay local under `%LOCALAPPDATA%\winghostty\crash` —
+read them with `winghostty +crash-report`. Recovery behavior, crash-report
+details, and diagnostic bundles are covered in
+[windows.md](windows.md#crash-reports-and-diagnostics).
 
-```powershell
-winghostty +diagnostic-bundle --output=winghostty-diagnostics
-```
+## 9. Automate it
 
-Crash dumps require the explicit `--include-crash-dumps` flag and may contain
-sensitive process memory.
+winghostty has a local automation surface: `winghostty +list-windows` reports
+windows, tabs, and panes as JSON, and `winghostty +perform-action` invokes
+keybinding actions over IPC. The full surface, including what it deliberately
+refuses to do, is documented in [windows.md](windows.md#automation).
 
-## 10. Local automation
+## 10. Uninstall
 
-winghostty exposes a local Windows automation surface over the same
-single-instance IPC path used by `+new-window`.
-
-List windows, tabs, and panes:
-
-```powershell
-winghostty +list-windows
-```
-
-The JSON schema is `winghostty.windows.v2`. It exposes local window, tab, and
-pane IDs, focus/active state, and structural counts only; it does not expose
-terminal text, shell input, working directories, or file paths.
-
-Invoke a keybinding action on the focused surface:
-
-```powershell
-winghostty +perform-action new_tab
-```
-
-Invoke an action on a specific pane from `+list-windows`:
-
-```powershell
-winghostty +perform-action --surface-id=<surface_id> toggle_fullscreen
-```
-
-Actions use the same names as `keybind` values. `--surface-id` is only valid
-for surface-scoped actions; app-scoped actions such as `quit` always target the
-app. Terminal-input and arbitrary file helper actions such as `text`, `csi`,
-`esc`, `paste_from_clipboard`, `write_screen_file`, and `crash` are rejected by
-the running instance. New keybinding action variants are not automation-enabled
-until explicitly reviewed and added to the allowlist.
-
-## 11. Uninstall
-
-- **Installer builds:** *Settings → Apps → Installed apps → winghostty →
-  Uninstall*.
+- **Installer builds:** _Settings → Apps → Installed apps → winghostty →
+  Uninstall_.
 - **Portable builds:** delete the folder you extracted to.
 
 Your config and any crash logs live under `%LOCALAPPDATA%\winghostty\` and
@@ -238,12 +192,12 @@ slate.
 
 - [docs/status.md](status.md) — what works, what's experimental, known
   caveats
-- [docs/windows.md](windows.md) — Windows-specific behavior,
-  troubleshooting, paths, app identity, notifications, and shell notes
+- [docs/windows.md](windows.md) — the Windows behavior reference: paths,
+  shells, updates, automation, and troubleshooting
 - [docs/windows-capability-matrix.md](windows-capability-matrix.md) —
-  Windows-specific behavior and docs truth
-- [HACKING.md](../HACKING.md) — build, test, runtime notes (for
-  developers)
+  row-by-row mapping against upstream Ghostty docs
+- [HACKING.md](../HACKING.md) — build, test, and runtime notes for
+  developers
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — how to submit changes
 - [Discussions](https://github.com/amanthanvi/winghostty/discussions) —
   questions and feedback

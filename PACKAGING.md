@@ -1,7 +1,7 @@
 # Packaging winghostty for Distribution
 
-This repository publishes Windows user artifacts directly from GitHub Releases.
-The public packaging targets are:
+This repository publishes Windows user artifacts directly from GitHub
+Releases. The public packaging targets are:
 
 - `winghostty-<version>-windows-x64-setup.exe`
 - `winghostty-<version>-windows-x64-portable.zip`
@@ -19,20 +19,18 @@ https://github.com/amanthanvi/winghostty/releases
 
 ## Release Inputs
 
-winghostty releases use plain semver tags such as `v1.3.100`.
-
-Release versioning standard:
+winghostty releases use plain semver tags such as `v1.3.100`:
 
 - `major.minor` track the Ghostty upstream compatibility line
 - `patch` is the winghostty release number on that line
-- fork releases should start at patch `100` for a new upstream line
+- fork releases start at patch `100` for a new upstream line
 
 The exact upstream base release is stored in
 `dist/windows/release-metadata.json`. For example, a release tagged
 `v1.3.105` can still declare `upstreamBaseVersion = 1.3.2`.
 
-The release workflow builds the Windows executable, stages runtime files, then
-produces:
+The release workflow builds the Windows executable, stages runtime files,
+then produces:
 
 1. An Inno Setup installer
 2. A portable ZIP
@@ -40,13 +38,11 @@ produces:
 4. A release icon asset
 5. Generated package-manager metadata
 
-Local unsigned packaging is still allowed for smoke validation, but the GitHub
-Release workflow requires signing and fails closed when signing is absent. The
-release installer and Windows PE files inside the portable ZIP are
+Local unsigned packaging is allowed for smoke validation, but the GitHub
+Release workflow requires signing and fails closed when signing is absent.
+The release installer and Windows PE files inside the portable ZIP are
 Authenticode-signed; the ZIP container itself is checksummed, not
-Authenticode-signed. SmartScreen and publisher trust should still be treated as
-incomplete until winghostty moves from internal/self-signed signing to a
-publicly trusted certificate.
+Authenticode-signed.
 
 ## Local Packaging
 
@@ -56,8 +52,8 @@ Build the app first:
 zig build -Demit-exe=true
 ```
 
-If Zig cannot hydrate its dependency cache automatically in your environment,
-seed the Windows build dependency cache first:
+If Zig cannot hydrate its dependency cache automatically in your
+environment, seed the Windows build dependency cache first:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/fetch-zig-deps.ps1
@@ -70,16 +66,17 @@ Then stage release assets:
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.3.100
 ```
 
-In a native Windows ARM64 PowerShell process, the packaging script defaults to
-ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware. Pass
-`-Architecture x64` or `-Architecture arm64` explicitly when you need a specific
-target.
+In a native Windows ARM64 PowerShell process, the packaging script defaults
+to ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware.
+Pass `-Architecture x64` or `-Architecture arm64` explicitly when you need a
+specific target.
 
-If Inno Setup is available on the machine, the packaging script can also build
-the installer. If it is not installed, the portable artifact and checksums are
-still produced so packaging can be validated locally.
+If Inno Setup is available on the machine, the packaging script can also
+build the installer. If it is not installed, the portable artifact and
+checksums are still produced so packaging can be validated locally.
 
-To exercise the local signing path, export these environment variables first:
+To exercise the local signing path, export these environment variables
+first:
 
 ```powershell
 $env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\winghostty-signing.pfx"
@@ -108,17 +105,17 @@ This emits:
 
 ## Release Automation
 
-The release workflow publishes to the official Windows package-manager tracks
-after the GitHub Release is live. The preflight fails closed unless signing is
-configured and both remote package-manager manifests already exist.
-
-Release metadata comes from the committed `dist/windows/release-metadata.json`
-file, so the release tag, generated package-manager metadata, and GitHub release
-notes all agree on the current upstream base.
+The release workflow publishes to the official Windows package-manager
+tracks after the GitHub Release is live. The preflight fails closed unless
+signing is configured and both remote package-manager manifests already
+exist. Release metadata comes from the committed
+`dist/windows/release-metadata.json` file, so the release tag, generated
+package-manager metadata, and GitHub release notes all agree on the current
+upstream base.
 
 Automated releases should use a dedicated GitHub Actions environment named
-`release`. The workflow now resolves signing secrets from that environment
-or the repo default secret scope and runs `scripts/release-preflight.ps1`
+`release`. The workflow resolves signing secrets from that environment or
+the repo default secret scope and runs `scripts/release-preflight.ps1`
 before build/test/package work starts.
 
 ### Authenticode Signing
@@ -140,8 +137,8 @@ Recommended setup:
 1. Export a password-protected `.pfx` that contains the private key and full
    certificate chain for the Windows code-signing identity.
 2. Base64-encode that file locally.
-3. Store the base64 and password in the `release` environment, not plain repo
-   scope, so release signing stays isolated from unrelated workflows.
+3. Store the base64 and password in the `release` environment, not plain
+   repo scope, so release signing stays isolated from unrelated workflows.
 
 Example `gh` commands:
 
@@ -157,14 +154,16 @@ gh variable set WINDOWS_CODESIGN_TRUST_SELF_SIGNED --repo $repo --env release --
 ```
 
 If you prefer a different RFC 3161/Authenticode timestamp service, set
-`WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script will default
+`WINDOWS_CODESIGN_TIMESTAMP_URL` explicitly. The packaging script defaults
 to DigiCert when the variable is absent.
 
 When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps
-internal/self-signed release probes green on the current runner. It does not
-create public publisher trust on other machines.
+internal/self-signed release probes green on the current runner — but it
+does not create public publisher trust on other machines. Until winghostty
+moves from internal/self-signed signing to a publicly trusted certificate,
+treat SmartScreen and publisher trust as incomplete.
 
 ### Release Runbook
 
@@ -188,11 +187,11 @@ Recommended order:
    - Scoop manifest update
    - WinGet submission
 
-If a tag already exists and the workflow failed before publish, configure the
-missing signing secrets and then rerun the failed `Release` workflow or
-manually dispatch **Release** with the same version. The workflow is idempotent
-for release creation/upload because it uses `gh release create` on first
-publish and `gh release upload --clobber` on reruns.
+If a tag already exists and the workflow failed before publish, configure
+the missing signing secrets and then rerun the failed `Release` workflow or
+manually dispatch **Release** with the same version. The workflow is
+idempotent for release creation/upload because it uses `gh release create`
+on first publish and `gh release upload --clobber` on reruns.
 
 ### WinGet
 
@@ -203,8 +202,9 @@ publish and `gh release upload --clobber` on reruns.
 The official WinGet package is bootstrapped as `AmanThanvi.winghostty`.
 Release preflight verifies that
 `microsoft/winget-pkgs/manifests/a/AmanThanvi/winghostty` exists before the
-release workflow can claim package-manager readiness. Keep CI on the truthful
-`update` path; do not switch to `wingetcreate new` for automated releases.
+release workflow can claim package-manager readiness. Keep CI on the
+truthful `update` path; do not switch to `wingetcreate new` for automated
+releases.
 
 ### Scoop
 
@@ -213,8 +213,8 @@ release workflow can claim package-manager readiness. Keep CI on the truthful
 - Optional repo variables: `SCOOP_BUCKET_BRANCH`, `SCOOP_BUCKET_MANIFEST_PATH`
 
 The workflow updates a manifest in a configured Scoop bucket repository. It
-does not attempt to auto-open PRs against `ScoopInstaller/Extras`; that path is
-review-driven and should stay explicit.
+does not attempt to auto-open PRs against `ScoopInstaller/Extras`; that path
+is review-driven and should stay explicit.
 
 The official Scoop track is the fork-owned bucket:
 
@@ -223,16 +223,18 @@ scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
 scoop install winghostty/winghostty
 ```
 
-Release preflight verifies that the configured manifest exists, defaulting to
-`bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
+Release preflight verifies that the configured manifest exists, defaulting
+to `bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
 ## Zig Version
 
-This repo is pinned to Zig `0.15.2` in CI. Packaging should use the same Zig
-version unless the repo is intentionally updated to a newer one.
+This repo is pinned to Zig `0.15.2` in CI, and packaging should use the same
+Zig version unless the repo is intentionally updated to a newer one. The
+full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
 ## Library Consumers
 
 `libghostty-vt` remains intentionally retained and keeps its existing public
-name. The app binary and Windows packaging are rebranded to `winghostty`, but
-the library surface is not being renamed as part of this packaging cleanup.
+name. The app binary and Windows packaging are rebranded to `winghostty`,
+but the library surface is not being renamed as part of this packaging
+cleanup.

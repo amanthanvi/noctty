@@ -40,7 +40,11 @@ Run the metadata validator plus the referenced Win32 runtime harnesses:
 powershell.exe -ExecutionPolicy Bypass -File .\test\windows\vt-probe-win32-conformance.ps1 -ResetState -Runtime
 ```
 
-Known runtime gaps are intentionally visible in `+vt-probe`: OSC 7 cwd state,
-OSC 8 link interaction, OSC 52 clipboard prompts/reads/writes, color rendering
-for OSC 4 / 10 / 11 / 21, and Kitty graphics pixel validation do not yet have
-dedicated Win32 GUI harnesses.
+Known runtime gaps are intentionally visible in `+vt-probe`. These do not yet
+have dedicated Win32 GUI harnesses:
+
+- OSC 7 cwd state
+- OSC 8 link interaction
+- OSC 52 clipboard prompts, reads, and writes
+- Color rendering for OSC 4 / 10 / 11 / 21
+- Kitty graphics pixel validation

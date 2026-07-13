@@ -33,69 +33,36 @@
 
 ## What is winghostty?
 
-winghostty is a terminal emulator for Windows. It pairs:
-
-- The **Ghostty terminal core** — VT parser, screen and scrollback, font
-  pipeline, and renderer — forked from
-  [ghostty-org/ghostty](https://github.com/ghostty-org/ghostty).
-- A **native Win32 application runtime** written for this fork: real Windows
-  tab bar, per-monitor DPI scaling, DWM dark title bar, IME, drag-and-drop,
-  native right-click menus, and a WSL-aware shell picker.
+winghostty is a terminal emulator for Windows. It pairs the **Ghostty
+terminal core** — VT parser, screen and scrollback, font pipeline, and
+renderer, forked from
+[ghostty-org/ghostty](https://github.com/ghostty-org/ghostty) — with a
+**native Win32 application runtime** written for this fork: a real Windows
+tab bar, splits, per-monitor DPI scaling, DWM dark title bar, IME,
+drag-and-drop, native context menus, and a WSL-aware shell picker.
 
 It also ships `libghostty-vt`, the Ghostty VT library, as a retained
 deliverable for Zig and C consumers.
 
-It is intended for developers who are comfortable editing a plain-text
-configuration file and clicking through a SmartScreen warning on first
-install.
+It's built for developers who are comfortable editing a plain-text config
+file and clicking through a SmartScreen warning on first install.
 
-## Project status
+## Status, honestly
 
-winghostty is a young, single-maintainer fork. First fork commit: 2026-04-06.
-First public releases: 2026-04-16.
+winghostty is a young, single-maintainer fork (first fork commit 2026-04-06,
+first public release 2026-04-16). It supports Windows 10 and 11 on x64 and
+ARM64, and it runs as its own top-level app window — installing it alongside
+Windows Terminal, WezTerm, or Alacritty is fine. macOS and Linux app runtimes
+are not shipped from this repo and are not planned.
 
-- **Supported platform:** Windows 10 and Windows 11 on x64 and ARM64.
-- **Releases:** Authenticode-signed installer and signed Windows binaries
-  inside the portable ZIP. The ZIP container itself is checksummed, not
-  Authenticode-signed. Windows SmartScreen may still warn on first run for a
-  new or low-reputation publisher certificate.
-- **Feedback:** use
-  [Discussions](https://github.com/amanthanvi/winghostty/discussions) for
-  questions. GitHub Issues are reserved for reproducible bugs.
-- **No cross-platform app:** macOS and Linux app runtimes are not shipped
-  from this repo and are not planned. `libghostty-vt` remains portable for
-  library consumers.
-- **Coexistence:** winghostty runs as its own top-level app window. It does
-  not register as a Windows Terminal profile provider; installing it
-  alongside Windows Terminal, WezTerm, or Alacritty is fine.
-- **Accessibility:** terminal text is exposed through UI Automation
-  `ITextProvider` / `ITextRangeProvider`, alongside native chrome semantics.
-  Broader Narrator/NVDA coverage and complete interaction announcements remain
-  active work.
-
-## What works today
-
-- Native Win32 runtime: tab bar with overflow, horizontal / vertical splits,
-  per-monitor DPI scaling, DWM dark title bar, right-click context menus,
-  IME, drag-and-drop of files.
-- OpenGL 4.3 renderer via WGL.
-- Shared Ghostty terminal core: VT parsing, scrollback, bracketed paste,
-  mouse tracking, OSC 8 hyperlinks, Kitty graphics protocol, shell
-  integration for bash / zsh / fish / PowerShell. Command Prompt is
-  available as a plain fallback shell without automatic shell integration.
-- Windows-aware shell selection: PowerShell, `cmd`, Git Bash, opt-in WSL.
-- In-app profile picker that auto-detects installed shells.
-- Session restore for practical window shape: windows, tabs, splits, profiles,
-  working directories, and explicit titles.
-- GitHub Releases updater with check and verified-download modes, gated to one
-  check per 24 hours. Update installation remains user-initiated.
-- High-contrast (HC) mode detection and palette switching.
-- `libghostty-vt` as a retained Zig / C library deliverable.
-
-A precise list, including what is experimental and what is out of scope,
-is in **[docs/status.md](docs/status.md)**. For a row-by-row mapping against
-official Ghostty docs, see
+What works today, what's experimental, and what's out of scope is tracked
+precisely in **[docs/status.md](docs/status.md)**; for a row-by-row mapping
+against official Ghostty docs, see
 **[docs/windows-capability-matrix.md](docs/windows-capability-matrix.md)**.
+
+Questions and feedback go to
+[Discussions](https://github.com/amanthanvi/winghostty/discussions) — GitHub
+Issues are reserved for reproducible bugs.
 
 ## Install
 
@@ -105,14 +72,14 @@ published 2026-07-11.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
-| File | Use when |
-| --- | --- |
-| [`winghostty-1.3.117-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-setup.exe) | You want a normal x64 install with a Start menu entry. |
-| [`winghostty-1.3.117-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-setup.exe) | You want a normal ARM64 install with a Start menu entry. |
-| [`winghostty-1.3.117-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-portable.zip) | You want to run x64 without installing. |
-| [`winghostty-1.3.117-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-portable.zip) | You want to run ARM64 without installing. |
-| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-x64.txt) | Verifying x64 downloads. |
-| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-arm64.txt) | Verifying ARM64 downloads. |
+| File                                                                                                                                                                 | Use when                                                 |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [`winghostty-1.3.117-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-setup.exe)           | You want a normal x64 install with a Start menu entry.   |
+| [`winghostty-1.3.117-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-setup.exe)       | You want a normal ARM64 install with a Start menu entry. |
+| [`winghostty-1.3.117-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-x64-portable.zip)     | You want to run x64 without installing.                  |
+| [`winghostty-1.3.117-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/winghostty-1.3.117-windows-arm64-portable.zip) | You want to run ARM64 without installing.                |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-x64.txt)                                       | Verifying x64 downloads.                                 |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS-windows-arm64.txt)                                   | Verifying ARM64 downloads.                               |
 
 The legacy [`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.117/SHA256SUMS.txt)
 file remains an x64 auto-update compatibility alias.
@@ -130,34 +97,16 @@ scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
 scoop install winghostty/winghostty
 ```
 
-On first run, Windows SmartScreen may say *"Windows protected your PC"*.
-Click **More info** → **Run anyway**. Release installers and Windows binaries
-inside the portable ZIP are Authenticode-signed, but SmartScreen reputation can
-still lag behind signing.
-
-Full walk-through — installer, portable, uninstall —
+Releases are Authenticode-signed, but SmartScreen may still warn on first run
+while publisher reputation builds — the full walkthrough (installer,
+portable, SmartScreen, uninstall) is in
 **[docs/getting-started.md](docs/getting-started.md)**.
-
-Windows-specific paths, shell behavior, app identity, notifications, quick
-terminal, windows/tabs/splits, automation, and troubleshooting live in
-**[docs/windows.md](docs/windows.md)**.
 
 ## First run
 
-On first launch, winghostty creates its config folder and writes a template:
-
-```
-%LOCALAPPDATA%\winghostty\config.ghostty
-```
-
-The template sets no options — defaults live in the binary. To see every
-option with inline docs:
-
-```powershell
-winghostty +show-config --default --docs | more
-```
-
-A minimal config:
+On first launch, winghostty writes a config template to
+`%LOCALAPPDATA%\winghostty\config.ghostty`. The template sets no options —
+defaults live in the binary. A minimal config:
 
 ```ini
 font-family = JetBrains Mono
@@ -169,145 +118,49 @@ theme       = Dracula
 
 Reload config without restarting: **Ctrl + Shift + ,**
 
-## Keybindings
+A few keybindings to get moving — `Ctrl+Shift+T` for a new tab,
+`Ctrl+Shift+O` / `Ctrl+Shift+E` to split, `Ctrl+Shift+C` / `Ctrl+Shift+V` for
+copy and paste. The full table, plus the rebind grammar, is in
+**[docs/getting-started.md](docs/getting-started.md#5-keybindings)**.
 
-Default keybindings follow Windows conventions. Common ones:
+## Privacy, updates, and crashes
 
-| Action | Binding |
-| --- | --- |
-| Copy | `Ctrl+Shift+C` |
-| Paste | `Ctrl+Shift+V` |
-| New tab | `Ctrl+Shift+T` |
-| Close tab | `Ctrl+Shift+W` |
-| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
-| Split right / down | `Ctrl+Shift+O` / `Ctrl+Shift+E` |
-| Start search | `Ctrl+Shift+F` |
-| Increase / decrease font | `Ctrl+=` / `Ctrl+-` |
-| Reload config | `Ctrl+Shift+,` |
+winghostty sends no telemetry and no analytics. The only outbound network
+call is the GitHub Releases updater (when you enable `auto-update`), which
+checks at most once every 24 hours and never replaces binaries silently.
+Update installation remains user-initiated.
 
-Full list, plus the keybind grammar for chords and rebinding:
+Crash reports are never uploaded — dumps stay local under
+`%LOCALAPPDATA%\winghostty\crash`, readable with `winghostty +crash-report`.
+If a broken config or session state blocks launch, `winghostty --safe-mode`
+starts once with built-in defaults.
 
-```powershell
-winghostty +list-keybinds
-winghostty +show-config --default --docs
-```
-
-## Profiles
-
-winghostty auto-detects installed Windows shells (PowerShell, `cmd`, Git
-Bash, opt-in WSL) and exposes them through an in-app profile picker. To
-pin a specific shell, set `command = <path>` in your config.
-
-## Privacy
-
-winghostty does not send telemetry or analytics. The only outbound network
-call from the app is the GitHub Releases updater (when enabled), which
-hits GitHub's public API. Crash reports, when produced, are stored locally
-and never uploaded (see below).
-
-## Updates
-
-```ini
-auto-update = check
-```
-
-The updater checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`
-at most once every 24 hours. `auto-update = check` opens the release page if a
-newer stable version exists and never replaces binaries silently.
-`auto-update = download` downloads only eligible stable Windows installer
-releases, verifies the architecture-specific SHA256SUMS file plus
-Authenticode, and stages the installer locally. Unsigned installers fail that
-verification and are not staged. Applying the staged installer is
-user-initiated and may prompt for UAC.
-
-## Crash reports
-
-winghostty does not upload crash reports. The app keeps a local directory:
-
-```
-%LOCALAPPDATA%\winghostty\crash
-```
-
-On Windows the Sentry initialization path is a no-op, but winghostty installs a
-local unhandled-exception filter that writes `.dmp` minidumps for process-level
-crash exceptions. Some hard-abort paths may still terminate before Windows can
-produce a dump. The `+crash-report` CLI reads anything that is there:
-
-```powershell
-winghostty +crash-report
-```
-
-Contents, if any, may include sensitive memory from the crashed process;
-review before sharing.
-
-If configuration or saved workspace state prevents a normal launch, start once
-with built-in defaults and no session restore:
-
-```powershell
-winghostty --safe-mode
-```
-
-Create an inspectable, local-only support bundle with redacted defaults:
-
-```powershell
-winghostty +diagnostic-bundle --output=winghostty-diagnostics
-```
-
-Crash dumps are excluded unless `--include-crash-dumps` is supplied. Dumps may
-contain sensitive process memory; review the directory before sharing it.
+Updater verification, crash-report details, and diagnostic bundles are
+documented in **[docs/windows.md](docs/windows.md)**.
 
 ## Build from source
 
-Most users should install from Releases. If you want to build:
-
-**Requirements**
-
-- Windows 10 or 11 on x64 or ARM64
-- **Zig 0.15.x (patch ≥ 2)** — enforced at compile time via
-  `src/build/zig.zig::requireZig`. Newer 0.15 patch releases (`0.15.3`,
-  etc.) are accepted; 0.15.0 / 0.15.1, 0.14.x, and 0.16.x will fail to
-  compile.
-- Visual Studio 2022 (Community is fine) — MSVC toolchain on PATH
-- Git for Windows
-
-The build script additionally rejects building the `win32` app runtime for
-non-Windows targets, returning
-`error.WindowsOnlyAppRuntimeRequiresWindowsTarget`.
-
-**Build**
+Most users should install from Releases. Building needs Windows 10/11 on x64
+or ARM64, **Zig 0.15.x (patch ≥ 2)**, Visual Studio 2022 with the MSVC
+toolchain on PATH, and Git for Windows:
 
 ```powershell
 zig build -Demit-exe=true
 ```
 
-Output: `zig-out\bin\winghostty.exe`.
-
-If Zig cannot reach `deps.files.ghostty.org` directly in your environment,
-seed the Windows build dependency cache first:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/fetch-zig-deps.ps1
-zig build -Demit-exe=true
-```
-
-For a pre-configured developer shell (Visual Studio + Git + Zig cache
-environment variables):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/dev-windows.ps1
-```
-
-Build, test, and runtime notes for contributors are in **[HACKING.md](HACKING.md)**.
-Packaging the installer and portable ZIP yourself is covered in
-**[PACKAGING.md](PACKAGING.md)**.
+Output lands at `zig-out\bin\winghostty.exe`. Toolchain details, dependency
+cache seeding, the pre-configured dev shell, and test commands are in
+**[HACKING.md](HACKING.md)**. Building the installer and portable ZIP
+yourself is covered in **[PACKAGING.md](PACKAGING.md)**.
 
 ## Relationship to Ghostty
 
 winghostty is a fork, not a re-implementation. Upstream is tracked as the
-`upstream` Git remote; the fork relationship is visible in full Git
+`upstream` Git remote, and the fork relationship is visible in full Git
 history.
 
 **Shared with upstream Ghostty**
+
 - `src/terminal/` — VT parsing, screen state, scrollback, search, Kitty
   graphics protocol, OSC handling
 - `src/font/` — font discovery and rasterization (HarfBuzz, FreeType)
@@ -316,13 +169,15 @@ history.
   `src/shell-integration/`, `src/inspector/`, `libghostty-vt`
 
 **New in this fork**
+
 - `src/apprt/win32.zig` — Win32 application runtime
 - `src/apprt/win32_theme.zig` — theme tokens, DWM integration, accent
-  helpers, HC handling (extracted from `win32.zig` in commit `a759eb6`)
+  helpers, high-contrast handling
 - `src/update/github_releases.zig` — updater
 - `dist/windows/` and `scripts/package-windows.ps1` — Windows packaging
 
 **Removed from this fork**
+
 - Upstream `macos/` Xcode project
 - Upstream `src/apprt/gtk/` runtime
 - Flatpak / Snap / Linux desktop packaging
