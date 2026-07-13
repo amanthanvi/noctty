@@ -223,12 +223,49 @@ Assert-TextContract `
     -Context "$testWorkflow :: Remote release copy checks"
 Assert-TextContract `
     -Content (Get-YamlStepText `
+        -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow) `
+        -Name 'Setup Zig' `
+        -Source "$testWorkflow :: windows") `
+    -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
+    -Description 'hosted Windows tests cannot restore failed Zig build caches' `
+    -Context "$testWorkflow :: windows :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlStepText `
+        -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-portable-smoke' -Source $testWorkflow) `
+        -Name 'Setup Zig' `
+        -Source "$testWorkflow :: windows-portable-smoke") `
+    -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
+    -Description 'portable smoke cannot restore failed Zig build caches' `
+    -Context "$testWorkflow :: windows-portable-smoke :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlStepText `
+        -Content (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow) `
+        -Name 'Setup Zig' `
+        -Source "$releaseWorkflow :: windows-release") `
+    -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
+    -Description 'release builds cannot restore failed Zig build caches' `
+    -Context "$releaseWorkflow :: windows-release :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlStepText `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-interactive") `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
+    -Pattern '(?ms)env:\s+ZIG_GLOBAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-global-cache\s+ZIG_LOCAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-local-cache' `
+    -Description 'interactive builds use clean per-job Zig caches' `
+    -Context "$testWorkflow :: windows-interactive"
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
+    -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
+    -Description 'Windows bootstrap preserves caller-provided Zig cache isolation'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'scripts\dev-windows.ps1') `
+    -Pattern '(?s)IsNullOrWhiteSpace\(\$env:ZIG_GLOBAL_CACHE_DIR\).*?IsNullOrWhiteSpace\(\$env:ZIG_LOCAL_CACHE_DIR\)' `
+    -Description 'PowerShell Windows bootstrap preserves caller-provided Zig cache isolation'
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
     -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `

@@ -63,6 +63,8 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          # Failed and cancelled jobs can save incomplete generated files.
+          use-cache: false
 
       - name: Zig version
         run: zig version
@@ -105,6 +107,7 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          use-cache: false
 
       - name: Run portable package CLI smoke
         shell: pwsh
@@ -130,6 +133,9 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11)
     runs-on: [self-hosted, Windows, X64, winghostty-interactive]
     timeout-minutes: 30
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}\zig-global-cache
+      ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}\zig-local-cache
 
     steps:
       - name: Checkout code
