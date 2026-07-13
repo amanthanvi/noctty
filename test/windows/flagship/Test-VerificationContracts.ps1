@@ -91,6 +91,7 @@ Assert-JsonDocument `
 $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
+$accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 Assert-WorkflowContract `
     -Path $releaseWorkflow `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
@@ -107,6 +108,26 @@ Assert-WorkflowContract `
     -Path $testWorkflow `
     -Pattern '(?ms)- name: Remote release copy checks.*?env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
     -Description 'scheduled remote verification authenticates gh'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\[DateTimeOffset\]::TryParse\(' `
+    -Description 'accessibility evidence timestamp is semantically validated'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance\.runner_name -ne \$result\.environment\.runner_name' `
+    -Description 'runner provenance is bound to the interactive result'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance\.runner_name -ne \$interactiveJob\[0\]\.runner_name' `
+    -Description 'runner provenance is bound to the GitHub job'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\$provenance\.run_attempt -ne \[int\]\$run\.run_attempt' `
+    -Description 'runner provenance is bound to the GitHub run attempt'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern '\[string\]\$provenance\.user -match .*SYSTEM' `
+    -Description 'service-account runner provenance is rejected'
 
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `

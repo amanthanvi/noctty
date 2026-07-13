@@ -25,6 +25,14 @@ $evidence = $json | ConvertFrom-Json
 if ($evidence.release_version -ne $Version) {
     throw "Accessibility evidence version '$($evidence.release_version)' does not match '$Version'."
 }
+$testedAt = [DateTimeOffset]::MinValue
+if (-not [DateTimeOffset]::TryParse(
+        [string]$evidence.tested_at,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$testedAt)) {
+    throw "Accessibility evidence tested_at is not a valid ISO 8601 timestamp: '$($evidence.tested_at)'."
+}
 
 $requiredScenarios = @('navigate-tabs', 'navigate-panes', 'read-terminal', 'command-palette', 'settings-edit', 'dismiss-transient-ui')
 $actualScenarios = @($evidence.scenarios | Sort-Object -Unique)
@@ -115,12 +123,18 @@ try {
         $provenance.runner_environment -ne 'self-hosted' -or
         $provenance.input_desktop -ne 'Default' -or
         [string]::IsNullOrWhiteSpace([string]$provenance.runner_name) -or
+        $provenance.runner_name -ne $result.environment.runner_name -or
+        $provenance.runner_name -ne $interactiveJob[0].runner_name -or
+        [string]$provenance.user -match '(?i)(^|\\)SYSTEM$' -or
         [int]$provenance.windows_build -lt 22000 -or
         [int]$provenance.process_session_id -le 0 -or
         [int]$provenance.process_session_id -ne [int]$provenance.active_console_session_id -or
         $provenance.repository -ne 'amanthanvi/winghostty' -or
         $provenance.workflow -ne 'Test' -or
         [string]$provenance.run_id -ne [string]$runId -or
+        [int]$provenance.run_attempt -lt 1 -or
+        [int]$provenance.run_attempt -ne [int]$run.run_attempt -or
+        [int]$provenance.run_attempt -ne [int]$result.workflow_run_attempt -or
         $provenance.commit -ne $evidence.tested_commit) {
         throw "Interactive runner provenance does not satisfy the release contract for run $runId."
     }
