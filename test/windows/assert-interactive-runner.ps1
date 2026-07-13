@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [string] $OutputPath,
-    [version] $MinimumRunnerVersion = '2.327.1'
+    [string] $OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,14 +11,19 @@ if ($env:RUNNER_ARCH -ne 'X64') { throw "Interactive runner architecture must be
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_NAME)) { throw 'RUNNER_NAME is required for provenance.' }
 if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required for runner version validation.' }
 
+$minimumRunnerVersion = [version]'2.327.1'
 $runnerRoot = Split-Path -Parent (Split-Path -Parent $env:RUNNER_TEMP)
 $runnerWorkerPath = Join-Path $runnerRoot 'bin\Runner.Worker.exe'
 if (-not (Test-Path -LiteralPath $runnerWorkerPath -PathType Leaf)) {
     throw "Runner.Worker.exe was not found at the expected runner root: $runnerWorkerPath"
 }
-$runnerVersion = [version](Get-Item -LiteralPath $runnerWorkerPath).VersionInfo.FileVersion
-if ($runnerVersion -lt $MinimumRunnerVersion) {
-    throw "Interactive runner $runnerVersion is older than required version $MinimumRunnerVersion."
+$runnerVersionText = (Get-Item -LiteralPath $runnerWorkerPath).VersionInfo.FileVersion
+[version]$runnerVersion = $null
+if (-not [version]::TryParse($runnerVersionText, [ref]$runnerVersion)) {
+    throw "Runner.Worker.exe has an invalid file version '$runnerVersionText': $runnerWorkerPath"
+}
+if ($runnerVersion -lt $minimumRunnerVersion) {
+    throw "Interactive runner $runnerVersion is older than required version $minimumRunnerVersion."
 }
 
 Add-Type -TypeDefinition @'

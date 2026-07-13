@@ -243,8 +243,12 @@ Assert-WorkflowContract `
     -Description 'service-account runner provenance is rejected'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
-    -Pattern "MinimumRunnerVersion = '2\.327\.1'" `
+    -Pattern "minimumRunnerVersion = \[version\]'2\.327\.1'" `
     -Description 'interactive evidence enforces the upload-artifact runner floor'
+Assert-WorkflowContract `
+    -Path $accessibilityChecker `
+    -Pattern "minimumRunnerVersion = \[version\]'2\.327\.1'" `
+    -Description 'accessibility evidence pins the upload-artifact runner floor'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\$provenanceRunnerVersion -lt \$minimumRunnerVersion' `
