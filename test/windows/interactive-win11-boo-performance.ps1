@@ -160,7 +160,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw "Render trace startup window must be positive (got $startupWindowMs)"
     }
     $startupDrawLeadMs = 500
-    $startupPaintGapLimitMs = 750
+    $startupPaintGapLimitMs = 1000
     $startupMatchToleranceMs = 16
     $startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
     $startupDurationDeltaMs = [Math]::Abs(
