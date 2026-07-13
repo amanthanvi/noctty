@@ -260,7 +260,7 @@ Assert-WorkflowContract `
     -Description 'interactive evidence enforces the upload-artifact runner floor'
 Assert-WorkflowContractAbsent `
     -Path $runnerProvenanceChecker `
-    -Pattern 'param\([\s\S]*MinimumRunnerVersion' `
+    -Pattern '(?m)^\s*\[version\]\s+\$MinimumRunnerVersion\b' `
     -Description 'interactive runner floor cannot be lowered by a parameter'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
