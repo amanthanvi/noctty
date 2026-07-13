@@ -232,6 +232,9 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         if (-not $Run.Process.HasExited -and $lastError -notin @(0, 1400, 1460)) {
             throw "SendMessageTimeoutW timed out or failed for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
         }
+        if (-not $Run.Process.HasExited) {
+            Write-Warning "WM_CLOSE delivery returned status=0 error=$lastError; waiting for winghostty to exit."
+        }
     }
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
