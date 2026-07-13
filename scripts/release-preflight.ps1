@@ -315,7 +315,7 @@ function Assert-WingetArchitectureCoverage {
         ForEach-Object { $_.Groups['architecture'].Value.ToLowerInvariant() } |
         Sort-Object -Unique)
     if (($architectures -join ',') -ne 'arm64,x64') {
-        throw "Latest public WinGet manifest $($latest.Name) must contain x64 and arm64 before a stable release (found: $($architectures -join ', '))."
+        throw "Latest public WinGet manifest $($latest.Name) must contain exactly x64 and arm64 before a stable release (found: $($architectures -join ', '))."
     }
 
     Write-Status -Label 'WinGet architectures' -Value "x64 + arm64 ($($latest.Name))"
