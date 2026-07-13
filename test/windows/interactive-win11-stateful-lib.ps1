@@ -198,7 +198,6 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $processHandle = $Run.Process.Handle
     $Run.Process.Refresh()
     if (-not $Run.Process.HasExited) {
-        $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description 'WM_CLOSE to winghostty'
         $windowProcessId = [uint32]0
         $windowThreadId = [WinghosttyStatefulNative]::GetWindowThreadProcessId($HostHwnd, [ref]$windowProcessId)
         if ($windowThreadId -eq 0 -or $windowProcessId -ne [uint32]$Run.Process.Id) {
@@ -207,6 +206,7 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
                 throw "Refusing WM_CLOSE for hwnd=$HostHwnd because owner pid=$windowProcessId does not match winghostty pid=$($Run.Process.Id)."
             }
         } else {
+            $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description 'WM_CLOSE to winghostty'
             $sendResult = [UIntPtr]::Zero
             [InteractiveWin11MessageNative]::SetLastError($script:InteractiveWin11ErrorSuccess)
             $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutW(
