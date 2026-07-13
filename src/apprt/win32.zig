@@ -233,6 +233,8 @@ const RenderTrace = struct {
 
     fn notePaintDrawDuration(self: *RenderTrace, duration_ms: u64) void {
         if (!self.enabled()) return;
+        // Paint timing is recorded only by the Win32 UI thread, so the max
+        // value and its timestamp cannot be paired across concurrent writers.
         updateMaxAtomicWithTimestamp(
             &self.max_paint_draw_duration_ms,
             &self.max_paint_draw_duration_at_ms,
@@ -282,7 +284,7 @@ const RenderTrace = struct {
             gap_ms,
             elapsed_ms,
         );
-        if (elapsed_ms > startup_window_ms) {
+        if (gapIsSustained(elapsed_ms, gap_ms)) {
             if (sustained) |targets| {
                 updateMaxAtomicWithTimestamp(
                     targets.max_gap_ms,
@@ -292,6 +294,10 @@ const RenderTrace = struct {
                 );
             }
         }
+    }
+
+    fn gapIsSustained(elapsed_ms: u64, gap_ms: u64) bool {
+        return elapsed_ms -| gap_ms >= startup_window_ms;
     }
 
     fn writeSnapshot(self: *const RenderTrace) void {
@@ -2316,6 +2322,13 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
     const max_config_size = 16 * 1024 * 1024;
     if (size > max_config_size) return error.SerializeFailed;
     return @intCast(size);
+}
+
+test "win32 render trace classifies gaps by start time" {
+    try std.testing.expect(!RenderTrace.gapIsSustained(1250, 578));
+    try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
+    try std.testing.expect(RenderTrace.gapIsSustained(1300, 300));
+    try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
 }
 
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
