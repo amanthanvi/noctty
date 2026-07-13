@@ -558,7 +558,8 @@ function Get-InteractiveWin11ProcessExitCode {
     try {
         $Process.Refresh()
         if ($Process.HasExited) {
-            return [int] $Process.ExitCode
+            $managedExitCode = $Process.ExitCode
+            if ($null -ne $managedExitCode) { return [int] $managedExitCode }
         }
     }
     catch {
@@ -574,7 +575,7 @@ function Get-InteractiveWin11ProcessExitCode {
         throw "Process has not exited yet for pid=$($Process.Id)"
     }
 
-    return [int] $nativeExitCode
+    return [BitConverter]::ToInt32([BitConverter]::GetBytes($nativeExitCode), 0)
 }
 
 function Reset-InteractiveWin11Sandbox {

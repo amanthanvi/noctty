@@ -22,10 +22,34 @@ public static class WinghosttyStatefulNative {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
 }
 '@
+}
+
+function Send-StatefulMessage(
+    [IntPtr] $Hwnd,
+    [uint32] $Message,
+    [UIntPtr] $WParam,
+    [IntPtr] $LParam,
+    [string] $Description
+) {
+    $sendResult = [UIntPtr]::Zero
+    $sendStatus = [WinghosttyStatefulNative]::SendMessageTimeoutW(
+        $Hwnd,
+        $Message,
+        $WParam,
+        $LParam,
+        0x0002,
+        5000,
+        [ref] $sendResult
+    )
+    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    if ($sendStatus -eq [IntPtr]::Zero) {
+        throw "SendMessageTimeoutW timed out or failed for $Description hwnd=$Hwnd error=$lastError"
+    }
+    return $sendResult
 }
 
 function Get-StatefulClassName([IntPtr] $Hwnd) {
@@ -83,14 +107,14 @@ function Get-StatefulWindowRect([IntPtr] $Hwnd) {
 }
 
 function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId) {
-    [void][WinghosttyStatefulNative]::SendMessageW($HostHwnd, 0x0111, [UIntPtr]([uint64]$CommandId), [IntPtr]::Zero)
+    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]([uint64]$CommandId)) ([IntPtr]::Zero) "WM_COMMAND id=$CommandId")
 }
 
 function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text) {
     $textPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
     try {
-        $result = [WinghosttyStatefulNative]::SendMessageW($Hwnd, 0x000C, [UIntPtr]::Zero, $textPointer)
-        if ($result -eq [IntPtr]::Zero) { throw "WM_SETTEXT failed for hwnd=$Hwnd" }
+        $result = Send-StatefulMessage $Hwnd 0x000C ([UIntPtr]::Zero) $textPointer 'WM_SETTEXT'
+        if ($result -eq [UIntPtr]::Zero) { throw "WM_SETTEXT failed for hwnd=$Hwnd" }
     }
     finally {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($textPointer)
@@ -98,7 +122,7 @@ function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text
     $enChange = 0x0300
     $controlId = [WinghosttyStatefulNative]::GetDlgCtrlID($Hwnd)
     $command = [uint64]([uint32]$controlId -bor ([uint32]$enChange -shl 16))
-    [void][WinghosttyStatefulNative]::SendMessageW($HostHwnd, 0x0111, [UIntPtr]$command, $Hwnd)
+    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd "WM_COMMAND EN_CHANGE id=$controlId")
 }
 
 function Show-StatefulHost([IntPtr] $HostHwnd) {
@@ -160,14 +184,14 @@ function Wait-StatefulHost($Run, [DateTime] $Deadline) {
 function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId) {
     $button = Get-StatefulChildren $HostHwnd | Where-Object Id -eq $ControlId | Select-Object -First 1
     if ($null -eq $button) { throw "No visible button with control ID $ControlId." }
-    [void][WinghosttyStatefulNative]::SendMessageW($button.Hwnd, 0x00F5, [UIntPtr]::Zero, [IntPtr]::Zero)
+    [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) "BM_CLICK id=$ControlId")
 }
 
 function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd) {
     $list = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
     if ($null -eq $list) { throw 'No visible command-palette list.' }
     $coordinates = [IntPtr](4 -bor (4 -shl 16))
-    [void][WinghosttyStatefulNative]::SendMessageW($list.Hwnd, 0x0201, [UIntPtr]::Zero, $coordinates)
+    [void](Send-StatefulMessage $list.Hwnd 0x0201 ([UIntPtr]::Zero) $coordinates 'WM_LBUTTONDOWN command-palette first row')
 }
 
 function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
@@ -182,6 +206,28 @@ function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
 }
 
 function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
-    [void][WinghosttyStatefulNative]::SendMessageW($HostHwnd, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
+    $processHandle = $Run.Process.Handle
+    $remainingMs = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remainingMs -le 0) { throw 'Deadline elapsed before sending WM_CLOSE to winghostty.' }
+    $sendTimeoutMs = [uint32][Math]::Min([double][uint32]::MaxValue, [Math]::Ceiling($remainingMs))
+    $sendResult = [UIntPtr]::Zero
+    $sendStatus = [WinghosttyStatefulNative]::SendMessageTimeoutW(
+        $HostHwnd,
+        0x0010,
+        [UIntPtr]::Zero,
+        [IntPtr]::Zero,
+        0x0002,
+        $sendTimeoutMs,
+        [ref] $sendResult
+    )
+    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    if ($sendStatus -eq [IntPtr]::Zero) {
+        $Run.Process.Refresh()
+        if (-not $Run.Process.HasExited -and $lastError -notin @(0, 1400, 1460)) {
+            throw "SendMessageTimeoutW timed out or failed for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
+        }
+    }
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+    $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
+    if ($exitCode -ne 0) { throw "winghostty exited after WM_CLOSE with exit code $exitCode" }
 }

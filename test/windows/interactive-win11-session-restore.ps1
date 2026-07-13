@@ -53,6 +53,7 @@ try {
     Invoke-StatefulCommand $hostHwnd 1904; Invoke-StatefulCommand $hostHwnd 1904
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
     Invoke-StatefulButton $hostHwnd 1001
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $hostHwnd $first $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'session-state file' -Condition { Test-Path $statePath }
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
@@ -63,6 +64,7 @@ try {
     $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
     $explicitHost = Wait-StatefulHost $explicit $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $explicitHost $explicit $deadline
     if ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
 
@@ -76,6 +78,7 @@ try {
     if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[1].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[1].active) {
         throw "Restored selected tab mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)"
     }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $restoredHost $second $deadline
 
     [IO.File]::WriteAllText($statePath, '{not valid json', [Text.UTF8Encoding]::new($false))
@@ -88,6 +91,7 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh tab after corrupt state' -Process $third.Process -Condition {
         (Get-StatefulTabCount $freshHost) -eq 1
     }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $freshHost $third $deadline
 }
 finally {
