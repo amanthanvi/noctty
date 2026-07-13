@@ -92,9 +92,29 @@ try {
     }
 }
 finally {
-    $hcRestoreFailed = $hcChanged -and -not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)
-    if ($null -ne $hcMutex) { try { $hcMutex.ReleaseMutex() } catch { }; $hcMutex.Dispose() }
-    foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
-    if ($hcRestoreFailed) { throw 'Failed to restore the original High Contrast setting.' }
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    if ($hcChanged) {
+        try {
+            if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) {
+                [void]$cleanupErrors.Add('Failed to restore the original High Contrast setting.')
+            }
+        }
+        catch {
+            [void]$cleanupErrors.Add("High Contrast restoration threw: $($_.Exception.Message)")
+        }
+    }
+    if ($null -ne $hcMutex) {
+        try { $hcMutex.ReleaseMutex() } catch { [void]$cleanupErrors.Add("High Contrast mutex release failed: $($_.Exception.Message)") }
+        try { $hcMutex.Dispose() } catch { [void]$cleanupErrors.Add("High Contrast mutex disposal failed: $($_.Exception.Message)") }
+    }
+    foreach ($run in $runs) {
+        try {
+            if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process }
+        }
+        catch {
+            [void]$cleanupErrors.Add("winghostty process cleanup failed: $($_.Exception.Message)")
+        }
+    }
+    if ($cleanupErrors.Count -gt 0) { throw "Palette/theme cleanup failed: $($cleanupErrors -join '; ')" }
 }
 Write-Host "interactive-win11 palette-theme validation: PASS (config=$configPath)"
