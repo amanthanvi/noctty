@@ -38,9 +38,26 @@ jobs:
 
       - name: Release copy checks
         shell: pwsh
-        # Keep CI local-only; manual release-copy validation uses -CheckRemoteLatest
-        # to avoid making PR checks depend on GitHub release API availability.
         run: ./scripts/check-release-copy.ps1
+
+      - name: Remote release copy checks
+        if: github.event_name == 'schedule'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
+
+      - name: Install site dependencies
+        shell: pwsh
+        run: npm ci --prefix site
+
+      - name: Deterministic site bundle check
+        shell: pwsh
+        run: ./scripts/check-site-bundle.ps1
+
+      - name: Signing trust policy tests
+        shell: pwsh
+        run: ./scripts/test-signing-trust.ps1
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -122,6 +139,13 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          # Ephemeral retries must start clean. setup-zig saves failed local
+          # caches and otherwise restores the broken build runner on retry.
+          use-cache: false
+
+      - name: Prove interactive runner provenance
+        shell: pwsh
+        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/winghostty-runner-provenance.json"
 
       - name: Run interactive Win11 composite
         shell: pwsh
@@ -146,3 +170,4 @@ jobs:
           path: |
             test/windows/flagship/artifacts/interactive-win11
             ${{ runner.temp }}/winghostty-interactive-win11-*/logs/**
+            ${{ runner.temp }}/winghostty-runner-provenance.json

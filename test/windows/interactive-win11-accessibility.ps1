@@ -37,6 +37,12 @@ public static class WinghosttyAccessibilityNative {
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
 }
 '@
@@ -101,16 +107,54 @@ try {
     )) {
         throw 'Terminal Document does not expose the UIA Text pattern.'
     }
-    try { $document.SetFocus() } catch { }
+    $documentFocusError = $null
+    try { $document.SetFocus() } catch { $documentFocusError = $_.Exception.Message }
     $focusDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    $clickedDocument = $false
     do {
         $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
         if ($null -ne $focused -and $focused.Current.ProcessId -eq $process.Id) { break }
         [void][WinghosttyAccessibilityNative]::SetForegroundWindow($process.MainWindowHandle)
+        if (-not $clickedDocument) {
+            $bounds = $document.Current.BoundingRectangle
+            if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+                $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
+                [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                    $process.MainWindowHandle,
+                    [IntPtr](-1),
+                    0,
+                    0,
+                    0,
+                    0,
+                    $noMoveNoSizeShow
+                )
+                $x = [int][Math]::Round($bounds.Left + ($bounds.Width / 2))
+                $y = [int][Math]::Round($bounds.Top + ($bounds.Height / 2))
+                if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
+                    [WinghosttyAccessibilityNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                    [WinghosttyAccessibilityNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                    [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                        $process.MainWindowHandle,
+                        [IntPtr](-2),
+                        0,
+                        0,
+                        0,
+                        0,
+                        $noMoveNoSizeShow
+                    )
+                    $clickedDocument = $true
+                }
+            }
+        }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $focusDeadline)
     if ($null -eq $focused -or $focused.Current.ProcessId -ne $process.Id) {
-        throw 'UIA focus did not resolve to an element owned by winghostty.'
+        $focusedSummary = if ($null -eq $focused) {
+            '<none>'
+        } else {
+            "pid=$($focused.Current.ProcessId) name='$($focused.Current.Name)'"
+        }
+        throw "UIA focus did not resolve to an element owned by winghostty (focused=$focusedSummary, document_set_focus_error='$documentFocusError', clicked_document=$clickedDocument)."
     }
     if (-not [WinghosttyAccessibilityNative]::PostMessage($process.MainWindowHandle, 0x0111, [UIntPtr]([uint64]1901), [IntPtr]::Zero)) {
         throw "Failed to open command palette: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"

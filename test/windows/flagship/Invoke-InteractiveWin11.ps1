@@ -142,6 +142,9 @@ finally {
             architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
             ci = [bool]$env:CI
             interactive_desktop = $interactiveDesktop
+            runner_name = $(if ($env:RUNNER_NAME) { [string]$env:RUNNER_NAME } else { $null })
+            runner_environment = $(if ($env:RUNNER_ENVIRONMENT) { [string]$env:RUNNER_ENVIRONMENT } else { $null })
+            runner_session_id = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
         }
         measurements = $measurements
         assertions = @([ordered]@{
