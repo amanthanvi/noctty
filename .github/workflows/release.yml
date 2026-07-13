@@ -39,6 +39,7 @@ jobs:
       WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
       WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
       WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
+      WINDOWS_CODESIGN_MIN_VALIDITY_DAYS: ${{ vars.WINDOWS_CODESIGN_MIN_VALIDITY_DAYS }}
 
     steps:
       - name: Checkout code
@@ -201,14 +202,25 @@ jobs:
 
       - name: Release preflight
         env:
+          GH_TOKEN: ${{ github.token }}
           SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
           WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
-        run: >
-          powershell -ExecutionPolicy Bypass -File scripts/release-preflight.ps1
-          -Version ${{ steps.meta.outputs.version }}
-          -RequireSigning
-          -RequirePackageManagers
+        run: |
+          $preflightArgs = @(
+            '-Version'
+            $env:RELEASE_VERSION
+            '-RequireSigning'
+            '-RequirePackageManagers'
+          )
+          if ($env:RELEASE_PRERELEASE -ne 'true') {
+            ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $preflightArgs += '-RequireAccessibilityEvidence'
+          }
+          ./scripts/release-preflight.ps1 @preflightArgs
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -391,6 +403,14 @@ jobs:
             & gh release upload $tag @assets --clobber
           }
 
+      - name: Verify published release copy and assets
+        if: steps.meta.outputs.prerelease != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
+
       - name: Publish Scoop manifest
         shell: pwsh
         env:
@@ -543,17 +563,18 @@ jobs:
           Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
 
           # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
-          $installerUrls = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-          if ($installerUrls.Count -eq 0) {
-            $installerUrls = @($metadata.winget.installerUrls | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+          $installerUrlArgs = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+          $installerArchitectures = @($installerUrlArgs | ForEach-Object {
+            if ($_ -cnotmatch '\|(?<architecture>x64|arm64)$') {
+              throw "WinGet installer URL must end with an explicit |x64 or |arm64 architecture: $_"
+            }
+            $Matches.architecture
+          })
+          $expectedInstallerArchitectures = @('arm64', 'x64')
+          if ($installerUrlArgs.Count -ne 2 -or
+              (($installerArchitectures | Sort-Object -Unique) -join ',') -ne ($expectedInstallerArchitectures -join ',')) {
+            throw "WinGet publishing requires exactly one x64 and one arm64 installer URL."
           }
-          if ($installerUrls.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$metadata.winget.installerUrl)) {
-            $installerUrls = @([string]$metadata.winget.installerUrl)
-          }
-          if ($installerUrls.Count -eq 0) {
-            throw "No WinGet installer URLs were found in release metadata."
-          }
-          $installerUrlArgs = @($installerUrls | ForEach-Object { [string]$_ })
 
           function Invoke-WinGetCreateUpdate {
             param([string[]]$InstallerUrlArgs)
@@ -575,15 +596,6 @@ jobs:
           }
 
           $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
-          if ($result.ExitCode -ne 0 -and
-              $installerUrlArgs.Count -gt 1 -and
-              $result.Output -match "same number of installer URLs" -and
-              -not [string]::IsNullOrWhiteSpace([string]$metadata.winget.installerUrl)) {
-            Write-Host "WinGet update does not support increasing installer URL count for this package yet; retrying with the primary installer URL."
-            $installerUrlArgs = @([string]$metadata.winget.installerUrl)
-            $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
-          }
-
           if ($result.ExitCode -ne 0) {
             throw "wingetcreate update failed with exit code $($result.ExitCode)"
           }

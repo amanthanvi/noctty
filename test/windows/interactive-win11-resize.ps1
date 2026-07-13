@@ -58,6 +58,9 @@ public static class WinghosttyResizeWin32 {
     public static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UpdateWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
@@ -262,6 +265,16 @@ function Show-ResizeHarnessWindow {
     )
 
     [void] [WinghosttyResizeWin32]::ShowWindow($Hwnd, $showWindowRestore)
+    $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
+    [void] [WinghosttyResizeWin32]::SetWindowPos(
+        $Hwnd,
+        [IntPtr](-1),
+        0,
+        0,
+        0,
+        0,
+        $noMoveNoSizeShow
+    )
     [void] [WinghosttyResizeWin32]::SetForegroundWindow($Hwnd)
 }
 

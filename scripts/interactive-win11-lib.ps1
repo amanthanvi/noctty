@@ -428,7 +428,13 @@ function Stop-InteractiveWin11Process {
     )
 
     if (-not $Process.HasExited) {
-        & taskkill.exe /PID $Process.Id /T /F *> $null
+        $taskkillError = $null
+        try {
+            & taskkill.exe /PID $Process.Id /T /F *> $null
+        }
+        catch {
+            $taskkillError = $_.Exception.Message
+        }
         try {
             $Process.Refresh()
         }
@@ -436,10 +442,17 @@ function Stop-InteractiveWin11Process {
             Write-Warning "Process refresh failed during interactive Win11 cleanup: $($_.Exception.Message)"
         }
         if (-not $Process.HasExited) {
-            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+            try {
+                Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+            }
+            catch {
+                throw "Failed to stop interactive Win11 process $($Process.Id) (taskkill='$taskkillError', Stop-Process='$($_.Exception.Message)')."
+            }
         }
     }
-    $Process.WaitForExit()
+    if (-not $Process.WaitForExit(5000)) {
+        throw "Interactive Win11 process $($Process.Id) did not exit within 5 seconds."
+    }
 }
 
 function Test-InteractiveWin11InputNewerThanBinary {

@@ -8,9 +8,8 @@
     "doctor": "react-doctor . --yes",
     "doctor:score": "react-doctor . --score --yes"
   },
-  "dependencies": {},
   "devDependencies": {
-    "esbuild": "0.28.0",
+    "esbuild": "0.28.1",
     "react": "18.3.1",
     "react-doctor": "0.2.13",
     "react-dom": "18.3.1"

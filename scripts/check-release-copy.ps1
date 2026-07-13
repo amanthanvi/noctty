@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [switch]$CheckRemoteLatest
+    [switch]$CheckRemoteLatest,
+
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$ExpectedVersion
 )
 
 $ErrorActionPreference = "Stop"
@@ -189,6 +192,9 @@ foreach ($sitePath in @("site/components/terminal.jsx", "site/bundle.js")) {
 }
 
 if ($latestVersion) {
+    if ($ExpectedVersion -and $latestVersion -ne $ExpectedVersion) {
+        Add-Failure "README.md: latest stable release is $latestVersion; expected $ExpectedVersion."
+    }
     foreach ($arch in $architectures) {
         foreach ($kind in @("setup", "portable", "checksums")) {
             $artifactName = New-WindowsPackageArtifactName -Version $latestVersion -Architecture $arch -Kind $kind
@@ -203,6 +209,7 @@ if ($latestVersion) {
     Require-Regex -RelativePath "site/components/hero/version-chip-color.jsx" -Pattern "DEFAULT_WG_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
     Require-Regex -RelativePath "site/components/terminal.jsx" -Pattern "WG_VERSION\s*=\s*window\.WG_VERSION\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
     Require-Regex -RelativePath "site/bundle.js" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "Generated site bundle should contain the current README release version."
+    Require-Regex -RelativePath "docs/getting-started.md" -Pattern ('current stable release is\s+`?' + $escapedVersion + '`?(?![\d.])') -Reason "Getting-started stable version should match README."
 }
 
 if ($CheckRemoteLatest) {
@@ -268,3 +275,4 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host "Release copy checks passed." -ForegroundColor Green
+$global:LASTEXITCODE = 0
