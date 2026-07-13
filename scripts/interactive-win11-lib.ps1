@@ -128,6 +128,7 @@ using System;
 using System.Runtime.InteropServices;
 public static class InteractiveWin11MessageNativeV2 {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", SetLastError=true)] private static extern bool PostMessageW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
     [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     public static uint GetWindowThreadProcessIdWithError(IntPtr hwnd, out uint processId, out int lastError) {
         SetLastError(0);
@@ -140,6 +141,12 @@ public static class InteractiveWin11MessageNativeV2 {
     public static IntPtr SendMessageTimeoutWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result, out int lastError) {
         SetLastError(0);
         IntPtr status = SendMessageTimeoutW(hwnd, message, wparam, lparam, flags, timeout, out result);
+        lastError = Marshal.GetLastWin32Error();
+        return status;
+    }
+    public static bool PostMessageWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, out int lastError) {
+        SetLastError(0);
+        bool status = PostMessageW(hwnd, message, wparam, lparam);
         lastError = Marshal.GetLastWin32Error();
         return status;
     }
@@ -236,6 +243,39 @@ function Invoke-InteractiveWin11Message {
     }
 
     return $sendResult
+}
+
+function Invoke-InteractiveWin11PostMessage {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [uint32] $Message,
+        [UIntPtr] $WParam = [UIntPtr]::Zero,
+        [IntPtr] $LParam = [IntPtr]::Zero,
+        [Parameter(Mandatory)] [string] $Description,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+    )
+
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        throw "Refusing to post $Description because winghostty already exited (exit code $($Process.ExitCode))."
+    }
+
+    $windowProcessId = [uint32]0
+    $windowLastError = 0
+    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
+    if ($windowThreadId -eq 0) {
+        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
+        throw "Refusing to post $Description to invalid hwnd=$Hwnd $detail."
+    }
+    if ($windowProcessId -ne [uint32]$Process.Id) {
+        throw "Refusing to post $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
+    }
+
+    $lastError = 0
+    if (-not [InteractiveWin11MessageNativeV2]::PostMessageWithError($Hwnd, $Message, $WParam, $LParam, [ref] $lastError)) {
+        $detail = if ($lastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $lastError" }
+        throw "PostMessageW failed for $Description hwnd=$Hwnd $detail."
+    }
 }
 
 function Get-InteractiveWin11LaunchArguments {

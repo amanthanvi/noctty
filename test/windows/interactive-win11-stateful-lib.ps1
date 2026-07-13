@@ -173,6 +173,15 @@ function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId, [DateTime] 
     [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) $Deadline $Process "BM_CLICK id=$ControlId")
 }
 
+function Invoke-StatefulPostedCommand([IntPtr]$Hwnd, [int]$Id, [System.Diagnostics.Process]$Process) {
+    Invoke-InteractiveWin11PostMessage `
+        -Hwnd $Hwnd `
+        -Message 0x0111 `
+        -WParam ([UIntPtr]::new([uint64]$Id)) `
+        -Description "WM_COMMAND id=$Id" `
+        -Process $Process
+}
+
 function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
     $list = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
     if ($null -eq $list) { throw 'No visible command-palette list.' }

@@ -1,3 +1,5 @@
+#requires -Version 7.1
+
 [CmdletBinding()]
 param()
 
@@ -116,14 +118,33 @@ function Get-PowerShellBlockText {
         [ref]$errors
     )
     if ($errors.Count -ne 0) { throw "PowerShell contract source does not parse: $($errors[0].Message)" }
-    $block = $ast.FindAll({
+    $blocks = @($ast.FindAll({
         param($node)
         ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
-            $node -is [System.Management.Automation.Language.IfStatementAst]) -and
-        $node.Extent.Text -match $HeaderPattern
-    }, $true) | Sort-Object { $_.Extent.Text.Length } | Select-Object -First 1
-    if ($null -eq $block) { throw "PowerShell block not found: $HeaderPattern" }
-    $block.Extent.Text
+            $node -is [System.Management.Automation.Language.IfStatementAst] -or
+            $node -is [System.Management.Automation.Language.ForEachStatementAst]) -and
+            $node.Extent.Text -match $HeaderPattern
+    }, $true))
+    if ($blocks.Count -ne 1) { throw "Expected exactly one PowerShell block for '$HeaderPattern'; found $($blocks.Count)." }
+    $blocks[0].Extent.Text
+}
+
+function Test-DirectStatementBlockChild {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.StatementBlockAst] $StatementBlock
+    )
+
+    $ancestor = $Node.Parent
+    while ($null -ne $ancestor -and $ancestor -isnot [System.Management.Automation.Language.StatementBlockAst]) {
+        if ($ancestor -isnot [System.Management.Automation.Language.PipelineAst] -and
+            $ancestor -isnot [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $ancestor -isnot [System.Management.Automation.Language.CommandExpressionAst]) {
+            return $false
+        }
+        $ancestor = $ancestor.Parent
+    }
+    [object]::ReferenceEquals($ancestor, $StatementBlock)
 }
 
 $stepBoundaryProbe = @'
@@ -196,11 +217,432 @@ $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.ym
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
+$sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
+$sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
+$sessionRestoreTabSeedLoop = Get-PowerShellBlockText `
+    -Content $sessionRestoreHarnessText `
+    -HeaderPattern '^foreach \(\$targetTabCount in 2\.\.3\)'
+$sessionLoopTokens = $null
+$sessionLoopErrors = $null
+$sessionLoopAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $sessionRestoreTabSeedLoop,
+    [ref]$sessionLoopTokens,
+    [ref]$sessionLoopErrors
+)
+if ($sessionLoopErrors.Count -ne 0) { throw "Session restore tab-seed loop does not parse: $($sessionLoopErrors[0].Message)" }
+$sessionLoopNodes = @($sessionLoopAst.FindAll({ param($node) $true }, $true))
+$sessionDeadlineNodes = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $_.Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)'
+})
+$sessionCommandNodes = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.CommandAst] -and
+    $_.Extent.Text.Trim() -eq 'Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process'
+})
+$sessionWaitNodes = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.CommandAst] -and
+    $_.Extent.Text.Trim() -match '(?s)^Wait-InteractiveWin11Until -Deadline \$deadline -Description "live tab count \$targetTabCount" -Process \$first\.Process -Condition \{\s*\(Get-StatefulTabCount \$hostHwnd\) -eq \$targetTabCount\s*\}$'
+})
+$sessionBarrierNodes = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $_.Extent.Text.Trim() -eq '(Get-StatefulTabCount $hostHwnd) -eq $targetTabCount'
+})
+$sessionReadyNodes = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.CommandAst] -and
+    $_.Extent.Text.Trim() -eq 'Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description "live tab $targetTabCount readiness barrier" -Process $first.Process'
+})
+if ($sessionDeadlineNodes.Count -ne 1 -or $sessionCommandNodes.Count -ne 1 -or
+    $sessionWaitNodes.Count -ne 1 -or $sessionBarrierNodes.Count -ne 1 -or
+    $sessionReadyNodes.Count -ne 1) {
+    throw 'Session restore tab-seed loop must contain one exact deadline, send, count wait, equality barrier, and pump-readiness barrier per iteration.'
+}
+$sessionParsedSeedLoops = @($sessionLoopNodes | Where-Object {
+    $_ -is [System.Management.Automation.Language.ForEachStatementAst] -and
+    $_.Extent.Text -match '^foreach \(\$targetTabCount in 2\.\.3\)'
+})
+if ($sessionParsedSeedLoops.Count -ne 1 -or $sessionParsedSeedLoops[0].Body.Statements.Count -ne 4) {
+    throw 'Session restore tab-seed contract must parse to one loop containing exactly four executable statements.'
+}
+foreach ($node in @($sessionDeadlineNodes[0], $sessionCommandNodes[0], $sessionWaitNodes[0], $sessionReadyNodes[0])) {
+    if (-not (Test-DirectStatementBlockChild -Node $node -StatementBlock $sessionParsedSeedLoops[0].Body)) {
+        throw 'Session restore tab-seed operations must be direct, executable statements in the loop body.'
+    }
+}
+$sessionSeedOffsets = @(
+    $sessionDeadlineNodes[0].Extent.StartOffset,
+    $sessionCommandNodes[0].Extent.StartOffset,
+    $sessionWaitNodes[0].Extent.StartOffset,
+    $sessionBarrierNodes[0].Extent.StartOffset,
+    $sessionReadyNodes[0].Extent.StartOffset
+)
+for ($i = 1; $i -lt $sessionSeedOffsets.Count; $i++) {
+    if ($sessionSeedOffsets[$i - 1] -ge $sessionSeedOffsets[$i]) {
+        throw 'Session restore tab-seed operations are not in fail-closed causal order.'
+    }
+}
+$sessionHarnessTokens = $null
+$sessionHarnessErrors = $null
+$sessionHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $sessionRestoreHarnessText,
+    [ref]$sessionHarnessTokens,
+    [ref]$sessionHarnessErrors
+)
+if ($sessionHarnessErrors.Count -ne 0) { throw "Session restore harness does not parse: $($sessionHarnessErrors[0].Message)" }
+$sessionMainTries = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.TryStatementAst] -and
+        $node.Parent -is [System.Management.Automation.Language.NamedBlockAst]
+}, $true))
+$sessionSeedLoops = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+        $node.Extent.Text -match '^foreach \(\$targetTabCount in 2\.\.3\)'
+}, $true))
+if ($sessionMainTries.Count -ne 1 -or $sessionSeedLoops.Count -ne 1 -or
+    -not (Test-DirectStatementBlockChild -Node $sessionSeedLoops[0] -StatementBlock $sessionMainTries[0].Body)) {
+    throw 'Session restore tab seeding must be one direct, executable loop in the main try body.'
+}
+$sessionBurstCommands = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process'
+}, $true))
+$sessionExplicitStarts = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq "Start-StatefulApp `$layout `$exe `$repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k')"
+}, $true))
+$sessionBurstWaits = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq "Wait-InteractiveWin11Until -Deadline `$deadline -Description 'asynchronous burst-created tabs' -Process `$explicit.Process -Condition { (Get-StatefulTabCount `$explicitHost) -eq 3 }"
+}, $true))
+$sessionBurstReady = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq "Invoke-InteractiveWin11Message -Hwnd `$explicitHost -Message 0 -Deadline `$deadline -Description 'asynchronous tab burst readiness barrier' -Process `$explicit.Process"
+}, $true))
+$sessionExplicitCloses = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Close-StatefulHost $explicitHost $explicit $deadline'
+}, $true))
+$sessionExactDeadlines = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)'
+}, $true))
+$sessionInvariantLoops = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+        $node.Parent -is [System.Management.Automation.Language.NamedBlockAst] -and
+        $node.Extent.Text.Trim() -match '(?s)^foreach \(\$run in \$runs\) \{\s*if \(Select-String -LiteralPath \$run\.Stderr -SimpleMatch ''shell/native invariant failed'' -Quiet\) \{\s*throw "Shell/native invariant failure reported by \$\(\$run\.Stderr\)\."\s*\}\s*\}$'
+}, $true))
+if ($sessionExplicitStarts.Count -ne 1 -or $sessionBurstCommands.Count -ne 2 -or
+    $sessionBurstWaits.Count -ne 1 -or $sessionBurstReady.Count -ne 1 -or
+    $sessionExplicitCloses.Count -ne 1 -or $sessionInvariantLoops.Count -ne 1) {
+    throw 'Session restore validation must preserve the explicit-process burst phase, its exact-count/pump barriers, and invariant-log rejection.'
+}
+$sessionBurstDeadlines = @($sessionExactDeadlines | Where-Object {
+    (Test-DirectStatementBlockChild -Node $_ -StatementBlock $sessionMainTries[0].Body) -and
+    $_.Extent.StartOffset -gt $sessionBurstCommands[1].Extent.EndOffset -and
+    $_.Extent.EndOffset -lt $sessionBurstWaits[0].Extent.StartOffset
+})
+$sessionCloseDeadlines = @($sessionExactDeadlines | Where-Object {
+    (Test-DirectStatementBlockChild -Node $_ -StatementBlock $sessionMainTries[0].Body) -and
+    $_.Extent.StartOffset -gt $sessionBurstReady[0].Extent.EndOffset -and
+    $_.Extent.EndOffset -lt $sessionExplicitCloses[0].Extent.StartOffset
+})
+if ($sessionBurstDeadlines.Count -ne 1 -or $sessionCloseDeadlines.Count -ne 1) {
+    throw 'Session restore asynchronous burst and close phases must each receive one fresh exact deadline.'
+}
+$sessionDirectBurstNodes = @(
+    $sessionExplicitStarts[0],
+    $sessionBurstCommands[0],
+    $sessionBurstCommands[1],
+    $sessionBurstDeadlines[0],
+    $sessionBurstWaits[0],
+    $sessionBurstReady[0],
+    $sessionCloseDeadlines[0],
+    $sessionExplicitCloses[0]
+)
+foreach ($node in $sessionDirectBurstNodes) {
+    if (-not (Test-DirectStatementBlockChild -Node $node -StatementBlock $sessionMainTries[0].Body)) {
+        throw 'Session restore asynchronous burst operations must be direct, executable statements in the main try body.'
+    }
+}
+$sessionInvariantIfs = @($sessionInvariantLoops[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst]
+}, $true))
+$sessionInvariantThrows = @($sessionInvariantLoops[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ThrowStatementAst] -and
+        $node.Extent.Text.Trim() -eq 'throw "Shell/native invariant failure reported by $($run.Stderr)."'
+}, $true))
+$sessionPassCommands = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.Extent.Text.Trim() -eq 'Write-Host "interactive-win11 session-restore validation: PASS (state=$statePath)"'
+}, $true))
+if ($sessionPassCommands.Count -ne 1) {
+    throw 'Session restore story must contain one exact PASS sentinel.'
+}
+$sessionBootstrapIfs = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(-not \$env:WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED\)'
+}, $true))
+if ($sessionBootstrapIfs.Count -ne 1) {
+    throw 'Session restore story must contain one exact bootstrap guard.'
+}
+$sessionSnapshotFunctions = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-SessionAutomationSnapshot' -and
+        $node.Extent.Text -match '^function Get-SessionAutomationSnapshot\(\[string\]\$Name, \[DateTime\]\$Deadline\)'
+}, $true))
+if ($sessionSnapshotFunctions.Count -ne 1) {
+    throw 'Session restore story must contain one exact automation snapshot helper.'
+}
+$sessionSnapshotRetryLoops = @($sessionSnapshotFunctions[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+        $node.Extent.Text -match '^foreach \(\$attempt in 1\.\.3\)'
+}, $true))
+$sessionSnapshotWaitIfs = @($sessionSnapshotFunctions[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(-not \$query\.WaitForExit\(\$remainingMs\)\)'
+}, $true))
+$sessionSnapshotOutputIfs = @($sessionSnapshotFunctions[0].FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(\(Test-Path \$out\) -and \(Get-Item \$out\)\.Length -gt 0\)'
+}, $true))
+if ($sessionSnapshotRetryLoops.Count -ne 1 -or $sessionSnapshotWaitIfs.Count -ne 1 -or
+    $sessionSnapshotOutputIfs.Count -ne 1 -or
+    -not [object]::ReferenceEquals($sessionSnapshotRetryLoops[0].Parent, $sessionSnapshotFunctions[0].Body.EndBlock) -or
+    -not (Test-DirectStatementBlockChild -Node $sessionSnapshotWaitIfs[0] -StatementBlock $sessionSnapshotRetryLoops[0].Body) -or
+    -not (Test-DirectStatementBlockChild -Node $sessionSnapshotOutputIfs[0] -StatementBlock $sessionSnapshotRetryLoops[0].Body)) {
+    throw 'Session restore automation snapshot control flow must remain directly inside one retry loop.'
+}
+$sessionSnapshotFunctionStatements = @($sessionSnapshotFunctions[0].Body.EndBlock.Statements)
+if ($sessionSnapshotFunctionStatements.Count -ne 5 -or
+    $sessionSnapshotFunctionStatements[0].Extent.Text.Trim() -ne '$cli = Join-Path (Split-Path -Parent $exe) ''winghostty.com''' -or
+    $sessionSnapshotFunctionStatements[1].Extent.Text.Trim() -ne 'if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }' -or
+    $sessionSnapshotFunctionStatements[2].Extent.Text.Trim() -ne '$lastError = ''''' -or
+    -not [object]::ReferenceEquals($sessionSnapshotFunctionStatements[3], $sessionSnapshotRetryLoops[0]) -or
+    $sessionSnapshotFunctionStatements[4].Extent.Text.Trim() -ne 'throw "Session automation query failed after three attempts: $lastError"') {
+    throw 'Session restore automation snapshot helper setup, retry, and terminal failure are not in causal order.'
+}
+$sessionSnapshotLoopStatements = @($sessionSnapshotRetryLoops[0].Body.Statements)
+$sessionSnapshotCausalPrefix = @(
+    '$out = Join-Path $layout.Logs "$Name-$attempt.json"',
+    '$err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"',
+    '$query = Start-Process -FilePath $cli -ArgumentList @(''+list-windows'', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru',
+    '$remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)'
+)
+if ($sessionSnapshotLoopStatements.Count -lt 7) {
+    throw 'Session restore automation snapshot retry loop is missing causal statements.'
+}
+for ($i = 0; $i -lt $sessionSnapshotCausalPrefix.Count; $i++) {
+    if ($sessionSnapshotLoopStatements[$i].Extent.Text.Trim() -ne $sessionSnapshotCausalPrefix[$i]) {
+        throw 'Session restore automation snapshot path, launch, and deadline statements are not in causal order.'
+    }
+}
+if (-not [object]::ReferenceEquals($sessionSnapshotLoopStatements[4], $sessionSnapshotWaitIfs[0]) -or
+    $sessionSnapshotLoopStatements[5].Extent.Text.Trim() -ne '$query.Refresh()' -or
+    -not [object]::ReferenceEquals($sessionSnapshotLoopStatements[6], $sessionSnapshotOutputIfs[0])) {
+    throw 'Session restore automation snapshot must wait, refresh, then inspect fresh output.'
+}
+$sessionRunsAssignments = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$runs' -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true))
+$sessionInstanceClassAssignments = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$instanceClass = "winghostty-interactive-$($layout.SandboxId)"'
+}, $true))
+$sessionTopLevelStatements = @($sessionHarnessAst.EndBlock.Statements)
+$sessionRunsInitializationIndex = -1
+$sessionInstanceClassIndex = -1
+$sessionSnapshotFunctionIndex = -1
+$sessionMainTryIndex = -1
+$sessionInvariantIndex = -1
+$sessionPassIndex = -1
+for ($i = 0; $i -lt $sessionTopLevelStatements.Count; $i++) {
+    if ($sessionRunsAssignments.Count -eq 1 -and [object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionRunsAssignments[0])) { $sessionRunsInitializationIndex = $i }
+    if ($sessionInstanceClassAssignments.Count -eq 1 -and [object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionInstanceClassAssignments[0])) { $sessionInstanceClassIndex = $i }
+    if ([object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionSnapshotFunctions[0])) { $sessionSnapshotFunctionIndex = $i }
+    if ([object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionMainTries[0])) { $sessionMainTryIndex = $i }
+    if ([object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionInvariantLoops[0])) { $sessionInvariantIndex = $i }
+    if ([object]::ReferenceEquals($sessionTopLevelStatements[$i], $sessionPassCommands[0].Parent)) { $sessionPassIndex = $i }
+}
+$sessionControlTransfers = @($sessionHarnessAst.FindAll({
+    param($node)
+    ($node -is [System.Management.Automation.Language.ReturnStatementAst] -or
+        $node -is [System.Management.Automation.Language.BreakStatementAst] -or
+        $node -is [System.Management.Automation.Language.ContinueStatementAst] -or
+        $node -is [System.Management.Automation.Language.ExitStatementAst]) -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true))
+$sessionFunctionDefinitions = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true))
+$sessionRunsInvocations = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Expression.Extent.Text -eq '$runs' -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true) | Sort-Object { $_.Extent.StartOffset })
+$sessionExpectedRunsInvocations = @(
+    '$runs.Add($first)',
+    '$runs.Add($explicit)',
+    '$runs.Add($second)',
+    '$runs.Add($third)'
+)
+$sessionExpectedStartAssignments = @(
+    '$first = Start-StatefulApp $layout $exe $repoRoot ''session-save'' @(''--single-instance=true'')',
+    '$explicit = Start-StatefulApp $layout $exe $repoRoot ''session-explicit-command'' @(''-e'', ''cmd.exe'', ''/k'')',
+    '$second = Start-StatefulApp $layout $exe $repoRoot ''session-restore'' @(''--single-instance=true'')',
+    '$third = Start-StatefulApp $layout $exe $repoRoot ''session-corrupt'''
+)
+$sessionStartAssignments = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -in $sessionExpectedStartAssignments
+}, $true) | Sort-Object { $_.Extent.StartOffset })
+$sessionAllStartCommands = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Start-StatefulApp' -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true) | Sort-Object { $_.Extent.StartOffset })
+$sessionEapAssignments = @($sessionHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$ErrorActionPreference' -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true))
+$sessionForbiddenTermination = @($sessionHarnessAst.FindAll({
+    param($node)
+    (($node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $node.Expression.TypeName.FullName -in @('Environment', 'System.Environment') -and
+            $node.Member.Extent.Text -eq 'Exit') -or
+        ($node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -match '(^|\\)(Stop-Process|taskkill(?:\.exe)?|Invoke-Expression|iex)$')) -and
+        $node.Extent.EndOffset -le $sessionPassCommands[0].Extent.EndOffset
+}, $true))
+$sessionBootstrapBody = $sessionBootstrapIfs[0].Clauses[0].Item2
+$sessionSnapshotWaitBody = $sessionSnapshotWaitIfs[0].Clauses[0].Item2
+$sessionSnapshotOutputBody = $sessionSnapshotOutputIfs[0].Clauses[0].Item2
+$sessionBootstrapExits = @($sessionControlTransfers | Where-Object {
+    $_ -is [System.Management.Automation.Language.ExitStatementAst] -and
+    $_.Extent.Text.Trim() -eq 'exit $code' -and
+    [object]::ReferenceEquals($_.Parent, $sessionBootstrapBody) -and
+    [object]::ReferenceEquals($_, $sessionBootstrapBody.Statements[-1])
+})
+$sessionSnapshotContinues = @($sessionControlTransfers | Where-Object {
+    $_ -is [System.Management.Automation.Language.ContinueStatementAst] -and
+    $_.Extent.Text.Trim() -eq 'continue' -and
+    [object]::ReferenceEquals($_.Parent, $sessionSnapshotWaitBody) -and
+    [object]::ReferenceEquals($_, $sessionSnapshotWaitBody.Statements[-1])
+})
+$sessionSnapshotReturns = @($sessionControlTransfers | Where-Object {
+    $_ -is [System.Management.Automation.Language.ReturnStatementAst] -and
+    $_.Extent.Text.Trim() -eq 'return Get-Content $out -Raw | ConvertFrom-Json' -and
+    $sessionSnapshotOutputBody.Statements.Count -eq 1 -and
+    [object]::ReferenceEquals($_.Parent, $sessionSnapshotOutputBody) -and
+    [object]::ReferenceEquals($_, $sessionSnapshotOutputBody.Statements[0])
+})
+if ($sessionRunsInvocations.Count -eq $sessionExpectedRunsInvocations.Count) {
+    for ($i = 0; $i -lt $sessionExpectedRunsInvocations.Count; $i++) {
+        if ($sessionRunsInvocations[$i].Extent.Text.Trim() -ne $sessionExpectedRunsInvocations[$i]) {
+            throw 'Session restore invariant evidence set was mutated or reordered.'
+        }
+    }
+}
+if ($sessionStartAssignments.Count -eq $sessionExpectedStartAssignments.Count -and
+    $sessionRunsInvocations.Count -eq $sessionExpectedRunsInvocations.Count -and
+    $sessionAllStartCommands.Count -eq $sessionExpectedStartAssignments.Count) {
+    $sessionMainTryStatements = @($sessionMainTries[0].Body.Statements)
+    for ($i = 0; $i -lt $sessionExpectedStartAssignments.Count; $i++) {
+        if ($sessionStartAssignments[$i].Extent.Text.Trim() -ne $sessionExpectedStartAssignments[$i] -or
+            -not [object]::ReferenceEquals($sessionAllStartCommands[$i].Parent.Parent, $sessionStartAssignments[$i]) -or
+            -not (Test-DirectStatementBlockChild -Node $sessionStartAssignments[$i] -StatementBlock $sessionMainTries[0].Body) -or
+            -not (Test-DirectStatementBlockChild -Node $sessionRunsInvocations[$i] -StatementBlock $sessionMainTries[0].Body)) {
+            throw 'Session restore process launch and evidence registration must be direct main-story statements.'
+        }
+        $startIndex = -1
+        $addIndex = -1
+        for ($statementIndex = 0; $statementIndex -lt $sessionMainTryStatements.Count; $statementIndex++) {
+            if ([object]::ReferenceEquals($sessionMainTryStatements[$statementIndex], $sessionStartAssignments[$i])) { $startIndex = $statementIndex }
+            if ([object]::ReferenceEquals($sessionMainTryStatements[$statementIndex], $sessionRunsInvocations[$i].Parent.Parent)) { $addIndex = $statementIndex }
+        }
+        if ($addIndex -ne ($startIndex + 1)) {
+            throw 'Session restore must register each launched process immediately for cleanup and invariant scanning.'
+        }
+    }
+}
+if ($sessionInvariantIfs.Count -ne 1 -or $sessionInvariantThrows.Count -ne 1 -or
+    $sessionFunctionDefinitions.Count -ne 1 -or
+    -not [object]::ReferenceEquals($sessionFunctionDefinitions[0], $sessionSnapshotFunctions[0]) -or
+    $sessionRunsAssignments.Count -ne 1 -or
+    $sessionRunsAssignments[0].Extent.Text.Trim() -ne '$runs = [Collections.Generic.List[object]]::new()' -or
+    $sessionInstanceClassAssignments.Count -ne 1 -or
+    $sessionRunsInvocations.Count -ne $sessionExpectedRunsInvocations.Count -or
+    $sessionStartAssignments.Count -ne $sessionExpectedStartAssignments.Count -or
+    $sessionAllStartCommands.Count -ne $sessionExpectedStartAssignments.Count -or
+    $sessionEapAssignments.Count -ne 1 -or
+    $sessionEapAssignments[0].Extent.Text.Trim() -ne '$ErrorActionPreference = ''Stop''' -or
+    -not [object]::ReferenceEquals($sessionEapAssignments[0], $sessionTopLevelStatements[0]) -or
+    $sessionForbiddenTermination.Count -ne 0 -or
+    $sessionControlTransfers.Count -ne 3 -or $sessionBootstrapExits.Count -ne 1 -or
+    $sessionSnapshotContinues.Count -ne 1 -or $sessionSnapshotReturns.Count -ne 1 -or
+    $sessionInstanceClassIndex -ne ($sessionRunsInitializationIndex + 1) -or
+    $sessionSnapshotFunctionIndex -ne ($sessionInstanceClassIndex + 1) -or
+    $sessionMainTryIndex -ne ($sessionSnapshotFunctionIndex + 1) -or
+    $sessionInvariantIndex -ne ($sessionMainTryIndex + 1) -or
+    $sessionPassIndex -ne ($sessionInvariantIndex + 1) -or
+    $sessionPassIndex -ne ($sessionTopLevelStatements.Count - 1) -or
+    $sessionInvariantLoops[0].Extent.StartOffset -le $sessionMainTries[0].Extent.EndOffset -or
+    $sessionInvariantLoops[0].Extent.EndOffset -ge $sessionPassCommands[0].Extent.StartOffset) {
+    throw 'Session restore story must reach invariant rejection after cleanup and before the PASS sentinel without an early control transfer.'
+}
+$sessionBurstOffsets = @(
+    $sessionExplicitStarts[0].Extent.StartOffset,
+    $sessionBurstCommands[0].Extent.StartOffset,
+    $sessionBurstCommands[1].Extent.StartOffset,
+    $sessionBurstDeadlines[0].Extent.StartOffset,
+    $sessionBurstWaits[0].Extent.StartOffset,
+    $sessionBurstReady[0].Extent.StartOffset,
+    $sessionCloseDeadlines[0].Extent.StartOffset,
+    $sessionExplicitCloses[0].Extent.StartOffset
+)
+for ($i = 1; $i -lt $sessionBurstOffsets.Count; $i++) {
+    if ($sessionBurstOffsets[$i - 1] -ge $sessionBurstOffsets[$i]) {
+        throw 'Session restore asynchronous burst operations are not in fail-closed causal order.'
+    }
+}
+$betweenBurstPosts = $sessionRestoreHarnessText.Substring(
+    $sessionBurstCommands[0].Extent.EndOffset,
+    $sessionBurstCommands[1].Extent.StartOffset - $sessionBurstCommands[0].Extent.EndOffset
+)
+if ($betweenBurstPosts -notmatch '^\s*$') {
+    throw 'Session restore asynchronous new-tab posts must remain adjacent.'
+}
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Release preflight' -Source $releaseWorkflow) `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `

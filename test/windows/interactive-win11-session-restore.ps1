@@ -50,8 +50,15 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $first = Start-StatefulApp $layout $exe $repoRoot 'session-save' @('--single-instance=true'); $runs.Add($first)
     $hostHwnd = Wait-StatefulHost $first $deadline
-    Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process; Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
+    foreach ($targetTabCount in 2..3) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        Invoke-StatefulCommand $hostHwnd 1904 $deadline $first.Process
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "live tab count $targetTabCount" -Process $first.Process -Condition {
+            (Get-StatefulTabCount $hostHwnd) -eq $targetTabCount
+        }
+        $null = Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description "live tab $targetTabCount readiness barrier" -Process $first.Process
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Invoke-StatefulButton $hostHwnd 1001 $deadline $first.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $hostHwnd $first $deadline
@@ -65,6 +72,11 @@ try {
     $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
     $explicitHost = Wait-StatefulHost $explicit $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
+    Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process
+    Invoke-StatefulPostedCommand $explicitHost 1904 $explicit.Process
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'asynchronous burst-created tabs' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 3 }
+    $null = Invoke-InteractiveWin11Message -Hwnd $explicitHost -Message 0 -Deadline $deadline -Description 'asynchronous tab burst readiness barrier' -Process $explicit.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $explicitHost $explicit $deadline
     if ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
@@ -97,5 +109,10 @@ try {
 }
 finally {
     foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
+}
+foreach ($run in $runs) {
+    if (Select-String -LiteralPath $run.Stderr -SimpleMatch 'shell/native invariant failed' -Quiet) {
+        throw "Shell/native invariant failure reported by $($run.Stderr)."
+    }
 }
 Write-Host "interactive-win11 session-restore validation: PASS (state=$statePath)"

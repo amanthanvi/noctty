@@ -22451,7 +22451,10 @@ pub const Surface = struct {
             self.shell_committed = true;
             if (self.window_focused) app.commitShellSurfaceFocus(self);
         }
-        app.auditShellNativeMapping("surface-create");
+        // Existing-host tab/split creation is intentionally provisional here:
+        // the shell reducer selects the new entity before the caller activates
+        // its native surface. The activation path performs the stable audit.
+        if (opts.host_id == null) app.auditShellNativeMapping("surface-create");
     }
 
     pub fn deinit(self: *Surface) void {
