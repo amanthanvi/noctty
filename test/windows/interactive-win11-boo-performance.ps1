@@ -141,6 +141,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     }
     $requiredRenderTraceFields = @(
         'startup_window_ms',
+        'startup_paint_gap_ceiling_ms',
         'paint_gap_limit_ms',
         'paint_gap_over_limit_count',
         'max_paint_gap_ms',
@@ -161,12 +162,15 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     if ($startupWindowMs -le 0) {
         throw "Render trace startup window must be positive (got $startupWindowMs)"
     }
+    $startupPaintGapLimitMs = [long]$renderTrace.startup_paint_gap_ceiling_ms
+    if ($startupPaintGapLimitMs -lt $startupWindowMs) {
+        throw "Render trace startup paint ceiling must cover the startup window (window=$startupWindowMs, ceiling=$startupPaintGapLimitMs)"
+    }
     $paintGapLimitMs = [long]$renderTrace.paint_gap_limit_ms
     if ($paintGapLimitMs -le 0) {
         throw "Render trace paint gap limit must be positive (got $paintGapLimitMs)"
     }
     $startupDrawLeadMs = 500
-    $startupPaintGapLimitMs = $startupWindowMs
     $startupMatchToleranceMs = 16
     $startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
     $startupDurationDeltaMs = [Math]::Abs(

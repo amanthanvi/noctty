@@ -89,6 +89,7 @@ pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = struct {
     const startup_window_ms: u64 = 1000;
+    const startup_paint_gap_ceiling_ms: u64 = 1500;
     const paint_gap_limit_ms: u64 = 300;
 
     const PaintGapTargets = struct {
@@ -336,6 +337,7 @@ const RenderTrace = struct {
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = GetTickCount64() - self.start_tick_ms,
             .startup_window_ms = startup_window_ms,
+            .startup_paint_gap_ceiling_ms = startup_paint_gap_ceiling_ms,
             .paint_gap_limit_ms = paint_gap_limit_ms,
             .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
             .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
@@ -2375,6 +2377,7 @@ test "win32 render trace classifies gaps by start time" {
 }
 
 test "win32 render trace classifies visible paint gaps" {
+    try std.testing.expect(RenderTrace.startup_paint_gap_ceiling_ms >= RenderTrace.startup_window_ms);
     try std.testing.expect(!RenderTrace.gapExceedsPaintLimit(300));
     try std.testing.expect(RenderTrace.gapExceedsPaintLimit(301));
 }

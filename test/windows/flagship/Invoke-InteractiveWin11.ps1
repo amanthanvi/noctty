@@ -110,6 +110,7 @@ finally {
         $measurements = [ordered]@{
             paint_draw_count = [long]$render.paint_draw_count
             startup_window_ms = [long]$render.startup_window_ms
+            startup_paint_gap_ceiling_ms = [long]$render.startup_paint_gap_ceiling_ms
             paint_gap_limit_ms = [long]$render.paint_gap_limit_ms
             paint_gap_over_limit_count = [long]$render.paint_gap_over_limit_count
             max_paint_gap_ms = [long]$render.max_paint_gap_ms
