@@ -184,19 +184,17 @@ function Find-HostWindow {
 
 function Find-SurfaceWindow {
     param(
-        [Parameter(Mandatory)] [IntPtr] $Parent,
-        [switch] $RequireVisible
+        [Parameter(Mandatory)] [IntPtr] $Parent
     )
 
     $script:InteractiveWin11BooMultiTabFoundSurface = [IntPtr]::Zero
     $callback = [InteractiveWin11BooMultiTabNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32') {
-            if ($script:InteractiveWin11BooMultiTabRequireVisible -and
-                -not [InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)) {
-                return $true
-            }
+        if (
+            (Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32' -and
+            [InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)
+        ) {
             $script:InteractiveWin11BooMultiTabFoundSurface = $hwnd
             return $false
         }
@@ -204,7 +202,6 @@ function Find-SurfaceWindow {
         return $true
     }
 
-    $script:InteractiveWin11BooMultiTabRequireVisible = $RequireVisible.IsPresent
     [void] [InteractiveWin11BooMultiTabNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:InteractiveWin11BooMultiTabFoundSurface
 }
@@ -212,7 +209,7 @@ function Find-SurfaceWindow {
 function Test-SurfaceWindow {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [switch] $RequireVisible
+        [Parameter(Mandatory)] [IntPtr] $ExpectedParent
     )
 
     if (-not [InteractiveWin11BooMultiTabNative]::IsWindow($Hwnd)) {
@@ -223,7 +220,11 @@ function Test-SurfaceWindow {
         return $false
     }
 
-    if ($RequireVisible -and -not [InteractiveWin11BooMultiTabNative]::IsWindowVisible($Hwnd)) {
+    if ([InteractiveWin11BooMultiTabNative]::GetParent($Hwnd) -ne $ExpectedParent) {
+        return $false
+    }
+
+    if (-not [InteractiveWin11BooMultiTabNative]::IsWindowVisible($Hwnd)) {
         return $false
     }
 
@@ -479,9 +480,12 @@ try {
     Show-InteractiveWin11Window -Hwnd $hostHwnd -NativeTypeName 'InteractiveWin11BooMultiTabNative' -SetForeground
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
-        (Find-SurfaceWindow -Parent $hostHwnd -RequireVisible) -ne [IntPtr]::Zero
+        (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
-    $initialSurfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd -RequireVisible
+    $initialSurfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
+    if ($initialSurfaceHwnd -eq [IntPtr]::Zero) {
+        throw 'initial surface disappeared after discovery'
+    }
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial tab button' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -ge 1
     }
@@ -500,7 +504,7 @@ try {
 
     Activate-TabButton -Tab $initialTabButton -ExpectedParent $hostHwnd
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial surface reactivation' -Process $process -Condition {
-        Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -RequireVisible
+        Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd
     }
     $surfaceHwnd = $initialSurfaceHwnd
     Start-Sleep -Milliseconds 300
@@ -543,7 +547,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     }
 
     if (
-        -not (Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -RequireVisible)
+        -not (Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd)
     ) {
         throw 'initial surface disappeared or became hidden after +boo'
     }
