@@ -48,13 +48,20 @@ const OutputTrace = struct {
             "WINGHOSTTY_TERMIO_TRACE_FILE",
         ) catch return .{}) orelse return .{};
 
+        return initWithClaimedPath(alloc, &output_trace_file_claimed, owned);
+    }
+
+    fn initWithClaimedPath(
+        alloc: Allocator,
+        claimed: *std.atomic.Value(bool),
+        owned: []const u8,
+    ) OutputTrace {
         // The configured path is a single JSON document. The interactive
         // harness waits for the initial terminal before seeding tabs, so the
         // first claimant is deterministic. Retaining the process-lifetime
         // claim prevents later tab teardown from replacing its evidence.
-        const trace_path = claimTracePath(alloc, &output_trace_file_claimed, owned) orelse
+        const trace_path = claimTracePath(alloc, claimed, owned) orelse
             return .{};
-
         return .{
             .path = trace_path,
             .start_time = std.time.Instant.now() catch null,
@@ -164,14 +171,17 @@ fn claimTracePath(
     return null;
 }
 
-test "termio output trace path rejects and frees a second process owner" {
+test "termio output trace init rejects and frees a second process owner" {
     var claimed = std.atomic.Value(bool).init(false);
     const first = try std.testing.allocator.dupe(u8, "first.json");
-    const first_owned = claimTracePath(std.testing.allocator, &claimed, first).?;
-    defer std.testing.allocator.free(first_owned);
+    const first_trace = OutputTrace.initWithClaimedPath(std.testing.allocator, &claimed, first);
+    defer if (first_trace.path) |path| std.testing.allocator.free(path);
+    try std.testing.expect(first_trace.path != null);
 
     const second = try std.testing.allocator.dupe(u8, "second.json");
-    try std.testing.expect(claimTracePath(std.testing.allocator, &claimed, second) == null);
+    const second_trace = OutputTrace.initWithClaimedPath(std.testing.allocator, &claimed, second);
+    defer if (second_trace.path) |path| std.testing.allocator.free(path);
+    try std.testing.expect(second_trace.path == null);
 }
 
 /// Mutex state argument for queueMessage.

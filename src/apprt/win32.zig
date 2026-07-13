@@ -150,13 +150,20 @@ const RenderTrace = struct {
             };
         if (trimmed.len != raw.len) alloc.free(raw);
 
+        return initWithClaimedPath(alloc, &render_trace_file_claimed, owned);
+    }
+
+    fn initWithClaimedPath(
+        alloc: Allocator,
+        claimed: *std.atomic.Value(bool),
+        owned: []const u8,
+    ) RenderTrace {
         // A trace path names one JSON document. The interactive harness waits
         // for the initial surface before seeding tabs, so the first claimant
         // is deterministic. Keeping that claim for the process lifetime stops
         // later tab teardown from overwriting the initial surface's evidence.
-        const trace_path = claimTracePath(alloc, &render_trace_file_claimed, owned) orelse
+        const trace_path = claimTracePath(alloc, claimed, owned) orelse
             return .{};
-
         return .{
             .path = trace_path,
             .start_tick_ms = GetTickCount64(),
@@ -2354,14 +2361,17 @@ test "win32 render trace classifies gaps by start time" {
     try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
 }
 
-test "win32 render trace path rejects and frees a second process owner" {
+test "win32 render trace init rejects and frees a second process owner" {
     var claimed = std.atomic.Value(bool).init(false);
     const first = try std.testing.allocator.dupe(u8, "first.json");
-    const first_owned = claimTracePath(std.testing.allocator, &claimed, first).?;
-    defer std.testing.allocator.free(first_owned);
+    const first_trace = RenderTrace.initWithClaimedPath(std.testing.allocator, &claimed, first);
+    defer if (first_trace.path) |path| std.testing.allocator.free(path);
+    try std.testing.expect(first_trace.path != null);
 
     const second = try std.testing.allocator.dupe(u8, "second.json");
-    try std.testing.expect(claimTracePath(std.testing.allocator, &claimed, second) == null);
+    const second_trace = RenderTrace.initWithClaimedPath(std.testing.allocator, &claimed, second);
+    defer if (second_trace.path) |path| std.testing.allocator.free(path);
+    try std.testing.expect(second_trace.path == null);
 }
 
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
