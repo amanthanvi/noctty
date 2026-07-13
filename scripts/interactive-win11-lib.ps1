@@ -505,12 +505,12 @@ function Wait-InteractiveWin11Until {
             throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
         }
 
-        if (& $Condition) {
-            return
-        }
-
         if ([DateTime]::UtcNow -ge $Deadline) {
             break
+        }
+
+        if (& $Condition) {
+            return
         }
 
         Start-Sleep -Milliseconds 100
