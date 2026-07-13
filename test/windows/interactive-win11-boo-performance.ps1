@@ -140,6 +140,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw "Expected visible paint cadence to stay well above the prior stalled path (expected >= 250, got $($renderTrace.paint_draw_count))"
     }
     $requiredRenderTraceFields = @(
+        'startup_window_ms',
         'max_paint_gap_ms',
         'max_paint_gap_ended_at_ms',
         'max_sustained_paint_gap_ms',
@@ -154,7 +155,10 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         }
     }
 
-    $startupWindowMs = 1000
+    $startupWindowMs = [long]$renderTrace.startup_window_ms
+    if ($startupWindowMs -le 0) {
+        throw "Render trace startup window must be positive (got $startupWindowMs)"
+    }
     $startupDrawLeadMs = 500
     $startupPaintGapLimitMs = 750
     $startupMatchToleranceMs = 16

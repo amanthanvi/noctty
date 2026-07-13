@@ -233,8 +233,6 @@ const RenderTrace = struct {
 
     fn notePaintDrawDuration(self: *RenderTrace, duration_ms: u64) void {
         if (!self.enabled()) return;
-        // Paint timing is recorded only by the Win32 UI thread, so the max
-        // value and its timestamp cannot be paired across concurrent writers.
         updateMaxAtomicWithTimestamp(
             &self.max_paint_draw_duration_ms,
             &self.max_paint_draw_duration_at_ms,
@@ -310,6 +308,7 @@ const RenderTrace = struct {
         const stream = &writer.interface;
         stream.print("{f}", .{std.json.fmt(.{
             .runtime_ms = GetTickCount64() - self.start_tick_ms,
+            .startup_window_ms = startup_window_ms,
             .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
             .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
             .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
