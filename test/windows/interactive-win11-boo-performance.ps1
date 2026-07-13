@@ -187,10 +187,8 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
     if ($renderTrace.max_sustained_paint_gap_ms -gt 300) {
         throw "Expected sustained visible paint gaps after startup to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_sustained_paint_gap_ms) at $($renderTrace.max_sustained_paint_gap_ended_at_ms) ms)"
     }
-    # PTY output batches are a transport proxy and can land one/few batches
-    # below frame cadence even when the child animation and paints are healthy.
-    if ($termioTrace.process_output_count -lt 135) {
-        throw "Expected steady PTY output batches for +boo (expected >= 135, got $($termioTrace.process_output_count))"
+    if ($termioTrace.process_output_count -lt 140) {
+        throw "Expected steady PTY output batches for +boo (expected >= 140, got $($termioTrace.process_output_count))"
     }
     if ($booTrace.frame_change_count -lt 140) {
         throw "Expected +boo child animation to advance near full rate (expected >= 140, got $($booTrace.frame_change_count))"
