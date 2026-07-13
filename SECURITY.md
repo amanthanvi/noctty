@@ -8,6 +8,11 @@ Report them privately through GitHub's security advisory flow for this
 repository if it is enabled. If private reporting is unavailable, contact the
 maintainer directly before publishing details.
 
+If your report involves a crash, note that crash dumps and diagnostic
+bundles stay local and may contain sensitive process memory — see
+[docs/windows.md](docs/windows.md#crash-reports-and-diagnostics) before
+attaching one.
+
 Include:
 
 - A concise description of the issue

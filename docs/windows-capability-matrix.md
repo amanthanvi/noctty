@@ -1,8 +1,9 @@
 # Windows Capability Matrix
 
 Maps current official Ghostty docs surfaces to winghostty behavior on
-Windows. Keep this short. Update rows when Windows behavior changes or when
-upstream docs add or remove a surface that this fork cares about.
+Windows. Cells stay short; rows with real nuance point into the
+[Notes](#notes) section below. Update rows when Windows behavior changes or
+when upstream docs add or remove a surface that this fork cares about.
 
 Last reviewed: 2026-07-11.
 
@@ -12,53 +13,111 @@ Last reviewed: 2026-07-11.
   closely enough to rely on them.
 - `partial` — some of the surface works, but Windows behavior is narrower,
   differently scoped, or still filling in.
-- `no-op compatibility` — the option or surface exists for compatibility,
-  but currently reduces to placeholder or weaker behavior.
 - `windows-specific` — added or materially changed by this fork; upstream
   Ghostty docs do not describe it accurately yet.
 
 ## Supported
 
-| Ghostty docs surface                                                                                               | winghostty note                                                                                                                                                                  |
-| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs surface. On Windows the config file lives at `%LOCALAPPDATA%\winghostty\config.ghostty`, and live reload is available via `Ctrl+Shift+,`. |
-| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow. Default bindings are Windows-native rather than macOS/Linux defaults.                                         |
-| [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                                  |
-| [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Transparent terminal backgrounds work on Windows and can be toggled live.                                                                                                        |
-| [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface used by terminal apps.                                                                              |
-| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in winghostty.                                                                                                                 |
+| Ghostty docs surface                                                                                               | winghostty note                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\winghostty\config.ghostty`; live reload via `Ctrl+Shift+,`.                             |
+| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; default bindings are Windows-native.                                                         |
+| [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                 |
+| [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Transparent terminal backgrounds work on Windows and can be toggled live.                                                                                       |
+| [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface. Win32-validated coverage: [windows-vt-conformance.md](windows-vt-conformance.md). |
+| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in winghostty.                                                                                                |
 
 ## Partial
 
-| Ghostty docs surface                                                                         | winghostty note                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh` injection still apply when those shells are launched on Windows. winghostty additionally supports automatic PowerShell injection (`powershell.exe`, `pwsh.exe`) plus a manual fallback under `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`. PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish status, and PSReadLine command metadata when available. PowerShell now wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but it does not auto-install remote terminfo; uncached hosts use `xterm-256color`. `cmd.exe` remains a plain fallback shell without automatic shell integration. |
-| [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream docs still mix shared actions with macOS/Linux-specific behavior. For Windows-specific truth on a disputed action, prefer `winghostty +show-config --default --docs` plus the current defaults from `+list-keybinds`.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | Windows implements the action as a local sensitive-input indicator and cursor/status/title state. It does not use a Windows OS API equivalent to macOS Secure Keyboard Entry and does not block system-wide keyboard hooks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Windows supports stable-release checking and update prompts backed by GitHub Releases. `download` can stage signed, checksum-matching installer releases and, for installer-managed installs, launch the verified staged installer after a user click.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Windows persists practical session shape under `%LOCALAPPDATA%\winghostty\session-state.json`: host windows, tabs, splits, selected profiles, working directories, and explicit titles. Terminal contents and child process state are not restored.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | On Windows 11 22H2 or newer, `background-opacity < 1` plus enabled `background-blur` requests the DWM tabbed system backdrop. On Windows 10 and Windows 11 21H2, the option remains accepted but no DWM backdrop is requested. Numeric blur radii are treated as enabled/disabled, not as tunable blur strength.                                                                                                                                                                                                                                                                                                                                                                                                          |
-| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: the Win32 host exposes a UI Automation root provider, the command palette exposes a list provider, and terminal text is available read-only through `ITextProvider` / `ITextRangeProvider`. Broader application-chrome coverage and screen-reader validation remain incomplete.                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| OSC 52 primary/selection clipboard selectors                                                 | Windows exposes one native clipboard. OSC 52 writes using selectors `c`, `s`, and `p` all target the standard Windows clipboard. OSC 52 read replies still echo the requested selector (`c`, `s`, or `p`) so terminal clients can correlate the response.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-
-## No-op Compatibility
-
-| Ghostty docs surface                                                                 | winghostty note                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Configuration: `auto-update = download`](https://ghostty.org/docs/config/reference) | Stages only stable Windows installer releases with architecture-specific SHA256 metadata, a matching installer SHA-256, and a valid Authenticode signature. Installer apply is user-initiated and may prompt for UAC. Portable ZIP apply is not implemented. |
+| Ghostty docs surface                                                                         | winghostty note                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows, `cmd.exe` stays a plain fallback. See [shell integration notes](#shell-integration).                                                                                                                             |
+| [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                         |
+| [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                         |
+| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
+| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\winghostty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
+| [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                           |
+| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial. See [accessibility notes](#accessibility).                                                                                                                                                                                                                  |
+| OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                              |
 
 ## Windows-Specific
 
-| Ghostty docs surface                                                              | winghostty note                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [Features overview](https://ghostty.org/docs/features)                            | Upstream Ghostty docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64.                                                                                                                                                                                                                                                                                                                                                                        |
-| [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders on Windows with OpenGL 4.3+ via WGL. A separate D3D11/DirectComposition shell pipeline owns recoverable top-level targets and transparent DPI-sized D2D surfaces; host banner/operation text is the first DirectWrite production zone with per-paint GDI fallback. It does not replace or call the terminal renderer.                                                                                                                                                         |
-| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream.                                                                                                                                                                                                                                                                                                                                                                                  |
-| Local automation                                                                  | `winghostty +list-windows` reports `winghostty.windows.v2` JSON with local window/tab/pane IDs, focus/active state, and structural counts. `winghostty +perform-action <action>` forwards allowlisted keybinding actions over Win32 single-instance IPC. `--surface-id` targets only surface-scoped actions; app-scoped actions target the app. Terminal-input, arbitrary file helper, and crash actions are rejected by the running instance, and new action variants remain disabled until reviewed. |
-| [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX includes DWM dark title bar integration, high-contrast palette switching, IME, drag-and-drop, and native context menus.                                                                                                                                                                                                                                                                                                                                                              |
-| Universal palette                                                                 | Configurable actions, live tabs, panes, Windows profiles, installed themes, native settings, reviewed help, and keyboard tab-to-pane moves share one typed fuzzy-ranked list with category prefixes, keyboard navigation, stable dispatch IDs, destructive/disabled semantics, UI Automation selection announcements, and reversible live theme preview before commit. High Contrast suppresses cosmetic live theme previews while still allowing an explicit commit.                                                                                                                         |
-| Native settings                                                                   | Appearance, Terminal, Shell, Privacy, Updates, Keybindings, and Advanced sections ship. Advanced shows the pending source-preserving field diff and retains the plain-text escape hatch. Saves use an atomic config patch and reload. Owned snapshots survive external reloads; native fields have reversible live preview, revision-aware merging, and explicit conflict resolution.                                                                                                                      |
-| Tab dragging                                                                      | Same-window reorder and DPI-aware exact-pane drag-to-split ship. The universal palette provides the equivalent keyboard workflow. Transfers move the complete source subtree through one authoritative ShellState/native transaction, with operation-labeled previews and exact structural undo/redo. Cross-window OLE transfer is not shipped.                                                                                                                                                         |
+| Ghostty docs surface                                                              | winghostty note                                                                                                            |
+| --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
+| [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
+| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream.      |
+| Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
+| [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
+| Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
+| Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).              |
+| Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                 |
+
+## Notes
+
+### Shell integration
+
+Upstream docs for automatic `bash` / `elvish` / `fish` / `nushell` / `zsh`
+injection still apply when those shells are launched on Windows. On top of
+that:
+
+- Automatic PowerShell injection (`powershell.exe`, `pwsh.exe`), with a
+  manual fallback at
+  `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`.
+- PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish
+  status, and PSReadLine command metadata when available.
+- PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
+  does not auto-install remote terminfo; uncached hosts use
+  `xterm-256color`.
+- `cmd.exe` remains a plain fallback shell without automatic integration.
+
+### Accessibility
+
+The Win32 host exposes a UI Automation root provider, the command palette
+exposes a list provider, and terminal text is available read-only through
+`ITextProvider` / `ITextRangeProvider`. Broader application-chrome coverage
+and screen-reader validation remain incomplete.
+
+### Renderer
+
+Terminal presentation is owned by WGL `SwapBuffers`. A separate
+D3D11/DirectComposition shell pipeline owns recoverable top-level targets and
+transparent DPI-sized D2D surfaces; host banner and operation text is the
+first DirectWrite production zone, with per-paint GDI fallback. That pipeline
+does not replace or call the terminal renderer.
+
+### Universal palette
+
+Configurable actions, live tabs, panes, Windows profiles, installed themes,
+native settings, reviewed help destinations, and keyboard tab-to-pane moves
+share one typed, fuzzy-ranked list with:
+
+- category prefixes (`>`, `@`, `/`, `~`, `:`) and keyboard navigation
+- stable dispatch IDs and destructive/disabled semantics
+- UI Automation selection announcements
+- reversible live theme preview before commit (High Contrast suppresses
+  cosmetic previews but still allows an explicit commit)
+- a snapshot-validated recent-action provider
+
+### Native settings
+
+Appearance, Terminal, Shell, Privacy, Updates, Keybindings, and Advanced
+sections ship. Edits are staged until Save and applied through an atomic,
+source-preserving config patch; Advanced shows the pending field diff and
+keeps the plain-text escape hatch. Owned snapshots survive external reloads,
+and native fields support reversible live preview, revision-aware
+external-edit merging, and explicit Keep mine / Use disk conflict
+resolution. Keybinding editing still uses the text config and CLI discovery
+commands.
+
+### Tab dragging
+
+Same-window reorder and DPI-aware exact-pane drag-to-split ship, with
+operation-labeled drop previews. Transfers move the complete source split
+subtree through one authoritative ShellState/native transaction, and undo /
+redo restore exact tab, pane, split-tree, ratio, and focus identity. The
+universal palette provides the equivalent keyboard workflow. Cross-window
+OLE transfer is not shipped.
 
 ## Maintenance Anchors
 
