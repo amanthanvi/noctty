@@ -22,14 +22,25 @@ public static class WinghosttyStatefulNative {
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
 }
 '@
 }
 
+if (-not ('WinghosttyStatefulMessageNative' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class WinghosttyStatefulMessageNative {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("kernel32.dll")] public static extern void SetLastError(uint errorCode);
+}
+'@
+}
+
 $script:SmtoNormal = [uint32]0
-$script:SmtoAbortIfHung = [uint32]0x0002
+$script:SmtoBlock = [uint32]0x0001
+$script:ErrorSuccess = 0
 $script:ErrorInvalidWindowHandle = 1400
 $script:ErrorTimeout = 1460
 
@@ -49,7 +60,8 @@ function Send-StatefulMessage(
 ) {
     $sendTimeoutMs = Get-StatefulMessageTimeoutMs $Deadline "$Description to hwnd=$Hwnd"
     $sendResult = [UIntPtr]::Zero
-    $sendStatus = [WinghosttyStatefulNative]::SendMessageTimeoutW(
+    [WinghosttyStatefulMessageNative]::SetLastError($script:ErrorSuccess)
+    $sendStatus = [WinghosttyStatefulMessageNative]::SendMessageTimeoutW(
         $Hwnd,
         $Message,
         $WParam,
@@ -220,30 +232,41 @@ function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
 
 function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $processHandle = $Run.Process.Handle
-    $sendTimeoutMs = Get-StatefulMessageTimeoutMs $Deadline 'WM_CLOSE to winghostty'
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [WinghosttyStatefulNative]::SendMessageTimeoutW(
-        $HostHwnd,
-        0x0010,
-        [UIntPtr]::Zero,
-        [IntPtr]::Zero,
-        $script:SmtoAbortIfHung,
-        $sendTimeoutMs,
-        [ref] $sendResult
-    )
-    $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $Run.Process.Refresh()
-        if (-not $Run.Process.HasExited) {
-            if ($lastError -eq $script:ErrorTimeout) {
-                throw "SendMessageTimeoutW timed out for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
+    $Run.Process.Refresh()
+    if (-not $Run.Process.HasExited) {
+        $windowProcessId = [uint32]0
+        $windowThreadId = [WinghosttyStatefulNative]::GetWindowThreadProcessId($HostHwnd, [ref]$windowProcessId)
+        if ($windowThreadId -eq 0 -or $windowProcessId -ne [uint32]$Run.Process.Id) {
+            throw "Refusing WM_CLOSE for hwnd=$HostHwnd because owner pid=$windowProcessId does not match winghostty pid=$($Run.Process.Id)."
+        }
+
+        $sendTimeoutMs = Get-StatefulMessageTimeoutMs $Deadline 'WM_CLOSE to winghostty'
+        $sendResult = [UIntPtr]::Zero
+        [WinghosttyStatefulMessageNative]::SetLastError($script:ErrorSuccess)
+        $sendStatus = [WinghosttyStatefulMessageNative]::SendMessageTimeoutW(
+            $HostHwnd,
+            0x0010,
+            [UIntPtr]::Zero,
+            [IntPtr]::Zero,
+            $script:SmtoBlock,
+            $sendTimeoutMs,
+            [ref] $sendResult
+        )
+        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if ($sendStatus -eq [IntPtr]::Zero) {
+            $Run.Process.Refresh()
+            if (-not $Run.Process.HasExited) {
+                if ($lastError -eq $script:ErrorTimeout) {
+                    throw "SendMessageTimeoutW timed out for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
+                }
+                if ($lastError -ne $script:ErrorInvalidWindowHandle) {
+                    $detail = if ($lastError -eq $script:ErrorSuccess) { 'generic failure without a Win32 error' } else { "Win32 error $lastError" }
+                    throw "SendMessageTimeoutW failed for winghostty WM_CLOSE hwnd=$HostHwnd ($detail)."
+                }
+                # A destroyed host HWND can race process teardown; the bounded exit
+                # wait and mandatory zero exit-code check below still fail closed.
+                Write-Warning "WM_CLOSE raced a destroyed hwnd=$HostHwnd; waiting for winghostty to exit."
             }
-            if ($lastError -ne $script:ErrorInvalidWindowHandle) {
-                throw "SendMessageTimeoutW failed for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
-            }
-            # A destroyed host HWND can race process teardown; the bounded exit
-            # wait and mandatory zero exit-code check below still fail closed.
-            Write-Warning "WM_CLOSE raced a destroyed hwnd=$HostHwnd; waiting for winghostty to exit."
         }
     }
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
