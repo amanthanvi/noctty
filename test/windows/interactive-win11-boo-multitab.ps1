@@ -193,6 +193,7 @@ function Find-SurfaceWindow {
 
         if (
             (Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32' -and
+            [InteractiveWin11BooMultiTabNative]::GetParent($hwnd) -eq $Parent -and
             [InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)
         ) {
             $script:InteractiveWin11BooMultiTabFoundSurface = $hwnd
