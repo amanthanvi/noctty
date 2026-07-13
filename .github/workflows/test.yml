@@ -166,8 +166,9 @@ jobs:
         with:
           name: flagship-interactive-win11-${{ github.run_id }}
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 14
           path: |
             test/windows/flagship/artifacts/interactive-win11
-            ${{ runner.temp }}/winghostty-interactive-win11-*/logs/**
+            ${{ github.workspace }}/.sandbox/win11/**/logs/**
             ${{ runner.temp }}/winghostty-runner-provenance.json

@@ -215,6 +215,11 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
+    -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
+    -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
+    -Context "$testWorkflow :: Upload interactive evidence"
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `
