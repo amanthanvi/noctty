@@ -136,12 +136,16 @@ Assert-WorkflowContract `
     -Description 'release-copy success explicitly clears native exit state'
 Assert-WorkflowContract `
     -Path $releasePreflight `
-    -Pattern '\$minimumValidityDays -lt 180' `
+    -Pattern '\$minimumValidityDays -lt 180(?!\d)' `
     -Description 'signer-validity overrides cannot lower the 180-day floor'
 Assert-WorkflowContract `
     -Path $releasePreflight `
     -Pattern '(?ms)Assert-WingetArchitectureCoverage.*?Architecture:.*?arm64,x64' `
     -Description 'stable preflight requires public WinGet x64 and arm64 bootstrap'
+Assert-WorkflowContract `
+    -Path $releasePreflight `
+    -Pattern '(?ms)if \(\$RequirePackageManagers\) \{.*?Assert-WingetArchitectureCoverage\s+`\r?\n\s+-ManifestPath' `
+    -Description 'package-manager preflight invokes the WinGet architecture gate'
 
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `

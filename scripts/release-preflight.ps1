@@ -288,8 +288,11 @@ function Assert-WingetArchitectureCoverage {
     $apiRoot = "https://api.github.com/repos/microsoft/winget-pkgs/contents/$ManifestPath"
     $versionListing = Invoke-RestMethod -Uri $apiRoot -Headers $headers -ErrorAction Stop
     $versions = @($versionListing | ForEach-Object {
-        $parsed = [version]::new()
-        if ($_.type -eq 'dir' -and [version]::TryParse([string]$_.name, [ref]$parsed)) {
+        if ($_.type -eq 'dir') {
+            $parsed = [version]::new()
+            if (-not [version]::TryParse([string]$_.name, [ref]$parsed)) {
+                throw "WinGet manifest directory is not a version: $($_.name)"
+            }
             [pscustomobject]@{ Name = [string]$_.name; Version = $parsed }
         }
     })
