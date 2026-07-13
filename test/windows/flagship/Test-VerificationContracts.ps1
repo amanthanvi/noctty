@@ -111,6 +111,10 @@ Assert-WorkflowContract `
     -Pattern '(?ms)- name: Remote release copy checks.*?env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
     -Description 'scheduled remote verification authenticates gh'
 Assert-WorkflowContract `
+    -Path $testWorkflow `
+    -Pattern '(?ms)windows-interactive:.*?- name: Setup Zig.*?with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
+    -Description 'ephemeral interactive retries cannot restore failed Zig build caches'
+Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `
     -Description 'accessibility evidence timestamp is semantically validated'

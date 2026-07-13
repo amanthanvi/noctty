@@ -139,6 +139,9 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          # Ephemeral retries must start clean. setup-zig saves failed local
+          # caches and otherwise restores the broken build runner on retry.
+          use-cache: false
 
       - name: Prove interactive runner provenance
         shell: pwsh
