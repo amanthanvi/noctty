@@ -559,6 +559,8 @@ function Get-InteractiveWin11ProcessExitCode {
         $Process.Refresh()
         if ($Process.HasExited) {
             $managedExitCode = $Process.ExitCode
+            # PowerShell can surface a blank ExitCode for an exited GUI child;
+            # retain the native handle fallback for that adapter edge case.
             if ($null -ne $managedExitCode) { return [int] $managedExitCode }
         }
     }

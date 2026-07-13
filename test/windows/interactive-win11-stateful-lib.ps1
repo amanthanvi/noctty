@@ -33,16 +33,20 @@ function Send-StatefulMessage(
     [uint32] $Message,
     [UIntPtr] $WParam,
     [IntPtr] $LParam,
+    [DateTime] $Deadline,
     [string] $Description
 ) {
+    $remainingMs = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remainingMs -le 0) { throw "Deadline elapsed before sending $Description to hwnd=$Hwnd." }
+    $sendTimeoutMs = [uint32][Math]::Min([double][uint32]::MaxValue, [Math]::Ceiling($remainingMs))
     $sendResult = [UIntPtr]::Zero
     $sendStatus = [WinghosttyStatefulNative]::SendMessageTimeoutW(
         $Hwnd,
         $Message,
         $WParam,
         $LParam,
-        0x0002,
-        5000,
+        0,
+        $sendTimeoutMs,
         [ref] $sendResult
     )
     $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
@@ -106,14 +110,14 @@ function Get-StatefulWindowRect([IntPtr] $Hwnd) {
     return $rect
 }
 
-function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId) {
-    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]([uint64]$CommandId)) ([IntPtr]::Zero) "WM_COMMAND id=$CommandId")
+function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId, [DateTime] $Deadline) {
+    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]([uint64]$CommandId)) ([IntPtr]::Zero) $Deadline "WM_COMMAND id=$CommandId")
 }
 
-function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text) {
+function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text, [DateTime] $Deadline) {
     $textPointer = [Runtime.InteropServices.Marshal]::StringToHGlobalUni($Text)
     try {
-        $result = Send-StatefulMessage $Hwnd 0x000C ([UIntPtr]::Zero) $textPointer 'WM_SETTEXT'
+        $result = Send-StatefulMessage $Hwnd 0x000C ([UIntPtr]::Zero) $textPointer $Deadline 'WM_SETTEXT'
         if ($result -eq [UIntPtr]::Zero) { throw "WM_SETTEXT failed for hwnd=$Hwnd" }
     }
     finally {
@@ -122,7 +126,7 @@ function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text
     $enChange = 0x0300
     $controlId = [WinghosttyStatefulNative]::GetDlgCtrlID($Hwnd)
     $command = [uint64]([uint32]$controlId -bor ([uint32]$enChange -shl 16))
-    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd "WM_COMMAND EN_CHANGE id=$controlId")
+    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd $Deadline "WM_COMMAND EN_CHANGE id=$controlId")
 }
 
 function Show-StatefulHost([IntPtr] $HostHwnd) {
@@ -181,17 +185,17 @@ function Wait-StatefulHost($Run, [DateTime] $Deadline) {
     return Find-StatefulHost $Run.Process.Id
 }
 
-function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId) {
+function Invoke-StatefulButton([IntPtr] $HostHwnd, [int] $ControlId, [DateTime] $Deadline) {
     $button = Get-StatefulChildren $HostHwnd | Where-Object Id -eq $ControlId | Select-Object -First 1
     if ($null -eq $button) { throw "No visible button with control ID $ControlId." }
-    [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) "BM_CLICK id=$ControlId")
+    [void](Send-StatefulMessage $button.Hwnd 0x00F5 ([UIntPtr]::Zero) ([IntPtr]::Zero) $Deadline "BM_CLICK id=$ControlId")
 }
 
-function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd) {
+function Invoke-StatefulPaletteFirstRow([IntPtr] $HostHwnd, [DateTime] $Deadline) {
     $list = Get-StatefulChildren $HostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
     if ($null -eq $list) { throw 'No visible command-palette list.' }
     $coordinates = [IntPtr](4 -bor (4 -shl 16))
-    [void](Send-StatefulMessage $list.Hwnd 0x0201 ([UIntPtr]::Zero) $coordinates 'WM_LBUTTONDOWN command-palette first row')
+    [void](Send-StatefulMessage $list.Hwnd 0x0201 ([UIntPtr]::Zero) $coordinates $Deadline 'WM_LBUTTONDOWN command-palette first row')
 }
 
 function Wait-StatefulSurface([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
@@ -223,6 +227,8 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
     if ($sendStatus -eq [IntPtr]::Zero) {
         $Run.Process.Refresh()
+        # Timeout/abort and destroyed-window races still converge on the same
+        # deadline-bounded exit wait and mandatory zero exit-code check below.
         if (-not $Run.Process.HasExited -and $lastError -notin @(0, 1400, 1460)) {
             throw "SendMessageTimeoutW timed out or failed for winghostty WM_CLOSE hwnd=$HostHwnd error=$lastError"
         }
