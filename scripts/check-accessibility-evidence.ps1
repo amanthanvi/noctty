@@ -144,7 +144,7 @@ finally {
     $resolvedDownload = [System.IO.Path]::GetFullPath($downloadRoot)
     if ($resolvedDownload.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
         (Test-Path -LiteralPath $resolvedDownload)) {
-        Remove-Item -LiteralPath $resolvedDownload -Recurse -Force
+        Remove-Item -LiteralPath $resolvedDownload -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
