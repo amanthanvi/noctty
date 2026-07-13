@@ -23,7 +23,8 @@ function Assert-ThrowsLike {
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-signing-trust-$([Guid]::NewGuid().ToString('N'))"
 [System.IO.Directory]::CreateDirectory($tempRoot) | Out-Null
-$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$rsa = [System.Security.Cryptography.RSA]::Create()
+$rsa.KeySize = 2048
 $certificate = $null
 try {
     $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(

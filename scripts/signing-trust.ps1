@@ -1,5 +1,3 @@
-Set-StrictMode -Version Latest
-
 function Get-UpdaterPublisherSpkiPins {
     param(
         [Parameter(Mandatory)]
