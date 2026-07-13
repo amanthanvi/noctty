@@ -9,7 +9,7 @@ the current self-signed release certificate without accepting broken signatures,
 wrong publishers, expired/invalid chains, or other WinTrust failures.
 
 The current release track pins the SPKI for the self-signed
-`CN=winghostty Local Dev Signing` certificate used by v1.3.117:
+`CN=winghostty Local Dev Signing` certificate used from v1.3.117 onward:
 `671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a`.
 Checksums published beside an installer remain integrity metadata, not an
 independent publisher identity.
@@ -20,6 +20,22 @@ an overlap release that trusts both the current and next public keys before
 release signing moves to the next key; a later release may remove the retired
 key. An empty allowlist or a signer mismatch disables verified download/apply
 and fails visibly while leaving release-page checks available.
+
+Release preflight loads the configured PFX, computes SHA-256 over its SPKI DER,
+and requires an exact match in that compiled allowlist. It also requires the
+certificate to be currently valid with at least 180 days remaining by default
+(`WINDOWS_CODESIGN_MIN_VALIDITY_DAYS` may raise the floor). This prevents a
+wrong-key secret, an unprepared rotation, or a nearly expired certificate from
+reaching packaging.
+
+The current certificate is self-signed and therefore does not provide
+third-party Windows publisher identity or SmartScreen reputation. Repository
+code cannot close that trust-chain gap: migration requires a CA-issued Windows
+code-signing certificate. The safe migration order is (1) ship its SPKI as an
+overlap pin in an update signed by the current key, (2) switch the release PFX
+and require timestamping, then (3) remove the retired pin only after the overlap
+release is broadly deployed. Until then, the updater pin is the narrow trust
+anchor and public copy must continue to warn that SmartScreen may intervene.
 
 The staged installer and its containing stage directory must remain open
 without delete sharing from hash and Authenticode verification until the

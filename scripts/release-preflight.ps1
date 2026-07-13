@@ -5,13 +5,16 @@ param(
 
     [switch]$RequireSigning,
 
-    [switch]$RequirePackageManagers
+    [switch]$RequirePackageManagers,
+
+    [switch]$RequireAccessibilityEvidence
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $releaseMetaPath = Join-Path $repoRoot "dist/windows/release-metadata.json"
+. (Join-Path $PSScriptRoot 'signing-trust.ps1')
 
 function Get-EnvValue {
     param([string]$Name)
@@ -262,6 +265,11 @@ Write-Status -Label "Version line" -Value $versionLine
 Write-Status -Label "Upstream base" -Value $upstreamBaseVersion
 Write-Status -Label "First fork patch" -Value $firstForkPatch
 
+if ($RequireAccessibilityEvidence) {
+    & (Join-Path $PSScriptRoot 'check-accessibility-evidence.ps1') -Version $Version
+    if ($LASTEXITCODE -ne 0) { throw 'Accessibility evidence validation failed.' }
+}
+
 if ($RequireSigning) {
     $hasPfxBase64 = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_BASE64"
     $hasPfxPath = Test-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PATH"
@@ -278,8 +286,31 @@ if ($RequireSigning) {
         }
     }
     Assert-EnvPresent -Name "WINDOWS_CODESIGN_PFX_PASSWORD"
+    $minimumValidityDays = 180
+    if (Test-EnvPresent -Name 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS') {
+        if (-not [int]::TryParse((Get-EnvValue -Name 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS'), [ref]$minimumValidityDays) -or $minimumValidityDays -lt 1) {
+            throw 'WINDOWS_CODESIGN_MIN_VALIDITY_DAYS must be a positive integer.'
+        }
+    }
+    $certificate = Import-CodeSigningCertificate `
+        -PfxBase64 $(if ($hasPfxBase64) { Get-EnvValue -Name 'WINDOWS_CODESIGN_PFX_BASE64' } else { $null }) `
+        -PfxPath $(if ($hasPfxPath) { Get-EnvValue -Name 'WINDOWS_CODESIGN_PFX_PATH' } else { $null }) `
+        -Password (Get-EnvValue -Name 'WINDOWS_CODESIGN_PFX_PASSWORD')
+    try {
+        $signingPolicy = Assert-CodeSigningCertificatePolicy `
+            -Certificate $certificate `
+            -UpdaterSourcePath (Join-Path $repoRoot 'src/update/github_releases.zig') `
+            -MinimumValidityDays $minimumValidityDays
+    }
+    finally {
+        $certificate.Dispose()
+    }
     Write-Status -Label "Code signing" -Value "enabled"
     Write-Status -Label "Signing source" -Value $(if ($hasPfxBase64) { "base64 secret" } else { "PFX path" })
+    Write-Status -Label "Signer SPKI SHA-256" -Value $signingPolicy.SpkiSha256
+    Write-Status -Label "Signer expires" -Value $signingPolicy.NotAfter.ToString('o')
+    Write-Status -Label "Signer validity left" -Value "$($signingPolicy.RemainingValidityDays) days"
+    Write-Status -Label "Signer identity" -Value $(if ($signingPolicy.SelfSigned) { 'self-signed; updater-pin constrained' } else { 'CA-issued; updater-pin constrained' })
     Write-Status -Label "Timestamp URL" -Value $timestampUrl
 } else {
     Write-Status -Label "Code signing" -Value "not required"

@@ -19,6 +19,11 @@ build with Narrator and NVDA: navigate tabs and panes, read terminal text,
 open/filter/invoke the palette, edit settings, and dismiss confirmation/update
 surfaces at 100%, 200%, and 300% DPI with High Contrast both off and on.
 
+Stable releases fail preflight without a durable, exact-matrix attestation in
+`docs/accessibility-evidence/v<version>.json`. The validator binds the report to
+an ancestor commit and rejects later code changes; see
+`docs/accessibility-evidence/README.md`.
+
 Custom row fragments exist only for the owner-drawn Universal Palette list.
 Standard native lists keep their HWND providers so Windows owns their roles,
 navigation, selection patterns, focus, and events.

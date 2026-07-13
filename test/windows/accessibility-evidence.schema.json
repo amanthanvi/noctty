@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://winghostty.dev/schemas/accessibility-evidence.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_version", "tested_commit", "tested_at", "tester", "windows_build", "workflow_run_url", "scenarios", "matrix"],
+  "properties": {
+    "schema_version": { "const": "winghostty.accessibility-evidence.v1" },
+    "release_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "tested_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "tested_at": { "type": "string", "format": "date-time" },
+    "tester": { "type": "string", "minLength": 1 },
+    "windows_build": { "type": "string", "minLength": 1 },
+    "workflow_run_url": { "type": "string", "pattern": "^https://github\\.com/amanthanvi/winghostty/actions/runs/[0-9]+$" },
+    "scenarios": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["navigate-tabs", "navigate-panes", "read-terminal", "command-palette", "settings-edit", "dismiss-transient-ui"] }
+    },
+    "matrix": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["screen_reader", "scale_percent", "high_contrast", "status", "notes"],
+        "properties": {
+          "screen_reader": { "enum": ["Narrator", "NVDA"] },
+          "scale_percent": { "enum": [100, 200, 300] },
+          "high_contrast": { "type": "boolean" },
+          "status": { "const": "pass" },
+          "notes": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

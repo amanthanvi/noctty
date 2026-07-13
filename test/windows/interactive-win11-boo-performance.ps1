@@ -156,6 +156,7 @@ foreach ($field in $requiredRenderTraceFields) {
 
 $startupWindowMs = 1000
 $startupDrawLeadMs = 250
+$startupPaintGapLimitMs = 750
 $startupPaintStartMs = $renderTrace.max_paint_gap_ended_at_ms - $renderTrace.max_paint_gap_ms
 $startupPaintGap =
     $renderTrace.max_paint_gap_ended_at_ms -le $startupWindowMs -and
@@ -165,6 +166,9 @@ $startupPaintGap =
     $startupPaintStartMs - $renderTrace.first_paint_at_ms -le $startupDrawLeadMs
 if ($renderTrace.max_paint_gap_ms -gt 300 -and -not $startupPaintGap) {
     throw "Expected visible paint gaps to stay below the prior choppy path (expected <= 300, got $($renderTrace.max_paint_gap_ms))"
+}
+if ($startupPaintGap -and $renderTrace.max_paint_gap_ms -gt $startupPaintGapLimitMs) {
+    throw "Startup paint initialization gap exceeded the hard ceiling (expected <= $startupPaintGapLimitMs, got $($renderTrace.max_paint_gap_ms))"
 }
 if ($renderTrace.max_paint_gap_ms -gt 300 -and $startupPaintGap) {
     Write-Warning "Ignoring startup paint initialization gap ($($renderTrace.max_paint_gap_ms) ms at $($renderTrace.max_paint_gap_ended_at_ms) ms); enforcing sustained paint gap <= 300 ms after $startupWindowMs ms."

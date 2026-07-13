@@ -1,7 +1,7 @@
 import { ColorDots } from './color-dots.jsx';
 
 const { useEffect, useState } = React;
-const DEFAULT_WG_VERSION = '1.3.117';
+const DEFAULT_WG_VERSION = '1.3.118';
 const WG_REPO = 'amanthanvi/winghostty';
 const CACHE_KEY = 'wg-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
