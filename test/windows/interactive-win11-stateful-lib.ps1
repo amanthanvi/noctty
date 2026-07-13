@@ -50,7 +50,7 @@ function Find-StatefulHost([int] $ProcessId) {
     $callback = [WinghosttyStatefulNative+EnumProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
-        [void][InteractiveWin11MessageNative]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
+        [void][InteractiveWin11MessageNativeV2]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
         if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'winghostty.win32.host') {
             $script:StatefulHost = $hwnd
             return $false

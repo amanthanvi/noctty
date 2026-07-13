@@ -122,13 +122,19 @@ function Get-InteractiveWin11Environment {
     }
 }
 
-if (-not ('InteractiveWin11MessageNative' -as [type])) {
+if (-not ('InteractiveWin11MessageNativeV2' -as [type])) {
     Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-public static class InteractiveWin11MessageNative {
+public static class InteractiveWin11MessageNativeV2 {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
     [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    public static uint GetWindowThreadProcessIdWithError(IntPtr hwnd, out uint processId, out int lastError) {
+        SetLastError(0);
+        uint result = GetWindowThreadProcessId(hwnd, out processId);
+        lastError = Marshal.GetLastWin32Error();
+        return result;
+    }
     [DllImport("kernel32.dll")] private static extern void SetLastError(uint errorCode);
 
     public static IntPtr SendMessageTimeoutWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result, out int lastError) {
@@ -189,8 +195,8 @@ function Invoke-InteractiveWin11Message {
     # Keep ownership validation immediately adjacent to the send so lengthy
     # phase work cannot turn a stale HWND into a cross-process message.
     $windowProcessId = [uint32]0
-    $windowThreadId = [InteractiveWin11MessageNative]::GetWindowThreadProcessId($Hwnd, [ref] $windowProcessId)
-    $windowLastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    $windowLastError = 0
+    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
     if ($windowThreadId -eq 0) {
         if ($windowLastError -in $ToleratedErrors) {
             $ObservedToleratedError.Value = $windowLastError
@@ -206,7 +212,7 @@ function Invoke-InteractiveWin11Message {
 
     $sendResult = [UIntPtr]::Zero
     $lastError = 0
-    $sendStatus = [InteractiveWin11MessageNative]::SendMessageTimeoutWithError(
+    $sendStatus = [InteractiveWin11MessageNativeV2]::SendMessageTimeoutWithError(
         $Hwnd,
         $Message,
         $WParam,
