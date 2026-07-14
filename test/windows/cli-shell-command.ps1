@@ -61,6 +61,7 @@ if (-not (Test-Path $commandExe)) {
 
 $envPath = "$binDir;$env:PATH"
 $argsDisplay = [string]::Join(' ', $Arguments)
+$shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
@@ -123,11 +124,12 @@ switch ($Shell) {
                     -WindowStyle Hidden `
                     -PassThru
                 $processHandle = $process.Handle
-                if (-not $process.WaitForExit(5000)) {
+                if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
                     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                     if (-not $process.WaitForExit(1000)) {
-                        throw "Timed out waiting for shell launcher process to exit."
+                        throw "Timed out waiting for shell launcher process to exit after termination."
                     }
+                    throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
                 }
 
                 $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle

@@ -505,6 +505,7 @@ $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
+$cliShellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
 $accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
@@ -517,6 +518,7 @@ $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
 $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
+$cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
@@ -552,6 +554,44 @@ foreach ($source in $resolutionSourceAsts) {
             throw "Interactive library has the wrong ownership count for protected function $name`: $($source.Path)"
         }
     }
+}
+$cliShellTokens = $null
+$cliShellErrors = $null
+$cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $cliShellHarnessText,
+    [ref]$cliShellTokens,
+    [ref]$cliShellErrors
+)
+$cliShellTimeoutAssignments = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Extent.Text.Trim() -eq '$shellLauncherTimeoutSeconds = 30'
+}, $true))
+$cliShellTimeoutIfs = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(\$shellLauncherTimeoutSeconds \* 1000\)\)'
+}, $true))
+$cliShellTimeoutStatements = if ($cliShellTimeoutIfs.Count -eq 1) {
+    @($cliShellTimeoutIfs[0].Clauses[0].Item2.Statements)
+} else { @() }
+$cliShellCleanupIfs = if ($cliShellTimeoutStatements.Count -ge 2) {
+    @($cliShellTimeoutStatements[1].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(1000\)\)'
+    }, $true))
+} else { @() }
+if ($cliShellErrors.Count -ne 0 -or
+    $cliShellTimeoutAssignments.Count -ne 1 -or
+    $cliShellTimeoutIfs.Count -ne 1 -or
+    $cliShellTimeoutStatements.Count -ne 3 -or
+    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue' -or
+    $cliShellCleanupIfs.Count -ne 1 -or
+    $cliShellCleanupIfs[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $cliShellCleanupIfs[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw "Timed out waiting for shell launcher process to exit after termination."' -or
+    $cliShellTimeoutStatements[2].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
+    throw 'PowerShell shell launcher timeout must allow hosted cold starts and fail explicitly after bounded cleanup.'
 }
 $accessibilityTokens = $null
 $accessibilityErrors = $null
