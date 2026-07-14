@@ -449,5 +449,5 @@ try {
     Write-Host ("interactive-win11 key-input validation: PASS (scenario={0}, key={1}, route={2}, mode={3}, focus-class={4}, stdout={5}, stderr={6}, result={7}{8})" -f $scenario, $Key, $Route, $deliveryMode, $focusClass, $stdoutPath, $stderrPath, $resultPath, $extra)
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }

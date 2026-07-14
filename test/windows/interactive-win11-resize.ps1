@@ -515,6 +515,7 @@ Start-Sleep -Seconds 30
 Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath, $surfaceScreenshotPath, $liveScreenshotPath -ErrorAction SilentlyContinue
 
 $launchArgs = @(
+    Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
     "--class=$instanceClass"
     "--config-file=$configPath"
@@ -633,7 +634,7 @@ finally {
             Write-Warning "cleanup WM_EXITSIZEMOVE failed: $($_.Exception.Message)"
         }
     }
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 Write-Host ("interactive-win11 resize validation: PASS (stderr={0}, screenshot={1}, live-screenshot={2}, surface-screenshot={3}, host={4}x{5}, surface={6}x{7}, split-union-before={8}x{9}, split-union-after={10}x{11}, live-right-near-black={12:P1}, live-bottom-near-black={13:P1}, live-right-neutral-gray={14:P1}, live-bottom-neutral-gray={15:P1}, right-near-black={16:P1}, bottom-near-black={17:P1}, right-neutral-gray={18:P1}, bottom-neutral-gray={19:P1})" -f $stderrPath, $screenshotPath, $liveScreenshotPath, $surfaceScreenshotPath, $hostRect.Width, $hostRect.Height, $surfaceRect.Width, $surfaceRect.Height, $initialUnion.SurfaceUnionWidth, $initialUnion.SurfaceUnionHeight, $grownUnion.SurfaceUnionWidth, $grownUnion.SurfaceUnionHeight, $liveRatios.RightBlackRatio, $liveRatios.BottomBlackRatio, $liveRatios.RightGrayRatio, $liveRatios.BottomGrayRatio, $ratios.RightBlackRatio, $ratios.BottomBlackRatio, $ratios.RightGrayRatio, $ratios.BottomGrayRatio)

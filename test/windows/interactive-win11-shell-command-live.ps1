@@ -731,5 +731,5 @@ finally {
         )
     }
 
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }

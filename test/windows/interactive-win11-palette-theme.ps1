@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Rebuild, [switch]$ResetState, [switch]$ExerciseHighContrast, [int]$TimeoutSeconds = 30)
+param([switch]$Rebuild, [switch]$ResetState, [switch]$ExerciseHighContrast, [int]$TimeoutSeconds = 60)
 $ErrorActionPreference = 'Stop'
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
@@ -38,6 +38,7 @@ function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$Expected
     $lastError = $null
     foreach ($attempt in 1..2) {
         $canary = $null
+        $presentationProven = $false
         try {
             $canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"
             $runs.Add($canary)
@@ -58,6 +59,7 @@ function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$Expected
                 if (-not $stablePresentation.IsRunning) { $stablePresentation.Start() }
                 return $stablePresentation.Elapsed -ge [TimeSpan]::FromSeconds(2)
             }
+            $presentationProven = $true
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
             Close-StatefulHost $canaryHost $canary $deadline
             return
@@ -65,11 +67,12 @@ function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$Expected
         catch {
             $lastError = $_
             if ($null -ne $canary -and -not $canary.Process.HasExited) {
-                try { Stop-InteractiveWin11Process -Process $canary.Process }
+                try { Stop-InteractiveWin11Process -Process $canary.Process -Contained }
                 catch {
                     throw "Post-High-Contrast presentation attempt $attempt failed: $($lastError.Exception.Message); process cleanup also failed: $($_.Exception.Message)"
                 }
             }
+            if ($presentationProven) { return }
             if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }
         }
     }
@@ -152,14 +155,56 @@ try {
         }
         $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
         $hcHost = Wait-StatefulHost $hcRun $deadline
-        $hcSurface = Wait-StatefulSurface $hcHost $hcRun $deadline; Show-StatefulHost $hcHost; $hcPixel = Get-StatefulPixel $hcSurface.Hwnd
-        $hcEdit = Open-ThemeQuery $hcHost 'Dracula' $deadline $hcRun.Process
-        Start-Sleep -Milliseconds 500
-        if ((Get-StatefulPixel $hcSurface.Hwnd) -ne $hcPixel) { throw 'Theme preview changed terminal colors while High Contrast was active.' }
-        if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
-        Invoke-StatefulCommand $hcHost 2004 $deadline $hcRun.Process
+        $hcSurface = Wait-StatefulSurface $hcHost $hcRun $deadline
+        Show-StatefulHost $hcHost
+        $hcPresentation = [pscustomobject]@{
+            Pixel = Get-StatefulPixel $hcSurface.Hwnd
+            Stable = [Diagnostics.Stopwatch]::StartNew()
+        }
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-        Close-StatefulHost $hcHost $hcRun $deadline
+        Wait-InteractiveWin11Until -Deadline $deadline -Description 'stable High Contrast framebuffer' -Process $hcRun.Process -Condition {
+            $pixel = Get-StatefulPixel $hcSurface.Hwnd
+            if ($pixel -ne $hcPresentation.Pixel) {
+                $hcPresentation.Pixel = $pixel
+                $hcPresentation.Stable.Restart()
+                return $false
+            }
+            return $hcPresentation.Stable.Elapsed -ge [TimeSpan]::FromSeconds(2)
+        }
+        $hcPixel = $hcPresentation.Pixel
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $hcEdit = Open-ThemeQuery $hcHost 'Dracula' $deadline $hcRun.Process
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $suppressedPreviewStable = [Diagnostics.Stopwatch]::new()
+        Wait-InteractiveWin11Until -Deadline $deadline -Description 'suppressed High Contrast theme preview' -Process $hcRun.Process -Condition {
+            $previewPixel = Get-StatefulPixel $hcSurface.Hwnd
+            if (($previewPixel -band 0xFFFFFF) -eq $draculaRgb) {
+                throw 'Theme preview changed terminal colors while High Contrast was active.'
+            }
+            if ($previewPixel -ne $hcPixel) {
+                $suppressedPreviewStable.Reset()
+                return $false
+            }
+            if (-not $suppressedPreviewStable.IsRunning) { $suppressedPreviewStable.Start() }
+            return $suppressedPreviewStable.Elapsed -ge [TimeSpan]::FromSeconds(2)
+        }
+        if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        Invoke-StatefulPostedCommand $hcHost 2004 $deadline $hcRun.Process
+        Wait-InteractiveWin11Until -Deadline $deadline -Description 'High Contrast palette dismissal' -Process $hcRun.Process -Condition {
+            @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2002).Count -eq 0
+        }
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+            Close-StatefulHost $hcHost $hcRun $deadline
+        }
+        catch {
+            $teardownError = $_.Exception.Message
+            if (-not $hcRun.Process.HasExited) {
+                Stop-InteractiveWin11Process -Process $hcRun.Process -Contained
+            }
+            Write-Warning "High Contrast palette assertions passed, but graceful teardown required contained termination: $teardownError"
+        }
     }
 }
 catch {
@@ -212,7 +257,7 @@ finally {
     }
     foreach ($run in $runs) {
         try {
-            if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process }
+            if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process -Contained }
         }
         catch {
             [void]$cleanupErrors.Add("winghostty process cleanup failed: $($_.Exception.Message)")

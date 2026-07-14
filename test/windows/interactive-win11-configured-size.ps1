@@ -85,6 +85,7 @@ Start-Sleep -Seconds 30
 Remove-Item -LiteralPath $stdoutPath, $stderrPath, $resultPath -ErrorAction SilentlyContinue
 
 $launchArgs = @(
+    Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
     "--class=winghostty-configured-size-$($layout.SandboxId)"
     "--config-file=$configPath"
@@ -183,7 +184,7 @@ try {
     }
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 Write-Host "interactive-win11 configured-size validation: PASS (pty=${width}x${height}, dpi=$dpi, result=$resultPath, stderr=$stderrPath)"

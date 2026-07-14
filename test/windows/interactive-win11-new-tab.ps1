@@ -291,6 +291,7 @@ function Invoke-NewTabScenario {
     Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
     $launchArgs = @(
+        Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
         "--class=winghostty-new-tab-$Name-$($Layout.SandboxId)"
     )
@@ -394,7 +395,7 @@ function Invoke-NewTabScenario {
         }
     }
     finally {
-        Stop-InteractiveWin11Process -Process $process
+        Stop-InteractiveWin11Process -Process $process -Contained
     }
 }
 

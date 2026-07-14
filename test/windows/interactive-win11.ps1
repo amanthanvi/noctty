@@ -76,7 +76,10 @@ Assert-True ($layout.SandboxRoot -ne $otherLayout.SandboxRoot) 'different sandbo
 Assert-True ($layout.SandboxId -ne $otherLayout.SandboxId) 'different sandbox names should produce unique sandbox ids'
 
 $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
-Assert-Equal $launchArgs.Count 2 'launch args should include the isolation overrides'
+Assert-Equal $launchArgs.Count 5 'launch args should include containment and isolation overrides'
+Assert-True ($launchArgs -contains '--linux-cgroup=always') 'launch args should enable Windows Job Object containment'
+Assert-True ($launchArgs -contains '--linux-cgroup-hard-fail=true') 'launch args should fail when Job Object attachment fails'
+Assert-True ($launchArgs -contains '--windows-job-object-kill-on-close=true') 'launch args should terminate contained descendants when the host exits'
 Assert-True ($launchArgs -contains '--single-instance=false') 'launch args should disable single-instance forwarding'
 Assert-True ($launchArgs -contains "--class=winghostty-interactive-$($layout.SandboxId)") 'launch args should include a sandbox-unique class'
 

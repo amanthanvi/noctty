@@ -286,6 +286,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 $runtimeFailurePattern = 'taskbar progress init failed|taskbar progress sync failed|panic: reached unreachable code'
 
 $launchArgs = @(
+    Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
     "--class=winghostty-progress-$($layout.SandboxId)"
     "--config-file=$configPath"
@@ -378,7 +379,7 @@ try {
     $bottomStripPauseVsErrorDistinct = $bottomStripPauseHash -ne $bottomStripErrorHash
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 Write-Host "interactive-win11 progress validation: PASS (stderr=$stderrPath, set-vs-remove-distinct=$visualSetVsRemoveDistinct, pause-vs-error-distinct=$visualPauseVsErrorDistinct, bottom-strip-set-vs-remove-distinct=$bottomStripSetVsRemoveDistinct, bottom-strip-pause-vs-error-distinct=$bottomStripPauseVsErrorDistinct, set=$($screenshots.set), remove=$($screenshots.remove), bottom-strip-set=$($bottomStrips.set), bottom-strip-remove=$($bottomStrips.remove))"

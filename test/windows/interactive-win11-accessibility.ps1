@@ -261,7 +261,7 @@ try {
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $artifact -Encoding utf8
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 Write-Host "interactive Win11 accessibility: PASS ($artifact)"

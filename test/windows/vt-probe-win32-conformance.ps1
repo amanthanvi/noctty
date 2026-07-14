@@ -70,7 +70,7 @@ try {
     }
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -AllowAlreadyExited
 }
 
 $stdout = Get-InteractiveWin11TextFile -Path $stdoutPath

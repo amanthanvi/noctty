@@ -82,6 +82,7 @@ $notificationsEnabled = $settingText -eq 'Enabled'
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
 $launchArgs = @(
+    Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
     "--class=winghostty-command-finish-$($layout.SandboxId)"
     "--config-file=$configPath"
@@ -146,7 +147,7 @@ try {
     }
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 if (-not $validated) {

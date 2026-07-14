@@ -26,6 +26,7 @@ pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 
 pub const JOBOBJECTINFOCLASS = enum(i32) {
     basic_limit_information = 2,
+    basic_process_id_list = 3,
     extended_limit_information = 9,
     _,
 };
@@ -72,10 +73,26 @@ pub extern "kernel32" fn SetInformationJobObject(
     cbJobObjectInfoLength: DWORD,
 ) callconv(.winapi) BOOL;
 
+pub extern "kernel32" fn QueryInformationJobObject(
+    hJob: HANDLE,
+    JobObjectInfoClass: JOBOBJECTINFOCLASS,
+    lpJobObjectInfo: *anyopaque,
+    cbJobObjectInfoLength: DWORD,
+    lpReturnLength: ?*DWORD,
+) callconv(.winapi) BOOL;
+
 pub extern "kernel32" fn AssignProcessToJobObject(
     hJob: HANDLE,
     hProcess: HANDLE,
 ) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn GetProcessId(Process: HANDLE) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn OpenProcess(
+    dwDesiredAccess: DWORD,
+    bInheritHandle: BOOL,
+    dwProcessId: DWORD,
+) callconv(.winapi) ?HANDLE;
 
 pub const Mode = enum {
     never,
@@ -98,6 +115,7 @@ pub const Plan = struct {
     attach_policy: AttachPolicy = .best_effort,
     active_process_limit: ?DWORD = null,
     job_memory_limit_bytes: ?SIZE_T = null,
+    kill_on_close: bool = false,
 
     pub fn wantsJobObject(self: Plan) bool {
         return self.mode != .never;
@@ -109,7 +127,7 @@ pub const Plan = struct {
     }
 
     pub fn extendedLimitInformation(self: Plan) ?JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        if (!self.wantsJobObject() or !self.hasLimits()) return null;
+        if (!self.wantsJobObject() or (!self.hasLimits() and !self.kill_on_close)) return null;
 
         var info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = .{};
 
@@ -121,6 +139,9 @@ pub const Plan = struct {
         if (self.job_memory_limit_bytes) |limit| {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
             info.JobMemoryLimit = limit;
+        }
+        if (self.kill_on_close) {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         }
 
         return info;
@@ -163,6 +184,7 @@ pub fn configPlan(config: *const configpkg.Config) ConfigPlanError!Plan {
             std.math.cast(SIZE_T, limit) orelse return error.JobMemoryLimitOverflow
         else
             null,
+        .kill_on_close = config.@"windows-job-object-kill-on-close",
     };
 }
 
@@ -187,6 +209,7 @@ test "win32 job object ABI declarations match expected Win32 values" {
     const set_info_fn = @typeInfo(@TypeOf(SetInformationJobObject)).@"fn";
 
     try std.testing.expectEqual(@as(i32, 9), @intFromEnum(JOBOBJECTINFOCLASS.extended_limit_information));
+    try std.testing.expectEqual(@as(i32, 3), @intFromEnum(JOBOBJECTINFOCLASS.basic_process_id_list));
     try std.testing.expectEqual(@as(DWORD, 0x00000008), JOB_OBJECT_LIMIT_ACTIVE_PROCESS);
     try std.testing.expectEqual(@as(DWORD, 0x00000200), JOB_OBJECT_LIMIT_JOB_MEMORY);
     try std.testing.expectEqual(@as(DWORD, 0x00002000), JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
@@ -242,16 +265,33 @@ test "win32 job object plan maps compatibility limits without kill-on-close" {
     try std.testing.expectEqual(@as(usize, 512 * 1024 * 1024), limits.JobMemoryLimit);
 }
 
+test "win32 job object plan opts into kill-on-close" {
+    var config: configpkg.Config = .{};
+    config.@"linux-cgroup" = .always;
+    config.@"windows-job-object-kill-on-close" = true;
+
+    const plan = try configPlan(&config);
+    const limits = plan.extendedLimitInformation().?;
+
+    try std.testing.expect(plan.kill_on_close);
+    try std.testing.expectEqual(
+        @as(DWORD, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE),
+        limits.BasicLimitInformation.LimitFlags,
+    );
+}
+
 test "win32 job object plan ignores compatibility limits when mode is never" {
     var config: configpkg.Config = .{};
     config.@"linux-cgroup-memory-limit" = 512 * 1024 * 1024;
     config.@"linux-cgroup-processes-limit" = 4;
     config.@"linux-cgroup-hard-fail" = true;
+    config.@"windows-job-object-kill-on-close" = true;
 
     const plan = try configPlan(&config);
 
     try std.testing.expectEqual(Mode.never, plan.mode);
     try std.testing.expectEqual(AttachPolicy.best_effort, plan.attach_policy);
+    try std.testing.expect(!plan.kill_on_close);
     try std.testing.expect(!plan.wantsJobObject());
     try std.testing.expect(!plan.hasLimits());
     try std.testing.expect(plan.extendedLimitInformation() == null);

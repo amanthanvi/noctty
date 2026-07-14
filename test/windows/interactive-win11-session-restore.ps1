@@ -36,7 +36,7 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
         $queryHandle = $query.Handle
         $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $query.WaitForExit($remainingMs)) {
-            Stop-InteractiveWin11Process -Process $query
+            Stop-InteractiveWin11Process -Process $query -RequireLiveRoot
             $lastError = "automation query process did not exit before the story deadline"
             continue
         }
@@ -117,7 +117,7 @@ try {
     Close-StatefulHost $freshHost $third $deadline
 }
 finally {
-    foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
+    foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process -Contained } }
 }
 foreach ($run in $runs) {
     if (Select-String -LiteralPath $run.Stderr -SimpleMatch 'shell/native invariant failed' -Quiet) {
