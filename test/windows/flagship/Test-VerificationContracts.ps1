@@ -2008,6 +2008,11 @@ Assert-TextContract `
     -Pattern '(?ms)env:\s+ZIG_GLOBAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-global-cache\s+ZIG_LOCAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-local-cache' `
     -Description 'interactive builds use clean per-job Zig caches' `
     -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+Assert-TextContract `
+    -Content $interactiveRunStep `
+    -Pattern "(?m)^[ \t]*\`$ErrorActionPreference = 'Stop'[ \t]*\r?\n[ \t]*\`$quick = " `
+    -Description 'interactive workflow treats parent PowerShell errors as terminating before branch selection' `
+    -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
 $interactiveHarnessCommands = @(
     './test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState',
     './test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness',
