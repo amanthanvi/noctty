@@ -106,6 +106,16 @@ function Assert-WindowsPowerShellObjdumpFailure {
     }
 }
 
+function Assert-ObjdumpTimeoutCleanupContract {
+    $checkerText = Get-Content -LiteralPath $checker -Raw
+    if ($checkerText -notmatch '\$objdumpProcess\.Kill\(\)' -or
+        $checkerText -notmatch '\[System\.Threading\.Tasks\.Task\]::WaitAll\(' -or
+        $checkerText -notmatch '\$streamCopyTimeoutMs' -or
+        $checkerText -notmatch 'stream cleanup timed out') {
+        throw 'CPU baseline checker must bound stream cleanup after killing a timed-out objdump process.'
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     $windowsPowerShell = Get-Command powershell.exe -CommandType Application -ErrorAction Stop |
@@ -147,6 +157,7 @@ public static class Program {
     }
     Assert-ObjdumpFailure
     Assert-WindowsPowerShellObjdumpFailure
+    Assert-ObjdumpTimeoutCleanupContract
 
     Write-Host 'Windows x64 baseline checker probes: PASS'
 }

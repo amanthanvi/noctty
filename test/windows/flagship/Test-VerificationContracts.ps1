@@ -172,12 +172,16 @@ function Get-MemberExpressionName {
 function Test-DynamicScriptTypeName {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
 
-    $typeName = (($TypeName -split ',', 2)[0] -replace '\s', '')
+    $typeName = ((($TypeName -split ',', 2)[0] -replace '\s', '')).ToLowerInvariant()
     return $typeName -in @(
-        'ScriptBlock',
-        'System.Management.Automation.ScriptBlock',
-        'PowerShell',
-        'System.Management.Automation.PowerShell'
+        'scriptblock',
+        'system.management.automation.scriptblock',
+        'powershell',
+        'system.management.automation.powershell',
+        'runspace',
+        'runspacefactory',
+        'system.management.automation.runspaces.runspace',
+        'system.management.automation.runspaces.runspacefactory'
     )
 }
 
@@ -237,7 +241,9 @@ function Test-CommandResolutionMutationNode {
         $isGetTypeArgument = $Node.Parent -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
             (Get-MemberExpressionName -Node $Node.Parent) -eq 'GetType' -and
             @($Node.Parent.Arguments | Where-Object { [object]::ReferenceEquals($_, $Node) }).Count -eq 1
-        if ($isTypeConversion -or $isGetTypeArgument) { return $true }
+        $isAsTypeArgument = $Node.Parent -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+            $Node.Parent.Operator -eq [System.Management.Automation.Language.TokenKind]::As
+        if ($isTypeConversion -or $isGetTypeArgument -or $isAsTypeArgument) { return $true }
     }
     if ($Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
         (($Node.VariablePath.UserPath -split ':')[-1] -eq 'ExecutionContext')) {
@@ -263,7 +269,11 @@ function Test-CommandResolutionMutationNode {
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
         if ((Test-DynamicScriptTypeExpression -Node $Node.Expression) -and
-            $memberName -in @('Create', 'GetMethod', 'GetMethods')) {
+            $memberName -in @('Create', 'CreateRunspace', 'CreatePipeline', 'CreateNestedPipeline', 'GetMethod', 'GetMethods')) {
+            return $true
+        }
+        if ($memberName -eq 'SessionState' -and
+            (Test-ExecutionContextRoot -Node $Node.Expression)) {
             return $true
         }
         # Reject access to the InvokeCommand object itself so assigning it to
@@ -282,11 +292,11 @@ function Test-CommandResolutionMutationNode {
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Invoke-Expression', 'iex') -or
-            $Node.Extent.Text -match '(?i)(?:alias|function):'
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+            $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
-        return $Node.Left.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function):'
+        return $Node.Left.Extent.Text -match '(?i)^\$(?:\{)?(?:global:|script:|local:|private:)?(?:alias|function|variable):'
     }
     return $false
 }
@@ -350,6 +360,9 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$(Get-Item variable:ExecutionContext).Value.InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ss = $ExecutionContext.SessionState; $ss.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$member = "Create"; [ScriptBlock]::$member("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$member = "InvokeCommand"; $ExecutionContext.$member.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ec = $($ExecutionContext)' }
@@ -357,6 +370,9 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock].GetMethod("Create")' }
     [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation.ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]"System.Management.Automation.ScriptBlock"' }
+    [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
+    [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
+    [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
     [pscustomobject]@{ Reject = $true; Text = '$ExecutionContext.InvokeCommand.InvokeScriptBlock("x")' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
