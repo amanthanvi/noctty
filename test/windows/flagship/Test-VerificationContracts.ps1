@@ -1579,6 +1579,10 @@ Assert-WorkflowContract `
     -Path $windowsPackager `
     -Pattern '(?ms)foreach \(\$runtimeFile in \$runtimeFiles\).*?Assert-PeMachine.*?if \(\$Architecture -eq "x64"\).*?check-windows-x64-baseline\.ps1.*?-Path \$runtimePath' `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
+    -Pattern '(?ms)\$objdumpTimeoutMs = 120000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?llvm-objdump timed out' `
+    -Description 'Windows x64 baseline disassembly is time-bounded and kills a timed-out tool'
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content (Get-Content -LiteralPath $releasePreflight -Raw) -HeaderPattern '^function\s+Assert-WingetArchitectureCoverage(?=\s|\{)') `
     -Pattern '(?ms)Assert-WingetArchitectureCoverage.*?Architecture:.*?arm64,x64' `

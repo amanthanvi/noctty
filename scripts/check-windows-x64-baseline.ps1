@@ -58,19 +58,51 @@ if (-not $objdumpPath) {
 
 $objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
 $objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
+$objdumpTimeoutMs = 120000
 try {
-    # Native redirection avoids PowerShell object creation for every decoded
-    # instruction while keeping the full disassembly out of process memory.
-    # Keep stderr separate so Windows PowerShell 5.1 does not turn native
-    # diagnostic lines into terminating ErrorRecord objects.
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
+    # Copy native streams directly to disk. PowerShell 5.1 otherwise creates
+    # one object per decoded line and wraps native stderr in ErrorRecords.
+    $processStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $processStart.UseShellExecute = $false
+    $processStart.CreateNoWindow = $true
+    $processStart.RedirectStandardOutput = $true
+    $processStart.RedirectStandardError = $true
+    if ([System.IO.Path]::GetExtension($objdumpPath) -in @('.cmd', '.bat')) {
+        # The regression fixture supplies a command shim; production resolves
+        # the real llvm-objdump executable.
+        $processStart.FileName = $env:ComSpec
+        $processStart.Arguments = "/d /s /c `"`"$objdumpPath`" --disassemble --no-show-raw-insn `"$fullPath`"`""
+    }
+    else {
+        $processStart.FileName = $objdumpPath
+        $processStart.Arguments = "--disassemble --no-show-raw-insn `"$fullPath`""
+    }
+
+    $objdumpProcess = [System.Diagnostics.Process]::new()
+    $objdumpProcess.StartInfo = $processStart
+    $stdoutStream = [System.IO.File]::Open($objdumpOutput, 'Create', 'Write', 'None')
+    $stderrStream = [System.IO.File]::Open($objdumpError, 'Create', 'Write', 'None')
     try {
-        & $objdumpPath --disassemble --no-show-raw-insn $fullPath > $objdumpOutput 2> $objdumpError
-        $objdumpExitCode = $LASTEXITCODE
+        if (-not $objdumpProcess.Start()) {
+            throw "Failed to start llvm-objdump while checking $fullPath."
+        }
+        $stdoutCopy = $objdumpProcess.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrCopy = $objdumpProcess.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $objdumpCompleted = $objdumpProcess.WaitForExit($objdumpTimeoutMs)
+        if (-not $objdumpCompleted) {
+            $objdumpProcess.Kill()
+            $objdumpProcess.WaitForExit()
+        }
+        [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy))
+        if (-not $objdumpCompleted) {
+            throw "llvm-objdump timed out after $objdumpTimeoutMs ms while checking $fullPath."
+        }
+        $objdumpExitCode = $objdumpProcess.ExitCode
     }
     finally {
-        $ErrorActionPreference = $previousErrorActionPreference
+        $stdoutStream.Dispose()
+        $stderrStream.Dispose()
+        $objdumpProcess.Dispose()
     }
     if ($objdumpExitCode -ne 0) {
         $details = @(
