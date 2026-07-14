@@ -405,6 +405,8 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
     [pscustomobject]@{ Reject = $false; Text = 'Write-Host "ScriptBlock"' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("System.Management.Automation.ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = 'Invoke-Expression ''Write-Host bypass''' }
+    [pscustomobject]@{ Reject = $true; Text = 'iex ''Write-Host bypass''' }
     [pscustomobject]@{ Reject = $true; Text = 'Add-PSSnapin Example.SnapIn' }
     [pscustomobject]@{ Reject = $true; Text = 'asnp Example.SnapIn' }
 )
