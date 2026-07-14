@@ -535,9 +535,13 @@ function Show-InteractiveWin11Window {
         [switch] $SetForeground
     )
 
-    $nativeType = $NativeTypeName -as [type]
+    $nativeType = switch ($NativeTypeName) {
+        'InteractiveWin11BooMultiTabNative' { [InteractiveWin11BooMultiTabNative]; break }
+        'InteractiveWin11BooPerfNative' { [InteractiveWin11BooPerfNative]; break }
+        default { $null }
+    }
     if ($null -eq $nativeType) {
-        throw "Missing native helper type: $NativeTypeName"
+        throw "Unsupported native helper type: $NativeTypeName"
     }
 
     [void] $nativeType::ShowWindow($Hwnd, $ShowCode)

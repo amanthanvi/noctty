@@ -238,6 +238,18 @@ function Test-ExecutionContextMemberChain {
 function Test-CommandResolutionMutationNode {
     param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
 
+    if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
+        (($Node.Type.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
+        return $Node.Child -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            (Test-DynamicScriptTypeName -TypeName $Node.Child.Value)
+    }
+    if ($Node -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $Node.Operator -eq [System.Management.Automation.Language.TokenKind]::As -and
+        $Node.Right -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (($Node.Right.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
+        return $Node.Left -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            (Test-DynamicScriptTypeName -TypeName $Node.Left.Value)
+    }
     if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
         (Test-DynamicScriptTypeName -TypeName $Node.Value)) {
         $isTypeConversion = $Node.Parent -is [System.Management.Automation.Language.ConvertExpressionAst] -and
@@ -380,7 +392,11 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; [PSObject].Assembly.GetType($typeName)' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]"System.Management.Automation.ScriptBlock"' }
+    [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = [type]$typeName' }
+    [pscustomobject]@{ Reject = $true; Text = '$factory = [type]("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
+    [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = $typeName -as [type]' }
+    [pscustomobject]@{ Reject = $false; Text = '$factory = "WinghosttyStatefulNative" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
