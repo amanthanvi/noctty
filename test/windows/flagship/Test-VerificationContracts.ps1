@@ -594,7 +594,12 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopIdentityTry.CatchClauses[0].CatchTypes.Count -ne 1 -or
     $stopIdentityTry.CatchClauses[0].CatchTypes[0].TypeName.FullName -ne 'System.InvalidOperationException' -or
     $stopIdentityTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
-    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne 'Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"' -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopIdentityTry.CatchClauses[0].Body.Statements[0].ElseClause -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '$VerbosePreference -eq ''Continue''' -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"' -or
     $stopIdentityTry.Body.Statements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
     $stopIdentityTry.Body.Statements[1].Extent.Text.Trim() -ne '$rootIsLive = -not $Process.HasExited -and $Process.StartTime -eq $rootStartedAt' -or
     $stopProcessStatements[4] -isnot [System.Management.Automation.Language.IfStatementAst] -or
