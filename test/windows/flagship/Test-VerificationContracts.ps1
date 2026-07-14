@@ -568,6 +568,10 @@ $stopTaskkillTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatem
 $stopManagedTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatements[10] } else { $null }
 if ($stopProcessFunctions.Count -ne 1 -or
     -not [object]::ReferenceEquals($stopProcessFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
+    @($stopProcessFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TrapStatementAst]
+    }, $true)).Count -ne 0 -or
     $null -ne $stopProcessFunctions[0].Body.BeginBlock -or
     $null -ne $stopProcessFunctions[0].Body.ProcessBlock -or
     $null -ne $stopProcessFunctions[0].Body.DynamicParamBlock -or
