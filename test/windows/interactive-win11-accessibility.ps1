@@ -153,7 +153,7 @@ try {
                 [void](Invoke-InteractiveWin11Message `
                     -Hwnd $targetHwnd `
                     -Message 0x0201 `
-                    -WParam ([UIntPtr]1) `
+                    -WParam ([UIntPtr]::new([uint64]1)) `
                     -LParam ([IntPtr]$clickCoordinates) `
                     -Deadline $focusDeadline `
                     -Process $process `
@@ -192,7 +192,7 @@ try {
     [void](Invoke-InteractiveWin11Message `
         -Hwnd $process.MainWindowHandle `
         -Message 0x0111 `
-        -WParam ([UIntPtr]([uint64]1901)) `
+        -WParam ([UIntPtr]::new([uint64]1901)) `
         -LParam ([IntPtr]::Zero) `
         -Deadline $paletteDeadline `
         -Process $process `
@@ -235,7 +235,7 @@ try {
     [void](Invoke-InteractiveWin11Message `
         -Hwnd $process.MainWindowHandle `
         -Message 0x0111 `
-        -WParam ([UIntPtr]([uint64]2004)) `
+        -WParam ([UIntPtr]::new([uint64]2004)) `
         -LParam ([IntPtr]::Zero) `
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Process $process `

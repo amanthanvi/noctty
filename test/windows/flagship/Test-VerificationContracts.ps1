@@ -506,6 +506,7 @@ $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidenc
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
+$accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
@@ -517,6 +518,7 @@ $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
 $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
+$accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
 $resolutionSourceAsts = foreach ($source in @(
@@ -550,6 +552,21 @@ foreach ($source in $resolutionSourceAsts) {
             throw "Interactive library has the wrong ownership count for protected function $name`: $($source.Path)"
         }
     }
+}
+$accessibilityTokens = $null
+$accessibilityErrors = $null
+$accessibilityAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $accessibilityHarnessText,
+    [ref]$accessibilityTokens,
+    [ref]$accessibilityErrors
+)
+$accessibilityUIntPtrConversions = @($accessibilityAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
+        $node.Type.TypeName.FullName -eq 'UIntPtr'
+}, $true))
+if ($accessibilityErrors.Count -ne 0 -or $accessibilityUIntPtrConversions.Count -ne 0) {
+    throw 'Accessibility harness must parse and construct nonzero WPARAM values through UIntPtr::new([uint64] ...).'
 }
 $timeoutFunctions = @($resolutionSourceAsts[0].Ast.FindAll({
     param($node)
