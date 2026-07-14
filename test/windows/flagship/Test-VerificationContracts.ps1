@@ -263,9 +263,11 @@ function Test-CommandResolutionMutationNode {
             $memberName -in @('Create', 'GetMethod', 'GetMethods')) {
             return $true
         }
-        if ($memberName -in @('InvokeScript', 'NewScriptBlock') -and
-            ((Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('InvokeCommand')) -or
-                (Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('SessionState', 'InvokeCommand')))) {
+        # Reject access to the InvokeCommand object itself so assigning it to
+        # an alias cannot bypass the direct member-chain checks.
+        if ($memberName -eq 'InvokeCommand' -and
+            ((Test-ExecutionContextRoot -Node $Node.Expression) -or
+                (Test-ExecutionContextMemberChain -Node $Node.Expression -Members @('SessionState')))) {
             return $true
         }
         if ($memberName -eq 'InvokeProvider' -and
@@ -343,13 +345,15 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '${ExecutionContext}.SessionState.InvokeCommand.''InvokeScript''("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$($ExecutionContext).InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ec = $($ExecutionContext)' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [ScriptBlock]' }
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock].GetMethod("Create")' }
     [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation.ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]"System.Management.Automation.ScriptBlock"' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
-    [pscustomobject]@{ Reject = $false; Text = '$ExecutionContext.InvokeCommand.InvokeScriptBlock("x")' }
+    [pscustomobject]@{ Reject = $true; Text = '$ExecutionContext.InvokeCommand.InvokeScriptBlock("x")' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
     [pscustomobject]@{ Reject = $false; Text = 'Write-Host "ScriptBlock"' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("System.Management.Automation.ScriptBlock")' }
