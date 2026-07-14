@@ -1606,6 +1606,22 @@ Assert-WorkflowContract `
     -Description 'accessibility evidence rejects unsupported runner provenance schemas'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
+    -Pattern 'WINGHOSTTY_EXPECTED_CHECKOUT_SHA' `
+    -Description 'interactive provenance can verify an exact PR head checkout instead of only GITHUB_SHA'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
+    -Pattern 'commit = \$expectedCommit' `
+    -Description 'interactive provenance records the exact expected tested commit'
+Assert-WorkflowContract `
+    -Path $testWorkflow `
+    -Pattern "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}" `
+    -Description 'Test workflow checkouts use the immutable PR head SHA for pull requests'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot '.github\workflows\windows-arm64.yml') `
+    -Pattern "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}" `
+    -Description 'ARM64 workflow checkout uses the immutable PR head SHA for pull requests'
+Assert-WorkflowContract `
+    -Path $runnerProvenanceChecker `
     -Pattern '\$runnerVersion -lt \$minimumRunnerVersion' `
     -Description 'interactive evidence rejects outdated runners'
 Assert-WorkflowContract `
