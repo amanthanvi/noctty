@@ -739,12 +739,15 @@ function Stop-InteractiveWin11RootHandle {
     Initialize-InteractiveWin11ProcessNative
     $terminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($RootProcessHandle, 1)
     $terminationError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    $waitResult = [InteractiveWin11ProcessNative]::WaitForSingleObject($RootProcessHandle, 5000)
+    # TerminateProcess is asynchronous. High Contrast and other system-wide UI
+    # transitions can keep teardown pending beyond the ordinary five-second
+    # harness cadence, so retain a bounded but transition-tolerant exit wait.
+    $waitResult = [InteractiveWin11ProcessNative]::WaitForSingleObject($RootProcessHandle, 15000)
     if (-not $terminationRequested -and $waitResult -ne 0) {
-        throw "root handle termination failed with Win32 error $terminationError; the root remained live after 5 seconds"
+        throw "root handle termination failed with Win32 error $terminationError; the root remained live after 15 seconds"
     }
     if ($waitResult -eq 258) {
-        throw 'root handle termination did not stop the process within 5 seconds'
+        throw 'root handle termination did not stop the process within 15 seconds'
     }
     if ($waitResult -eq [uint32]::MaxValue) {
         $waitError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()

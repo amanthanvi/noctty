@@ -706,7 +706,7 @@ $rootTerminateCalls = @($stopRootHandleFunctions[0].FindAll({
 $rootWaitCalls = @($stopRootHandleFunctions[0].FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
-            $node.Extent.Text -eq '[InteractiveWin11ProcessNative]::WaitForSingleObject($RootProcessHandle, 5000)'
+            $node.Extent.Text -eq '[InteractiveWin11ProcessNative]::WaitForSingleObject($RootProcessHandle, 15000)'
     }, $true))
 if ($snapshotCimCommands.Count -ne 1 -or
     $verificationCimCommands.Count -ne 1 -or
@@ -1369,6 +1369,11 @@ $paletteThemeAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$paletteThemeErrors
 )
 if ($paletteThemeErrors.Count -ne 0) { throw "Palette theme harness does not parse: $($paletteThemeErrors[0].Message)" }
+Assert-TextContract `
+    -Content $paletteThemeHarnessText `
+    -Pattern ([regex]::Escape('[int]$TimeoutSeconds = 60')) `
+    -Description 'palette High Contrast transition budget remains Debug-build tolerant' `
+    -Context $paletteThemeHarness
 Assert-CommandResolutionContract -Ast $paletteThemeAst -Tokens $paletteThemeTokens -Context $paletteThemeHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
     ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
@@ -1439,15 +1444,16 @@ if ($postHighContrastLoops.Count -ne 1 -or
     throw 'Post-High-Contrast presentation must use one exact two-attempt loop.'
 }
 $postHighContrastLoopStatements = @($postHighContrastLoops[0].Body.Statements)
-if ($postHighContrastLoopStatements.Count -ne 2 -or
+if ($postHighContrastLoopStatements.Count -ne 3 -or
     $postHighContrastLoopStatements[0].Extent.Text.Trim() -ne '$canary = $null' -or
-    $postHighContrastLoopStatements[1] -isnot [System.Management.Automation.Language.TryStatementAst]) {
+    $postHighContrastLoopStatements[1].Extent.Text.Trim() -ne '$presentationProven = $false' -or
+    $postHighContrastLoopStatements[2] -isnot [System.Management.Automation.Language.TryStatementAst]) {
     throw 'Post-High-Contrast presentation must guard each complete canary lifecycle with one try/catch.'
 }
-$postHighContrastTry = $postHighContrastLoopStatements[1]
+$postHighContrastTry = $postHighContrastLoopStatements[2]
 $postHighContrastTryStatements = @($postHighContrastTry.Body.Statements)
 if ($postHighContrastTry.CatchClauses.Count -ne 1 -or $null -ne $postHighContrastTry.Finally -or
-    $postHighContrastTryStatements.Count -ne 13 -or
+    $postHighContrastTryStatements.Count -ne 14 -or
     $postHighContrastTryStatements[0].Extent.Text.Trim() -ne '$canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"' -or
     $postHighContrastTryStatements[1].Extent.Text.Trim() -ne '$runs.Add($canary)' -or
     $postHighContrastTryStatements[2].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
@@ -1458,16 +1464,18 @@ if ($postHighContrastTry.CatchClauses.Count -ne 1 -or $null -ne $postHighContras
     $postHighContrastTryStatements[7].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
     $postHighContrastTryStatements[8].Extent.Text.Trim() -ne '$stablePresentation = [Diagnostics.Stopwatch]::new()' -or
     $postHighContrastTryStatements[9].Extent.Text.Trim() -notmatch '(?s)^Wait-InteractiveWin11Until -Deadline \$deadline -Description ''post-High-Contrast canary framebuffer'' -Process \$canary\.Process -Condition \{\s*if \(\(\(Get-StatefulPixel \$canarySurface\.Hwnd\) -band 0xFFFFFF\) -ne \$ExpectedRgb\) \{\s*\$stablePresentation\.Reset\(\)\s*return \$false\s*\}\s*if \(-not \$stablePresentation\.IsRunning\) \{ \$stablePresentation\.Start\(\) \}\s*return \$stablePresentation\.Elapsed -ge \[TimeSpan\]::FromSeconds\(2\)\s*\}$' -or
-    $postHighContrastTryStatements[10].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
-    $postHighContrastTryStatements[11].Extent.Text.Trim() -ne 'Close-StatefulHost $canaryHost $canary $deadline' -or
-    $postHighContrastTryStatements[12].Extent.Text.Trim() -ne 'return') {
+    $postHighContrastTryStatements[10].Extent.Text.Trim() -ne '$presentationProven = $true' -or
+    $postHighContrastTryStatements[11].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $postHighContrastTryStatements[12].Extent.Text.Trim() -ne 'Close-StatefulHost $canaryHost $canary $deadline' -or
+    $postHighContrastTryStatements[13].Extent.Text.Trim() -ne 'return') {
     throw 'Post-High-Contrast presentation must preserve its exact launch, readiness, framebuffer, and close sequence with three fresh deadlines.'
 }
 $postHighContrastCatchStatements = @($postHighContrastTry.CatchClauses[0].Body.Statements)
-if ($postHighContrastCatchStatements.Count -ne 3 -or
+if ($postHighContrastCatchStatements.Count -ne 4 -or
     $postHighContrastCatchStatements[0].Extent.Text.Trim() -ne '$lastError = $_' -or
     $postHighContrastCatchStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$null -ne \$canary -and -not \$canary\.Process\.HasExited\) \{\s*try \{ Stop-InteractiveWin11Process -Process \$canary\.Process -Contained \}\s*catch \{\s*throw "Post-High-Contrast presentation attempt \$attempt failed: \$\(\$lastError\.Exception\.Message\); process cleanup also failed: \$\(\$_\.Exception\.Message\)"\s*\}\s*\}$' -or
-    $postHighContrastCatchStatements[2].Extent.Text.Trim() -ne 'if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }') {
+    $postHighContrastCatchStatements[2].Extent.Text.Trim() -ne 'if ($presentationProven) { return }' -or
+    $postHighContrastCatchStatements[3].Extent.Text.Trim() -ne 'if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }') {
     throw 'Post-High-Contrast presentation must preserve nullable failed-attempt cleanup and bounded retry reporting.'
 }
 $postHighContrastCalls = @($paletteThemeAst.FindAll({
@@ -1577,20 +1585,22 @@ $testCanaryMutationShape = {
         param($node)
         $node -is [System.Management.Automation.Language.ForEachStatementAst]
     }, $true))
-    if ($loops.Count -ne 1 -or $loops[0].Body.Statements.Count -ne 2 -or
-        $loops[0].Body.Statements[1] -isnot [System.Management.Automation.Language.TryStatementAst]) {
+    if ($loops.Count -ne 1 -or $loops[0].Body.Statements.Count -ne 3 -or
+        $loops[0].Body.Statements[1].Extent.Text.Trim() -ne '$presentationProven = $false' -or
+        $loops[0].Body.Statements[2] -isnot [System.Management.Automation.Language.TryStatementAst]) {
         return $false
     }
-    $statements = @($loops[0].Body.Statements[1].Body.Statements)
-    return $statements.Count -eq 13 -and
+    $statements = @($loops[0].Body.Statements[2].Body.Statements)
+    return $statements.Count -eq 14 -and
         $statements[0].Extent.Text.Trim() -eq '$canary = Start-StatefulApp $layout $exe $repoRoot "$Name-$attempt"' -and
         $statements[1].Extent.Text.Trim() -eq '$runs.Add($canary)' -and
         $statements[2].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
         $statements[7].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
         $statements[8].Extent.Text.Trim() -eq '$stablePresentation = [Diagnostics.Stopwatch]::new()' -and
-        $statements[10].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
-        $statements[11].Extent.Text.Trim() -eq 'Close-StatefulHost $canaryHost $canary $deadline' -and
-        $statements[12].Extent.Text.Trim() -eq 'return'
+        $statements[10].Extent.Text.Trim() -eq '$presentationProven = $true' -and
+        $statements[11].Extent.Text.Trim() -eq '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -and
+        $statements[12].Extent.Text.Trim() -eq 'Close-StatefulHost $canaryHost $canary $deadline' -and
+        $statements[13].Extent.Text.Trim() -eq 'return'
 }
 $testMarkerMutationShape = {
     param([string] $Content)
@@ -1691,6 +1701,69 @@ foreach ($candidate in @($paletteThemeAst.FindAll({ param($node) $node -is [Syst
 if ($null -eq $paletteHighContrastCallIf -or
     -not (Test-DirectStatementBlockChild -Node $paletteHighContrastCallIf -StatementBlock $paletteMainTries[0].Body)) {
     throw 'High Contrast palette query call must be direct in its main-try ExerciseHighContrast block.'
+}
+$highContrastClause = @($paletteHighContrastCallIf.Clauses | Where-Object {
+    $_.Item1.Extent.Text.Trim() -eq '$ExerciseHighContrast' -and
+        (Test-DirectStatementBlockChild -Node $paletteHighContrastOpenCalls[0] -StatementBlock $_.Item2)
+})[0]
+$highContrastOpenStatement = Get-DirectStatementBlockChild `
+    -Node $paletteHighContrastOpenCalls[0] `
+    -StatementBlock $highContrastClause.Item2
+$highContrastOpenIndex = [Array]::IndexOf($highContrastClause.Item2.Statements, $highContrastOpenStatement)
+if ($highContrastOpenIndex -lt 1 -or $highContrastOpenIndex -ge ($highContrastClause.Item2.Statements.Count - 1) -or
+    $highContrastClause.Item2.Statements[$highContrastOpenIndex - 1].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $highContrastClause.Item2.Statements[$highContrastOpenIndex + 1].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)') {
+    throw 'High Contrast palette opening and suppression checks must each receive a fresh deadline.'
+}
+$highContrastStabilityWaits = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Wait-InteractiveWin11Until' -and
+        $node.Extent.Text -match "-Description '(?:stable High Contrast framebuffer|suppressed High Contrast theme preview)'"
+}, $true))
+if ($highContrastStabilityWaits.Count -ne 2 -or
+    @($highContrastStabilityWaits | Where-Object {
+        $_.Extent.Text -match [regex]::Escape('[TimeSpan]::FromSeconds(2)')
+    }).Count -ne 2 -or
+    @($highContrastStabilityWaits | Where-Object {
+        $_.Extent.Text -match [regex]::Escape('$hcPresentation.Stable.Restart()')
+    }).Count -ne 1 -or
+    @($highContrastStabilityWaits | Where-Object {
+        $_.Extent.Text -match [regex]::Escape("throw 'Theme preview changed terminal colors while High Contrast was active.'") -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreviewStable.Reset()') -and
+            $_.Extent.Text -match [regex]::Escape('$previewPixel -band 0xFFFFFF) -eq $draculaRgb')
+    }).Count -ne 1) {
+    throw 'High Contrast theme preview must reject Dracula immediately and prove the original framebuffer stable for two seconds.'
+}
+$highContrastCloseCalls = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Close-StatefulHost $hcHost $hcRun $deadline'
+}, $true))
+$highContrastDismissCalls = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $hcHost 2004 $deadline $hcRun.Process'
+}, $true))
+$highContrastDismissWaits = @($paletteThemeAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Wait-InteractiveWin11Until' -and
+        $node.Extent.Text -match "-Description 'High Contrast palette dismissal'" -and
+        $node.Extent.Text -match 'Where-Object Id -eq 2002\)\.Count -eq 0'
+}, $true))
+if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 1 -or
+    $highContrastDismissWaits.Count -ne 1 -or
+    -not (Test-DirectStatementBlockChild -Node $highContrastDismissCalls[0] -StatementBlock $highContrastClause.Item2) -or
+    -not (Test-DirectStatementBlockChild -Node $highContrastDismissWaits[0] -StatementBlock $highContrastClause.Item2) -or
+    $highContrastCloseCalls[0].Parent.Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+    $highContrastCloseCalls[0].Parent.Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $highContrastCloseCalls[0].Parent.Parent.Statements.Count -ne 2 -or
+    $highContrastCloseCalls[0].Parent.Parent.Statements[0].Extent.Text.Trim() -ne '$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)' -or
+    $highContrastCloseCalls[0].Parent.Parent.Parent.CatchClauses.Count -ne 1 -or
+    $highContrastCloseCalls[0].Parent.Parent.Parent.CatchClauses[0].Body.Extent.Text -notmatch
+        '(?s)Stop-InteractiveWin11Process -Process \$hcRun\.Process -Contained.*?Write-Warning') {
+    throw 'High Contrast palette dismissal must stay strict; only host-close timeout may become a warning after contained termination.'
 }
 $sessionRestoreTabSeedLoop = Get-PowerShellBlockText `
     -Content $sessionRestoreHarnessText `
