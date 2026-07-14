@@ -257,6 +257,9 @@ function Test-CommandResolutionMutationNode {
         return $true
     }
     if ($Node -is [System.Management.Automation.Language.MemberExpressionAst]) {
+        if ($Node.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            return $true
+        }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
         if ((Test-DynamicScriptTypeExpression -Node $Node.Expression) -and
@@ -347,6 +350,8 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$member = "Create"; [ScriptBlock]::$member("1+1")' }
+    [pscustomobject]@{ Reject = $true; Text = '$member = "InvokeCommand"; $ExecutionContext.$member.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ec = $($ExecutionContext)' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [ScriptBlock]' }
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock].GetMethod("Create")' }
@@ -1585,7 +1590,7 @@ Assert-WorkflowContract `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
-    -Pattern '(?ms)\$objdumpTimeoutMs = 120000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?llvm-objdump timed out' `
+    -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `
     -Description 'Windows x64 baseline disassembly is time-bounded and kills a timed-out tool'
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content (Get-Content -LiteralPath $releasePreflight -Raw) -HeaderPattern '^function\s+Assert-WingetArchitectureCoverage(?=\s|\{)') `

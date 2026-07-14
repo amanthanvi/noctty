@@ -39,7 +39,7 @@ finally {
     $stream.Dispose()
 }
 
-$objdumpCommand = Get-Command llvm-objdump -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$objdumpCommand = Get-Command llvm-objdump.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 $objdumpPath = if ($null -ne $objdumpCommand) { $objdumpCommand.Source } else { $null }
 if (-not $objdumpPath) {
     foreach ($candidate in @(
@@ -59,6 +59,7 @@ if (-not $objdumpPath) {
 $objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
 $objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
 $objdumpTimeoutMs = 120000
+$streamCopyTimeoutMs = 30000
 try {
     # Copy native streams directly to disk. PowerShell 5.1 otherwise creates
     # one object per decoded line and wraps native stderr in ErrorRecords.
@@ -67,16 +68,8 @@ try {
     $processStart.CreateNoWindow = $true
     $processStart.RedirectStandardOutput = $true
     $processStart.RedirectStandardError = $true
-    if ([System.IO.Path]::GetExtension($objdumpPath) -in @('.cmd', '.bat')) {
-        # The regression fixture supplies a command shim; production resolves
-        # the real llvm-objdump executable.
-        $processStart.FileName = $env:ComSpec
-        $processStart.Arguments = "/d /s /c `"`"$objdumpPath`" --disassemble --no-show-raw-insn `"$fullPath`"`""
-    }
-    else {
-        $processStart.FileName = $objdumpPath
-        $processStart.Arguments = "--disassemble --no-show-raw-insn `"$fullPath`""
-    }
+    $processStart.FileName = $objdumpPath
+    $processStart.Arguments = "--disassemble --no-show-raw-insn `"$fullPath`""
 
     $objdumpProcess = [System.Diagnostics.Process]::new()
     $objdumpProcess.StartInfo = $processStart
@@ -93,7 +86,13 @@ try {
             $objdumpProcess.Kill()
             $objdumpProcess.WaitForExit()
         }
-        [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy))
+        $streamsCompleted = [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy),
+            $streamCopyTimeoutMs
+        )
+        if (-not $streamsCompleted) {
+            throw "llvm-objdump stream cleanup timed out after $streamCopyTimeoutMs ms while checking $fullPath."
+        }
         if (-not $objdumpCompleted) {
             throw "llvm-objdump timed out after $objdumpTimeoutMs ms while checking $fullPath."
         }

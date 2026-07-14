@@ -108,28 +108,37 @@ function Assert-WindowsPowerShellObjdumpFailure {
 
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-    $fakeObjdump = Join-Path $tempRoot 'llvm-objdump.cmd'
-    [IO.File]::WriteAllText($fakeObjdump, @'
-@echo off
-:next_argument
-if "%~1"=="" goto arguments_done
-set "target=%~nx1"
-shift
-goto next_argument
-:arguments_done
-if /I "%target%"=="tool-failure.exe" (
-  echo synthetic llvm-objdump failure 1>&2
-  exit /b 7
-)
-for %%M in (extrq insertq movntsd movntss) do (
-  if /I "%target%"=="%%M.exe" (
-    echo 140001000:        %%M
-    exit /b 0
-  )
-)
-echo 140001000:        nop
-exit /b 0
+    $windowsPowerShell = Get-Command powershell.exe -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty Source
+    $fakeSource = Join-Path $tempRoot 'llvm-objdump.cs'
+    $fakeObjdump = Join-Path $tempRoot 'llvm-objdump.exe'
+    [IO.File]::WriteAllText($fakeSource, @'
+using System;
+using System.IO;
+
+public static class Program {
+    public static int Main(string[] args) {
+        string target = Path.GetFileName(args[args.Length - 1]);
+        if (target.Equals("tool-failure.exe", StringComparison.OrdinalIgnoreCase)) {
+            Console.Error.WriteLine("synthetic llvm-objdump failure");
+            return 7;
+        }
+        foreach (string mnemonic in new[] { "extrq", "insertq", "movntsd", "movntss" }) {
+            if (target.Equals(mnemonic + ".exe", StringComparison.OrdinalIgnoreCase)) {
+                Console.WriteLine("140001000:        " + mnemonic);
+                return 0;
+            }
+        }
+        Console.WriteLine("140001000:        nop");
+        return 0;
+    }
+}
 '@)
+    $compileCommand = "Add-Type -LiteralPath '$($fakeSource.Replace("'", "''"))' -OutputAssembly '$($fakeObjdump.Replace("'", "''"))' -OutputType ConsoleApplication"
+    & $windowsPowerShell -NoLogo -NoProfile -Command $compileCommand
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $fakeObjdump -PathType Leaf)) {
+        throw "Failed to compile the llvm-objdump fixture (exit=$LASTEXITCODE)."
+    }
     $env:PATH = "$tempRoot;$originalPath"
 
     Assert-BaselinePass -Name 'raw-sse4a-looking-data'
