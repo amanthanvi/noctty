@@ -565,7 +565,7 @@ $cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
 $cliShellTimeoutAssignments = @($cliShellAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Extent.Text.Trim() -eq '$shellLauncherTimeoutSeconds = 30'
+        $node.Left.Extent.Text.Trim() -eq '$shellLauncherTimeoutSeconds'
 }, $true))
 $cliShellSwitches = @($cliShellAst.FindAll({
     param($node)
@@ -643,25 +643,42 @@ for ($i = 0; $i -lt $cliShellTopLevelStatements.Count; $i++) {
 }
 if ($cliShellErrors.Count -ne 0 -or
     $cliShellTimeoutAssignments.Count -ne 1 -or
+    $cliShellTimeoutAssignments[0].Right.Extent.Text.Trim() -ne '30' -or
     $cliShellSwitches.Count -ne 1 -or
     $cliShellPowerShellClauseIndexes.Count -ne 1 -or
     $cliShellStartProcessAssignments.Count -ne 1 -or
     $cliShellWaitForExitCalls.Count -ne 1 -or
     $cliShellTimeoutIfs.Count -ne 1 -or
+    $cliShellTimeoutIfs[0].Clauses.Count -ne 1 -or
+    $null -ne $cliShellTimeoutIfs[0].ElseClause -or
     -not $cliShellTopLevelShared -or
     $cliShellTimeoutAssignmentIndex -lt 0 -or
     $cliShellSwitchIndex -ne ($cliShellTimeoutAssignmentIndex + 1) -or
     -not $cliShellLauncherBlockShared -or
     $cliShellStartProcessAssignments[0].Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
     $cliShellStartProcessAssignments[0].Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    -not [Object]::ReferenceEquals(
+        $cliShellStartProcessAssignments[0].Parent,
+        $cliShellStartProcessAssignments[0].Parent.Parent.Body
+    ) -or
+    $cliShellStartProcessAssignments[0].Parent.Parent.CatchClauses.Count -ne 0 -or
+    $null -eq $cliShellStartProcessAssignments[0].Parent.Parent.Finally -or
     $cliShellStartProcessAssignments[0].Parent.Parent.Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
     $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    -not [Object]::ReferenceEquals(
+        $cliShellStartProcessAssignments[0].Parent.Parent.Parent,
+        $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Body
+    ) -or
+    $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.CatchClauses.Count -ne 0 -or
+    $null -eq $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Finally -or
     -not [Object]::ReferenceEquals(
         $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Parent,
         $cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2
     ) -or
     $cliShellStartProcessIndex -lt 0 -or
     $cliShellTimeoutIndex -ne ($cliShellStartProcessIndex + 2) -or
+    ($cliShellStartProcessIndex + 1) -ge $cliShellLauncherStatements.Count -or
+    ($cliShellTimeoutIndex + 1) -ge $cliShellLauncherStatements.Count -or
     $cliShellLauncherStatements[$cliShellStartProcessIndex + 1].Extent.Text.Trim() -ne '$processHandle = $process.Handle' -or
     $cliShellLauncherStatements[$cliShellTimeoutIndex + 1].Extent.Text.Trim() -ne '$exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle' -or
     $cliShellTimeoutStatements.Count -ne 2 -or
