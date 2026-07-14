@@ -626,9 +626,6 @@ $stopProcessFunctions = @($interactiveWin11LibAst.FindAll({
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -eq 'Stop-InteractiveWin11Process'
 }, $true))
-$stopProcessStatements = if ($stopProcessFunctions.Count -eq 1) {
-    @($stopProcessFunctions[0].Body.EndBlock.Statements)
-} else { @() }
 $processTreeSnapshotFunctions = @($interactiveWin11LibAst.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-InteractiveWin11ProcessTreeSnapshot'
@@ -664,10 +661,120 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].DefaultValue) {
     throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around native tree kill and root-only fallback.'
 }
+$snapshotCimCommands = @($processTreeSnapshotFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-CimInstance'
+    }, $true))
+$verificationCimCommands = @($processTreeExitedFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-CimInstance'
+    }, $true))
+$snapshotCalls = @($stopProcessFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-InteractiveWin11ProcessTreeSnapshot'
+    }, $true))
+$verificationCalls = @($stopProcessFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-InteractiveWin11ProcessTreeSnapshotExited'
+    }, $true))
+if ($snapshotCimCommands.Count -ne 1 -or
+    $verificationCimCommands.Count -ne 1 -or
+    $snapshotCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process\s+-ErrorAction\s+Stop' -or
+    $verificationCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process\s+-ErrorAction\s+Stop' -or
+    $snapshotCimCommands[0].Extent.Text -match '(?i)-Filter\b' -or
+    $verificationCimCommands[0].Extent.Text -match '(?i)-Filter\b' -or
+    @($processTreeSnapshotFunctions[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true)).Count -ne 0 -or
+    @($processTreeExitedFunctions[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true)).Count -ne 0 -or
+    $snapshotCalls.Count -ne 2 -or
+    $verificationCalls.Count -lt 3) {
+    throw 'Interactive cleanup must take coherent fail-closed process-table snapshots before kill and fallback, then verify every exit path.'
+}
+
+Invoke-Expression $processTreeSnapshotFunctions[0].Extent.Text
+Invoke-Expression $processTreeExitedFunctions[0].Extent.Text
+$script:verificationCimProcesses = @()
+$script:verificationCimFailure = $null
+function script:Get-CimInstance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $ClassName,
+        [string] $Filter
+    )
+
+    if ($ClassName -ne 'Win32_Process' -or $PSBoundParameters.ContainsKey('Filter')) {
+        throw 'Verification mock requires one unfiltered Win32_Process query.'
+    }
+    if ($null -ne $script:verificationCimFailure) {
+        throw $script:verificationCimFailure
+    }
+    $script:verificationCimProcesses
+}
+
+try {
+    $rootCreated = [datetime]'2026-07-14T15:00:00Z'
+    $childCreated = $rootCreated.AddSeconds(1)
+    $grandchildCreated = $rootCreated.AddSeconds(2)
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; CreationDate = $rootCreated },
+        [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; CreationDate = $childCreated },
+        [pscustomobject]@{ ProcessId = 102; ParentProcessId = 101; CreationDate = $grandchildCreated },
+        [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; CreationDate = $rootCreated }
+    )
+    $snapshot = @(Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100)
+    if ((@($snapshot.ProcessId | Sort-Object) -join ',') -ne '100,101,102') {
+        throw 'Interactive process snapshot did not close over the full descendant tree.'
+    }
+    if (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot) {
+        throw 'Interactive process verification accepted captured identities that were still live.'
+    }
+
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; CreationDate = $rootCreated.AddMinutes(1) },
+        [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; CreationDate = $rootCreated }
+    )
+    if (-not (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot)) {
+        throw 'Interactive process verification confused a reused PID with a captured identity.'
+    }
+
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 201; ParentProcessId = 100; CreationDate = $rootCreated.AddMinutes(2) }
+    )
+    if (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot) {
+        throw 'Interactive process verification missed a child created after the snapshot.'
+    }
+
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; CreationDate = $rootCreated }
+    )
+    $missingRootRejected = $false
+    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100) } catch { $missingRootRejected = $true }
+    if (-not $missingRootRejected) {
+        throw 'Interactive process snapshot accepted a missing root identity.'
+    }
+
+    $script:verificationCimFailure = 'simulated CIM failure'
+    $snapshotFailureRejected = $false
+    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100) } catch { $snapshotFailureRejected = $true }
+    $verificationFailureRejected = $false
+    try { [void](Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot) } catch { $verificationFailureRejected = $true }
+    if (-not $snapshotFailureRejected -or -not $verificationFailureRejected) {
+        throw 'Interactive process cleanup treated a CIM failure as proof of exit.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-CimInstance -ErrorAction SilentlyContinue
+    Remove-Variable -Scope Script -Name verificationCimProcesses, verificationCimFailure -ErrorAction SilentlyContinue
+}
+
 Assert-TextContract `
     -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('$processTreeSnapshot = Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId $rootProcessId')) `
-    -Description 'interactive cleanup snapshots root process tree before kill' `
+    -Pattern ([regex]::Escape('throw "Interactive Win11 root process $RootProcessId was absent from the process-table snapshot."')) `
+    -Description 'interactive cleanup fails closed if root is absent from process snapshot' `
+    -Context $interactiveWin11Lib
+Assert-TextContract `
+    -Content $interactiveWin11LibText `
+    -Pattern ([regex]::Escape('throw ''Interactive Win11 process-tree verification requires a non-empty snapshot.''')) `
+    -Description 'interactive cleanup rejects vacuous empty-snapshot verification' `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
@@ -681,8 +788,8 @@ Assert-TextContract `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $processTreeSnapshot')) `
-    -Description 'interactive cleanup verifies captured descendants after fallback' `
+    -Pattern ([regex]::Escape('$capturedProcessIds.Contains([int]$process.ParentProcessId)')) `
+    -Description 'interactive cleanup fails closed on descendants created after snapshot' `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
