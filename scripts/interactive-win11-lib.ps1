@@ -612,6 +612,7 @@ function Stop-InteractiveWin11Process {
     }
     catch [System.InvalidOperationException] {
         # The root exited while its identity was being checked.
+        Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"
     }
     if (-not $rootIsLive) {
         if (-not $RequireLiveRoot) {

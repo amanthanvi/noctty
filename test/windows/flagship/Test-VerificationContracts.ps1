@@ -593,7 +593,8 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $null -ne $stopIdentityTry.Finally -or
     $stopIdentityTry.CatchClauses[0].CatchTypes.Count -ne 1 -or
     $stopIdentityTry.CatchClauses[0].CatchTypes[0].TypeName.FullName -ne 'System.InvalidOperationException' -or
-    $stopIdentityTry.CatchClauses[0].Body.Statements.Count -ne 0 -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne 'Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"' -or
     $stopIdentityTry.Body.Statements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
     $stopIdentityTry.Body.Statements[1].Extent.Text.Trim() -ne '$rootIsLive = -not $Process.HasExited -and $Process.StartTime -eq $rootStartedAt' -or
     $stopProcessStatements[4] -isnot [System.Management.Automation.Language.IfStatementAst] -or
@@ -608,6 +609,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
     $stopProcessStatements[4].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw "Interactive Win11 process $rootProcessId exited before process-tree cleanup could be verified."' -or
     $stopProcessStatements[5].Extent.Text.Trim() -ne '$taskkillError = $null' -or
     $stopProcessStatements[6].Extent.Text.Trim() -ne '$taskkill = $null' -or
     $stopProcessStatements[7].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $true' -or
@@ -636,6 +638,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $taskkillTerminationVerified' -or
     $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw ''taskkill could not be stopped within 5 seconds''' -or
     $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[3].Extent.Text.Trim() -ne '$taskkillError = ''taskkill exceeded 10 seconds''' -or
     $stopTaskkillTry.Body.Statements[8].Clauses[1].Item1.Extent.Text.Trim() -ne '$taskkill.ExitCode -ne 0' -or
     $stopTaskkillTry.Body.Statements[8].Clauses[1].Item2.Statements.Count -ne 1 -or
@@ -653,6 +656,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $taskkillTerminationVerified' -or
     $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw' -or
     $stopTaskkillTry.CatchClauses[0].Body.Statements[1].Extent.Text.Trim() -ne '$taskkillError = $_.Exception.Message' -or
     $stopTaskkillTry.Finally.Statements.Count -ne 1 -or
     $stopTaskkillTry.Finally.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
@@ -678,6 +682,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw ''the root exited before fallback cleanup could verify the process tree''' -or
     $stopManagedTry.Body.Statements[2].Extent.Text.Trim() -ne '$Process.Kill()' -or
     $stopManagedTry.Body.Statements[3] -isnot [System.Management.Automation.Language.IfStatementAst] -or
     $stopManagedTry.Body.Statements[3].Clauses.Count -ne 1 -or
@@ -685,9 +690,12 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $Process.WaitForExit(5000)' -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[3].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw ''root fallback did not stop the process within 5 seconds''' -or
     $stopManagedTry.Body.Statements[4] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[4].Extent.Text.Trim() -ne 'throw ''root fallback stopped the process but could not verify descendant cleanup''' -or
     $stopManagedTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
-    $stopManagedTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst]) {
+    $stopManagedTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne 'throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill=''$taskkillError'', fallback=''$($_.Exception.Message)'')."') {
     throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around native tree kill and root-only fallback.'
 }
 $cliShellTokens = $null
