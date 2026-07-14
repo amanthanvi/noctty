@@ -2013,13 +2013,33 @@ Assert-TextContract `
     -Pattern "(?m)^[ \t]*\`$ErrorActionPreference = 'Stop'[ \t]*\r?\n[ \t]*\`$quick = " `
     -Description 'interactive workflow treats parent PowerShell errors as terminating before branch selection' `
     -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
-$interactiveHarnessCommands = @(
+$requiredInteractiveHarnessCommands = @(
     './test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState',
     './test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness',
     './test/windows/interactive-win11-accessibility.ps1 -ResetState',
     './test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast',
     './test/windows/interactive-win11-session-restore.ps1 -ResetState'
 )
+$interactiveHarnessLinePattern = [regex]::new(
+    '(?m)^[ \t]*(?<command>\./test/windows/[^\r\n]*?\.ps1(?:[ \t]+[^\r\n]*)?)[ \t]*(?=\r?$)'
+)
+$interactiveHarnessCommands = @(
+    foreach ($match in $interactiveHarnessLinePattern.Matches($interactiveRunStep)) {
+        $match.Groups['command'].Value.TrimEnd()
+    }
+)
+$allExecutablePs1Lines = [regex]::Matches(
+    $interactiveRunStep,
+    '(?m)^(?![ \t]*#)[ \t]*[^\r\n]*\.ps1(?:[ \t]+[^\r\n]*)?[ \t]*\r?$'
+)
+$missingInteractiveHarnesses = @(
+    $requiredInteractiveHarnessCommands | Where-Object { $_ -notin $interactiveHarnessCommands }
+)
+if ($interactiveHarnessCommands.Count -ne $allExecutablePs1Lines.Count -or
+    $interactiveHarnessCommands.Count -ne @($interactiveHarnessCommands | Sort-Object -Unique).Count -or
+    $missingInteractiveHarnesses.Count -gt 0) {
+    throw 'Interactive workflow harness discovery found an unsupported, duplicate, or missing PowerShell invocation.'
+}
 foreach ($command in $interactiveHarnessCommands) {
     $commandGuardPattern = '(?m)^[ \t]*' + [regex]::Escape($command) +
         '[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}[ \t]*\r?$'
@@ -2028,14 +2048,22 @@ foreach ($command in $interactiveHarnessCommands) {
         -Pattern $commandGuardPattern `
         -Description "interactive workflow propagates the exit code from $command" `
         -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
-    $commentedCommandStep = [regex]::Replace(
+    $commandLinePattern = [regex]::new(
+        '(?m)^([ \t]*)' + [regex]::Escape($command) + '[ \t]*(?=\r?$)'
+    )
+    $commentedCommandStep = $commandLinePattern.Replace(
         $interactiveRunStep,
-        '(?m)^([ \t]*)' + [regex]::Escape($command) + '[ \t]*(?=\r?$)',
         '$1# ' + $command,
         1)
+    $separatedCommandStep = $commandLinePattern.Replace(
+        $interactiveRunStep,
+        '$0' + [Environment]::NewLine,
+        1)
     if ($commentedCommandStep -eq $interactiveRunStep -or
-        [regex]::IsMatch($commentedCommandStep, $commandGuardPattern)) {
-        throw "Interactive workflow contract accepted a commented-out harness command: $command"
+        $separatedCommandStep -eq $interactiveRunStep -or
+        [regex]::IsMatch($commentedCommandStep, $commandGuardPattern) -or
+        [regex]::IsMatch($separatedCommandStep, $commandGuardPattern)) {
+        throw "Interactive workflow contract accepted a commented-out or non-adjacent harness command: $command"
     }
 }
 Assert-WorkflowContract `
