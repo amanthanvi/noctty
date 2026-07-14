@@ -942,6 +942,13 @@ if ($containmentFunctions.Count -ne 1 -or
     $launchArgumentFunctions[0].Extent.Text -notmatch '\bGet-InteractiveWin11ContainmentArguments\b') {
     throw 'Interactive Win11 launches must opt into hard-fail kill-on-close Job Object containment.'
 }
+$interactiveLibraryTest = Get-Content -LiteralPath (Join-Path $repoRoot 'test\windows\interactive-win11.ps1') -Raw
+if ($interactiveLibraryTest -notmatch [regex]::Escape("Assert-Equal `$launchArgs.Count 5 'launch args should include containment and isolation overrides'") -or
+    $interactiveLibraryTest -notmatch [regex]::Escape("Assert-True (`$launchArgs -contains '--linux-cgroup=always')") -or
+    $interactiveLibraryTest -notmatch [regex]::Escape("Assert-True (`$launchArgs -contains '--linux-cgroup-hard-fail=true')") -or
+    $interactiveLibraryTest -notmatch [regex]::Escape("Assert-True (`$launchArgs -contains '--windows-job-object-kill-on-close=true')")) {
+    throw 'Interactive helper tests must assert all containment and isolation launch arguments.'
+}
 $interactiveHarnessFiles = @(
     Get-ChildItem -LiteralPath (Join-Path $repoRoot 'test\windows') -Filter 'interactive-win11-*.ps1' -File
 )
