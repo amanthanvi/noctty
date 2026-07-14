@@ -1583,6 +1583,10 @@ Assert-WorkflowContract `
     -Description 'interactive PR smoke retries exactly the transient Zig cache hydration miss'
 Assert-WorkflowContract `
     -Path $interactivePrSmoke `
+    -Pattern "(?ms)\`$originalErrorActionPreference = \`$ErrorActionPreference\s*try \{\s*\`$ErrorActionPreference = 'Continue'\s*\`$buildOutput = @\(& \(Join-Path \`$repoRoot 'scripts\\dev-windows\.cmd'\) zig build -Demit-exe=true 2>&1\)\s*\`$buildExitCode = \`$LASTEXITCODE\s*\}\s*finally \{\s*\`$ErrorActionPreference = \`$originalErrorActionPreference\s*\}" `
+    -Description 'interactive PR smoke captures native build stderr without bypassing exit-code retry logic on PowerShell 7.0'
+Assert-WorkflowContract `
+    -Path $interactivePrSmoke `
     -Pattern "(?ms)if \(\`$attempt -eq 2 -and \`$env:RUNNER_TEMP\).*?zig-global-cache-pr-smoke-retry-\`$PID.*?zig-local-cache-pr-smoke-retry-\`$PID" `
     -Description 'interactive PR smoke moves the retry to fresh runner-temp Zig cache directories'
 Assert-WorkflowContract `

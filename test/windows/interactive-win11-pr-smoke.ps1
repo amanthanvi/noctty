@@ -18,8 +18,15 @@ if ($Rebuild) {
                 $env:ZIG_LOCAL_CACHE_DIR = Join-Path $env:RUNNER_TEMP "zig-local-cache-pr-smoke-retry-$PID"
             }
 
-            $buildOutput = @(& (Join-Path $repoRoot 'scripts\dev-windows.cmd') zig build -Demit-exe=true 2>&1)
-            $buildExitCode = $LASTEXITCODE
+            $originalErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $buildOutput = @(& (Join-Path $repoRoot 'scripts\dev-windows.cmd') zig build -Demit-exe=true 2>&1)
+                $buildExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $originalErrorActionPreference
+            }
             $buildOutput | ForEach-Object { Write-Host $_ }
             if ($buildExitCode -eq 0) { break }
 
