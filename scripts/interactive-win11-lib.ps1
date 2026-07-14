@@ -597,6 +597,71 @@ function Wait-InteractiveWin11Until {
     throw "Timed out waiting for $Description"
 }
 
+function Get-InteractiveWin11ProcessTreeSnapshot {
+    param(
+        [Parameter(Mandatory)] [int] $RootProcessId
+    )
+
+    $snapshot = [Collections.Generic.List[object]]::new()
+    $queue = [Collections.Generic.Queue[int]]::new()
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    $queue.Enqueue($RootProcessId)
+    [void]$seen.Add($RootProcessId)
+
+    while ($queue.Count -gt 0) {
+        $processId = $queue.Dequeue()
+        try {
+            $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop
+        }
+        catch {
+            if ($VerbosePreference -eq 'Continue') {
+                Write-Verbose "Unable to snapshot Win32 process ${processId}: $($_.Exception.Message)"
+            }
+            continue
+        }
+        if ($null -eq $process) { continue }
+        [void]$snapshot.Add([pscustomobject]@{
+                ProcessId    = [int]$process.ProcessId
+                CreationDate = $process.CreationDate
+            })
+        try {
+            Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId = $processId" -ErrorAction Stop | ForEach-Object {
+                $childProcessId = [int]$_.ProcessId
+                if ($seen.Add($childProcessId)) {
+                    $queue.Enqueue($childProcessId)
+                }
+            }
+        }
+        catch {
+            if ($VerbosePreference -eq 'Continue') {
+                Write-Verbose "Unable to enumerate children for Win32 process ${processId}: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    return @($snapshot)
+}
+
+function Test-InteractiveWin11ProcessTreeSnapshotExited {
+    param(
+        [Parameter(Mandatory)] [object[]] $Snapshot
+    )
+
+    foreach ($entry in $Snapshot) {
+        try {
+            $live = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($entry.ProcessId)" -ErrorAction Stop
+        }
+        catch {
+            continue
+        }
+        if ($null -ne $live -and $live.CreationDate -eq $entry.CreationDate) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Stop-InteractiveWin11Process {
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
@@ -607,12 +672,14 @@ function Stop-InteractiveWin11Process {
     $rootProcessHandle = [IntPtr]::Zero
     $rootStartedAt = $null
     $rootIsLive = $false
+    $processTreeSnapshot = @()
     try {
         $Process.Refresh()
         if (-not $Process.HasExited) {
             $rootProcessHandle = $Process.Handle
             $rootStartedAt = $Process.StartTime
             $rootIsLive = $true
+            $processTreeSnapshot = Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId $rootProcessId
         }
     }
     catch [System.InvalidOperationException] {
@@ -650,8 +717,11 @@ function Stop-InteractiveWin11Process {
         } elseif ($taskkill.ExitCode -ne 0) {
             $taskkillError = "taskkill exited with code $($taskkill.ExitCode)"
         }
-        if ($null -eq $taskkillError -and $Process.WaitForExit(5000)) {
-            return
+        if ($Process.WaitForExit(5000)) {
+            if ($null -eq $taskkillError -or (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $processTreeSnapshot)) {
+                return
+            }
+            $taskkillError = "$taskkillError; root exited but captured descendants remained live"
         }
     }
     catch {
@@ -690,7 +760,10 @@ function Stop-InteractiveWin11Process {
         if (-not $rootExited) {
             throw 'root fallback did not stop the process within 5 seconds'
         }
-        throw 'root fallback stopped the process but could not verify descendant cleanup'
+        if (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $processTreeSnapshot) {
+            return
+        }
+        throw 'root fallback stopped the process but captured descendants remained live'
     }
     catch {
         throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill='$taskkillError', fallback='$($_.Exception.Message)')."
