@@ -437,6 +437,7 @@ $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
+$interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
@@ -1483,6 +1484,10 @@ Assert-TextContract `
     -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
     -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
     -Context "$testWorkflow :: Upload interactive evidence"
+Assert-WorkflowContract `
+    -Path $interactivePrSmoke `
+    -Pattern "(?ms)if \(\`$harness -eq 'interactive-win11-undo\.ps1'\) \{\s*\`$harnessArgs \+= @\('-TimeoutSeconds', '35'\)\s*\}" `
+    -Description 'interactive PR smoke preserves the documented undo harness timeout'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `

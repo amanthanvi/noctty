@@ -34,6 +34,9 @@ foreach ($harness in @(
         (Join-Path $PSScriptRoot $harness)
     )
     if ($ResetState) { $harnessArgs += '-ResetState' }
+    if ($harness -eq 'interactive-win11-undo.ps1') {
+        $harnessArgs += @('-TimeoutSeconds', '35')
+    }
 
     & $childPowerShell @harnessArgs
     if ($LASTEXITCODE -ne 0) { throw "$harness failed with exit code $LASTEXITCODE." }
