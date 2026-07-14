@@ -57,26 +57,43 @@ if (-not $objdumpPath) {
 }
 
 $objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
+$objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
 try {
     # Native redirection avoids PowerShell object creation for every decoded
     # instruction while keeping the full disassembly out of process memory.
-    & $objdumpPath --disassemble --no-show-raw-insn $fullPath > $objdumpOutput 2>&1
-    $objdumpExitCode = $LASTEXITCODE
+    # Keep stderr separate so Windows PowerShell 5.1 does not turn native
+    # diagnostic lines into terminating ErrorRecord objects.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $objdumpPath --disassemble --no-show-raw-insn $fullPath > $objdumpOutput 2> $objdumpError
+        $objdumpExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($objdumpExitCode -ne 0) {
-        $details = @(Get-Content -LiteralPath $objdumpOutput -Tail 20) -join [Environment]::NewLine
+        $details = @(
+            Get-Content -LiteralPath $objdumpError -Tail 20
+            Get-Content -LiteralPath $objdumpOutput -Tail 20
+        ) -join [Environment]::NewLine
         throw "llvm-objdump failed with exit code $objdumpExitCode while checking $fullPath`:$([Environment]::NewLine)$details"
     }
 
+    # The PE contract marks executable sections as code. Treat any decoded
+    # SSE4a there as a build failure; embedded constants belong in a
+    # non-executable section and must not be hidden behind a byte allowlist.
     $decodedMatches = @(Select-String `
         -LiteralPath $objdumpOutput `
         -Pattern '^\s*[0-9A-Fa-f]+:\s+(extrq|insertq|movntsd|movntss)\b')
     if ($decodedMatches.Count -gt 0) {
         $details = @($decodedMatches | ForEach-Object { $_.Line.Trim() }) -join [Environment]::NewLine
-        throw "Windows x64 baseline check failed: found AMD-only SSE4a instructions:$([Environment]::NewLine)$details"
+        throw "Windows x64 baseline check failed: found decoded AMD-only SSE4a instructions in executable sections. Move intentional data to a non-executable section; do not allowlist instruction bytes.$([Environment]::NewLine)$details"
     }
 }
 finally {
     Remove-Item -LiteralPath $objdumpOutput -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $objdumpError -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "CPU baseline check: passed for $fullPath"

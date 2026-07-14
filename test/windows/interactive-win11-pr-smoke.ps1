@@ -7,8 +7,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if ($Rebuild) {
-    & (Join-Path $repoRoot 'scripts\dev-windows.cmd') zig build -Demit-exe=true
-    if ($LASTEXITCODE -ne 0) { throw "PR smoke build failed with exit code $LASTEXITCODE." }
+    $originalZigGlobalCache = $env:ZIG_GLOBAL_CACHE_DIR
+    $originalZigLocalCache = $env:ZIG_LOCAL_CACHE_DIR
+    try {
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            if ($attempt -eq 2 -and $env:RUNNER_TEMP) {
+                $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $env:RUNNER_TEMP "zig-global-cache-pr-smoke-retry-$PID"
+                $env:ZIG_LOCAL_CACHE_DIR = Join-Path $env:RUNNER_TEMP "zig-local-cache-pr-smoke-retry-$PID"
+            }
+
+            $buildOutput = @(& (Join-Path $repoRoot 'scripts\dev-windows.cmd') zig build -Demit-exe=true 2>&1)
+            $buildExitCode = $LASTEXITCODE
+            $buildOutput | ForEach-Object { Write-Host $_ }
+            if ($buildExitCode -eq 0) { break }
+
+            $buildText = $buildOutput -join "`n"
+            $cacheHydrationMiss = $buildText -match 'FileNotFound' -and $buildText -match 'zig-global-cache'
+            if ($attempt -eq 2 -or -not $cacheHydrationMiss) {
+                throw "PR smoke build failed with exit code $buildExitCode."
+            }
+            Write-Warning 'PR smoke build hit a transient Zig package-cache miss; retrying once with fresh temp cache directories.'
+        }
+    }
+    finally {
+        $env:ZIG_GLOBAL_CACHE_DIR = $originalZigGlobalCache
+        $env:ZIG_LOCAL_CACHE_DIR = $originalZigLocalCache
+    }
 }
 
 $childPowerShell = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue |

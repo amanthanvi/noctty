@@ -1490,6 +1490,18 @@ Assert-WorkflowContract `
     -Pattern "(?ms)if \(\`$harness -eq 'interactive-win11-undo\.ps1'\) \{\s*\`$harnessArgs \+= @\('-TimeoutSeconds', '35'\)\s*\}" `
     -Description 'interactive PR smoke preserves the documented undo harness timeout'
 Assert-WorkflowContract `
+    -Path $interactivePrSmoke `
+    -Pattern "(?ms)for \(\`$attempt = 1; \`$attempt -le 2; \`$attempt\+\+\).*?\`$cacheHydrationMiss = \`$buildText -match 'FileNotFound' -and \`$buildText -match 'zig-global-cache'.*?retrying once with fresh temp cache directories" `
+    -Description 'interactive PR smoke retries exactly the transient Zig cache hydration miss'
+Assert-WorkflowContract `
+    -Path $interactivePrSmoke `
+    -Pattern "(?ms)if \(\`$attempt -eq 2 -and \`$env:RUNNER_TEMP\).*?zig-global-cache-pr-smoke-retry-\`$PID.*?zig-local-cache-pr-smoke-retry-\`$PID" `
+    -Description 'interactive PR smoke moves the retry to fresh runner-temp Zig cache directories'
+Assert-WorkflowContract `
+    -Path $interactivePrSmoke `
+    -Pattern "(?ms)finally \{\s*\`$env:ZIG_GLOBAL_CACHE_DIR = \`$originalZigGlobalCache\s*\`$env:ZIG_LOCAL_CACHE_DIR = \`$originalZigLocalCache\s*\}" `
+    -Description 'interactive PR smoke restores caller-provided Zig cache directories after rebuild retry'
+Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `
     -Description 'accessibility evidence timestamp is semantically validated'

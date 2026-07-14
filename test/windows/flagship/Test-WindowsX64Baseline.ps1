@@ -91,12 +91,32 @@ function Assert-ObjdumpFailure {
     throw 'CPU baseline checker ignored an llvm-objdump failure.'
 }
 
+function Assert-WindowsPowerShellObjdumpFailure {
+    $windowsPowerShell = Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Source
+    if (-not $windowsPowerShell) { return }
+
+    $path = Join-Path $tempRoot 'tool-failure.exe'
+    $outputPath = Join-Path $tempRoot 'windows-powershell-failure.log'
+    & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $checker -Path $path *> $outputPath
+    $exitCode = $LASTEXITCODE
+    $output = Get-Content -LiteralPath $outputPath -Raw
+    if ($exitCode -eq 0 -or $output -notmatch 'llvm-objdump failed with exit code 7') {
+        throw "Windows PowerShell did not preserve the llvm-objdump failure (exit=$exitCode):$([Environment]::NewLine)$output"
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     $fakeObjdump = Join-Path $tempRoot 'llvm-objdump.cmd'
     [IO.File]::WriteAllText($fakeObjdump, @'
 @echo off
-set "target=%~nx3"
+:next_argument
+if "%~1"=="" goto arguments_done
+set "target=%~nx1"
+shift
+goto next_argument
+:arguments_done
 if /I "%target%"=="tool-failure.exe" (
   echo synthetic llvm-objdump failure 1>&2
   exit /b 7
@@ -117,6 +137,7 @@ exit /b 0
         Assert-BaselineReject -Name $mnemonic
     }
     Assert-ObjdumpFailure
+    Assert-WindowsPowerShellObjdumpFailure
 
     Write-Host 'Windows x64 baseline checker probes: PASS'
 }
