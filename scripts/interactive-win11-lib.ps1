@@ -599,34 +599,101 @@ function Wait-InteractiveWin11Until {
 
 function Stop-InteractiveWin11Process {
     param(
-        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [switch] $RequireLiveRoot
     )
 
-    if (-not $Process.HasExited) {
-        $taskkillError = $null
-        try {
-            & taskkill.exe /PID $Process.Id /T /F *> $null
-        }
-        catch {
-            $taskkillError = $_.Exception.Message
-        }
-        try {
-            $Process.Refresh()
-        }
-        catch {
-            Write-Warning "Process refresh failed during interactive Win11 cleanup: $($_.Exception.Message)"
-        }
+    $rootProcessId = $Process.Id
+    $rootProcessHandle = [IntPtr]::Zero
+    $rootStartedAt = $null
+    $rootIsLive = $false
+    try {
+        $Process.Refresh()
         if (-not $Process.HasExited) {
-            try {
-                Stop-Process -Id $Process.Id -Force -ErrorAction Stop
-            }
-            catch {
-                throw "Failed to stop interactive Win11 process $($Process.Id) (taskkill='$taskkillError', Stop-Process='$($_.Exception.Message)')."
-            }
+            $rootProcessHandle = $Process.Handle
+            $rootStartedAt = $Process.StartTime
+            $rootIsLive = $true
         }
     }
-    if (-not $Process.WaitForExit(5000)) {
-        throw "Interactive Win11 process $($Process.Id) did not exit within 5 seconds."
+    catch [System.InvalidOperationException] {
+        # The root exited while its identity was being checked.
+        if ($VerbosePreference -eq 'Continue') {
+            Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"
+        }
+    }
+    if (-not $rootIsLive) {
+        if (-not $RequireLiveRoot) {
+            return
+        }
+        throw "Interactive Win11 process $rootProcessId exited before process-tree cleanup could be verified."
+    }
+
+    $taskkillError = $null
+    $taskkill = $null
+    $taskkillTerminationVerified = $true
+    try {
+        $taskkillStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $taskkillStartInfo.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'
+        $taskkillStartInfo.UseShellExecute = $false
+        $taskkillStartInfo.CreateNoWindow = $true
+        $taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"
+        $taskkill = [System.Diagnostics.Process]::Start($taskkillStartInfo)
+        $taskkillTerminationVerified = $false
+        $taskkillTerminationVerified = $taskkill.WaitForExit(10000)
+        if (-not $taskkillTerminationVerified) {
+            $taskkill.Kill()
+            $taskkillTerminationVerified = $taskkill.WaitForExit(5000)
+            if (-not $taskkillTerminationVerified) {
+                throw 'taskkill could not be stopped within 5 seconds'
+            }
+            $taskkillError = 'taskkill exceeded 10 seconds'
+        } elseif ($taskkill.ExitCode -ne 0) {
+            $taskkillError = "taskkill exited with code $($taskkill.ExitCode)"
+        }
+        if ($null -eq $taskkillError -and $Process.WaitForExit(5000)) {
+            return
+        }
+    }
+    catch {
+        if (-not $taskkillTerminationVerified) {
+            throw
+        }
+        $taskkillError = $_.Exception.Message
+    }
+    finally {
+        if ($null -ne $taskkill) {
+            $taskkill.Dispose()
+        }
+    }
+
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited -or $Process.StartTime -ne $rootStartedAt) {
+            if (-not $RequireLiveRoot) {
+                return
+            }
+            throw 'the root exited before fallback cleanup could verify the process tree'
+        }
+        Initialize-InteractiveWin11ProcessNative
+        $rootTerminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($rootProcessHandle, 1)
+        $terminationError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $rootExited = $Process.WaitForExit(5000)
+        if (-not $rootTerminationRequested) {
+            if ($rootExited) {
+                if (-not $RequireLiveRoot) {
+                    return
+                }
+                throw 'the root exited before fallback cleanup could verify the process tree'
+            }
+            throw "root fallback termination failed with Win32 error $terminationError; the root remained live after 5 seconds"
+        }
+        if (-not $rootExited) {
+            throw 'root fallback did not stop the process within 5 seconds'
+        }
+        throw 'root fallback stopped the process but could not verify descendant cleanup'
+    }
+    catch {
+        throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill='$taskkillError', fallback='$($_.Exception.Message)')."
     }
 }
 
@@ -717,6 +784,10 @@ public static class InteractiveWin11ProcessNative {
     [DllImport("kernel32.dll", SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 }
 "@
     }

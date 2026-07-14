@@ -312,7 +312,7 @@ function Test-CommandResolutionMutationNode {
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -324,6 +324,7 @@ function Test-CommandResolutionMutationNode {
 function Assert-CommandResolutionContract {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Token[]] $Tokens,
         [Parameter(Mandatory)] [string] $Context,
         [string[]] $ExpectedDotSources = @(),
         [string[]] $ExpectedAmpersandCommands = @()
@@ -331,6 +332,9 @@ function Assert-CommandResolutionContract {
 
     $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
+    if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
+        throw "Command-loading #requires directive is forbidden: $Context"
+    }
     $dotSources = @($Ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and
@@ -353,6 +357,23 @@ function Assert-CommandResolutionContract {
             throw "Unexpected call-operator command: $Context"
         }
     }
+}
+
+function Test-CommandLoadingRequirement {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Token[]] $Tokens
+    )
+
+    if ($null -ne $Ast.ScriptRequirements -and
+        @($Ast.ScriptRequirements.RequiredModules).Count -ne 0) {
+        return $true
+    }
+
+    return @($Tokens | Where-Object {
+        $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment -and
+            $_.Text -match '(?i)^#requires\b[^\r\n]*[ \t]-(?:M(?:o(?:d(?:u(?:l(?:e(?:s)?)?)?)?)?)?|P(?:S(?:S(?:n(?:a(?:p(?:i(?:n)?)?)?)?)?)?)?)(?::|[ \t]|$)'
+    }).Count -ne 0
 }
 
 function Assert-NoProtectedFunctionDefinitions {
@@ -404,14 +425,39 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
     [pscustomobject]@{ Reject = $false; Text = 'Write-Host "ScriptBlock"' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("System.Management.Automation.ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = 'Invoke-Expression ''Write-Host bypass''' }
+    [pscustomobject]@{ Reject = $true; Text = 'iex ''Write-Host bypass''' }
+    [pscustomobject]@{ Reject = $true; Text = 'Add-PSSnapin Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = 'asnp Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin:Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -P Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PS Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSn Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#ReQuIrEs -Version 5.1 -PsSnApIn Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -Modules Example.Module' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -M Example.Module' }
+    [pscustomobject]@{ Reject = $false; Text = '#requires -Version 5.1' }
+    [pscustomobject]@{ Reject = $false; Text = '#requires -PSEdition Desktop' }
+    [pscustomobject]@{ Reject = $false; Text = 'Write-Host ''#requires -PSSnapin Example.SnapIn''' }
+    [pscustomobject]@{ Reject = $false; Text = ("@'" + [Environment]::NewLine + '#requires -Modules Example.Module' + [Environment]::NewLine + "'@") }
 )
 foreach ($probe in $commandResolutionProbes) {
     $probeTokens = $null
     $probeErrors = $null
     $probeAst = [System.Management.Automation.Language.Parser]::ParseInput($probe.Text, [ref] $probeTokens, [ref] $probeErrors)
     if ($probeErrors.Count -ne 0) { throw "Command-resolution probe does not parse: $($probe.Text)" }
-    $probeRejected = @($probeAst.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true)).Count -ne 0
-    if ($probeRejected -ne $probe.Reject) { throw "Command-resolution probe contract failed: $($probe.Text)" }
+    $probeRejected = $false
+    $probeFailure = $null
+    try {
+        Assert-CommandResolutionContract -Ast $probeAst -Tokens $probeTokens -Context "probe: $($probe.Text)"
+    } catch {
+        $probeRejected = $true
+        $probeFailure = $_.Exception.Message
+    }
+    if ($probeRejected -ne $probe.Reject) {
+        throw "Command-resolution probe contract failed: $($probe.Text) (contract result: $probeFailure)"
+    }
 }
 
 $directStatementTokens = $null
@@ -505,6 +551,7 @@ $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
+$cliShellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
 $accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
@@ -517,6 +564,7 @@ $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
 $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
+$cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
@@ -529,18 +577,17 @@ $resolutionSourceAsts = foreach ($source in @(
     $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($source.Text, [ref]$tokens, [ref]$errors)
     if ($errors.Count -ne 0) { throw "PowerShell resolution source does not parse: $($source.Path) ($($errors[0].Message))" }
-    [pscustomobject]@{ Path = $source.Path; Ast = $ast }
+    [pscustomobject]@{ Path = $source.Path; Ast = $ast; Tokens = $tokens }
 }
 foreach ($source in $resolutionSourceAsts) {
     $expectedAmpersands = if ($source.Path -eq $interactiveWin11Lib) {
         @(
             '& $bootstrapCmd powershell.exe -ExecutionPolicy Bypass -File $LauncherPath @ArgumentList',
             '& cmd /c $devWindowsCmd zig build -Demit-exe=true',
-            '& $Condition',
-            '& taskkill.exe /PID $Process.Id /T /F *> $null'
+            '& $Condition'
         )
     } else { @() }
-    Assert-CommandResolutionContract -Ast $source.Ast -Context $source.Path -ExpectedAmpersandCommands $expectedAmpersands
+    Assert-CommandResolutionContract -Ast $source.Ast -Tokens $source.Tokens -Context $source.Path -ExpectedAmpersandCommands $expectedAmpersands
     $definitions = @($source.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
     foreach ($name in @('Get-InteractiveWin11MessageTimeoutMs', 'Assert-InteractiveWin11WindowOwner', 'Invoke-InteractiveWin11PostMessage', 'Invoke-StatefulPostedCommand')) {
         $expected = if ($source.Path -eq $interactiveWin11Lib) {
@@ -553,6 +600,406 @@ foreach ($source in $resolutionSourceAsts) {
         }
     }
 }
+$interactiveWin11LibAst = @($resolutionSourceAsts | Where-Object { $_.Path -eq $interactiveWin11Lib })[0].Ast
+$stopProcessFunctions = @($interactiveWin11LibAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Stop-InteractiveWin11Process'
+}, $true))
+$stopProcessStatements = if ($stopProcessFunctions.Count -eq 1) {
+    @($stopProcessFunctions[0].Body.EndBlock.Statements)
+} else { @() }
+$stopIdentityTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatements[4] } else { $null }
+$stopTaskkillTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatements[9] } else { $null }
+$stopManagedTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatements[10] } else { $null }
+if ($stopProcessFunctions.Count -ne 1 -or
+    -not [object]::ReferenceEquals($stopProcessFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
+    @($interactiveWin11LibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TrapStatementAst]
+    }, $true)).Count -ne 0 -or
+    $null -ne $stopProcessFunctions[0].Body.BeginBlock -or
+    $null -ne $stopProcessFunctions[0].Body.ProcessBlock -or
+    $null -ne $stopProcessFunctions[0].Body.DynamicParamBlock -or
+    $null -ne $stopProcessFunctions[0].Body.CleanBlock -or
+    $null -eq $stopProcessFunctions[0].Body.ParamBlock -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters.Count -ne 2 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Name.VariablePath.UserPath -ne 'Process' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes.Count -ne 2 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes[0].Extent.Text.Trim() -ne '[Parameter(Mandatory)]' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes[1].Extent.Text.Trim() -ne '[System.Diagnostics.Process]' -or
+    $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].DefaultValue -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Name.VariablePath.UserPath -ne 'RequireLiveRoot' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes.Count -ne 1 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes[0].Extent.Text.Trim() -ne '[switch]' -or
+    $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].DefaultValue -or
+    $stopProcessStatements.Count -ne 11 -or
+    $stopProcessStatements[0].Extent.Text.Trim() -ne '$rootProcessId = $Process.Id' -or
+    $stopProcessStatements[1].Extent.Text.Trim() -ne '$rootProcessHandle = [IntPtr]::Zero' -or
+    $stopProcessStatements[2].Extent.Text.Trim() -ne '$rootStartedAt = $null' -or
+    $stopProcessStatements[3].Extent.Text.Trim() -ne '$rootIsLive = $false' -or
+    $stopIdentityTry -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $stopIdentityTry.Body.Statements.Count -ne 2 -or
+    $stopIdentityTry.CatchClauses.Count -ne 1 -or
+    $null -ne $stopIdentityTry.Finally -or
+    $stopIdentityTry.CatchClauses[0].CatchTypes.Count -ne 1 -or
+    $stopIdentityTry.CatchClauses[0].CatchTypes[0].TypeName.FullName -ne 'System.InvalidOperationException' -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopIdentityTry.CatchClauses[0].Body.Statements[0].ElseClause -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '$VerbosePreference -eq ''Continue''' -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopIdentityTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'Write-Verbose "Interactive Win11 process $rootProcessId identity check raced with exit: $($_.Exception.Message)"' -or
+    $stopIdentityTry.Body.Statements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
+    $stopIdentityTry.Body.Statements[1] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopIdentityTry.Body.Statements[1].Clauses.Count -ne 1 -or
+    $null -ne $stopIdentityTry.Body.Statements[1].ElseClause -or
+    $stopIdentityTry.Body.Statements[1].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $Process.HasExited' -or
+    $stopIdentityTry.Body.Statements[1].Clauses[0].Item2.Statements.Count -ne 3 -or
+    $stopIdentityTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne '$rootProcessHandle = $Process.Handle' -or
+    $stopIdentityTry.Body.Statements[1].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne '$rootStartedAt = $Process.StartTime' -or
+    $stopIdentityTry.Body.Statements[1].Clauses[0].Item2.Statements[2].Extent.Text.Trim() -ne '$rootIsLive = $true' -or
+    $stopProcessStatements[5] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopProcessStatements[5].Clauses.Count -ne 1 -or
+    $null -ne $stopProcessStatements[5].ElseClause -or
+    $stopProcessStatements[5].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $rootIsLive' -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopProcessStatements[5].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $RequireLiveRoot' -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopProcessStatements[5].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw "Interactive Win11 process $rootProcessId exited before process-tree cleanup could be verified."' -or
+    $stopProcessStatements[6].Extent.Text.Trim() -ne '$taskkillError = $null' -or
+    $stopProcessStatements[7].Extent.Text.Trim() -ne '$taskkill = $null' -or
+    $stopProcessStatements[8].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $true' -or
+    $stopTaskkillTry -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $stopTaskkillTry.Body.Statements.Count -ne 10 -or
+    $stopTaskkillTry.CatchClauses.Count -ne 1 -or
+    $null -eq $stopTaskkillTry.Finally -or
+    $stopTaskkillTry.Body.Statements[0].Extent.Text.Trim() -ne '$taskkillStartInfo = [System.Diagnostics.ProcessStartInfo]::new()' -or
+    $stopTaskkillTry.Body.Statements[1].Extent.Text.Trim() -ne '$taskkillStartInfo.FileName = Join-Path ([Environment]::SystemDirectory) ''taskkill.exe''' -or
+    $stopTaskkillTry.Body.Statements[2].Extent.Text.Trim() -ne '$taskkillStartInfo.UseShellExecute = $false' -or
+    $stopTaskkillTry.Body.Statements[3].Extent.Text.Trim() -ne '$taskkillStartInfo.CreateNoWindow = $true' -or
+    $stopTaskkillTry.Body.Statements[4].Extent.Text.Trim() -ne '$taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"' -or
+    $stopTaskkillTry.Body.Statements[5].Extent.Text.Trim() -ne '$taskkill = [System.Diagnostics.Process]::Start($taskkillStartInfo)' -or
+    $stopTaskkillTry.Body.Statements[6].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $false' -or
+    $stopTaskkillTry.Body.Statements[7].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $taskkill.WaitForExit(10000)' -or
+    $stopTaskkillTry.Body.Statements[8] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopTaskkillTry.Body.Statements[8].Clauses.Count -ne 2 -or
+    $null -ne $stopTaskkillTry.Body.Statements[8].ElseClause -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $taskkillTerminationVerified' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements.Count -ne 4 -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne '$taskkill.Kill()' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $taskkill.WaitForExit(5000)' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses.Count -ne 1 -or
+    $null -ne $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].ElseClause -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $taskkillTerminationVerified' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[2].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw ''taskkill could not be stopped within 5 seconds''' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[0].Item2.Statements[3].Extent.Text.Trim() -ne '$taskkillError = ''taskkill exceeded 10 seconds''' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[1].Item1.Extent.Text.Trim() -ne '$taskkill.ExitCode -ne 0' -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[1].Item2.Statements.Count -ne 1 -or
+    $stopTaskkillTry.Body.Statements[8].Clauses[1].Item2.Statements[0].Extent.Text.Trim() -ne '$taskkillError = "taskkill exited with code $($taskkill.ExitCode)"' -or
+    $stopTaskkillTry.Body.Statements[9] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopTaskkillTry.Body.Statements[9].Clauses.Count -ne 1 -or
+    $null -ne $stopTaskkillTry.Body.Statements[9].ElseClause -or
+    $stopTaskkillTry.Body.Statements[9].Clauses[0].Item1.Extent.Text.Trim() -ne '$null -eq $taskkillError -and $Process.WaitForExit(5000)' -or
+    $stopTaskkillTry.Body.Statements[9].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopTaskkillTry.Body.Statements[9].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements.Count -ne 2 -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopTaskkillTry.CatchClauses[0].Body.Statements[0].ElseClause -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $taskkillTerminationVerified' -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw' -or
+    $stopTaskkillTry.CatchClauses[0].Body.Statements[1].Extent.Text.Trim() -ne '$taskkillError = $_.Exception.Message' -or
+    $stopTaskkillTry.Finally.Statements.Count -ne 1 -or
+    $stopTaskkillTry.Finally.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopTaskkillTry.Finally.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopTaskkillTry.Finally.Statements[0].ElseClause -or
+    $stopTaskkillTry.Finally.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '$null -ne $taskkill' -or
+    $stopTaskkillTry.Finally.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopTaskkillTry.Finally.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne '$taskkill.Dispose()' -or
+    $stopManagedTry -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $stopManagedTry.Body.Statements.Count -ne 9 -or
+    $stopManagedTry.CatchClauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Finally -or
+    $stopManagedTry.Body.Statements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
+    $stopManagedTry.Body.Statements[1] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[1].ElseClause -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item1.Extent.Text.Trim() -ne '$Process.HasExited -or $Process.StartTime -ne $rootStartedAt' -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $RequireLiveRoot' -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw ''the root exited before fallback cleanup could verify the process tree''' -or
+    $stopManagedTry.Body.Statements[2].Extent.Text.Trim() -ne 'Initialize-InteractiveWin11ProcessNative' -or
+    $stopManagedTry.Body.Statements[3].Extent.Text.Trim() -ne '$rootTerminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($rootProcessHandle, 1)' -or
+    $stopManagedTry.Body.Statements[4].Extent.Text.Trim() -ne '$terminationError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()' -or
+    $stopManagedTry.Body.Statements[5].Extent.Text.Trim() -ne '$rootExited = $Process.WaitForExit(5000)' -or
+    $stopManagedTry.Body.Statements[6] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[6].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[6].ElseClause -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $rootTerminationRequested' -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '$rootExited' -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $RequireLiveRoot' -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw ''the root exited before fallback cleanup could verify the process tree''' -or
+    $stopManagedTry.Body.Statements[6].Clauses[0].Item2.Statements[1].Extent.Text.Trim() -ne 'throw "root fallback termination failed with Win32 error $terminationError; the root remained live after 5 seconds"' -or
+    $stopManagedTry.Body.Statements[7] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[7].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[7].ElseClause -or
+    $stopManagedTry.Body.Statements[7].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $rootExited' -or
+    $stopManagedTry.Body.Statements[7].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopManagedTry.Body.Statements[7].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw ''root fallback did not stop the process within 5 seconds''' -or
+    $stopManagedTry.Body.Statements[8] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[8].Extent.Text.Trim() -ne 'throw ''root fallback stopped the process but could not verify descendant cleanup''' -or
+    $stopManagedTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
+    $stopManagedTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.CatchClauses[0].Body.Statements[0].Extent.Text.Trim() -ne 'throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill=''$taskkillError'', fallback=''$($_.Exception.Message)'')."') {
+    throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around native tree kill and root-only fallback.'
+}
+Assert-TextContract `
+    -Content $interactiveWin11LibText `
+    -Pattern ([regex]::Escape('public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);')) `
+    -Description 'native root fallback termination declaration' `
+    -Context $interactiveWin11Lib
+$expectedCliShellHarnessText = @'
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('cmd', 'powershell')]
+    [string] $Shell,
+
+    [Parameter(Mandatory = $true)]
+    [string[]] $Arguments,
+
+    [Parameter(Mandatory = $true)]
+    [string] $ExpectedText,
+
+    [int] $ExpectedExitCode = 0,
+
+    [string] $BinDir
+)
+
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+
+function Format-CmdArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+
+    $escaped = $Argument.Replace('%', '%%').Replace('"', '""')
+    if ($escaped -match '[\s"&|<>()^!]') {
+        return '"' + $escaped + '"'
+    }
+
+    return $escaped
+}
+
+function Format-PowerShellLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    return "'" + $Argument.Replace("'", "''") + "'"
+}
+
+$binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
+$guiExe = Join-Path $binDir 'winghostty.exe'
+$commandExe = Join-Path $binDir 'winghostty.com'
+$cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+$powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+
+foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
+    if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+    }
+}
+
+$envPath = "$binDir;$env:PATH"
+$argsDisplay = [string]::Join(' ', $Arguments)
+$shellLauncherTimeoutSeconds = 30
+
+switch ($Shell) {
+    'cmd' {
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
+        if ($LASTEXITCODE -ne 0) {
+            throw "cmd could not resolve winghostty from PATH."
+        }
+        $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
+        if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
+        }
+
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        try {
+            $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            @(
+                '@echo off'
+                "set `"PATH=$envPath`""
+                $cmdCommand
+            ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
+
+            $process = Start-Process `
+                -FilePath $cmdExe `
+                -ArgumentList "/d /c `"$payloadPath`"" `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -WindowStyle Hidden `
+                -PassThru
+            $processHandle = $process.Handle
+            if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
+                Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
+                throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
+            }
+
+            $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+            $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
+                Get-Content -LiteralPath $stdoutPath -Raw
+            } else {
+                ''
+            }
+            $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath -Raw
+            } else {
+                ''
+            }
+            $output = $stdoutText + $stderrText
+        }
+        finally {
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
+        }
+    }
+
+    'powershell' {
+        $oldPath = $env:PATH
+        $env:PATH = $envPath
+        try {
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
+            if ($LASTEXITCODE -ne 0) {
+                throw "PowerShell could not resolve winghostty from PATH."
+            }
+            $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
+            if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
+            }
+
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            try {
+                $env:PATH = $envPath
+                $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
+                @(
+                    '$argsList = @(' + $argLiterals + ')'
+                    '$output = & winghostty @argsList | Out-String'
+                    '$exitCode = $LASTEXITCODE'
+                    '[Console]::Out.Write($output)'
+                    'exit $exitCode'
+                ) | Set-Content -LiteralPath $payloadPath -Encoding UTF8
+
+                $process = Start-Process `
+                    -FilePath $powershellExe `
+                    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $payloadPath) `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -WindowStyle Hidden `
+                    -PassThru
+                $processHandle = $process.Handle
+                if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
+                    Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
+                    throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
+                }
+
+                $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+                $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
+                    Get-Content -LiteralPath $stdoutPath -Raw
+                } else {
+                    ''
+                }
+                $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                    Get-Content -LiteralPath $stderrPath -Raw
+                } else {
+                    ''
+                }
+                $output = $stdoutText + $stderrText
+            }
+            finally {
+                Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            $env:PATH = $oldPath
+        }
+    }
+}
+
+if ($exitCode -ne $ExpectedExitCode) {
+    throw "$Shell shell launcher should exit with code $ExpectedExitCode, got $exitCode."
+}
+
+$outputText = if ($output -is [string]) { $output } else { ($output | Out-String) }
+if (-not $outputText.Contains($ExpectedText)) {
+    throw "$Shell shell launcher output did not contain expected text '$ExpectedText'."
+}
+
+Write-Host "shell launcher validation: PASS (shell=$Shell, args=$argsDisplay)"
+'@
+if ((($cliShellHarnessText -replace "\r\n?", "`n") -replace '\n+\z', '') -cne
+    (($expectedCliShellHarnessText -replace "\r\n?", "`n") -replace '\n+\z', '')) {
+    throw 'CLI shell harness must match its complete reviewed source snapshot.'
+}
+$cliShellTokens = $null
+$cliShellErrors = $null
+$cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $cliShellHarnessText,
+    [ref]$cliShellTokens,
+    [ref]$cliShellErrors
+)
+if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without errors.' }
+Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Context $cliShellHarness -ExpectedDotSources @(
+    ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
+) -ExpectedAmpersandCommands @(
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
+    '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
+)
 $accessibilityTokens = $null
 $accessibilityErrors = $null
 $accessibilityAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -655,7 +1102,7 @@ $paletteThemeAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$paletteThemeErrors
 )
 if ($paletteThemeErrors.Count -ne 0) { throw "Palette theme harness does not parse: $($paletteThemeErrors[0].Message)" }
-Assert-CommandResolutionContract -Ast $paletteThemeAst -Context $paletteThemeHarness -ExpectedDotSources @(
+Assert-CommandResolutionContract -Ast $paletteThemeAst -Tokens $paletteThemeTokens -Context $paletteThemeHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
     ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
 )
@@ -1047,7 +1494,7 @@ $sessionHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$sessionHarnessErrors
 )
 if ($sessionHarnessErrors.Count -ne 0) { throw "Session restore harness does not parse: $($sessionHarnessErrors[0].Message)" }
-Assert-CommandResolutionContract -Ast $sessionHarnessAst -Context $sessionRestoreHarness -ExpectedDotSources @(
+Assert-CommandResolutionContract -Ast $sessionHarnessAst -Tokens $sessionHarnessTokens -Context $sessionRestoreHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
     ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
 )
