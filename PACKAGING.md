@@ -52,6 +52,11 @@ Build the app first:
 zig build -Demit-exe=true
 ```
 
+x64 packaging also requires LLVM's `llvm-objdump` on `PATH` or in the
+standard LLVM installation directory. The packaging gate disassembles every
+runtime PE and rejects AMD-only SSE4a instructions so published x64 builds
+retain the documented baseline CPU compatibility.
+
 If Zig cannot hydrate its dependency cache automatically in your
 environment, seed the Windows build dependency cache first:
 

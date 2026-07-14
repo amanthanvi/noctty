@@ -440,6 +440,7 @@ $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palet
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
+$windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
@@ -1558,6 +1559,14 @@ Assert-WorkflowContract `
     -Path $releasePreflight `
     -Pattern '\$minimumValidityDays -lt 180(?!\d)' `
     -Description 'signer-validity overrides cannot lower the 180-day floor'
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)& zig build .*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{\s*throw "Zig build failed with exit code \$LASTEXITCODE\."' `
+    -Description 'Windows packaging fails closed when its native Zig build fails'
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)foreach \(\$runtimeFile in \$runtimeFiles\).*?Assert-PeMachine.*?if \(\$Architecture -eq "x64"\).*?check-windows-x64-baseline\.ps1.*?-Path \$runtimePath' `
+    -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content (Get-Content -LiteralPath $releasePreflight -Raw) -HeaderPattern '^function\s+Assert-WingetArchitectureCoverage(?=\s|\{)') `
     -Pattern '(?ms)Assert-WingetArchitectureCoverage.*?Architecture:.*?arm64,x64' `

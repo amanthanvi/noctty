@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $checker = Join-Path $repoRoot 'scripts/check-windows-x64-baseline.ps1'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "winghostty-x64-baseline-$([Guid]::NewGuid().ToString('N'))"
+$originalPath = $env:PATH
 
 function New-ProbePe {
     param(
@@ -46,52 +47,81 @@ function New-ProbePe {
 }
 
 function Assert-BaselinePass {
-    param(
-        [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [byte[]] $Text
-    )
+    param([Parameter(Mandatory)] [string] $Name)
 
     $path = Join-Path $tempRoot "$Name.exe"
-    New-ProbePe -Path $path -Text $Text
-    & $checker -Path $path
+    # These bytes resemble EXTRQ inside .text. The fake disassembler reports
+    # only a decoded NOP, proving raw data is not treated as an instruction.
+    New-ProbePe -Path $path -Text ([byte[]](0x66, 0x0F, 0x78, 0xC0, 0x01, 0x02))
+    $output = @(& $checker -Path $path 6>&1)
+    if (($output -join "`n") -notmatch 'CPU baseline check: passed') {
+        throw "CPU baseline checker did not report its PASS sentinel for '$Name'."
+    }
 }
 
 function Assert-BaselineReject {
-    param(
-        [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [byte[]] $Text
-    )
+    param([Parameter(Mandatory)] [string] $Name)
 
     $path = Join-Path $tempRoot "$Name.exe"
-    New-ProbePe -Path $path -Text $Text
+    New-ProbePe -Path $path -Text ([byte[]](0x90))
     try {
         & $checker -Path $path
     }
     catch {
-        if ($_.Exception.Message -notmatch 'AMD-only SSE4a EXTRQ/INSERTQ') {
+        if ($_.Exception.Message -notmatch 'AMD-only SSE4a instructions') {
             throw
         }
         return
     }
-    throw "CPU baseline checker accepted SSE4a probe '$Name'."
+    throw "CPU baseline checker accepted decoded SSE4a probe '$Name'."
+}
+
+function Assert-ObjdumpFailure {
+    $path = Join-Path $tempRoot 'tool-failure.exe'
+    New-ProbePe -Path $path -Text ([byte[]](0x90))
+    try {
+        & $checker -Path $path
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'llvm-objdump failed with exit code 7') {
+            throw
+        }
+        return
+    }
+    throw 'CPU baseline checker ignored an llvm-objdump failure.'
 }
 
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    $fakeObjdump = Join-Path $tempRoot 'llvm-objdump.cmd'
+    [IO.File]::WriteAllText($fakeObjdump, @'
+@echo off
+set "target=%~nx3"
+if /I "%target%"=="tool-failure.exe" (
+  echo synthetic llvm-objdump failure 1>&2
+  exit /b 7
+)
+for %%M in (extrq insertq movntsd movntss) do (
+  if /I "%target%"=="%%M.exe" (
+    echo 140001000:        %%M
+    exit /b 0
+  )
+)
+echo 140001000:        nop
+exit /b 0
+'@)
+    $env:PATH = "$tempRoot;$originalPath"
 
-    # Prefix bytes embedded in another instruction are not SSE4a opcodes.
-    Assert-BaselinePass -Name 'insertq-memory-form' -Text ([byte[]](0x90, 0xF2, 0x0F, 0x78, 0x00, 0x90, 0x90))
-    Assert-BaselinePass -Name 'extrq-wrong-extension' -Text ([byte[]](0x90, 0x66, 0x0F, 0x78, 0xC8, 0x01, 0x02))
-    Assert-BaselinePass -Name 'truncated-immediate' -Text ([byte[]](0x90, 0xF2, 0x0F, 0x78, 0xC1, 0x01))
-
-    Assert-BaselineReject -Name 'extrq-immediate' -Text ([byte[]](0x66, 0x0F, 0x78, 0xC0, 0x01, 0x02))
-    Assert-BaselineReject -Name 'extrq-register' -Text ([byte[]](0x66, 0x0F, 0x79, 0xC1))
-    Assert-BaselineReject -Name 'insertq-immediate-rex' -Text ([byte[]](0xF2, 0x41, 0x0F, 0x78, 0xC1, 0x01, 0x02))
-    Assert-BaselineReject -Name 'insertq-register' -Text ([byte[]](0xF2, 0x0F, 0x79, 0xC1))
+    Assert-BaselinePass -Name 'raw-sse4a-looking-data'
+    foreach ($mnemonic in @('extrq', 'insertq', 'movntsd', 'movntss')) {
+        Assert-BaselineReject -Name $mnemonic
+    }
+    Assert-ObjdumpFailure
 
     Write-Host 'Windows x64 baseline checker probes: PASS'
 }
 finally {
+    $env:PATH = $originalPath
     $resolvedTemp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     $resolvedRoot = [IO.Path]::GetFullPath($tempRoot)
     if ($resolvedRoot.StartsWith($resolvedTemp, [StringComparison]::OrdinalIgnoreCase) -and
