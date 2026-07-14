@@ -530,30 +530,21 @@ function Get-InteractiveWin11RequiredJsonFile {
 function Show-InteractiveWin11Window {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [Parameter(Mandatory)] [type] $NativeType,
         [int] $ShowCode = 9,
         [switch] $SetForeground
     )
 
-    $nativeType = switch ($NativeTypeName) {
-        'InteractiveWin11BooMultiTabNative' { [InteractiveWin11BooMultiTabNative]; break }
-        'InteractiveWin11BooPerfNative' { [InteractiveWin11BooPerfNative]; break }
-        default { $null }
-    }
-    if ($null -eq $nativeType) {
-        throw "Unsupported native helper type: $NativeTypeName"
-    }
-
-    [void] $nativeType::ShowWindow($Hwnd, $ShowCode)
+    [void] $NativeType::ShowWindow($Hwnd, $ShowCode)
     if ($SetForeground) {
-        [void] $nativeType::SetForegroundWindow($Hwnd)
+        [void] $NativeType::SetForegroundWindow($Hwnd)
     }
 }
 
 function Show-InteractiveWin11ProcessMainWindow {
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
-        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [Parameter(Mandatory)] [type] $NativeType,
         [int] $ShowCode = 9,
         [switch] $SetForeground,
         [int] $ReadyTimeoutSeconds = 5
@@ -565,7 +556,7 @@ function Show-InteractiveWin11ProcessMainWindow {
         if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
             Show-InteractiveWin11Window `
                 -Hwnd $Process.MainWindowHandle `
-                -NativeTypeName $NativeTypeName `
+                -NativeType $NativeType `
                 -ShowCode $ShowCode `
                 -SetForeground:$SetForeground
             return
