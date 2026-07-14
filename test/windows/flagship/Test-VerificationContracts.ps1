@@ -1999,14 +1999,29 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+$interactiveRunStep = Get-YamlStepText `
+    -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
+    -Name 'Run interactive Win11 composite' `
+    -Source "$testWorkflow :: windows-interactive"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
-        -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
-        -Name 'Run interactive Win11 composite' `
-        -Source "$testWorkflow :: windows-interactive") `
+    -Content $interactiveRunStep `
     -Pattern '(?ms)env:\s+ZIG_GLOBAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-global-cache\s+ZIG_LOCAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-local-cache' `
     -Description 'interactive builds use clean per-job Zig caches' `
     -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+$interactiveHarnessCommands = @(
+    './test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState',
+    './test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness',
+    './test/windows/interactive-win11-accessibility.ps1 -ResetState',
+    './test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast',
+    './test/windows/interactive-win11-session-restore.ps1 -ResetState'
+)
+foreach ($command in $interactiveHarnessCommands) {
+    Assert-TextContract `
+        -Content $interactiveRunStep `
+        -Pattern ([regex]::Escape($command) + '\s*\r?\n\s*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}') `
+        -Description "interactive workflow propagates the exit code from $command" `
+        -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+}
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
     -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
