@@ -568,7 +568,7 @@ $stopTaskkillTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatem
 $stopManagedTry = if ($stopProcessStatements.Count -eq 11) { $stopProcessStatements[10] } else { $null }
 if ($stopProcessFunctions.Count -ne 1 -or
     -not [object]::ReferenceEquals($stopProcessFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
-    @($stopProcessFunctions[0].FindAll({
+    @($interactiveWin11LibAst.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.TrapStatementAst]
     }, $true)).Count -ne 0 -or
@@ -828,6 +828,10 @@ for ($i = 0; $i -lt $cliShellTopLevelStatements.Count; $i++) {
     }
 }
 if ($cliShellErrors.Count -ne 0 -or
+    @($cliShellAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TrapStatementAst]
+    }, $true)).Count -ne 0 -or
     $cliShellTimeoutAssignments.Count -ne 1 -or
     $cliShellTimeoutAssignments[0].Right.Extent.Text.Trim() -ne '30' -or
     $cliShellSwitches.Count -ne 1 -or
