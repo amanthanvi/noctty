@@ -614,14 +614,31 @@ $cliShellLauncherBlockShared = $cliShellStartProcessAssignments.Count -eq 1 -and
 $cliShellLauncherStatements = if ($cliShellLauncherBlockShared) {
     @($cliShellStartProcessAssignments[0].Parent.Statements)
 } else { @() }
+$cliShellTopLevelShared = $cliShellTimeoutAssignments.Count -eq 1 -and
+    $cliShellSwitches.Count -eq 1 -and
+    [Object]::ReferenceEquals($cliShellTimeoutAssignments[0].Parent, $cliShellSwitches[0].Parent) -and
+    [Object]::ReferenceEquals($cliShellTimeoutAssignments[0].Parent, $cliShellAst.EndBlock)
+$cliShellTopLevelStatements = if ($cliShellTopLevelShared) {
+    @($cliShellAst.EndBlock.Statements)
+} else { @() }
 $cliShellStartProcessIndex = -1
 $cliShellTimeoutIndex = -1
+$cliShellTimeoutAssignmentIndex = -1
+$cliShellSwitchIndex = -1
 for ($i = 0; $i -lt $cliShellLauncherStatements.Count; $i++) {
     if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellStartProcessAssignments[0])) {
         $cliShellStartProcessIndex = $i
     }
     if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellTimeoutIfs[0])) {
         $cliShellTimeoutIndex = $i
+    }
+}
+for ($i = 0; $i -lt $cliShellTopLevelStatements.Count; $i++) {
+    if ([Object]::ReferenceEquals($cliShellTopLevelStatements[$i], $cliShellTimeoutAssignments[0])) {
+        $cliShellTimeoutAssignmentIndex = $i
+    }
+    if ([Object]::ReferenceEquals($cliShellTopLevelStatements[$i], $cliShellSwitches[0])) {
+        $cliShellSwitchIndex = $i
     }
 }
 if ($cliShellErrors.Count -ne 0 -or
@@ -631,6 +648,9 @@ if ($cliShellErrors.Count -ne 0 -or
     $cliShellStartProcessAssignments.Count -ne 1 -or
     $cliShellWaitForExitCalls.Count -ne 1 -or
     $cliShellTimeoutIfs.Count -ne 1 -or
+    -not $cliShellTopLevelShared -or
+    $cliShellTimeoutAssignmentIndex -lt 0 -or
+    $cliShellSwitchIndex -ne ($cliShellTimeoutAssignmentIndex + 1) -or
     -not $cliShellLauncherBlockShared -or
     $cliShellStartProcessAssignments[0].Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
     $cliShellStartProcessAssignments[0].Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
