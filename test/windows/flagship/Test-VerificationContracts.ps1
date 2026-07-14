@@ -2016,11 +2016,22 @@ $interactiveHarnessCommands = @(
     './test/windows/interactive-win11-session-restore.ps1 -ResetState'
 )
 foreach ($command in $interactiveHarnessCommands) {
+    $commandGuardPattern = '(?m)^[ \t]*' + [regex]::Escape($command) +
+        '[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}[ \t]*\r?$'
     Assert-TextContract `
         -Content $interactiveRunStep `
-        -Pattern ([regex]::Escape($command) + '\s*\r?\n\s*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}') `
+        -Pattern $commandGuardPattern `
         -Description "interactive workflow propagates the exit code from $command" `
         -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+    $commentedCommandStep = [regex]::Replace(
+        $interactiveRunStep,
+        '(?m)^([ \t]*)' + [regex]::Escape($command) + '[ \t]*(?=\r?$)',
+        '$1# ' + $command,
+        1)
+    if ($commentedCommandStep -eq $interactiveRunStep -or
+        [regex]::IsMatch($commentedCommandStep, $commandGuardPattern)) {
+        throw "Interactive workflow contract accepted a commented-out harness command: $command"
+    }
 }
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
