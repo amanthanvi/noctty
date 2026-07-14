@@ -312,7 +312,7 @@ function Test-CommandResolutionMutationNode {
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -370,6 +370,7 @@ function Assert-NoProtectedFunctionDefinitions {
     if ($definitions.Count -ne 0) { throw "Harness must not redefine protected interactive functions: $Context" }
 }
 
+$psSnapinRequirementPattern = '(?im)^[ \t]*#requires\b[^\r\n]*[ \t]-PSSnapin(?::|[ \t]|$)'
 $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock]::' + [Environment]::NewLine + '''Create''("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '[ System.Management.Automation.ScriptBlock, System.Management.Automation ]::Create("1+1")' }
@@ -404,6 +405,8 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("[ScriptBlock]::Create")' }
     [pscustomobject]@{ Reject = $false; Text = 'Write-Host "ScriptBlock"' }
     [pscustomobject]@{ Reject = $false; Text = '$list.Add("System.Management.Automation.ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = 'Add-PSSnapin Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = 'asnp Example.SnapIn' }
 )
 foreach ($probe in $commandResolutionProbes) {
     $probeTokens = $null
@@ -412,6 +415,18 @@ foreach ($probe in $commandResolutionProbes) {
     if ($probeErrors.Count -ne 0) { throw "Command-resolution probe does not parse: $($probe.Text)" }
     $probeRejected = @($probeAst.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true)).Count -ne 0
     if ($probeRejected -ne $probe.Reject) { throw "Command-resolution probe contract failed: $($probe.Text)" }
+}
+$psSnapinRequirementProbes = @(
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin:Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#ReQuIrEs -Version 5.1 -PsSnApIn Example.SnapIn' }
+    [pscustomobject]@{ Reject = $false; Text = '#requires -Modules Example.Module' }
+    [pscustomobject]@{ Reject = $false; Text = 'Write-Host ''#requires -PSSnapin Example.SnapIn''' }
+)
+foreach ($probe in $psSnapinRequirementProbes) {
+    if (($probe.Text -match $psSnapinRequirementPattern) -ne $probe.Reject) {
+        throw "PSSnapin requirement probe contract failed: $($probe.Text)"
+    }
 }
 
 $directStatementTokens = $null
@@ -748,6 +763,53 @@ $cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$cliShellTokens,
     [ref]$cliShellErrors
 )
+$cliShellFunctionDefinitions = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $true))
+$cliShellUsingModules = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.UsingStatementAst] -and
+        $node.UsingStatementKind.ToString() -eq 'Module'
+}, $true))
+$cliShellRequiredModules = if ($null -eq $cliShellAst.ScriptRequirements) {
+    @()
+} else {
+    @($cliShellAst.ScriptRequirements.RequiredModules)
+}
+$cliShellPathAssignments = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -in @('envPath', 'oldPath', 'env:PATH')
+}, $true))
+$cliShellTemporaryPathAssignments = @($cliShellAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -in @('payloadPath', 'stdoutPath', 'stderrPath')
+}, $true))
+$cliShellForbiddenProviderCommands = @($cliShellAst.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.CommandAst]) { return $false }
+    $name = $node.GetCommandName()
+    $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
+    return $leafName -in @(
+        'Set-Item', 'si', 'New-Item', 'ni', 'Move-Item', 'mi', 'mv',
+        'Copy-Item', 'cpi', 'cp', 'Rename-Item', 'rni', 'Clear-Item', 'cli',
+        'Set-Variable', 'sv', 'New-Variable', 'nv', 'Remove-Variable', 'rv',
+        'Clear-Variable', 'clv', 'Add-Content', 'ac', 'Clear-Content', 'clc',
+        'Out-File', 'Tee-Object', 'tee', 'sc', 'rm', 'ri', 'del', 'erase',
+        'rd', 'rmdir'
+    )
+}, $true))
+$cliShellAllowedProviderCommands = @($cliShellAst.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.CommandAst]) { return $false }
+    $name = $node.GetCommandName()
+    $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
+    return $leafName -in @('Set-Content', 'Remove-Item')
+}, $true))
 $cliShellTimeoutAssignments = @($cliShellAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -832,6 +894,28 @@ if ($cliShellErrors.Count -ne 0 -or
         param($node)
         $node -is [System.Management.Automation.Language.TrapStatementAst]
     }, $true)).Count -ne 0 -or
+    $cliShellFunctionDefinitions.Count -ne 2 -or
+    $cliShellFunctionDefinitions[0].Name -ne 'Format-CmdArgument' -or
+    $cliShellFunctionDefinitions[1].Name -ne 'Format-PowerShellLiteral' -or
+    $cliShellUsingModules.Count -ne 0 -or
+    $cliShellRequiredModules.Count -ne 0 -or
+    $cliShellHarnessText -match $psSnapinRequirementPattern -or
+    $cliShellPathAssignments.Count -ne 4 -or
+    $cliShellPathAssignments[0].Extent.Text.Trim() -ne '$envPath = "$binDir;$env:PATH"' -or
+    $cliShellPathAssignments[1].Extent.Text.Trim() -ne '$oldPath = $env:PATH' -or
+    $cliShellPathAssignments[2].Extent.Text.Trim() -ne '$env:PATH = $envPath' -or
+    $cliShellPathAssignments[3].Extent.Text.Trim() -ne '$env:PATH = $oldPath' -or
+    $cliShellTemporaryPathAssignments.Count -ne 4 -or
+    $cliShellTemporaryPathAssignments[0].Extent.Text.Trim() -ne '$payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")' -or
+    $cliShellTemporaryPathAssignments[1].Extent.Text.Trim() -ne '$stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")' -or
+    $cliShellTemporaryPathAssignments[2].Extent.Text.Trim() -ne '$stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")' -or
+    $cliShellTemporaryPathAssignments[3].Extent.Text.Trim() -ne '$payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")' -or
+    $cliShellForbiddenProviderCommands.Count -ne 0 -or
+    $cliShellAllowedProviderCommands.Count -ne 4 -or
+    $cliShellAllowedProviderCommands[0].Extent.Text.Trim() -ne 'Set-Content -LiteralPath $payloadPath -Encoding ASCII' -or
+    $cliShellAllowedProviderCommands[1].Extent.Text.Trim() -ne 'Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue' -or
+    $cliShellAllowedProviderCommands[2].Extent.Text.Trim() -ne 'Set-Content -LiteralPath $payloadPath -Encoding UTF8' -or
+    $cliShellAllowedProviderCommands[3].Extent.Text.Trim() -ne 'Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue' -or
     $cliShellTimeoutAssignments.Count -ne 1 -or
     $cliShellTimeoutAssignments[0].Right.Extent.Text.Trim() -ne '30' -or
     $cliShellSwitches.Count -ne 1 -or
@@ -876,6 +960,13 @@ if ($cliShellErrors.Count -ne 0 -or
     $cliShellTimeoutStatements[1].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
     throw 'The live PowerShell shell launcher must use one hosted-cold-start timeout and fail explicitly after bounded process-tree cleanup.'
 }
+Assert-CommandResolutionContract -Ast $cliShellAst -Context $cliShellHarness -ExpectedDotSources @(
+    ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
+) -ExpectedAmpersandCommands @(
+    '& cmd /d /c "set ""PATH=$envPath""&& where winghostty"'
+    '& cmd /d /c $payloadPath 2>&1'
+    '& powershell.exe -NoProfile -Command "(Get-Command winghostty).Source"'
+)
 $accessibilityTokens = $null
 $accessibilityErrors = $null
 $accessibilityAst = [System.Management.Automation.Language.Parser]::ParseInput(
