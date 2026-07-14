@@ -670,8 +670,14 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopManagedTry.Body.Statements[1].Clauses.Count -ne 1 -or
     $null -ne $stopManagedTry.Body.Statements[1].ElseClause -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item1.Extent.Text.Trim() -ne '$Process.HasExited -or $Process.StartTime -ne $rootStartedAt' -or
-    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements.Count -ne 1 -or
-    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $RequireLiveRoot' -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
     $stopManagedTry.Body.Statements[2].Extent.Text.Trim() -ne '$Process.Kill()' -or
     $stopManagedTry.Body.Statements[3] -isnot [System.Management.Automation.Language.IfStatementAst] -or
     $stopManagedTry.Body.Statements[3].Clauses.Count -ne 1 -or

@@ -661,6 +661,9 @@ function Stop-InteractiveWin11Process {
     try {
         $Process.Refresh()
         if ($Process.HasExited -or $Process.StartTime -ne $rootStartedAt) {
+            if (-not $RequireLiveRoot) {
+                return
+            }
             throw 'the root exited before fallback cleanup could verify the process tree'
         }
         $Process.Kill()
