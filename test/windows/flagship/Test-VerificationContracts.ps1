@@ -104,6 +104,26 @@ function Get-YamlStepText {
     $match.Value
 }
 
+function Get-YamlLiteralRunScript {
+    param(
+        [Parameter(Mandatory)] [string] $Content,
+        [Parameter(Mandatory)] [string] $Source
+    )
+
+    $match = [regex]::Match($Content, '(?ms)^        run:[ \t]*\|[ \t]*\r?\n(?<body>.*)\z')
+    if (-not $match.Success) { throw "Literal workflow run block not found: $Source" }
+    $scriptLines = @(
+        foreach ($line in ($match.Groups['body'].Value -split '\r?\n')) {
+            if ($line.Length -eq 0) { ''; continue }
+            if (-not $line.StartsWith('          ', [StringComparison]::Ordinal)) {
+                throw "Literal workflow run block has unexpected indentation: $Source"
+            }
+            $line.Substring(10)
+        }
+    )
+    ($scriptLines -join "`n").TrimEnd([char[]]"`n")
+}
+
 function Get-PowerShellBlockText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -2008,63 +2028,29 @@ Assert-TextContract `
     -Pattern '(?ms)env:\s+ZIG_GLOBAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-global-cache\s+ZIG_LOCAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-local-cache' `
     -Description 'interactive builds use clean per-job Zig caches' `
     -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
-Assert-TextContract `
+$interactiveRunScript = Get-YamlLiteralRunScript `
     -Content $interactiveRunStep `
-    -Pattern "(?m)^[ \t]*\`$ErrorActionPreference = 'Stop'[ \t]*\r?\n[ \t]*\`$quick = " `
-    -Description 'interactive workflow treats parent PowerShell errors as terminating before branch selection' `
-    -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
-$requiredInteractiveHarnessCommands = @(
-    './test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState',
-    './test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness',
-    './test/windows/interactive-win11-accessibility.ps1 -ResetState',
-    './test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast',
-    './test/windows/interactive-win11-session-restore.ps1 -ResetState'
-)
-$interactiveHarnessLinePattern = [regex]::new(
-    '(?m)^[ \t]*(?<command>\./test/windows/[^\r\n]*?\.ps1(?:[ \t]+[^\r\n]*)?)[ \t]*(?=\r?$)'
-)
-$interactiveHarnessCommands = @(
-    foreach ($match in $interactiveHarnessLinePattern.Matches($interactiveRunStep)) {
-        $match.Groups['command'].Value.TrimEnd()
-    }
-)
-$allExecutablePs1Lines = [regex]::Matches(
-    $interactiveRunStep,
-    '(?m)^(?![ \t]*#)[ \t]*[^\r\n]*\.ps1(?:[ \t]+[^\r\n]*)?[ \t]*\r?$'
-)
-$missingInteractiveHarnesses = @(
-    $requiredInteractiveHarnessCommands | Where-Object { $_ -notin $interactiveHarnessCommands }
-)
-if ($interactiveHarnessCommands.Count -ne $allExecutablePs1Lines.Count -or
-    $interactiveHarnessCommands.Count -ne @($interactiveHarnessCommands | Sort-Object -Unique).Count -or
-    $missingInteractiveHarnesses.Count -gt 0) {
-    throw 'Interactive workflow harness discovery found an unsupported, duplicate, or missing PowerShell invocation.'
+    -Source "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+$expectedInteractiveRunScript = @'
+$ErrorActionPreference = 'Stop'
+$quick = '${{ github.event_name }}' -eq 'pull_request'
+if ($quick) {
+  ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+  ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-session-restore.ps1 -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-foreach ($command in $interactiveHarnessCommands) {
-    $commandGuardPattern = '(?m)^[ \t]*' + [regex]::Escape($command) +
-        '[ \t]*\r?\n[ \t]*if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}[ \t]*\r?$'
-    Assert-TextContract `
-        -Content $interactiveRunStep `
-        -Pattern $commandGuardPattern `
-        -Description "interactive workflow propagates the exit code from $command" `
-        -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
-    $commandLinePattern = [regex]::new(
-        '(?m)^([ \t]*)' + [regex]::Escape($command) + '[ \t]*(?=\r?$)'
-    )
-    $commentedCommandStep = $commandLinePattern.Replace(
-        $interactiveRunStep,
-        '$1# ' + $command,
-        1)
-    $separatedCommandStep = $commandLinePattern.Replace(
-        $interactiveRunStep,
-        '$0' + [Environment]::NewLine,
-        1)
-    if ($commentedCommandStep -eq $interactiveRunStep -or
-        $separatedCommandStep -eq $interactiveRunStep -or
-        [regex]::IsMatch($commentedCommandStep, $commandGuardPattern) -or
-        [regex]::IsMatch($separatedCommandStep, $commandGuardPattern)) {
-        throw "Interactive workflow contract accepted a commented-out or non-adjacent harness command: $command"
-    }
+'@
+$expectedInteractiveRunScript = ($expectedInteractiveRunScript -replace '\r\n?', "`n").TrimEnd([char[]]"`n")
+if ($interactiveRunScript -cne $expectedInteractiveRunScript) {
+    throw 'Interactive workflow run script drifted from its exact fail-closed source snapshot.'
 }
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
