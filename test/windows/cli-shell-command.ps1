@@ -125,10 +125,7 @@ switch ($Shell) {
                     -PassThru
                 $processHandle = $process.Handle
                 if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
-                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                    if (-not $process.WaitForExit(1000)) {
-                        throw "Timed out waiting for shell launcher process to exit after termination."
-                    }
+                    Stop-InteractiveWin11Process -Process $process
                     throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
                 }
 

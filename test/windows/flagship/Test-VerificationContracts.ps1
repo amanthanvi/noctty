@@ -567,31 +567,58 @@ $cliShellTimeoutAssignments = @($cliShellAst.FindAll({
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
         $node.Extent.Text.Trim() -eq '$shellLauncherTimeoutSeconds = 30'
 }, $true))
-$cliShellTimeoutIfs = @($cliShellAst.FindAll({
+$cliShellSwitches = @($cliShellAst.FindAll({
     param($node)
-    $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(\$shellLauncherTimeoutSeconds \* 1000\)\)'
+    $node -is [System.Management.Automation.Language.SwitchStatementAst] -and
+        $node.Condition.Extent.Text.Trim() -eq '$Shell'
 }, $true))
+$cliShellPowerShellClauseIndexes = if ($cliShellSwitches.Count -eq 1) {
+    @(for ($i = 0; $i -lt $cliShellSwitches[0].Clauses.Count; $i++) {
+        if ($cliShellSwitches[0].Clauses[$i].Item1.Extent.Text.Trim() -eq "'powershell'") { $i }
+    })
+} else { @() }
+$cliShellPowerShellClauseIndex = if ($cliShellPowerShellClauseIndexes.Count -eq 1) {
+    [int] $cliShellPowerShellClauseIndexes[0]
+} else { -1 }
+$cliShellStartProcessAssignments = if ($cliShellPowerShellClauseIndex -ge 0) {
+    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
+        param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text.Trim() -eq '$process' -and
+            $node.Right -is [System.Management.Automation.Language.PipelineAst] -and
+            $node.Right.PipelineElements.Count -eq 1 -and
+            $node.Right.PipelineElements[0] -is [System.Management.Automation.Language.CommandAst] -and
+            $node.Right.PipelineElements[0].GetCommandName() -eq 'Start-Process'
+    }, $true))
+} else { @() }
+$cliShellWaitForExitCalls = if ($cliShellPowerShellClauseIndex -ge 0) {
+    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Member.Extent.Text.Trim() -eq 'WaitForExit'
+    }, $true))
+} else { @() }
+$cliShellTimeoutIfs = if ($cliShellPowerShellClauseIndex -ge 0) {
+    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(\$shellLauncherTimeoutSeconds \* 1000\)\)'
+    }, $true))
+} else { @() }
 $cliShellTimeoutStatements = if ($cliShellTimeoutIfs.Count -eq 1) {
     @($cliShellTimeoutIfs[0].Clauses[0].Item2.Statements)
 } else { @() }
-$cliShellCleanupIfs = if ($cliShellTimeoutStatements.Count -ge 2) {
-    @($cliShellTimeoutStatements[1].FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.IfStatementAst] -and
-            $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(1000\)\)'
-    }, $true))
-} else { @() }
 if ($cliShellErrors.Count -ne 0 -or
     $cliShellTimeoutAssignments.Count -ne 1 -or
+    $cliShellSwitches.Count -ne 1 -or
+    $cliShellPowerShellClauseIndexes.Count -ne 1 -or
+    $cliShellStartProcessAssignments.Count -ne 1 -or
+    $cliShellWaitForExitCalls.Count -ne 1 -or
     $cliShellTimeoutIfs.Count -ne 1 -or
-    $cliShellTimeoutStatements.Count -ne 3 -or
-    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue' -or
-    $cliShellCleanupIfs.Count -ne 1 -or
-    $cliShellCleanupIfs[0].Clauses[0].Item2.Statements.Count -ne 1 -or
-    $cliShellCleanupIfs[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne 'throw "Timed out waiting for shell launcher process to exit after termination."' -or
-    $cliShellTimeoutStatements[2].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
-    throw 'PowerShell shell launcher timeout must allow hosted cold starts and fail explicitly after bounded cleanup.'
+    $cliShellTimeoutStatements.Count -ne 2 -or
+    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-InteractiveWin11Process -Process $process' -or
+    $cliShellTimeoutStatements[1].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
+    throw 'The live PowerShell shell launcher must use one hosted-cold-start timeout and fail explicitly after bounded process-tree cleanup.'
 }
 $accessibilityTokens = $null
 $accessibilityErrors = $null
