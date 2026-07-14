@@ -125,7 +125,7 @@ switch ($Shell) {
                     -PassThru
                 $processHandle = $process.Handle
                 if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
-                    Stop-InteractiveWin11Process -Process $process
+                    Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
                     throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
                 }
 

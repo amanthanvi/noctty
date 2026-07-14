@@ -573,12 +573,16 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $null -ne $stopProcessFunctions[0].Body.DynamicParamBlock -or
     $null -ne $stopProcessFunctions[0].Body.CleanBlock -or
     $null -eq $stopProcessFunctions[0].Body.ParamBlock -or
-    $stopProcessFunctions[0].Body.ParamBlock.Parameters.Count -ne 1 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters.Count -ne 2 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Name.VariablePath.UserPath -ne 'Process' -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes.Count -ne 2 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes[0].Extent.Text.Trim() -ne '[Parameter(Mandatory)]' -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes[1].Extent.Text.Trim() -ne '[System.Diagnostics.Process]' -or
     $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].DefaultValue -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Name.VariablePath.UserPath -ne 'RequireLiveRoot' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes.Count -ne 1 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes[0].Extent.Text.Trim() -ne '[switch]' -or
+    $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].DefaultValue -or
     $stopProcessStatements.Count -ne 10 -or
     $stopProcessStatements[0].Extent.Text.Trim() -ne '$rootProcessId = $Process.Id' -or
     $stopProcessStatements[1].Extent.Text.Trim() -ne '$rootStartedAt = $Process.StartTime' -or
@@ -596,8 +600,14 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopProcessStatements[4].Clauses.Count -ne 1 -or
     $null -ne $stopProcessStatements[4].ElseClause -or
     $stopProcessStatements[4].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $rootIsLive' -or
-    $stopProcessStatements[4].Clauses[0].Item2.Statements.Count -ne 1 -or
-    $stopProcessStatements[4].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements.Count -ne 2 -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses.Count -ne 1 -or
+    $null -ne $stopProcessStatements[4].Clauses[0].Item2.Statements[0].ElseClause -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $RequireLiveRoot' -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[0].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ReturnStatementAst] -or
+    $stopProcessStatements[4].Clauses[0].Item2.Statements[1] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
     $stopProcessStatements[5].Extent.Text.Trim() -ne '$taskkillError = $null' -or
     $stopProcessStatements[6].Extent.Text.Trim() -ne '$taskkill = $null' -or
     $stopProcessStatements[7].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $true' -or
@@ -609,9 +619,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopTaskkillTry.Body.Statements[1].Extent.Text.Trim() -ne '$taskkillStartInfo.FileName = Join-Path $env:SystemRoot ''System32\taskkill.exe''' -or
     $stopTaskkillTry.Body.Statements[2].Extent.Text.Trim() -ne '$taskkillStartInfo.UseShellExecute = $false' -or
     $stopTaskkillTry.Body.Statements[3].Extent.Text.Trim() -ne '$taskkillStartInfo.CreateNoWindow = $true' -or
-    $stopTaskkillTry.Body.Statements[4].Extent.Text.Trim() -notmatch '^foreach \(\$argument in @\(''/PID'', "\$rootProcessId", ''/T'', ''/F''\)\)' -or
-    $stopTaskkillTry.Body.Statements[4].Body.Statements.Count -ne 1 -or
-    $stopTaskkillTry.Body.Statements[4].Body.Statements[0].Extent.Text.Trim() -ne '[void] $taskkillStartInfo.ArgumentList.Add($argument)' -or
+    $stopTaskkillTry.Body.Statements[4].Extent.Text.Trim() -ne '$taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"' -or
     $stopTaskkillTry.Body.Statements[5].Extent.Text.Trim() -ne '$taskkill = [System.Diagnostics.Process]::Start($taskkillStartInfo)' -or
     $stopTaskkillTry.Body.Statements[6].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $false' -or
     $stopTaskkillTry.Body.Statements[7].Extent.Text.Trim() -ne '$taskkillTerminationVerified = $taskkill.WaitForExit(10000)' -or
@@ -654,7 +662,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopTaskkillTry.Finally.Statements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopTaskkillTry.Finally.Statements[0].Clauses[0].Item2.Statements[0].Extent.Text.Trim() -ne '$taskkill.Dispose()' -or
     $stopManagedTry -isnot [System.Management.Automation.Language.TryStatementAst] -or
-    $stopManagedTry.Body.Statements.Count -ne 4 -or
+    $stopManagedTry.Body.Statements.Count -ne 5 -or
     $stopManagedTry.CatchClauses.Count -ne 1 -or
     $null -ne $stopManagedTry.Finally -or
     $stopManagedTry.Body.Statements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
@@ -664,16 +672,17 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item1.Extent.Text.Trim() -ne '$Process.HasExited -or $Process.StartTime -ne $rootStartedAt' -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopManagedTry.Body.Statements[1].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
-    $stopManagedTry.Body.Statements[2].Extent.Text.Trim() -ne '$Process.Kill($true)' -or
+    $stopManagedTry.Body.Statements[2].Extent.Text.Trim() -ne '$Process.Kill()' -or
     $stopManagedTry.Body.Statements[3] -isnot [System.Management.Automation.Language.IfStatementAst] -or
     $stopManagedTry.Body.Statements[3].Clauses.Count -ne 1 -or
     $null -ne $stopManagedTry.Body.Statements[3].ElseClause -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item1.Extent.Text.Trim() -ne '-not $Process.WaitForExit(5000)' -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item2.Statements.Count -ne 1 -or
     $stopManagedTry.Body.Statements[3].Clauses[0].Item2.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
+    $stopManagedTry.Body.Statements[4] -isnot [System.Management.Automation.Language.ThrowStatementAst] -or
     $stopManagedTry.CatchClauses[0].Body.Statements.Count -ne 1 -or
     $stopManagedTry.CatchClauses[0].Body.Statements[0] -isnot [System.Management.Automation.Language.ThrowStatementAst]) {
-    throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around both tree-kill mechanisms.'
+    throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around native tree kill and root-only fallback.'
 }
 $cliShellTokens = $null
 $cliShellErrors = $null
@@ -802,7 +811,7 @@ if ($cliShellErrors.Count -ne 0 -or
     $cliShellLauncherStatements[$cliShellStartProcessIndex + 1].Extent.Text.Trim() -ne '$processHandle = $process.Handle' -or
     $cliShellLauncherStatements[$cliShellTimeoutIndex + 1].Extent.Text.Trim() -ne '$exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle' -or
     $cliShellTimeoutStatements.Count -ne 2 -or
-    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-InteractiveWin11Process -Process $process' -or
+    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-InteractiveWin11Process -Process $process -RequireLiveRoot' -or
     $cliShellTimeoutStatements[1].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
     throw 'The live PowerShell shell launcher must use one hosted-cold-start timeout and fail explicitly after bounded process-tree cleanup.'
 }

@@ -599,7 +599,8 @@ function Wait-InteractiveWin11Until {
 
 function Stop-InteractiveWin11Process {
     param(
-        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [switch] $RequireLiveRoot
     )
 
     $rootProcessId = $Process.Id
@@ -613,6 +614,9 @@ function Stop-InteractiveWin11Process {
         # The root exited while its identity was being checked.
     }
     if (-not $rootIsLive) {
+        if (-not $RequireLiveRoot) {
+            return
+        }
         throw "Interactive Win11 process $rootProcessId exited before process-tree cleanup could be verified."
     }
 
@@ -624,9 +628,7 @@ function Stop-InteractiveWin11Process {
         $taskkillStartInfo.FileName = Join-Path $env:SystemRoot 'System32\taskkill.exe'
         $taskkillStartInfo.UseShellExecute = $false
         $taskkillStartInfo.CreateNoWindow = $true
-        foreach ($argument in @('/PID', "$rootProcessId", '/T', '/F')) {
-            [void] $taskkillStartInfo.ArgumentList.Add($argument)
-        }
+        $taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"
         $taskkill = [System.Diagnostics.Process]::Start($taskkillStartInfo)
         $taskkillTerminationVerified = $false
         $taskkillTerminationVerified = $taskkill.WaitForExit(10000)
@@ -659,15 +661,16 @@ function Stop-InteractiveWin11Process {
     try {
         $Process.Refresh()
         if ($Process.HasExited -or $Process.StartTime -ne $rootStartedAt) {
-            throw 'the root exited before fallback tree cleanup could be verified'
+            throw 'the root exited before fallback cleanup could verify the process tree'
         }
-        $Process.Kill($true)
+        $Process.Kill()
         if (-not $Process.WaitForExit(5000)) {
-            throw 'managed tree kill did not stop the root within 5 seconds'
+            throw 'root fallback did not stop the process within 5 seconds'
         }
+        throw 'root fallback stopped the process but could not verify descendant cleanup'
     }
     catch {
-        throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill='$taskkillError', managed='$($_.Exception.Message)')."
+        throw "Failed to verify cleanup of interactive Win11 process tree $rootProcessId (taskkill='$taskkillError', fallback='$($_.Exception.Message)')."
     }
 }
 
