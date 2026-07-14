@@ -95,6 +95,7 @@ try {
     $process = Start-Process `
         -FilePath $exePath `
         -ArgumentList @(
+            Get-InteractiveWin11ContainmentArguments
             '--single-instance=false'
             "--class=winghostty-boo-performance-$($layout.SandboxId)"
             '-e'
@@ -224,6 +225,6 @@ finally {
     }
 
     if ($null -ne $process) {
-        Stop-InteractiveWin11Process -Process $process
+        Stop-InteractiveWin11Process -Process $process -Contained
     }
 }

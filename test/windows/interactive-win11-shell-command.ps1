@@ -73,6 +73,7 @@ function Invoke-AppShellRun {
     Remove-Item -LiteralPath $StdoutPath, $StderrPath -ErrorAction SilentlyContinue
 
     $launchArgs = @(
+        Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
         "--class=winghostty-shell-command-$Name-$($layout.SandboxId)"
         '-e'
@@ -105,7 +106,7 @@ function Invoke-AppShellRun {
         return $stderr
     }
     finally {
-        Stop-InteractiveWin11Process -Process $process
+        Stop-InteractiveWin11Process -Process $process -Contained
     }
 }
 

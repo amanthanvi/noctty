@@ -1105,6 +1105,73 @@ test "Command: windows job object plan attaches to local child process" {
     try testing.expectEqual(@as(u32, 0), @as(u32, exit.Exited));
 }
 
+test "Command: windows job object kill-on-close terminates local child" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const ProcessIdList = extern struct {
+        assigned_count: windows.DWORD = 0,
+        listed_count: windows.DWORD = 0,
+        process_ids: [16]usize = @splat(0),
+    };
+
+    var cmd: Command = .{
+        .path = "C:\\Windows\\System32\\cmd.exe",
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "ping.exe", "-t", "127.0.0.1" },
+        .windows_job_object_plan = .{
+            .mode = .always,
+            .attach_policy = .hard_fail,
+            .kill_on_close = true,
+        },
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+    defer cmd.closeWindowsJobObject();
+
+    try cmd.testingStart();
+    try testing.expect(cmd.pid != null);
+    try testing.expect(cmd.windows_job_object_handle != null);
+
+    const root_process_id = apprt.win32_job_object.GetProcessId(cmd.pid.?);
+    try testing.expect(root_process_id != 0);
+    var process_ids: ProcessIdList = .{};
+    const query_deadline = std.time.nanoTimestamp() + (5 * std.time.ns_per_s);
+    while (true) {
+        var returned_length: windows.DWORD = 0;
+        if (apprt.win32_job_object.QueryInformationJobObject(
+            cmd.windows_job_object_handle.?,
+            .basic_process_id_list,
+            &process_ids,
+            @sizeOf(ProcessIdList),
+            &returned_length,
+        ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (process_ids.listed_count >= 2) break;
+        if (std.time.nanoTimestamp() >= query_deadline) return error.WindowsJobObjectDescendantDidNotStart;
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+
+    var descendant_handle: ?windows.HANDLE = null;
+    for (process_ids.process_ids[0..process_ids.listed_count]) |process_id| {
+        if (process_id == root_process_id) continue;
+        descendant_handle = apprt.win32_job_object.OpenProcess(
+            windows.SYNCHRONIZE,
+            windows.FALSE,
+            @intCast(process_id),
+        );
+        if (descendant_handle != null) break;
+    }
+    const child = descendant_handle orelse return error.WindowsJobObjectDescendantHandleUnavailable;
+    defer _ = windows.CloseHandle(child);
+
+    cmd.closeWindowsJobObject();
+
+    try std.os.windows.WaitForSingleObject(child, 5000);
+    const exit = try cmd.wait(true);
+    try testing.expect(exit == .Exited);
+}
+
 // Test validate an execveZ failure correctly terminates when error.ExecFailedInChild is correctly handled
 //
 // Incorrectly handling an error.ExecFailedInChild results in a second copy of the test process running.

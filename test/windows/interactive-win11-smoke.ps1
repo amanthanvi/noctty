@@ -156,7 +156,7 @@ try {
     }
 }
 finally {
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
 }
 
 if (-not $smokePassed -or -not $closePassed) {

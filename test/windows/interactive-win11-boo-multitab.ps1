@@ -552,7 +552,7 @@ $(Get-InteractiveWin11TextFileTail -Path $stderrPath)
         throw "unexpected post-boo key input result: $($result | ConvertTo-Json -Compress)"
     }
 
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
     $process = $null
 
     Wait-InteractiveWin11Until -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'post-exit trace files' -Condition {
@@ -590,6 +590,6 @@ finally {
     }
 
     if ($null -ne $process) {
-        Stop-InteractiveWin11Process -Process $process
+        Stop-InteractiveWin11Process -Process $process -Contained
     }
 }

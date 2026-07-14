@@ -634,12 +634,24 @@ $processTreeExitedFunctions = @($interactiveWin11LibAst.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-InteractiveWin11ProcessTreeSnapshotExited'
     }, $true))
+$waitProcessTreeExitedFunctions = @($interactiveWin11LibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-InteractiveWin11ProcessTreeSnapshotExited'
+    }, $true))
+$stopRootHandleFunctions = @($interactiveWin11LibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-InteractiveWin11RootHandle'
+    }, $true))
 if ($stopProcessFunctions.Count -ne 1 -or
     $processTreeSnapshotFunctions.Count -ne 1 -or
     $processTreeExitedFunctions.Count -ne 1 -or
+    $waitProcessTreeExitedFunctions.Count -ne 1 -or
+    $stopRootHandleFunctions.Count -ne 1 -or
     -not [object]::ReferenceEquals($stopProcessFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
     -not [object]::ReferenceEquals($processTreeSnapshotFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
     -not [object]::ReferenceEquals($processTreeExitedFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
+    -not [object]::ReferenceEquals($waitProcessTreeExitedFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
+    -not [object]::ReferenceEquals($stopRootHandleFunctions[0].Parent, $interactiveWin11LibAst.EndBlock) -or
     @($interactiveWin11LibAst.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.TrapStatementAst]
@@ -649,7 +661,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $null -ne $stopProcessFunctions[0].Body.DynamicParamBlock -or
     $null -ne $stopProcessFunctions[0].Body.CleanBlock -or
     $null -eq $stopProcessFunctions[0].Body.ParamBlock -or
-    $stopProcessFunctions[0].Body.ParamBlock.Parameters.Count -ne 2 -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters.Count -ne 4 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Name.VariablePath.UserPath -ne 'Process' -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes.Count -ne 2 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[0].Attributes[0].Extent.Text.Trim() -ne '[Parameter(Mandatory)]' -or
@@ -658,8 +670,12 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Name.VariablePath.UserPath -ne 'RequireLiveRoot' -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes.Count -ne 1 -or
     $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].Attributes[0].Extent.Text.Trim() -ne '[switch]' -or
-    $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].DefaultValue) {
-    throw 'Interactive process cleanup must remain live, bounded, identity-checked, and fail closed around native tree kill and root-only fallback.'
+    $null -ne $stopProcessFunctions[0].Body.ParamBlock.Parameters[1].DefaultValue -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[2].Name.VariablePath.UserPath -ne 'Contained' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[2].Attributes[0].Extent.Text.Trim() -ne '[switch]' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[3].Name.VariablePath.UserPath -ne 'AllowAlreadyExited' -or
+    $stopProcessFunctions[0].Body.ParamBlock.Parameters[3].Attributes[0].Extent.Text.Trim() -ne '[switch]') {
+    throw 'Interactive process cleanup must expose explicit contained, live-root, and already-exited contracts.'
 }
 $snapshotCimCommands = @($processTreeSnapshotFunctions[0].FindAll({
         param($node)
@@ -673,36 +689,66 @@ $snapshotCalls = @($stopProcessFunctions[0].FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-InteractiveWin11ProcessTreeSnapshot'
     }, $true))
-$verificationCalls = @($stopProcessFunctions[0].FindAll({
+$rootStopCalls = @($stopProcessFunctions[0].FindAll({
         param($node)
-        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-InteractiveWin11ProcessTreeSnapshotExited'
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Stop-InteractiveWin11RootHandle'
+    }, $true))
+$waitCalls = @($stopProcessFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Wait-InteractiveWin11ProcessTreeSnapshotExited'
+    }, $true))
+$stopProcessText = $stopProcessFunctions[0].Extent.Text
+$rootTerminateCalls = @($stopRootHandleFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Extent.Text -eq '[InteractiveWin11ProcessNative]::TerminateProcess($RootProcessHandle, 1)'
+    }, $true))
+$rootWaitCalls = @($stopRootHandleFunctions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Extent.Text -eq '[InteractiveWin11ProcessNative]::WaitForSingleObject($RootProcessHandle, 5000)'
     }, $true))
 if ($snapshotCimCommands.Count -ne 1 -or
     $verificationCimCommands.Count -ne 1 -or
-    $snapshotCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process\s+-ErrorAction\s+Stop' -or
-    $verificationCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process\s+-ErrorAction\s+Stop' -or
+    $snapshotCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process\s+-OperationTimeoutSec\s+5\s+-ErrorAction\s+Stop' -or
+    $verificationCimCommands[0].Extent.Text -notmatch '(?s)-ClassName\s+Win32_Process.*?-OperationTimeoutSec\s+\$OperationTimeoutSec.*?-ErrorAction\s+Stop' -or
     $snapshotCimCommands[0].Extent.Text -match '(?i)-Filter\b' -or
     $verificationCimCommands[0].Extent.Text -match '(?i)-Filter\b' -or
     @($processTreeSnapshotFunctions[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true)).Count -ne 0 -or
     @($processTreeExitedFunctions[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CatchClauseAst] }, $true)).Count -ne 0 -or
-    $snapshotCalls.Count -ne 2 -or
-    $verificationCalls.Count -lt 3) {
-    throw 'Interactive cleanup must take coherent fail-closed process-table snapshots before kill and fallback, then verify every exit path.'
+    $snapshotCalls.Count -ne 1 -or
+    $rootStopCalls.Count -ne 1 -or
+    $waitCalls.Count -ne 1 -or
+    $snapshotCalls[0].Extent.StartOffset -ge $rootStopCalls[0].Extent.StartOffset -or
+    $rootStopCalls[0].Extent.StartOffset -ge $waitCalls[0].Extent.StartOffset -or
+    $rootTerminateCalls.Count -ne 1 -or
+    $rootWaitCalls.Count -ne 1 -or
+    $stopProcessText -notmatch '(?s)if \(-not \$Contained\).*?taskkill\.exe.*?WaitForExit\(10000\).*?Kill\(\).*?WaitForExit\(5000\)' -or
+    $stopProcessText -notmatch '(?s)\$taskkillCleanupError.*?if \(\$null -ne \$taskkillCleanupError\)\s*\{\s*throw' -or
+    $stopProcessText -notmatch '(?s)if \(\$Contained -and \$null -ne \$snapshotError\).*?return' -or
+    $stopProcessText -notmatch '(?s)\$lifecycleModeCount.*?if \(\$lifecycleModeCount -gt 1\).*?mutually exclusive' -or
+    $stopProcessText -notmatch '(?s)if \(\$null -ne \$verificationError\).*?if \(\$Contained\).*?return.*?throw' -or
+    $waitProcessTreeExitedFunctions[0].Extent.Text -notmatch '(?s)\$deadline\s*=\s*\[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\).*?while \(\[DateTime\]::UtcNow -lt \$deadline\)') {
+    throw 'Interactive cleanup must use bounded uncontained tree kill, contained Job cleanup, native root termination, and deadline-bound verification.'
 }
 
-Invoke-Expression $processTreeSnapshotFunctions[0].Extent.Text
-Invoke-Expression $processTreeExitedFunctions[0].Extent.Text
+. ([scriptblock]::Create($processTreeSnapshotFunctions[0].Extent.Text))
+. ([scriptblock]::Create($processTreeExitedFunctions[0].Extent.Text))
 $script:verificationCimProcesses = @()
 $script:verificationCimFailure = $null
 function script:Get-CimInstance {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [string] $ClassName,
-        [string] $Filter
+        [string] $Filter,
+        [uint32] $OperationTimeoutSec
     )
 
-    if ($ClassName -ne 'Win32_Process' -or $PSBoundParameters.ContainsKey('Filter')) {
-        throw 'Verification mock requires one unfiltered Win32_Process query.'
+    if ($ClassName -ne 'Win32_Process' -or
+        $PSBoundParameters.ContainsKey('Filter') -or
+        $OperationTimeoutSec -lt 1 -or
+        $OperationTimeoutSec -gt 5) {
+        throw 'Verification mock requires one bounded, unfiltered Win32_Process query.'
     }
     if ($null -ne $script:verificationCimFailure) {
         throw $script:verificationCimFailure
@@ -718,9 +764,10 @@ try {
         [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; CreationDate = $rootCreated },
         [pscustomobject]@{ ProcessId = 101; ParentProcessId = 100; CreationDate = $childCreated },
         [pscustomobject]@{ ProcessId = 102; ParentProcessId = 101; CreationDate = $grandchildCreated },
+        [pscustomobject]@{ ProcessId = 103; ParentProcessId = 100; CreationDate = $rootCreated.AddMinutes(-1) },
         [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; CreationDate = $rootCreated }
     )
-    $snapshot = @(Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100)
+    $snapshot = @(Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100 -RootStartedAt $rootCreated)
     if ((@($snapshot.ProcessId | Sort-Object) -join ',') -ne '100,101,102') {
         throw 'Interactive process snapshot did not close over the full descendant tree.'
     }
@@ -742,19 +789,34 @@ try {
     if (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot) {
         throw 'Interactive process verification missed a child created after the snapshot.'
     }
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 201; ParentProcessId = 100; CreationDate = $rootCreated.AddMinutes(-1) }
+    )
+    if (-not (Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot)) {
+        throw 'Interactive process verification confused a stale child from a reused parent PID with a live descendant.'
+    }
 
     $script:verificationCimProcesses = @(
         [pscustomobject]@{ ProcessId = 200; ParentProcessId = 4; CreationDate = $rootCreated }
     )
     $missingRootRejected = $false
-    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100) } catch { $missingRootRejected = $true }
+    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100 -RootStartedAt $rootCreated) } catch { $missingRootRejected = $true }
     if (-not $missingRootRejected) {
         throw 'Interactive process snapshot accepted a missing root identity.'
     }
 
+    $script:verificationCimProcesses = @(
+        [pscustomobject]@{ ProcessId = 100; ParentProcessId = 4; CreationDate = $rootCreated.AddMinutes(1) }
+    )
+    $reusedRootRejected = $false
+    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100 -RootStartedAt $rootCreated) } catch { $reusedRootRejected = $true }
+    if (-not $reusedRootRejected) {
+        throw 'Interactive process snapshot accepted a reused root PID.'
+    }
+
     $script:verificationCimFailure = 'simulated CIM failure'
     $snapshotFailureRejected = $false
-    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100) } catch { $snapshotFailureRejected = $true }
+    try { [void](Get-InteractiveWin11ProcessTreeSnapshot -RootProcessId 100 -RootStartedAt $rootCreated) } catch { $snapshotFailureRejected = $true }
     $verificationFailureRejected = $false
     try { [void](Test-InteractiveWin11ProcessTreeSnapshotExited -Snapshot $snapshot) } catch { $verificationFailureRejected = $true }
     if (-not $snapshotFailureRejected -or -not $verificationFailureRejected) {
@@ -764,6 +826,190 @@ try {
 finally {
     Remove-Item -LiteralPath Function:\Get-CimInstance -ErrorAction SilentlyContinue
     Remove-Variable -Scope Script -Name verificationCimProcesses, verificationCimFailure -ErrorAction SilentlyContinue
+}
+
+. ([scriptblock]::Create($stopProcessFunctions[0].Extent.Text))
+$script:cleanupSnapshotFailure = $false
+$script:cleanupVerificationFailure = $false
+$script:cleanupVerificationExited = $true
+function script:Get-InteractiveWin11ProcessTreeSnapshot {
+    param([int] $RootProcessId, [datetime] $RootStartedAt)
+    if ($script:cleanupSnapshotFailure) { throw 'simulated snapshot failure' }
+    @([pscustomobject]@{ ProcessId = $RootProcessId; CreationDate = $RootStartedAt })
+}
+function script:Stop-InteractiveWin11RootHandle {
+    param(
+        [System.Diagnostics.Process] $Process,
+        [IntPtr] $RootProcessHandle,
+        [datetime] $RootStartedAt
+    )
+    $Process.Kill()
+    if (-not $Process.WaitForExit(5000)) { throw 'mock root process did not exit' }
+}
+function script:Wait-InteractiveWin11ProcessTreeSnapshotExited {
+    param([object[]] $Snapshot)
+    if ($script:cleanupVerificationFailure) { throw 'simulated verification query failure' }
+    $script:cleanupVerificationExited
+}
+function script:Start-CleanupContractProcess {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $PSHOME 'pwsh.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.ArgumentList.Add('-NoProfile')
+    $startInfo.ArgumentList.Add('-Command')
+    $startInfo.ArgumentList.Add('Start-Sleep -Seconds 30')
+    [System.Diagnostics.Process]::Start($startInfo)
+}
+try {
+    $process = Start-CleanupContractProcess
+    $script:cleanupVerificationFailure = $true
+    Stop-InteractiveWin11Process -Process $process -Contained
+    if (-not $process.HasExited) {
+        throw 'Contained cleanup did not terminate the root before accepting unavailable verification.'
+    }
+    $process.Dispose()
+    $process = $null
+
+    $process = Start-CleanupContractProcess
+    $script:cleanupVerificationFailure = $false
+    $script:cleanupVerificationExited = $false
+    $liveDescendantRejected = $false
+    try { Stop-InteractiveWin11Process -Process $process -Contained } catch { $liveDescendantRejected = $true }
+    if (-not $liveDescendantRejected -or -not $process.HasExited) {
+        throw 'Contained cleanup accepted a successful verification query that reported live descendants.'
+    }
+    $process.Dispose()
+    $process = $null
+
+    $process = Start-CleanupContractProcess
+    $script:cleanupSnapshotFailure = $true
+    $script:cleanupVerificationExited = $true
+    Stop-InteractiveWin11Process -Process $process -Contained
+    if (-not $process.HasExited) {
+        throw 'Contained cleanup did not terminate the root after initial snapshot failure.'
+    }
+    $process.Dispose()
+    $process = $null
+
+    $process = Start-CleanupContractProcess
+    $script:cleanupSnapshotFailure = $true
+    Stop-InteractiveWin11Process -Process $process -AllowAlreadyExited
+    if (-not $process.HasExited) {
+        throw 'Already-exited cleanup did not terminate the root after a snapshot race.'
+    }
+    $process.Dispose()
+    $process = $null
+
+    $conflictingModesRejected = $false
+    try {
+        Stop-InteractiveWin11Process `
+            -Process ([System.Diagnostics.Process]::GetCurrentProcess()) `
+            -Contained `
+            -RequireLiveRoot
+    }
+    catch { $conflictingModesRejected = $true }
+    if (-not $conflictingModesRejected) {
+        throw 'Interactive cleanup accepted conflicting lifecycle modes.'
+    }
+}
+finally {
+    if ($null -ne $process) {
+        if (-not $process.HasExited) { $process.Kill() }
+        $process.Dispose()
+    }
+    Remove-Item -LiteralPath Function:\Get-InteractiveWin11ProcessTreeSnapshot -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Stop-InteractiveWin11RootHandle -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Wait-InteractiveWin11ProcessTreeSnapshotExited -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Start-CleanupContractProcess -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Stop-InteractiveWin11Process -ErrorAction SilentlyContinue
+    Remove-Variable -Scope Script -Name cleanupSnapshotFailure, cleanupVerificationFailure, cleanupVerificationExited -ErrorAction SilentlyContinue
+}
+
+$containmentFunctions = @($interactiveWin11LibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-InteractiveWin11ContainmentArguments'
+    }, $true))
+$launchArgumentFunctions = @($interactiveWin11LibAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-InteractiveWin11LaunchArguments'
+    }, $true))
+if ($containmentFunctions.Count -ne 1 -or
+    $launchArgumentFunctions.Count -ne 1 -or
+    $containmentFunctions[0].Extent.Text -notmatch [regex]::Escape("'--linux-cgroup=always'") -or
+    $containmentFunctions[0].Extent.Text -notmatch [regex]::Escape("'--linux-cgroup-hard-fail=true'") -or
+    $containmentFunctions[0].Extent.Text -notmatch [regex]::Escape("'--windows-job-object-kill-on-close=true'") -or
+    $launchArgumentFunctions[0].Extent.Text -notmatch '\bGet-InteractiveWin11ContainmentArguments\b') {
+    throw 'Interactive Win11 launches must opt into hard-fail kill-on-close Job Object containment.'
+}
+$interactiveHarnessFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'test\windows') -Filter 'interactive-win11-*.ps1' -File
+)
+$launchContainmentViolations = [Collections.Generic.List[string]]::new()
+$forbiddenConfigOverrides = [Collections.Generic.List[string]]::new()
+foreach ($file in @($interactiveHarnessFiles) + @(Get-Item -LiteralPath $interactiveWin11Lib)) {
+    $content = Get-Content -LiteralPath $file.FullName -Raw
+    foreach ($match in [regex]::Matches($content, '[''"]--single-instance=false[''"]')) {
+        $prefixStart = [math]::Max(0, $match.Index - 512)
+        $prefix = $content.Substring($prefixStart, $match.Index - $prefixStart)
+        if ($prefix -notmatch '\bGet-InteractiveWin11(?:Launch|Containment)Arguments\b') {
+            [void]$launchContainmentViolations.Add("$($file.Name):$($match.Index)")
+        }
+    }
+    if ($file.FullName -ne $interactiveWin11Lib -and
+        $content -match '(?im)^\s*(?:linux-cgroup|linux-cgroup-hard-fail|windows-job-object-kill-on-close)\s*=') {
+        [void]$forbiddenConfigOverrides.Add($file.Name)
+    }
+}
+if ($launchContainmentViolations.Count -ne 0) {
+    throw "Interactive launch arguments bypass Job Object containment: $($launchContainmentViolations -join ', ')"
+}
+if ($forbiddenConfigOverrides.Count -ne 0) {
+    throw "Interactive harness config overrides CLI containment: $($forbiddenConfigOverrides -join ', ')"
+}
+
+$cleanupContractViolations = [Collections.Generic.List[string]]::new()
+$cleanupScriptFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'test\windows') -Filter '*.ps1' -File -Recurse |
+        Where-Object { $_.FullName -ne $PSCommandPath }
+)
+foreach ($file in $cleanupScriptFiles) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) {
+        throw "PowerShell parser errors while checking cleanup contract: $($file.FullName)"
+    }
+    foreach ($command in @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Stop-InteractiveWin11Process'
+            }, $true))) {
+        $text = $command.Extent.Text
+        $modeCount = @(
+            $text -match '(?i)(?:^|\s)-Contained(?:\s|$)'
+            $text -match '(?i)(?:^|\s)-RequireLiveRoot(?:\s|$)'
+            $text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)'
+        ).Where({ $_ }).Count
+        # The composite validator is a byte-for-byte frozen baseline artifact.
+        # Mode omission uses Stop-InteractiveWin11Process's fail-closed live-root
+        # default; every mutable caller must state exactly one lifecycle mode.
+        $frozenValidatorDefault = $file.Name -eq 'interactive-win11-validate.ps1' -and $modeCount -eq 0
+        if ((-not $frozenValidatorDefault -and $modeCount -ne 1) -or
+            ($text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)' -and $file.Name -ne 'vt-probe-win32-conformance.ps1')) {
+            [void]$cleanupContractViolations.Add("$($file.Name):$($command.Extent.StartLineNumber): $text")
+        }
+    }
+}
+if ($cleanupContractViolations.Count -ne 0) {
+    throw "Interactive cleanup calls lack exactly one explicit lifecycle contract:`n$($cleanupContractViolations -join "`n")"
+}
+$jobObjectSource = Get-Content -LiteralPath (Join-Path $repoRoot 'src\apprt\win32_job_object.zig') -Raw
+$commandSource = Get-Content -LiteralPath (Join-Path $repoRoot 'src\Command.zig') -Raw
+if ($jobObjectSource -notmatch 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE' -or
+    $jobObjectSource -notmatch 'kill_on_close' -or
+    $commandSource -notmatch '(?s)CREATE_SUSPENDED.*?AssignProcessToJobObject.*?ResumeThread') {
+    throw 'Windows child containment must assign the suspended process to a kill-on-close Job Object before resume.'
 }
 
 Assert-TextContract `
@@ -778,23 +1024,13 @@ Assert-TextContract `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('$taskkillTerminationVerified = $taskkill.WaitForExit(10000)')) `
-    -Description 'interactive cleanup keeps bounded taskkill wait' `
+    -Pattern ([regex]::Escape('$capturedStartedAtById[$parentProcessId]')) `
+    -Description 'interactive cleanup fails closed on identity-matched descendants created after snapshot' `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('$taskkill.Kill()')) `
-    -Description 'interactive cleanup kills wedged taskkill process' `
-    -Context $interactiveWin11Lib
-Assert-TextContract `
-    -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('$capturedProcessIds.Contains([int]$process.ParentProcessId)')) `
-    -Description 'interactive cleanup fails closed on descendants created after snapshot' `
-    -Context $interactiveWin11Lib
-Assert-TextContract `
-    -Content $interactiveWin11LibText `
-    -Pattern ([regex]::Escape('$rootTerminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($rootProcessHandle, 1)')) `
-    -Description 'interactive cleanup preserves native root fallback termination' `
+    -Pattern ([regex]::Escape('$terminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($RootProcessHandle, 1)')) `
+    -Description 'interactive cleanup terminates only the captured root handle' `
     -Context $interactiveWin11Lib
 Assert-TextContract `
     -Content $interactiveWin11LibText `
@@ -805,6 +1041,11 @@ Assert-TextContract `
     -Content $interactiveWin11LibText `
     -Pattern ([regex]::Escape('public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);')) `
     -Description 'native root fallback termination declaration' `
+    -Context $interactiveWin11Lib
+Assert-TextContract `
+    -Content $interactiveWin11LibText `
+    -Pattern ([regex]::Escape('public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);')) `
+    -Description 'native root termination wait declaration' `
     -Context $interactiveWin11Lib
 $expectedCliShellHarnessText = @'
 param(
@@ -1218,7 +1459,7 @@ if ($postHighContrastTry.CatchClauses.Count -ne 1 -or $null -ne $postHighContras
 $postHighContrastCatchStatements = @($postHighContrastTry.CatchClauses[0].Body.Statements)
 if ($postHighContrastCatchStatements.Count -ne 3 -or
     $postHighContrastCatchStatements[0].Extent.Text.Trim() -ne '$lastError = $_' -or
-    $postHighContrastCatchStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$null -ne \$canary -and -not \$canary\.Process\.HasExited\) \{\s*try \{ Stop-InteractiveWin11Process -Process \$canary\.Process \}\s*catch \{\s*throw "Post-High-Contrast presentation attempt \$attempt failed: \$\(\$lastError\.Exception\.Message\); process cleanup also failed: \$\(\$_\.Exception\.Message\)"\s*\}\s*\}$' -or
+    $postHighContrastCatchStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$null -ne \$canary -and -not \$canary\.Process\.HasExited\) \{\s*try \{ Stop-InteractiveWin11Process -Process \$canary\.Process -Contained \}\s*catch \{\s*throw "Post-High-Contrast presentation attempt \$attempt failed: \$\(\$lastError\.Exception\.Message\); process cleanup also failed: \$\(\$_\.Exception\.Message\)"\s*\}\s*\}$' -or
     $postHighContrastCatchStatements[2].Extent.Text.Trim() -ne 'if ($attempt -lt 2) { Write-Warning "Post-High-Contrast presentation attempt $attempt stalled; retrying with a fresh process." }') {
     throw 'Post-High-Contrast presentation must preserve nullable failed-attempt cleanup and bounded retry reporting.'
 }

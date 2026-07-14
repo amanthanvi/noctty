@@ -65,7 +65,7 @@ function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$Expected
         catch {
             $lastError = $_
             if ($null -ne $canary -and -not $canary.Process.HasExited) {
-                try { Stop-InteractiveWin11Process -Process $canary.Process }
+                try { Stop-InteractiveWin11Process -Process $canary.Process -Contained }
                 catch {
                     throw "Post-High-Contrast presentation attempt $attempt failed: $($lastError.Exception.Message); process cleanup also failed: $($_.Exception.Message)"
                 }
@@ -212,7 +212,7 @@ finally {
     }
     foreach ($run in $runs) {
         try {
-            if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process }
+            if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process -Contained }
         }
         catch {
             [void]$cleanupErrors.Add("winghostty process cleanup failed: $($_.Exception.Message)")

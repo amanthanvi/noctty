@@ -330,6 +330,7 @@ Start-Sleep -Seconds 30
 Remove-Item -LiteralPath $stdoutPath, $stderrPath, $readyPath, $tracePath, $resultPath -ErrorAction SilentlyContinue
 
 $launchArgs = @(
+    Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
     "--class=$instanceClass"
     "--config-file=$configPath"
@@ -487,7 +488,7 @@ finally {
         }
     }
 
-    Stop-InteractiveWin11Process -Process $process
+    Stop-InteractiveWin11Process -Process $process -Contained
     if ($null -eq $previousImeTraceFile) {
         Remove-Item Env:WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE -ErrorAction SilentlyContinue
     }

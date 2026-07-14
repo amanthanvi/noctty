@@ -3078,6 +3078,14 @@ keybind: Keybinds = .{},
 /// the launch instead of continuing without limits.
 @"linux-cgroup-hard-fail": bool = false,
 
+/// Windows-only Job Object cleanup policy.
+///
+/// When true with `linux-cgroup` enabled, closing the Job Object terminates all
+/// attached processes. The default remains false so normal launches preserve
+/// existing detached-child behavior. Interactive validation enables this with
+/// hard-fail attachment to make descendant cleanup deterministic.
+@"windows-job-object-kill-on-close": bool = false,
+
 /// Retained compatibility settings from the removed GTK runtime.
 ///
 /// These keys continue to parse so existing configs remain loadable, but they

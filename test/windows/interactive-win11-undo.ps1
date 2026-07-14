@@ -521,7 +521,7 @@ $stderrTail
 }
 finally {
     if ($null -ne $process -and -not $process.HasExited) {
-        Stop-InteractiveWin11Process -Process $process
+        Stop-InteractiveWin11Process -Process $process -Contained
     }
 }
 
