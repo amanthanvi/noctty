@@ -153,6 +153,10 @@ function Get-DirectStatementBlockChild {
         [Parameter(Mandatory)] [System.Management.Automation.Language.StatementBlockAst] $StatementBlock
     )
 
+    if (-not (Test-DirectStatementBlockChild -Node $Node -StatementBlock $StatementBlock)) {
+        return $null
+    }
+
     $statement = $Node
     $ancestor = $Node.Parent
     while ($null -ne $ancestor -and $ancestor -isnot [System.Management.Automation.Language.StatementBlockAst]) {
@@ -268,6 +272,10 @@ function Test-CommandResolutionMutationNode {
         }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ($Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $memberName -eq 'GetType' -and $Node.Arguments.Count -ne 0) {
+            return $true
+        }
         if ((Test-DynamicScriptTypeExpression -Node $Node.Expression) -and
             $memberName -in @('Create', 'CreateRunspace', 'CreatePipeline', 'CreateNestedPipeline', 'GetMethod', 'GetMethods')) {
             return $true
@@ -369,6 +377,8 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$factory = [ScriptBlock]' }
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock].GetMethod("Create")' }
     [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation.ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = '[PSObject].Assembly.GetType("System.Management.Automation." + "ScriptBlock")' }
+    [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; [PSObject].Assembly.GetType($typeName)' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]"System.Management.Automation.ScriptBlock"' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
@@ -386,6 +396,26 @@ foreach ($probe in $commandResolutionProbes) {
     if ($probeErrors.Count -ne 0) { throw "Command-resolution probe does not parse: $($probe.Text)" }
     $probeRejected = @($probeAst.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true)).Count -ne 0
     if ($probeRejected -ne $probe.Reject) { throw "Command-resolution probe contract failed: $($probe.Text)" }
+}
+
+$directStatementTokens = $null
+$directStatementErrors = $null
+$directStatementAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    'try { if ($(Invoke-StatefulPostedCommand 1 2 $deadline $process)) { } } finally { }',
+    [ref] $directStatementTokens,
+    [ref] $directStatementErrors
+)
+if ($directStatementErrors.Count -ne 0) {
+    throw "Direct-statement control-flow probe does not parse: $($directStatementErrors[0].Message)"
+}
+$directStatementTry = @($directStatementAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.TryStatementAst] }, $true))[0]
+$conditionalPostedCall = @($directStatementAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Invoke-StatefulPostedCommand'
+}, $true))[0]
+if ($null -ne (Get-DirectStatementBlockChild -Node $conditionalPostedCall -StatementBlock $directStatementTry.Body)) {
+    throw 'Direct-statement helper accepted a protected call nested in control flow.'
 }
 
 $stepBoundaryProbe = @'
@@ -1606,7 +1636,7 @@ Assert-WorkflowContract `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
-    -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `
+    -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$objdumpKillTimeoutMs = 5000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitForExit\(\$objdumpKillTimeoutMs\).*?llvm-objdump did not exit after termination.*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `
     -Description 'Windows x64 baseline disassembly is time-bounded and kills a timed-out tool'
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content (Get-Content -LiteralPath $releasePreflight -Raw) -HeaderPattern '^function\s+Assert-WingetArchitectureCoverage(?=\s|\{)') `

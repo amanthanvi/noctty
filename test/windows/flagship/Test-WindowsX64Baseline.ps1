@@ -109,6 +109,9 @@ function Assert-WindowsPowerShellObjdumpFailure {
 function Assert-ObjdumpTimeoutCleanupContract {
     $checkerText = Get-Content -LiteralPath $checker -Raw
     if ($checkerText -notmatch '\$objdumpProcess\.Kill\(\)' -or
+        $checkerText -notmatch '\$objdumpKillTimeoutMs\s*=\s*5000' -or
+        $checkerText -notmatch 'WaitForExit\(\$objdumpKillTimeoutMs\)' -or
+        $checkerText -notmatch 'llvm-objdump did not exit after termination' -or
         $checkerText -notmatch '\[System\.Threading\.Tasks\.Task\]::WaitAll\(' -or
         $checkerText -notmatch '\$streamCopyTimeoutMs' -or
         $checkerText -notmatch 'stream cleanup timed out') {

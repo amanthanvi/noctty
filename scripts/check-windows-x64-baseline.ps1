@@ -59,6 +59,7 @@ if (-not $objdumpPath) {
 $objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
 $objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
 $objdumpTimeoutMs = 120000
+$objdumpKillTimeoutMs = 5000
 $streamCopyTimeoutMs = 30000
 try {
     # Copy native streams directly to disk. PowerShell 5.1 otherwise creates
@@ -84,7 +85,9 @@ try {
         $objdumpCompleted = $objdumpProcess.WaitForExit($objdumpTimeoutMs)
         if (-not $objdumpCompleted) {
             $objdumpProcess.Kill()
-            $objdumpProcess.WaitForExit()
+            if (-not $objdumpProcess.WaitForExit($objdumpKillTimeoutMs)) {
+                throw "llvm-objdump did not exit after termination within $objdumpKillTimeoutMs ms while checking $fullPath."
+            }
         }
         $streamsCompleted = [System.Threading.Tasks.Task]::WaitAll(
             [System.Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy),
