@@ -457,7 +457,7 @@ try {
     }
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
-    Show-InteractiveWin11Window -Hwnd $hostHwnd -NativeTypeName 'InteractiveWin11BooMultiTabNative' -SetForeground
+    Show-InteractiveWin11Window -Hwnd $hostHwnd -NativeType ([InteractiveWin11BooMultiTabNative]) -SetForeground
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero

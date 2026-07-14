@@ -110,7 +110,7 @@ try {
     $processHandle = $process.Handle
     Show-InteractiveWin11ProcessMainWindow `
         -Process $process `
-        -NativeTypeName 'InteractiveWin11BooPerfNative' `
+        -NativeType ([InteractiveWin11BooPerfNative]) `
         -SetForeground
 
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
