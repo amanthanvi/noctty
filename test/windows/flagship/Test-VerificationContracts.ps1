@@ -324,6 +324,7 @@ function Test-CommandResolutionMutationNode {
 function Assert-CommandResolutionContract {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Token[]] $Tokens,
         [Parameter(Mandatory)] [string] $Context,
         [string[]] $ExpectedDotSources = @(),
         [string[]] $ExpectedAmpersandCommands = @()
@@ -331,6 +332,9 @@ function Assert-CommandResolutionContract {
 
     $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
+    if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
+        throw "Command-loading #requires directive is forbidden: $Context"
+    }
     $dotSources = @($Ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and
@@ -355,6 +359,23 @@ function Assert-CommandResolutionContract {
     }
 }
 
+function Test-CommandLoadingRequirement {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Token[]] $Tokens
+    )
+
+    if ($null -ne $Ast.ScriptRequirements -and
+        @($Ast.ScriptRequirements.RequiredModules).Count -ne 0) {
+        return $true
+    }
+
+    return @($Tokens | Where-Object {
+        $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment -and
+            $_.Text -match '(?i)^#requires\b[^\r\n]*[ \t]-(?:M(?:o(?:d(?:u(?:l(?:e(?:s)?)?)?)?)?)?|P(?:S(?:S(?:n(?:a(?:p(?:i(?:n)?)?)?)?)?)?)?)(?::|[ \t]|$)'
+    }).Count -ne 0
+}
+
 function Assert-NoProtectedFunctionDefinitions {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
@@ -370,7 +391,6 @@ function Assert-NoProtectedFunctionDefinitions {
     if ($definitions.Count -ne 0) { throw "Harness must not redefine protected interactive functions: $Context" }
 }
 
-$psSnapinRequirementPattern = '(?im)^[ \t]*#requires\b[^\r\n]*[ \t]-PSSnapin(?::|[ \t]|$)'
 $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '[ScriptBlock]::' + [Environment]::NewLine + '''Create''("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '[ System.Management.Automation.ScriptBlock, System.Management.Automation ]::Create("1+1")' }
@@ -409,25 +429,34 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = 'iex ''Write-Host bypass''' }
     [pscustomobject]@{ Reject = $true; Text = 'Add-PSSnapin Example.SnapIn' }
     [pscustomobject]@{ Reject = $true; Text = 'asnp Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin:Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -P Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PS Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSn Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#ReQuIrEs -Version 5.1 -PsSnApIn Example.SnapIn' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -Modules Example.Module' }
+    [pscustomobject]@{ Reject = $true; Text = '#requires -M Example.Module' }
+    [pscustomobject]@{ Reject = $false; Text = '#requires -Version 5.1' }
+    [pscustomobject]@{ Reject = $false; Text = '#requires -PSEdition Desktop' }
+    [pscustomobject]@{ Reject = $false; Text = 'Write-Host ''#requires -PSSnapin Example.SnapIn''' }
+    [pscustomobject]@{ Reject = $false; Text = ("@'" + [Environment]::NewLine + '#requires -Modules Example.Module' + [Environment]::NewLine + "'@") }
 )
 foreach ($probe in $commandResolutionProbes) {
     $probeTokens = $null
     $probeErrors = $null
     $probeAst = [System.Management.Automation.Language.Parser]::ParseInput($probe.Text, [ref] $probeTokens, [ref] $probeErrors)
     if ($probeErrors.Count -ne 0) { throw "Command-resolution probe does not parse: $($probe.Text)" }
-    $probeRejected = @($probeAst.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true)).Count -ne 0
-    if ($probeRejected -ne $probe.Reject) { throw "Command-resolution probe contract failed: $($probe.Text)" }
-}
-$psSnapinRequirementProbes = @(
-    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin Example.SnapIn' }
-    [pscustomobject]@{ Reject = $true; Text = '#requires -PSSnapin:Example.SnapIn' }
-    [pscustomobject]@{ Reject = $true; Text = '#ReQuIrEs -Version 5.1 -PsSnApIn Example.SnapIn' }
-    [pscustomobject]@{ Reject = $false; Text = '#requires -Modules Example.Module' }
-    [pscustomobject]@{ Reject = $false; Text = 'Write-Host ''#requires -PSSnapin Example.SnapIn''' }
-)
-foreach ($probe in $psSnapinRequirementProbes) {
-    if (($probe.Text -match $psSnapinRequirementPattern) -ne $probe.Reject) {
-        throw "PSSnapin requirement probe contract failed: $($probe.Text)"
+    $probeRejected = $false
+    $probeFailure = $null
+    try {
+        Assert-CommandResolutionContract -Ast $probeAst -Tokens $probeTokens -Context "probe: $($probe.Text)"
+    } catch {
+        $probeRejected = $true
+        $probeFailure = $_.Exception.Message
+    }
+    if ($probeRejected -ne $probe.Reject) {
+        throw "Command-resolution probe contract failed: $($probe.Text) (contract result: $probeFailure)"
     }
 }
 
@@ -548,7 +577,7 @@ $resolutionSourceAsts = foreach ($source in @(
     $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($source.Text, [ref]$tokens, [ref]$errors)
     if ($errors.Count -ne 0) { throw "PowerShell resolution source does not parse: $($source.Path) ($($errors[0].Message))" }
-    [pscustomobject]@{ Path = $source.Path; Ast = $ast }
+    [pscustomobject]@{ Path = $source.Path; Ast = $ast; Tokens = $tokens }
 }
 foreach ($source in $resolutionSourceAsts) {
     $expectedAmpersands = if ($source.Path -eq $interactiveWin11Lib) {
@@ -558,7 +587,7 @@ foreach ($source in $resolutionSourceAsts) {
             '& $Condition'
         )
     } else { @() }
-    Assert-CommandResolutionContract -Ast $source.Ast -Context $source.Path -ExpectedAmpersandCommands $expectedAmpersands
+    Assert-CommandResolutionContract -Ast $source.Ast -Tokens $source.Tokens -Context $source.Path -ExpectedAmpersandCommands $expectedAmpersands
     $definitions = @($source.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
     foreach ($name in @('Get-InteractiveWin11MessageTimeoutMs', 'Assert-InteractiveWin11WindowOwner', 'Invoke-InteractiveWin11PostMessage', 'Invoke-StatefulPostedCommand')) {
         $expected = if ($source.Path -eq $interactiveWin11Lib) {
@@ -652,7 +681,7 @@ if ($stopProcessFunctions.Count -ne 1 -or
     $stopTaskkillTry.CatchClauses.Count -ne 1 -or
     $null -eq $stopTaskkillTry.Finally -or
     $stopTaskkillTry.Body.Statements[0].Extent.Text.Trim() -ne '$taskkillStartInfo = [System.Diagnostics.ProcessStartInfo]::new()' -or
-    $stopTaskkillTry.Body.Statements[1].Extent.Text.Trim() -ne '$taskkillStartInfo.FileName = Join-Path $env:SystemRoot ''System32\taskkill.exe''' -or
+    $stopTaskkillTry.Body.Statements[1].Extent.Text.Trim() -ne '$taskkillStartInfo.FileName = Join-Path ([Environment]::SystemDirectory) ''taskkill.exe''' -or
     $stopTaskkillTry.Body.Statements[2].Extent.Text.Trim() -ne '$taskkillStartInfo.UseShellExecute = $false' -or
     $stopTaskkillTry.Body.Statements[3].Extent.Text.Trim() -ne '$taskkillStartInfo.CreateNoWindow = $true' -or
     $stopTaskkillTry.Body.Statements[4].Extent.Text.Trim() -ne '$taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"' -or
@@ -836,6 +865,8 @@ switch ($Shell) {
             throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
         }
 
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
         $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
@@ -846,11 +877,34 @@ switch ($Shell) {
                 $cmdCommand
             ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
-            $output = & $cmdExe /d /c $payloadPath 2>&1 | Out-String
-            $exitCode = $LASTEXITCODE
+            $process = Start-Process `
+                -FilePath $cmdExe `
+                -ArgumentList "/d /c `"$payloadPath`"" `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -WindowStyle Hidden `
+                -PassThru
+            $processHandle = $process.Handle
+            if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
+                Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
+                throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
+            }
+
+            $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+            $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
+                Get-Content -LiteralPath $stdoutPath -Raw
+            } else {
+                ''
+            }
+            $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath -Raw
+            } else {
+                ''
+            }
+            $output = $stdoutText + $stderrText
         }
         finally {
-            Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
         }
     }
 
@@ -940,11 +994,10 @@ $cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$cliShellErrors
 )
 if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without errors.' }
-Assert-CommandResolutionContract -Ast $cliShellAst -Context $cliShellHarness -ExpectedDotSources @(
+Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Context $cliShellHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
     '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
-    '& $cmdExe /d /c $payloadPath 2>&1'
     '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
 )
 $accessibilityTokens = $null
@@ -1049,7 +1102,7 @@ $paletteThemeAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$paletteThemeErrors
 )
 if ($paletteThemeErrors.Count -ne 0) { throw "Palette theme harness does not parse: $($paletteThemeErrors[0].Message)" }
-Assert-CommandResolutionContract -Ast $paletteThemeAst -Context $paletteThemeHarness -ExpectedDotSources @(
+Assert-CommandResolutionContract -Ast $paletteThemeAst -Tokens $paletteThemeTokens -Context $paletteThemeHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
     ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
 )
@@ -1441,7 +1494,7 @@ $sessionHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$sessionHarnessErrors
 )
 if ($sessionHarnessErrors.Count -ne 0) { throw "Session restore harness does not parse: $($sessionHarnessErrors[0].Message)" }
-Assert-CommandResolutionContract -Ast $sessionHarnessAst -Context $sessionRestoreHarness -ExpectedDotSources @(
+Assert-CommandResolutionContract -Ast $sessionHarnessAst -Tokens $sessionHarnessTokens -Context $sessionRestoreHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')",
     ". (Join-Path `$PSScriptRoot 'interactive-win11-stateful-lib.ps1')"
 )

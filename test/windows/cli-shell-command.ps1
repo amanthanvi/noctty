@@ -75,6 +75,8 @@ switch ($Shell) {
             throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
         }
 
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
         $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
@@ -85,11 +87,34 @@ switch ($Shell) {
                 $cmdCommand
             ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
-            $output = & $cmdExe /d /c $payloadPath 2>&1 | Out-String
-            $exitCode = $LASTEXITCODE
+            $process = Start-Process `
+                -FilePath $cmdExe `
+                -ArgumentList "/d /c `"$payloadPath`"" `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -WindowStyle Hidden `
+                -PassThru
+            $processHandle = $process.Handle
+            if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
+                Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
+                throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
+            }
+
+            $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+            $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
+                Get-Content -LiteralPath $stdoutPath -Raw
+            } else {
+                ''
+            }
+            $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                Get-Content -LiteralPath $stderrPath -Raw
+            } else {
+                ''
+            }
+            $output = $stdoutText + $stderrText
         }
         finally {
-            Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
         }
     }
 

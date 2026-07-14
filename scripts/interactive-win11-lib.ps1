@@ -633,7 +633,7 @@ function Stop-InteractiveWin11Process {
     $taskkillTerminationVerified = $true
     try {
         $taskkillStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
-        $taskkillStartInfo.FileName = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        $taskkillStartInfo.FileName = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'
         $taskkillStartInfo.UseShellExecute = $false
         $taskkillStartInfo.CreateNoWindow = $true
         $taskkillStartInfo.Arguments = "/PID $rootProcessId /T /F"
