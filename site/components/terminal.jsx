@@ -4,7 +4,7 @@ import { TerminalLine } from './terminal/terminal-line.jsx';
 
 const { useEffect, useReducer } = React;
 
-let WG_VERSION = window.WG_VERSION || '1.3.118';
+let WG_VERSION = window.WG_VERSION || '1.3.119';
 const WG_REPO = 'amanthanvi/winghostty';
 
 function buildScript(v) {
