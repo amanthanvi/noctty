@@ -38,17 +38,6 @@ $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 $buildInputs = Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot
 $launchAction = Get-InteractiveWin11LaunchAction -ExePath $exePath -Rebuild:$Rebuild -BuildInputs $buildInputs
 
-if (-not ('InteractiveWin11SmokeNative' -as [type])) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class InteractiveWin11SmokeNative {
-    [DllImport("user32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool PostMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
-}
-"@
-}
 $launchArgs = @(Get-InteractiveWin11LaunchArguments -Layout $layout)
 $stdoutPath = Join-Path $layout.Logs 'interactive-win11-smoke-stdout.log'
 $stderrPath = Join-Path $layout.Logs 'interactive-win11-smoke-stderr.log'
@@ -100,7 +89,6 @@ try {
 
     if ($smokePassed) {
         $closeTimeoutSeconds = [Math]::Max(5, $TimeoutSeconds)
-        $closeTimeoutMs = $closeTimeoutSeconds * 1000
         $closeDeadline = [DateTime]::UtcNow.AddSeconds($closeTimeoutSeconds)
         while ([DateTime]::UtcNow -lt $closeDeadline) {
             $process.Refresh()
@@ -119,18 +107,28 @@ try {
         }
         elseif (-not $failureReason) {
             $processHandle = $process.Handle
-            if (-not [InteractiveWin11SmokeNative]::PostMessageW(
-                $process.MainWindowHandle,
-                0x0010,
-                [UIntPtr]::Zero,
-                [IntPtr]::Zero
-            )) {
-                $failureReason = "winghostty could not be sent WM_CLOSE: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-            }
-            elseif (-not $process.WaitForExit($closeTimeoutMs)) {
-                $failureReason = 'winghostty did not exit cleanly after WM_CLOSE'
-            }
-            else {
+            try {
+                try {
+                    [void](Invoke-InteractiveWin11Message `
+                        -Hwnd $process.MainWindowHandle `
+                        -Message 0x0010 `
+                        -Deadline $closeDeadline `
+                        -Description 'WM_CLOSE smoke validation' `
+                        -Flags $script:InteractiveWin11SmtoBlock `
+                        -Process $process)
+                }
+                catch {
+                    $sendError = $_
+                    $process.Refresh()
+                    if (-not $process.HasExited) {
+                        throw $sendError
+                    }
+                }
+                $closeProcess = $process
+                Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'winghostty smoke graceful exit' -Condition {
+                    $closeProcess.Refresh()
+                    $closeProcess.HasExited
+                }
                 $process.Refresh()
                 $exitCode = $process.ExitCode
 
@@ -150,6 +148,9 @@ try {
                 elseif (-not $failureReason) {
                     $closePassed = $true
                 }
+            }
+            catch {
+                $failureReason = "winghostty graceful-close validation failed: $($_.Exception.Message)"
             }
         }
     }

@@ -92,8 +92,6 @@ public static class Win11NewTabNative {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
 }
 
 public sealed class Win11NewTabChildControl {
@@ -244,10 +242,12 @@ function Get-VisibleTabCount {
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $CommandId
+        [Parameter(Mandatory)] [int] $CommandId,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
-    [void] [Win11NewTabNative]::SendMessageW($HostHwnd, 0x0111, (New-WParam -Low $CommandId), [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message 0x0111 -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
 }
 
 function Invoke-CommandPaletteAction {
@@ -255,10 +255,10 @@ function Invoke-CommandPaletteAction {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [string] $Action,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901 -Deadline $Deadline -Process $Process
     $script:Win11NewTabPaletteHostHwnd = $HostHwnd
     Wait-InteractiveWin11Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
         @(Get-VisibleChildControls -Parent $script:Win11NewTabPaletteHostHwnd |
@@ -270,15 +270,10 @@ function Invoke-CommandPaletteAction {
         Select-Object -First 1
 
     foreach ($ch in $Action.ToCharArray()) {
-        [void] [Win11NewTabNative]::SendMessageW(
-            $edit.Hwnd,
-            0x0102,
-            ([UIntPtr]([uint64]([int][char]$ch))),
-            [IntPtr]::Zero
-        )
+        [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64]([int][char]$ch))) -Deadline $Deadline -Description "palette WM_CHAR '$ch'" -Process $Process)
     }
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 2003
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 2003 -Deadline $Deadline -Process $Process
 }
 
 function Invoke-NewTabScenario {
@@ -322,7 +317,7 @@ function Invoke-NewTabScenario {
 
         while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
             $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
-            Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904
+            Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904 -Deadline $deadline -Process $process
             Wait-InteractiveWin11Until -Deadline $deadline -Description "seed tabs ($Name)" -Process $process -Condition {
                 (Get-VisibleTabCount -Parent $hostHwnd) -ge $targetTabCount
             }
@@ -382,12 +377,7 @@ function Invoke-NewTabScenario {
             throw "$Name new-tab path changed WINDOWPLACEMENT restore target while maximized. before=$($normalPlacementBeforeMaximize.NormalPosition | ConvertTo-Json -Compress) after=$($maximizedPlacementAfterNewTab.NormalPosition | ConvertTo-Json -Compress)"
         }
 
-        [void] [Win11NewTabNative]::SendMessageW(
-            $hostHwnd,
-            0x0112,
-            (New-WParam -Low 0xF120),
-            [IntPtr]::Zero
-        )
+        [void] (Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0x0112 -WParam (New-WParam -Low 0xF120) -Deadline $deadline -Description 'SC_RESTORE' -Process $process)
         Wait-InteractiveWin11Until -Deadline $deadline -Description "restored host ($Name)" -Process $process -Condition {
             -not [Win11NewTabNative]::IsZoomed($hostHwnd)
         }
@@ -450,7 +440,7 @@ function Invoke-NewTabScenarioRun {
 
 $titlebarRun = Invoke-NewTabScenarioRun -Name 'titlebar' -OpenAction {
     param($HostHwnd, $Deadline, $Process)
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1904
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1904 -Deadline $Deadline -Process $Process
 }
 
 $commandRun = Invoke-NewTabScenarioRun -Name 'command-palette' -OpenAction {

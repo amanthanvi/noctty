@@ -70,15 +70,11 @@ public static class Win11ImeCandidateNative {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetFocus(IntPtr hWnd);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-
 }
 '@
 
 $CFS_POINT = 0x0002
 $CFS_EXCLUDE = 0x0080
-$SMTO_ABORTIFHUNG = 0x0002
 $SW_RESTORE = 9
 $WM_MOUSEMOVE = 0x0200
 $WM_IME_STARTCOMPOSITION = 0x010D
@@ -183,23 +179,19 @@ function Send-WindowMessage {
         [Parameter(Mandatory)] [uint32] $Message,
         [UIntPtr] $WParam = [UIntPtr]::Zero,
         [IntPtr] $LParam = [IntPtr]::Zero,
-        [string] $Description = 'window message'
+        [string] $Description = 'window message',
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
-    $result = [UIntPtr]::Zero
-    $status = [Win11ImeCandidateNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $Message,
-        $WParam,
-        $LParam,
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] 1000,
-        [ref] $result
-    )
-    if ($status -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for $Description (hwnd=$Hwnd msg=$Message error=$lastError)"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $Message `
+        -WParam $WParam `
+        -LParam $LParam `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description $Description)
 }
 
 function Read-ImeFormTrace {
@@ -404,11 +396,15 @@ try {
         -Hwnd $surfaceHwnd `
         -Message $WM_MOUSEMOVE `
         -LParam (New-LParam -X $poisonX -Y $poisonY) `
+        -Deadline $deadline `
+        -Process $process `
         -Description "poison WM_MOUSEMOVE at $poisonX,$poisonY"
 
     Send-WindowMessage `
         -Hwnd $surfaceHwnd `
         -Message $WM_IME_STARTCOMPOSITION `
+        -Deadline $deadline `
+        -Process $process `
         -Description 'WM_IME_STARTCOMPOSITION'
 
     $script:Win11ImeCandidateTrace = $null
@@ -482,6 +478,8 @@ finally {
                 Send-WindowMessage `
                     -Hwnd $surfaceHwnd `
                     -Message $WM_IME_ENDCOMPOSITION `
+                    -Deadline ([DateTime]::UtcNow.AddSeconds(3)) `
+                    -Process $process `
                     -Description 'WM_IME_ENDCOMPOSITION'
             }
         }

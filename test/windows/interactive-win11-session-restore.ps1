@@ -33,15 +33,22 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
         $out = Join-Path $layout.Logs "$Name-$attempt.json"
         $err = Join-Path $layout.Logs "$Name-$attempt.stderr.log"
         $query = Start-Process -FilePath $cli -ArgumentList @('+list-windows', "--class=$instanceClass") -WorkingDirectory $repoRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+        $queryHandle = $query.Handle
         $remainingMs = [Math]::Max(0, [int]($Deadline - [DateTime]::UtcNow).TotalMilliseconds)
         if (-not $query.WaitForExit($remainingMs)) {
-            $query.Kill($true); $query.WaitForExit()
+            Stop-InteractiveWin11Process -Process $query
             $lastError = "automation query process did not exit before the story deadline"
             continue
         }
         $query.Refresh()
+        $queryExitCode = Get-InteractiveWin11ProcessExitCode -Process $query -ProcessHandle $queryHandle
+        if ($queryExitCode -ne 0) {
+            $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { "exit ${queryExitCode}: $(Get-Content $err -Raw)" } else { "exit $queryExitCode" }
+            Start-Sleep -Milliseconds 250
+            continue
+        }
         if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return Get-Content $out -Raw | ConvertFrom-Json }
-        $lastError = if (Test-Path $err) { Get-Content $err -Raw } else { "exit $($query.ExitCode)" }
+        $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { Get-Content $err -Raw } else { 'empty stdout' }
         Start-Sleep -Milliseconds 250
     }
     throw "Session automation query failed after three attempts: $lastError"
@@ -50,10 +57,21 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $first = Start-StatefulApp $layout $exe $repoRoot 'session-save' @('--single-instance=true'); $runs.Add($first)
     $hostHwnd = Wait-StatefulHost $first $deadline
-    Invoke-StatefulCommand $hostHwnd 1904; Invoke-StatefulCommand $hostHwnd 1904
-    Wait-InteractiveWin11Until -Deadline $deadline -Description 'three live tabs' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 3 }
-    Invoke-StatefulButton $hostHwnd 1001
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial session-save tab' -Process $first.Process -Condition { (Get-StatefulTabCount $hostHwnd) -eq 1 }
+    $null = Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description 'initial session-save host readiness barrier' -Process $first.Process
+    foreach ($targetTabCount in 2..3) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        Invoke-StatefulPostedCommand $hostHwnd 1904 $deadline $first.Process
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "live tab count $targetTabCount" -Process $first.Process -Condition {
+            (Get-StatefulTabCount $hostHwnd) -eq $targetTabCount
+        }
+        $null = Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0 -Deadline $deadline -Description "live tab $targetTabCount readiness barrier" -Process $first.Process
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-StatefulButton $hostHwnd 1001 $deadline $first.Process
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $hostHwnd $first $deadline
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'session-state file' -Condition { Test-Path $statePath }
     $saved = Get-Content $statePath -Raw | ConvertFrom-Json
     if ($saved.windows[0].tabs.Count -ne 3 -or $saved.windows[0].selected_tab -ne 1) { throw "Saved session mismatch: $($saved | ConvertTo-Json -Depth 8 -Compress)" }
@@ -63,6 +81,12 @@ try {
     $explicit = Start-StatefulApp $layout $exe $repoRoot 'session-explicit-command' @('-e', 'cmd.exe', '/k'); $runs.Add($explicit)
     $explicitHost = Wait-StatefulHost $explicit $deadline
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh explicit-command tab' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 1 }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-StatefulPostedCommand $explicitHost 1904 $deadline $explicit.Process
+    Invoke-StatefulPostedCommand $explicitHost 1904 $deadline $explicit.Process
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'asynchronous burst-created tabs' -Process $explicit.Process -Condition { (Get-StatefulTabCount $explicitHost) -eq 3 }
+    $null = Invoke-InteractiveWin11Message -Hwnd $explicitHost -Message 0 -Deadline $deadline -Description 'asynchronous tab burst readiness barrier' -Process $explicit.Process
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $explicitHost $explicit $deadline
     if ((Get-Content $statePath -Raw) -ne $savedRaw) { throw 'Explicit -e launch read or replaced the saved workspace.' }
 
@@ -76,6 +100,7 @@ try {
     if ($activeTabs.Count -ne 1 -or $snapshot.windows[0].tabs[1].tab_id -ne $snapshot.windows[0].active_tab_id -or -not $snapshot.windows[0].tabs[1].active) {
         throw "Restored selected tab mismatch: $($snapshot | ConvertTo-Json -Depth 8 -Compress)"
     }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $restoredHost $second $deadline
 
     [IO.File]::WriteAllText($statePath, '{not valid json', [Text.UTF8Encoding]::new($false))
@@ -88,9 +113,15 @@ try {
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'fresh tab after corrupt state' -Process $third.Process -Condition {
         (Get-StatefulTabCount $freshHost) -eq 1
     }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Close-StatefulHost $freshHost $third $deadline
 }
 finally {
     foreach ($run in $runs) { if (-not $run.Process.HasExited) { Stop-InteractiveWin11Process -Process $run.Process } }
+}
+foreach ($run in $runs) {
+    if (Select-String -LiteralPath $run.Stderr -SimpleMatch 'shell/native invariant failed' -Quiet) {
+        throw "Shell/native invariant failure reported by $($run.Stderr)."
+    }
 }
 Write-Host "interactive-win11 session-restore validation: PASS (state=$statePath)"

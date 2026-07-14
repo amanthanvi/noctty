@@ -26,65 +26,10 @@ try {
         }
 
         $machine = $reader.ReadUInt16()
-        $sectionCount = $reader.ReadUInt16()
-        $stream.Position = $peOffset + 20
-        $optionalHeaderSize = $reader.ReadUInt16()
-        $sectionTable = $peOffset + 24 + $optionalHeaderSize
-
         if ($machine -ne 0x8664) {
             Write-Host "CPU baseline check: skipped non-x64 PE $fullPath"
             return
         }
-
-        $textSection = $null
-        for ($i = 0; $i -lt $sectionCount; $i++) {
-            $stream.Position = $sectionTable + ($i * 40)
-            $nameBytes = $reader.ReadBytes(8)
-            $name = [System.Text.Encoding]::ASCII.GetString($nameBytes).TrimEnd([char]0)
-            $virtualSize = $reader.ReadUInt32()
-            $virtualAddress = $reader.ReadUInt32()
-            $rawSize = $reader.ReadUInt32()
-            $rawPointer = $reader.ReadUInt32()
-            if ($name -eq ".text") {
-                $textSection = [pscustomobject]@{
-                    VirtualSize = $virtualSize
-                    VirtualAddress = $virtualAddress
-                    RawSize = $rawSize
-                    RawPointer = $rawPointer
-                }
-                break
-            }
-        }
-
-        if ($null -eq $textSection) {
-            throw "Missing .text section: $fullPath"
-        }
-
-        $stream.Position = $textSection.RawPointer
-        $text = $reader.ReadBytes($textSection.RawSize)
-        $matches = [System.Collections.Generic.List[string]]::new()
-
-        for ($i = 0; $i -le $text.Length - 3; $i++) {
-            $prefix = $text[$i]
-            if (($prefix -ne 0x66) -and ($prefix -ne 0xF2)) {
-                continue
-            }
-
-            if (($text[$i + 1] -eq 0x0F) -and
-                (($text[$i + 2] -eq 0x78) -or ($text[$i + 2] -eq 0x79))) {
-                $rva = $textSection.VirtualAddress + $i
-                $fileOffset = $textSection.RawPointer + $i
-                $opcode = "{0:X2} {1:X2} {2:X2}" -f $text[$i], $text[$i + 1], $text[$i + 2]
-                $matches.Add(("RVA 0x{0:X8}, file offset 0x{1:X8}, opcode {2}" -f $rva, $fileOffset, $opcode))
-            }
-        }
-
-        if ($matches.Count -gt 0) {
-            $details = $matches -join [Environment]::NewLine
-            throw "Windows x64 baseline check failed: found AMD-only SSE4a EXTRQ/INSERTQ opcodes in .text:$([Environment]::NewLine)$details"
-        }
-
-        Write-Host "CPU baseline check: passed for $fullPath"
     }
     finally {
         $reader.Dispose()
@@ -93,3 +38,96 @@ try {
 finally {
     $stream.Dispose()
 }
+
+$objdumpCommand = Get-Command llvm-objdump.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$objdumpPath = if ($null -ne $objdumpCommand) { $objdumpCommand.Source } else { $null }
+if (-not $objdumpPath) {
+    foreach ($candidate in @(
+        (Join-Path $env:ProgramFiles "LLVM\bin\llvm-objdump.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "LLVM\bin\llvm-objdump.exe")
+    )) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            $objdumpPath = $candidate
+            break
+        }
+    }
+}
+if (-not $objdumpPath) {
+    throw "Windows x64 baseline check requires llvm-objdump on PATH or in the standard LLVM install directory."
+}
+
+$objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
+$objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
+$objdumpTimeoutMs = 120000
+$objdumpKillTimeoutMs = 5000
+$streamCopyTimeoutMs = 30000
+try {
+    # Copy native streams directly to disk. PowerShell 5.1 otherwise creates
+    # one object per decoded line and wraps native stderr in ErrorRecords.
+    $processStart = [System.Diagnostics.ProcessStartInfo]::new()
+    $processStart.UseShellExecute = $false
+    $processStart.CreateNoWindow = $true
+    $processStart.RedirectStandardOutput = $true
+    $processStart.RedirectStandardError = $true
+    $processStart.FileName = $objdumpPath
+    $processStart.Arguments = "--disassemble --no-show-raw-insn `"$fullPath`""
+
+    $objdumpProcess = [System.Diagnostics.Process]::new()
+    $objdumpProcess.StartInfo = $processStart
+    $stdoutStream = [System.IO.File]::Open($objdumpOutput, 'Create', 'Write', 'None')
+    $stderrStream = [System.IO.File]::Open($objdumpError, 'Create', 'Write', 'None')
+    try {
+        if (-not $objdumpProcess.Start()) {
+            throw "Failed to start llvm-objdump while checking $fullPath."
+        }
+        $stdoutCopy = $objdumpProcess.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrCopy = $objdumpProcess.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $objdumpCompleted = $objdumpProcess.WaitForExit($objdumpTimeoutMs)
+        if (-not $objdumpCompleted) {
+            $objdumpProcess.Kill()
+            if (-not $objdumpProcess.WaitForExit($objdumpKillTimeoutMs)) {
+                throw "llvm-objdump did not exit after termination within $objdumpKillTimeoutMs ms while checking $fullPath."
+            }
+        }
+        $streamsCompleted = [System.Threading.Tasks.Task]::WaitAll(
+            [System.Threading.Tasks.Task[]]@($stdoutCopy, $stderrCopy),
+            $streamCopyTimeoutMs
+        )
+        if (-not $streamsCompleted) {
+            throw "llvm-objdump stream cleanup timed out after $streamCopyTimeoutMs ms while checking $fullPath."
+        }
+        if (-not $objdumpCompleted) {
+            throw "llvm-objdump timed out after $objdumpTimeoutMs ms while checking $fullPath."
+        }
+        $objdumpExitCode = $objdumpProcess.ExitCode
+    }
+    finally {
+        $stdoutStream.Dispose()
+        $stderrStream.Dispose()
+        $objdumpProcess.Dispose()
+    }
+    if ($objdumpExitCode -ne 0) {
+        $details = @(
+            Get-Content -LiteralPath $objdumpError -Tail 20
+            Get-Content -LiteralPath $objdumpOutput -Tail 20
+        ) -join [Environment]::NewLine
+        throw "llvm-objdump failed with exit code $objdumpExitCode while checking $fullPath`:$([Environment]::NewLine)$details"
+    }
+
+    # The PE contract marks executable sections as code. Treat any decoded
+    # SSE4a there as a build failure; embedded constants belong in a
+    # non-executable section and must not be hidden behind a byte allowlist.
+    $decodedMatches = @(Select-String `
+        -LiteralPath $objdumpOutput `
+        -Pattern '^\s*[0-9A-Fa-f]+:\s+(extrq|insertq|movntsd|movntss)\b')
+    if ($decodedMatches.Count -gt 0) {
+        $details = @($decodedMatches | ForEach-Object { $_.Line.Trim() }) -join [Environment]::NewLine
+        throw "Windows x64 baseline check failed: found decoded AMD-only SSE4a instructions in executable sections. Move intentional data to a non-executable section; do not allowlist instruction bytes.$([Environment]::NewLine)$details"
+    }
+}
+finally {
+    Remove-Item -LiteralPath $objdumpOutput -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $objdumpError -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "CPU baseline check: passed for $fullPath"

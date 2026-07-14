@@ -70,8 +70,6 @@ public static class Win11UndoNative {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-    [DllImport("user32.dll")]
-    public static extern IntPtr SendMessageW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam);
 }
 
 public sealed class Win11UndoChildControl {
@@ -248,28 +246,18 @@ function Wait-Until {
         [System.Diagnostics.Process] $Process
     )
 
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
+    Wait-InteractiveWin11Until @PSBoundParameters
 }
 
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $CommandId
+        [Parameter(Mandatory)] [int] $CommandId,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
-    [void] [Win11UndoNative]::SendMessageW($HostHwnd, 0x0111, (New-WParam -Low $CommandId), [IntPtr]::Zero)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $HostHwnd -Message 0x0111 -WParam (New-WParam -Low $CommandId) -Deadline $Deadline -Description "WM_COMMAND $CommandId" -Process $Process)
 }
 
 function Invoke-CommandPaletteAction {
@@ -277,10 +265,10 @@ function Invoke-CommandPaletteAction {
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
         [Parameter(Mandatory)] [Win11UndoPaletteAction] $Action,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901 -Deadline $Deadline -Process $Process
     $script:Win11UndoPaletteHostHwnd = $HostHwnd
     Wait-Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
         $null -ne (Get-VisibleChildById -Parent $script:Win11UndoPaletteHostHwnd -Id 2002)
@@ -294,20 +282,17 @@ function Invoke-CommandPaletteAction {
         ([Win11UndoPaletteAction]::CloseTabThis) { 'close_tab:this' }
     }
     foreach ($ch in $actionText.ToCharArray()) {
-        [void] [Win11UndoNative]::SendMessageW(
-            $edit.Hwnd,
-            0x0102,
-            ([UIntPtr]([uint64]([int][char]$ch))),
-            [IntPtr]::Zero
-        )
+        [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64]([int][char]$ch))) -Deadline $Deadline -Description "palette WM_CHAR '$ch'" -Process $Process)
     }
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 2003
+    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 2003 -Deadline $Deadline -Process $Process
 }
 
 function Invoke-CloseSecondTab {
     param(
-        [Parameter(Mandatory)] [IntPtr] $HostHwnd
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $tab = Get-VisibleTabButtons -Parent $HostHwnd |
@@ -325,13 +310,15 @@ function Invoke-CloseSecondTab {
     $x = [Math]::Max(0, $rect.Right - 4)
     $y = [Math]::Max(0, [int] (($rect.Bottom - $rect.Top) / 2))
     $lParam = New-LParam -X $x -Y $y
-    [void] [Win11UndoNative]::SendMessageW($tab.Hwnd, 0x0201, [UIntPtr]::Zero, $lParam)
-    [void] [Win11UndoNative]::SendMessageW($tab.Hwnd, 0x0202, [UIntPtr]::Zero, $lParam)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $tab.Hwnd -Message 0x0201 -LParam $lParam -Deadline $Deadline -Description 'second tab mouse down' -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $tab.Hwnd -Message 0x0202 -LParam $lParam -Deadline $Deadline -Description 'second tab mouse up' -Process $Process)
 }
 
 function Invoke-DragFirstTabIntoActiveSurface {
     param(
-        [Parameter(Mandatory)] [IntPtr] $HostHwnd
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $sourceTab = Get-VisibleTabButtons -Parent $HostHwnd |
@@ -360,24 +347,9 @@ function Invoke-DragFirstTabIntoActiveSurface {
     $moveX = $targetScreenX - $tabScreen.Left
     $moveY = $targetScreenY - $tabScreen.Top
 
-    [void] [Win11UndoNative]::SendMessageW(
-        $sourceTab.Hwnd,
-        0x0201,
-        [UIntPtr]::Zero,
-        (New-LParam -X $downX -Y $downY)
-    )
-    [void] [Win11UndoNative]::SendMessageW(
-        $sourceTab.Hwnd,
-        0x0200,
-        (New-WParam -Low 1),
-        (New-LParam -X $moveX -Y $moveY)
-    )
-    [void] [Win11UndoNative]::SendMessageW(
-        $sourceTab.Hwnd,
-        0x0202,
-        [UIntPtr]::Zero,
-        (New-LParam -X $moveX -Y $moveY)
-    )
+    [void] (Invoke-InteractiveWin11Message -Hwnd $sourceTab.Hwnd -Message 0x0201 -LParam (New-LParam -X $downX -Y $downY) -Deadline $Deadline -Description 'tab drag mouse down' -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $sourceTab.Hwnd -Message 0x0200 -WParam (New-WParam -Low 1) -LParam (New-LParam -X $moveX -Y $moveY) -Deadline $Deadline -Description 'tab drag mouse move' -Process $Process)
+    [void] (Invoke-InteractiveWin11Message -Hwnd $sourceTab.Hwnd -Message 0x0202 -LParam (New-LParam -X $moveX -Y $moveY) -Deadline $Deadline -Description 'tab drag mouse up' -Process $Process)
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'undo' -ResetState:$ResetState
@@ -471,7 +443,7 @@ try {
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible surface count after second split undo'
 
-    Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904
+    Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904 -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'second tab button' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
     }
@@ -480,7 +452,7 @@ try {
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 2 'tab count after new_tab'
 
-    Invoke-DragFirstTabIntoActiveSurface -HostHwnd $hostHwnd
+    Invoke-DragFirstTabIntoActiveSurface -HostHwnd $hostHwnd -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'tab drag split transfer' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1 -and
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
@@ -506,7 +478,7 @@ try {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
 
-    Invoke-CloseSecondTab -HostHwnd $hostHwnd
+    Invoke-CloseSecondTab -HostHwnd $hostHwnd -Deadline $deadline -Process $process
     Wait-Until -Deadline $deadline -Description 'second tab close' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1
     }

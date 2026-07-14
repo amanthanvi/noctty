@@ -122,6 +122,182 @@ function Get-InteractiveWin11Environment {
     }
 }
 
+if (-not ('InteractiveWin11MessageNativeV2' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class InteractiveWin11MessageNativeV2 {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
+    [DllImport("user32.dll", SetLastError=true)] private static extern bool PostMessageW(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    public static uint GetWindowThreadProcessIdWithError(IntPtr hwnd, out uint processId, out int lastError) {
+        SetLastError(0);
+        uint result = GetWindowThreadProcessId(hwnd, out processId);
+        lastError = Marshal.GetLastWin32Error();
+        return result;
+    }
+    [DllImport("kernel32.dll")] private static extern void SetLastError(uint errorCode);
+
+    public static IntPtr SendMessageTimeoutWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result, out int lastError) {
+        SetLastError(0);
+        IntPtr status = SendMessageTimeoutW(hwnd, message, wparam, lparam, flags, timeout, out result);
+        lastError = Marshal.GetLastWin32Error();
+        return status;
+    }
+    public static bool PostMessageWithError(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, out int lastError) {
+        SetLastError(0);
+        bool status = PostMessageW(hwnd, message, wparam, lparam);
+        lastError = Marshal.GetLastWin32Error();
+        return status;
+    }
+}
+'@
+}
+
+$script:InteractiveWin11SmtoNormal = [uint32]0
+$script:InteractiveWin11SmtoBlock = [uint32]0x0001
+$script:InteractiveWin11ErrorSuccess = 0
+$script:InteractiveWin11ErrorInvalidWindowHandle = 1400
+$script:InteractiveWin11ErrorTimeout = 1460
+
+function Get-InteractiveWin11MessageTimeoutMs {
+    param(
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [string] $Description
+    )
+
+    $remainingMs = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remainingMs -le 0) {
+        throw "Deadline elapsed before sending $Description."
+    }
+
+    return [uint32][Math]::Min([double][uint32]::MaxValue, [Math]::Ceiling($remainingMs))
+}
+
+function Assert-InteractiveWin11WindowOwner {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)] [string] $Description,
+        [Parameter(Mandatory)] [ValidateSet('send', 'post')] [string] $Verb,
+        [int[]] $ToleratedErrors = @(),
+        [ref] $ObservedToleratedError
+    )
+
+    $windowProcessId = [uint32]0
+    $windowLastError = 0
+    $windowThreadId = [InteractiveWin11MessageNativeV2]::GetWindowThreadProcessIdWithError($Hwnd, [ref] $windowProcessId, [ref] $windowLastError)
+    if ($windowThreadId -eq 0) {
+        if ($windowLastError -in $ToleratedErrors) {
+            if ($null -eq $ObservedToleratedError) { throw 'ToleratedErrors requires an ObservedToleratedError output reference.' }
+            $ObservedToleratedError.Value = $windowLastError
+            Write-Warning "GetWindowThreadProcessId returned tolerated Win32 error $windowLastError for $Description hwnd=$Hwnd."
+            return $false
+        }
+        $detail = if ($windowLastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $windowLastError" }
+        throw "Refusing to $Verb $Description to invalid hwnd=$Hwnd $detail."
+    }
+    if ($windowProcessId -ne [uint32]$Process.Id) {
+        throw "Refusing to $Verb $Description to hwnd=$Hwnd because owner pid=$windowProcessId does not match expected pid=$($Process.Id)."
+    }
+
+    return $true
+}
+
+function Invoke-InteractiveWin11Message {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [uint32] $Message,
+        [UIntPtr] $WParam = [UIntPtr]::Zero,
+        [IntPtr] $LParam = [IntPtr]::Zero,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [string] $Description,
+        [uint32] $Flags = $script:InteractiveWin11SmtoNormal,
+        [int[]] $ToleratedErrors = @(),
+        [ref] $ObservedToleratedError,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+    )
+
+    if ($ToleratedErrors.Count -gt 0) {
+        if ($null -eq $ObservedToleratedError) { throw 'ToleratedErrors requires an ObservedToleratedError output reference.' }
+        $ObservedToleratedError.Value = 0
+    }
+
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        throw "Refusing to send $Description because winghostty already exited (exit code $($Process.ExitCode))."
+    }
+
+    $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description "$Description hwnd=$Hwnd"
+    # Keep ownership validation immediately adjacent to the send so lengthy
+    # phase work cannot turn a stale HWND into a cross-process message.
+    $ownershipArgs = @{
+        Hwnd = $Hwnd
+        Process = $Process
+        Description = $Description
+        Verb = 'send'
+        ToleratedErrors = $ToleratedErrors
+    }
+    if ($null -ne $ObservedToleratedError) {
+        $ownershipArgs.ObservedToleratedError = $ObservedToleratedError
+    }
+    if (-not (Assert-InteractiveWin11WindowOwner @ownershipArgs)) {
+        return [UIntPtr]::Zero
+    }
+
+    $sendResult = [UIntPtr]::Zero
+    $lastError = 0
+    $sendStatus = [InteractiveWin11MessageNativeV2]::SendMessageTimeoutWithError(
+        $Hwnd,
+        $Message,
+        $WParam,
+        $LParam,
+        $Flags,
+        $sendTimeoutMs,
+        [ref] $sendResult,
+        [ref] $lastError
+    )
+    if ($sendStatus -eq [IntPtr]::Zero) {
+        if ($lastError -eq $script:InteractiveWin11ErrorTimeout) {
+            throw "SendMessageTimeoutW timed out for $Description hwnd=$Hwnd error=$lastError"
+        }
+        if ($lastError -in $ToleratedErrors) {
+            $ObservedToleratedError.Value = $lastError
+            Write-Warning "SendMessageTimeoutW returned tolerated Win32 error $lastError for $Description hwnd=$Hwnd."
+            return $sendResult
+        }
+        $detail = if ($lastError -eq $script:InteractiveWin11ErrorSuccess) { 'generic failure without a Win32 error' } else { "Win32 error $lastError" }
+        throw "SendMessageTimeoutW failed for $Description hwnd=$Hwnd ($detail)."
+    }
+
+    return $sendResult
+}
+
+function Invoke-InteractiveWin11PostMessage {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $Hwnd,
+        [Parameter(Mandatory)] [uint32] $Message,
+        [UIntPtr] $WParam = [UIntPtr]::Zero,
+        [IntPtr] $LParam = [IntPtr]::Zero,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [string] $Description,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
+    )
+
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        throw "Refusing to post $Description because winghostty already exited (exit code $($Process.ExitCode))."
+    }
+
+    [void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb 'post')
+    $lastError = 0
+    if ($Deadline -le [DateTime]::UtcNow) { throw "Timed out waiting for $Description." }
+    if (-not [InteractiveWin11MessageNativeV2]::PostMessageWithError($Hwnd, $Message, $WParam, $LParam, [ref] $lastError)) {
+        $detail = if ($lastError -eq 0) { 'without a Win32 error' } else { "with Win32 error $lastError" }
+        throw "PostMessageW failed for $Description hwnd=$Hwnd $detail."
+    }
+}
+
 function Get-InteractiveWin11LaunchArguments {
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Layout
@@ -354,26 +530,21 @@ function Get-InteractiveWin11RequiredJsonFile {
 function Show-InteractiveWin11Window {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [Parameter(Mandatory)] [type] $NativeType,
         [int] $ShowCode = 9,
         [switch] $SetForeground
     )
 
-    $nativeType = $NativeTypeName -as [type]
-    if ($null -eq $nativeType) {
-        throw "Missing native helper type: $NativeTypeName"
-    }
-
-    [void] $nativeType::ShowWindow($Hwnd, $ShowCode)
+    [void] $NativeType::ShowWindow($Hwnd, $ShowCode)
     if ($SetForeground) {
-        [void] $nativeType::SetForegroundWindow($Hwnd)
+        [void] $NativeType::SetForegroundWindow($Hwnd)
     }
 }
 
 function Show-InteractiveWin11ProcessMainWindow {
     param(
         [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
-        [Parameter(Mandatory)] [string] $NativeTypeName,
+        [Parameter(Mandatory)] [type] $NativeType,
         [int] $ShowCode = 9,
         [switch] $SetForeground,
         [int] $ReadyTimeoutSeconds = 5
@@ -385,7 +556,7 @@ function Show-InteractiveWin11ProcessMainWindow {
         if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
             Show-InteractiveWin11Window `
                 -Hwnd $Process.MainWindowHandle `
-                -NativeTypeName $NativeTypeName `
+                -NativeType $NativeType `
                 -ShowCode $ShowCode `
                 -SetForeground:$SetForeground
             return
@@ -407,9 +578,13 @@ function Wait-InteractiveWin11Until {
         [System.Diagnostics.Process] $Process
     )
 
-    while ([DateTime]::UtcNow -lt $Deadline) {
+    while ($true) {
         if ($null -ne $Process -and $Process.HasExited) {
             throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+        }
+
+        if ([DateTime]::UtcNow -ge $Deadline) {
+            break
         }
 
         if (& $Condition) {
@@ -558,10 +733,14 @@ function Get-InteractiveWin11ProcessExitCode {
     try {
         $Process.Refresh()
         if ($Process.HasExited) {
-            return [int] $Process.ExitCode
+            $managedExitCode = $Process.ExitCode
+            # PowerShell can surface a blank ExitCode for an exited GUI child;
+            # retain the native handle fallback for that adapter edge case.
+            if ($null -ne $managedExitCode) { return [int] $managedExitCode }
         }
     }
     catch {
+        Write-Verbose "Managed exit-code fast path failed for pid=$($Process.Id); falling back to native GetExitCodeProcess: $($_.Exception.Message)"
     }
 
     [uint32] $nativeExitCode = 0
@@ -570,11 +749,19 @@ function Get-InteractiveWin11ProcessExitCode {
         throw "Exit code could not be read for pid=$($Process.Id): $lastError"
     }
 
+    $Process.Refresh()
     if ($nativeExitCode -eq 259) {
-        throw "Process has not exited yet for pid=$($Process.Id)"
+        if (-not $Process.HasExited) {
+            throw "Process has not exited yet for pid=$($Process.Id)"
+        }
+
+        if (-not [InteractiveWin11ProcessNative]::GetExitCodeProcess($ProcessHandle, [ref] $nativeExitCode)) {
+            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw "Exit code could not be re-read for pid=$($Process.Id): $lastError"
+        }
     }
 
-    return [int] $nativeExitCode
+    return [BitConverter]::ToInt32([BitConverter]::GetBytes($nativeExitCode), 0)
 }
 
 function Reset-InteractiveWin11Sandbox {

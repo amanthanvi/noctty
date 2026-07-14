@@ -105,8 +105,12 @@ $env:SystemDrive = $systemDrive
 New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
 New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
 New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
-$env:ZIG_GLOBAL_CACHE_DIR = Join-Path $env:LOCALAPPDATA "zig"
-$env:ZIG_LOCAL_CACHE_DIR = Join-Path (Get-Location) ".zig-cache"
+if ([string]::IsNullOrWhiteSpace($env:ZIG_GLOBAL_CACHE_DIR)) {
+    $env:ZIG_GLOBAL_CACHE_DIR = Join-Path $env:LOCALAPPDATA "zig"
+}
+if ([string]::IsNullOrWhiteSpace($env:ZIG_LOCAL_CACHE_DIR)) {
+    $env:ZIG_LOCAL_CACHE_DIR = Join-Path (Get-Location) ".zig-cache"
+}
 
 $bootstrap = @"
 call "$vsDevCmd" -arch=$Architecture || exit /b 1

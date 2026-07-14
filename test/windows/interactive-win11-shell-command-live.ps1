@@ -110,9 +110,6 @@ public static class Win11ShellCommandLiveNative {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-
     [DllImport("user32.dll")]
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
@@ -127,7 +124,6 @@ if (-not ('System.Drawing.Bitmap' -as [type])) {
 }
 
 $MAPVK_VK_TO_VSC = 0
-$SMTO_ABORTIFHUNG = 0x0002
 $SW_RESTORE = 9
 $SWP_NOMOVE = 0x0002
 $SWP_NOSIZE = 0x0001
@@ -135,7 +131,6 @@ $SWP_SHOWWINDOW = 0x0040
 $VISIBLE_TAB_MIN_ID = 1000
 $VISIBLE_TAB_MAX_ID_EXCLUSIVE = 1900
 $HOST_COMMAND_NEW_TAB_ID = 1904
-$SEND_TIMEOUT_MS = 1000
 $BOO_AUTO_EXIT_MS = 1000
 $KEY_STROKE_DELAY_MS = 15
 $CAPTURE_PROMOTION_DELAY_MS = 150
@@ -292,7 +287,9 @@ function Get-VisibleTabCount {
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $CommandId
+        [Parameter(Mandatory)] [int] $CommandId,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     Invoke-SendMessageTimeoutOrThrow `
@@ -300,6 +297,8 @@ function Invoke-HostCommand {
         -Message 0x0111 `
         -WParam (New-WParam -Low $CommandId) `
         -LParam ([IntPtr]::Zero) `
+        -Deadline $Deadline `
+        -Process $Process `
         -Description "host command $CommandId"
 }
 
@@ -309,29 +308,27 @@ function Invoke-SendMessageTimeoutOrThrow {
         [Parameter(Mandatory)] [uint32] $Message,
         [Parameter(Mandatory)] [UIntPtr] $WParam,
         [Parameter(Mandatory)] [IntPtr] $LParam,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
         [Parameter(Mandatory)] [string] $Description
     )
 
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $Message,
-        $WParam,
-        $LParam,
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $SEND_TIMEOUT_MS,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for $Description hwnd=$Hwnd error=$lastError"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $Message `
+        -WParam $WParam `
+        -LParam $LParam `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description $Description)
 }
 
-function Activate-TabIndex {
+function Invoke-TabIndexActivation {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
-        [Parameter(Mandatory)] [int] $TabIndex
+        [Parameter(Mandatory)] [int] $TabIndex,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $tab = Get-VisibleTabButtons -Parent $HostHwnd | Select-Object -Index $TabIndex
@@ -344,36 +341,17 @@ function Activate-TabIndex {
         -Message 0x0201 `
         -WParam ([UIntPtr]::Zero) `
         -LParam ([IntPtr]::Zero) `
+        -Deadline $Deadline `
+        -Process $Process `
         -Description "activate tab index $TabIndex mouse down"
     Invoke-SendMessageTimeoutOrThrow `
         -Hwnd $tab.Hwnd `
         -Message 0x0202 `
         -WParam ([UIntPtr]::Zero) `
         -LParam ([IntPtr]::Zero) `
+        -Deadline $Deadline `
+        -Process $Process `
         -Description "activate tab index $TabIndex mouse up"
-}
-
-function Wait-Until {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Condition,
-        [Parameter(Mandatory)] [string] $Description,
-        [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
-    )
-
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
 }
 
 function New-KeyLParam {
@@ -395,7 +373,9 @@ function Send-KeyMessage {
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
         [Parameter(Mandatory)] [UInt16] $VirtualKey,
         [UInt16] $CharCode = 0,
-        [switch] $KeyUp
+        [switch] $KeyUp,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $scanCode = [Win11ShellCommandLiveNative]::MapVirtualKeyW([uint32] $VirtualKey, [uint32] $MAPVK_VK_TO_VSC)
@@ -404,43 +384,33 @@ function Send-KeyMessage {
     }
 
     $message = if ($KeyUp) { $WM_KEYUP } else { $WM_KEYDOWN }
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-        $Hwnd,
-        [uint32] $message,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp:$KeyUp),
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $SEND_TIMEOUT_MS,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for message=$message hwnd=$Hwnd vk=$VirtualKey error=$lastError"
-    }
+    Invoke-SendMessageTimeoutOrThrow `
+        -Hwnd $Hwnd `
+        -Message ([uint32] $message) `
+        -WParam ([UIntPtr]([uint64] $VirtualKey)) `
+        -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp:$KeyUp) `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description "message=$message vk=$VirtualKey"
 
     if (-not $KeyUp -and $CharCode -ne 0) {
-        $sendResult = [UIntPtr]::Zero
-        $sendStatus = [Win11ShellCommandLiveNative]::SendMessageTimeoutW(
-            $Hwnd,
-            [uint32] $WM_CHAR,
-            [UIntPtr]([uint64] $CharCode),
-            (New-KeyLParam -ScanCode ([uint16] $scanCode)),
-            [uint32] $SMTO_ABORTIFHUNG,
-            [uint32] $SEND_TIMEOUT_MS,
-            [ref] $sendResult
-        )
-        if ($sendStatus -eq [IntPtr]::Zero) {
-            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            throw "SendMessageTimeoutW failed for WM_CHAR hwnd=$Hwnd char=$CharCode error=$lastError"
-        }
+        Invoke-SendMessageTimeoutOrThrow `
+            -Hwnd $Hwnd `
+            -Message ([uint32] $WM_CHAR) `
+            -WParam ([UIntPtr]([uint64] $CharCode)) `
+            -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode)) `
+            -Deadline $Deadline `
+            -Process $Process `
+            -Description "WM_CHAR char=$CharCode"
     }
 }
 
 function Send-ModifiedChar {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [char] $Character
+        [Parameter(Mandatory)] [char] $Character,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $vkScan = [Win11ShellCommandLiveNative]::VkKeyScanW($Character)
@@ -456,17 +426,17 @@ function Send-ModifiedChar {
     if ($modifierMask -band 0x01) { $modifiers += [uint16] $VK_SHIFT }
 
     foreach ($modifier in $modifiers) {
-        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $modifier
+        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $modifier -Deadline $Deadline -Process $Process
     }
 
     try {
-        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $virtualKey -CharCode ([uint16] [int] $Character)
-        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $virtualKey -KeyUp
+        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $virtualKey -CharCode ([uint16] [int] $Character) -Deadline $Deadline -Process $Process
+        Send-KeyMessage -Hwnd $Hwnd -VirtualKey $virtualKey -KeyUp -Deadline $Deadline -Process $Process
     }
     finally {
         for ($i = $modifiers.Count - 1; $i -ge 0; $i -= 1) {
             $modifier = $modifiers[$i]
-            Send-KeyMessage -Hwnd $Hwnd -VirtualKey $modifier -KeyUp
+            Send-KeyMessage -Hwnd $Hwnd -VirtualKey $modifier -KeyUp -Deadline $Deadline -Process $Process
         }
     }
 }
@@ -474,16 +444,18 @@ function Send-ModifiedChar {
 function Send-Line {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $Text
+        [Parameter(Mandatory)] [string] $Text,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     foreach ($character in $Text.ToCharArray()) {
-        Send-ModifiedChar -Hwnd $Hwnd -Character $character
+        Send-ModifiedChar -Hwnd $Hwnd -Character $character -Deadline $Deadline -Process $Process
         Start-Sleep -Milliseconds $KEY_STROKE_DELAY_MS
     }
 
-    Send-KeyMessage -Hwnd $Hwnd -VirtualKey ([uint16] $VK_RETURN) -CharCode 13
-    Send-KeyMessage -Hwnd $Hwnd -VirtualKey ([uint16] $VK_RETURN) -KeyUp
+    Send-KeyMessage -Hwnd $Hwnd -VirtualKey ([uint16] $VK_RETURN) -CharCode 13 -Deadline $Deadline -Process $Process
+    Send-KeyMessage -Hwnd $Hwnd -VirtualKey ([uint16] $VK_RETURN) -KeyUp -Deadline $Deadline -Process $Process
 }
 
 function Save-WindowCapture {
@@ -670,28 +642,28 @@ $hostHwnd = [IntPtr]::Zero
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
-    Wait-Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
         (Find-HostWindow -ProcessId $process.Id) -ne [IntPtr]::Zero
     }
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
     Promote-WindowForCapture -Hwnd $hostHwnd
 
-    Wait-Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
 
     while ((Get-VisibleTabCount -Parent $hostHwnd) -lt $SeedTabs) {
         $targetTabCount = (Get-VisibleTabCount -Parent $hostHwnd) + 1
-        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId $HOST_COMMAND_NEW_TAB_ID
-        Wait-Until -Deadline $deadline -Description "seed tabs ($targetTabCount/$SeedTabs)" -Process $process -Condition {
+        Invoke-HostCommand -HostHwnd $hostHwnd -CommandId $HOST_COMMAND_NEW_TAB_ID -Deadline $deadline -Process $process
+        Wait-InteractiveWin11Until -Deadline $deadline -Description "seed tabs ($targetTabCount/$SeedTabs)" -Process $process -Condition {
             (Get-VisibleTabCount -Parent $hostHwnd) -ge $targetTabCount
         }
     }
 
-    Activate-TabIndex -HostHwnd $hostHwnd -TabIndex 0
+    Invoke-TabIndexActivation -HostHwnd $hostHwnd -TabIndex 0 -Deadline $deadline -Process $process
 
-    Wait-Until -Deadline $deadline -Description 'shell ready file' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'shell ready file' -Process $process -Condition {
         Test-Path -LiteralPath $readyPath
     }
 
@@ -700,14 +672,14 @@ try {
     Promote-WindowForCapture -Hwnd $hostHwnd
     Save-WindowCapture -Hwnd $surfaceHwnd -Path $beforeCapturePath
 
-    Send-Line -Hwnd $surfaceHwnd -Text 'echo READY>interactive-win11-shell-command-live-control.txt'
-    Wait-Until -Deadline $deadline -Description 'control output file' -Process $process -Condition {
+    Send-Line -Hwnd $surfaceHwnd -Text 'echo READY>interactive-win11-shell-command-live-control.txt' -Deadline $deadline -Process $process
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'control output file' -Process $process -Condition {
         Test-Path -LiteralPath $controlPath
     }
     Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
 
-    Send-Line -Hwnd $surfaceHwnd -Text 'where winghostty>interactive-win11-shell-command-live-resolved.txt'
-    Wait-Until -Deadline $deadline -Description 'command resolution file' -Process $process -Condition {
+    Send-Line -Hwnd $surfaceHwnd -Text 'where winghostty>interactive-win11-shell-command-live-resolved.txt' -Deadline $deadline -Process $process
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'command resolution file' -Process $process -Condition {
         Test-Path -LiteralPath $resolvedPath
     }
     Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
@@ -726,7 +698,7 @@ try {
         throw "live shell resolved unexpected first winghostty command: $($resolved[0]) (expected same install dir as $exePath)"
     }
 
-    Send-Line -Hwnd $surfaceHwnd -Text ("{0} & echo POST>interactive-win11-shell-command-live-post.txt" -f $typedCommandText)
+    Send-Line -Hwnd $surfaceHwnd -Text ("{0} & echo POST>interactive-win11-shell-command-live-post.txt" -f $typedCommandText) -Deadline $deadline -Process $process
     Start-Sleep -Milliseconds $POST_COMMAND_CAPTURE_SETTLE_MS
     Promote-WindowForCapture -Hwnd $hostHwnd
     Save-WindowCapture -Hwnd $surfaceHwnd -Path $afterCapturePath
@@ -735,7 +707,7 @@ try {
         throw "live shell command '$typedCommandText' produced too little visible change (changed=$($imageDelta.ChangedPixels), sampled=$($imageDelta.SampledPixels))"
     }
 
-    Wait-Until -Deadline $deadline -Description 'post output file' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'post output file' -Process $process -Condition {
         Test-Path -LiteralPath $postPath
     }
 

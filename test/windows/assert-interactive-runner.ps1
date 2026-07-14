@@ -79,9 +79,14 @@ try {
     if ($identity.IsSystem) { throw 'Interactive runner must not run as LocalSystem.' }
     if ($inputDesktop -ne 'Default') { throw "Interactive runner input desktop must be Default; got '$inputDesktop'." }
 
+    $expectedCommit = if ([string]::IsNullOrWhiteSpace($env:WINGHOSTTY_EXPECTED_CHECKOUT_SHA)) {
+        $env:GITHUB_SHA
+    } else {
+        $env:WINGHOSTTY_EXPECTED_CHECKOUT_SHA
+    }
     $checkedOutCommit = (& git -C $env:GITHUB_WORKSPACE rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $checkedOutCommit -ne $env:GITHUB_SHA) {
-        throw "Interactive runner checkout $checkedOutCommit does not match GITHUB_SHA $($env:GITHUB_SHA)."
+    if ($LASTEXITCODE -ne 0 -or $checkedOutCommit -ne $expectedCommit) {
+        throw "Interactive runner checkout $checkedOutCommit does not match expected commit $expectedCommit."
     }
 
     $explorer = @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $processSession)
@@ -105,7 +110,9 @@ try {
         workflow = $env:GITHUB_WORKFLOW
         run_id = $env:GITHUB_RUN_ID
         run_attempt = $env:GITHUB_RUN_ATTEMPT
-        commit = $env:GITHUB_SHA
+        commit = $expectedCommit
+        checked_out_commit = $checkedOutCommit
+        github_sha = $env:GITHUB_SHA
     }
     if ($OutputPath) {
         $parent = Split-Path -Parent $OutputPath

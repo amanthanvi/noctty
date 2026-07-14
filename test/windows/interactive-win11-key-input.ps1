@@ -43,27 +43,6 @@ public static class Win11KeyInputNative {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct INPUT {
-        public uint type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct InputUnion {
-        [FieldOffset(0)]
-        public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KEYBDINPUT {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
         public int Top;
@@ -108,22 +87,12 @@ public static class Win11KeyInputNative {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
     [DllImport("user32.dll")]
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 }
 '@
-Add-Type -AssemblyName Microsoft.VisualBasic
 
-$INPUT_KEYBOARD = 1
-$KEYEVENTF_KEYUP = 0x0002
 $MAPVK_VK_TO_VSC = 0
-$SMTO_ABORTIFHUNG = 0x0002
 $SW_RESTORE = 9
 $VK_A = 0x41
 $VK_ESCAPE = 0x1B
@@ -191,29 +160,6 @@ function Find-SurfaceWindow {
     return $script:Win11KeyInputFoundSurface
 }
 
-function Wait-Until {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Condition,
-        [Parameter(Mandatory)] [string] $Description,
-        [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
-    )
-
-    while ([DateTime]::UtcNow -lt $Deadline) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
-        }
-
-        if (& $Condition) {
-            return
-        }
-
-        Start-Sleep -Milliseconds 100
-    }
-
-    throw "Timed out waiting for $Description"
-}
-
 function Get-GuiThreadInfo {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd
@@ -253,44 +199,13 @@ function New-KeyLParam {
     return [IntPtr] $bits
 }
 
-function Send-VirtualKey {
-    param(
-        [Parameter(Mandatory)] [UInt16] $VirtualKey
-    )
-
-    $scanCode = [Win11KeyInputNative]::MapVirtualKeyW([uint32] $VirtualKey, [uint32] $MAPVK_VK_TO_VSC)
-    if ($scanCode -eq 0) {
-        throw "MapVirtualKeyW returned 0 for VK=$VirtualKey"
-    }
-
-    $inputs = [Win11KeyInputNative+INPUT[]]::new(2)
-
-    $inputs[0].type = $INPUT_KEYBOARD
-    $inputs[0].U.ki.wVk = $VirtualKey
-    $inputs[0].U.ki.wScan = [uint16] $scanCode
-    $inputs[0].U.ki.dwFlags = 0
-
-    $inputs[1].type = $INPUT_KEYBOARD
-    $inputs[1].U.ki.wVk = $VirtualKey
-    $inputs[1].U.ki.wScan = [uint16] $scanCode
-    $inputs[1].U.ki.dwFlags = $KEYEVENTF_KEYUP
-
-    $sent = [Win11KeyInputNative]::SendInput(
-        [uint32] $inputs.Length,
-        $inputs,
-        [Runtime.InteropServices.Marshal]::SizeOf([type] [Win11KeyInputNative+INPUT])
-    )
-    if ($sent -ne $inputs.Length) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendInput sent $sent/$($inputs.Length) events (Win32 error $lastError)"
-    }
-}
-
 function Send-VirtualKeyMessage {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
         [Parameter(Mandatory)] [UInt16] $VirtualKey,
-        [UInt16] $CharCode = 0
+        [UInt16] $CharCode = 0,
+        [Parameter(Mandatory)] [DateTime] $Deadline,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process
     )
 
     $scanCode = [Win11KeyInputNative]::MapVirtualKeyW([uint32] $VirtualKey, [uint32] $MAPVK_VK_TO_VSC)
@@ -298,51 +213,32 @@ function Send-VirtualKeyMessage {
         throw "MapVirtualKeyW returned 0 for VK=$VirtualKey"
     }
 
-    $sendTimeoutMs = 1000
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $WM_KEYDOWN,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode ([uint16] $scanCode)),
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $sendTimeoutMs,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for WM_KEYDOWN (hwnd=$Hwnd, vk=$VirtualKey, error=$lastError)"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $WM_KEYDOWN `
+        -WParam ([UIntPtr]([uint64] $VirtualKey)) `
+        -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode)) `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description "WM_KEYDOWN vk=$VirtualKey")
     if ($CharCode -ne 0) {
-        $sendResult = [UIntPtr]::Zero
-        $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-            $Hwnd,
-            $WM_CHAR,
-            [UIntPtr]([uint64] $CharCode),
-            (New-KeyLParam -ScanCode ([uint16] $scanCode)),
-            [uint32] $SMTO_ABORTIFHUNG,
-            [uint32] $sendTimeoutMs,
-            [ref] $sendResult
-        )
-        if ($sendStatus -eq [IntPtr]::Zero) {
-            $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            throw "SendMessageTimeoutW failed for WM_CHAR (hwnd=$Hwnd, char=$CharCode, error=$lastError)"
-        }
+        [void](Invoke-InteractiveWin11Message `
+            -Hwnd $Hwnd `
+            -Message $WM_CHAR `
+            -WParam ([UIntPtr]([uint64] $CharCode)) `
+            -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode)) `
+            -Deadline $Deadline `
+            -Process $Process `
+            -Description "WM_CHAR char=$CharCode")
     }
-    $sendResult = [UIntPtr]::Zero
-    $sendStatus = [Win11KeyInputNative]::SendMessageTimeoutW(
-        $Hwnd,
-        $WM_KEYUP,
-        [UIntPtr]([uint64] $VirtualKey),
-        (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp),
-        [uint32] $SMTO_ABORTIFHUNG,
-        [uint32] $sendTimeoutMs,
-        [ref] $sendResult
-    )
-    if ($sendStatus -eq [IntPtr]::Zero) {
-        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "SendMessageTimeoutW failed for WM_KEYUP (hwnd=$Hwnd, vk=$VirtualKey, error=$lastError)"
-    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $Hwnd `
+        -Message $WM_KEYUP `
+        -WParam ([UIntPtr]([uint64] $VirtualKey)) `
+        -LParam (New-KeyLParam -ScanCode ([uint16] $scanCode) -KeyUp) `
+        -Deadline $Deadline `
+        -Process $Process `
+        -Description "WM_KEYUP vk=$VirtualKey")
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'key-input' -ResetState:$ResetState -IncludeResourcesDir
@@ -439,10 +335,11 @@ $process = Start-Process -FilePath $exePath `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -PassThru
+$keyInputProcessHandle = $process.Handle
 
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    Wait-Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
         (Find-HostWindow -ProcessId $process.Id) -ne [IntPtr]::Zero
     }
 
@@ -450,7 +347,7 @@ try {
     [void] [Win11KeyInputNative]::ShowWindow($hostHwnd, $SW_RESTORE)
     [void] [Win11KeyInputNative]::SetForegroundWindow($hostHwnd)
 
-    Wait-Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
 
@@ -461,7 +358,7 @@ try {
 
     if ($RunBooFirst) {
         try {
-            Wait-Until -Deadline $deadline -Description 'post-boo readiness file' -Process $process -Condition {
+            Wait-InteractiveWin11Until -Deadline $deadline -Description 'post-boo readiness file' -Process $process -Condition {
                 Test-Path -LiteralPath $preReadKeyReadyPath
             }
         }
@@ -492,13 +389,44 @@ try {
         Start-Sleep -Milliseconds 300
     }
 
-    Send-VirtualKeyMessage -Hwnd $messageTargetHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode)
+    Send-VirtualKeyMessage -Hwnd $messageTargetHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode) -Deadline $deadline -Process $process
 
-    Wait-Until -Deadline $deadline -Description 'key input result file' -Process $process -Condition {
-        Test-Path -LiteralPath $resultPath
+    $resultRef = [ref]$null
+    $lastResultReadError = [ref]'result file has not appeared'
+    $lastResultContent = [ref]'<missing>'
+    $keyInputProcess = $process
+    try {
+        Wait-InteractiveWin11Until -Deadline $deadline -Description 'key input result file' -Condition {
+            if (Test-Path -LiteralPath $resultPath) {
+                try {
+                    $content = Get-Content -LiteralPath $resultPath -Raw
+                    $contentText = if ($null -eq $content) { '' } else { [string]$content }
+                    $contentText = $contentText -replace '\s+', ' '
+                    $lastResultContent.Value = if ($contentText.Length -gt 240) { $contentText.Substring(0, 240) + '...' } elseif ($contentText.Length -eq 0) { '<empty>' } else { $contentText }
+                    $parsed = $content | ConvertFrom-Json
+                    if ($null -ne $parsed) {
+                        $resultRef.Value = $parsed
+                        return $true
+                    }
+                    $lastResultReadError.Value = 'JSON parsed to null'
+                }
+                catch {
+                    $lastResultReadError.Value = $_.Exception.Message
+                }
+            }
+            $keyInputProcess.Refresh()
+            if ($keyInputProcess.HasExited) {
+                $exitCode = Get-InteractiveWin11ProcessExitCode -Process $keyInputProcess -ProcessHandle $keyInputProcessHandle
+                throw "winghostty exited while waiting for key input result file (exit code $exitCode)"
+            }
+            return $false
+        }
+    }
+    catch {
+        throw "$($_.Exception.Message) (last result read error='$($lastResultReadError.Value)', content='$($lastResultContent.Value)')"
     }
 
-    $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    $result = $resultRef.Value
     if ($result.keyCharCode -ne $expectedKeyCharCode -or $result.key -ne $expectedKeyName) {
         throw "unexpected key input result (mode=$deliveryMode): $($result | ConvertTo-Json -Compress)"
     }

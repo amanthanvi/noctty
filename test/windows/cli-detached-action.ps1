@@ -15,6 +15,7 @@ if ($TimeoutSeconds -le 0) {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $exePath = if ($ExePath) { $ExePath } else { Join-Path $repoRoot 'zig-out\bin\winghostty.exe' }
 $expectedTitle = 'winghostty CLI action failed'
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 
 if (-not (Test-Path $exePath)) {
     throw "Missing built executable: $exePath. Run `zig build -Demit-exe=true` first."
@@ -44,36 +45,12 @@ using System.Text;
 
 public static class DetachedCliActionNative {
     [DllImport("user32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool PostMessageW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam);
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-
-    [DllImport("user32.dll", SetLastError=true)]
     public static extern int GetWindowTextLengthW(IntPtr hwnd);
 
     [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
     public static extern int GetWindowTextW(IntPtr hwnd, StringBuilder lpString, int nMaxCount);
 }
 "@
-}
-
-function Get-DetachedCliExitCode {
-    param([System.Diagnostics.Process] $Process)
-
-    $Process.Refresh()
-    if ($null -ne $Process.ExitCode) {
-        return [int] $Process.ExitCode
-    }
-
-    [uint32] $nativeExitCode = 0
-    if (-not [DetachedCliActionNative]::GetExitCodeProcess($Process.Handle, [ref] $nativeExitCode)) {
-        throw "Unable to read exit code for detached CLI action: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
-
-    return [int] $nativeExitCode
 }
 
 function Get-DetachedCliWindowTitle {
@@ -116,6 +93,7 @@ finally {
         Remove-Item Env:GHOSTTY_RESOURCES_DIR -ErrorAction SilentlyContinue
     }
 }
+$processHandle = $process.Handle
 
 $dialogHandle = [IntPtr]::Zero
 $observedTitle = ''
@@ -139,22 +117,38 @@ try {
 
     if ($observedTitle -ne $expectedTitle) {
         if ($process.HasExited) {
-            $exitCode = Get-DetachedCliExitCode -Process $process
+            $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
             throw "Detached CLI action exited without a visible error dialog (exit code $exitCode)."
         }
 
         throw "Detached CLI action did not expose the expected error dialog within ${TimeoutSeconds}s (observed title: '$observedTitle')."
     }
 
-    if (-not [DetachedCliActionNative]::PostMessageW($dialogHandle, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
-        throw "Unable to close detached CLI error dialog: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    $closeDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    try {
+        [void](Invoke-InteractiveWin11Message `
+            -Hwnd $dialogHandle `
+            -Message 0x0010 `
+            -Deadline $closeDeadline `
+            -Description 'WM_CLOSE detached CLI error dialog' `
+            -Flags $script:InteractiveWin11SmtoBlock `
+            -Process $process)
+    }
+    catch {
+        $sendError = $_
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            throw $sendError
+        }
+        Write-Warning "WM_CLOSE send raced detached CLI process exit: $sendError"
+    }
+    $closeProcess = $process
+    Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'detached CLI action exit' -Condition {
+        $closeProcess.Refresh()
+        $closeProcess.HasExited
     }
 
-    if (-not $process.WaitForExit(5000)) {
-        throw 'Detached CLI action did not exit after its error dialog was closed.'
-    }
-
-    $finalExitCode = Get-DetachedCliExitCode -Process $process
+    $finalExitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
     if ($finalExitCode -ne 1) {
         throw "Detached CLI action should exit with code 1 after its error dialog closes, got $finalExitCode."
     }

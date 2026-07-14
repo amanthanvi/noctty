@@ -416,6 +416,9 @@ try {
         Push-Location $repoRoot
         try {
             & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline "-Dversion-string=$Version"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Zig build failed with exit code $LASTEXITCODE."
+            }
         }
         finally {
             Pop-Location
@@ -433,9 +436,9 @@ try {
             throw "Expected build output was not found: $runtimePath"
         }
         Assert-PeMachine -PathToCheck $runtimePath -ExpectedArchitecture $Architecture
-    }
-    if ($Architecture -eq "x64") {
-        & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $exePath
+        if ($Architecture -eq "x64") {
+            & (Join-Path $repoRoot "scripts/check-windows-x64-baseline.ps1") -Path $runtimePath
+        }
     }
 
     Write-Host "Packaging phase: stage portable tree"
