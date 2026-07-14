@@ -604,11 +604,16 @@ function Stop-InteractiveWin11Process {
     )
 
     $rootProcessId = $Process.Id
-    $rootStartedAt = $Process.StartTime
+    $rootProcessHandle = [IntPtr]::Zero
+    $rootStartedAt = $null
     $rootIsLive = $false
     try {
         $Process.Refresh()
-        $rootIsLive = -not $Process.HasExited -and $Process.StartTime -eq $rootStartedAt
+        if (-not $Process.HasExited) {
+            $rootProcessHandle = $Process.Handle
+            $rootStartedAt = $Process.StartTime
+            $rootIsLive = $true
+        }
     }
     catch [System.InvalidOperationException] {
         # The root exited while its identity was being checked.
@@ -669,8 +674,20 @@ function Stop-InteractiveWin11Process {
             }
             throw 'the root exited before fallback cleanup could verify the process tree'
         }
-        $Process.Kill()
-        if (-not $Process.WaitForExit(5000)) {
+        Initialize-InteractiveWin11ProcessNative
+        $rootTerminationRequested = [InteractiveWin11ProcessNative]::TerminateProcess($rootProcessHandle, 1)
+        $terminationError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $rootExited = $Process.WaitForExit(5000)
+        if (-not $rootTerminationRequested) {
+            if ($rootExited) {
+                if (-not $RequireLiveRoot) {
+                    return
+                }
+                throw 'the root exited before fallback cleanup could verify the process tree'
+            }
+            throw "root fallback termination failed with Win32 error $terminationError; the root remained live after 5 seconds"
+        }
+        if (-not $rootExited) {
             throw 'root fallback did not stop the process within 5 seconds'
         }
         throw 'root fallback stopped the process but could not verify descendant cleanup'
@@ -767,6 +784,10 @@ public static class InteractiveWin11ProcessNative {
     [DllImport("kernel32.dll", SetLastError=true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 }
 "@
     }
