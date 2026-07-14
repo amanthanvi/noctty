@@ -104,6 +104,26 @@ function Get-YamlStepText {
     $match.Value
 }
 
+function Get-YamlLiteralRunScript {
+    param(
+        [Parameter(Mandatory)] [string] $Content,
+        [Parameter(Mandatory)] [string] $Source
+    )
+
+    $match = [regex]::Match($Content, '(?ms)^        run:[ \t]*\|[ \t]*\r?\n(?<body>.*)\z')
+    if (-not $match.Success) { throw "Literal workflow run block not found: $Source" }
+    $scriptLines = @(
+        foreach ($line in ($match.Groups['body'].Value -split '\r?\n')) {
+            if ($line.Length -eq 0) { ''; continue }
+            if (-not $line.StartsWith('          ', [StringComparison]::Ordinal)) {
+                throw "Literal workflow run block has unexpected indentation: $Source"
+            }
+            $line.Substring(10)
+        }
+    )
+    ($scriptLines -join "`n").TrimEnd([char[]]"`n")
+}
+
 function Get-PowerShellBlockText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -1999,14 +2019,39 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+$interactiveRunStep = Get-YamlStepText `
+    -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
+    -Name 'Run interactive Win11 composite' `
+    -Source "$testWorkflow :: windows-interactive"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
-        -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
-        -Name 'Run interactive Win11 composite' `
-        -Source "$testWorkflow :: windows-interactive") `
+    -Content $interactiveRunStep `
     -Pattern '(?ms)env:\s+ZIG_GLOBAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-global-cache\s+ZIG_LOCAL_CACHE_DIR: \$\{\{ runner\.temp \}\}\\zig-local-cache' `
     -Description 'interactive builds use clean per-job Zig caches' `
     -Context "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+$interactiveRunScript = Get-YamlLiteralRunScript `
+    -Content $interactiveRunStep `
+    -Source "$testWorkflow :: windows-interactive :: Run interactive Win11 composite"
+$expectedInteractiveRunScript = @'
+$ErrorActionPreference = 'Stop'
+$quick = '${{ github.event_name }}' -eq 'pull_request'
+if ($quick) {
+  ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+  ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-session-restore.ps1 -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+'@
+$expectedInteractiveRunScript = ($expectedInteractiveRunScript -replace '\r\n?', "`n").TrimEnd([char[]]"`n")
+if ($interactiveRunScript -cne $expectedInteractiveRunScript) {
+    throw 'Interactive workflow run script drifted from its exact fail-closed source snapshot.'
+}
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
     -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
