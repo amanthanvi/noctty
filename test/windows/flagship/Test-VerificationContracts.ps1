@@ -758,6 +758,180 @@ Assert-TextContract `
     -Pattern ([regex]::Escape('public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);')) `
     -Description 'native root fallback termination declaration' `
     -Context $interactiveWin11Lib
+$expectedCliShellHarnessText = @'
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('cmd', 'powershell')]
+    [string] $Shell,
+
+    [Parameter(Mandatory = $true)]
+    [string[]] $Arguments,
+
+    [Parameter(Mandatory = $true)]
+    [string] $ExpectedText,
+
+    [int] $ExpectedExitCode = 0,
+
+    [string] $BinDir
+)
+
+$ErrorActionPreference = 'Stop'
+
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+
+function Format-CmdArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+
+    $escaped = $Argument.Replace('%', '%%').Replace('"', '""')
+    if ($escaped -match '[\s"&|<>()^!]') {
+        return '"' + $escaped + '"'
+    }
+
+    return $escaped
+}
+
+function Format-PowerShellLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string] $Argument
+    )
+
+    return "'" + $Argument.Replace("'", "''") + "'"
+}
+
+$binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
+$guiExe = Join-Path $binDir 'winghostty.exe'
+$commandExe = Join-Path $binDir 'winghostty.com'
+$cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+$powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+
+foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
+    if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+    }
+}
+
+$envPath = "$binDir;$env:PATH"
+$argsDisplay = [string]::Join(' ', $Arguments)
+$shellLauncherTimeoutSeconds = 30
+
+switch ($Shell) {
+    'cmd' {
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
+        if ($LASTEXITCODE -ne 0) {
+            throw "cmd could not resolve winghostty from PATH."
+        }
+        $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
+        if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
+        }
+
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        try {
+            $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            @(
+                '@echo off'
+                "set `"PATH=$envPath`""
+                $cmdCommand
+            ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
+
+            $output = & $cmdExe /d /c $payloadPath 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue
+        }
+    }
+
+    'powershell' {
+        $oldPath = $env:PATH
+        $env:PATH = $envPath
+        try {
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
+            if ($LASTEXITCODE -ne 0) {
+                throw "PowerShell could not resolve winghostty from PATH."
+            }
+            $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
+            if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
+            }
+
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            try {
+                $env:PATH = $envPath
+                $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
+                @(
+                    '$argsList = @(' + $argLiterals + ')'
+                    '$output = & winghostty @argsList | Out-String'
+                    '$exitCode = $LASTEXITCODE'
+                    '[Console]::Out.Write($output)'
+                    'exit $exitCode'
+                ) | Set-Content -LiteralPath $payloadPath -Encoding UTF8
+
+                $process = Start-Process `
+                    -FilePath $powershellExe `
+                    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $payloadPath) `
+                    -RedirectStandardOutput $stdoutPath `
+                    -RedirectStandardError $stderrPath `
+                    -WindowStyle Hidden `
+                    -PassThru
+                $processHandle = $process.Handle
+                if (-not $process.WaitForExit($shellLauncherTimeoutSeconds * 1000)) {
+                    Stop-InteractiveWin11Process -Process $process -RequireLiveRoot
+                    throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."
+                }
+
+                $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
+                $stdoutText = if (Test-Path -LiteralPath $stdoutPath) {
+                    Get-Content -LiteralPath $stdoutPath -Raw
+                } else {
+                    ''
+                }
+                $stderrText = if (Test-Path -LiteralPath $stderrPath) {
+                    Get-Content -LiteralPath $stderrPath -Raw
+                } else {
+                    ''
+                }
+                $output = $stdoutText + $stderrText
+            }
+            finally {
+                Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            $env:PATH = $oldPath
+        }
+    }
+}
+
+if ($exitCode -ne $ExpectedExitCode) {
+    throw "$Shell shell launcher should exit with code $ExpectedExitCode, got $exitCode."
+}
+
+$outputText = if ($output -is [string]) { $output } else { ($output | Out-String) }
+if (-not $outputText.Contains($ExpectedText)) {
+    throw "$Shell shell launcher output did not contain expected text '$ExpectedText'."
+}
+
+Write-Host "shell launcher validation: PASS (shell=$Shell, args=$argsDisplay)"
+'@
+if ((($cliShellHarnessText -replace "\r\n?", "`n") -replace '\n+\z', '') -cne
+    (($expectedCliShellHarnessText -replace "\r\n?", "`n") -replace '\n+\z', '')) {
+    throw 'CLI shell harness must match its complete reviewed source snapshot.'
+}
 $cliShellTokens = $null
 $cliShellErrors = $null
 $cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -765,209 +939,13 @@ $cliShellAst = [System.Management.Automation.Language.Parser]::ParseInput(
     [ref]$cliShellTokens,
     [ref]$cliShellErrors
 )
-$cliShellFunctionDefinitions = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
-}, $true))
-$cliShellUsingModules = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.UsingStatementAst] -and
-        $node.UsingStatementKind.ToString() -eq 'Module'
-}, $true))
-$cliShellRequiredModules = if ($null -eq $cliShellAst.ScriptRequirements) {
-    @()
-} else {
-    @($cliShellAst.ScriptRequirements.RequiredModules)
-}
-$cliShellPathAssignments = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        $node.Left.VariablePath.UserPath -in @('envPath', 'oldPath', 'env:PATH')
-}, $true))
-$cliShellTemporaryPathAssignments = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        $node.Left.VariablePath.UserPath -in @('payloadPath', 'stdoutPath', 'stderrPath')
-}, $true))
-$cliShellForbiddenProviderCommands = @($cliShellAst.FindAll({
-    param($node)
-    if ($node -isnot [System.Management.Automation.Language.CommandAst]) { return $false }
-    $name = $node.GetCommandName()
-    $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-    return $leafName -in @(
-        'Set-Item', 'si', 'New-Item', 'ni', 'Move-Item', 'mi', 'mv',
-        'Copy-Item', 'cpi', 'cp', 'Rename-Item', 'rni', 'Clear-Item', 'cli',
-        'Set-Variable', 'sv', 'New-Variable', 'nv', 'Remove-Variable', 'rv',
-        'Clear-Variable', 'clv', 'Add-Content', 'ac', 'Clear-Content', 'clc',
-        'Out-File', 'Tee-Object', 'tee', 'sc', 'rm', 'ri', 'del', 'erase',
-        'rd', 'rmdir'
-    )
-}, $true))
-$cliShellAllowedProviderCommands = @($cliShellAst.FindAll({
-    param($node)
-    if ($node -isnot [System.Management.Automation.Language.CommandAst]) { return $false }
-    $name = $node.GetCommandName()
-    $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-    return $leafName -in @('Set-Content', 'Remove-Item')
-}, $true))
-$cliShellTimeoutAssignments = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text.Trim() -eq '$shellLauncherTimeoutSeconds'
-}, $true))
-$cliShellSwitches = @($cliShellAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.SwitchStatementAst] -and
-        $node.Condition.Extent.Text.Trim() -eq '$Shell'
-}, $true))
-$cliShellPowerShellClauseIndexes = if ($cliShellSwitches.Count -eq 1) {
-    @(for ($i = 0; $i -lt $cliShellSwitches[0].Clauses.Count; $i++) {
-        if ($cliShellSwitches[0].Clauses[$i].Item1.Extent.Text.Trim() -eq "'powershell'") { $i }
-    })
-} else { @() }
-$cliShellPowerShellClauseIndex = if ($cliShellPowerShellClauseIndexes.Count -eq 1) {
-    [int] $cliShellPowerShellClauseIndexes[0]
-} else { -1 }
-$cliShellStartProcessAssignments = if ($cliShellPowerShellClauseIndex -ge 0) {
-    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
-        param($node)
-            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text.Trim() -eq '$process' -and
-            $node.Right -is [System.Management.Automation.Language.PipelineAst] -and
-            $node.Right.PipelineElements.Count -eq 1 -and
-            $node.Right.PipelineElements[0] -is [System.Management.Automation.Language.CommandAst] -and
-            $node.Right.PipelineElements[0].GetCommandName() -eq 'Start-Process'
-    }, $true))
-} else { @() }
-$cliShellWaitForExitCalls = if ($cliShellPowerShellClauseIndex -ge 0) {
-    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
-            $node.Member.Extent.Text.Trim() -eq 'WaitForExit'
-    }, $true))
-} else { @() }
-$cliShellTimeoutIfs = if ($cliShellPowerShellClauseIndex -ge 0) {
-    @($cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text -match '^if \(-not \$process\.WaitForExit\(\$shellLauncherTimeoutSeconds \* 1000\)\)'
-    }, $true))
-} else { @() }
-$cliShellTimeoutStatements = if ($cliShellTimeoutIfs.Count -eq 1) {
-    @($cliShellTimeoutIfs[0].Clauses[0].Item2.Statements)
-} else { @() }
-$cliShellLauncherBlockShared = $cliShellStartProcessAssignments.Count -eq 1 -and
-    $cliShellTimeoutIfs.Count -eq 1 -and
-    [Object]::ReferenceEquals($cliShellStartProcessAssignments[0].Parent, $cliShellTimeoutIfs[0].Parent)
-$cliShellLauncherStatements = if ($cliShellLauncherBlockShared) {
-    @($cliShellStartProcessAssignments[0].Parent.Statements)
-} else { @() }
-$cliShellTopLevelShared = $cliShellTimeoutAssignments.Count -eq 1 -and
-    $cliShellSwitches.Count -eq 1 -and
-    [Object]::ReferenceEquals($cliShellTimeoutAssignments[0].Parent, $cliShellSwitches[0].Parent) -and
-    [Object]::ReferenceEquals($cliShellTimeoutAssignments[0].Parent, $cliShellAst.EndBlock)
-$cliShellTopLevelStatements = if ($cliShellTopLevelShared) {
-    @($cliShellAst.EndBlock.Statements)
-} else { @() }
-$cliShellStartProcessIndex = -1
-$cliShellTimeoutIndex = -1
-$cliShellTimeoutAssignmentIndex = -1
-$cliShellSwitchIndex = -1
-for ($i = 0; $i -lt $cliShellLauncherStatements.Count; $i++) {
-    if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellStartProcessAssignments[0])) {
-        $cliShellStartProcessIndex = $i
-    }
-    if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellTimeoutIfs[0])) {
-        $cliShellTimeoutIndex = $i
-    }
-}
-for ($i = 0; $i -lt $cliShellTopLevelStatements.Count; $i++) {
-    if ([Object]::ReferenceEquals($cliShellTopLevelStatements[$i], $cliShellTimeoutAssignments[0])) {
-        $cliShellTimeoutAssignmentIndex = $i
-    }
-    if ([Object]::ReferenceEquals($cliShellTopLevelStatements[$i], $cliShellSwitches[0])) {
-        $cliShellSwitchIndex = $i
-    }
-}
-if ($cliShellErrors.Count -ne 0 -or
-    @($cliShellAst.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.TrapStatementAst]
-    }, $true)).Count -ne 0 -or
-    $cliShellFunctionDefinitions.Count -ne 2 -or
-    $cliShellFunctionDefinitions[0].Name -ne 'Format-CmdArgument' -or
-    $cliShellFunctionDefinitions[1].Name -ne 'Format-PowerShellLiteral' -or
-    $cliShellUsingModules.Count -ne 0 -or
-    $cliShellRequiredModules.Count -ne 0 -or
-    $cliShellHarnessText -match $psSnapinRequirementPattern -or
-    $cliShellPathAssignments.Count -ne 4 -or
-    $cliShellPathAssignments[0].Extent.Text.Trim() -ne '$envPath = "$binDir;$env:PATH"' -or
-    $cliShellPathAssignments[1].Extent.Text.Trim() -ne '$oldPath = $env:PATH' -or
-    $cliShellPathAssignments[2].Extent.Text.Trim() -ne '$env:PATH = $envPath' -or
-    $cliShellPathAssignments[3].Extent.Text.Trim() -ne '$env:PATH = $oldPath' -or
-    $cliShellTemporaryPathAssignments.Count -ne 4 -or
-    $cliShellTemporaryPathAssignments[0].Extent.Text.Trim() -ne '$payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")' -or
-    $cliShellTemporaryPathAssignments[1].Extent.Text.Trim() -ne '$stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")' -or
-    $cliShellTemporaryPathAssignments[2].Extent.Text.Trim() -ne '$stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")' -or
-    $cliShellTemporaryPathAssignments[3].Extent.Text.Trim() -ne '$payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")' -or
-    $cliShellForbiddenProviderCommands.Count -ne 0 -or
-    $cliShellAllowedProviderCommands.Count -ne 4 -or
-    $cliShellAllowedProviderCommands[0].Extent.Text.Trim() -ne 'Set-Content -LiteralPath $payloadPath -Encoding ASCII' -or
-    $cliShellAllowedProviderCommands[1].Extent.Text.Trim() -ne 'Remove-Item -LiteralPath $payloadPath -ErrorAction SilentlyContinue' -or
-    $cliShellAllowedProviderCommands[2].Extent.Text.Trim() -ne 'Set-Content -LiteralPath $payloadPath -Encoding UTF8' -or
-    $cliShellAllowedProviderCommands[3].Extent.Text.Trim() -ne 'Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath -ErrorAction SilentlyContinue' -or
-    $cliShellTimeoutAssignments.Count -ne 1 -or
-    $cliShellTimeoutAssignments[0].Right.Extent.Text.Trim() -ne '30' -or
-    $cliShellSwitches.Count -ne 1 -or
-    $cliShellPowerShellClauseIndexes.Count -ne 1 -or
-    $cliShellStartProcessAssignments.Count -ne 1 -or
-    $cliShellWaitForExitCalls.Count -ne 1 -or
-    $cliShellTimeoutIfs.Count -ne 1 -or
-    $cliShellTimeoutIfs[0].Clauses.Count -ne 1 -or
-    $null -ne $cliShellTimeoutIfs[0].ElseClause -or
-    -not $cliShellTopLevelShared -or
-    $cliShellTimeoutAssignmentIndex -lt 0 -or
-    $cliShellSwitchIndex -ne ($cliShellTimeoutAssignmentIndex + 1) -or
-    -not $cliShellLauncherBlockShared -or
-    $cliShellStartProcessAssignments[0].Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
-    $cliShellStartProcessAssignments[0].Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
-    -not [Object]::ReferenceEquals(
-        $cliShellStartProcessAssignments[0].Parent,
-        $cliShellStartProcessAssignments[0].Parent.Parent.Body
-    ) -or
-    $cliShellStartProcessAssignments[0].Parent.Parent.CatchClauses.Count -ne 0 -or
-    $null -eq $cliShellStartProcessAssignments[0].Parent.Parent.Finally -or
-    $cliShellStartProcessAssignments[0].Parent.Parent.Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
-    $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
-    -not [Object]::ReferenceEquals(
-        $cliShellStartProcessAssignments[0].Parent.Parent.Parent,
-        $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Body
-    ) -or
-    $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.CatchClauses.Count -ne 0 -or
-    $null -eq $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Finally -or
-    -not [Object]::ReferenceEquals(
-        $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Parent,
-        $cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2
-    ) -or
-    $cliShellStartProcessIndex -lt 0 -or
-    $cliShellTimeoutIndex -ne ($cliShellStartProcessIndex + 2) -or
-    ($cliShellStartProcessIndex + 1) -ge $cliShellLauncherStatements.Count -or
-    ($cliShellTimeoutIndex + 1) -ge $cliShellLauncherStatements.Count -or
-    $cliShellLauncherStatements[$cliShellStartProcessIndex + 1].Extent.Text.Trim() -ne '$processHandle = $process.Handle' -or
-    $cliShellLauncherStatements[$cliShellTimeoutIndex + 1].Extent.Text.Trim() -ne '$exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle' -or
-    $cliShellTimeoutStatements.Count -ne 2 -or
-    $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-InteractiveWin11Process -Process $process -RequireLiveRoot' -or
-    $cliShellTimeoutStatements[1].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
-    throw 'The live PowerShell shell launcher must use one hosted-cold-start timeout and fail explicitly after bounded process-tree cleanup.'
-}
+if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without errors.' }
 Assert-CommandResolutionContract -Ast $cliShellAst -Context $cliShellHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
-    '& cmd /d /c "set ""PATH=$envPath""&& where winghostty"'
-    '& cmd /d /c $payloadPath 2>&1'
-    '& powershell.exe -NoProfile -Command "(Get-Command winghostty).Source"'
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
+    '& $cmdExe /d /c $payloadPath 2>&1'
+    '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
 )
 $accessibilityTokens = $null
 $accessibilityErrors = $null

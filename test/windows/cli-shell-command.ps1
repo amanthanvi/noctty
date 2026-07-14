@@ -48,15 +48,16 @@ function Format-PowerShellLiteral {
     return "'" + $Argument.Replace("'", "''") + "'"
 }
 
-$binDir = if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }
+$binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
 $guiExe = Join-Path $binDir 'winghostty.exe'
 $commandExe = Join-Path $binDir 'winghostty.com'
+$cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+$powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
-if (-not (Test-Path $guiExe)) {
-    throw "Missing built executable: $guiExe. Run `zig build -Demit-exe=true` first."
-}
-if (-not (Test-Path $commandExe)) {
-    throw "Missing shell launcher: $commandExe. Run `zig build -Demit-exe=true` first."
+foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
+    if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+    }
 }
 
 $envPath = "$binDir;$env:PATH"
@@ -65,12 +66,13 @@ $shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & cmd /d /c "set ""PATH=$envPath""&& where winghostty"
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
         if ($LASTEXITCODE -ne 0) {
             throw "cmd could not resolve winghostty from PATH."
         }
-        if (-not ($resolved | Select-Object -First 1 | ForEach-Object { $_.ToLowerInvariant().EndsWith('winghostty.com') })) {
-            throw "cmd resolved winghostty to the wrong artifact: $($resolved | Select-Object -First 1)"
+        $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
+        if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
         }
 
         $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
@@ -83,7 +85,7 @@ switch ($Shell) {
                 $cmdCommand
             ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
-            $output = & cmd /d /c $payloadPath 2>&1 | Out-String
+            $output = & $cmdExe /d /c $payloadPath 2>&1 | Out-String
             $exitCode = $LASTEXITCODE
         }
         finally {
@@ -95,18 +97,20 @@ switch ($Shell) {
         $oldPath = $env:PATH
         $env:PATH = $envPath
         try {
-            $resolved = & powershell.exe -NoProfile -Command "(Get-Command winghostty).Source"
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
             if ($LASTEXITCODE -ne 0) {
                 throw "PowerShell could not resolve winghostty from PATH."
             }
-            if (-not $resolved.ToLowerInvariant().EndsWith('winghostty.com')) {
-                throw "PowerShell resolved winghostty to the wrong artifact: $resolved"
+            $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
+            if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
             }
 
             $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
             $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
             $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
+                $env:PATH = $envPath
                 $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
                 @(
                     '$argsList = @(' + $argLiterals + ')'
@@ -117,7 +121,7 @@ switch ($Shell) {
                 ) | Set-Content -LiteralPath $payloadPath -Encoding UTF8
 
                 $process = Start-Process `
-                    -FilePath powershell.exe `
+                    -FilePath $powershellExe `
                     -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $payloadPath) `
                     -RedirectStandardOutput $stdoutPath `
                     -RedirectStandardError $stderrPath `
