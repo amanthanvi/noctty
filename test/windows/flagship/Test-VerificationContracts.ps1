@@ -608,6 +608,22 @@ $cliShellTimeoutIfs = if ($cliShellPowerShellClauseIndex -ge 0) {
 $cliShellTimeoutStatements = if ($cliShellTimeoutIfs.Count -eq 1) {
     @($cliShellTimeoutIfs[0].Clauses[0].Item2.Statements)
 } else { @() }
+$cliShellLauncherBlockShared = $cliShellStartProcessAssignments.Count -eq 1 -and
+    $cliShellTimeoutIfs.Count -eq 1 -and
+    [Object]::ReferenceEquals($cliShellStartProcessAssignments[0].Parent, $cliShellTimeoutIfs[0].Parent)
+$cliShellLauncherStatements = if ($cliShellLauncherBlockShared) {
+    @($cliShellStartProcessAssignments[0].Parent.Statements)
+} else { @() }
+$cliShellStartProcessIndex = -1
+$cliShellTimeoutIndex = -1
+for ($i = 0; $i -lt $cliShellLauncherStatements.Count; $i++) {
+    if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellStartProcessAssignments[0])) {
+        $cliShellStartProcessIndex = $i
+    }
+    if ([Object]::ReferenceEquals($cliShellLauncherStatements[$i], $cliShellTimeoutIfs[0])) {
+        $cliShellTimeoutIndex = $i
+    }
+}
 if ($cliShellErrors.Count -ne 0 -or
     $cliShellTimeoutAssignments.Count -ne 1 -or
     $cliShellSwitches.Count -ne 1 -or
@@ -615,6 +631,19 @@ if ($cliShellErrors.Count -ne 0 -or
     $cliShellStartProcessAssignments.Count -ne 1 -or
     $cliShellWaitForExitCalls.Count -ne 1 -or
     $cliShellTimeoutIfs.Count -ne 1 -or
+    -not $cliShellLauncherBlockShared -or
+    $cliShellStartProcessAssignments[0].Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+    $cliShellStartProcessAssignments[0].Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    $cliShellStartProcessAssignments[0].Parent.Parent.Parent -isnot [System.Management.Automation.Language.StatementBlockAst] -or
+    $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent -isnot [System.Management.Automation.Language.TryStatementAst] -or
+    -not [Object]::ReferenceEquals(
+        $cliShellStartProcessAssignments[0].Parent.Parent.Parent.Parent.Parent,
+        $cliShellSwitches[0].Clauses[$cliShellPowerShellClauseIndex].Item2
+    ) -or
+    $cliShellStartProcessIndex -lt 0 -or
+    $cliShellTimeoutIndex -ne ($cliShellStartProcessIndex + 2) -or
+    $cliShellLauncherStatements[$cliShellStartProcessIndex + 1].Extent.Text.Trim() -ne '$processHandle = $process.Handle' -or
+    $cliShellLauncherStatements[$cliShellTimeoutIndex + 1].Extent.Text.Trim() -ne '$exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle' -or
     $cliShellTimeoutStatements.Count -ne 2 -or
     $cliShellTimeoutStatements[0].Extent.Text.Trim() -ne 'Stop-InteractiveWin11Process -Process $process' -or
     $cliShellTimeoutStatements[1].Extent.Text.Trim() -ne 'throw "Timed out waiting $shellLauncherTimeoutSeconds seconds for shell launcher process to exit."') {
