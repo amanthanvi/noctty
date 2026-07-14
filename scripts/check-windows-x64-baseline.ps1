@@ -61,22 +61,55 @@ try {
         }
 
         $stream.Position = $textSection.RawPointer
-        $text = $reader.ReadBytes($textSection.RawSize)
+        $textSize = [Math]::Min([uint64]$textSection.VirtualSize, [uint64]$textSection.RawSize)
+        if ($textSize -eq 0 -or $textSize -gt [int]::MaxValue) {
+            throw "Invalid .text section size: $textSize ($fullPath)"
+        }
+        $text = $reader.ReadBytes([int]$textSize)
+        if ($text.Length -ne $textSize) {
+            throw "Truncated .text section: expected $textSize bytes, read $($text.Length) ($fullPath)"
+        }
         $matches = [System.Collections.Generic.List[string]]::new()
 
-        for ($i = 0; $i -le $text.Length - 3; $i++) {
+        for ($i = 0; $i -le $text.Length - 4; $i++) {
             $prefix = $text[$i]
             if (($prefix -ne 0x66) -and ($prefix -ne 0xF2)) {
                 continue
             }
 
-            if (($text[$i + 1] -eq 0x0F) -and
-                (($text[$i + 2] -eq 0x78) -or ($text[$i + 2] -eq 0x79))) {
-                $rva = $textSection.VirtualAddress + $i
-                $fileOffset = $textSection.RawPointer + $i
-                $opcode = "{0:X2} {1:X2} {2:X2}" -f $text[$i], $text[$i + 1], $text[$i + 2]
-                $matches.Add(("RVA 0x{0:X8}, file offset 0x{1:X8}, opcode {2}" -f $rva, $fileOffset, $opcode))
+            $opcodeOffset = $i + 1
+            if ($text[$opcodeOffset] -ge 0x40 -and $text[$opcodeOffset] -le 0x4F) {
+                $opcodeOffset++
             }
+            if ($opcodeOffset + 2 -ge $text.Length -or
+                $text[$opcodeOffset] -ne 0x0F -or
+                $text[$opcodeOffset + 1] -notin @(0x78, 0x79)) {
+                continue
+            }
+
+            $opcodeByte = $text[$opcodeOffset + 1]
+            $modRmOffset = $opcodeOffset + 2
+            $modRm = $text[$modRmOffset]
+
+            # EXTRQ and INSERTQ operate only on XMM registers. A three-byte
+            # prefix found inside another instruction is not an SSE4a opcode.
+            if (($modRm -band 0xC0) -ne 0xC0) {
+                continue
+            }
+            # The immediate EXTRQ form is /0; other ModRM.reg values do not
+            # encode EXTRQ. Both 0x78 forms also require two immediate bytes.
+            if ($prefix -eq 0x66 -and $opcodeByte -eq 0x78 -and ($modRm -band 0x38) -ne 0) {
+                continue
+            }
+            $instructionEnd = $modRmOffset + $(if ($opcodeByte -eq 0x78) { 2 } else { 0 })
+            if ($instructionEnd -ge $text.Length) {
+                continue
+            }
+
+            $rva = $textSection.VirtualAddress + $i
+            $fileOffset = $textSection.RawPointer + $i
+            $opcode = ($text[$i..$instructionEnd] | ForEach-Object { "{0:X2}" -f $_ }) -join " "
+            $matches.Add(("RVA 0x{0:X8}, file offset 0x{1:X8}, opcode {2}" -f $rva, $fileOffset, $opcode))
         }
 
         if ($matches.Count -gt 0) {

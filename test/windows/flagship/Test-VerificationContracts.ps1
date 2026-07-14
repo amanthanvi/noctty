@@ -1564,6 +1564,8 @@ Assert-TextContract `
     -Description 'package-manager preflight invokes the WinGet architecture gate' `
     -Context "$releasePreflight :: RequirePackageManagers"
 
+& (Join-Path $root 'Test-WindowsX64Baseline.ps1')
+
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `
         -Path $baselinePath.FullName `
