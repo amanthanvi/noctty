@@ -3414,6 +3414,36 @@ pub const IncreaseCapacity = enum {
     grapheme_bytes,
     hyperlink_bytes,
     string_bytes,
+
+    /// Returns the capacity dimension that must be increased for the
+    /// given row clone error to succeed on retry, or null if the page
+    /// only needs to be rehashed at its current capacity.
+    pub fn forCloneError(err: Page.CloneFromError) ?IncreaseCapacity {
+        return switch (err) {
+            // Rehash the sets
+            error.StyleSetNeedsRehash,
+            error.HyperlinkSetNeedsRehash,
+            => null,
+
+            // Increase style memory
+            error.StyleSetOutOfMemory,
+            => .styles,
+
+            // Increase string memory
+            error.StringAllocOutOfMemory,
+            => .string_bytes,
+
+            // Increase hyperlink memory
+            error.HyperlinkSetOutOfMemory,
+            error.HyperlinkMapOutOfMemory,
+            => .hyperlink_bytes,
+
+            // Increase grapheme memory
+            error.GraphemeMapOutOfMemory,
+            error.GraphemeAllocOutOfMemory,
+            => .grapheme_bytes,
+        };
+    }
 };
 
 pub const IncreaseCapacityError = error{
@@ -3650,6 +3680,57 @@ fn destroyNodeExt(
     pool.nodes.destroy(node);
 }
 
+/// Clone the given source row into the row at `dst_y` of the given
+/// node's page, increasing the node's capacity as necessary to fit the
+/// source row's managed memory (styles, hyperlinks, etc.).
+///
+/// Since increasing capacity replaces the node in the page list, the
+/// (possibly replaced) node is returned and the caller must use it in
+/// place of the old node. The source must NOT be on the given node
+/// since the node's page memory may be freed on capacity increase.
+fn cloneRowGrowCapacity(
+    self: *PageList,
+    node: *List.Node,
+    dst_y: usize,
+    src_page: *Page,
+    src_row: *const Row,
+) *List.Node {
+    assert(src_page != &node.data);
+
+    var current = node;
+    while (true) {
+        const cur_page = &current.data;
+        const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+        cur_page.cloneRowFrom(
+            src_page,
+            &cur_rows[dst_y],
+            src_row,
+        ) catch |err| {
+            // Adjust our page capacity to make room for what we
+            // didn't have space for.
+            current = self.increaseCapacity(
+                current,
+                IncreaseCapacity.forCloneError(err),
+            ) catch |e| switch (e) {
+                // We can't gracefully recover from either of these
+                // here: our callers have already rotated rows, so
+                // returning an error would leave the page list
+                // half-mutated (and corrupt), so a crash is better.
+                error.OutOfMemory,
+                => @panic("increaseCapacity system allocator OOM"),
+
+                error.OutOfSpace,
+                => @panic("increaseCapacity OutOfSpace"),
+            };
+
+            // Retry the row copy with the increased capacity.
+            continue;
+        };
+
+        return current;
+    }
+}
+
 /// Fast-path function to erase exactly 1 row. Erasing means that the row
 /// is completely REMOVED, not just cleared. All rows following the removed
 /// row will be shifted up by 1 to fill the empty space.
@@ -3713,9 +3794,16 @@ pub fn eraseRow(
         //    5         5         5  |      6
         //    6         6         6  |      7
         //    7         7         7 <'      4
-        try node.data.cloneRowFrom(
+        //
+        // The copy may replace the destination node in order to
+        // increase its capacity. We can discard the replacement
+        // because we advance to the next node below, and the
+        // replacement is already linked in its place (so e.g. the
+        // `node.prev` access in the pin fixups below is correct).
+        _ = self.cloneRowGrowCapacity(
+            node,
+            node.data.size.rows - 1,
             &next.data,
-            &rows[node.data.size.rows - 1],
             &next_rows[0],
         );
 
@@ -3860,9 +3948,15 @@ pub fn eraseRowBounded(
     while (node.next) |next| {
         const next_rows = next.data.rows.ptr(next.data.memory.ptr);
 
-        try node.data.cloneRowFrom(
+        // The copy may replace the destination node in order to
+        // increase its capacity. We can discard the replacement
+        // because we advance to the next node below, and the
+        // replacement is already linked in its place (so e.g. the
+        // `node.prev` access in the pin fixups below is correct).
+        _ = self.cloneRowGrowCapacity(
+            node,
+            node.data.size.rows - 1,
             &next.data,
-            &rows[node.data.size.rows - 1],
             &next_rows[0],
         );
 
@@ -10235,6 +10329,227 @@ test "PageList resize trimmed rows have default state" {
         try testing.expectEqual(.none, rac.row.semantic_prompt);
         try testing.expect(rac.cell.isZero());
     }
+}
+
+test "PageList eraseRow hyperlink-dense row crosses page boundary" {
+    // Regression test: when eraseRow shifts rows up across a page
+    // boundary, the top row of the next page is cloned into the last
+    // row of the previous page. If the previous page doesn't have
+    // enough capacity for the managed memory of that row (hyperlinks,
+    // styles, etc.) the error propagated out AFTER the previous page
+    // had already been rotated and its tracked pins moved, leaving
+    // the page list half-mutated.
+    //
+    // eraseRow must instead increase the destination page's capacity
+    // and retry, the same way insertLines/deleteLines and
+    // cursorScrollAbove handle their cross-page copies.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 10, null);
+    defer s.deinit();
+
+    // Grow to two pages so our active area straddles them: the first
+    // page is exactly full and the second page holds the last 5 rows
+    // of the active area.
+    {
+        const page = &s.pages.last.?.data;
+        page.pauseIntegrityChecks(true);
+        for (0..page.capacity.rows - page.size.rows) |_| _ = try s.grow();
+        page.pauseIntegrityChecks(false);
+        try s.growRows(5);
+        try testing.expectEqual(@as(usize, 2), s.totalPages());
+        try testing.expectEqual(@as(usize, 5), s.pages.last.?.data.size.rows);
+    }
+
+    // Mark each active row with a codepoint so we can verify the
+    // shift afterwards. Row y gets codepoint '0' + y at x = 0.
+    for (0..10) |y| {
+        const row_pin = s.pin(.{ .active = .{ .y = @intCast(y) } }).?;
+        row_pin.rowAndCell().cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = @intCast('0' + y) },
+        };
+    }
+
+    // Fill the top row of the second page (active y=5) with more
+    // unique hyperlinks ('A' through 'J') than the first page's
+    // default hyperlink capacity can hold. We must increase the
+    // second page's capacity to even create such a row; the first
+    // page keeps its default capacity.
+    const link_count: usize = 10;
+    while (s.pages.last.?.data.hyperlink_set.layout.cap <= link_count) {
+        _ = try s.increaseCapacity(s.pages.last.?, .hyperlink_bytes);
+    }
+    try testing.expect(s.pages.first.?.data.hyperlink_set.layout.cap < link_count);
+    {
+        const page = &s.pages.last.?.data;
+        for (0..link_count) |x| {
+            var buf: [64]u8 = undefined;
+            const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+            const id = try page.insertHyperlink(.{
+                .id = .{ .implicit = @intCast(x) },
+                .uri = uri,
+            });
+            const rac = page.getRowAndCell(x, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = @intCast('A' + x) },
+            };
+            try page.setHyperlink(rac.row, rac.cell, id);
+            page.hyperlink_set.use(page.memory, id);
+        }
+    }
+
+    // Track a pin in the shifted region of the first page to verify
+    // it survives the capacity change of its node.
+    const p = try s.trackPin(s.pin(.{ .active = .{ .x = 3, .y = 1 } }).?);
+    defer s.untrackPin(p);
+
+    // Erase the first active row. The dense hyperlink row must cross
+    // the page boundary into the first page, which requires growing
+    // the first page's hyperlink capacity.
+    try s.eraseRow(.{ .active = .{ .y = 0 } });
+
+    // Every remaining row shifted up by one: the '0' marker row was
+    // erased, the dense row moved up across the page boundary to
+    // row 4, and the last row was cleared.
+    const expected = [10]u21{ '1', '2', '3', '4', 'A', '6', '7', '8', '9', 0 };
+    for (expected, 0..) |cp, y| {
+        const list_cell = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
+        try testing.expectEqual(cp, list_cell.cell.content.codepoint);
+    }
+
+    // Every cell of the dense row must still resolve to a real
+    // hyperlink entry with the correct URI. A half-applied erase
+    // leaves cells whose hyperlink flag is set but that have no map
+    // entry, which aborts in clearCells later.
+    for (0..link_count) |x| {
+        const list_cell = s.getCell(.{ .active = .{
+            .x = @intCast(x),
+            .y = 4,
+        } }).?;
+        try testing.expect(list_cell.cell.hyperlink);
+        const page: *Page = &list_cell.node.data;
+        const id = page.lookupHyperlink(list_cell.cell).?;
+        const link = page.hyperlink_set.get(page.memory, id);
+        var buf: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
+    }
+
+    // All pages must pass integrity checks.
+    var node_: ?*List.Node = s.pages.first;
+    while (node_) |node| : (node_ = node.next) node.data.assertIntegrity();
+
+    // Our tracked pin shifted up by one row and still points into
+    // the (possibly replaced) first page.
+    try testing.expectEqual(s.pages.first.?, p.node);
+    const p_pt = s.pointFromPin(.active, p.*).?.active;
+    try testing.expectEqual(@as(u32, 3), p_pt.x);
+    try testing.expectEqual(@as(u32, 0), p_pt.y);
+}
+
+test "PageList eraseRowBounded hyperlink-dense row crosses page boundary" {
+    // Same as the eraseRow variant above but for eraseRowBounded,
+    // which has the same rotate-then-clone structure and had the
+    // same bug: a cross-page row clone failure propagated out after
+    // the first page had already been rotated.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 10, null);
+    defer s.deinit();
+
+    // Grow to two pages so our active area straddles them: the first
+    // page is exactly full and the second page holds the last 5 rows
+    // of the active area.
+    {
+        const page = &s.pages.last.?.data;
+        page.pauseIntegrityChecks(true);
+        for (0..page.capacity.rows - page.size.rows) |_| _ = try s.grow();
+        page.pauseIntegrityChecks(false);
+        try s.growRows(5);
+        try testing.expectEqual(@as(usize, 2), s.totalPages());
+        try testing.expectEqual(@as(usize, 5), s.pages.last.?.data.size.rows);
+    }
+
+    // Mark each active row with a codepoint so we can verify the
+    // shift afterwards. Row y gets codepoint '0' + y at x = 0.
+    for (0..10) |y| {
+        const row_pin = s.pin(.{ .active = .{ .y = @intCast(y) } }).?;
+        row_pin.rowAndCell().cell.* = .{
+            .content_tag = .codepoint,
+            .content = .{ .codepoint = @intCast('0' + y) },
+        };
+    }
+
+    // Fill the top row of the second page (active y=5) with more
+    // unique hyperlinks ('A' through 'J') than the first page's
+    // default hyperlink capacity can hold. We must increase the
+    // second page's capacity to even create such a row; the first
+    // page keeps its default capacity.
+    const link_count: usize = 10;
+    while (s.pages.last.?.data.hyperlink_set.layout.cap <= link_count) {
+        _ = try s.increaseCapacity(s.pages.last.?, .hyperlink_bytes);
+    }
+    try testing.expect(s.pages.first.?.data.hyperlink_set.layout.cap < link_count);
+    {
+        const page = &s.pages.last.?.data;
+        for (0..link_count) |x| {
+            var buf: [64]u8 = undefined;
+            const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+            const id = try page.insertHyperlink(.{
+                .id = .{ .implicit = @intCast(x) },
+                .uri = uri,
+            });
+            const rac = page.getRowAndCell(x, 0);
+            rac.cell.* = .{
+                .content_tag = .codepoint,
+                .content = .{ .codepoint = @intCast('A' + x) },
+            };
+            try page.setHyperlink(rac.row, rac.cell, id);
+            page.hyperlink_set.use(page.memory, id);
+        }
+    }
+
+    // Erase the first active row with a limit that extends into the
+    // second page (5 rows remain in the first page, so a limit of 6
+    // forces the cross-page path). The dense hyperlink row must cross
+    // the page boundary into the first page.
+    try s.eraseRowBounded(.{ .active = .{ .y = 0 } }, 6);
+
+    // Rows within the limit shifted up by one: the '0' marker row was
+    // erased, the dense row moved up across the page boundary to
+    // row 4, row 6 is the new blank row, and rows past the limit are
+    // unchanged.
+    const expected = [10]u21{ '1', '2', '3', '4', 'A', '6', 0, '7', '8', '9' };
+    for (expected, 0..) |cp, y| {
+        const list_cell = s.getCell(.{ .active = .{ .y = @intCast(y) } }).?;
+        try testing.expectEqual(cp, list_cell.cell.content.codepoint);
+    }
+
+    // Every cell of the dense row must still resolve to a real
+    // hyperlink entry with the correct URI. A half-applied erase
+    // leaves cells whose hyperlink flag is set but that have no map
+    // entry, which aborts in clearCells later.
+    for (0..link_count) |x| {
+        const list_cell = s.getCell(.{ .active = .{
+            .x = @intCast(x),
+            .y = 4,
+        } }).?;
+        try testing.expect(list_cell.cell.hyperlink);
+        const page: *Page = &list_cell.node.data;
+        const id = page.lookupHyperlink(list_cell.cell).?;
+        const link = page.hyperlink_set.get(page.memory, id);
+        var buf: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&buf, "http://example.com/{d}", .{x});
+        try testing.expectEqualStrings(uri, link.uri.slice(page.memory));
+    }
+
+    // All pages must pass integrity checks.
+    var node_: ?*List.Node = s.pages.first;
+    while (node_) |node| : (node_ = node.next) node.data.assertIntegrity();
 }
 
 test "PageList clone" {
