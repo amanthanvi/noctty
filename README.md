@@ -120,8 +120,9 @@ theme       = Dracula
 Reload config without restarting: **Ctrl + Shift + ,**
 
 A few keybindings to get moving — `Ctrl+Shift+T` for a new tab,
-`Ctrl+Shift+O` / `Ctrl+Shift+E` to split, `Ctrl+Shift+C` / `Ctrl+Shift+V` for
-copy and paste. The full table, plus the rebind grammar, is in
+`Ctrl+Shift+Backslash` / `Ctrl+Shift+E` to split, `Alt+Arrow` to move between
+panes, and `Ctrl+Shift+C` / `Ctrl+Shift+V` for copy and paste. The full table,
+plus the rebind grammar, is in
 **[docs/getting-started.md](docs/getting-started.md#5-keybindings)**.
 
 ## Privacy, updates, and crashes

@@ -111,6 +111,7 @@ The defaults you'll reach for daily:
 | Close tab                | `Ctrl+Shift+W`                  |
 | Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab`   |
 | Split right / down       | `Ctrl+Shift+Backslash` / `Ctrl+Shift+E` |
+| Move between panes       | `Alt+Arrow`                     |
 | Start search             | `Ctrl+Shift+F`                  |
 | Increase / decrease font | `Ctrl+=` / `Ctrl+-`             |
 | Reload config            | `Ctrl+Shift+,`                  |

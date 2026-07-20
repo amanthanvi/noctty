@@ -7214,6 +7214,17 @@ pub const Keybinds = struct {
                 inputpkg.Binding.Action{ .new_split = case.direction },
                 entry.leaf.action,
             );
+
+            const event_entry = keybinds.set.getEvent(.{
+                .key = inputpkg.Key.fromASCII(@intCast(case.key)) orelse unreachable,
+                .mods = .{ .ctrl = true, .shift = true },
+                .unshifted_codepoint = case.key,
+            }).?.value_ptr.*;
+            try testing.expect(event_entry == .leaf);
+            try testing.expectEqual(
+                inputpkg.Binding.Action{ .new_split = case.direction },
+                event_entry.leaf.action,
+            );
         }
 
         const parsed_fallback = try inputpkg.Binding.Trigger.parse("ctrl+shift+backslash");
@@ -7226,6 +7237,15 @@ pub const Keybinds = struct {
         try testing.expectEqual(
             inputpkg.Binding.Action{ .new_split = .right },
             fallback.leaf.action,
+        );
+        const fallback_event = keybinds.set.getEvent(.{
+            .key = .backslash,
+            .mods = .{ .ctrl = true, .shift = true },
+        }).?.value_ptr.*;
+        try testing.expect(fallback_event == .leaf);
+        try testing.expectEqual(
+            inputpkg.Binding.Action{ .new_split = .right },
+            fallback_event.leaf.action,
         );
 
         const focus_cases = [_]struct {
@@ -7246,6 +7266,15 @@ pub const Keybinds = struct {
             try testing.expectEqual(
                 inputpkg.Binding.Action{ .goto_split = case.direction },
                 alt.leaf.action,
+            );
+            const alt_event = keybinds.set.getEvent(.{
+                .key = case.key,
+                .mods = .{ .alt = true },
+            }).?.value_ptr.*;
+            try testing.expect(alt_event == .leaf);
+            try testing.expectEqual(
+                inputpkg.Binding.Action{ .goto_split = case.direction },
+                alt_event.leaf.action,
             );
             try testing.expect(keybinds.set.get(.{
                 .mods = .{ .ctrl = true, .alt = true },

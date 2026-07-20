@@ -9849,7 +9849,7 @@ const Host = struct {
                 .configuration => self.showPaletteHelp("Open Settings, then Advanced, to edit the configuration file."),
                 .troubleshooting => self.showPaletteHelp("Run winghostty +diagnostic-bundle when reporting a problem."),
                 .diagnostics => self.showPaletteHelp("Run winghostty +diagnostic-bundle to export a redacted support bundle."),
-                .accessibility => self.showPaletteHelp("winghostty supports keyboard navigation and Windows UI Automation."),
+                .accessibility => self.showPaletteHelp("Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes."),
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),
         }
@@ -19732,6 +19732,39 @@ fn refocusActiveSurface(host: *Host) void {
     }
 }
 
+fn hostActivationFocusTarget(
+    mode: HostOverlayMode,
+    edit: ?HWND,
+    accept: ?HWND,
+    cancel: ?HWND,
+    surface: ?HWND,
+) ?HWND {
+    return switch (mode) {
+        .none => surface,
+        .command_palette,
+        .profile,
+        .search,
+        .surface_title,
+        .tab_title,
+        .tab_overview,
+        => edit orelse surface,
+        .confirm => accept orelse cancel orelse surface,
+    };
+}
+
+fn refocusHostAfterActivation(host: *Host) void {
+    const surface_hwnd = if (host.activeSurface()) |surface| surface.hwnd else null;
+    if (hostActivationFocusTarget(
+        host.overlay_mode,
+        host.overlay_edit_hwnd,
+        host.overlay_accept_hwnd,
+        host.overlay_cancel_hwnd,
+        surface_hwnd,
+    )) |target| {
+        _ = SetFocus(target);
+    }
+}
+
 fn postDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) bool {
     if (thread_id == 0) return false;
     return PostThreadMessageW(
@@ -20873,7 +20906,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         WM_SETFOCUS => {
             if (host) |v| {
-                refocusActiveSurface(v);
+                refocusHostAfterActivation(v);
             }
             return 0;
         },
@@ -34341,6 +34374,30 @@ test "win32 overlay dismissal restores focus only from owned controls" {
     try std.testing.expect(shouldRefocusAfterOverlayHide(list, edit, accept, cancel, list));
     try std.testing.expect(!shouldRefocusAfterOverlayHide(external, edit, accept, cancel, list));
     try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
+}
+
+test "win32 host activation keeps focus within transient UI" {
+    const edit: HWND = @ptrFromInt(0x10);
+    const accept: HWND = @ptrFromInt(0x20);
+    const cancel: HWND = @ptrFromInt(0x30);
+    const surface: HWND = @ptrFromInt(0x40);
+
+    try std.testing.expectEqual(surface, hostActivationFocusTarget(.none, edit, accept, cancel, surface).?);
+    inline for (.{
+        HostOverlayMode.command_palette,
+        HostOverlayMode.profile,
+        HostOverlayMode.search,
+        HostOverlayMode.surface_title,
+        HostOverlayMode.tab_title,
+        HostOverlayMode.tab_overview,
+    }) |mode| {
+        try std.testing.expectEqual(edit, hostActivationFocusTarget(mode, edit, accept, cancel, surface).?);
+        try std.testing.expectEqual(surface, hostActivationFocusTarget(mode, null, accept, cancel, surface).?);
+    }
+    try std.testing.expectEqual(accept, hostActivationFocusTarget(.confirm, edit, accept, cancel, surface).?);
+    try std.testing.expectEqual(cancel, hostActivationFocusTarget(.confirm, edit, null, cancel, surface).?);
+    try std.testing.expectEqual(surface, hostActivationFocusTarget(.confirm, edit, null, null, surface).?);
+    try std.testing.expect(hostActivationFocusTarget(.none, null, null, null, null) == null);
 }
 
 test "win32 buttonColorsFromTheme reflects hover and active states" {
