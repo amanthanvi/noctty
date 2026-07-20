@@ -14,7 +14,9 @@ pub const UIA_WindowControlTypeId: i32 = 50032;
 // ── Pattern IDs ────────────────────────────────────────────────────────
 
 pub const UIA_ValuePatternId: i32 = 10002;
+pub const UIA_SelectionPatternId: i32 = 10001;
 pub const UIA_TextPatternId: i32 = 10014;
+pub const UIA_TextPattern2Id: i32 = 10024;
 pub const UIA_SelectionItemPatternId: i32 = 10010;
 
 // ── Properties ──────────────────────────────────────────────────────────
@@ -41,3 +43,5 @@ pub const UIA_AutomationFocusChangedEventId: i32 = 20005;
 pub const UIA_StructureChangedEventId: i32 = 20002;
 pub const UIA_Selection_InvalidatedEventId: i32 = 20013;
 pub const UIA_SelectionItem_ElementSelectedEventId: i32 = 20012;
+pub const UIA_Text_TextChangedEventId: i32 = 20015;
+pub const UIA_Text_TextSelectionChangedEventId: i32 = 20014;

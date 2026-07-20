@@ -554,6 +554,14 @@ const WM_WINHOSTTY_WAKE = WM_APP + 1;
 const WM_WINHOSTTY_UPDATE = WM_APP + 2;
 const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
 const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
+const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
+
+const DeferredUiaDisconnect = struct {
+    ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+    retries: u8 = 0,
+};
 const PM_NOREMOVE: UINT = 0x0000;
 const WS_OVERLAPPED = 0x00000000;
 const WS_CHILD = 0x40000000;
@@ -719,6 +727,7 @@ const SCROLLBAR_TIMER_ID: UINT_PTR = 0x77684703; // "whgT3" in 32-bit hex
 const SCROLLBAR_TIMER_INTERVAL_MS: UINT = 16;
 const RESIZE_SETTLE_TIMER_ID: UINT_PTR = 0x77684704; // "whgT4" in 32-bit hex
 const RESIZE_SETTLE_TIMER_INTERVAL_MS: UINT = 16;
+const TERMINAL_UIA_TIMER_ID: UINT_PTR = 0x77684705; // "whgT5" in 32-bit hex
 const RESIZE_SETTLE_REPAINT_TICKS: u8 = 12;
 const FW_NORMAL: i32 = 400;
 const DEFAULT_CHARSET: u8 = 1;
@@ -1100,6 +1109,7 @@ extern "user32" fn ToUnicode(
     wFlags: UINT,
 ) callconv(.winapi) i32;
 extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) BOOL;
+extern "user32" fn IsDialogMessageW(hDlg: HWND, lpMsg: *MSG) callconv(.winapi) BOOL;
 extern "user32" fn UnregisterHotKey(hWnd: ?HWND, id: i32) callconv(.winapi) BOOL;
 extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn KillTimer(hWnd: ?HWND, uIDEvent: UINT_PTR) callconv(.winapi) BOOL;
@@ -2733,6 +2743,7 @@ pub const App = struct {
             .ctx = @ptrCast(self),
             .alloc = core_app.alloc,
             .hinstance = self.hinstance,
+            .ownerWindow = &settingsOwnerWindowThunk,
             .chromeBg = &settingsChromeBgThunk,
             .textPrimary = &settingsTextPrimaryThunk,
             .openInEditor = &settingsOpenInEditorThunk,
@@ -2879,6 +2890,24 @@ pub const App = struct {
                 continue;
             }
 
+            if (msg.message == WM_WINHOSTTY_UIA_DISCONNECT) {
+                const pending: *DeferredUiaDisconnect = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+                const hr = pending.disconnect(pending.ctx);
+                if (hr == win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL and pending.retries < 3) {
+                    pending.retries += 1;
+                    if (postDeferredUiaDisconnect(self.ui_thread_id, pending)) continue;
+                }
+                if (hr != win32_uia.S_OK) {
+                    log.warn("win32 UIA deferred disconnect failed hr=0x{x} retries={d}", .{
+                        @as(u32, @bitCast(hr)),
+                        pending.retries,
+                    });
+                }
+                pending.release(pending.ctx);
+                std.heap.page_allocator.destroy(pending);
+                continue;
+            }
+
             if (msg.message == WM_TIMER) {
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
@@ -2902,6 +2931,17 @@ pub const App = struct {
             if (msg.message == WM_HOTKEY) {
                 self.handleGlobalHotkey(@intCast(msg.wParam));
                 continue;
+            }
+
+            // The settings surface is a modeless native dialog. Route its
+            // keyboard messages through the system dialog manager so Tab,
+            // Shift+Tab, arrow-key radio navigation, and default buttons use
+            // standard Win32 accessibility semantics.
+            if (self.settings_window.hwnd) |settings_hwnd| {
+                if (IsDialogMessageW(settings_hwnd, &msg) != 0) {
+                    try self.core_app.tick(self);
+                    continue;
+                }
             }
 
             _ = TranslateMessage(&msg);
@@ -2957,6 +2997,10 @@ pub const App = struct {
             slot.* = null;
         }
         self.settings_window.deinit();
+        const uia_disconnect_hr = win32_uia.disconnectAllProviders();
+        if (uia_disconnect_hr != 0) {
+            log.warn("win32 UIA disconnect-all failed hr=0x{x}", .{@as(u32, @bitCast(uia_disconnect_hr))});
+        }
         if (self.winrt_toast) |*toast| {
             toast.deinit();
             self.winrt_toast = null;
@@ -4633,11 +4677,13 @@ pub const App = struct {
                     .app => blk: {
                         for (self.windows.items) |surface| {
                             try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                            surface.refreshTerminalUiaText();
                         }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
                         try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                        surface.refreshTerminalUiaText();
                         break :blk true;
                     } else false,
                 };
@@ -5359,6 +5405,7 @@ pub const App = struct {
             }
         }
         for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
+        self.settings_window.themeChanged();
     }
 
     fn applyLauncherQuickSlotPreferences(self: *App, profiles: []windows_shell.Profile) void {
@@ -8208,6 +8255,7 @@ const Host = struct {
     // current query's ranked matches so the paint path doesn't re-rank
     // on every WM_PAINT; rebuilt on EDIT text change.
     palette_list_hwnd: ?HWND = null,
+    root_uia_provider: ?*win32_uia.RootProvider = null,
     palette_list_uia_provider: ?*win32_uia.PaletteListProvider = null,
     palette_list_placement: ChildPlacement = .{},
     palette_catalog_items: [palette_catalog_capacity]PaletteItem = undefined,
@@ -9392,6 +9440,7 @@ const Host = struct {
     }
 
     fn rebuildPaletteList(self: *Host) void {
+        const previous_result_count = self.palette_list_ranked_count;
         // `overlayEditText` returns either a literal "" or a borrowed
         // view of `self.cached_overlay_edit`; the Host owns the cache
         // and frees it in deinit. Do NOT free here — that either
@@ -9579,6 +9628,12 @@ const Host = struct {
         );
 
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_uia_provider) |provider| {
+            win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+            if (previous_result_count > 0 and self.palette_list_ranked_count == 0) {
+                win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+            }
+        }
         self.announcePaletteSelection();
         self.previewSelectedPaletteTheme();
     }
@@ -9622,55 +9677,66 @@ const Host = struct {
         return true;
     }
 
-    /// Describe the palette list's current state as a single string
-    /// suitable for `UIA_NamePropertyId`. The UIA host reads this
-    /// whenever a client queries the palette list's name, and the
-    /// selection-change path raises `NameChanged` so Narrator re-reads
-    /// after each ↑/↓ keystroke.
-    fn buildPaletteListName(self: *const Host, buf: []u8) []const u8 {
-        if (self.palette_list_ranked_count == 0) {
-            return std.fmt.bufPrint(
-                buf,
-                "Command palette, no matches",
-                .{},
-            ) catch "Command palette";
-        }
-        const idx = @min(
-            self.palette_list_selected,
-            self.palette_list_ranked_count - 1,
-        );
-        const catalog = if (self.palette_catalog) |*value| value else return "Command palette";
-        const descriptor = catalog.descriptorFor(self.palette_list_ranked[idx]) orelse return "Command palette";
-        return std.fmt.bufPrint(
-            buf,
-            "Command palette, {d} of {d}: {s} — {s}",
-            .{
-                idx + 1,
-                self.palette_list_ranked_count,
-                descriptor.item.title,
-                if (descriptor.item.enabled)
-                    descriptor.item.subtitle
-                else
-                    descriptor.item.disabled_reason orelse "Unavailable",
+    /// Stable list identity. Row selection is announced by the native
+    /// SelectionItem event, avoiding duplicate Name/Notification speech.
+    fn buildPaletteListName(_: *const Host, _: []u8) []const u8 {
+        return "Command palette results";
+    }
+
+    fn paletteShortcutLabel(
+        self: *const Host,
+        descriptor: win32_palette.catalog.Descriptor,
+        buf: []u8,
+    ) ?[]const u8 {
+        if (descriptor.item.shortcut) |shortcut| return shortcut.label;
+        return switch (descriptor.payload) {
+            .action => |payload| blk: {
+                const snapshot_index = payload.snapshot_index orelse break :blk null;
+                const snap = self.paletteSnapshot();
+                if (snapshot_index >= snap.commands.len) break :blk null;
+                const trigger = self.app.config.keybind.set.reverse.get(snap.commands[snapshot_index].action) orelse
+                    break :blk null;
+                break :blk std.fmt.bufPrint(buf, "{f}", .{trigger}) catch null;
             },
-        ) catch "Command palette";
+            else => null,
+        };
     }
 
     fn buildPaletteRowName(self: *const Host, index: usize, buf: []u8) []const u8 {
         if (index >= self.palette_list_ranked_count) return "Command palette row";
         const catalog = if (self.palette_catalog) |*value| value else return "Command palette row";
         const descriptor = catalog.descriptorFor(self.palette_list_ranked[index]) orelse return "Command palette row";
+        var shortcut_buf: [96]u8 = undefined;
+        const shortcut = self.paletteShortcutLabel(descriptor, &shortcut_buf);
+        const state = if (!descriptor.item.enabled)
+            ", unavailable"
+        else if (descriptor.item.destructive)
+            ", destructive"
+        else
+            "";
+        if (shortcut) |label| {
+            return std.fmt.bufPrint(
+                buf,
+                "{d} of {d}: {s} — {s}, shortcut {s}{s}",
+                .{
+                    index + 1,
+                    self.palette_list_ranked_count,
+                    descriptor.item.title,
+                    if (descriptor.item.enabled) descriptor.item.subtitle else descriptor.item.disabled_reason orelse "Unavailable",
+                    label,
+                    state,
+                },
+            ) catch "Command palette row";
+        }
         return std.fmt.bufPrint(
             buf,
-            "{d} of {d}: {s} — {s}",
+            "{d} of {d}: {s} — {s}{s}",
             .{
                 index + 1,
                 self.palette_list_ranked_count,
                 descriptor.item.title,
-                if (descriptor.item.enabled)
-                    descriptor.item.subtitle
-                else
-                    descriptor.item.disabled_reason orelse "Unavailable",
+                if (descriptor.item.enabled) descriptor.item.subtitle else descriptor.item.disabled_reason orelse "Unavailable",
+                state,
             },
         ) catch "Command palette row";
     }
@@ -9682,6 +9748,8 @@ const Host = struct {
             .row_count = &paletteListRowCountThunk,
             .selected_index = &paletteListSelectedIndexThunk,
             .row_name = &paletteListRowNameThunk,
+            .row_enabled = &paletteListRowEnabledThunk,
+            .row_id = &paletteListRowIdThunk,
             .select_row = &paletteListSelectRowThunk,
             .geometry = &paletteListGeometryThunk,
         };
@@ -9689,10 +9757,30 @@ const Host = struct {
 
     fn announcePaletteSelection(self: *const Host) void {
         const provider = self.palette_list_uia_provider orelse return;
-        win32_uia.events.raiseNameChanged(&provider.base);
         if (self.palette_list_ranked_count > 0) {
             provider.raiseSelectionChanged(@min(self.palette_list_selected, self.palette_list_ranked_count - 1));
         }
+    }
+
+    fn announcePaletteOutcome(
+        self: *const Host,
+        notification: win32_uia.events.Notification,
+        message: []const u8,
+    ) void {
+        const provider = self.palette_list_uia_provider orelse return;
+        win32_uia.events.raiseNotification(&provider.base, notification, message);
+    }
+
+    fn abortPaletteAction(self: *Host, message: []const u8) void {
+        self.setBanner(.err, message) catch {};
+        self.announcePaletteOutcome(.action_aborted, message);
+    }
+
+    fn showPaletteHelp(self: *Host, message: []const u8) void {
+        self.setBanner(.info, message) catch |err| {
+            log.warn("palette help banner failed err={}", .{err});
+        };
+        self.announcePaletteOutcome(.other, message);
     }
 
     /// Translate a y coordinate (client-area) into an absolute rank
@@ -9718,6 +9806,13 @@ const Host = struct {
         const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return;
         if (!descriptor.item.enabled) {
             try self.setBanner(.err, descriptor.item.disabled_reason orelse "This item is unavailable.");
+            if (self.palette_list_uia_provider) |provider| {
+                win32_uia.events.raiseNotification(
+                    &provider.base,
+                    .action_aborted,
+                    descriptor.item.disabled_reason orelse "Command unavailable",
+                );
+            }
             return;
         }
 
@@ -9726,40 +9821,73 @@ const Host = struct {
                 return self.invokePaletteAction(payload, true);
             },
             .tab => |tab_id| {
-                const index = self.findTabIndexById(@intCast(tab_id)) orelse return;
+                const index = self.findTabIndexById(@intCast(tab_id)) orelse {
+                    self.abortPaletteAction("Tab is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
                 _ = self.activateTabIndex(index);
             },
             .pane => |surface_id| {
-                const surface = self.app.findSurfaceById(surface_id) orelse return;
+                const surface = self.app.findSurfaceById(surface_id) orelse {
+                    self.abortPaletteAction("Pane is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
                 self.app.activateSurface(surface);
             },
             .profile => |key| {
-                const profiles = self.profiles orelse return;
-                const index = profileIndexByKey(profiles, key) orelse return;
-                _ = try self.setSelectedProfileIndex(index);
+                const profiles = self.profiles orelse {
+                    self.abortPaletteAction("Profile is no longer available; reopen the palette.");
+                    return;
+                };
+                const index = profileIndexByKey(profiles, key) orelse {
+                    self.abortPaletteAction("Profile is no longer available; reopen the palette.");
+                    return;
+                };
+                _ = self.setSelectedProfileIndex(index) catch |err| {
+                    log.warn("palette profile selection failed key={s} err={}", .{ key, err });
+                    self.abortPaletteAction("Profile selection failed; no profile was opened.");
+                    return;
+                };
                 self.hideOverlay();
-                _ = self.openSelectedProfile(.tab);
+                if (!self.openSelectedProfile(.tab)) {
+                    self.abortPaletteAction("Profile could not be opened; no terminal was changed.");
+                }
             },
             .setting => |key| {
-                const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse return;
+                const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse {
+                    self.abortPaletteAction("Setting is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
-                try self.app.settings_window.openField(field);
+                self.app.settings_window.openField(field) catch |err| {
+                    log.warn("palette settings open failed field={} err={}", .{ field, err });
+                    self.abortPaletteAction("Settings could not be opened.");
+                    return;
+                };
             },
             .theme => |name| {
-                try self.commitPaletteTheme(name);
+                self.commitPaletteTheme(name) catch |err| {
+                    log.warn("palette theme preflight failed theme={s} err={}", .{ name, err });
+                    self.abortPaletteAction("Theme could not be prepared; no setting was changed.");
+                    return;
+                };
             },
             .help => |target| switch (target) {
                 .settings => {
                     self.hideOverlay();
-                    try self.app.settings_window.openField(.font_size);
+                    self.app.settings_window.openField(.font_size) catch |err| {
+                        log.warn("palette help settings open failed err={}", .{err});
+                        self.abortPaletteAction("Settings help could not be opened.");
+                        return;
+                    };
                 },
-                .keyboard_shortcuts => try self.setBanner(.info, "Keyboard shortcuts are configured in Settings > Keybindings."),
-                .configuration => try self.setBanner(.info, "Open Settings, then Advanced, to edit the configuration file."),
-                .troubleshooting => try self.setBanner(.info, "Run winghostty +diagnostic-bundle when reporting a problem."),
-                .diagnostics => try self.setBanner(.info, "Run winghostty +diagnostic-bundle to export a redacted support bundle."),
-                .accessibility => try self.setBanner(.info, "winghostty supports keyboard navigation and Windows UI Automation."),
+                .keyboard_shortcuts => self.showPaletteHelp("Keyboard shortcuts are configured in Settings > Keybindings."),
+                .configuration => self.showPaletteHelp("Open Settings, then Advanced, to edit the configuration file."),
+                .troubleshooting => self.showPaletteHelp("Run winghostty +diagnostic-bundle when reporting a problem."),
+                .diagnostics => self.showPaletteHelp("Run winghostty +diagnostic-bundle to export a redacted support bundle."),
+                .accessibility => self.showPaletteHelp("winghostty supports keyboard navigation and Windows UI Automation."),
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),
         }
@@ -9919,29 +10047,43 @@ const Host = struct {
     }
 
     fn commitPaletteTheme(self: *Host, name: []const u8) !void {
-        var original = if (self.palette_theme_preview_original) |value| blk: {
-            self.palette_theme_preview_original = null;
-            break :blk value;
-        } else try self.app.config.clone(self.app.core_app.alloc);
-        defer original.deinit();
+        // Clone the reversible baseline first. Do not detach the live preview
+        // owner until every fallible preflight allocation has succeeded;
+        // otherwise an OOM could strand the preview with no way to restore it.
+        var original = if (self.palette_theme_preview_original) |*value|
+            try value.clone(self.app.core_app.alloc)
+        else
+            try self.app.config.clone(self.app.core_app.alloc);
+        var original_owned = true;
+        defer if (original_owned) original.deinit();
 
         var pending = try original.clone(self.app.core_app.alloc);
         defer pending.deinit();
         try setConfigTheme(&pending, name);
 
+        if (self.palette_theme_preview_original) |*value| {
+            value.deinit();
+            self.palette_theme_preview_original = null;
+        }
+
         self.app.settingsSaveAndReload(&pending, &original) catch |err| {
             log.warn("palette theme save failed theme={s} err={}", .{ name, err });
-            const restored = original.clone(self.app.core_app.alloc) catch {
-                try self.setBanner(.err, "Theme save failed; restart or reload config to clear the preview.");
-                return;
-            };
-            self.replaceRuntimeConfigFromPalette(restored);
-            self.setBanner(.err, "Theme save failed; reverted preview.") catch {};
+            // Roll back without another allocation: `original` is already an
+            // owned deep clone of the pre-preview baseline. Transfer it into
+            // the runtime config and suppress the local deferred deinit.
+            self.replaceRuntimeConfigFromPalette(original);
+            original_owned = false;
+            self.abortPaletteAction("Theme save failed; reverted preview.");
             return;
         };
 
+        if (self.palette_list_uia_provider) |provider| {
+            win32_uia.events.raiseNotification(&provider.base, .action_completed, "Theme applied");
+        }
         self.hideOverlay();
-        try self.layout();
+        self.layout() catch |err| {
+            log.warn("palette theme post-save layout failed err={}", .{err});
+        };
     }
 
     fn invokePaletteAction(
@@ -9950,10 +10092,22 @@ const Host = struct {
         record_mru: bool,
     ) !void {
         if (payload.tab_transfer) |transfer| {
-            const source_index = self.findTabIndexById(@intCast(transfer.source_tab)) orelse return;
-            const target = self.app.findSurfaceById(transfer.target_pane) orelse return;
-            const target_found = self.app.findTabForSurface(target) orelse return;
-            if (target_found.host != self or target_found.index != self.active_tab) return;
+            const source_index = self.findTabIndexById(@intCast(transfer.source_tab)) orelse {
+                self.abortPaletteAction("Tab move is no longer available; reopen the palette.");
+                return;
+            };
+            const target = self.app.findSurfaceById(transfer.target_pane) orelse {
+                self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
+                return;
+            };
+            const target_found = self.app.findTabForSurface(target) orelse {
+                self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
+                return;
+            };
+            if (target_found.host != self or target_found.index != self.active_tab) {
+                self.abortPaletteAction("Tab move target changed; reopen the palette.");
+                return;
+            }
             self.tab_drop_target_surface = target;
             self.tab_drop_operation = switch (transfer.direction) {
                 .left => .split_left,
@@ -9962,21 +10116,40 @@ const Host = struct {
                 .down => .split_down,
             };
             if (!self.commitTabDropSplit(source_index)) {
-                try self.setBanner(.err, "Tab move could not be completed; no layout was changed.");
+                self.abortPaletteAction("Tab move could not be completed; no layout was changed.");
                 return;
             }
             self.hideOverlay();
             return;
         }
         const snap = self.paletteSnapshot();
-        const snapshot_index = payload.snapshot_index orelse return;
-        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) return;
+        const snapshot_index = payload.snapshot_index orelse {
+            self.abortPaletteAction("Command is no longer available; reopen the palette.");
+            return;
+        };
+        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) {
+            self.abortPaletteAction("Command is no longer available; reopen the palette.");
+            return;
+        }
         const current_text = std.mem.span(snap.cvals[snapshot_index].action);
-        if (!std.mem.eql(u8, current_text, payload.action)) return;
+        if (!std.mem.eql(u8, current_text, payload.action)) {
+            self.abortPaletteAction("Command changed; reopen the palette and try again.");
+            return;
+        }
         const action = snap.commands[snapshot_index].action;
-        const surface = self.activeSurface() orelse return;
+        const surface = self.activeSurface() orelse {
+            self.abortPaletteAction("No active terminal is available for this command.");
+            return;
+        };
         if (record_mru) self.app.pushPaletteMru(current_text) catch |err| {
             std.log.warn("palette MRU push failed err={}", .{err});
+        };
+        const outcome_provider = if (self.palette_list_uia_provider) |provider| blk: {
+            _ = provider.base.vtbl.AddRef(&provider.base);
+            break :blk &provider.base;
+        } else null;
+        defer if (outcome_provider) |provider| {
+            _ = provider.vtbl.Release(provider);
         };
         self.hideOverlay();
         runUiActionOrLog("palette layout refresh failed", self.layout());
@@ -9984,7 +10157,16 @@ const Host = struct {
             self.postDeferredNewTab();
             return;
         }
-        _ = try surface.core_surface.performBindingAction(action);
+        _ = surface.core_surface.performBindingAction(action) catch |err| {
+            if (outcome_provider) |provider| {
+                win32_uia.events.raiseNotification(
+                    provider,
+                    .action_aborted,
+                    "Command failed; no action was completed.",
+                );
+            }
+            return err;
+        };
         // Do NOT touch `self` after dispatch — the host may be freed.
     }
 
@@ -10132,20 +10314,7 @@ const Host = struct {
             // Format into a stack buffer — the per-frame allocation
             // would otherwise stack up at every keystroke's WM_PAINT.
             var hint_buf: [96]u8 = undefined;
-            const hint: ?[]const u8 = if (item.shortcut) |shortcut|
-                shortcut.label
-            else switch (descriptor.payload) {
-                .action => |payload| blk: {
-                    const snapshot_index = payload.snapshot_index orelse break :blk null;
-                    const snap = self.paletteSnapshot();
-                    if (snapshot_index >= snap.commands.len) break :blk null;
-                    if (self.app.config.keybind.set.reverse.get(snap.commands[snapshot_index].action)) |trigger| {
-                        break :blk std.fmt.bufPrint(&hint_buf, "{f}", .{trigger}) catch null;
-                    }
-                    break :blk null;
-                },
-                else => null,
-            };
+            const hint = self.paletteShortcutLabel(descriptor, &hint_buf);
             if (hint) |hint_text| {
                 drawPaletteRowText(
                     hdc,
@@ -10235,10 +10404,25 @@ const Host = struct {
         destroySubclassedWindowWithPrev(&self.new_tab_hwnd, chrome_prev);
         destroySubclassedWindowWithPrev(&self.overflow_hwnd, chrome_prev);
 
-        if (self.palette_list_uia_provider) |provider| {
+        if (self.root_uia_provider) |provider| {
+            self.root_uia_provider = null;
             provider.detach();
-            _ = win32_uia.PaletteListProvider.Release(&provider.base);
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &rootDisconnectThunk,
+                &rootReleaseThunk,
+            );
+        }
+        if (self.palette_list_uia_provider) |provider| {
             self.palette_list_uia_provider = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &paletteDisconnectThunk,
+                &paletteReleaseThunk,
+            );
         }
         destroyChildWindow(&self.palette_list_hwnd);
         destroyChildWindow(&self.tab_drop_preview_hwnd);
@@ -11435,6 +11619,13 @@ const Host = struct {
 
     fn hideOverlay(self: *Host) void {
         const was_confirm = self.overlay_mode == .confirm;
+        const restore_terminal_focus = shouldRefocusAfterOverlayHide(
+            GetFocus(),
+            self.overlay_edit_hwnd,
+            self.overlay_accept_hwnd,
+            self.overlay_cancel_hwnd,
+            self.palette_list_hwnd,
+        );
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
@@ -11461,6 +11652,8 @@ const Host = struct {
         if (was_confirm) {
             self.layout() catch {};
             self.forceVisibleSurfaceRepaintsNow();
+        }
+        if (restore_terminal_focus) {
             refocusActiveSurface(self);
         }
     }
@@ -13060,6 +13253,9 @@ const Host = struct {
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
                     try self.setBanner(.err, "Unknown Ghostty action. Example: new_tab or toggle_fullscreen");
+                    if (self.palette_list_uia_provider) |provider| {
+                        win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
+                    }
                     return false;
                 };
                 self.app.pushPaletteMru(text) catch |err| {
@@ -16308,6 +16504,20 @@ fn paletteListRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 
     return host.buildPaletteRowName(index, buf);
 }
 
+fn paletteListRowEnabledThunk(ctx: *anyopaque, index: usize) bool {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    if (index >= host.palette_list_ranked_count) return false;
+    const catalog = if (host.palette_catalog) |*value| value else return true;
+    const descriptor = catalog.descriptorFor(host.palette_list_ranked[index]) orelse return false;
+    return descriptor.item.enabled;
+}
+
+fn paletteListRowIdThunk(ctx: *anyopaque, index: usize) u64 {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    if (index >= host.palette_list_ranked_count) return 0;
+    return host.palette_list_ranked[index].id.value;
+}
+
 fn paletteListSelectRowThunk(ctx: *anyopaque, index: usize) void {
     const host: *Host = @ptrCast(@alignCast(ctx));
     _ = host.setPaletteListSelection(index);
@@ -16337,6 +16547,12 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
 /// Thunks adapting `*App` into the `AppHandle` callback shape used by
 /// `win32_settings.SettingsWindow`. Kept inline so a theme swap is
 /// picked up on the next paint without cache invalidation.
+fn settingsOwnerWindowThunk(ctx: *anyopaque) ?HWND {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const surface = app.focusedSurfaceForUndoRedo() orelse app.primarySurface() orelse return null;
+    return surface.windowHwnd();
+}
+
 fn settingsChromeBgThunk(ctx: *anyopaque) u32 {
     const app: *const App = @ptrCast(@alignCast(ctx));
     return app.resolved_theme.chrome_bg;
@@ -19433,6 +19649,70 @@ fn refocusActiveSurface(host: *Host) void {
     }
 }
 
+fn postDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) bool {
+    return PostThreadMessageW(
+        thread_id,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        0,
+        @as(LPARAM, @bitCast(@as(usize, @intFromPtr(pending)))),
+    ) != 0;
+}
+
+fn scheduleDeferredUiaDisconnect(
+    app: *App,
+    ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+) void {
+    const pending = std.heap.page_allocator.create(DeferredUiaDisconnect) catch {
+        log.warn("win32 UIA deferred disconnect allocation failed", .{});
+        release(ctx);
+        return;
+    };
+    pending.* = .{ .ctx = ctx, .disconnect = disconnect, .release = release };
+    if (!postDeferredUiaDisconnect(app.ui_thread_id, pending)) {
+        log.warn("win32 UIA deferred disconnect post failed", .{});
+        release(ctx);
+        std.heap.page_allocator.destroy(pending);
+    }
+}
+
+fn rootDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.RootProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn rootReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.RootProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.RootProvider.Release(&provider.base);
+}
+fn paletteDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.PaletteListProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn paletteReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.PaletteListProvider.Release(&provider.base);
+}
+fn terminalDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.TerminalProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn terminalReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.TerminalProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.TerminalProvider.Release(&provider.base);
+}
+
+fn shouldRefocusAfterOverlayHide(
+    focused: ?HWND,
+    edit: ?HWND,
+    accept: ?HWND,
+    cancel: ?HWND,
+    list: ?HWND,
+) bool {
+    const hwnd = focused orelse return false;
+    return (edit != null and hwnd == edit.?) or
+        (accept != null and hwnd == accept.?) or
+        (cancel != null and hwnd == cancel.?) or
+        (list != null and hwnd == list.?);
+}
+
 fn logUiActionError(comptime context: []const u8, err: anyerror) void {
     log.warn(context ++ " err={}", .{err});
 }
@@ -20103,10 +20383,19 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
         WM_GETOBJECT => {
-            if (host != null) {
-                if (win32_uia.handleGetObject(std.heap.page_allocator, hwnd, wParam, lParam)) |lr| {
-                    return lr;
-                }
+            if (host) |v| {
+                const provider = v.root_uia_provider orelse provider: {
+                    const created = win32_uia.RootProvider.create(
+                        std.heap.page_allocator,
+                        hwnd,
+                    ) catch |err| {
+                        log.warn("uia: root provider init failed err={}", .{err});
+                        return DefWindowProcW(hwnd, msg, wParam, lParam);
+                    };
+                    v.root_uia_provider = created;
+                    break :provider created;
+                };
+                if (win32_uia.returnRootProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -21561,6 +21850,17 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
+        WM_TIMER => {
+            if (wParam == TERMINAL_UIA_TIMER_ID) {
+                if (surface) |v| {
+                    v.cancelTerminalUiaRefreshTimer();
+                    v.refreshTerminalUiaText();
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+
         WM_GETOBJECT => {
             if (surface) |v| {
                 // UIA may query the child HWND reentrantly while DestroyWindow
@@ -21859,13 +22159,36 @@ const TerminalUiaContext = struct {
     refcount: std.atomic.Value(u32),
     mutex: std.Thread.Mutex = .{},
     surface: ?*Surface,
+    /// Bounded, immutable-to-readers terminal snapshot. UIA callbacks copy
+    /// this cache and never acquire the renderer mutex.
+    cached_text: []u8,
+    cached_visible_text: []u8,
+    cached_visible_range: win32_uia.OffsetRange = .{ .start = 0, .end = 0 },
+    cached_caret_offset: usize = 0,
+    cached_cells: []win32_uia.TerminalCellPosition,
+    viewport_rows: u32 = 0,
+    viewport_columns: u32 = 0,
+    cell_width: f64 = 0,
+    cell_height: f64 = 0,
+    origin_x: f64 = 0,
+    origin_y: f64 = 0,
 
     fn create(alloc: Allocator, surface: *Surface) !*TerminalUiaContext {
         const self = try alloc.create(TerminalUiaContext);
+        errdefer alloc.destroy(self);
+        const cached_text = try alloc.dupe(u8, "");
+        errdefer alloc.free(cached_text);
+        const cached_visible_text = try alloc.dupe(u8, "");
+        errdefer alloc.free(cached_visible_text);
+        const cached_cells = try alloc.alloc(win32_uia.TerminalCellPosition, 0);
+        errdefer alloc.free(cached_cells);
         self.* = .{
             .alloc = alloc,
             .refcount = std.atomic.Value(u32).init(1),
             .surface = surface,
+            .cached_text = cached_text,
+            .cached_visible_text = cached_visible_text,
+            .cached_cells = cached_cells,
         };
         return self;
     }
@@ -21878,13 +22201,102 @@ const TerminalUiaContext = struct {
     fn release(ctx: *anyopaque) void {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
         const prev = self.refcount.fetchSub(1, .acq_rel);
-        if (prev == 1) self.alloc.destroy(self);
+        if (prev == 1) {
+            self.alloc.free(self.cached_cells);
+            self.alloc.free(self.cached_visible_text);
+            self.alloc.free(self.cached_text);
+            self.alloc.destroy(self);
+        }
     }
 
     fn detachSurface(self: *TerminalUiaContext) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.surface = null;
+    }
+
+    /// Refresh on the application/UI thread after terminal mutations. The
+    /// renderer lock is never held together with the context lock.
+    const Change = enum { unchanged, geometry, caret, text, text_and_caret };
+
+    fn refresh(self: *TerminalUiaContext, surface: *Surface) !Change {
+        if (!surface.core_initialized) return .unchanged;
+
+        surface.core_surface.renderer_state.mutex.lock();
+        var snapshot = win32_uia.snapshotTerminalAccessiblePlainText(
+            self.alloc,
+            surface.core_surface.renderer_state.terminal,
+        ) catch |err| {
+            surface.core_surface.renderer_state.mutex.unlock();
+            return err;
+        };
+        const renderer_size = surface.core_surface.size;
+        surface.core_surface.renderer_state.mutex.unlock();
+        defer snapshot.deinit();
+
+        const text = snapshot.text;
+        snapshot.text = text[0..0];
+        errdefer self.alloc.free(text);
+        const cells = snapshot.cell_for_byte;
+        snapshot.cell_for_byte = cells[0..0];
+        errdefer self.alloc.free(cells);
+        const visible_range = snapshot.visible_range;
+        const caret_offset = snapshot.caret_offset;
+        const visible_text = try self.alloc.dupe(u8, text[visible_range.start..visible_range.end]);
+        errdefer self.alloc.free(visible_text);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.surface != surface) {
+            self.alloc.free(visible_text);
+            self.alloc.free(cells);
+            self.alloc.free(text);
+            return .unchanged;
+        }
+        const text_changed = !std.mem.eql(u8, self.cached_text, text) or
+            self.cached_visible_range.start != visible_range.start or
+            self.cached_visible_range.end != visible_range.end;
+        const caret_changed = self.cached_caret_offset != caret_offset;
+        const unchanged = std.mem.eql(u8, self.cached_text, text) and
+            self.cached_visible_range.start == visible_range.start and
+            self.cached_visible_range.end == visible_range.end and
+            self.cached_caret_offset == caret_offset and
+            self.viewport_rows == snapshot.viewport_rows and
+            self.viewport_columns == snapshot.viewport_columns and
+            self.cell_width == @as(f64, @floatFromInt(renderer_size.cell.width)) and
+            self.cell_height == @as(f64, @floatFromInt(renderer_size.cell.height)) and
+            self.origin_x == @as(f64, @floatFromInt(renderer_size.padding.left)) and
+            self.origin_y == @as(f64, @floatFromInt(renderer_size.padding.top)) and
+            terminalUiaCellsEqual(self.cached_cells, cells);
+        if (unchanged) {
+            self.alloc.free(visible_text);
+            self.alloc.free(cells);
+            self.alloc.free(text);
+            return .unchanged;
+        }
+
+        self.alloc.free(self.cached_cells);
+        self.alloc.free(self.cached_visible_text);
+        self.alloc.free(self.cached_text);
+        self.cached_text = text;
+        self.cached_visible_text = visible_text;
+        self.cached_visible_range = visible_range;
+        self.cached_caret_offset = caret_offset;
+        self.cached_cells = cells;
+        self.viewport_rows = snapshot.viewport_rows;
+        self.viewport_columns = snapshot.viewport_columns;
+        self.cell_width = @floatFromInt(renderer_size.cell.width);
+        self.cell_height = @floatFromInt(renderer_size.cell.height);
+        self.origin_x = @floatFromInt(renderer_size.padding.left);
+        self.origin_y = @floatFromInt(renderer_size.padding.top);
+        return if (text_changed and caret_changed)
+            .text_and_caret
+        else if (text_changed)
+            .text
+        else if (caret_changed)
+            .caret
+        else
+            .geometry;
     }
 
     fn state(self: *TerminalUiaContext) win32_uia.TerminalState {
@@ -21915,20 +22327,7 @@ const TerminalUiaContext = struct {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        const surface = self.surface orelse return try alloc.dupe(u8, "");
-        if (!surface.core_initialized) return try alloc.dupe(u8, "");
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var snapshot = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer snapshot.deinit();
-
-        return snapshot.takeText();
+        return try alloc.dupe(u8, self.cached_text);
     }
 
     fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
@@ -21936,19 +22335,7 @@ const TerminalUiaContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const surface = self.surface orelse return try alloc.dupe(u8, "");
-        if (!surface.core_initialized) return try alloc.dupe(u8, "");
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var snapshot = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer snapshot.deinit();
-
-        return snapshot.takeText();
+        return try alloc.dupe(u8, self.cached_visible_text);
     }
 
     fn terminalUiaVisibleRange(ctx: *anyopaque, alloc: Allocator) !win32_uia.OffsetRange {
@@ -21956,25 +22343,8 @@ const TerminalUiaContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const surface = self.surface orelse return .{ .start = 0, .end = 0 };
-        if (!surface.core_initialized) return .{ .start = 0, .end = 0 };
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var document = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer document.deinit();
-
-        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer visible.deinit();
-
-        return win32_uia.visibleRangeInDocument(&document, &visible) orelse .{ .start = 0, .end = 0 };
+        _ = alloc;
+        return self.cached_visible_range;
     }
 
     fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
@@ -21982,41 +22352,25 @@ const TerminalUiaContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const surface = self.surface orelse return try terminalUiaEmptySnapshot(alloc);
-        if (!surface.core_initialized) return try terminalUiaEmptySnapshot(alloc);
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var document = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer document.deinit();
-
-        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer visible.deinit();
-
-        const visible_range = win32_uia.visibleRangeInDocument(&document, &visible) orelse win32_uia.OffsetRange{ .start = 0, .end = 0 };
-
-        return .{
-            .document_text = document.takeText(),
-            .visible_text = visible.takeText(),
-            .visible_range = visible_range,
-        };
-    }
-
-    fn terminalUiaEmptySnapshot(alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
-        const document_text = try alloc.dupe(u8, "");
+        const document_text = try alloc.dupe(u8, self.cached_text);
         errdefer alloc.free(document_text);
-        const visible_text = try alloc.dupe(u8, "");
+        const visible_text = try alloc.dupe(u8, self.cached_visible_text);
+        errdefer alloc.free(visible_text);
+        const cells = try alloc.dupe(win32_uia.TerminalCellPosition, self.cached_cells);
         return .{
             .document_text = document_text,
             .visible_text = visible_text,
-            .visible_range = .{ .start = 0, .end = 0 },
+            .visible_range = self.cached_visible_range,
+            .caret_offset = self.cached_caret_offset,
+            .geometry = .{
+                .cell_for_byte = cells,
+                .viewport_rows = self.viewport_rows,
+                .viewport_columns = self.viewport_columns,
+                .cell_width = self.cell_width,
+                .cell_height = self.cell_height,
+                .origin_x = self.origin_x,
+                .origin_y = self.origin_y,
+            },
         };
     }
 
@@ -22029,6 +22383,89 @@ const TerminalUiaContext = struct {
         return surface.app.isSurfaceFocused(surface);
     }
 };
+
+fn terminalUiaCellsEqual(
+    lhs: []const win32_uia.TerminalCellPosition,
+    rhs: []const win32_uia.TerminalCellPosition,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |a, b| {
+        if (a.row != b.row or a.column != b.column or a.width != b.width) return false;
+    }
+    return true;
+}
+
+const terminal_uia_refresh_interval_ms: u64 = 100;
+
+fn terminalUiaRefreshDue(last_refresh_ms: u64, now_ms: u64) bool {
+    return last_refresh_ms == 0 or now_ms -| last_refresh_ms >= terminal_uia_refresh_interval_ms;
+}
+
+fn terminalUiaRefreshDelay(last_refresh_ms: u64, now_ms: u64) UINT {
+    const elapsed = now_ms -| last_refresh_ms;
+    return @intCast(@max(1, terminal_uia_refresh_interval_ms -| elapsed));
+}
+
+fn terminalUiaSnapshotWasSlow(start_ms: u64, completed_ms: u64) bool {
+    return completed_ms -| start_ms >= terminal_uia_refresh_interval_ms;
+}
+
+const TerminalUiaPublishPolicy = struct {
+    refresh_snapshot: bool,
+    emit_events: bool,
+};
+
+fn terminalUiaPublishPolicy(clients_listening_for_events: bool) TerminalUiaPublishPolicy {
+    return .{
+        // UiaClientsAreListening reports event subscriptions, not clients
+        // that poll an already-acquired TextPattern. Query-only clients still
+        // require the cached snapshot to advance after renderer updates.
+        .refresh_snapshot = true,
+        .emit_events = clients_listening_for_events,
+    };
+}
+
+test "terminal UIA snapshots are rate limited while a client is connected" {
+    try std.testing.expect(terminalUiaRefreshDue(0, 1));
+    try std.testing.expect(!terminalUiaRefreshDue(100, 199));
+    try std.testing.expect(terminalUiaRefreshDue(100, 200));
+    try std.testing.expectEqual(@as(UINT, 1), terminalUiaRefreshDelay(100, 199));
+    try std.testing.expectEqual(@as(UINT, 80), terminalUiaRefreshDelay(100, 120));
+    try std.testing.expect(!terminalUiaSnapshotWasSlow(100, 199));
+    try std.testing.expect(terminalUiaSnapshotWasSlow(100, 200));
+}
+
+test "terminal UIA query-only clients refresh without event emission" {
+    const query_only = terminalUiaPublishPolicy(false);
+    try std.testing.expect(query_only.refresh_snapshot);
+    try std.testing.expect(!query_only.emit_events);
+
+    const subscribed = terminalUiaPublishPolicy(true);
+    try std.testing.expect(subscribed.refresh_snapshot);
+    try std.testing.expect(subscribed.emit_events);
+}
+
+test "terminal UIA document and visible callbacks expose distinct cached ranges" {
+    var context = TerminalUiaContext{
+        .alloc = std.testing.allocator,
+        .refcount = std.atomic.Value(u32).init(1),
+        .surface = null,
+        .cached_text = try std.testing.allocator.dupe(u8, "history\nvisible"),
+        .cached_visible_text = try std.testing.allocator.dupe(u8, "visible"),
+        .cached_visible_range = .{ .start = 8, .end = 15 },
+        .cached_cells = try std.testing.allocator.alloc(win32_uia.TerminalCellPosition, 0),
+    };
+    defer std.testing.allocator.free(context.cached_cells);
+    defer std.testing.allocator.free(context.cached_visible_text);
+    defer std.testing.allocator.free(context.cached_text);
+
+    const document = try TerminalUiaContext.terminalUiaValue(&context, std.testing.allocator);
+    defer std.testing.allocator.free(document);
+    const visible = try TerminalUiaContext.terminalUiaVisibleValue(&context, std.testing.allocator);
+    defer std.testing.allocator.free(visible);
+    try std.testing.expectEqualStrings("history\nvisible", document);
+    try std.testing.expectEqualStrings("visible", visible);
+}
 
 pub const Surface = struct {
     app: *App,
@@ -22163,6 +22600,8 @@ pub const Surface = struct {
     pending_clipboard_op: ?PendingClipboardOp = null,
     terminal_uia_context: ?*TerminalUiaContext = null,
     terminal_uia_provider: ?*win32_uia.TerminalProvider = null,
+    terminal_uia_last_refresh_ms: u64 = 0,
+    terminal_uia_refresh_timer_active: bool = false,
     /// Close preflight ownership. Normal close paths build both candidates
     /// before HWND/core teardown; `windowDestroyed` consumes them without
     /// allocating after the Surface is already dead.
@@ -22857,13 +23296,77 @@ pub const Surface = struct {
     fn terminalUiaProvider(self: *Surface) !*win32_uia.TerminalProvider {
         if (self.terminal_uia_provider == null) {
             const hwnd = self.hwnd orelse return error.NoWindow;
+            const context = self.terminal_uia_context orelse context: {
+                _ = try self.terminalUiaState();
+                break :context self.terminal_uia_context.?;
+            };
+            _ = try context.refresh(self);
+            self.terminal_uia_last_refresh_ms = GetTickCount64();
             self.terminal_uia_provider = try win32_uia.TerminalProvider.create(
                 std.heap.page_allocator,
                 hwnd,
-                try self.terminalUiaState(),
+                context.state(),
             );
+        } else if (self.terminal_uia_context) |context| {
+            // WM_GETOBJECT is also delivered when a client reconnects after
+            // terminal output occurred with no UIA listeners. Refresh here so
+            // the first TextPattern query cannot observe that stale cache.
+            _ = try context.refresh(self);
+            self.terminal_uia_last_refresh_ms = GetTickCount64();
         }
         return self.terminal_uia_provider.?;
+    }
+
+    /// Publish a bounded accessible-text snapshot after a coalesced renderer
+    /// update. Provider calls never format terminal state themselves.
+    fn refreshTerminalUiaText(self: *Surface) void {
+        const context = self.terminal_uia_context orelse return;
+        const provider = self.terminal_uia_provider orelse return;
+        const publish_policy = terminalUiaPublishPolicy(win32_uia.events.clientsAreListening());
+        if (!publish_policy.refresh_snapshot) return;
+        const now_ms = GetTickCount64();
+        if (!terminalUiaRefreshDue(self.terminal_uia_last_refresh_ms, now_ms)) {
+            if (!self.terminal_uia_refresh_timer_active) {
+                const hwnd = self.hwnd orelse return;
+                if (SetTimer(
+                    hwnd,
+                    TERMINAL_UIA_TIMER_ID,
+                    terminalUiaRefreshDelay(self.terminal_uia_last_refresh_ms, now_ms),
+                    null,
+                ) != 0) self.terminal_uia_refresh_timer_active = true;
+            }
+            return;
+        }
+        self.cancelTerminalUiaRefreshTimer();
+        const refresh_started_ms = now_ms;
+        const refresh_result = context.refresh(self);
+        const refresh_completed_ms = GetTickCount64();
+        self.terminal_uia_last_refresh_ms = refresh_completed_ms;
+        if (terminalUiaSnapshotWasSlow(refresh_started_ms, refresh_completed_ms)) {
+            log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{refresh_completed_ms -| refresh_started_ms});
+        }
+        if (refresh_result) |change| {
+            // Query-only clients do not make UiaClientsAreListening return
+            // true. Keep their snapshot current and gate only event emission.
+            if (!publish_policy.emit_events) return;
+            switch (change) {
+                .text => provider.raiseTextChanged(),
+                .caret => provider.raiseTextSelectionChanged(),
+                .text_and_caret => {
+                    provider.raiseTextChanged();
+                    provider.raiseTextSelectionChanged();
+                },
+                .unchanged, .geometry => {},
+            }
+        } else |err| {
+            log.warn("win32 terminal UIA snapshot refresh failed err={}", .{err});
+        }
+    }
+
+    fn cancelTerminalUiaRefreshTimer(self: *Surface) void {
+        if (!self.terminal_uia_refresh_timer_active) return;
+        if (self.hwnd) |hwnd| _ = KillTimer(hwnd, TERMINAL_UIA_TIMER_ID);
+        self.terminal_uia_refresh_timer_active = false;
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -25431,12 +25934,18 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
 
+        self.cancelTerminalUiaRefreshTimer();
         if (self.terminal_uia_context) |ctx| {
             ctx.detachSurface();
             if (self.terminal_uia_provider) |provider| {
-                provider.detach();
-                _ = win32_uia.TerminalProvider.Release(&provider.base);
                 self.terminal_uia_provider = null;
+                provider.detach();
+                scheduleDeferredUiaDisconnect(
+                    self.app,
+                    @ptrCast(provider),
+                    &terminalDisconnectThunk,
+                    &terminalReleaseThunk,
+                );
             }
             TerminalUiaContext.release(@ptrCast(ctx));
             self.terminal_uia_context = null;
@@ -33233,10 +33742,12 @@ test "win32 palette UIA state exposes rows and can select a row" {
     try std.testing.expectEqual(@as(?usize, 1), state.selected_index.?(state.ctx));
 
     var name_buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("Command palette", state.name(state.ctx, &name_buf));
+    try std.testing.expectEqualStrings("Command palette results", state.name(state.ctx, &name_buf));
 
     var row_buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("Command palette row", state.row_name.?(state.ctx, 2, &row_buf));
+    try std.testing.expect(state.row_enabled.?(state.ctx, 2));
+    try std.testing.expect(!state.row_enabled.?(state.ctx, 9));
 
     state.select_row.?(state.ctx, 3);
     try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
@@ -33641,6 +34152,20 @@ test "win32 overlayEditBorderColor reflects mode and focus" {
     try std.testing.expectEqual(overlayAccentColor(.search, false), overlayEditBorderColor(.search, true, false));
     try std.testing.expectEqual(rgb(140, 140, 140), overlayEditBorderColor(.search, false, false));
     try std.testing.expectEqual(rgb(180, 180, 180), overlayEditBorderColor(.none, false, false));
+}
+
+test "win32 overlay dismissal restores focus only from owned controls" {
+    const edit: HWND = @ptrFromInt(0x10);
+    const accept: HWND = @ptrFromInt(0x20);
+    const cancel: HWND = @ptrFromInt(0x30);
+    const list: HWND = @ptrFromInt(0x40);
+    const external: HWND = @ptrFromInt(0x50);
+
+    try std.testing.expect(shouldRefocusAfterOverlayHide(edit, edit, accept, cancel, list));
+    try std.testing.expect(shouldRefocusAfterOverlayHide(accept, edit, accept, cancel, list));
+    try std.testing.expect(shouldRefocusAfterOverlayHide(list, edit, accept, cancel, list));
+    try std.testing.expect(!shouldRefocusAfterOverlayHide(external, edit, accept, cancel, list));
+    try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
 }
 
 test "win32 buttonColorsFromTheme reflects hover and active states" {

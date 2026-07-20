@@ -31,6 +31,64 @@ pub fn raiseSelectionInvalidated(provider: *com.IRawElementProviderSimple) void 
     logIfFailed("UIA_Selection_InvalidatedEventId", hr);
 }
 
+/// Notify text clients that a document's content changed. Callers must
+/// coalesce byte-level terminal updates before raising this event.
+pub fn raiseTextChanged(provider: *com.IRawElementProviderSimple) void {
+    if (!clientsAreListening()) return;
+    const hr = com.UiaRaiseAutomationEvent(
+        provider,
+        constants.UIA_Text_TextChangedEventId,
+    );
+    logIfFailed("UIA_Text_TextChangedEventId", hr);
+}
+
+/// Notify text clients that the terminal insertion caret moved. Callers must
+/// coalesce cursor motion with the same snapshot cadence as text changes.
+pub fn raiseTextSelectionChanged(provider: *com.IRawElementProviderSimple) void {
+    if (!clientsAreListening()) return;
+    const hr = com.UiaRaiseAutomationEvent(
+        provider,
+        constants.UIA_Text_TextSelectionChangedEventId,
+    );
+    logIfFailed("UIA_Text_TextSelectionChangedEventId", hr);
+}
+
+pub const Notification = enum {
+    other,
+    action_completed,
+    action_aborted,
+
+    fn toInt(self: Notification) i32 {
+        return switch (self) {
+            .other => com.NotificationKind_Other,
+            .action_completed => com.NotificationKind_ActionCompleted,
+            .action_aborted => com.NotificationKind_ActionAborted,
+        };
+    }
+};
+
+/// Announce sparse palette states/outcomes. Selection movement uses only
+/// SelectionItem events; MostRecent prevents rapid failures from queueing.
+pub fn raiseNotification(
+    provider: *com.IRawElementProviderSimple,
+    kind: Notification,
+    message: []const u8,
+) void {
+    if (!clientsAreListening() or message.len == 0) return;
+    var message_w: [256]u16 = undefined;
+    const written = std.unicode.utf8ToUtf16Le(message_w[0 .. message_w.len - 1], message) catch return;
+    message_w[written] = 0;
+    const activity_id = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.command-palette");
+    const hr = com.UiaRaiseNotificationEvent(
+        provider,
+        kind.toInt(),
+        com.NotificationProcessing_MostRecent,
+        @ptrCast(&message_w),
+        activity_id,
+    );
+    logIfFailed("UiaRaiseNotificationEvent", hr);
+}
+
 /// Notify clients that a widget's live accessible name changed. Empty
 /// VARIANTs intentionally ask clients to re-query the provider; this avoids
 /// allocating duplicate BSTRs solely for an event whose value is already
@@ -139,4 +197,10 @@ test "StructureChange maps to the right SDK integer" {
         @as(i32, com.StructureChangeType_ChildrenReordered),
         StructureChange.children_reordered.toInt(),
     );
+}
+
+test "Notification maps sparse palette outcomes to SDK values" {
+    try std.testing.expectEqual(@as(i32, com.NotificationKind_Other), Notification.other.toInt());
+    try std.testing.expectEqual(@as(i32, com.NotificationKind_ActionCompleted), Notification.action_completed.toInt());
+    try std.testing.expectEqual(@as(i32, com.NotificationKind_ActionAborted), Notification.action_aborted.toInt());
 }

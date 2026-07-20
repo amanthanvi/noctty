@@ -171,7 +171,7 @@ jobs:
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+            ./test/windows/interactive-win11-accessibility.ps1 -ResetState -IdleSoakSeconds 600
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -6031,6 +6031,13 @@ pub const Keybinds = struct {
                 .{ .key = .{ .unicode = 'o' }, .mods = .{ .ctrl = true, .shift = true } },
                 .{ .new_split = .right },
             );
+            // Narrator can reserve O for reading commands. Keep a physical-key
+            // fallback that reaches the terminal regardless of keyboard layout.
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .physical = .backslash }, .mods = .{ .ctrl = true, .shift = true } },
+                .{ .new_split = .right },
+            );
             try self.set.put(
                 alloc,
                 .{ .key = .{ .unicode = 'e' }, .mods = .{ .ctrl = true, .shift = true } },
@@ -6048,27 +6055,35 @@ pub const Keybinds = struct {
                 .{ .goto_split = .next },
                 .{ .performable = true },
             );
+            // Narrator reserves Ctrl+Alt+Arrow for table navigation and
+            // consumes those chords before the terminal sees them. Match the
+            // native Windows Terminal convention on Windows so pane focus
+            // remains available while a screen reader is running.
+            const split_focus_mods: inputpkg.Mods = if (comptime builtin.target.os.tag == .windows)
+                .{ .alt = true }
+            else
+                .{ .ctrl = true, .alt = true };
             try self.set.putFlags(
                 alloc,
-                .{ .key = .{ .physical = .arrow_up }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .key = .{ .physical = .arrow_up }, .mods = split_focus_mods },
                 .{ .goto_split = .up },
                 .{ .performable = true },
             );
             try self.set.putFlags(
                 alloc,
-                .{ .key = .{ .physical = .arrow_down }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .key = .{ .physical = .arrow_down }, .mods = split_focus_mods },
                 .{ .goto_split = .down },
                 .{ .performable = true },
             );
             try self.set.putFlags(
                 alloc,
-                .{ .key = .{ .physical = .arrow_left }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .key = .{ .physical = .arrow_left }, .mods = split_focus_mods },
                 .{ .goto_split = .left },
                 .{ .performable = true },
             );
             try self.set.putFlags(
                 alloc,
-                .{ .key = .{ .physical = .arrow_right }, .mods = .{ .ctrl = true, .alt = true } },
+                .{ .key = .{ .physical = .arrow_right }, .mods = split_focus_mods },
                 .{ .goto_split = .right },
                 .{ .performable = true },
             );
@@ -7170,6 +7185,73 @@ pub const Keybinds = struct {
         try testing.expectEqual(@as(usize, 2), foo_entry.leaf_chained.actions.items.len);
         try testing.expect(foo_entry.leaf_chained.actions.items[0] == .text);
         try testing.expect(foo_entry.leaf_chained.actions.items[1] == .deactivate_key_table);
+    }
+
+    test "Windows split defaults avoid Narrator table navigation chords" {
+        if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var keybinds: Keybinds = .{};
+        try keybinds.init(arena.allocator());
+
+        const split_cases = [_]struct {
+            key: u21,
+            direction: inputpkg.Binding.Action.SplitDirection,
+        }{
+            .{ .key = 'o', .direction = .right },
+            .{ .key = 'e', .direction = .down },
+        };
+        for (split_cases) |case| {
+            const entry = keybinds.set.get(.{
+                .mods = .{ .ctrl = true, .shift = true },
+                .key = .{ .unicode = case.key },
+            }).?.value_ptr.*;
+            try testing.expect(entry == .leaf);
+            try testing.expectEqual(
+                inputpkg.Binding.Action{ .new_split = case.direction },
+                entry.leaf.action,
+            );
+        }
+
+        const parsed_fallback = try inputpkg.Binding.Trigger.parse("ctrl+shift+backslash");
+        try testing.expectEqual(inputpkg.Binding.Trigger{
+            .mods = .{ .ctrl = true, .shift = true },
+            .key = .{ .physical = .backslash },
+        }, parsed_fallback);
+        const fallback = keybinds.set.get(parsed_fallback).?.value_ptr.*;
+        try testing.expect(fallback == .leaf);
+        try testing.expectEqual(
+            inputpkg.Binding.Action{ .new_split = .right },
+            fallback.leaf.action,
+        );
+
+        const focus_cases = [_]struct {
+            key: inputpkg.Key,
+            direction: inputpkg.SplitFocusDirection,
+        }{
+            .{ .key = .arrow_up, .direction = .up },
+            .{ .key = .arrow_down, .direction = .down },
+            .{ .key = .arrow_left, .direction = .left },
+            .{ .key = .arrow_right, .direction = .right },
+        };
+        for (focus_cases) |case| {
+            const alt = keybinds.set.get(.{
+                .mods = .{ .alt = true },
+                .key = .{ .physical = case.key },
+            }).?.value_ptr.*;
+            try testing.expect(alt == .leaf);
+            try testing.expectEqual(
+                inputpkg.Binding.Action{ .goto_split = case.direction },
+                alt.leaf.action,
+            );
+            try testing.expect(keybinds.set.get(.{
+                .mods = .{ .ctrl = true, .alt = true },
+                .key = .{ .physical = case.key },
+            }) == null);
+        }
     }
 
     test "clone with tables" {

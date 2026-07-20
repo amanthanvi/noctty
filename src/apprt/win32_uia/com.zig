@@ -22,15 +22,20 @@ pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
 pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
 pub const UIA_E_ELEMENTNOTAVAILABLE: HRESULT = @bitCast(@as(u32, 0x80040201));
+pub const UIA_E_ELEMENTNOTENABLED: HRESULT = @bitCast(@as(u32, 0x80040200));
+pub const UIA_E_INVALIDOPERATION: HRESULT = @bitCast(@as(u32, 0x80131509));
+pub const RPC_E_CANTCALLOUT_ININPUTSYNCCALL: HRESULT = @bitCast(@as(u32, 0x8001010D));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
 pub const IID_IRawElementProviderSimple = GUID.parse("{D6DD68D1-86FD-4332-8666-9ABEDEA2D24C}");
 pub const IID_IRawElementProviderFragment = GUID.parse("{F7063DA8-8359-439C-9297-BBC5299A7D87}");
 pub const IID_IRawElementProviderFragmentRoot = GUID.parse("{620CE2A5-AB8F-40A9-86CB-DE3C75599B58}");
+pub const IID_ISelectionProvider = GUID.parse("{FB8B03AF-3BDF-48D4-BD36-1A65793BE168}");
 pub const IID_ISelectionItemProvider = GUID.parse("{2ACAD808-B2D4-452D-A407-91FF1AD167B2}");
 pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 pub const IID_ITextProvider = GUID.parse("{3589C92C-63F3-4367-99BB-ADA653B77CF2}");
+pub const IID_ITextProvider2 = GUID.parse("{0DC5E6ED-3E16-4BF1-8F9A-A979878BC195}");
 pub const IID_ITextRangeProvider = GUID.parse("{5347AD7B-C355-46F8-AFF5-909033582F63}");
 
 /// UIA object IDs passed as WM_GETOBJECT.lParam by the system / client.
@@ -181,7 +186,20 @@ pub const IRawElementProviderFragmentRoot = extern struct {
     vtbl: *const IRawElementProviderFragmentRootVtbl,
 };
 
-// ── ISelectionItemProvider ─────────────────────────────────────────────
+// ── ISelectionProvider / ISelectionItemProvider ────────────────────────
+
+pub const ISelectionProviderVtbl = extern struct {
+    QueryInterface: *const fn (*ISelectionProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ISelectionProvider) callconv(.winapi) u32,
+    Release: *const fn (*ISelectionProvider) callconv(.winapi) u32,
+    GetSelection: *const fn (*ISelectionProvider, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    get_CanSelectMultiple: *const fn (*ISelectionProvider, *BOOL) callconv(.winapi) HRESULT,
+    get_IsSelectionRequired: *const fn (*ISelectionProvider, *BOOL) callconv(.winapi) HRESULT,
+};
+
+pub const ISelectionProvider = extern struct {
+    vtbl: *const ISelectionProviderVtbl,
+};
 
 pub const ISelectionItemProviderVtbl = extern struct {
     QueryInterface: *const fn (*ISelectionItemProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -259,6 +277,29 @@ pub const ITextProvider = extern struct {
     vtbl: *const ITextProviderVtbl,
 };
 
+pub const ITextProvider2Vtbl = extern struct {
+    // IUnknown
+    QueryInterface: *const fn (*ITextProvider2, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ITextProvider2) callconv(.winapi) u32,
+    Release: *const fn (*ITextProvider2) callconv(.winapi) u32,
+
+    // ITextProvider
+    GetSelection: *const fn (*ITextProvider2, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    GetVisibleRanges: *const fn (*ITextProvider2, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    RangeFromChild: *const fn (*ITextProvider2, ?*IRawElementProviderSimple, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    RangeFromPoint: *const fn (*ITextProvider2, UiaPoint, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    get_DocumentRange: *const fn (*ITextProvider2, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    get_SupportedTextSelection: *const fn (*ITextProvider2, *i32) callconv(.winapi) HRESULT,
+
+    // ITextProvider2
+    RangeFromAnnotation: *const fn (*ITextProvider2, ?*IRawElementProviderSimple, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    GetCaretRange: *const fn (*ITextProvider2, *BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+};
+
+pub const ITextProvider2 = extern struct {
+    vtbl: *const ITextProvider2Vtbl,
+};
+
 pub const ITextRangeProviderVtbl = extern struct {
     // IUnknown
     QueryInterface: *const fn (*ITextRangeProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -271,7 +312,7 @@ pub const ITextRangeProviderVtbl = extern struct {
     CompareEndpoints: *const fn (*ITextRangeProvider, i32, ?*ITextRangeProvider, i32, *i32) callconv(.winapi) HRESULT,
     ExpandToEnclosingUnit: *const fn (*ITextRangeProvider, i32) callconv(.winapi) HRESULT,
     FindAttribute: *const fn (*ITextRangeProvider, i32, VARIANT, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
-    FindText: *const fn (*ITextRangeProvider, ?[*:0]const u16, BOOL, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    FindText: *const fn (*ITextRangeProvider, ?[*]const u16, BOOL, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
     GetAttributeValue: *const fn (*ITextRangeProvider, i32, *VARIANT) callconv(.winapi) HRESULT,
     GetBoundingRectangles: *const fn (*ITextRangeProvider, *?*SAFEARRAY) callconv(.winapi) HRESULT,
     GetEnclosingElement: *const fn (*ITextRangeProvider, *?*IRawElementProviderSimple) callconv(.winapi) HRESULT,
@@ -300,6 +341,11 @@ pub const StructureChangeType_ChildrenInvalidated: i32 = 2;
 pub const StructureChangeType_ChildrenBulkAdded: i32 = 3;
 pub const StructureChangeType_ChildrenBulkRemoved: i32 = 4;
 pub const StructureChangeType_ChildrenReordered: i32 = 5;
+
+pub const NotificationKind_ActionCompleted: i32 = 2;
+pub const NotificationKind_ActionAborted: i32 = 3;
+pub const NotificationKind_Other: i32 = 4;
+pub const NotificationProcessing_MostRecent: i32 = 3;
 
 // ── UIA externs ─────────────────────────────────────────────────────────
 
@@ -347,17 +393,30 @@ pub extern "uiautomationcore" fn UiaRaiseAutomationPropertyChangedEvent(
     newValue: VARIANT,
 ) callconv(.winapi) HRESULT;
 
+pub extern "uiautomationcore" fn UiaRaiseNotificationEvent(
+    provider: *IRawElementProviderSimple,
+    notification_kind: i32,
+    notification_processing: i32,
+    display_string: [*:0]const u16,
+    activity_id: [*:0]const u16,
+) callconv(.winapi) HRESULT;
+
 /// Report whether a UIA client is currently listening for a given event
 /// so we can skip the raise entirely when nobody cares.
 pub extern "uiautomationcore" fn UiaClientsAreListening() callconv(.winapi) BOOL;
+pub extern "uiautomationcore" fn UiaDisconnectProvider(provider: *IRawElementProviderSimple) callconv(.winapi) HRESULT;
+pub extern "uiautomationcore" fn UiaDisconnectAllProviders() callconv(.winapi) HRESULT;
 pub extern "uiautomationcore" fn UiaGetReservedNotSupportedValue(value: *?*IUnknown) callconv(.winapi) HRESULT;
 
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
 pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
 pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
-pub extern "oleaut32" fn SysStringLen(bstr: ?[*:0]const u16) callconv(.winapi) u32;
+pub extern "oleaut32" fn SysStringLen(bstr: ?[*]const u16) callconv(.winapi) u32;
 pub extern "oleaut32" fn SafeArrayCreateVector(vt: u16, lLbound: i32, cElements: u32) callconv(.winapi) ?*SAFEARRAY;
 pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: ?*anyopaque) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetElement(psa: *SAFEARRAY, rgIndices: *i32, pv: *anyopaque) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetLBound(psa: *SAFEARRAY, nDim: u32, plLbound: *i32) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetUBound(psa: *SAFEARRAY, nDim: u32, plUbound: *i32) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayDestroy(psa: ?*SAFEARRAY) callconv(.winapi) HRESULT;
 
 /// Live HWND text query. Used by the UIA Name provider so screen
