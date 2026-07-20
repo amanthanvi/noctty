@@ -3969,10 +3969,60 @@ fn writeOwnedSettingDiffs(
 }
 
 fn utf8ToW(buf: []u16, text: []const u8) [*:0]const u16 {
-    const written = std.unicode.utf8ToUtf16Le(buf, text) catch buf.len;
-    const n: usize = @min(written, buf.len - 1);
-    buf[n] = 0;
+    std.debug.assert(buf.len > 0);
+    if (!std.unicode.utf8ValidateSlice(text)) {
+        buf[0] = 0;
+        return @ptrCast(buf.ptr);
+    }
+
+    const capacity = buf.len - 1;
+    var byte_end: usize = 0;
+    var utf16_len: usize = 0;
+    while (byte_end < text.len) {
+        const scalar_len = std.unicode.utf8ByteSequenceLength(text[byte_end]) catch unreachable;
+        const codepoint = std.unicode.utf8Decode(text[byte_end .. byte_end + scalar_len]) catch unreachable;
+        const unit_len: usize = if (codepoint <= 0xFFFF) 1 else 2;
+        if (utf16_len + unit_len > capacity) break;
+        utf16_len += unit_len;
+        byte_end += scalar_len;
+    }
+
+    const written = std.unicode.utf8ToUtf16Le(buf[0..capacity], text[0..byte_end]) catch unreachable;
+    std.debug.assert(written == utf16_len);
+    buf[written] = 0;
     return @ptrCast(buf.ptr);
+}
+
+test "win32_settings: utf8ToW rejects invalid input without a partial prefix" {
+    var buf = [_]u16{0xAAAA} ** 8;
+    const converted = utf8ToW(&buf, "valid\xFFinvalid");
+
+    try std.testing.expectEqual(@as(usize, 0), std.mem.len(converted));
+    try std.testing.expectEqual(@as(u16, 0), buf[0]);
+}
+
+test "win32_settings: utf8ToW truncates ASCII for the terminator" {
+    var buf: [5]u16 = undefined;
+    const converted = utf8ToW(&buf, "abcdef");
+
+    try std.testing.expectEqualSlices(u16, &.{ 'a', 'b', 'c', 'd' }, converted[0..4]);
+    try std.testing.expectEqual(@as(u16, 0), buf[4]);
+}
+
+test "win32_settings: utf8ToW never splits a supplementary scalar" {
+    var too_small = [_]u16{0xAAAA} ** 2;
+    const omitted = utf8ToW(&too_small, "🚀");
+    try std.testing.expectEqual(@as(usize, 0), std.mem.len(omitted));
+    try std.testing.expectEqual(@as(u16, 0), too_small[0]);
+
+    var fits: [3]u16 = undefined;
+    const converted = utf8ToW(&fits, "🚀");
+    try std.testing.expectEqualSlices(
+        u16,
+        std.unicode.utf8ToUtf16LeStringLiteral("🚀"),
+        converted[0..2],
+    );
+    try std.testing.expectEqual(@as(u16, 0), fits[2]);
 }
 
 test "settings background blur checkbox preserves enabled radius" {

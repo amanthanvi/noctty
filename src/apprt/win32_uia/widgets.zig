@@ -1139,33 +1139,10 @@ pub const TerminalProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         out.* = null;
         const self = fromText(self_text);
-        var terminal_snapshot = self.terminalSnapshot() catch |err| return switch (err) {
-            error.ElementNotAvailable => com.UIA_E_ELEMENTNOTAVAILABLE,
-            else => com.E_OUTOFMEMORY,
-        };
-        defer self.alloc.free(terminal_snapshot.visible_text);
-
-        var range: ?*com.ITextRangeProvider = null;
-        const range_hr = self.createRangeFromSnapshot(
-            &terminal_snapshot,
-            .{
-                .start = terminal_snapshot.caret_offset,
-                .end = terminal_snapshot.caret_offset,
-            },
-            &range,
-        );
-        if (range_hr != com.S_OK) return range_hr;
-        defer _ = TerminalTextRangeProvider.Release(range.?);
-
-        const array = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 1) orelse return com.E_OUTOFMEMORY;
-        var index: i32 = 0;
-        const put_hr = com.SafeArrayPutElement(array, &index, @ptrCast(range.?));
-        if (put_hr != com.S_OK) {
-            _ = com.SafeArrayDestroy(array);
-            return put_hr;
-        }
-        out.* = array;
-        return com.S_OK;
+        return if (self.detached.load(.acquire))
+            com.UIA_E_ELEMENTNOTAVAILABLE
+        else
+            com.S_OK;
     }
 
     fn GetVisibleRanges(
@@ -1458,14 +1435,13 @@ pub const TerminalProvider = struct {
         range_offsets: terminal_text.OffsetRange,
         out: *?*com.ITextRangeProvider,
     ) com.HRESULT {
-        const range = TerminalTextRangeProvider.create(
+        const range = TerminalTextRangeProvider.createOwned(
             self.alloc,
             self,
             text,
             range_offsets,
         ) catch |err| {
             std.log.warn("uia: TerminalTextRangeProvider.create failed err={}", .{err});
-            self.alloc.free(text);
             return com.E_OUTOFMEMORY;
         };
         out.* = &range.base;
@@ -1480,7 +1456,10 @@ pub const TerminalProvider = struct {
     ) com.HRESULT {
         const text = snapshot.document_text;
         const geometry = snapshot.geometry;
-        const range = TerminalTextRangeProvider.createWithGeometry(
+        snapshot.document_text = snapshot.document_text[0..0];
+        snapshot.geometry = null;
+
+        const range = TerminalTextRangeProvider.createOwnedWithGeometry(
             self.alloc,
             self,
             text,
@@ -1488,14 +1467,8 @@ pub const TerminalProvider = struct {
             geometry,
         ) catch |err| {
             std.log.warn("uia: TerminalTextRangeProvider.create failed err={}", .{err});
-            self.alloc.free(text);
-            if (geometry) |value| self.alloc.free(value.cell_for_byte);
-            snapshot.document_text = snapshot.document_text[0..0];
-            snapshot.geometry = null;
             return com.E_OUTOFMEMORY;
         };
-        snapshot.document_text = snapshot.document_text[0..0];
-        snapshot.geometry = null;
         out.* = &range.base;
         return com.S_OK;
     }
@@ -1520,11 +1493,16 @@ const TerminalTextRangeProvider = struct {
         text: []u8,
         geometry: ?TerminalRangeGeometry,
 
-        fn create(
+        /// Consumes `text` and `geometry` on every outcome.
+        fn createOwned(
             alloc: std.mem.Allocator,
             text: []u8,
             geometry: ?TerminalRangeGeometry,
         ) !*Snapshot {
+            errdefer {
+                if (geometry) |value| alloc.free(value.cell_for_byte);
+                alloc.free(text);
+            }
             const self = try alloc.create(Snapshot);
             self.* = .{
                 .refcount = std.atomic.Value(u32).init(1),
@@ -1571,37 +1549,36 @@ const TerminalTextRangeProvider = struct {
         .GetChildren = GetChildren,
     };
 
-    fn create(
+    /// Consumes `text` on every outcome.
+    fn createOwned(
         alloc: std.mem.Allocator,
         parent: *TerminalProvider,
         text: []u8,
         range: terminal_text.OffsetRange,
     ) !*TerminalTextRangeProvider {
-        return createWithGeometry(alloc, parent, text, range, null);
+        return createOwnedWithGeometry(alloc, parent, text, range, null);
     }
 
-    fn createWithGeometry(
+    /// Consumes `text` and `geometry` on every outcome.
+    fn createOwnedWithGeometry(
         alloc: std.mem.Allocator,
         parent: *TerminalProvider,
         text: []u8,
         range: terminal_text.OffsetRange,
         geometry: ?TerminalRangeGeometry,
     ) !*TerminalTextRangeProvider {
-        const snapshot = try Snapshot.create(alloc, text, geometry);
-        return createWithSnapshot(alloc, parent, snapshot, range) catch |err| {
-            // Ownership of text/geometry transfers only with a successfully
-            // created range. The caller still owns both on error.
-            alloc.destroy(snapshot);
-            return err;
-        };
+        const snapshot = try Snapshot.createOwned(alloc, text, geometry);
+        return createOwnedWithSnapshot(alloc, parent, snapshot, range);
     }
 
-    fn createWithSnapshot(
+    /// Consumes one owned or retained `snapshot` reference on every outcome.
+    fn createOwnedWithSnapshot(
         alloc: std.mem.Allocator,
         parent: *TerminalProvider,
         snapshot: *Snapshot,
         range: terminal_text.OffsetRange,
     ) !*TerminalTextRangeProvider {
+        errdefer snapshot.release();
         const self = try alloc.create(TerminalTextRangeProvider);
         _ = TerminalProvider.AddRef(&parent.base);
         self.* = .{
@@ -1669,8 +1646,7 @@ const TerminalTextRangeProvider = struct {
         out.* = null;
         if (self.parent.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         self.snapshot.retain();
-        const clone = createWithSnapshot(self.alloc, self.parent, self.snapshot, self.range) catch {
-            self.snapshot.release();
+        const clone = createOwnedWithSnapshot(self.alloc, self.parent, self.snapshot, self.range) catch {
             return com.E_OUTOFMEMORY;
         };
         out.* = &clone.base;
@@ -1770,7 +1746,7 @@ const TerminalTextRangeProvider = struct {
         if (relative_range == null) return com.S_OK;
         const relative = relative_range.?;
         self.snapshot.retain();
-        const match = createWithSnapshot(
+        const match = createOwnedWithSnapshot(
             self.alloc,
             self.parent,
             self.snapshot,
@@ -1778,10 +1754,7 @@ const TerminalTextRangeProvider = struct {
                 .start = normalized.start + relative.start,
                 .end = normalized.start + relative.end,
             },
-        ) catch {
-            self.snapshot.release();
-            return com.E_OUTOFMEMORY;
-        };
+        ) catch return com.E_OUTOFMEMORY;
         out.* = &match.base;
         return com.S_OK;
     }
@@ -2954,7 +2927,7 @@ test "TerminalProvider refcount and state retain balance across text provider re
     try std.testing.expectEqual(@as(u32, 1), state_data.releases);
 }
 
-test "TerminalProvider reports one degenerate insertion range" {
+test "TerminalProvider reports no legacy selection for a PTY-owned caret" {
     var state_data = TestTerminalStateData{ .caret_offset = 6 };
     const state = testTerminalState(&state_data);
 
@@ -2968,64 +2941,7 @@ test "TerminalProvider reports one degenerate insertion range" {
 
     var ranges: ?*com.SAFEARRAY = @ptrFromInt(0x10);
     try std.testing.expectEqual(com.S_OK, TerminalProvider.GetSelection(&p.text_iface, &ranges));
-    try std.testing.expect(ranges != null);
-    defer {
-        if (ranges) |array| _ = com.SafeArrayDestroy(array);
-    }
-    var lower: i32 = -1;
-    var upper: i32 = -1;
-    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetLBound(ranges.?, 1, &lower));
-    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
-    try std.testing.expectEqual(@as(i32, 0), lower);
-    try std.testing.expectEqual(@as(i32, 0), upper);
-
-    var element_index: i32 = 0;
-    var element: ?*com.IUnknown = null;
-    try std.testing.expectEqual(
-        com.S_OK,
-        com.SafeArrayGetElement(ranges.?, &element_index, @ptrCast(&element)),
-    );
-    try std.testing.expect(element != null);
-    defer {
-        if (element) |value| _ = value.vtbl.Release(value);
-    }
-
-    var range_raw: ?*anyopaque = null;
-    try std.testing.expectEqual(
-        com.S_OK,
-        element.?.vtbl.QueryInterface(element.?, &com.IID_ITextRangeProvider, &range_raw),
-    );
-    try std.testing.expect(range_raw != null);
-    const range: *com.ITextRangeProvider = @ptrCast(@alignCast(range_raw.?));
-    defer _ = range.vtbl.Release(range);
-
-    _ = element.?.vtbl.Release(element.?);
-    element = null;
-    try std.testing.expectEqual(com.S_OK, com.SafeArrayDestroy(ranges));
-    ranges = null;
-
-    try std.testing.expectEqual(
-        terminal_text.OffsetRange{ .start = 6, .end = 6 },
-        TerminalTextRangeProvider.fromBase(range).range,
-    );
-    var endpoint_delta: i32 = -1;
-    try std.testing.expectEqual(
-        com.S_OK,
-        range.vtbl.CompareEndpoints(
-            range,
-            com.TextPatternRangeEndpoint_Start,
-            range,
-            com.TextPatternRangeEndpoint_End,
-            &endpoint_delta,
-        ),
-    );
-    try std.testing.expectEqual(@as(i32, 0), endpoint_delta);
-
-    var text: ?[*:0]u16 = null;
-    try std.testing.expectEqual(com.S_OK, range.vtbl.GetText(range, -1, &text));
-    defer com.SysFreeString(text);
-    try std.testing.expect(text != null);
-    try std.testing.expectEqual(@as(u32, 0), com.SysStringLen(text));
+    try std.testing.expect(ranges == null);
 }
 
 test "TerminalProvider visible ranges returns a SAFEARRAY" {
@@ -3134,7 +3050,39 @@ test "TerminalTextRangeProvider clone and enclosing element retain parent" {
     try std.testing.expectEqual(@as(u32, 3), TerminalProvider.Release(enclosing.?));
 }
 
-test "TerminalTextRangeProvider creation failure preserves caller backing ownership" {
+test "TerminalTextRangeProvider Clone consumes retained snapshot reference on allocation failure" {
+    var state_data = TestTerminalStateData{};
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var range = try TerminalTextRangeProvider.createOwned(
+        std.testing.allocator,
+        provider,
+        try std.testing.allocator.dupe(u8, state_data.value_text),
+        .{ .start = 0, .end = state_data.value_text.len },
+    );
+    defer _ = TerminalTextRangeProvider.Release(&range.base);
+
+    const original_alloc = range.alloc;
+    defer range.alloc = original_alloc;
+    const references_before = range.snapshot.refcount.load(.monotonic);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    range.alloc = failing.allocator();
+
+    var clone: ?*com.ITextRangeProvider = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.E_OUTOFMEMORY,
+        TerminalTextRangeProvider.Clone(&range.base, &clone),
+    );
+    try std.testing.expect(clone == null);
+    try std.testing.expectEqual(references_before, range.snapshot.refcount.load(.monotonic));
+}
+
+test "TerminalTextRangeProvider owned creation frees text and geometry on snapshot allocation failure" {
     var state_data = TestTerminalStateData{};
     var provider = try TerminalProvider.create(
         std.testing.allocator,
@@ -3144,18 +3092,87 @@ test "TerminalTextRangeProvider creation failure preserves caller backing owners
     defer _ = TerminalProvider.Release(&provider.base);
 
     const text = try std.testing.allocator.dupe(u8, state_data.value_text);
-    defer std.testing.allocator.free(text);
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const cells = try std.testing.allocator.alloc(terminal_text.TerminalCellPosition, text.len);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     try std.testing.expectError(
         error.OutOfMemory,
-        TerminalTextRangeProvider.createWithGeometry(
+        TerminalTextRangeProvider.createOwnedWithGeometry(
             failing.allocator(),
             provider,
             text,
             .{ .start = 0, .end = text.len },
-            null,
+            .{
+                .cell_for_byte = cells,
+                .viewport_rows = 24,
+                .viewport_columns = 80,
+                .cell_width = 8,
+                .cell_height = 16,
+                .origin_x = 0,
+                .origin_y = 0,
+            },
         ),
     );
+}
+
+test "TerminalTextRangeProvider owned creation frees snapshot text and geometry on range allocation failure" {
+    var state_data = TestTerminalStateData{};
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    const text = try std.testing.allocator.dupe(u8, state_data.value_text);
+    const cells = try std.testing.allocator.alloc(terminal_text.TerminalCellPosition, text.len);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        TerminalTextRangeProvider.createOwnedWithGeometry(
+            failing.allocator(),
+            provider,
+            text,
+            .{ .start = 0, .end = text.len },
+            .{
+                .cell_for_byte = cells,
+                .viewport_rows = 24,
+                .viewport_columns = 80,
+                .cell_width = 8,
+                .cell_height = 16,
+                .origin_x = 0,
+                .origin_y = 0,
+            },
+        ),
+    );
+}
+
+test "TerminalTextRangeProvider owned creation releases text and geometry on success" {
+    var state_data = TestTerminalStateData{};
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    const text = try std.testing.allocator.dupe(u8, state_data.value_text);
+    const cells = try std.testing.allocator.alloc(terminal_text.TerminalCellPosition, text.len);
+    const range = try TerminalTextRangeProvider.createOwnedWithGeometry(
+        std.testing.allocator,
+        provider,
+        text,
+        .{ .start = 0, .end = text.len },
+        .{
+            .cell_for_byte = cells,
+            .viewport_rows = 24,
+            .viewport_columns = 80,
+            .cell_width = 8,
+            .cell_height = 16,
+            .origin_x = 0,
+            .origin_y = 0,
+        },
+    );
+    try std.testing.expectEqual(@as(u32, 0), TerminalTextRangeProvider.Release(&range.base));
 }
 
 test "TerminalTextRangeProvider CompareEndpoints rejects different parents" {
@@ -3196,7 +3213,7 @@ test "TerminalTextRangeProvider ExpandToEnclosingUnit supports basic units" {
     defer _ = TerminalProvider.Release(&p.base);
 
     const text = try std.testing.allocator.dupe(u8, state_data.value_text);
-    var range_provider = try TerminalTextRangeProvider.create(
+    var range_provider = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         p,
         text,
@@ -3224,7 +3241,7 @@ test "TerminalTextRangeProvider moves by UTF-8 character word and line" {
     defer _ = TerminalProvider.Release(&provider.base);
 
     const text = try std.testing.allocator.dupe(u8, state_data.value_text);
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         text,
@@ -3266,7 +3283,7 @@ test "TerminalTextRangeProvider normalizes a non-degenerate move to the requeste
     defer _ = TerminalProvider.Release(&provider.base);
 
     const text = try std.testing.allocator.dupe(u8, state_data.value_text);
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         text,
@@ -3324,7 +3341,7 @@ test "TerminalTextRangeProvider endpoint movement collapses crossing ranges" {
     defer _ = TerminalProvider.Release(&provider.base);
 
     const text = try std.testing.allocator.dupe(u8, state_data.value_text);
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         text,
@@ -3367,7 +3384,7 @@ test "TerminalTextRangeProvider finds text backward and case-insensitively" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, state_data.value_text),
@@ -3404,7 +3421,7 @@ test "TerminalTextRangeProvider finds Unicode text case-insensitively" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, document),
@@ -3437,7 +3454,7 @@ test "TerminalTextRangeProvider FindText reports allocation failures" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, state_data.value_text),
@@ -3462,6 +3479,40 @@ test "TerminalTextRangeProvider FindText reports allocation failures" {
     }
 }
 
+test "TerminalTextRangeProvider exact FindText consumes retained snapshot reference on child allocation failure" {
+    var state_data = TestTerminalStateData{ .value_text = "one TWO" };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var range = try TerminalTextRangeProvider.createOwned(
+        std.testing.allocator,
+        provider,
+        try std.testing.allocator.dupe(u8, state_data.value_text),
+        .{ .start = 0, .end = state_data.value_text.len },
+    );
+    defer _ = TerminalTextRangeProvider.Release(&range.base);
+
+    const needle = com.SysAllocString(std.unicode.utf8ToUtf16LeStringLiteral("TWO")).?;
+    defer com.SysFreeString(needle);
+    const original_alloc = range.alloc;
+    defer range.alloc = original_alloc;
+    const references_before = range.snapshot.refcount.load(.monotonic);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    range.alloc = failing.allocator();
+
+    var match: ?*com.ITextRangeProvider = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.E_OUTOFMEMORY,
+        TerminalTextRangeProvider.FindText(&range.base, needle, 0, 0, &match),
+    );
+    try std.testing.expect(match == null);
+    try std.testing.expectEqual(references_before, range.snapshot.refcount.load(.monotonic));
+}
+
 test "TerminalTextRangeProvider clamps endpoints copied from a newer snapshot" {
     var state_data = TestTerminalStateData{ .value_text = "old" };
     var provider = try TerminalProvider.create(
@@ -3471,14 +3522,14 @@ test "TerminalTextRangeProvider clamps endpoints copied from a newer snapshot" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var old_range = try TerminalTextRangeProvider.create(
+    var old_range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, "old"),
         .{ .start = 0, .end = 3 },
     );
     defer _ = TerminalTextRangeProvider.Release(&old_range.base);
-    var new_range = try TerminalTextRangeProvider.create(
+    var new_range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, "newer snapshot"),
@@ -3777,7 +3828,7 @@ test "retained terminal range rejects queries after provider detach" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, state_data.value_text),
@@ -3821,7 +3872,7 @@ test "TerminalTextRangeProvider reports unsupported mutation and scrolling hones
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var range = try TerminalTextRangeProvider.create(
+    var range = try TerminalTextRangeProvider.createOwned(
         std.testing.allocator,
         provider,
         try std.testing.allocator.dupe(u8, state_data.value_text),

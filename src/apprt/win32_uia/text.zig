@@ -112,7 +112,18 @@ pub const AccessibleTextSnapshot = struct {
     }
 };
 
-pub const accessible_history_rows: usize = 64;
+pub const accessible_history_max_rows: usize = 500;
+pub const accessible_history_target_cells: usize = 40_000;
+
+/// Bound UIA history by an approximate cell budget so narrow terminals expose
+/// useful context without making wide terminal snapshots disproportionately
+/// expensive. The active viewport is always exposed separately.
+pub fn accessibleHistoryRows(columns: usize, scrollback_enabled: bool) usize {
+    if (!scrollback_enabled) return 0;
+
+    const rows_for_cell_budget = accessible_history_target_cells / @max(columns, 1);
+    return @min(rows_for_cell_budget, accessible_history_max_rows);
+}
 
 /// Return metadata using the same line-start semantics as
 /// `TerminalTextSnapshot`: empty text counts as one line, interior blank lines
@@ -193,7 +204,8 @@ pub fn snapshotTerminalAccessiblePlainText(
     const screen = terminal_state.screens.active;
     const pages = &screen.pages;
     const viewport_top = pages.getTopLeft(.viewport);
-    const document_top = switch (viewport_top.upOverflow(accessible_history_rows)) {
+    const history_rows = accessibleHistoryRows(pages.cols, !screen.no_scrollback);
+    const document_top = switch (viewport_top.upOverflow(history_rows)) {
         .offset => |pin| pin,
         .overflow => |overflow| overflow.end,
     };
@@ -497,7 +509,7 @@ test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
     defer t.deinit(std.testing.allocator);
 
     var line: [32]u8 = undefined;
-    for (0..250) |index| {
+    for (0..750) |index| {
         const value = try std.fmt.bufPrint(&line, "row-{d:0>3}\n", .{index});
         try t.printString(value);
     }
@@ -508,7 +520,8 @@ test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
     try std.testing.expect(snapshot.text.len > 0);
     try std.testing.expectEqual(snapshot.text.len, snapshot.cell_for_byte.len);
     try std.testing.expect(std.mem.indexOf(u8, snapshot.text, "row-000") == null);
-    try std.testing.expect(std.mem.indexOf(u8, snapshot.text, "row-249") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.text, "row-300") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.text, "row-749") != null);
     try std.testing.expect(snapshot.visible_range.start <= snapshot.visible_range.end);
     try std.testing.expect(snapshot.visible_range.end <= snapshot.text.len);
     try std.testing.expect(snapshot.visible_range.start > 0);
@@ -519,11 +532,21 @@ test "snapshotTerminalAccessiblePlainText bounds history and maps viewport" {
     for (snapshot.text) |byte| if (byte == '\n') {
         line_count += 1;
     };
-    try std.testing.expect(line_count <= accessible_history_rows + 3);
+    const history_rows = accessibleHistoryRows(t.screens.active.pages.cols, true);
+    try std.testing.expectEqual(accessible_history_max_rows, history_rows);
+    try std.testing.expect(line_count <= history_rows + 3);
     for (snapshot.cell_for_byte[snapshot.visible_range.start..snapshot.visible_range.end]) |cell| {
         try std.testing.expect(cell.row >= 0);
         try std.testing.expect(cell.row < 3);
     }
+}
+
+test "accessible history policy follows scrollback and cell budget" {
+    try std.testing.expectEqual(@as(usize, 0), accessibleHistoryRows(80, false));
+    try std.testing.expectEqual(@as(usize, 500), accessibleHistoryRows(0, true));
+    try std.testing.expectEqual(@as(usize, 500), accessibleHistoryRows(80, true));
+    try std.testing.expectEqual(@as(usize, 333), accessibleHistoryRows(120, true));
+    try std.testing.expectEqual(@as(usize, 0), accessibleHistoryRows(40_001, true));
 }
 
 test "accessible caret mapping uses UTF-8 grid boundaries and line ends" {

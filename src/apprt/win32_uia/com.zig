@@ -13,6 +13,7 @@ pub const BOOL = windows.BOOL;
 pub const LRESULT = isize;
 pub const WPARAM = usize;
 pub const LPARAM = isize;
+pub const BSTR = ?[*:0]u16;
 
 pub const S_OK: HRESULT = 0;
 pub const S_FALSE: HRESULT = 1;
@@ -70,7 +71,7 @@ pub const VARIANT = extern struct {
     wReserved3: u16 = 0,
     value: extern union {
         i4: i32,
-        bstr: ?[*:0]u16,
+        bstr: BSTR,
         bool_val: i16,
         unknown: ?*IUnknown,
     },
@@ -83,7 +84,7 @@ pub const VARIANT = extern struct {
         return .{ .vt = VT_I4, .value = .{ .i4 = v } };
     }
 
-    pub fn fromBstr(s: ?[*:0]u16) VARIANT {
+    pub fn fromBstr(s: BSTR) VARIANT {
         return .{ .vt = VT_BSTR, .value = .{ .bstr = s } };
     }
 
@@ -397,8 +398,8 @@ pub extern "uiautomationcore" fn UiaRaiseNotificationEvent(
     provider: *IRawElementProviderSimple,
     notification_kind: i32,
     notification_processing: i32,
-    display_string: [*:0]const u16,
-    activity_id: [*:0]const u16,
+    display_string: BSTR,
+    activity_id: BSTR,
 ) callconv(.winapi) HRESULT;
 
 /// Report whether a UIA client is currently listening for a given event
@@ -409,8 +410,9 @@ pub extern "uiautomationcore" fn UiaDisconnectAllProviders() callconv(.winapi) H
 pub extern "uiautomationcore" fn UiaGetReservedNotSupportedValue(value: *?*IUnknown) callconv(.winapi) HRESULT;
 
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
-pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
-pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
+pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) BSTR;
+pub extern "oleaut32" fn SysAllocStringLen(psz: ?[*]const u16, len: u32) callconv(.winapi) BSTR;
+pub extern "oleaut32" fn SysFreeString(bstr: BSTR) callconv(.winapi) void;
 pub extern "oleaut32" fn SysStringLen(bstr: ?[*]const u16) callconv(.winapi) u32;
 pub extern "oleaut32" fn SafeArrayCreateVector(vt: u16, lLbound: i32, cElements: u32) callconv(.winapi) ?*SAFEARRAY;
 pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: ?*anyopaque) callconv(.winapi) HRESULT;

@@ -75,18 +75,30 @@ pub fn raiseNotification(
     message: []const u8,
 ) void {
     if (!clientsAreListening() or message.len == 0) return;
-    var message_w: [256]u16 = undefined;
-    const written = std.unicode.utf8ToUtf16Le(message_w[0 .. message_w.len - 1], message) catch return;
-    message_w[written] = 0;
-    const activity_id = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.command-palette");
+    const message_bstr = allocNotificationBstr(std.heap.page_allocator, message) catch return;
+    defer com.SysFreeString(message_bstr);
+    const activity_id = com.SysAllocString(
+        std.unicode.utf8ToUtf16LeStringLiteral("winghostty.command-palette"),
+    ) orelse return;
+    defer com.SysFreeString(activity_id);
     const hr = com.UiaRaiseNotificationEvent(
         provider,
         kind.toInt(),
         com.NotificationProcessing_MostRecent,
-        @ptrCast(&message_w),
+        message_bstr,
         activity_id,
     );
     logIfFailed("UiaRaiseNotificationEvent", hr);
+}
+
+fn allocNotificationBstr(
+    allocator: std.mem.Allocator,
+    message: []const u8,
+) ![*:0]u16 {
+    const message_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, message);
+    defer allocator.free(message_w);
+    const len = std.math.cast(u32, message_w.len) orelse return error.OutOfMemory;
+    return com.SysAllocStringLen(message_w.ptr, len) orelse error.OutOfMemory;
 }
 
 /// Notify clients that a widget's live accessible name changed. Empty
@@ -203,4 +215,30 @@ test "Notification maps sparse palette outcomes to SDK values" {
     try std.testing.expectEqual(@as(i32, com.NotificationKind_Other), Notification.other.toInt());
     try std.testing.expectEqual(@as(i32, com.NotificationKind_ActionCompleted), Notification.action_completed.toInt());
     try std.testing.expectEqual(@as(i32, com.NotificationKind_ActionAborted), Notification.action_aborted.toInt());
+}
+
+test "notification message conversion preserves long messages" {
+    const message = "a" ** 300;
+    const message_w = try allocNotificationBstr(std.testing.allocator, message);
+    defer com.SysFreeString(message_w);
+
+    try std.testing.expectEqual(@as(u32, 300), com.SysStringLen(message_w));
+    for (message_w[0..300]) |unit| try std.testing.expectEqual(@as(u16, 'a'), unit);
+    try std.testing.expectEqual(@as(u16, 0), message_w[300]);
+}
+
+test "notification message conversion preserves supplementary scalars" {
+    const message_w = try allocNotificationBstr(std.testing.allocator, "status: 🚀");
+    defer com.SysFreeString(message_w);
+    const expected = std.unicode.utf8ToUtf16LeStringLiteral("status: 🚀");
+
+    try std.testing.expectEqual(@as(u32, @intCast(expected.len)), com.SysStringLen(message_w));
+    try std.testing.expectEqualSlices(u16, expected, message_w[0..expected.len]);
+}
+
+test "notification message conversion rejects invalid UTF-8" {
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        allocNotificationBstr(std.testing.allocator, "valid\xFFinvalid"),
+    );
 }

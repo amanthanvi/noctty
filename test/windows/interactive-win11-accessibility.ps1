@@ -96,6 +96,8 @@ public static class WinghosttyAccessibilityNative {
     public static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("kernel32.dll")]
@@ -590,53 +592,97 @@ try {
     $documentFocusError = $null
     try { $document.SetFocus() } catch { $documentFocusError = $_.Exception.Message }
     $focusDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    $focusActivationMaxAttempts = 30
+    $focusActivationAttempts = 0
     $clickedDocument = $false
     $focusedHwnd = [IntPtr]::Zero
     [uint32] $focusedProcessId = 0
+    $lastSetCursorPosError = 0
+    $lastGetCursorPosError = 0
+    $lastActualCursorX = $null
+    $lastActualCursorY = $null
+    $lastClickError = 0
+    $lastTargetHwnd = [IntPtr]::Zero
+    [uint32] $lastTargetOwner = 0
     do {
         $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
         $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $focusedProcessId = 0
         if ($focusedHwnd -ne [IntPtr]::Zero) {
             [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
-            if ($focusedProcessId -eq [uint32]$process.Id -and $clickedDocument) { break }
+            if ($focusedProcessId -eq [uint32]$process.Id) { break }
         }
-        [void][WinghosttyAccessibilityNative]::SetForegroundWindow($process.MainWindowHandle)
-        if (-not $clickedDocument) {
-            $bounds = $document.Current.BoundingRectangle
-            if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
-                $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
-                [void][WinghosttyAccessibilityNative]::SetWindowPos(
-                    $process.MainWindowHandle,
-                    [IntPtr](-1),
-                    0,
-                    0,
-                    0,
-                    0,
-                    $noMoveNoSizeShow
-                )
+
+        if ($focusActivationAttempts -ge $focusActivationMaxAttempts) { break }
+        $focusActivationAttempts++
+        [void][WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+        try { $document.SetFocus() } catch { $documentFocusError = $_.Exception.Message }
+
+        $bounds = $document.Current.BoundingRectangle
+        if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+            $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
+            [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                $process.MainWindowHandle,
+                [IntPtr](-1),
+                0,
+                0,
+                0,
+                0,
+                $noMoveNoSizeShow
+            )
+            try {
                 $x = [int][Math]::Round($bounds.Left + ($bounds.Width / 2))
                 $y = [int][Math]::Round($bounds.Top + ($bounds.Height / 2))
                 $point = [WinghosttyAccessibilityNative+POINT]::new()
                 $point.x = $x
                 $point.y = $y
-                $targetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($point)
-                [uint32] $targetProcessId = 0
+                $lastTargetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($point)
+                $lastTargetOwner = 0
                 $targetThreadId = [WinghosttyAccessibilityNative]::GetWindowThreadProcessId(
-                    $targetHwnd,
-                    [ref] $targetProcessId
+                    $lastTargetHwnd,
+                    [ref] $lastTargetOwner
                 )
-                if ($targetHwnd -eq [IntPtr]::Zero -or $targetThreadId -eq 0 -or $targetProcessId -ne [uint32]$process.Id) {
-                    throw "Refusing accessibility click outside winghostty (hwnd=$targetHwnd, owner=$targetProcessId, expected=$($process.Id))."
-                }
-                if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
-                    if (-not [WinghosttyAccessibilityNative]::SendMouseClick()) {
-                        throw "SendInput failed for accessibility click: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                if ($lastTargetHwnd -ne [IntPtr]::Zero -and
+                    $targetThreadId -ne 0 -and
+                    $lastTargetOwner -eq [uint32]$process.Id) {
+                    if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
+                        $lastSetCursorPosError = 0
+                        $actualPoint = [WinghosttyAccessibilityNative+POINT]::new()
+                        if ([WinghosttyAccessibilityNative]::GetCursorPos([ref]$actualPoint)) {
+                            $lastGetCursorPosError = 0
+                            $lastActualCursorX = $actualPoint.x
+                            $lastActualCursorY = $actualPoint.y
+                            # SendInput clicks the actual cursor location, so
+                            # verify that exact point immediately before input.
+                            if ($actualPoint.x -eq $x -and $actualPoint.y -eq $y) {
+                                $verifiedTargetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($actualPoint)
+                                [uint32] $verifiedTargetOwner = 0
+                                $verifiedTargetThreadId = [WinghosttyAccessibilityNative]::GetWindowThreadProcessId(
+                                    $verifiedTargetHwnd,
+                                    [ref] $verifiedTargetOwner
+                                )
+                                $lastTargetHwnd = $verifiedTargetHwnd
+                                $lastTargetOwner = $verifiedTargetOwner
+                                if ($verifiedTargetHwnd -ne [IntPtr]::Zero -and
+                                    $verifiedTargetThreadId -ne 0 -and
+                                    $verifiedTargetOwner -eq [uint32]$process.Id) {
+                                    if ([WinghosttyAccessibilityNative]::SendMouseClick()) {
+                                        $clickedDocument = $true
+                                        $lastClickError = 0
+                                    } else {
+                                        $lastClickError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                                    }
+                                }
+                            }
+                        } else {
+                            $lastGetCursorPosError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        }
+                    } else {
+                        $lastSetCursorPosError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                     }
                 }
-                elseif (-not [WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)) {
-                    throw "Unable to activate winghostty for accessibility input."
-                }
-                Start-Sleep -Milliseconds 150
+            }
+            finally {
                 [void][WinghosttyAccessibilityNative]::SetWindowPos(
                     $process.MainWindowHandle,
                     [IntPtr](-2),
@@ -646,18 +692,30 @@ try {
                     0,
                     $noMoveNoSizeShow
                 )
-                $clickedDocument = $true
             }
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $focusDeadline)
+
+    # The final activation attempt can succeed at the deadline. Re-query
+    # before deciding failure so stale pre-attempt HWND state cannot fail it.
+    $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+    $focusedProcessId = 0
+    if ($focusedHwnd -ne [IntPtr]::Zero) {
+        [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
+    }
     if ($focusedHwnd -eq [IntPtr]::Zero -or $focusedProcessId -ne [uint32]$process.Id) {
         $focusedSummary = if ($null -eq $focused) {
             '<none>'
         } else {
             "pid=$($focused.Current.ProcessId) name='$($focused.Current.Name)'"
         }
-        throw "Keyboard focus did not resolve to a winghostty HWND (uia_focused=$focusedSummary, hwnd=$focusedHwnd, hwnd_owner=$focusedProcessId, expected=$($process.Id), document_set_focus_error='$documentFocusError', clicked_document=$clickedDocument)."
+        $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        [uint32] $foregroundOwner = 0
+        if ($foregroundHwnd -ne [IntPtr]::Zero) {
+            [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
+        }
+        throw "Keyboard focus did not resolve to a winghostty HWND (attempts=$focusActivationAttempts/$focusActivationMaxAttempts; SetCursorPos Win32 error=$lastSetCursorPosError; GetCursorPos Win32 error=$lastGetCursorPosError actual=($lastActualCursorX,$lastActualCursorY); click Win32 error=$lastClickError; foreground HWND=$foregroundHwnd owner=$foregroundOwner; focused HWND=$focusedHwnd owner=$focusedProcessId; target HWND=$lastTargetHwnd owner=$lastTargetOwner; expected owner=$($process.Id); UIA focused=$focusedSummary; Document.SetFocus error='$documentFocusError'; clicked document=$clickedDocument)."
     }
 
     [WinghosttyAccessibilityNative]::ResetTextChangedCount()
@@ -705,17 +763,13 @@ try {
         throw "Terminal emitted $textChangedCount TextChanged events in $([Math]::Round($textChangedElapsedSeconds, 2))s; limit=$textChangedLimit."
     }
 
-    $selection = @($textPattern.GetSelection())
-    if ($selection.Count -ne 1) {
-        throw "Terminal TextPattern returned $($selection.Count) selection ranges; expected one insertion range."
+    $supportedTextSelection = $textPattern.Current.SupportedTextSelection
+    if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::None) {
+        throw "Terminal TextPattern unexpectedly advertises selection support: $supportedTextSelection."
     }
-    $selectionSpan = $selection[0].CompareEndpoints(
-        [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
-        $selection[0],
-        [System.Windows.Automation.TextPatternRangeEndpoint]::End
-    )
-    if ($selectionSpan -ne 0 -or $selection[0].GetText(-1).Length -ne 0) {
-        throw "Terminal TextPattern selection is not a degenerate caret/insertion range (endpoint delta=$selectionSpan)."
+    $selection = @($textPattern.GetSelection())
+    if ($selection.Count -ne 0) {
+        throw "Terminal TextPattern returned $($selection.Count) legacy selection ranges despite reporting None."
     }
     $markerRange = $textPattern.DocumentRange.FindText($marker, $true, $false)
     if ($null -eq $markerRange) { throw 'Terminal FindText did not return the visible marker range.' }
@@ -1372,9 +1426,10 @@ try {
     }
     $stressLineCount = 150
     $stressPrefix = "${marker}_STRESS"
+    $stressFirstMarker = "${stressPrefix}_FIRST"
     $stressFinalMarker = "${stressPrefix}_150"
     $stressResponsiveMarker = "${stressPrefix}_RESPONSIVE"
-    $stressCommand = "cmd.exe /d /c `"for /L %i in (1,1,$stressLineCount) do @echo ${stressPrefix}_%i`""
+    $stressCommand = "cmd.exe /d /c `"echo $stressFirstMarker & for /L %i in (1,1,$stressLineCount) do @echo ${stressPrefix}_%i`""
     [WinghosttyAccessibilityNative]::ResetTextChangedCount()
     $process.Refresh()
     $stressBaselineHandles = $process.HandleCount
@@ -1386,12 +1441,20 @@ try {
         throw "SendInput failed for sustained output command: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'sustained output Enter' -Process $process
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(15)) -Description 'sustained output final marker through TextPattern' -Condition {
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(15)) -Description 'sustained output first and final markers through one fresh TextPattern range' -Condition {
+        $script:stressFirstMarkerVisible = $false
         $script:stressFinalMarkerVisible = $false
         foreach ($candidateDocument in $documents) {
             $candidatePattern = $null
-            if ($candidateDocument.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$candidatePattern) -and
-                $candidatePattern.DocumentRange.GetText(-1).Contains($stressFinalMarker)) {
+            if (-not $candidateDocument.TryGetCurrentPattern(
+                [System.Windows.Automation.TextPattern]::Pattern,
+                [ref]$candidatePattern
+            )) { continue }
+            $candidateRange = $candidatePattern.DocumentRange
+            $candidateText = $candidateRange.GetText(-1)
+            if ($candidateText.Contains($stressFirstMarker) -and
+                $candidateText.Contains($stressFinalMarker)) {
+                $script:stressFirstMarkerVisible = $true
                 $script:stressFinalMarkerVisible = $true
                 break
             }
@@ -1425,6 +1488,8 @@ try {
     }
     $sustainedOutputEvidence = [ordered]@{
         line_count = $stressLineCount
+        first_marker = $stressFirstMarker
+        first_marker_visible = [bool]$script:stressFirstMarkerVisible
         final_marker = $stressFinalMarker
         final_marker_visible = [bool]$script:stressFinalMarkerVisible
         responsive_marker = $stressResponsiveMarker
@@ -1508,7 +1573,8 @@ try {
             text_changed_events = $textChangedCount
             rectangle_count = $terminalRectCount
             selection_range_count = $selection.Count
-            selection_is_degenerate = $true
+            supported_text_selection = $supportedTextSelection.ToString()
+            selection_is_degenerate = $false
             query_only_marker = $queryOnlyMarker
             query_only_acquired_text_pattern_refreshed = $queryOnlyRangeRefreshed
             text_pattern2_client_available = $false

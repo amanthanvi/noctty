@@ -528,6 +528,7 @@ const SC_MINIMIZE: WPARAM = 0xF020;
 const SC_MAXIMIZE: WPARAM = 0xF030;
 const SC_RESTORE: WPARAM = 0xF120;
 const WM_PAINT = 0x000F;
+const WM_QUIT = 0x0012;
 const WM_TIMER = 0x0113;
 const WM_CTLCOLOREDIT = 0x0133;
 const WM_CTLCOLORBTN = 0x0135;
@@ -563,6 +564,7 @@ const DeferredUiaDisconnect = struct {
     retries: u8 = 0,
 };
 const PM_NOREMOVE: UINT = 0x0000;
+const PM_REMOVE: UINT = 0x0001;
 const WS_OVERLAPPED = 0x00000000;
 const WS_CHILD = 0x40000000;
 const WS_CLIPCHILDREN = 0x02000000;
@@ -2379,6 +2381,49 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
     return @intCast(size);
 }
 
+const SettingsConfigKey = @import("../config/key.zig").Key;
+const SettingsEditedKeySet = std.StaticBitSet(std.enums.values(SettingsConfigKey).len);
+const settings_explicit_optional_edit_keys = .{
+    SettingsConfigKey.theme,
+    SettingsConfigKey.command,
+    SettingsConfigKey.@"auto-update",
+    SettingsConfigKey.@"auto-update-channel",
+};
+
+fn settingsUserEditedKeys(
+    original: *const configpkg.Config,
+    pending: *const configpkg.Config,
+) SettingsEditedKeySet {
+    var edited: SettingsEditedKeySet = .initEmpty();
+    inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
+        if (field.name[0] == '_') continue;
+        switch (@typeInfo(field.type)) {
+            .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
+                const key = @field(SettingsConfigKey, field.name);
+                if (original.changed(pending, key)) edited.set(@intFromEnum(key));
+            },
+            else => {},
+        }
+    }
+    inline for (settings_explicit_optional_edit_keys) |key| {
+        if (original.changed(pending, key)) edited.set(@intFromEnum(key));
+    }
+    return edited;
+}
+
+fn settingsEditedValueMasked(
+    pending: *const configpkg.Config,
+    reloaded: *const configpkg.Config,
+    comptime key: SettingsConfigKey,
+) bool {
+    if (key == SettingsConfigKey.@"auto-update-channel") {
+        const expected = pending.@"auto-update-channel" orelse build_config.release_channel;
+        const actual = reloaded.@"auto-update-channel" orelse build_config.release_channel;
+        return expected != actual;
+    }
+    return pending.changed(reloaded, comptime key);
+}
+
 test "win32 render trace classifies gaps by start time" {
     try std.testing.expect(!RenderTrace.gapIsSustained(1250, 578));
     try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
@@ -2812,11 +2857,13 @@ pub const App = struct {
         }
 
         self.running = true;
-        @atomicStore(DWORD, &self.ui_thread_id, GetCurrentThreadId(), .release);
+        const ui_thread_id = GetCurrentThreadId();
+        @atomicStore(DWORD, &self.ui_thread_id, ui_thread_id, .release);
         self.ensureMessageQueue();
         defer {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
+            drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
         }
@@ -2891,20 +2938,12 @@ pub const App = struct {
             }
 
             if (msg.message == WM_WINHOSTTY_UIA_DISCONNECT) {
+                if (msg.lParam == 0) {
+                    log.warn("win32 UIA deferred disconnect message had no context", .{});
+                    continue;
+                }
                 const pending: *DeferredUiaDisconnect = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
-                const hr = pending.disconnect(pending.ctx);
-                if (hr == win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL and pending.retries < 3) {
-                    pending.retries += 1;
-                    if (postDeferredUiaDisconnect(self.ui_thread_id, pending)) continue;
-                }
-                if (hr != win32_uia.S_OK) {
-                    log.warn("win32 UIA deferred disconnect failed hr=0x{x} retries={d}", .{
-                        @as(u32, @bitCast(hr)),
-                        pending.retries,
-                    });
-                }
-                pending.release(pending.ctx);
-                std.heap.page_allocator.destroy(pending);
+                processDeferredUiaDisconnect(self.ui_thread_id, pending);
                 continue;
             }
 
@@ -7012,65 +7051,6 @@ pub const App = struct {
         );
         defer alloc.free(tmp_path);
 
-        // Build a file-only baseline: `Config.default()` merged with
-        // `loadDefaultFiles()` but WITHOUT `loadCliArgs()` or
-        // `loadRecursiveFiles()`. This avoids three previously
-        // shipping-day bugs:
-        //   1. `-e`, `--working-directory`, `--class` and similar CLI
-        //      overrides from the current process launch would bake
-        //      into `ghostty.conf` the first time the user saved
-        //      (`Config.load()` already applied them to `pending`).
-        //   2. `config-file` includes would get flattened into the
-        //      primary file, leaving duplicate directives that fight
-        //      each other on the next reload.
-        //   3. Future new CLI-only flags would silently persist.
-        //
-        // Then copy every field the GUI user actually edited from
-        // `pending` into `file_cfg`, and use that as the source for
-        // patching the raw target file. The raw-text patcher below
-        // preserves comments, formatting, relative include paths, and
-        // unrelated fields.
-        //
-        // Field types we currently support as GUI edits are all value
-        // types (bool, int, float, enum, packed struct, tagged union
-        // with no pointer variants). Assigning via `@field` is a
-        // shallow bit-copy and is safe without arena-transfer. Any
-        // GUI-exposed pointer field (string / slice) needs an explicit
-        // string-dupe branch here.
-        var file_cfg = configpkg.Config.default(alloc) catch return error.SerializeFailed;
-        defer file_cfg.deinit();
-        // Seed the baseline from the ACTUAL target file, not the
-        // per-user default search path. When launched with
-        // `--config-file custom.conf`, `target_path` resolves to
-        // `custom.conf` (see `cliConfigFileOverride`), and we must
-        // load THAT file — loading `loadDefaultFiles` would write
-        // back a merge of `ghostty.conf` defaults + GUI edits into
-        // the custom file, dropping every key that existed only in
-        // the custom file.
-        //
-        // `loadFile` accepts an absolute path and merges its
-        // contents on top of `file_cfg` (already `default()`), so
-        // we get: defaults + target-file overrides, then the GUI
-        // edits patched on top below. If the target file doesn't
-        // exist yet (first-save case), `loadFile` returns early
-        // with a warn; `file_cfg` stays at defaults, which is the
-        // intended behaviour.
-        blk: {
-            const path_abs = std.fs.realpathAlloc(alloc, target_path) catch |err| {
-                if (err == error.FileNotFound) break :blk;
-                // Other real-path errors (permission denied, not-a-
-                // dir) leave us with the default-only baseline; log
-                // and proceed rather than erroring the save.
-                std.log.warn("settings: couldn't realpath target_path err={}; using default baseline", .{err});
-                break :blk;
-            };
-            defer alloc.free(path_abs);
-            file_cfg.loadFile(alloc, path_abs) catch |err| {
-                std.log.warn("settings: loadFile on target failed err={}; using default baseline", .{err});
-            };
-        }
-
-        const ConfigKey = @import("../config/key.zig").Key;
         // Diff pending against `original` (the snapshot from when
         // the settings window opened), NOT against the live
         // `self.config`. Otherwise a concurrent `reload_config` or
@@ -7085,27 +7065,7 @@ pub const App = struct {
         // default in Settings would NOT stick — FileFormatter's
         // default-drop would strip the reset line, and the include
         // would re-apply its non-default value on next reload.
-        var user_edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
-        var any_edit = false;
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] == '_') continue;
-            switch (@typeInfo(field.type)) {
-                .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(ConfigKey, field.name);
-                    if (original.changed(pending, key)) {
-                        @field(file_cfg, field.name) = @field(pending, field.name);
-                        user_edited.set(@intFromEnum(key));
-                        any_edit = true;
-                    }
-                },
-                else => {}, // skip pointer / optional-pointer / array fields
-            }
-        }
-        const theme_key = ConfigKey.theme;
-        if (original.changed(pending, theme_key)) {
-            user_edited.set(@intFromEnum(theme_key));
-            any_edit = true;
-        }
+        const user_edited = settingsUserEditedKeys(original, pending);
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -7113,7 +7073,7 @@ pub const App = struct {
         // `error.FileIsEmpty` warnings on every subsequent load.
         // On an existing file, skipping also avoids an unnecessary
         // mtime bump.
-        if (!any_edit) return;
+        if (user_edited.count() == 0) return;
 
         // SURGICAL SAVE: read the raw target file text and patch
         // only GUI-edited field lines in place. This preserves
@@ -7128,12 +7088,9 @@ pub const App = struct {
         // serialised `key = value` emission. If no matching line
         // exists, append to the file end.
         //
-        // For fields NOT on disk but in `file_cfg` non-default
-        // (first-save case with no prior file content), emit them
-        // after the preserved content. `file_cfg` retains this
-        // information because `loadFile` already applied the
-        // target file; subtracting the raw-text lines from what
-        // `file_cfg` holds tells us what needs appending.
+        // Edited fields that are not already present are appended by
+        // `patchOrAppendEdits` below. No parsed-file baseline is needed:
+        // unedited source lines remain byte-for-byte intact.
         const raw_before: []u8 = blk: {
             const f = std.fs.cwd().openFile(target_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk try alloc.dupe(u8, ""),
@@ -7266,7 +7223,7 @@ pub const App = struct {
             if (field.name[0] == '_') continue;
             switch (@typeInfo(field.type)) {
                 .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(ConfigKey, field.name);
+                    const key = @field(SettingsConfigKey, field.name);
                     if (user_edited.isSet(@intFromEnum(key))) {
                         if (pending.changed(&reloaded, key)) {
                             std.log.warn(
@@ -7280,9 +7237,14 @@ pub const App = struct {
                 else => {},
             }
         }
-        if (user_edited.isSet(@intFromEnum(theme_key)) and pending.changed(&reloaded, theme_key)) {
-            std.log.warn("settings save: field 'theme' was saved but is masked by a later config-file layer", .{});
-            any_masked = true;
+        inline for (settings_explicit_optional_edit_keys) |key| {
+            if (user_edited.isSet(@intFromEnum(key)) and settingsEditedValueMasked(pending, &reloaded, key)) {
+                std.log.warn(
+                    "settings save: field '{s}' was saved but is masked by a later config-file layer",
+                    .{@tagName(key)},
+                );
+                any_masked = true;
+            }
         }
 
         self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
@@ -17300,6 +17262,127 @@ test "win32 settings patch persists a palette theme selection" {
     try testing.expect(std.mem.indexOf(u8, patched.items, "window-save-state = never") != null);
 }
 
+test "win32 settings patch persists optional command edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    var direct: configpkg.Config.Command = undefined;
+    try direct.parseCLI(pending._arena.?.allocator(), "direct:pwsh.exe -NoLogo");
+    pending.command = direct;
+
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.command)));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(
+        testing.allocator,
+        "font-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = direct:pwsh.exe -NoLogo") != null);
+
+    original.command = try pending.command.?.clone(original._arena.?.allocator());
+    pending.command = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.command)));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "command = cmd.exe\nfont-size = 12\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = \n") != null);
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = cmd.exe") == null);
+}
+
+test "win32 settings patch persists optional update channel edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    pending.@"auto-update-channel" = .tip;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update-channel")));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
+    try testing.expectEqualStrings("auto-update-channel = tip\n", patched.items);
+
+    original.@"auto-update-channel" = .stable;
+    pending.@"auto-update-channel" = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.@"auto-update-channel")));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "auto-update-channel = stable\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expectEqualStrings("auto-update-channel = \n", patched.items);
+
+    var reloaded = try configpkg.Config.default(testing.allocator);
+    defer reloaded.deinit();
+    reloaded.@"auto-update-channel" = build_config.release_channel;
+    try testing.expect(!settingsEditedValueMasked(
+        &pending,
+        &reloaded,
+        SettingsConfigKey.@"auto-update-channel",
+    ));
+    reloaded.@"auto-update-channel" = if (build_config.release_channel == .stable) .tip else .stable;
+    try testing.expect(settingsEditedValueMasked(
+        &pending,
+        &reloaded,
+        SettingsConfigKey.@"auto-update-channel",
+    ));
+}
+
+test "win32 settings patch persists optional auto update edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    pending.@"auto-update" = .download;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update")));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
+    try testing.expectEqualStrings("auto-update = download\n", patched.items);
+
+    original.@"auto-update" = .check;
+    pending.@"auto-update" = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.@"auto-update")));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "auto-update = check\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expectEqualStrings("auto-update = \n", patched.items);
+}
+
 /// Strip HTML tags for the CF_UNICODETEXT fallback when core only
 /// supplies `text/html`. Plain consumers get readable text; entity
 /// references are preserved verbatim.
@@ -19650,12 +19733,51 @@ fn refocusActiveSurface(host: *Host) void {
 }
 
 fn postDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) bool {
+    if (thread_id == 0) return false;
     return PostThreadMessageW(
         thread_id,
         WM_WINHOSTTY_UIA_DISCONNECT,
         0,
         @as(LPARAM, @bitCast(@as(usize, @intFromPtr(pending)))),
     ) != 0;
+}
+
+fn processDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) void {
+    const hr = pending.disconnect(pending.ctx);
+    if (hr == win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL and pending.retries < 3) {
+        pending.retries += 1;
+        if (postDeferredUiaDisconnect(thread_id, pending)) return;
+    }
+    if (hr != win32_uia.S_OK) {
+        log.warn("win32 UIA deferred disconnect failed hr=0x{x} retries={d}", .{
+            @as(u32, @bitCast(hr)),
+            pending.retries,
+        });
+    }
+    pending.release(pending.ctx);
+    std.heap.page_allocator.destroy(pending);
+}
+
+fn drainDeferredUiaDisconnects(thread_id: DWORD) void {
+    var msg: MSG = undefined;
+    while (PeekMessageW(
+        &msg,
+        null,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        PM_REMOVE,
+    ) != 0) {
+        // PeekMessage always returns WM_QUIT regardless of the filter.
+        // Consume it during shutdown, but never interpret its lParam as a
+        // deferred-disconnect pointer.
+        if (msg.message != WM_WINHOSTTY_UIA_DISCONNECT) continue;
+        if (msg.lParam == 0) {
+            log.warn("win32 UIA deferred disconnect message had no context", .{});
+            continue;
+        }
+        const pending: *DeferredUiaDisconnect = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+        processDeferredUiaDisconnect(thread_id, pending);
+    }
 }
 
 fn scheduleDeferredUiaDisconnect(
@@ -19666,15 +19788,68 @@ fn scheduleDeferredUiaDisconnect(
 ) void {
     const pending = std.heap.page_allocator.create(DeferredUiaDisconnect) catch {
         log.warn("win32 UIA deferred disconnect allocation failed", .{});
+        const hr = disconnect(ctx);
+        if (hr != win32_uia.S_OK) {
+            log.warn("win32 UIA immediate disconnect fallback failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        }
         release(ctx);
         return;
     };
     pending.* = .{ .ctx = ctx, .disconnect = disconnect, .release = release };
     if (!postDeferredUiaDisconnect(app.ui_thread_id, pending)) {
         log.warn("win32 UIA deferred disconnect post failed", .{});
-        release(ctx);
-        std.heap.page_allocator.destroy(pending);
+        processDeferredUiaDisconnect(0, pending);
     }
+}
+
+test "win32 deferred UIA disconnect drain retries and releases once" {
+    const Fake = struct {
+        disconnects: usize = 0,
+        releases: usize = 0,
+        always_rpc: bool = false,
+
+        fn disconnect(raw: *anyopaque) win32_uia.HRESULT {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.disconnects += 1;
+            return if (self.always_rpc or self.disconnects == 1)
+                win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL
+            else
+                win32_uia.S_OK;
+        }
+
+        fn release(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.releases += 1;
+        }
+    };
+
+    var fake: Fake = .{};
+    var queue_probe: MSG = undefined;
+    _ = PeekMessageW(&queue_probe, null, 0, 0, PM_NOREMOVE);
+    const pending = try std.heap.page_allocator.create(DeferredUiaDisconnect);
+    pending.* = .{
+        .ctx = @ptrCast(&fake),
+        .disconnect = &Fake.disconnect,
+        .release = &Fake.release,
+    };
+    const thread_id = GetCurrentThreadId();
+    PostQuitMessage(0);
+    try std.testing.expect(postDeferredUiaDisconnect(thread_id, pending));
+    drainDeferredUiaDisconnects(thread_id);
+    try std.testing.expectEqual(@as(usize, 2), fake.disconnects);
+    try std.testing.expectEqual(@as(usize, 1), fake.releases);
+
+    var exhausted: Fake = .{ .always_rpc = true };
+    const retry_pending = try std.heap.page_allocator.create(DeferredUiaDisconnect);
+    retry_pending.* = .{
+        .ctx = @ptrCast(&exhausted),
+        .disconnect = &Fake.disconnect,
+        .release = &Fake.release,
+    };
+    try std.testing.expect(postDeferredUiaDisconnect(thread_id, retry_pending));
+    drainDeferredUiaDisconnects(thread_id);
+    try std.testing.expectEqual(@as(usize, 4), exhausted.disconnects);
+    try std.testing.expectEqual(@as(usize, 1), exhausted.releases);
 }
 
 fn rootDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
