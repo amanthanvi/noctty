@@ -400,9 +400,10 @@ pub const PaletteListProvider = struct {
         self_selection: *com.ISelectionProvider,
         out: *com.BOOL,
     ) callconv(.winapi) com.HRESULT {
+        out.* = 0;
         const self = fromSelection(self_selection);
-        out.* = if (self.rowCount() > 0) 1 else 0;
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = if (self.rowCount() > 0) 1 else 0;
         return com.S_OK;
     }
 
@@ -1749,15 +1750,16 @@ const TerminalTextRangeProvider = struct {
         if (self.parent.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         const value_ptr = value_w orelse return com.E_POINTER;
         const value_len: usize = @intCast(com.SysStringLen(value_ptr));
-        const needle = std.unicode.utf16LeToUtf8Alloc(self.alloc, value_ptr[0..value_len]) catch return com.E_INVALIDARG;
+        const needle = std.unicode.utf16LeToUtf8Alloc(self.alloc, value_ptr[0..value_len]) catch |err|
+            return if (err == error.OutOfMemory) com.E_OUTOFMEMORY else com.E_INVALIDARG;
         defer self.alloc.free(needle);
         if (needle.len == 0) return com.S_OK;
 
         const normalized = normalizeRange(self.range, self.text.len);
         const haystack = self.text[normalized.start..normalized.end];
         const relative_range = if (ignore_case != 0)
-            findTextRangeIgnoreCase(self.alloc, haystack, value_ptr[0..value_len], backward != 0) catch
-                return com.E_INVALIDARG
+            findTextRangeIgnoreCase(self.alloc, haystack, value_ptr[0..value_len], backward != 0) catch |err|
+                return if (err == error.OutOfMemory) com.E_OUTOFMEMORY else com.E_INVALIDARG
         else exact: {
             const relative = findTextIndex(haystack, needle, backward != 0) orelse return com.S_OK;
             break :exact terminal_text.OffsetRange{
@@ -2676,6 +2678,14 @@ test "PaletteListProvider exposes one-selection container semantics without fabr
     var focus: ?*com.IRawElementProviderFragment = @ptrFromInt(0x10);
     try std.testing.expectEqual(com.S_OK, PaletteListProvider.FragmentRootGetFocus(&provider.fragment_root, &focus));
     try std.testing.expect(focus == null);
+
+    provider.detach();
+    required = 1;
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteListProvider.SelectionGetIsSelectionRequired(&provider.selection_iface, &required),
+    );
+    try std.testing.expectEqual(@as(com.BOOL, 0), required);
 }
 
 test "Palette row selection rejects disabled items" {
@@ -3416,6 +3426,40 @@ test "TerminalTextRangeProvider finds Unicode text case-insensitively" {
         terminal_text.OffsetRange{ .start = start, .end = start + expected_text.len },
         TerminalTextRangeProvider.fromBase(match.?).range,
     );
+}
+
+test "TerminalTextRangeProvider FindText reports allocation failures" {
+    var state_data = TestTerminalStateData{ .value_text = "one TWO" };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var range = try TerminalTextRangeProvider.create(
+        std.testing.allocator,
+        provider,
+        try std.testing.allocator.dupe(u8, state_data.value_text),
+        .{ .start = 0, .end = state_data.value_text.len },
+    );
+    defer _ = TerminalTextRangeProvider.Release(&range.base);
+
+    const needle = com.SysAllocString(std.unicode.utf8ToUtf16LeStringLiteral("two")).?;
+    defer com.SysFreeString(needle);
+    const original_alloc = range.alloc;
+    defer range.alloc = original_alloc;
+
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        range.alloc = failing.allocator();
+        var match: ?*com.ITextRangeProvider = @ptrFromInt(0x10);
+        try std.testing.expectEqual(
+            com.E_OUTOFMEMORY,
+            TerminalTextRangeProvider.FindText(&range.base, needle, 0, 1, &match),
+        );
+        try std.testing.expect(match == null);
+    }
 }
 
 test "TerminalTextRangeProvider clamps endpoints copied from a newer snapshot" {

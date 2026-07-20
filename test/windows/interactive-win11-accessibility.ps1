@@ -13,6 +13,25 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 
+function Get-AccessibilitySha256Hex {
+    param([Parameter(Mandatory)][string] $Path)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $digest = $sha256.ComputeHash($stream)
+            return ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED) {
     $forwarded = @('-TimeoutSeconds', $TimeoutSeconds.ToString(), '-IdleSoakSeconds', $IdleSoakSeconds.ToString())
     if ($Rebuild) { $forwarded += '-Rebuild' }
@@ -470,7 +489,7 @@ if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInpu
 }
 Assert-InteractiveWin11ExeExists -ExePath $exe
 $resolvedExe = (Resolve-Path -LiteralPath $exe).Path
-$binaryHash = (Get-FileHash -LiteralPath $resolvedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$binaryHash = Get-AccessibilitySha256Hex -Path $resolvedExe
 $binaryLastWriteUtc = (Get-Item -LiteralPath $resolvedExe).LastWriteTimeUtc
 $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
