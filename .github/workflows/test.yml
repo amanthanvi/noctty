@@ -135,7 +135,7 @@ jobs:
       github.ref == 'refs/heads/main' ||
       (github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11)
     runs-on: [self-hosted, Windows, X64, winghostty-interactive]
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code

@@ -324,6 +324,13 @@ public static class WinghosttyAccessibilityNative {
     public static string NotificationDisplayString {
         get { lock (notificationSync) { return notificationDisplayString; } }
     }
+    public static object[] NotificationSnapshot {
+        get {
+            lock (notificationSync) {
+                return new object[] { notificationCount, notificationKind, notificationDisplayString };
+            }
+        }
+    }
     private static T VtableDelegate<T>(IntPtr instance, int slot) where T : class {
         IntPtr vtable = Marshal.ReadIntPtr(instance);
         IntPtr function = Marshal.ReadIntPtr(vtable, slot * IntPtr.Size);
@@ -619,9 +626,10 @@ function Get-ExactAccessibilityNotification(
     [string] $ExpectedDisplayString
 ) {
     Start-Sleep -Milliseconds 300
-    $count = [WinghosttyAccessibilityNative]::NotificationCount
-    $kind = [WinghosttyAccessibilityNative]::NotificationKind
-    $displayString = [WinghosttyAccessibilityNative]::NotificationDisplayString
+    $snapshot = [WinghosttyAccessibilityNative]::NotificationSnapshot
+    $count = [int]$snapshot[0]
+    $kind = [string]$snapshot[1]
+    $displayString = [string]$snapshot[2]
     if ($count -ne 1 -or $kind -ne $ExpectedKind -or $displayString -ne $ExpectedDisplayString) {
         throw "$Description emitted count=$count kind='$kind' display='$displayString'; expected exactly one kind='$ExpectedKind' display='$ExpectedDisplayString'."
     }

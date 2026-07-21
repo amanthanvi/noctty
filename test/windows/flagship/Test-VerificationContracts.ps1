@@ -2339,6 +2339,11 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
+    -Pattern '(?m)^\s*timeout-minutes:\s+60\s*$' `
+    -Description 'full interactive validation has enough job budget for the accessibility soak' `
+    -Context "$testWorkflow :: windows-interactive"
 $interactiveRunStep = Get-YamlStepText `
     -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
     -Name 'Run interactive Win11 composite' `
