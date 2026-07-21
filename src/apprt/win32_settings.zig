@@ -134,6 +134,7 @@ const BN_CLICKED: u16 = 0x0000;
 const EN_SETFOCUS: u16 = 0x0100;
 const CBN_SETFOCUS: u16 = 0x0003;
 const BN_SETFOCUS: u16 = 0x0006;
+const BN_KILLFOCUS: u16 = 0x0007;
 const WM_SETTEXT: UINT = 0x000C;
 const EM_LIMITTEXT: UINT = 0x00C5;
 const BS_AUTOCHECKBOX: u32 = 0x3;
@@ -236,6 +237,15 @@ pub const Section = enum(u32) {
         };
     }
 };
+
+fn clickedButton(id: usize, notify: u16, expected_id: usize) bool {
+    return id == expected_id and notify == BN_CLICKED;
+}
+
+fn clickedSection(id: usize, notify: u16) ?Section {
+    if (notify != BN_CLICKED) return null;
+    return Section.fromButtonId(id);
+}
 
 fn backgroundBlurFromCheckbox(
     current: Config.BackgroundBlur,
@@ -3627,15 +3637,15 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             if (lParam != 0 and (notify == EN_SETFOCUS or notify == CBN_SETFOCUS or notify == BN_SETFOCUS)) {
                 if (owner) |o| o.ensureControlVisible(@ptrFromInt(@as(usize, @bitCast(lParam))));
             }
-            if (id == BTN_OPEN_EDITOR) {
+            if (clickedButton(id, notify, BTN_OPEN_EDITOR)) {
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
                 return 0;
             }
-            if (id == BTN_KEYBINDINGS_EDITOR) {
+            if (clickedButton(id, notify, BTN_KEYBINDINGS_EDITOR)) {
                 if (owner) |o| o.handle.openInEditor(o.handle.ctx);
                 return 0;
             }
-            if (id == BTN_SAVE) {
+            if (clickedButton(id, notify, BTN_SAVE)) {
                 if (owner) |o| o.save();
                 return 0;
             }
@@ -3774,7 +3784,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 if (owner) |o| o.syncAutoUpdateChannelFromCombo();
                 return 0;
             }
-            if (Section.fromButtonId(id)) |section| {
+            if (clickedSection(id, notify)) |section| {
                 if (owner) |o| o.setActiveSection(section);
                 return 0;
             }
@@ -4073,6 +4083,17 @@ test "settings policy combo mappings round trip" {
     try std.testing.expectEqual(@as(usize, 0), comboIndexFromLinkPreviews(.true));
     try std.testing.expectEqual(@as(usize, 1), comboIndexFromLinkPreviews(.osc8));
     try std.testing.expectEqual(@as(usize, 2), comboIndexFromLinkPreviews(.false));
+}
+
+test "settings action and section buttons activate only on click" {
+    try std.testing.expect(clickedButton(BTN_SAVE, BN_CLICKED, BTN_SAVE));
+    try std.testing.expect(!clickedButton(BTN_SAVE, BN_SETFOCUS, BTN_SAVE));
+    try std.testing.expect(!clickedButton(BTN_SAVE, BN_KILLFOCUS, BTN_SAVE));
+    try std.testing.expect(!clickedButton(BTN_OPEN_EDITOR, BN_CLICKED, BTN_SAVE));
+
+    try std.testing.expectEqual(Section.appearance, clickedSection(BTN_SECTION_APPEARANCE, BN_CLICKED).?);
+    try std.testing.expectEqual(@as(?Section, null), clickedSection(BTN_SECTION_APPEARANCE, BN_SETFOCUS));
+    try std.testing.expectEqual(@as(?Section, null), clickedSection(BTN_SECTION_APPEARANCE, BN_KILLFOCUS));
 }
 
 test "win32_settings: every tracked field maps to its matching config value" {

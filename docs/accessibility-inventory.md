@@ -1,24 +1,26 @@
 # Windows accessibility contract
 
-winghostty uses native Win32 accessibility for standard edit, button, list,
-dialog, and settings controls. Custom UI Automation providers are limited to
-owner-drawn surfaces whose semantics Win32 cannot infer.
+winghostty uses native Win32 accessibility for standard button, list, dialog,
+and settings controls. It installs custom UI Automation providers where native
+semantics are incomplete, including terminal/owner-drawn surfaces and the
+palette/search Edit HWNDs that need reliable Text, Text2, and Value patterns.
 
 | Surface | Contract | Provider |
 | --- | --- | --- |
 | Host window and custom caption | Window name, focus, native caption buttons | winghostty root chained to host provider |
 | Terminal pane | Bounded document text/ranges, visible geometry, active caret range, text/caret/focus changes | winghostty TextPattern/TextPattern2 provider |
-| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | winghostty selection/list-item fragment providers; native edit for query |
-| Tabs, search, settings, confirmation/update/recovery UI | Name, role, value/selection, keyboard focus | native HWND providers |
+| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | winghostty selection/list-item fragments plus custom Text/Text2/Value provider on the native query Edit HWND |
+| Tabs, docked search, settings, confirmation/update/recovery UI | Name, role, value/selection, keyboard focus | native HWND providers; custom Text/Text2/Value provider on the docked-search Edit HWND |
 
 Automated acceptance is `test/windows/interactive-win11-accessibility.ps1`.
 It emits exact-source/binary provenance with the UIA tree and requires terminal
-text plus a degenerate TextPattern insertion range, all four directional split-focus moves,
+text, all four directional split-focus moves,
 palette selection/focus semantics, non-overlapping native settings controls,
 settings owner-close survival, idle resource bounds, graceful close/reopen,
 and clean Explorer/WER postflight. Pull requests run the quick interactive
 lane; release candidates require the full workflow-dispatch lane. Before a
-public release, provider unit tests cover TextPattern2 caret ABI/semantics and
+public release, provider unit tests cover the degenerate TextPattern2 caret
+range plus its ABI/semantics, and
 the physical screen-reader matrix validates that contract end to end. Manually
 verify the exact build with Narrator and NVDA:
 navigate tabs and panes, read terminal text, open/filter/invoke the palette,

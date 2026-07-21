@@ -8,6 +8,7 @@
 
 pub const UIA_ListControlTypeId: i32 = 50008;
 pub const UIA_ListItemControlTypeId: i32 = 50007;
+pub const UIA_EditControlTypeId: i32 = 50004;
 pub const UIA_DocumentControlTypeId: i32 = 50030;
 pub const UIA_WindowControlTypeId: i32 = 50032;
 

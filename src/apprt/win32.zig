@@ -634,7 +634,11 @@ const SS_CENTERIMAGE = 0x00000200;
 const SS_OWNERDRAW = 0x0000000D;
 const ES_AUTOHSCROLL = 0x0080;
 const BN_CLICKED = 0;
+const BN_SETFOCUS = 6;
+const BN_KILLFOCUS = 7;
 const EM_SETSEL = 0x00B1;
+const EM_GETSEL = 0x00B0;
+const EM_CHARFROMPOS = 0x00D7;
 const EM_SETMARGINS = 0x00D3;
 const EM_SETCUEBANNER = 0x1501;
 const EC_LEFTMARGIN: usize = 0x0001;
@@ -1085,6 +1089,7 @@ extern "user32" fn SetCursor(hCursor: HCURSOR) callconv(.winapi) HCURSOR;
 extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
+extern "user32" fn GetCaretPos(lpPoint: *POINT) callconv(.winapi) BOOL;
 extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) callconv(.winapi) ?*anyopaque;
 extern "user32" fn SetLayeredWindowAttributes(hwnd: HWND, crKey: u32, bAlpha: BYTE, dwFlags: u32) callconv(.winapi) BOOL;
 extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) callconv(.winapi) LONG_PTR;
@@ -1117,9 +1122,9 @@ extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn KillTimer(hWnd: ?HWND, uIDEvent: UINT_PTR) callconv(.winapi) BOOL;
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.winapi) HINSTANCE;
 /// Main-thread COM apartment for in-process STA clients (settings path
-/// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` and
-/// `RPC_E_CHANGED_MODE` are success values per the MS contract — they
-/// mean the thread already had an apartment in the desired mode.
+/// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means
+/// the desired STA already exists. `RPC_E_CHANGED_MODE` means the thread
+/// is already in a different apartment and is not safe for STA-only work.
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const RPC_E_CHANGED_MODE: i32 = @bitCast(@as(u32, 0x80010106));
 extern "ole32" fn CoInitializeEx(pvReserved: ?*anyopaque, dwCoInit: u32) callconv(.winapi) i32;
@@ -2823,8 +2828,7 @@ pub const App = struct {
     /// OLE drag-drop). Safe to call multiple times —
     /// `S_FALSE` means "already initialised in this mode", and
     /// `RPC_E_CHANGED_MODE` means "already initialised in a different
-    /// mode" (a library probably did it first; still usable for STA
-    /// interop paths that don't care about the apartment type).
+    /// mode" and leaves STA-only consumers disabled.
     fn initComApartment(self: *App) void {
         const hr = CoInitializeEx(null, COINIT_APARTMENTTHREADED);
         switch (hr) {
@@ -8104,6 +8108,8 @@ const Host = struct {
     overlay_label_hwnd: ?HWND = null,
     overlay_edit_hwnd: ?HWND = null,
     overlay_edit_prev_proc: ?*const anyopaque = null,
+    overlay_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
+    overlay_edit_uia_selection: ?[2]u32 = null,
     cached_overlay_edit: ?[:0]const u8 = null,
     /// Guard flag: set true while `setOverlayEditText` drives a
     /// programmatic `SetWindowTextW` on the overlay EDIT. That call
@@ -9371,12 +9377,20 @@ const Host = struct {
         const edit_hwnd = self.overlay_edit_hwnd orelse return false;
         self.suppress_edit_events = true;
         defer self.suppress_edit_events = false;
-        return try syncWindowTextUtf8CachedAfterSet(
+        const changed = try syncWindowTextUtf8CachedAfterSet(
             self.app.core_app.alloc,
             edit_hwnd,
             &self.cached_overlay_edit,
             value,
         );
+        if (changed) {
+            if (self.overlay_edit_uia_provider) |provider| {
+                provider.raiseTextChanged();
+                provider.raiseValueChanged();
+            }
+            self.raiseOverlayEditSelectionChangedIfNeeded();
+        }
+        return changed;
     }
 
     /// Rebuild the ranked match cache for the current EDIT query and
@@ -9715,6 +9729,31 @@ const Host = struct {
             .select_row = &paletteListSelectRowThunk,
             .geometry = &paletteListGeometryThunk,
         };
+    }
+
+    fn overlayEditUiaState(self: *const Host) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(@constCast(self)),
+            .name = &overlayEditNameThunk,
+            .value = &overlayEditValueThunk,
+            .snapshot = &overlayEditSnapshotThunk,
+            .focused = &overlayEditFocusedThunk,
+            .role = .edit,
+            .use_com_threading = self.app.com_initialized,
+            .set_value = &overlayEditSetValueThunk,
+            .select_range = &overlayEditSelectRangeThunk,
+        };
+    }
+
+    fn raiseOverlayEditSelectionChangedIfNeeded(self: *Host) void {
+        const hwnd = self.overlay_edit_hwnd orelse return;
+        const provider = self.overlay_edit_uia_provider orelse return;
+        const selection = nativeEditSelection(hwnd);
+        if (self.overlay_edit_uia_selection) |previous| {
+            if (std.meta.eql(previous, selection)) return;
+        }
+        self.overlay_edit_uia_selection = selection;
+        provider.raiseTextSelectionChanged();
     }
 
     fn announcePaletteSelection(self: *const Host) void {
@@ -10353,6 +10392,17 @@ const Host = struct {
         }
 
         destroyChildWindow(&self.overlay_label_hwnd);
+        if (self.overlay_edit_uia_provider) |provider| {
+            self.overlay_edit_uia_provider = null;
+            self.overlay_edit_uia_selection = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &terminalDisconnectThunk,
+                &terminalReleaseThunk,
+            );
+        }
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
         destroyChildWindow(&self.overlay_hint_hwnd);
 
@@ -11404,6 +11454,19 @@ const Host = struct {
             EC_LEFTMARGIN | EC_RIGHTMARGIN,
             packed_margins,
         );
+        self.overlay_edit_uia_provider = if (self.app.com_initialized)
+            win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                edit_hwnd,
+                self.overlayEditUiaState(),
+            ) catch |err| blk: {
+                log.warn("overlay edit UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("overlay edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            break :blk null;
+        };
 
         self.overlay_hint_hwnd = CreateWindowExW(
             0,
@@ -11529,6 +11592,10 @@ const Host = struct {
     fn showOverlay(self: *Host, mode: HostOverlayMode, initial: ?[]const u8) !void {
         try self.ensureOverlayControls();
         self.overlay_mode = mode;
+        self.overlay_edit_uia_selection = null;
+        if (self.overlay_edit_uia_provider) |provider| {
+            win32_uia.events.raiseNameChanged(&provider.base);
+        }
         self.clearOverlayCompletion();
         try self.setOverlayDefaultBanner(mode);
 
@@ -12423,6 +12490,24 @@ const Host = struct {
     fn isOverlayButton(self: *const Host, child: HWND) bool {
         return (self.overlay_accept_hwnd != null and child == self.overlay_accept_hwnd.?) or
             (self.overlay_cancel_hwnd != null and child == self.overlay_cancel_hwnd.?);
+    }
+
+    fn overlayFocusSlot(self: *const Host, child: HWND) ?OverlayFocusSlot {
+        if (self.overlay_edit_hwnd != null and child == self.overlay_edit_hwnd.?) return .edit;
+        if (self.overlay_accept_hwnd != null and child == self.overlay_accept_hwnd.?) return .accept;
+        if (self.overlay_cancel_hwnd != null and child == self.overlay_cancel_hwnd.?) return .cancel;
+        return null;
+    }
+
+    fn focusRelativeOverlayControl(self: *Host, current: HWND, reverse: bool) bool {
+        const current_slot = self.overlayFocusSlot(current) orelse return false;
+        const target = switch (nextOverlayFocusSlot(self.overlay_mode, current_slot, reverse)) {
+            .edit => self.overlay_edit_hwnd,
+            .accept => self.overlay_accept_hwnd,
+            .cancel => self.overlay_cancel_hwnd,
+        } orelse return false;
+        _ = SetFocus(target);
+        return true;
     }
 
     fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
@@ -16441,6 +16526,228 @@ fn getPaletteListHost(hwnd: HWND) ?*Host {
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
 
+fn utf16CodeUnitOffsetToUtf8ByteOffset(text: []const u8, target_units: usize) usize {
+    var byte_offset: usize = 0;
+    var utf16_units: usize = 0;
+    while (byte_offset < text.len) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return byte_offset;
+        const end = byte_offset + @as(usize, sequence_len);
+        if (end > text.len) return byte_offset;
+        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return byte_offset;
+        const codepoint_units: usize = if (codepoint > 0xFFFF) 2 else 1;
+        if (utf16_units + codepoint_units > target_units) return byte_offset;
+        utf16_units += codepoint_units;
+        byte_offset = end;
+        if (utf16_units == target_units) return byte_offset;
+    }
+    return text.len;
+}
+
+fn utf8ByteOffsetToUtf16CodeUnitOffset(text: []const u8, target_bytes: usize) usize {
+    const target = @min(target_bytes, text.len);
+    var byte_offset: usize = 0;
+    var utf16_units: usize = 0;
+    while (byte_offset < target) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return utf16_units;
+        const end = byte_offset + @as(usize, sequence_len);
+        if (end > target or end > text.len) return utf16_units;
+        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return utf16_units;
+        utf16_units += if (codepoint > 0xFFFF) 2 else 1;
+        byte_offset = end;
+    }
+    return utf16_units;
+}
+
+test "Win32 edit offsets preserve supplementary Unicode boundaries" {
+    const text = "a🚀b";
+    const utf16_offsets = [_]usize{ 0, 1, 3, 4 };
+    const utf8_offsets = [_]usize{ 0, 1, 5, 6 };
+    for (utf16_offsets, utf8_offsets) |utf16_offset, utf8_offset| {
+        try std.testing.expectEqual(
+            utf8_offset,
+            utf16CodeUnitOffsetToUtf8ByteOffset(text, utf16_offset),
+        );
+        try std.testing.expectEqual(
+            utf16_offset,
+            utf8ByteOffsetToUtf16CodeUnitOffset(text, utf8_offset),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitOffsetToUtf8ByteOffset(text, 2));
+    try std.testing.expectEqual(@as(usize, 1), utf8ByteOffsetToUtf16CodeUnitOffset(text, 2));
+}
+
+test "Win32 edit caret chooses the active selection endpoint" {
+    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 2));
+    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 8));
+    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 3));
+    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 7));
+    try std.testing.expectEqual(@as(u32, 5), editSelectionCaretEndpoint(.{ 5, 5 }, 99));
+}
+
+fn nativeEditSelection(hwnd: HWND) [2]u32 {
+    var start: u32 = 0;
+    var end: u32 = 0;
+    _ = SendMessageW(
+        hwnd,
+        EM_GETSEL,
+        @intFromPtr(&start),
+        @bitCast(@intFromPtr(&end)),
+    );
+    return .{ start, end };
+}
+
+fn editSelectionCaretEndpoint(selection: [2]u32, native_caret: u32) u32 {
+    if (selection[0] == selection[1]) return selection[0];
+    const distance_to_start = if (native_caret >= selection[0])
+        native_caret - selection[0]
+    else
+        selection[0] - native_caret;
+    const distance_to_end = if (native_caret >= selection[1])
+        native_caret - selection[1]
+    else
+        selection[1] - native_caret;
+    return if (distance_to_start < distance_to_end) selection[0] else selection[1];
+}
+
+fn nativeEditCaret(hwnd: HWND, selection: [2]u32) u32 {
+    if (selection[0] == selection[1]) return selection[0];
+    if (GetFocus() != hwnd) return selection[1];
+    var point: POINT = undefined;
+    if (GetCaretPos(&point) == 0) return selection[1];
+    const x: u16 = @bitCast(@as(i16, @truncate(point.x)));
+    const y: u16 = @bitCast(@as(i16, @truncate(point.y)));
+    const packed_point: LPARAM = @bitCast(@as(usize, x) | (@as(usize, y) << 16));
+    const result = SendMessageW(hwnd, EM_CHARFROMPOS, 0, packed_point);
+    const native_caret: u32 = @intCast(@as(usize, @bitCast(result)) & 0xFFFF);
+    return editSelectionCaretEndpoint(selection, native_caret);
+}
+
+fn editSnapshot(
+    alloc: Allocator,
+    hwnd: HWND,
+    value: []const u8,
+) !win32_uia.TerminalSnapshot {
+    const document_text = try alloc.dupe(u8, value);
+    errdefer alloc.free(document_text);
+    const visible_text = try alloc.dupe(u8, value);
+    const selection = nativeEditSelection(hwnd);
+    const start = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[0]);
+    const end = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[1]);
+    const caret = utf16CodeUnitOffsetToUtf8ByteOffset(value, nativeEditCaret(hwnd, selection));
+    return .{
+        .document_text = document_text,
+        .visible_text = visible_text,
+        .visible_range = .{ .start = 0, .end = document_text.len },
+        .caret_offset = caret,
+        .selection_range = .{ .start = @min(start, end), .end = @max(start, end) },
+    };
+}
+
+fn selectNativeEditRange(
+    hwnd: HWND,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) void {
+    const start = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.start);
+    const end = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.end);
+    _ = SendMessageW(hwnd, EM_SETSEL, start, @intCast(end));
+    _ = SetFocus(hwnd);
+}
+
+fn overlayEditNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
+    _ = buf;
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    return switch (host.overlay_mode) {
+        .command_palette => "Command palette query",
+        .profile => "Profile filter",
+        .search => "Search query",
+        .surface_title => "Surface title",
+        .tab_title => "Tab title",
+        .tab_overview => "Tab overview filter",
+        .none, .confirm => "Overlay input",
+    };
+}
+
+fn overlayEditValueThunk(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const value = try overlayEditText(host);
+    return alloc.dupe(u8, value);
+}
+
+fn overlayEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.TerminalSnapshot {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    const value = try overlayEditText(host);
+    return editSnapshot(alloc, hwnd, value);
+}
+
+fn overlayEditFocusedThunk(ctx: *anyopaque) bool {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return false;
+    return GetFocus() == hwnd;
+}
+
+fn overlayEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(host.app.core_app.alloc, value);
+    defer host.app.core_app.alloc.free(value_w);
+    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+}
+
+fn overlayEditSelectRangeThunk(
+    ctx: *anyopaque,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) !void {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    selectNativeEditRange(hwnd, snapshot_text, range);
+}
+
+fn searchEditNameThunk(_: *anyopaque, _: []u8) []const u8 {
+    return "Search query";
+}
+
+fn searchEditValueThunk(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const value = try surface.readSearchBarEditText();
+    defer surface.app.core_app.alloc.free(value);
+    return alloc.dupe(u8, value);
+}
+
+fn searchEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.TerminalSnapshot {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    const value = try surface.readSearchBarEditText();
+    defer surface.app.core_app.alloc.free(value);
+    return editSnapshot(alloc, hwnd, value);
+}
+
+fn searchEditFocusedThunk(ctx: *anyopaque) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return false;
+    return GetFocus() == hwnd;
+}
+
+fn searchEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(surface.app.core_app.alloc, value);
+    defer surface.app.core_app.alloc.free(value_w);
+    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+}
+
+fn searchEditSelectRangeThunk(
+    ctx: *anyopaque,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) !void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    selectNativeEditRange(hwnd, snapshot_text, range);
+}
+
 /// Trampoline bridging `PaletteListState.name` (C-compatible fn
 /// pointer shape) into `Host.buildPaletteListName`. `ctx` is the
 /// const-erased `*Host` stashed on `PaletteListState`; the provider
@@ -17778,6 +18085,24 @@ fn layoutChildPaintPlan(chrome_changed: bool, content_changed: bool) LayoutChild
 
 fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
     return mode != .command_palette;
+}
+
+const OverlayFocusSlot = enum { edit, accept, cancel };
+
+fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
+    if (mode == .confirm) return if (current == .accept) .cancel else .accept;
+    if (!overlayAcceptButtonVisible(mode)) return if (current == .edit) .cancel else .edit;
+    return if (reverse)
+        switch (current) {
+            .edit => .cancel,
+            .accept => .edit,
+            .cancel => .accept,
+        }
+    else switch (current) {
+        .edit => .accept,
+        .accept => .cancel,
+        .cancel => .edit,
+    };
 }
 
 fn inspectorChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
@@ -19720,6 +20045,10 @@ fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     return @ptrFromInt(@as(usize, @intCast(lParam)));
 }
 
+fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
+    return notify == BN_CLICKED and child != null and expected != null and child.? == expected.?;
+}
+
 fn getHost(hwnd: HWND) ?*Host {
     const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
@@ -19950,13 +20279,8 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     return 0;
                 },
                 VK_TAB, VK_LEFT, VK_RIGHT => {
-                    const target: ?HWND = if (hwnd == v.overlay_accept_hwnd)
-                        v.overlay_cancel_hwnd
-                    else if (hwnd == v.overlay_cancel_hwnd)
-                        v.overlay_accept_hwnd
-                    else
-                        null;
-                    if (target) |t| _ = SetFocus(t);
+                    const reverse = if (wParam == VK_TAB) keyPressed(VK_SHIFT) else wParam == VK_LEFT;
+                    _ = v.focusRelativeOverlayControl(hwnd, reverse);
                     return 0;
                 },
                 VK_RETURN, VK_SPACE => {
@@ -20286,6 +20610,15 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
 
 fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
+    if (msg == WM_GETOBJECT) {
+        if (host) |v| {
+            if (v.searchControlSurface(hwnd)) |surface| {
+                if (surface.search_bar_edit_uia_provider) |provider| {
+                    if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+                }
+            }
+        }
+    }
     if (host) |v| {
         if (v.searchControlSurface(hwnd)) |surface| switch (msg) {
             WM_SETFOCUS => {
@@ -20333,18 +20666,35 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         };
     }
 
-    if (host) |v| {
+    const result = if (host) |v| blk: {
         if (v.searchControlSurface(hwnd)) |surface| {
             if (surface.search_bar_edit_prev_proc) |proc| {
-                return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
             }
         }
+        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (host) |v| {
+        if (v.searchControlSurface(hwnd)) |surface| {
+            if (surface.search_bar_edit_uia_provider) |provider| switch (msg) {
+                WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+                WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => surface.raiseSearchEditSelectionChangedIfNeeded(),
+                else => {},
+            };
+        }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return result;
 }
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
+    if (msg == WM_GETOBJECT) {
+        if (host) |v| {
+            if (v.overlay_edit_uia_provider) |provider| {
+                if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+    }
     if (host) |v| switch (msg) {
         WM_CHAR => {
             if (wParam == VK_ESCAPE) return 0;
@@ -20368,6 +20718,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                     if ((v.completeCommandPalette(reverse) catch false)) return 0;
                 }
             }
+            if (wParam == VK_TAB and v.focusRelativeOverlayControl(hwnd, keyPressed(VK_SHIFT))) return 0;
             if (v.overlay_mode == .tab_overview) {
                 if (wParam == VK_UP or wParam == VK_DOWN) {
                     if ((v.stepTabOverviewSelection(wParam == VK_UP) catch false)) return 0;
@@ -20435,12 +20786,20 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         else => {},
     };
 
-    if (host) |v| {
+    const result = if (host) |v| blk: {
         if (v.overlay_edit_prev_proc) |proc| {
-            return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
+        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (host) |v| {
+        if (v.overlay_edit_uia_provider) |provider| switch (msg) {
+            WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+            WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
+            else => {},
+        };
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return result;
 }
 
 fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -20726,6 +21085,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             // caused palette edit re-entry crashes.
                             if (v.suppress_edit_events) return 0;
                             appendOwnedString(v.app.core_app.alloc, &v.cached_overlay_edit, null) catch {};
+                            if (v.overlay_edit_uia_provider) |provider| {
+                                provider.raiseTextChanged();
+                                provider.raiseValueChanged();
+                            }
+                            v.raiseOverlayEditSelectionChangedIfNeeded();
                             if (v.overlay_mode == .search) {
                                 _ = v.syncSearchOverlay() catch {};
                             } else if (v.overlay_mode == .command_palette) {
@@ -20744,6 +21108,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             if (v.suppress_edit_events) return 0;
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
+                                    if (surface.search_bar_edit_uia_provider) |provider| {
+                                        provider.raiseTextChanged();
+                                        provider.raiseValueChanged();
+                                    }
+                                    surface.raiseSearchEditSelectionChangedIfNeeded();
                                     _ = surface.handleSearchBarEditChanged() catch |err| {
                                         logUiActionError("docked search edit update failed", err);
                                     };
@@ -20752,7 +21121,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             }
                         }
                     },
-                    2003 => {
+                    2003 => if (expectedButtonClick(notify_code, child_hwnd, v.overlay_accept_hwnd)) {
                         if (v.overlay_mode == .confirm) {
                             // MUST NOT touch `v` after the callback
                             // — a destructive accept (close-surface)
@@ -20774,7 +21143,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         }
                         return 0;
                     },
-                    2004 => {
+                    2004 => if (expectedButtonClick(notify_code, child_hwnd, v.overlay_cancel_hwnd)) {
                         if (v.overlay_mode == .confirm) {
                             // Cancel callbacks can mutate or destroy
                             // the Host. Use the same no-access-after
@@ -22771,6 +23140,8 @@ pub const Surface = struct {
     search_bar_bg_placement: ChildPlacement = .{},
     search_bar_edit_hwnd: ?HWND = null,
     search_bar_edit_prev_proc: ?*const anyopaque = null,
+    search_bar_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
+    search_bar_edit_uia_selection: ?[2]u32 = null,
     search_bar_edit_placement: ChildPlacement = .{},
     search_bar_prev_hwnd: ?HWND = null,
     search_bar_next_hwnd: ?HWND = null,
@@ -22825,6 +23196,31 @@ pub const Surface = struct {
             .whole_word => self.search_bar_word_hwnd,
             .close => self.search_bar_close_hwnd,
         };
+    }
+
+    fn searchEditUiaState(self: *Surface) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(self),
+            .name = &searchEditNameThunk,
+            .value = &searchEditValueThunk,
+            .snapshot = &searchEditSnapshotThunk,
+            .focused = &searchEditFocusedThunk,
+            .role = .edit,
+            .use_com_threading = self.app.com_initialized,
+            .set_value = &searchEditSetValueThunk,
+            .select_range = &searchEditSelectRangeThunk,
+        };
+    }
+
+    fn raiseSearchEditSelectionChangedIfNeeded(self: *Surface) void {
+        const hwnd = self.search_bar_edit_hwnd orelse return;
+        const provider = self.search_bar_edit_uia_provider orelse return;
+        const selection = nativeEditSelection(hwnd);
+        if (self.search_bar_edit_uia_selection) |previous| {
+            if (std.meta.eql(previous, selection)) return;
+        }
+        self.search_bar_edit_uia_selection = selection;
+        provider.raiseTextSelectionChanged();
     }
 
     fn searchBarButtonPlacement(self: *Surface, role: SearchBarButtonRole) *ChildPlacement {
@@ -24814,6 +25210,19 @@ pub const Surface = struct {
             packed_margins,
         );
         _ = SendMessageW(edit_hwnd, EM_SETCUEBANNER, 0, @as(LPARAM, @intCast(@intFromPtr(search_edit_cue.ptr))));
+        self.search_bar_edit_uia_provider = if (self.app.com_initialized)
+            win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                edit_hwnd,
+                self.searchEditUiaState(),
+            ) catch |err| blk: {
+                log.warn("search edit UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("search edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            break :blk null;
+        };
 
         self.search_bar_prev_hwnd = try self.createSearchBarButton(host, hwnd, .prev);
         self.search_bar_next_hwnd = try self.createSearchBarButton(host, hwnd, .next);
@@ -24844,6 +25253,17 @@ pub const Surface = struct {
 
     fn destroySearchBarControls(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
+        if (self.search_bar_edit_uia_provider) |provider| {
+            self.search_bar_edit_uia_provider = null;
+            self.search_bar_edit_uia_selection = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &terminalDisconnectThunk,
+                &terminalReleaseThunk,
+            );
+        }
         if (self.search_bar_results_cache) |value| {
             alloc.free(value);
             self.search_bar_results_cache = null;
@@ -25023,12 +25443,22 @@ pub const Surface = struct {
     fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
         const edit_hwnd = self.search_bar_edit_hwnd orelse return false;
         const host = self.host orelse return false;
+        const current = try self.readSearchBarEditText();
+        defer self.app.core_app.alloc.free(current);
+        if (std.mem.eql(u8, current, value)) return false;
         host.suppress_edit_events = true;
         defer host.suppress_edit_events = false;
 
         const value_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, value);
         defer self.app.core_app.alloc.free(value_w);
-        _ = SetWindowTextW(edit_hwnd, value_w.ptr);
+        if (SetWindowTextW(edit_hwnd, value_w.ptr) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        if (self.search_bar_edit_uia_provider) |provider| {
+            provider.raiseTextChanged();
+            provider.raiseValueChanged();
+        }
+        self.raiseSearchEditSelectionChangedIfNeeded();
         return true;
     }
 
@@ -34865,6 +35295,34 @@ test "win32 command palette hides duplicate accept button" {
     try std.testing.expect(overlayAcceptButtonVisible(.profile));
     try std.testing.expect(overlayAcceptButtonVisible(.search));
     try std.testing.expect(overlayAcceptButtonVisible(.confirm));
+}
+
+test "win32 transient overlay focus ring includes every visible control" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .edit, false));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .accept, false));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .cancel, false));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .edit, true));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .accept, true));
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .cancel, true));
+
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.command_palette, .edit, false));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.command_palette, .cancel, true));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.confirm, .accept, false));
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.confirm, .cancel, true));
+}
+
+test "win32 overlay buttons activate only for their exact click notification" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const accept: HWND = @ptrFromInt(0x10);
+    const cancel: HWND = @ptrFromInt(0x20);
+    try std.testing.expect(expectedButtonClick(BN_CLICKED, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_SETFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_KILLFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_CLICKED, cancel, accept));
+    try std.testing.expect(!expectedButtonClick(BN_CLICKED, null, accept));
 }
 
 test "win32 inspectorBannerStateChanged only trips on actual banner deltas" {

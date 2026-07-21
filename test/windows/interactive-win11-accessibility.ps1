@@ -134,6 +134,13 @@ public static class WinghosttyAccessibilityNative {
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
     private static int textChangedCount;
+    private static int editTextChangedCount;
+    private static int textSelectionChangedCount;
+    private static int valueChangedCount;
+    private static readonly object editEventSync = new object();
+    private static readonly List<object> editTextChangedSenders = new List<object>();
+    private static readonly List<object> textSelectionChangedSenders = new List<object>();
+    private static readonly List<object> valueChangedSenders = new List<object>();
     private static int selectionItemSelectedCount;
     private static readonly object selectionItemSelectedSync = new object();
     private static readonly List<object> selectionItemSelectedSenders = new List<object>();
@@ -201,6 +208,62 @@ public static class WinghosttyAccessibilityNative {
     }
     public static int TextChangedCount {
         get { return Volatile.Read(ref textChangedCount); }
+    }
+    public static void OnEditTextChanged(object sender, EventArgs args) {
+        lock (editEventSync) {
+            editTextChangedSenders.Add(sender);
+            editTextChangedCount++;
+        }
+    }
+    public static void ResetEditTextChangedCount() {
+        lock (editEventSync) {
+            editTextChangedSenders.Clear();
+            editTextChangedCount = 0;
+        }
+    }
+    public static int EditTextChangedCount {
+        get { return Volatile.Read(ref editTextChangedCount); }
+    }
+    public static object[] EditTextChangedSenders {
+        get { lock (editEventSync) { return editTextChangedSenders.ToArray(); } }
+    }
+    public static void OnTextSelectionChanged(object sender, EventArgs args) {
+        lock (editEventSync) {
+            textSelectionChangedSenders.Add(sender);
+            textSelectionChangedCount++;
+        }
+    }
+    public static void ResetTextSelectionChangedCount() {
+        lock (editEventSync) {
+            textSelectionChangedSenders.Clear();
+            textSelectionChangedCount = 0;
+        }
+    }
+    public static int TextSelectionChangedCount {
+        get { return Volatile.Read(ref textSelectionChangedCount); }
+    }
+    public static object[] TextSelectionChangedSenders {
+        get { lock (editEventSync) { return textSelectionChangedSenders.ToArray(); } }
+    }
+    public static void OnValueChanged(
+        object sender,
+        EventArgs args) {
+        lock (editEventSync) {
+            valueChangedSenders.Add(sender);
+            valueChangedCount++;
+        }
+    }
+    public static void ResetValueChangedCount() {
+        lock (editEventSync) {
+            valueChangedSenders.Clear();
+            valueChangedCount = 0;
+        }
+    }
+    public static int ValueChangedCount {
+        get { return Volatile.Read(ref valueChangedCount); }
+    }
+    public static object[] ValueChangedSenders {
+        get { lock (editEventSync) { return valueChangedSenders.ToArray(); } }
     }
     public static void OnSelectionItemSelected(object sender, EventArgs args) {
         lock (selectionItemSelectedSync) {
@@ -553,6 +616,116 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
     throw "Timed out waiting for $Description."
 }
 
+function Start-AccessibilityEditEventCapture([System.Windows.Automation.AutomationElement] $Element) {
+    if ($script:editEventsRegistered) { throw 'Edit event capture is already registered.' }
+    if ($null -eq $script:editTextChangedHandler) {
+        $script:editTextChangedHandler = [Delegate]::CreateDelegate(
+            [System.Windows.Automation.AutomationEventHandler],
+            [WinghosttyAccessibilityNative].GetMethod('OnEditTextChanged')
+        )
+        $script:editTextSelectionChangedHandler = [Delegate]::CreateDelegate(
+            [System.Windows.Automation.AutomationEventHandler],
+            [WinghosttyAccessibilityNative].GetMethod('OnTextSelectionChanged')
+        )
+        $script:editValueChangedHandler = [Delegate]::CreateDelegate(
+            [System.Windows.Automation.AutomationPropertyChangedEventHandler],
+            [WinghosttyAccessibilityNative].GetMethod('OnValueChanged')
+        )
+    }
+    [WinghosttyAccessibilityNative]::ResetEditTextChangedCount()
+    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    [WinghosttyAccessibilityNative]::ResetValueChangedCount()
+    [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+        [System.Windows.Automation.TextPattern]::TextChangedEvent,
+        $Element,
+        [System.Windows.Automation.TreeScope]::Element,
+        $script:editTextChangedHandler
+    )
+    try {
+        [System.Windows.Automation.Automation]::AddAutomationEventHandler(
+            [System.Windows.Automation.TextPattern]::TextSelectionChangedEvent,
+            $Element,
+            [System.Windows.Automation.TreeScope]::Element,
+            $script:editTextSelectionChangedHandler
+        )
+        try {
+            [System.Windows.Automation.Automation]::AddAutomationPropertyChangedEventHandler(
+                $Element,
+                [System.Windows.Automation.TreeScope]::Element,
+                $script:editValueChangedHandler,
+                @([System.Windows.Automation.ValuePattern]::ValueProperty)
+            )
+        }
+        catch {
+            [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
+                [System.Windows.Automation.TextPattern]::TextSelectionChangedEvent,
+                $Element,
+                $script:editTextSelectionChangedHandler
+            )
+            throw
+        }
+    }
+    catch {
+        [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
+            [System.Windows.Automation.TextPattern]::TextChangedEvent,
+            $Element,
+            $script:editTextChangedHandler
+        )
+        throw
+    }
+    $script:editEventElement = $Element
+    $script:editEventsRegistered = $true
+}
+
+function Stop-AccessibilityEditEventCapture {
+    if (-not $script:editEventsRegistered) { return }
+    $element = $script:editEventElement
+    try {
+        [System.Windows.Automation.Automation]::RemoveAutomationPropertyChangedEventHandler(
+            $element,
+            $script:editValueChangedHandler
+        )
+    }
+    finally {
+        try {
+            [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
+                [System.Windows.Automation.TextPattern]::TextSelectionChangedEvent,
+                $element,
+                $script:editTextSelectionChangedHandler
+            )
+        }
+        finally {
+            [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
+                [System.Windows.Automation.TextPattern]::TextChangedEvent,
+                $element,
+                $script:editTextChangedHandler
+            )
+            $script:editEventElement = $null
+            $script:editEventsRegistered = $false
+        }
+    }
+}
+
+function Get-AccessibilityMatchingSenderCount(
+    [object[]] $Senders,
+    [System.Windows.Automation.AutomationElement] $Element
+) {
+    $count = 0
+    foreach ($sender in @($Senders)) {
+        try {
+            if ($sender -is [System.Windows.Automation.AutomationElement] -and
+                [System.Windows.Automation.Automation]::Compare($sender, $Element)) {
+                $count++
+            }
+        }
+        catch {
+            # A late event from a disconnected provider is not evidence for
+            # the currently captured Edit element.
+        }
+    }
+    return $count
+}
+
 $validationStartedAt = [DateTime]::UtcNow
 $script:accessibilityOverallDeadline = $validationStartedAt.AddSeconds(
     [Math]::Max(90, ($TimeoutSeconds * 2) + $IdleSoakSeconds + 60)
@@ -601,6 +774,11 @@ $textChangedRegistered = $false
 $paletteSelectionHandler = $null
 $paletteSelectionRegistered = $false
 $paletteNotificationRegistered = $false
+$editTextChangedHandler = $null
+$editTextSelectionChangedHandler = $null
+$editValueChangedHandler = $null
+$editEventElement = $null
+$editEventsRegistered = $false
 $relaunchProcess = $null
 $ownerProbeProcess = $null
 $marker = "WINGHOSTTY_UIA_$([Guid]::NewGuid().ToString('N'))"
@@ -626,6 +804,8 @@ $paletteUnavailableNotificationDisplayString = ''
 $paletteActionAbortedNotificationCount = 0
 $paletteActionAbortedNotificationKind = ''
 $paletteActionAbortedNotificationDisplayString = ''
+$paletteEditEvidence = $null
+$searchEditEvidence = $null
 $paletteUnavailableQuery = "zzzzwinghosttynomatch$([Guid]::NewGuid().ToString('N'))"
 $settingsLifecycle = $null
 $settingsOwnerLifecycle = $null
@@ -977,6 +1157,7 @@ try {
         ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
     } while ($null -eq $palette -and [DateTime]::UtcNow -lt $paletteDeadline)
     if ($null -eq $palette) { throw 'UIA tree contains no command palette List element.' }
+    $paletteName = $palette.Current.Name
     $paletteBounds = $palette.Current.BoundingRectangle
     if ($paletteBounds.Width -le 0 -or $paletteBounds.Height -le 0) { throw 'Command palette List has empty UIA bounds.' }
     $paletteItems = @($palette.FindAll(
@@ -1107,6 +1288,44 @@ try {
         }
         throw "Command palette query Edit does not own UIA focus (focused=$paletteFocusedSummary; Win32 focused HWND=$focusedWin32Hwnd class=$focusedWin32Class FromHandle=$focusedFromHandleSummary; Edit candidates=$paletteEditCandidates)."
     }
+    if ($paletteFocused.Current.Name -ne 'Command palette query') {
+        throw "Command palette query Edit name was '$($paletteFocused.Current.Name)'."
+    }
+    $paletteFocusedControlType = $paletteFocused.Current.ControlType.ProgrammaticName
+    $paletteQueryBounds = $paletteFocused.Current.BoundingRectangle
+    if ($paletteQueryBounds.Width -le 0 -or $paletteQueryBounds.Height -le 0 -or $paletteFocused.Current.IsOffscreen) {
+        throw 'Command palette query Edit is not visible with positive UIA bounds.'
+    }
+    $paletteQueryTextPattern = $null
+    if (-not $paletteFocused.TryGetCurrentPattern(
+        [System.Windows.Automation.TextPattern]::Pattern,
+        [ref]$paletteQueryTextPattern
+    )) {
+        throw 'Command palette query Edit does not expose TextPattern.'
+    }
+    $paletteQueryValuePattern = $null
+    if (-not $paletteFocused.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$paletteQueryValuePattern
+    )) {
+        throw 'Command palette query Edit does not expose ValuePattern.'
+    }
+    if ($paletteQueryTextPattern.SupportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::Single) {
+        throw "Command palette query Edit reports $($paletteQueryTextPattern.SupportedTextSelection) selection support; expected Single."
+    }
+    if ($paletteQueryValuePattern.Current.IsReadOnly) {
+        throw 'Command palette query Edit reports a read-only ValuePattern.'
+    }
+    $paletteInitialQuerySelection = @($paletteQueryTextPattern.GetSelection())
+    if ($paletteInitialQuerySelection.Count -ne 1 -or
+        $paletteInitialQuerySelection[0].CompareEndpoints(
+            [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+            $paletteInitialQuerySelection[0],
+            [System.Windows.Automation.TextPatternRangeEndpoint]::End
+        ) -ne 0) {
+        throw 'Command palette query Edit did not expose one degenerate initial caret range.'
+    }
+    Start-AccessibilityEditEventCapture -Element $paletteFocused
     $selectedBounds = $selectedItems[0].Current.BoundingRectangle
     if ($selectedBounds.Width -le 0 -or $selectedBounds.Height -le 0 -or $selectedItems[0].Current.IsOffscreen) {
         throw 'Selected command palette row is not visible with positive UIA bounds.'
@@ -1117,9 +1336,7 @@ try {
     }
 
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x41) -Description 'select command palette query for help outcome' -Process $process
-    if (-not [WinghosttyAccessibilityNative]::SendAsciiText('Accessibility')) {
-        throw "SendInput failed for command palette Accessibility query: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
+    $paletteQueryValuePattern.SetValue('Accessibility')
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Accessibility help palette row' -Condition {
         $script:paletteHelpItems = @($palette.FindAll(
             [System.Windows.Automation.TreeScope]::Children,
@@ -1130,6 +1347,41 @@ try {
         ) | ForEach-Object { $_ })
         return $script:paletteHelpItems.Count -eq 1 -and
             $script:paletteHelpItems[0].Current.Name -match 'Accessibility'
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'command palette query Text and Value updates' -Condition {
+        return $paletteQueryTextPattern.DocumentRange.GetText(-1) -eq 'Accessibility' -and
+            $paletteQueryValuePattern.Current.Value -eq 'Accessibility' -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) `
+                -Element $paletteFocused) -gt 0 -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) `
+                -Element $paletteFocused) -gt 0
+    }
+    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    $paletteQueryTextPattern.DocumentRange.Select()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'command palette TextPattern selection' -Condition {
+        $script:paletteQuerySelection = @($paletteQueryTextPattern.GetSelection())
+        return $script:paletteQuerySelection.Count -eq 1 -and
+            $script:paletteQuerySelection[0].GetText(-1) -eq 'Accessibility' -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) `
+                -Element $paletteFocused) -gt 0
+    }
+    $paletteEditTextChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) -Element $paletteFocused
+    $paletteEditValueChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) -Element $paletteFocused
+    $paletteEditSelectionChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) -Element $paletteFocused
+    $paletteEditEvidence = [ordered]@{
+        name = $paletteFocused.Current.Name
+        text = $paletteQueryTextPattern.DocumentRange.GetText(-1)
+        value = $paletteQueryValuePattern.Current.Value
+        selected_text = $script:paletteQuerySelection[0].GetText(-1)
+        text_changed_events = $paletteEditTextChangedCount
+        value_changed_events = $paletteEditValueChangedCount
+        selection_changed_events = $paletteEditSelectionChangedCount
     }
     [WinghosttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'invoke safe Accessibility help palette row' -Process $process
@@ -1192,6 +1444,7 @@ try {
     $paletteSelectionRegistered = $false
     [WinghosttyAccessibilityNative]::StopNotificationCapture()
     $paletteNotificationRegistered = $false
+    Stop-AccessibilityEditEventCapture
     Send-AccessibilityChord -Keys @([uint16]0x1B) -Description 'Escape dismiss accessibility command palette' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette removal after Escape' -Condition {
         return @($root.FindAll(
@@ -1240,6 +1493,120 @@ try {
             $script:paletteToggleFocused.Current.ProcessId -eq $process.Id -and
             $script:paletteToggleFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and
             $script:paletteToggleTerminalHwnds -contains $script:paletteToggleFocusedHwnd
+    }
+
+    Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x46) -Description 'Ctrl+Shift+F open docked search' -Process $process
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'docked search query Edit' -Condition {
+        $script:searchQueryEdit = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Edit
+            )
+        ) | Where-Object {
+            $_.Current.ProcessId -eq $process.Id -and $_.Current.Name -eq 'Search query'
+        }) | Select-Object -First 1
+        return $null -ne $script:searchQueryEdit
+    }
+    $searchQueryEdit = $script:searchQueryEdit
+    $searchNativeHwnd = [IntPtr]$searchQueryEdit.Current.NativeWindowHandle
+    [uint32]$searchNativeOwner = 0
+    if ($searchNativeHwnd -eq [IntPtr]::Zero -or
+        [WinghosttyAccessibilityNative]::GetWindowThreadProcessId($searchNativeHwnd, [ref]$searchNativeOwner) -eq 0 -or
+        $searchNativeOwner -ne [uint32]$process.Id -or
+        -not [WinghosttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) {
+        throw "Docked search query Edit has invalid native HWND $searchNativeHwnd (owner=$searchNativeOwner)."
+    }
+    $searchBounds = $searchQueryEdit.Current.BoundingRectangle
+    if ($searchBounds.Width -le 0 -or $searchBounds.Height -le 0 -or $searchQueryEdit.Current.IsOffscreen) {
+        throw 'Docked search query Edit is not visible with positive UIA bounds.'
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search query UIA focus' -Condition {
+        $script:searchFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        return $null -ne $script:searchFocused -and
+            [System.Windows.Automation.Automation]::Compare($script:searchFocused, $searchQueryEdit)
+    }
+    $searchTextPattern = $null
+    if (-not $searchQueryEdit.TryGetCurrentPattern(
+        [System.Windows.Automation.TextPattern]::Pattern,
+        [ref]$searchTextPattern
+    )) {
+        throw 'Docked search query Edit does not expose TextPattern.'
+    }
+    $searchValuePattern = $null
+    if (-not $searchQueryEdit.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$searchValuePattern
+    )) {
+        throw 'Docked search query Edit does not expose ValuePattern.'
+    }
+    if ($searchTextPattern.SupportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::Single -or
+        $searchValuePattern.Current.IsReadOnly) {
+        throw 'Docked search query Edit does not expose writable single-selection semantics.'
+    }
+    $searchInitialSelection = @($searchTextPattern.GetSelection())
+    if ($searchInitialSelection.Count -ne 1 -or
+        $searchInitialSelection[0].CompareEndpoints(
+            [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+            $searchInitialSelection[0],
+            [System.Windows.Automation.TextPatternRangeEndpoint]::End
+        ) -ne 0) {
+        throw 'Docked search query Edit did not expose one degenerate initial caret range.'
+    }
+    Start-AccessibilityEditEventCapture -Element $searchQueryEdit
+    $searchValuePattern.SetValue('needle')
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search Text and Value updates' -Condition {
+        return $searchTextPattern.DocumentRange.GetText(-1) -eq 'needle' -and
+            $searchValuePattern.Current.Value -eq 'needle' -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) `
+                -Element $searchQueryEdit) -gt 0 -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) `
+                -Element $searchQueryEdit) -gt 0
+    }
+    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    $searchTextPattern.DocumentRange.Select()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search TextPattern selection' -Condition {
+        $script:searchQuerySelection = @($searchTextPattern.GetSelection())
+        return $script:searchQuerySelection.Count -eq 1 -and
+            $script:searchQuerySelection[0].GetText(-1) -eq 'needle' -and
+            (Get-AccessibilityMatchingSenderCount `
+                -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) `
+                -Element $searchQueryEdit) -gt 0
+    }
+    $searchEditTextChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) -Element $searchQueryEdit
+    $searchEditValueChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) -Element $searchQueryEdit
+    $searchEditSelectionChangedCount = Get-AccessibilityMatchingSenderCount `
+        -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) -Element $searchQueryEdit
+    $searchEditEvidence = [ordered]@{
+        name = $searchQueryEdit.Current.Name
+        text = $searchTextPattern.DocumentRange.GetText(-1)
+        value = $searchValuePattern.Current.Value
+        selected_text = $script:searchQuerySelection[0].GetText(-1)
+        text_changed_events = $searchEditTextChangedCount
+        value_changed_events = $searchEditValueChangedCount
+        selection_changed_events = $searchEditSelectionChangedCount
+    }
+    Stop-AccessibilityEditEventCapture
+    Send-AccessibilityChord -Keys @([uint16]0x1B) -Description 'Escape close docked search' -Process $process
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'docked search hide and terminal focus restoration' -Condition {
+        $script:searchDismissFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $script:searchDismissFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $script:searchDismissTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        return -not [WinghosttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd) -and
+            $null -ne $script:searchDismissFocused -and
+            $script:searchDismissFocused.Current.ProcessId -eq $process.Id -and
+            $script:searchDismissFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Document -and
+            $script:searchDismissTerminalHwnds -contains $script:searchDismissFocusedHwnd
+    }
+    $hiddenSearchElement = [System.Windows.Automation.AutomationElement]::FromHandle($searchNativeHwnd)
+    if ($null -eq $hiddenSearchElement -or
+        $hiddenSearchElement.Current.ControlType -ne [System.Windows.Automation.ControlType]::Edit -or
+        -not $hiddenSearchElement.Current.IsOffscreen) {
+        throw 'Hidden docked search Edit did not remain an offscreen UIA Edit after dismissal.'
     }
 
     $settingsCycles = @()
@@ -1378,6 +1745,37 @@ try {
                 visible_interactive_controls = $interactiveSettingsControls.Count
             }
         }
+        $selectedBeforeFocusOnly = @($sectionButtons | Where-Object {
+            $candidateSelection = $null
+            $_.TryGetCurrentPattern(
+                [System.Windows.Automation.SelectionItemPattern]::Pattern,
+                [ref]$candidateSelection
+            ) -and $candidateSelection.Current.IsSelected
+        } | ForEach-Object { $_.Current.Name })
+        if ($selectedBeforeFocusOnly.Count -ne 1) {
+            throw "Settings cycle $settingsCycle has no unique section before focus-only probe."
+        }
+        $focusOnlySection = @($sectionButtons | Where-Object {
+            $_.Current.Name -ne $selectedBeforeFocusOnly[0]
+        })[0]
+        $focusOnlySectionHwnd = [IntPtr]$focusOnlySection.Current.NativeWindowHandle
+        $focusOnlySection.SetFocus()
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus-only ownership' -Condition {
+            $script:settingsFocusOnlyElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+            return $null -ne $script:settingsFocusOnlyElement -and
+                [System.Windows.Automation.Automation]::Compare($script:settingsFocusOnlyElement, $focusOnlySection) -and
+                [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusOnlySectionHwnd
+        }
+        $selectedAfterFocusOnly = @($sectionButtons | Where-Object {
+            $candidateSelection = $null
+            $_.TryGetCurrentPattern(
+                [System.Windows.Automation.SelectionItemPattern]::Pattern,
+                [ref]$candidateSelection
+            ) -and $candidateSelection.Current.IsSelected
+        } | ForEach-Object { $_.Current.Name })
+        if ($selectedAfterFocusOnly.Count -ne 1 -or $selectedAfterFocusOnly[0] -ne $selectedBeforeFocusOnly[0]) {
+            throw "Focusing settings section '$($focusOnlySection.Current.Name)' changed selection from '$($selectedBeforeFocusOnly -join ', ')' to '$($selectedAfterFocusOnly -join ', ')'."
+        }
         $settingsCycles += [ordered]@{
             cycle = $settingsCycle
             hwnd = $settingsHwnd.ToInt64()
@@ -1385,6 +1783,7 @@ try {
             named_visible_text_labels = $settingsNamedTextTotal
             label_overlap_comparisons = $settingsLabelOverlapComparisons
             label_control_overlap_comparisons = $settingsOverlapComparisons
+            focus_only_preserved_section = $selectedBeforeFocusOnly[0]
             sections = $settingsSectionEvidence
             bounds = [ordered]@{
                 left = $settingsRect.left
@@ -1467,6 +1866,17 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings owner probe dirty draft' -Condition {
         return $scrollbackValuePattern.Current.Value -eq $draftScrollbackText -and $ownerSaveButton.Current.IsEnabled
     }
+    $ownerSaveButton.SetFocus()
+    $ownerSaveHwnd = [IntPtr]$ownerSaveButton.Current.NativeWindowHandle
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings Save focus-only ownership' -Condition {
+        $script:ownerSaveFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+        return $null -ne $script:ownerSaveFocusedElement -and
+            [System.Windows.Automation.Automation]::Compare($script:ownerSaveFocusedElement, $ownerSaveButton) -and
+            [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerSaveHwnd
+    }
+    if ($scrollbackValuePattern.Current.Value -ne $draftScrollbackText -or -not $ownerSaveButton.Current.IsEnabled) {
+        throw 'Focusing the settings Save button unexpectedly committed or discarded the dirty draft.'
+    }
 
     if (-not [WinghosttyAccessibilityNative]::PostMessageW(
         $ownerProbeHost,
@@ -1538,6 +1948,7 @@ try {
         original_value = $originalScrollback.ToString([Globalization.CultureInfo]::InvariantCulture)
         dirty_value = $draftScrollbackText
         dirty_value_preserved = $true
+        save_focus_preserved_dirty_draft = $true
         save_enabled_after_owner_close = $true
         explicitly_discarded = $true
         exit_code = $ownerProbeExitCode
@@ -1620,6 +2031,24 @@ try {
         private_bytes_growth = $stressPrivateGrowth
     }
 
+    Assert-AccessibilityInputOwner -Process $process -Description 'settings-open idle soak'
+    if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+        throw "SendInput failed while opening settings for idle soak: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings HWND for idle soak' -Condition {
+        $script:idleSettingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            [uint32]$process.Id,
+            'winghostty.win32.settings'
+        ))
+        return $script:idleSettingsWindowsProbe.Count -eq 1
+    }
+    $idleSettingsHwnd = $script:idleSettingsWindowsProbe[0]
+    $idleSettingsElement = [System.Windows.Automation.AutomationElement]::FromHandle($idleSettingsHwnd)
+    if ($null -eq $idleSettingsElement -or $idleSettingsElement.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window) {
+        throw 'Settings idle-soak window exposes no UIA Window root.'
+    }
+    $idleSettingsName = $idleSettingsElement.Current.Name
+
     Start-Sleep -Seconds 1
     [WinghosttyAccessibilityNative]::ResetTextChangedCount()
     $process.Refresh()
@@ -1636,6 +2065,15 @@ try {
         Start-Sleep -Seconds 1
         $process.Refresh()
         if ($process.HasExited) { throw "winghostty exited during UIA idle soak at ${second}s." }
+        if (-not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)) {
+            throw "Settings window was destroyed during UIA idle soak at ${second}s."
+        }
+        if ($IdleSoakSeconds -gt 1 -and $second -eq [Math]::Floor($IdleSoakSeconds / 2)) {
+            if (-not [WinghosttyAccessibilityNative]::ForceForeground($idleSettingsHwnd) -or
+                -not [WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)) {
+                throw "Settings/main-window focus round trip failed during UIA idle soak at ${second}s."
+            }
+        }
         $peakHandles = [Math]::Max($peakHandles, $process.HandleCount)
         $peakThreads = [Math]::Max($peakThreads, $process.Threads.Count)
         $peakPrivateBytes = [Math]::Max($peakPrivateBytes, $process.PrivateMemorySize64)
@@ -1662,6 +2100,20 @@ try {
             }
         }
         return $script:idleMarkerVisible
+    }
+    if ($idleSettingsElement.Current.Name -ne $idleSettingsName) {
+        throw "Settings UIA root changed after idle soak; before='$idleSettingsName', after='$($idleSettingsElement.Current.Name)'."
+    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $idleSettingsHwnd `
+        -Message 0x0010 `
+        -WParam ([UIntPtr]::Zero) `
+        -LParam ([IntPtr]::Zero) `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Process $process `
+        -Description 'close settings after idle soak')
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction after idle soak' -Condition {
+        return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)
     }
     $hc = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
@@ -1707,6 +2159,8 @@ try {
             idle_handle_growth = $idleHandleGrowth
             idle_thread_growth = $idleThreadGrowth
             idle_private_bytes_growth = $idlePrivateGrowth
+            settings_open_during_idle = $true
+            settings_focus_round_trip = [bool]($IdleSoakSeconds -gt 1)
         }
         splits = [ordered]@{
             baseline = $splitBaseline
@@ -1717,7 +2171,7 @@ try {
             exact_focus = $paneFocusResults
         }
         palette = [ordered]@{
-            name = $palette.Current.Name
+            name = $paletteName
             item_count = $paletteItems.Count
             initial_selected_name = $paletteInitialSelectedName
             moved_selected_name = $paletteMovedSelectedName
@@ -1735,13 +2189,21 @@ try {
             action_aborted_notification_events = $paletteActionAbortedNotificationCount
             action_aborted_notification_kind = $paletteActionAbortedNotificationKind
             action_aborted_notification_display_string = $paletteActionAbortedNotificationDisplayString
-            focused_control_type = $paletteFocused.Current.ControlType.ProgrammaticName
+            focused_control_type = $paletteFocusedControlType
             escape_restored_terminal_document = $true
             escape_focused_hwnd = $script:paletteDismissFocusedHwnd.ToInt64()
             keyboard_toggle_restored_terminal_document = $true
             keyboard_toggle_focused_hwnd = $script:paletteToggleFocusedHwnd.ToInt64()
+            query_edit = $paletteEditEvidence
             bounds = [ordered]@{ left = $paletteBounds.Left; top = $paletteBounds.Top; width = $paletteBounds.Width; height = $paletteBounds.Height }
             selected_bounds = [ordered]@{ left = $selectedBounds.Left; top = $selectedBounds.Top; width = $selectedBounds.Width; height = $selectedBounds.Height }
+        }
+        docked_search = [ordered]@{
+            edit = $searchEditEvidence
+            escape_restored_terminal_document = $true
+            escape_focused_hwnd = $script:searchDismissFocusedHwnd.ToInt64()
+            native_edit_hidden = $true
+            hidden_control_type = $hiddenSearchElement.Current.ControlType.ProgrammaticName
         }
         settings = $settingsLifecycle
         settings_owner_lifecycle = $settingsOwnerLifecycle
@@ -1822,6 +2284,14 @@ catch {
     $runFailure = $_
 }
 finally {
+    if ($editEventsRegistered) {
+        try {
+            Stop-AccessibilityEditEventCapture
+        }
+        catch {
+            Write-Warning "Failed to remove Edit UIA handlers: $($_.Exception.Message)"
+        }
+    }
     if ($paletteSelectionRegistered -and $null -ne $paletteSelectionHandler -and $null -ne $root) {
         try {
             [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(

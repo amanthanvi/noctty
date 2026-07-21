@@ -45,6 +45,7 @@ pub const UiaRootObjectId: LPARAM = -25;
 
 /// ProviderOptions flags for IRawElementProviderSimple::get_ProviderOptions.
 pub const ProviderOptions_ServerSideProvider: i32 = 0x2;
+pub const ProviderOptions_UseComThreading: i32 = 0x20;
 
 /// VARIANT variant-type tags that we actually emit.
 pub const VT_EMPTY: u16 = 0;
