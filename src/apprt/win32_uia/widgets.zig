@@ -1390,8 +1390,7 @@ pub const TerminalProvider = struct {
         };
         defer self.alloc.free(terminal_snapshot.visible_text);
 
-        is_active.* = if (self.state.focused(self.state.ctx)) 1 else 0;
-        return self.createRangeFromSnapshot(
+        const hr = self.createRangeFromSnapshot(
             &terminal_snapshot,
             .{
                 .start = terminal_snapshot.caret_offset,
@@ -1399,6 +1398,10 @@ pub const TerminalProvider = struct {
             },
             out,
         );
+        if (hr == com.S_OK) {
+            is_active.* = if (self.state.focused(self.state.ctx)) 1 else 0;
+        }
+        return hr;
     }
 
     /// UI-thread event hook used after the owning terminal publishes a new
@@ -3072,6 +3075,30 @@ test "TerminalProvider TextProvider2 exposes active degenerate caret range" {
         TerminalProvider.RangeFromAnnotation(&provider.text2_iface, null, &annotation),
     );
     try std.testing.expect(annotation == null);
+}
+
+test "TerminalProvider TextProvider2 keeps caret outputs safe on range allocation failure" {
+    var state_data = TestTerminalStateData{ .caret_offset = 6 };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    const original_alloc = provider.alloc;
+    defer provider.alloc = original_alloc;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    provider.alloc = failing.allocator();
+
+    var active: com.BOOL = 1;
+    var caret: ?*com.ITextRangeProvider = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.E_OUTOFMEMORY,
+        TerminalProvider.GetCaretRange(&provider.text2_iface, &active, &caret),
+    );
+    try std.testing.expectEqual(@as(com.BOOL, 0), active);
+    try std.testing.expect(caret == null);
 }
 
 test "TerminalProvider refcount and state retain balance across text provider refs" {

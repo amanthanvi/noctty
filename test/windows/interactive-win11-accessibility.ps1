@@ -367,23 +367,20 @@ public static class WinghosttyAccessibilityNative {
         IntPtr automation = notificationAutomation;
         IntPtr element = notificationElement;
         IntPtr handlerInterface = notificationHandlerInterface;
+        if (automation == IntPtr.Zero) return;
+        if (element == IntPtr.Zero || handlerInterface == IntPtr.Zero || notificationHandler == null) {
+            throw new InvalidOperationException("Notification capture state is incomplete.");
+        }
+        RemoveNotificationEventHandlerDelegate remove = VtableDelegate<RemoveNotificationEventHandlerDelegate>(automation, 69);
+        int hr = remove(automation, element, handlerInterface);
+        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
         notificationAutomation = IntPtr.Zero;
         notificationElement = IntPtr.Zero;
         notificationHandlerInterface = IntPtr.Zero;
         notificationHandler = null;
-        int hr = 0;
-        try {
-            if (automation != IntPtr.Zero && element != IntPtr.Zero && handlerInterface != IntPtr.Zero) {
-                RemoveNotificationEventHandlerDelegate remove = VtableDelegate<RemoveNotificationEventHandlerDelegate>(automation, 69);
-                hr = remove(automation, element, handlerInterface);
-            }
-        }
-        finally {
-            if (handlerInterface != IntPtr.Zero) Marshal.Release(handlerInterface);
-            if (element != IntPtr.Zero) Marshal.Release(element);
-            if (automation != IntPtr.Zero) Marshal.Release(automation);
-        }
-        if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+        Marshal.Release(handlerInterface);
+        Marshal.Release(element);
+        Marshal.Release(automation);
     }
 
     private static INPUT Key(ushort virtualKey, ushort scan, uint flags) {
@@ -614,6 +611,25 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $effectiveDeadline)
     throw "Timed out waiting for $Description."
+}
+
+function Get-ExactAccessibilityNotification(
+    [string] $Description,
+    [string] $ExpectedKind,
+    [string] $ExpectedDisplayString
+) {
+    Start-Sleep -Milliseconds 300
+    $count = [WinghosttyAccessibilityNative]::NotificationCount
+    $kind = [WinghosttyAccessibilityNative]::NotificationKind
+    $displayString = [WinghosttyAccessibilityNative]::NotificationDisplayString
+    if ($count -ne 1 -or $kind -ne $ExpectedKind -or $displayString -ne $ExpectedDisplayString) {
+        throw "$Description emitted count=$count kind='$kind' display='$displayString'; expected exactly one kind='$ExpectedKind' display='$ExpectedDisplayString'."
+    }
+    return [pscustomobject]@{
+        Count = $count
+        Kind = $kind
+        DisplayString = $displayString
+    }
 }
 
 function Start-AccessibilityEditEventCapture([System.Windows.Automation.AutomationElement] $Element) {
@@ -1388,13 +1404,13 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Accessibility help UIA notification' -Condition {
         return [WinghosttyAccessibilityNative]::NotificationCount -gt 0
     }
-    $paletteHelpNotificationCount = [WinghosttyAccessibilityNative]::NotificationCount
-    $paletteHelpNotificationKind = [WinghosttyAccessibilityNative]::NotificationKind
-    $paletteHelpNotificationDisplayString = [WinghosttyAccessibilityNative]::NotificationDisplayString
-    if ($paletteHelpNotificationKind -ne 'Other' -or
-        $paletteHelpNotificationDisplayString -ne 'Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes.') {
-        throw "Accessibility help notification was kind='$paletteHelpNotificationKind' display='$paletteHelpNotificationDisplayString'."
-    }
+    $helpNotification = Get-ExactAccessibilityNotification `
+        -Description 'Accessibility help notification' `
+        -ExpectedKind 'Other' `
+        -ExpectedDisplayString 'Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes.'
+    $paletteHelpNotificationCount = $helpNotification.Count
+    $paletteHelpNotificationKind = $helpNotification.Kind
+    $paletteHelpNotificationDisplayString = $helpNotification.DisplayString
 
     [WinghosttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x41) -Description 'select command palette query for unavailable outcome' -Process $process
@@ -1412,13 +1428,13 @@ try {
         return $script:paletteUnavailableItems.Count -eq 0 -and
             [WinghosttyAccessibilityNative]::NotificationCount -gt 0
     }
-    $paletteUnavailableNotificationCount = [WinghosttyAccessibilityNative]::NotificationCount
-    $paletteUnavailableNotificationKind = [WinghosttyAccessibilityNative]::NotificationKind
-    $paletteUnavailableNotificationDisplayString = [WinghosttyAccessibilityNative]::NotificationDisplayString
-    if ($paletteUnavailableNotificationKind -ne 'Other' -or
-        $paletteUnavailableNotificationDisplayString -ne 'No matches') {
-        throw "No-match notification was kind='$paletteUnavailableNotificationKind' display='$paletteUnavailableNotificationDisplayString'."
-    }
+    $unavailableNotification = Get-ExactAccessibilityNotification `
+        -Description 'No-match notification' `
+        -ExpectedKind 'Other' `
+        -ExpectedDisplayString 'No matches'
+    $paletteUnavailableNotificationCount = $unavailableNotification.Count
+    $paletteUnavailableNotificationKind = $unavailableNotification.Kind
+    $paletteUnavailableNotificationDisplayString = $unavailableNotification.DisplayString
 
     # With zero ranked rows, Enter falls back to parsing the query as a
     # binding action. This deliberately invalid identifier is rejected before
@@ -1428,13 +1444,13 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette ActionAborted notification' -Condition {
         return [WinghosttyAccessibilityNative]::NotificationCount -gt 0
     }
-    $paletteActionAbortedNotificationCount = [WinghosttyAccessibilityNative]::NotificationCount
-    $paletteActionAbortedNotificationKind = [WinghosttyAccessibilityNative]::NotificationKind
-    $paletteActionAbortedNotificationDisplayString = [WinghosttyAccessibilityNative]::NotificationDisplayString
-    if ($paletteActionAbortedNotificationKind -ne 'ActionAborted' -or
-        $paletteActionAbortedNotificationDisplayString -ne 'Unknown command') {
-        throw "Unknown-command notification was kind='$paletteActionAbortedNotificationKind' display='$paletteActionAbortedNotificationDisplayString'."
-    }
+    $actionAbortedNotification = Get-ExactAccessibilityNotification `
+        -Description 'Unknown-command notification' `
+        -ExpectedKind 'ActionAborted' `
+        -ExpectedDisplayString 'Unknown command'
+    $paletteActionAbortedNotificationCount = $actionAbortedNotification.Count
+    $paletteActionAbortedNotificationKind = $actionAbortedNotification.Kind
+    $paletteActionAbortedNotificationDisplayString = $actionAbortedNotification.DisplayString
 
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
         [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent,
