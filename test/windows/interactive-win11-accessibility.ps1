@@ -752,7 +752,7 @@ function Get-AccessibilityMatchingSenderCount(
 
 $validationStartedAt = [DateTime]::UtcNow
 $script:accessibilityOverallDeadline = $validationStartedAt.AddSeconds(
-    [Math]::Max(90, ($TimeoutSeconds * 2) + $IdleSoakSeconds + 60)
+    [Math]::Max(90, ($TimeoutSeconds * 3) + $IdleSoakSeconds + 60)
 )
 $machineProcesses = @(Get-Process)
 $machineThreadCount = (@($machineProcesses | ForEach-Object { try { $_.Threads.Count } catch { 0 } }) | Measure-Object -Sum).Sum

@@ -2411,6 +2411,10 @@ Assert-WorkflowContract `
     -Pattern "(?ms)finally \{\s*\`$env:ZIG_GLOBAL_CACHE_DIR = \`$originalZigGlobalCache\s*\`$env:ZIG_LOCAL_CACHE_DIR = \`$originalZigLocalCache\s*\}" `
     -Description 'interactive PR smoke restores caller-provided Zig cache directories after rebuild retry'
 Assert-WorkflowContract `
+    -Path $accessibilityHarness `
+    -Pattern '\[Math\]::Max\(90, \(\$TimeoutSeconds \* 3\) \+ \$IdleSoakSeconds \+ 60\)' `
+    -Description 'accessibility harness budgets all three timeout-bearing launch phases plus idle soak'
+Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `
     -Description 'accessibility evidence timestamp is semantically validated'
