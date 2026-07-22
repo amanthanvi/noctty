@@ -555,8 +555,9 @@ pub const PaletteListProvider = struct {
         out: *com.UiaRect,
     ) callconv(.winapi) com.HRESULT {
         const self = fromFragment(self_fragment);
+        out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         if (!self.isAvailable()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        out.* = if (self.geometry()) |value| value.bounds else .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+        if (self.geometry()) |value| out.* = value.bounds;
         return com.S_OK;
     }
 
@@ -821,8 +822,9 @@ const PaletteRowProvider = struct {
     }
     fn GetBoundingRectangle(p: *com.IRawElementProviderFragment, out: *com.UiaRect) callconv(.winapi) com.HRESULT {
         const self = fromFragment(p);
+        out.* = .{ .left = 0, .top = 0, .width = 0, .height = 0 };
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        out.* = self.parent.rowBounds(self.index) orelse .{ .left = 0, .top = 0, .width = 0, .height = 0 };
+        if (self.parent.rowBounds(self.index)) |bounds| out.* = bounds;
         return com.S_OK;
     }
     fn GetEmbeddedFragmentRoots(_: *com.IRawElementProviderFragment, out: *?*com.SAFEARRAY) callconv(.winapi) com.HRESULT {
@@ -873,6 +875,7 @@ const PaletteRowProvider = struct {
     }
     fn GetIsSelected(p: *com.ISelectionItemProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
         const self = fromSelection(p);
+        out.* = 0;
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         out.* = if (self.parent.selectedIndex() == self.index) 1 else 0;
         return com.S_OK;
@@ -3701,6 +3704,12 @@ test "PaletteListProvider exposes one-selection container semantics without fabr
     try std.testing.expect(focus == null);
 
     provider.detach();
+    var bounds = com.UiaRect{ .left = 1, .top = 2, .width = 3, .height = 4 };
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteListProvider.FragmentGetBoundingRectangle(&provider.fragment, &bounds),
+    );
+    try std.testing.expectEqual(com.UiaRect{ .left = 0, .top = 0, .width = 0, .height = 0 }, bounds);
     required = 1;
     try std.testing.expectEqual(
         com.UIA_E_ELEMENTNOTAVAILABLE,
@@ -3793,6 +3802,18 @@ test "Palette row late query reports unavailable after removal and detach" {
     defer _ = PaletteRowProvider.Release(&row.base);
 
     state_data.count = 0;
+    var bounds = com.UiaRect{ .left = 1, .top = 2, .width = 3, .height = 4 };
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteRowProvider.GetBoundingRectangle(&row.fragment, &bounds),
+    );
+    try std.testing.expectEqual(com.UiaRect{ .left = 0, .top = 0, .width = 0, .height = 0 }, bounds);
+    var selected: com.BOOL = 1;
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteRowProvider.GetIsSelected(&row.selection_item, &selected),
+    );
+    try std.testing.expectEqual(@as(com.BOOL, 0), selected);
     var value = com.VARIANT.empty();
     try std.testing.expectEqual(
         com.UIA_E_ELEMENTNOTAVAILABLE,
@@ -3827,11 +3848,18 @@ test "Palette row late query reports unavailable after removal and detach" {
 
     state_data.count = 1;
     provider.detach();
-    var selected: com.BOOL = 0;
+    bounds = .{ .left = 1, .top = 2, .width = 3, .height = 4 };
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        PaletteRowProvider.GetBoundingRectangle(&row.fragment, &bounds),
+    );
+    try std.testing.expectEqual(com.UiaRect{ .left = 0, .top = 0, .width = 0, .height = 0 }, bounds);
+    selected = 1;
     try std.testing.expectEqual(
         com.UIA_E_ELEMENTNOTAVAILABLE,
         PaletteRowProvider.GetIsSelected(&row.selection_item, &selected),
     );
+    try std.testing.expectEqual(@as(com.BOOL, 0), selected);
 }
 
 test "Palette row late query rejects a different item at the same filtered index" {
