@@ -35,6 +35,11 @@ const RECT = extern struct {
 };
 
 extern "user32" fn GetClientRect(hWnd: com.HWND, lpRect: *RECT) callconv(.winapi) com.BOOL;
+extern "user32" fn GetParent(hWnd: com.HWND) callconv(.winapi) ?com.HWND;
+extern "user32" fn IsWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+extern "user32" fn IsWindowEnabled(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+extern "user32" fn IsWindowVisible(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+extern "user32" fn PostMessageW(hWnd: com.HWND, Msg: u32, wParam: com.WPARAM, lParam: com.LPARAM) callconv(.winapi) com.BOOL;
 extern "user32" fn ScreenToClient(hWnd: com.HWND, lpPoint: *POINT) callconv(.winapi) com.BOOL;
 extern "user32" fn ClientToScreen(hWnd: com.HWND, lpPoint: *POINT) callconv(.winapi) com.BOOL;
 extern "kernel32" fn CompareStringOrdinal(
@@ -44,6 +49,16 @@ extern "kernel32" fn CompareStringOrdinal(
     cchCount2: i32,
     bIgnoreCase: com.BOOL,
 ) callconv(.winapi) i32;
+
+fn windowVisibilityIsOffscreen(visible: com.BOOL) bool {
+    return visible == 0;
+}
+
+fn settingsControlIsOffscreen(visible: com.BOOL, viewport_fully_clipped: bool) bool {
+    return windowVisibilityIsOffscreen(visible) or viewport_fully_clipped;
+}
+
+const BM_CLICK: u32 = 0x00F5;
 
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
@@ -631,7 +646,7 @@ const PaletteRowProvider = struct {
         .GetRuntimeId = GetRuntimeId,
         .get_BoundingRectangle = GetBoundingRectangle,
         .GetEmbeddedFragmentRoots = GetEmbeddedFragmentRoots,
-        .SetFocus = SetFocus,
+        .SetFocus = PaletteRowProvider.SetFocus,
         .get_FragmentRoot = GetFragmentRoot,
     };
     const selection_vtbl: com.ISelectionItemProviderVtbl = .{
@@ -712,7 +727,7 @@ const PaletteRowProvider = struct {
         }
         return previous - 1;
     }
-    fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+    pub fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
         return fromBase(p).release();
     }
     fn FragmentRelease(p: *com.IRawElementProviderFragment) callconv(.winapi) u32 {
@@ -874,6 +889,867 @@ const PaletteRowProvider = struct {
         return com.S_OK;
     }
 };
+
+pub const settings_section_count = 7;
+
+/// Stable provider for native STATIC controls that this custom settings
+/// window otherwise exposes as generic Panes through the system bridge.
+pub const SettingsControlProvider = struct {
+    pub const Role = enum {
+        text,
+        edit,
+        combo_box,
+        check_box,
+        button,
+    };
+
+    base: com.IRawElementProviderSimple,
+    value_iface: com.IValueProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    hwnd: com.HWND,
+    role: Role,
+    name: ?[]const u8,
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
+    viewport_fully_clipped: std.atomic.Value(bool),
+
+    const vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = getProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = getHostRawElementProvider,
+    };
+
+    const value_vtbl: com.IValueProviderVtbl = .{
+        .QueryInterface = ValueQueryInterface,
+        .AddRef = ValueAddRef,
+        .Release = ValueRelease,
+        .SetValue = SetValue,
+        .get_Value = GetValue,
+        .get_IsReadOnly = GetIsReadOnly,
+    };
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        hwnd: com.HWND,
+        role: Role,
+        name: ?[]const u8,
+    ) !*SettingsControlProvider {
+        const self = try alloc.create(SettingsControlProvider);
+        self.* = .{
+            .base = .{ .vtbl = &vtbl },
+            .value_iface = .{ .vtbl = &value_vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .hwnd = hwnd,
+            .role = role,
+            .name = name,
+            .detached = std.atomic.Value(bool).init(false),
+            .disconnected = std.atomic.Value(bool).init(false),
+            .viewport_fully_clipped = std.atomic.Value(bool).init(false),
+        };
+        return self;
+    }
+
+    pub fn detach(self: *SettingsControlProvider) void {
+        self.detached.store(true, .release);
+    }
+
+    pub fn setViewportFullyClipped(self: *SettingsControlProvider, fully_clipped: bool) void {
+        self.viewport_fully_clipped.store(fully_clipped, .release);
+    }
+
+    pub fn disconnect(self: *SettingsControlProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        const hr = com.UiaDisconnectProvider(&self.base);
+        // Deferred settings teardown runs after native child destruction.
+        // UIA reports E_INVALIDARG when that HWND/provider registration is
+        // already gone; the detached provider is nevertheless terminal.
+        if (hr == com.S_OK or hr == com.E_INVALIDARG) {
+            self.disconnected.store(true, .release);
+            return com.S_OK;
+        }
+        return hr;
+    }
+
+    fn fromBase(p: *com.IRawElementProviderSimple) *SettingsControlProvider {
+        return @fieldParentPtr("base", p);
+    }
+
+    fn fromValue(p: *com.IValueProvider) *SettingsControlProvider {
+        return @fieldParentPtr("value_iface", p);
+    }
+
+    fn available(self: *const SettingsControlProvider) bool {
+        return !self.detached.load(.acquire) and IsWindow(self.hwnd) != 0;
+    }
+
+    fn QueryInterface(
+        p: *com.IRawElementProviderSimple,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        const self = fromBase(p);
+        if (iidEqual(iid, &com.IID_IUnknown) or
+            iidEqual(iid, &com.IID_IRawElementProviderSimple))
+        {
+            out.* = @ptrCast(p);
+        } else if (self.role == .edit and iidEqual(iid, &com.IID_IValueProvider)) {
+            out.* = @ptrCast(&self.value_iface);
+        } else return com.E_NOINTERFACE;
+        _ = AddRef(p);
+        return com.S_OK;
+    }
+
+    fn ValueQueryInterface(
+        p: *com.IValueProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromValue(p).base, iid, out);
+    }
+
+    fn AddRef(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(p).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn ValueAddRef(p: *com.IValueProvider) callconv(.winapi) u32 {
+        return AddRef(&fromValue(p).base);
+    }
+
+    pub fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        const self = fromBase(p);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn ValueRelease(p: *com.IValueProvider) callconv(.winapi) u32 {
+        return Release(&fromValue(p).base);
+    }
+
+    fn getProviderOptions(
+        _: *com.IRawElementProviderSimple,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.ProviderOptions_ServerSideProvider | com.ProviderOptions_UseComThreading;
+        return com.S_OK;
+    }
+
+    fn GetPatternProvider(
+        p: *com.IRawElementProviderSimple,
+        pattern_id: i32,
+        out: *?*com.IUnknown,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.role == .text) return com.S_OK;
+        if (self.role == .edit and pattern_id == constants.UIA_ValuePatternId) {
+            out.* = @ptrCast(&self.value_iface);
+            _ = AddRef(&self.base);
+            return com.S_OK;
+        }
+        var host: ?*com.IRawElementProviderSimple = null;
+        const host_hr = com.UiaHostProviderFromHwnd(self.hwnd, &host);
+        if (host_hr != com.S_OK or host == null) return host_hr;
+        defer _ = host.?.vtbl.Release(host.?);
+        return host.?.vtbl.GetPatternProvider(host.?, pattern_id, out);
+    }
+
+    fn GetPropertyValue(
+        p: *com.IRawElementProviderSimple,
+        property: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = com.VARIANT.empty();
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        switch (property) {
+            constants.UIA_ControlTypePropertyId => out.* = com.VARIANT.fromI4(switch (self.role) {
+                .text => constants.UIA_TextControlTypeId,
+                .edit => constants.UIA_EditControlTypeId,
+                .combo_box => constants.UIA_ComboBoxControlTypeId,
+                .check_box => constants.UIA_CheckBoxControlTypeId,
+                .button => constants.UIA_ButtonControlTypeId,
+            }),
+            constants.UIA_NamePropertyId => {
+                if (self.name) |name| {
+                    const bstr = allocBstrFromUtf8(self.alloc, name) orelse return com.E_OUTOFMEMORY;
+                    out.* = com.VARIANT.fromBstr(bstr);
+                } else {
+                    const length = @max(0, com.GetWindowTextLengthW(self.hwnd));
+                    const buffer = self.alloc.alloc(u16, @as(usize, @intCast(length)) + 1) catch return com.E_OUTOFMEMORY;
+                    defer self.alloc.free(buffer);
+                    const copied = com.GetWindowTextW(self.hwnd, buffer.ptr, @intCast(buffer.len));
+                    const bstr = com.SysAllocStringLen(buffer.ptr, @intCast(@max(0, copied))) orelse return com.E_OUTOFMEMORY;
+                    out.* = com.VARIANT.fromBstr(bstr);
+                }
+            },
+            constants.UIA_ValueValuePropertyId => if (self.role == .edit) {
+                const value = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(value);
+            },
+            constants.UIA_ValueIsReadOnlyPropertyId => if (self.role == .edit) {
+                out.* = com.VARIANT.fromBool(false);
+            },
+            constants.UIA_FrameworkIdPropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_IsControlElementPropertyId,
+            constants.UIA_IsContentElementPropertyId,
+            => out.* = com.VARIANT.fromBool(true),
+            constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
+            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(self.role != .text),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(settingsControlIsOffscreen(
+                IsWindowVisible(self.hwnd),
+                self.viewport_fully_clipped.load(.acquire),
+            )),
+            else => {},
+        }
+        return com.S_OK;
+    }
+
+    fn allocValueBstr(self: *SettingsControlProvider) com.BSTR {
+        const length = @max(0, com.GetWindowTextLengthW(self.hwnd));
+        const buffer = self.alloc.alloc(u16, @as(usize, @intCast(length)) + 1) catch return null;
+        defer self.alloc.free(buffer);
+        const copied = com.GetWindowTextW(self.hwnd, buffer.ptr, @intCast(buffer.len));
+        return com.SysAllocStringLen(buffer.ptr, @intCast(@max(0, copied)));
+    }
+
+    fn setValuePrecondition(provider_available: bool, role: Role, enabled: bool) com.HRESULT {
+        if (!provider_available) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (role != .edit) return com.UIA_E_INVALIDOPERATION;
+        if (!enabled) return com.UIA_E_ELEMENTNOTENABLED;
+        return com.S_OK;
+    }
+
+    fn SetValue(
+        p: *com.IValueProvider,
+        value: [*:0]const u16,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        const precondition = setValuePrecondition(
+            self.available(),
+            self.role,
+            IsWindowEnabled(self.hwnd) != 0,
+        );
+        if (precondition != com.S_OK) return precondition;
+        return if (com.SetWindowTextW(self.hwnd, value) != 0) com.S_OK else com.E_INVALIDARG;
+    }
+
+    fn GetValue(
+        p: *com.IValueProvider,
+        out: *com.BSTR,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.role != .edit) return com.UIA_E_INVALIDOPERATION;
+        out.* = self.allocValueBstr() orelse return com.E_OUTOFMEMORY;
+        return com.S_OK;
+    }
+
+    fn GetIsReadOnly(
+        p: *com.IValueProvider,
+        out: *com.BOOL,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromValue(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return if (self.role == .edit) com.S_OK else com.UIA_E_INVALIDOPERATION;
+    }
+
+    fn getHostRawElementProvider(
+        p: *com.IRawElementProviderSimple,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
+};
+
+pub fn returnSettingsControlProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *SettingsControlProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    if (!provider.available() or provider.hwnd != hwnd) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
+/// Selection container for the settings window's native section radio buttons.
+/// The section providers retain this object; it only borrows their pointers while
+/// attached, so teardown cannot form a COM reference cycle.
+pub const SettingsSectionGroupProvider = struct {
+    base: com.IRawElementProviderSimple,
+    selection_iface: com.ISelectionProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    hwnd: com.HWND,
+    sections_mutex: std.Thread.Mutex,
+    sections: [settings_section_count]?*SettingsSectionProvider,
+    selected_index: std.atomic.Value(u8),
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
+
+    const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = getProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = getHostRawElementProvider,
+    };
+
+    const selection_vtbl: com.ISelectionProviderVtbl = .{
+        .QueryInterface = SelectionQueryInterface,
+        .AddRef = SelectionAddRef,
+        .Release = SelectionRelease,
+        .GetSelection = GetSelection,
+        .get_CanSelectMultiple = GetCanSelectMultiple,
+        .get_IsSelectionRequired = GetIsSelectionRequired,
+    };
+
+    pub fn create(alloc: std.mem.Allocator, hwnd: com.HWND) !*SettingsSectionGroupProvider {
+        const self = try alloc.create(SettingsSectionGroupProvider);
+        self.* = .{
+            .base = .{ .vtbl = &simple_vtbl },
+            .selection_iface = .{ .vtbl = &selection_vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .hwnd = hwnd,
+            .sections_mutex = .{},
+            .sections = [_]?*SettingsSectionProvider{null} ** settings_section_count,
+            .selected_index = .init(std.math.maxInt(u8)),
+            .detached = std.atomic.Value(bool).init(false),
+            .disconnected = std.atomic.Value(bool).init(false),
+        };
+        return self;
+    }
+
+    pub fn setSection(self: *SettingsSectionGroupProvider, index: usize, section: *SettingsSectionProvider) void {
+        self.sections_mutex.lock();
+        defer self.sections_mutex.unlock();
+        if (index < self.sections.len) self.sections[index] = section;
+    }
+
+    pub fn setSelected(self: *SettingsSectionGroupProvider, index: usize) void {
+        self.selected_index.store(@intCast(index), .release);
+    }
+
+    pub fn detach(self: *SettingsSectionGroupProvider) void {
+        self.detached.store(true, .release);
+        self.selected_index.store(std.math.maxInt(u8), .release);
+        self.sections_mutex.lock();
+        defer self.sections_mutex.unlock();
+        self.sections = [_]?*SettingsSectionProvider{null} ** settings_section_count;
+    }
+
+    pub fn disconnect(self: *SettingsSectionGroupProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        const hr = com.UiaDisconnectProvider(&self.base);
+        if (hr == com.S_OK or hr == com.E_INVALIDARG) {
+            self.disconnected.store(true, .release);
+            return com.S_OK;
+        }
+        return hr;
+    }
+
+    fn fromBase(p: *com.IRawElementProviderSimple) *SettingsSectionGroupProvider {
+        return @fieldParentPtr("base", p);
+    }
+
+    fn fromSelection(p: *com.ISelectionProvider) *SettingsSectionGroupProvider {
+        return @fieldParentPtr("selection_iface", p);
+    }
+
+    fn available(self: *const SettingsSectionGroupProvider) bool {
+        return !self.detached.load(.acquire) and IsWindow(self.hwnd) != 0;
+    }
+
+    fn queryInterface(
+        self: *SettingsSectionGroupProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) com.HRESULT {
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or
+            iidEqual(iid, &com.IID_IRawElementProviderSimple))
+        {
+            out.* = @ptrCast(&self.base);
+        } else if (iidEqual(iid, &com.IID_ISelectionProvider)) {
+            out.* = @ptrCast(&self.selection_iface);
+        } else {
+            return com.E_NOINTERFACE;
+        }
+        _ = self.refcount.fetchAdd(1, .monotonic);
+        return com.S_OK;
+    }
+
+    fn QueryInterface(
+        p: *com.IRawElementProviderSimple,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return fromBase(p).queryInterface(iid, out);
+    }
+
+    fn AddRef(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(p).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    pub fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        const self = fromBase(p);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn getProviderOptions(
+        _: *com.IRawElementProviderSimple,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.ProviderOptions_ServerSideProvider | com.ProviderOptions_UseComThreading;
+        return com.S_OK;
+    }
+
+    fn GetPatternProvider(
+        p: *com.IRawElementProviderSimple,
+        pattern_id: i32,
+        out: *?*com.IUnknown,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (pattern_id == constants.UIA_SelectionPatternId) {
+            out.* = @ptrCast(&self.selection_iface);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+        }
+        return com.S_OK;
+    }
+
+    fn GetPropertyValue(
+        p: *com.IRawElementProviderSimple,
+        property: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = com.VARIANT.empty();
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        switch (property) {
+            constants.UIA_FrameworkIdPropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_IsControlElementPropertyId,
+            constants.UIA_IsContentElementPropertyId,
+            => out.* = com.VARIANT.fromBool(true),
+            constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(windowVisibilityIsOffscreen(IsWindowVisible(self.hwnd))),
+            else => {},
+        }
+        return com.S_OK;
+    }
+
+    fn getHostRawElementProvider(
+        p: *com.IRawElementProviderSimple,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
+
+    fn SelectionQueryInterface(
+        p: *com.ISelectionProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return fromSelection(p).queryInterface(iid, out);
+    }
+
+    fn SelectionAddRef(p: *com.ISelectionProvider) callconv(.winapi) u32 {
+        return fromSelection(p).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn SelectionRelease(p: *com.ISelectionProvider) callconv(.winapi) u32 {
+        return Release(&fromSelection(p).base);
+    }
+
+    fn GetSelection(
+        p: *com.ISelectionProvider,
+        out: *?*com.SAFEARRAY,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        var selected: ?*SettingsSectionProvider = null;
+        self.sections_mutex.lock();
+        if (self.detached.load(.acquire)) {
+            self.sections_mutex.unlock();
+            return com.UIA_E_ELEMENTNOTAVAILABLE;
+        }
+        const selected_index: usize = @intCast(self.selected_index.load(.acquire));
+        if (selected_index < self.sections.len) {
+            selected = self.sections[selected_index];
+            if (selected) |section| _ = SettingsSectionProvider.AddRef(&section.base);
+        }
+        self.sections_mutex.unlock();
+        defer {
+            if (selected) |section| _ = SettingsSectionProvider.Release(&section.base);
+        }
+        const array = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, if (selected == null) 0 else 1) orelse
+            return com.E_OUTOFMEMORY;
+        if (selected) |section| {
+            var array_index: i32 = 0;
+            if (com.SafeArrayPutElement(array, &array_index, @ptrCast(&section.base)) != com.S_OK) {
+                _ = com.SafeArrayDestroy(array);
+                return com.E_OUTOFMEMORY;
+            }
+        }
+        out.* = array;
+        return com.S_OK;
+    }
+
+    fn GetCanSelectMultiple(p: *com.ISelectionProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.S_OK;
+    }
+
+    fn GetIsSelectionRequired(p: *com.ISelectionProvider, out: *com.BOOL) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = 1;
+        return com.S_OK;
+    }
+};
+
+pub fn returnSettingsSectionGroupProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *SettingsSectionGroupProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    if (!provider.available() or provider.hwnd != hwnd) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
+/// Explicit provider for the settings window's native section radio buttons.
+/// The system UIA bridge reports these push-like BUTTON HWNDs as generic Panes,
+/// so Narrator otherwise loses both their radio role and selection semantics.
+pub const SettingsSectionProvider = struct {
+    base: com.IRawElementProviderSimple,
+    selection_iface: com.ISelectionItemProvider,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    hwnd: com.HWND,
+    name: []const u8,
+    index: u8,
+    container: *SettingsSectionGroupProvider,
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
+
+    const simple_vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = getProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = getHostRawElementProvider,
+    };
+
+    const selection_vtbl: com.ISelectionItemProviderVtbl = .{
+        .QueryInterface = SelectionQueryInterface,
+        .AddRef = SelectionAddRef,
+        .Release = SelectionRelease,
+        .Select = Select,
+        .AddToSelection = AddToSelection,
+        .RemoveFromSelection = RemoveFromSelection,
+        .get_IsSelected = GetIsSelected,
+        .get_SelectionContainer = GetSelectionContainer,
+    };
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        hwnd: com.HWND,
+        name: []const u8,
+        index: usize,
+        container: *SettingsSectionGroupProvider,
+    ) !*SettingsSectionProvider {
+        const self = try alloc.create(SettingsSectionProvider);
+        _ = SettingsSectionGroupProvider.AddRef(&container.base);
+        self.* = .{
+            .base = .{ .vtbl = &simple_vtbl },
+            .selection_iface = .{ .vtbl = &selection_vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .hwnd = hwnd,
+            .name = name,
+            .index = @intCast(index),
+            .container = container,
+            .detached = std.atomic.Value(bool).init(false),
+            .disconnected = std.atomic.Value(bool).init(false),
+        };
+        return self;
+    }
+
+    pub fn detach(self: *SettingsSectionProvider) void {
+        self.detached.store(true, .release);
+    }
+
+    pub fn disconnect(self: *SettingsSectionProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        const hr = com.UiaDisconnectProvider(&self.base);
+        if (hr == com.S_OK or hr == com.E_INVALIDARG) {
+            self.disconnected.store(true, .release);
+            return com.S_OK;
+        }
+        return hr;
+    }
+
+    pub fn raiseSelected(self: *SettingsSectionProvider) void {
+        if (!self.available() or com.UiaClientsAreListening() == 0) return;
+        const hr = com.UiaRaiseAutomationEvent(
+            &self.base,
+            constants.UIA_SelectionItem_ElementSelectedEventId,
+        );
+        if (hr < 0) std.log.warn("uia: settings section selection event failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+    }
+
+    fn fromBase(p: *com.IRawElementProviderSimple) *SettingsSectionProvider {
+        return @fieldParentPtr("base", p);
+    }
+
+    fn fromSelection(p: *com.ISelectionItemProvider) *SettingsSectionProvider {
+        return @fieldParentPtr("selection_iface", p);
+    }
+
+    fn available(self: *const SettingsSectionProvider) bool {
+        return !self.detached.load(.acquire) and IsWindow(self.hwnd) != 0;
+    }
+
+    fn queryInterface(
+        self: *SettingsSectionProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) com.HRESULT {
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or
+            iidEqual(iid, &com.IID_IRawElementProviderSimple))
+        {
+            out.* = @ptrCast(&self.base);
+        } else if (iidEqual(iid, &com.IID_ISelectionItemProvider)) {
+            out.* = @ptrCast(&self.selection_iface);
+        } else {
+            return com.E_NOINTERFACE;
+        }
+        _ = self.refcount.fetchAdd(1, .monotonic);
+        return com.S_OK;
+    }
+
+    fn QueryInterface(
+        p: *com.IRawElementProviderSimple,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return fromBase(p).queryInterface(iid, out);
+    }
+
+    fn AddRef(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(p).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    pub fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        const self = fromBase(p);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            _ = SettingsSectionGroupProvider.Release(&self.container.base);
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn getProviderOptions(
+        _: *com.IRawElementProviderSimple,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = com.ProviderOptions_ServerSideProvider | com.ProviderOptions_UseComThreading;
+        return com.S_OK;
+    }
+
+    fn GetPatternProvider(
+        p: *com.IRawElementProviderSimple,
+        pattern_id: i32,
+        out: *?*com.IUnknown,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (pattern_id == constants.UIA_SelectionItemPatternId) {
+            out.* = @ptrCast(&self.selection_iface);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+        }
+        return com.S_OK;
+    }
+
+    fn GetPropertyValue(
+        p: *com.IRawElementProviderSimple,
+        property: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = com.VARIANT.empty();
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        switch (property) {
+            constants.UIA_ControlTypePropertyId => out.* = com.VARIANT.fromI4(constants.UIA_RadioButtonControlTypeId),
+            constants.UIA_NamePropertyId => {
+                const bstr = allocBstrFromUtf8(self.alloc, self.name) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_FrameworkIdPropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_IsControlElementPropertyId,
+            constants.UIA_IsContentElementPropertyId,
+            constants.UIA_IsKeyboardFocusablePropertyId,
+            => out.* = com.VARIANT.fromBool(true),
+            constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
+            constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(windowVisibilityIsOffscreen(IsWindowVisible(self.hwnd))),
+            constants.UIA_SelectionItemIsSelectedPropertyId => out.* = com.VARIANT.fromBool(self.isSelected()),
+            else => {},
+        }
+        return com.S_OK;
+    }
+
+    fn getHostRawElementProvider(
+        p: *com.IRawElementProviderSimple,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
+
+    fn SelectionQueryInterface(
+        p: *com.ISelectionItemProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return fromSelection(p).queryInterface(iid, out);
+    }
+
+    fn SelectionAddRef(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return fromSelection(p).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn SelectionRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
+        return Release(&fromSelection(p).base);
+    }
+
+    fn isSelected(self: *const SettingsSectionProvider) bool {
+        return !self.container.detached.load(.acquire) and
+            self.container.selected_index.load(.acquire) == self.index;
+    }
+
+    fn Select(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (IsWindowEnabled(self.hwnd) == 0) return com.UIA_E_ELEMENTNOTENABLED;
+        return if (PostMessageW(self.hwnd, BM_CLICK, 0, 0) != 0)
+            com.S_OK
+        else
+            com.UIA_E_ELEMENTNOTAVAILABLE;
+    }
+
+    fn AddToSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return settingsSectionAddToSelectionResult(self.isSelected());
+    }
+
+    fn RemoveFromSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return settingsSectionRemoveFromSelectionResult(self.isSelected());
+    }
+
+    fn GetIsSelected(
+        p: *com.ISelectionItemProvider,
+        out: *com.BOOL,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = 0;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = if (self.isSelected()) 1 else 0;
+        return com.S_OK;
+    }
+
+    fn GetSelectionContainer(
+        p: *com.ISelectionItemProvider,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromSelection(p);
+        out.* = null;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (!self.container.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        out.* = &self.container.base;
+        _ = SettingsSectionGroupProvider.AddRef(&self.container.base);
+        return com.S_OK;
+    }
+};
+
+fn settingsSectionAddToSelectionResult(selected: bool) com.HRESULT {
+    return if (selected) com.S_OK else com.UIA_E_INVALIDOPERATION;
+}
+
+fn settingsSectionRemoveFromSelectionResult(selected: bool) com.HRESULT {
+    return if (selected) com.UIA_E_INVALIDOPERATION else com.S_OK;
+}
+
+pub fn returnSettingsSectionProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *SettingsSectionProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    if (!provider.available() or provider.hwnd != hwnd) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
 
 pub const TerminalProvider = struct {
     base: com.IRawElementProviderSimple,
@@ -1188,6 +2064,9 @@ pub const TerminalProvider = struct {
             => out.* = com.VARIANT.fromBool(true),
             constants.UIA_HasKeyboardFocusPropertyId => {
                 out.* = com.VARIANT.fromBool(self.state.focused(self.state.ctx));
+            },
+            constants.UIA_IsOffscreenPropertyId => {
+                out.* = com.VARIANT.fromBool(windowVisibilityIsOffscreen(IsWindowVisible(self.hwnd)));
             },
             else => {},
         }
@@ -3193,6 +4072,58 @@ test "TerminalProvider DocumentRange returns terminal text" {
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
 }
 
+test "TerminalProvider retained TextPattern returns fresh immutable document ranges" {
+    var state_data = TestTerminalStateData{};
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&state_data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var original_range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.get_DocumentRange(&provider.text_iface, &original_range),
+    );
+    defer _ = TerminalTextRangeProvider.Release(original_range.?);
+
+    state_data.value_text = "new output";
+    state_data.visible_value_text = "new output";
+    state_data.visible_range = .{ .start = 0, .end = state_data.value_text.len };
+    var refreshed_range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.get_DocumentRange(&provider.text_iface, &refreshed_range),
+    );
+    defer _ = TerminalTextRangeProvider.Release(refreshed_range.?);
+
+    var original_text: ?[*:0]u16 = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalTextRangeProvider.GetText(original_range.?, -1, &original_text),
+    );
+    defer com.SysFreeString(original_text);
+    try std.testing.expectEqualSlices(
+        u16,
+        std.unicode.utf8ToUtf16LeStringLiteral("hello\nworld"),
+        original_text.?[0..11],
+    );
+
+    var refreshed_text: ?[*:0]u16 = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalTextRangeProvider.GetText(refreshed_range.?, -1, &refreshed_text),
+    );
+    defer com.SysFreeString(refreshed_text);
+    try std.testing.expectEqualSlices(
+        u16,
+        std.unicode.utf8ToUtf16LeStringLiteral("new output"),
+        refreshed_text.?[0..10],
+    );
+    try std.testing.expectEqual(@as(u32, 2), state_data.value_calls);
+}
+
 test "TerminalTextRangeProvider GetText honors UTF-16 maxLength" {
     var state_data = TestTerminalStateData{ .value_text = "A🔥B" };
     const state = testTerminalState(&state_data);
@@ -4323,6 +5254,107 @@ test "TerminalTextRangeProvider reports unsupported mutation and scrolling hones
     try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.AddToSelection(&range.base));
     try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.RemoveFromSelection(&range.base));
     try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.ScrollIntoView(&range.base, 1));
+}
+
+test "TerminalProvider maps hidden native windows to UIA offscreen" {
+    try std.testing.expect(windowVisibilityIsOffscreen(0));
+    try std.testing.expect(!windowVisibilityIsOffscreen(1));
+    try std.testing.expect(settingsControlIsOffscreen(0, false));
+    try std.testing.expect(settingsControlIsOffscreen(1, true));
+    try std.testing.expect(!settingsControlIsOffscreen(1, false));
+}
+
+test "SettingsControlProvider exposes ValueProvider only for edit controls" {
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        SettingsControlProvider.setValuePrecondition(false, .edit, true),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        SettingsControlProvider.setValuePrecondition(true, .button, true),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTENABLED,
+        SettingsControlProvider.setValuePrecondition(true, .edit, false),
+    );
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsControlProvider.setValuePrecondition(true, .edit, true),
+    );
+
+    var edit = try SettingsControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(1),
+        .edit,
+        "Scrollback limit",
+    );
+    defer _ = SettingsControlProvider.Release(&edit.base);
+
+    var value: ?*anyopaque = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsControlProvider.QueryInterface(&edit.base, &com.IID_IValueProvider, &value),
+    );
+    try std.testing.expect(value == @as(?*anyopaque, @ptrCast(&edit.value_iface)));
+    try std.testing.expectEqual(@as(u32, 1), SettingsControlProvider.ValueRelease(@ptrCast(@alignCast(value.?))));
+
+    var text = try SettingsControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(1),
+        .text,
+        "Terminal",
+    );
+    defer _ = SettingsControlProvider.Release(&text.base);
+    value = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.E_NOINTERFACE,
+        SettingsControlProvider.QueryInterface(&text.base, &com.IID_IValueProvider, &value),
+    );
+    try std.testing.expect(value == null);
+}
+
+test "SettingsSectionProvider preserves required single-selection semantics" {
+    try std.testing.expectEqual(com.S_OK, settingsSectionAddToSelectionResult(true));
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, settingsSectionAddToSelectionResult(false));
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, settingsSectionRemoveFromSelectionResult(true));
+    try std.testing.expectEqual(com.S_OK, settingsSectionRemoveFromSelectionResult(false));
+}
+
+test "SettingsSectionProvider retains its selection container without a cycle" {
+    const fake_hwnd: com.HWND = @ptrFromInt(1);
+    const group = try SettingsSectionGroupProvider.create(std.testing.allocator, fake_hwnd);
+    try std.testing.expectEqual(@as(u32, 1), group.refcount.load(.acquire));
+
+    const section = try SettingsSectionProvider.create(
+        std.testing.allocator,
+        fake_hwnd,
+        "Appearance",
+        0,
+        group,
+    );
+    try std.testing.expectEqual(@as(u32, 2), group.refcount.load(.acquire));
+    group.setSection(0, section);
+    try std.testing.expect(!section.isSelected());
+    group.setSelected(0);
+    try std.testing.expect(section.isSelected());
+
+    var selection: ?*anyopaque = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsSectionProvider.QueryInterface(
+            &section.base,
+            &com.IID_ISelectionItemProvider,
+            &selection,
+        ),
+    );
+    try std.testing.expect(selection != null);
+    _ = SettingsSectionProvider.SelectionRelease(@ptrCast(@alignCast(selection.?)));
+
+    group.detach();
+    section.detach();
+    try std.testing.expectEqual(@as(u32, 0), SettingsSectionProvider.Release(&section.base));
+    try std.testing.expectEqual(@as(u32, 1), group.refcount.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), SettingsSectionGroupProvider.Release(&group.base));
 }
 
 fn testTerminalState(data: *TestTerminalStateData) TerminalState {

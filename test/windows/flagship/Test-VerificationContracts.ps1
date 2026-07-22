@@ -576,6 +576,11 @@ $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful
 $accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
+$newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1'
+$undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
+$resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
+$win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
+$win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
@@ -587,6 +592,8 @@ $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
+$win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
+$win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
 $resolutionSourceAsts = foreach ($source in @(
@@ -1281,6 +1288,79 @@ $accessibilityUIntPtrConversions = @($accessibilityAst.FindAll({
 }, $true))
 if ($accessibilityErrors.Count -ne 0 -or $accessibilityUIntPtrConversions.Count -ne 0) {
     throw 'Accessibility harness must parse and construct nonzero WPARAM values through UIntPtr::new([uint64] ...).'
+}
+$textRangeEndpointReferences = [regex]::Matches(
+    $accessibilityHarnessText,
+    '\[System\.Windows\.Automation\.Text\.TextPatternRangeEndpoint\]::(?:Start|End)'
+)
+if ($textRangeEndpointReferences.Count -ne 4 -or
+    $accessibilityHarnessText -match '\[System\.Windows\.Automation\.TextPatternRangeEndpoint\]') {
+    throw 'Accessibility caret assertions must use the installed UIAutomation Text.TextPatternRangeEndpoint type.'
+}
+if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
+    $accessibilityHarnessText -notmatch 'private const uint KEYEVENTF_UNICODE = 0x0004;' -or
+    ([regex]::Matches($accessibilityHarnessText, 'inputs\.Add\(Key\(0, value, KEYEVENTF_UNICODE(?: \| KEYEVENTF_KEYUP)?\)\);')).Count -ne 2) {
+    throw 'Accessibility text injection must use layout-independent KEYEVENTF_UNICODE key down/up pairs.'
+}
+$queryOnlyTextPatternContract = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)\$queryOnlyPreviousRange = \$textPattern\.DocumentRange.*?RemoveAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent.*?Send-AccessibilityOutputMarker .*?-TextPattern \$textPattern .*?-Marker \$queryOnlyMarker.*?\$script:queryOnlyTextProbe = \$textPattern\.DocumentRange\.GetText\(-1\).*?\$queryOnlyPreviousRange\.GetText\(-1\)\.Contains\(\$queryOnlyMarker\).*?AddAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent'
+)
+if (-not $queryOnlyTextPatternContract.Success) {
+    throw 'Accessibility query-only contract must remove this client handler, request fresh ranges through the retained TextPattern, preserve the prior immutable range, and restore the handler.'
+}
+if ($win32RuntimeText -notmatch 'WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP \+ 6' -or
+    $win32RuntimeText -notmatch 'SendMessageTimeoutW\(\s*hwnd\.\?,\s*WM_WINHOSTTY_UIA_QUERY_REFRESH,\s*1,' -or
+    $win32RuntimeText -notmatch 'refreshTerminalUiaTextWithMode\(wParam != 0\)' -or
+    $win32RuntimeText -notmatch 'if \(!force and !terminalUiaRefreshDue' -or
+    $win32RuntimeText -notmatch 'query_refresh_post_pending\.cmpxchgStrong\(false, true' -or
+    $win32RuntimeText -notmatch 'PostMessageW\(hwnd\.\?, WM_WINHOSTTY_UIA_QUERY_REFRESH' -or
+    $win32RuntimeText -notmatch 'refresh_snapshot = clients_listening_for_events or query_recently_active') {
+    throw 'Terminal UIA polling must use a coalesced query-driven UI-thread refresh and stop snapshots when clients are idle.'
+}
+if ($accessibilityHarnessText -notmatch 'Send-AccessibilityBlindOutputMarker' -or
+    $accessibilityHarnessText -notmatch 'Start-Sleep -Milliseconds 1200' -or
+    $accessibilityHarnessText -notmatch '\$coldQueryFirstText = \$textPattern\.DocumentRange\.GetText\(-1\)' -or
+    $accessibilityHarnessText -notmatch 'cold_query_first_document_range_fresh') {
+    throw 'Accessibility evidence must prove the first TextPattern range after a cold query is fresh without pre-querying.'
+}
+$stressBoundaryContract = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)\$stressFirstMarker = "\$\{stressPrefix\}_1".*?\$stressFinalMarker = "\$\{stressPrefix\}_150".*?for /L %i in \(1,1,\$stressLineCount\) do @echo \$\{stressPrefix\}_%i.*?\$stressCommand\.Contains\(\$stressFirstMarker\).*?\$stressCommand\.Contains\(\$stressFinalMarker\)'
+)
+if (-not $stressBoundaryContract.Success -or $accessibilityHarnessText -match 'echo \$stressFirstMarker') {
+    throw 'Accessibility sustained-output boundaries must be generated only by command execution, never echoed literally in the typed command.'
+}
+if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''winghostty settings''' -or
+    $accessibilityHarnessText -notmatch '\$settingsExpectedControls = \[ordered\]@\{' -or
+    $accessibilityHarnessText -notmatch 'settingsControlOverlapComparisons' -or
+    $accessibilityHarnessText -notmatch 'settingsContainmentChecks' -or
+    $accessibilityHarnessText -notmatch '\$settingsLayoutControls = @\(\$sectionButtons\) \+ @\(\$interactiveSettingsControls\)' -or
+    $accessibilityHarnessText -notmatch 'Automation\]::Compare\(\s*\$settingsSharedSectionContainer' -or
+    $accessibilityHarnessText -notmatch '\$containerSelection\.Current\.GetSelection\(\)') {
+    throw 'Accessibility settings evidence must assert root identity, named roles, shared selection semantics, peer overlap, and client containment.'
+}
+if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
+    $accessibilityHarnessText -notmatch '\$script:palette = @\(\$root\.FindAll' -or
+    $accessibilityHarnessText -notmatch '\$hresult -eq 0x80010001 -or \$hresult -eq 0x8001010A' -or
+    $accessibilityHarnessText -notmatch '\$hresult -eq 0x80040201') {
+    throw 'Accessibility palette recovery must use script-scoped reacquisition and retry only known transient HRESULTs.'
+}
+if ($accessibilityHarnessText -notmatch 'ExpectedFocusedHwnd' -or
+    $accessibilityHarnessText -notmatch 'sustained output command'' -ExpectedFocusedHwnd \$leftPane\.Hwnd' -or
+    $accessibilityHarnessText -notmatch 'failed to remove terminal TextChanged handler') {
+    throw 'Accessibility input ownership and UIA cleanup must remain exact and fail closed.'
+}
+$settingsSectionProviderContract = [regex]::Match(
+    $win32UiaWidgetsText,
+    '(?ms)^pub const SettingsSectionProvider = struct \{(?<body>.*?)^\};\s*$'
+)
+if (-not $settingsSectionProviderContract.Success -or
+    $settingsSectionProviderContract.Groups['body'].Value -match 'SendMessageW|SetFocus' -or
+    $settingsSectionProviderContract.Groups['body'].Value -notmatch 'container\.selected_index\.load\(\.acquire\)' -or
+    $settingsSectionProviderContract.Groups['body'].Value -notmatch 'PostMessageW\(self\.hwnd, BM_CLICK') {
+    throw 'Settings section UIA callbacks must use atomic selection state and asynchronously marshal clicks to the UI thread.'
 }
 $timeoutFunctions = @($resolutionSourceAsts[0].Ast.FindAll({
     param($node)
@@ -2402,6 +2482,42 @@ Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)\`$originalErrorActionPreference = \`$ErrorActionPreference\s*try \{\s*\`$ErrorActionPreference = 'Continue'\s*\`$buildOutput = @\(& \(Join-Path \`$repoRoot 'scripts\\dev-windows\.cmd'\) zig build -Demit-exe=true 2>&1\)\s*\`$buildExitCode = \`$LASTEXITCODE\s*\}\s*finally \{\s*\`$ErrorActionPreference = \`$originalErrorActionPreference\s*\}" `
     -Description 'interactive PR smoke captures native build stderr without bypassing exit-code retry logic on PowerShell 7.0'
+foreach ($paletteActionHarness in @($newTabHarness, $undoHarness, $resizeHarness)) {
+    $tokens = $null
+    $errors = $null
+    $paletteActionAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $paletteActionHarness,
+        [ref] $tokens,
+        [ref] $errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "Palette action harness does not parse: $paletteActionHarness ($($errors[0].Message))"
+    }
+    $paletteActionFunctions = @($paletteActionAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Invoke-CommandPaletteAction'
+    }, $true))
+    if ($paletteActionFunctions.Count -ne 1) {
+        throw "Palette action harness must define exactly one Invoke-CommandPaletteAction helper: $paletteActionHarness"
+    }
+    $paletteActionBody = $paletteActionFunctions[0].Body
+    $paletteSubmitCalls = @($paletteActionBody.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Invoke-InteractiveWin11Message' -and
+            $node.Extent.Text -match '-Hwnd\s+\$edit\.Hwnd' -and
+            $node.Extent.Text -match '-Message\s+(?:\$wmChar|0x0102)' -and
+            $node.Extent.Text -match '-WParam\s+\(\[UIntPtr\]\(\[uint64\](?:\$vkReturn|0x0D)\)\)' -and
+            $node.Extent.Text -match '-Description\s+[''\"]palette WM_CHAR Enter[''\"]'
+    }, $true))
+    if ($paletteSubmitCalls.Count -ne 1) {
+        throw "Palette action helper must submit exactly once through WM_CHAR Enter on its edit HWND: $paletteActionHarness"
+    }
+    if ($paletteActionBody.Extent.Text -match '(?i)paletteConfirmCommandId|\b2003\b') {
+        throw "Palette action helper cannot reference the hidden accept-button command ID: $paletteActionHarness"
+    }
+}
 Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)if \(\`$attempt -eq 2 -and \`$env:RUNNER_TEMP\).*?zig-global-cache-pr-smoke-retry-\`$PID.*?zig-local-cache-pr-smoke-retry-\`$PID" `

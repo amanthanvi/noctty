@@ -22,6 +22,7 @@ const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
 const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
+const win32_uia = @import("win32_uia/mod.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
@@ -57,6 +58,7 @@ const SW_HIDE: i32 = 0;
 const SW_SHOWNORMAL: i32 = 1;
 const SW_RESTORE: i32 = 9;
 const GWLP_USERDATA: i32 = -21;
+const GWLP_WNDPROC: i32 = -4;
 const GWL_STYLE: i32 = -16;
 const CS_HREDRAW: u32 = 0x2;
 const CS_VREDRAW: u32 = 0x1;
@@ -68,6 +70,7 @@ const WM_NCCREATE: UINT = 0x0081;
 const WM_PAINT: UINT = 0x000F;
 const WM_ERASEBKGND: UINT = 0x0014;
 const WM_NCDESTROY: UINT = 0x0082;
+const WM_GETOBJECT: UINT = 0x003D;
 const WM_COMMAND: UINT = 0x0111;
 const WM_SIZE: UINT = 0x0005;
 const WM_VSCROLL: UINT = 0x0115;
@@ -237,6 +240,12 @@ pub const Section = enum(u32) {
         };
     }
 };
+const section_count = std.enums.values(Section).len;
+comptime {
+    if (section_count != win32_uia.widgets.settings_section_count) {
+        @compileError("settings section UIA provider count must match Section");
+    }
+}
 
 fn clickedButton(id: usize, notify: u16, expected_id: usize) bool {
     return id == expected_id and notify == BN_CLICKED;
@@ -484,11 +493,13 @@ extern "user32" fn CreateWindowExW(
     lpParam: ?*anyopaque,
 ) callconv(.winapi) ?HWND;
 extern "user32" fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+extern "user32" fn CallWindowProcW(lpPrevWndFunc: ?*const anyopaque, hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
 extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
 extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
 extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn GetFocus() callconv(.winapi) ?HWND;
+extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn IsWindowVisible(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn IsWindowEnabled(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn MessageBoxW(hWnd: ?HWND, lpText: LPCWSTR, lpCaption: LPCWSTR, uType: UINT) callconv(.winapi) c_int;
@@ -596,6 +607,42 @@ const settings_label_specs = [_]struct { section: Section, text: []const u8 }{
     .{ .section = .advanced, .text = "Full config editor" },
 };
 
+const settings_text_count = 4 + settings_label_specs.len;
+const SettingsControlRole = win32_uia.SettingsControlProvider.Role;
+const settings_control_specs = [_]struct { role: SettingsControlRole, name: []const u8 }{
+    .{ .role = .edit, .name = "Scrollback limit" },
+    .{ .role = .combo_box, .name = "Close confirmation" },
+    .{ .role = .combo_box, .name = "Copy on select" },
+    .{ .role = .check_box, .name = "Clipboard trimming" },
+    .{ .role = .edit, .name = "Font family fallbacks" },
+    .{ .role = .edit, .name = "Font size" },
+    .{ .role = .edit, .name = "Terminal theme" },
+    .{ .role = .edit, .name = "Background opacity" },
+    .{ .role = .combo_box, .name = "Window theme" },
+    .{ .role = .combo_box, .name = "Cursor style" },
+    .{ .role = .edit, .name = "Window padding X" },
+    .{ .role = .edit, .name = "Window padding Y" },
+    .{ .role = .combo_box, .name = "Window padding balance" },
+    .{ .role = .check_box, .name = "Background blur" },
+    .{ .role = .edit, .name = "Default command" },
+    .{ .role = .combo_box, .name = "Shell integration" },
+    .{ .role = .combo_box, .name = "OSC 52 clipboard read requests" },
+    .{ .role = .combo_box, .name = "OSC 52 clipboard write requests" },
+    .{ .role = .combo_box, .name = "Clickable URL opening" },
+    .{ .role = .combo_box, .name = "Link preview popups" },
+    .{ .role = .check_box, .name = "Terminal notifications" },
+    .{ .role = .check_box, .name = "Clipboard-copy notification" },
+    .{ .role = .check_box, .name = "Config-reload notification" },
+    .{ .role = .combo_box, .name = "Auto-update mode" },
+    .{ .role = .combo_box, .name = "Auto-update channel" },
+    .{ .role = .button, .name = "Keybind configuration" },
+    .{ .role = .button, .name = "Full config editor" },
+    .{ .role = .button, .name = "Save" },
+    .{ .role = .button, .name = "Keep mine" },
+    .{ .role = .button, .name = "Use disk" },
+};
+const settings_control_count = settings_control_specs.len;
+
 /// Error set returned from `AppHandle.saveAndReload`. The settings
 /// window surfaces these inline so users can re-try without losing
 /// edits.
@@ -678,6 +725,19 @@ pub const AppHandle = struct {
     /// keep them alive only for the duration of the call; the stack
     /// copies internally.
     notifySuccess: *const fn (ctx: *anyopaque, title: []const u8, body: []const u8) void,
+    /// Custom UIA providers touch HWND state and therefore require the UI
+    /// thread's confirmed STA initialization. When unavailable, native Win32
+    /// providers remain the safe fallback.
+    customUiaProvidersEnabled: ?*const fn (ctx: *anyopaque) bool = null,
+    /// Queue UIA provider disconnect/release outside synchronous window
+    /// teardown. UiaDisconnectProvider may reject COM callouts from
+    /// WM_NCDESTROY with RPC_E_CANTCALLOUT_ININPUTSYNCCALL.
+    deferUiaDisconnect: ?*const fn (
+        ctx: *anyopaque,
+        provider_ctx: *anyopaque,
+        disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+        release: *const fn (*anyopaque) void,
+    ) void = null,
     /// Fired after the settings window's HWND is destroyed. Lets the
     /// app re-evaluate its quit-timer policy (the settings HWND
     /// participates in the "has live UI windows" count so closing
@@ -697,6 +757,9 @@ pub const SettingsWindow = struct {
     btn_section_updates: ?HWND = null,
     btn_section_keybindings: ?HWND = null,
     btn_section_advanced: ?HWND = null,
+    section_button_prev_proc: ?*const anyopaque = null,
+    section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
+    section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
     btn_save: ?HWND = null,
     btn_keybindings_editor: ?HWND = null,
     btn_conflict_keep: ?HWND = null,
@@ -706,6 +769,10 @@ pub const SettingsWindow = struct {
     text_status: ?HWND = null,
     text_help: ?HWND = null,
     field_labels: [settings_label_specs.len]?HWND = [_]?HWND{null} ** settings_label_specs.len,
+    text_uia_prev_proc: ?*const anyopaque = null,
+    text_uia_providers: [settings_text_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_text_count,
+    control_uia_prev_procs: [settings_control_count]?*const anyopaque = [_]?*const anyopaque{null} ** settings_control_count,
+    control_uia_providers: [settings_control_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_control_count,
     ui_font: HGDIOBJ = null,
     edit_scrollback: ?HWND = null,
     edit_font_family: ?HWND = null,
@@ -778,6 +845,14 @@ pub const SettingsWindow = struct {
         return .{ .handle = handle };
     }
 
+    fn canInitializeCustomUiaProviders(self: *const SettingsWindow) bool {
+        const enabled = if (self.handle.customUiaProvidersEnabled) |probe|
+            probe(self.handle.ctx)
+        else
+            false;
+        return confirmedStaAllowsCustomUiaProviders(enabled);
+    }
+
     fn px(self: *const SettingsWindow, logical: i32) i32 {
         return scaleForDpi(logical, self.dpi);
     }
@@ -791,6 +866,9 @@ pub const SettingsWindow = struct {
         if (self.hwnd) |h| {
             if (IsWindow(h) != 0) _ = DestroyWindow(h);
         }
+        self.releaseSectionUiaProviders();
+        self.releaseTextUiaProviders();
+        self.releaseControlUiaProviders();
         self.hwnd = null;
         self.deleteUiFont();
         self.btn_open_editor = null;
@@ -801,6 +879,8 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
+        self.section_button_prev_proc = null;
+        self.text_uia_prev_proc = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
         self.btn_conflict_keep = null;
@@ -1345,6 +1425,9 @@ pub const SettingsWindow = struct {
     /// both WM_CLOSE and WM_NCDESTROY so the next `open()` recreates
     /// fresh children and clones.
     fn clearChildRefs(self: *SettingsWindow) void {
+        self.releaseSectionUiaProviders();
+        self.releaseTextUiaProviders();
+        self.releaseControlUiaProviders();
         self.hwnd = null;
         self.text_header = null;
         self.text_summary = null;
@@ -1360,6 +1443,7 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = null;
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
+        self.section_button_prev_proc = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
         self.btn_conflict_keep = null;
@@ -1392,6 +1476,198 @@ pub const SettingsWindow = struct {
         self.clearPending();
     }
 
+    fn releaseSectionUiaProviders(self: *SettingsWindow) void {
+        const group = self.section_uia_group;
+        self.section_uia_group = null;
+        if (group) |provider| provider.detach();
+        for (&self.section_uia_providers) |*slot| {
+            const provider = slot.* orelse continue;
+            slot.* = null;
+            provider.detach();
+            self.deferProviderDisconnect(
+                @ptrCast(provider),
+                settingsSectionDisconnect,
+                settingsSectionRelease,
+            );
+        }
+        if (group) |provider| {
+            self.deferProviderDisconnect(
+                @ptrCast(provider),
+                settingsSectionGroupDisconnect,
+                settingsSectionGroupRelease,
+            );
+        }
+    }
+
+    fn releaseTextUiaProviders(self: *SettingsWindow) void {
+        for (&self.text_uia_providers) |*slot| {
+            const provider = slot.* orelse continue;
+            slot.* = null;
+            provider.detach();
+            self.deferProviderDisconnect(
+                @ptrCast(provider),
+                settingsControlDisconnect,
+                settingsControlRelease,
+            );
+        }
+    }
+
+    fn textHwnd(self: *const SettingsWindow, index: usize) ?HWND {
+        return switch (index) {
+            0 => self.text_header,
+            1 => self.text_summary,
+            2 => self.text_status,
+            3 => self.text_help,
+            else => if (index - 4 < self.field_labels.len) self.field_labels[index - 4] else null,
+        };
+    }
+
+    fn textIndex(self: *const SettingsWindow, hwnd: HWND) ?usize {
+        for (0..settings_text_count) |index| {
+            if (self.textHwnd(index)) |text| {
+                if (text == hwnd) return index;
+            }
+        }
+        return null;
+    }
+
+    fn initializeTextUiaProviders(self: *SettingsWindow) void {
+        self.releaseTextUiaProviders();
+        self.text_uia_prev_proc = null;
+        if (!self.canInitializeCustomUiaProviders()) return;
+        for (0..settings_text_count) |index| {
+            const text = self.textHwnd(index) orelse continue;
+            const provider = win32_uia.SettingsControlProvider.create(std.heap.page_allocator, text, .text, null) catch |err| {
+                std.log.warn("settings text UIA provider unavailable index={} err={}", .{ index, err });
+                continue;
+            };
+            const previous = SetWindowLongPtrW(
+                text,
+                GWLP_WNDPROC,
+                @as(LONG_PTR, @intCast(@intFromPtr(&settingsTextProc))),
+            );
+            if (previous == 0) {
+                _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+                continue;
+            }
+            const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+            if (self.text_uia_prev_proc) |existing| {
+                if (existing != proc) {
+                    _ = SetWindowLongPtrW(text, GWLP_WNDPROC, previous);
+                    _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+                    continue;
+                }
+            } else {
+                self.text_uia_prev_proc = proc;
+            }
+            self.text_uia_providers[index] = provider;
+        }
+    }
+
+    fn releaseControlUiaProviders(self: *SettingsWindow) void {
+        for (&self.control_uia_providers) |*slot| {
+            const provider = slot.* orelse continue;
+            slot.* = null;
+            provider.detach();
+            self.deferProviderDisconnect(
+                @ptrCast(provider),
+                settingsControlDisconnect,
+                settingsControlRelease,
+            );
+        }
+        self.control_uia_prev_procs = [_]?*const anyopaque{null} ** settings_control_count;
+    }
+
+    fn deferProviderDisconnect(
+        self: *SettingsWindow,
+        provider_ctx: *anyopaque,
+        disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+        release: *const fn (*anyopaque) void,
+    ) void {
+        if (self.handle.deferUiaDisconnect) |defer_disconnect| {
+            defer_disconnect(self.handle.ctx, provider_ctx, disconnect, release);
+            return;
+        }
+        const hr = disconnect(provider_ctx);
+        if (hr != win32_uia.S_OK) {
+            std.log.warn("settings UIA immediate disconnect failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        }
+        release(provider_ctx);
+    }
+
+    fn controlHwnd(self: *const SettingsWindow, index: usize) ?HWND {
+        return switch (index) {
+            0 => self.edit_scrollback,
+            1 => self.combo_confirm_close,
+            2 => self.combo_copy_on_select,
+            3 => self.chk_trim_trail,
+            4 => self.edit_font_family,
+            5 => self.edit_font_size,
+            6 => self.edit_theme,
+            7 => self.edit_bg_opacity,
+            8 => self.combo_window_theme,
+            9 => self.combo_cursor_style,
+            10 => self.edit_pad_x,
+            11 => self.edit_pad_y,
+            12 => self.combo_pad_balance,
+            13 => self.chk_bg_blur,
+            14 => self.edit_command,
+            15 => self.combo_shell_integ,
+            16 => self.combo_clipboard_read,
+            17 => self.combo_clipboard_write,
+            18 => self.combo_link_url,
+            19 => self.combo_link_previews,
+            20 => self.chk_desktop_notifications,
+            21 => self.chk_app_notify_clipboard,
+            22 => self.chk_app_notify_config,
+            23 => self.combo_auto_update,
+            24 => self.combo_auto_update_channel,
+            25 => self.btn_keybindings_editor,
+            26 => self.btn_open_editor,
+            27 => self.btn_save,
+            28 => self.btn_conflict_keep,
+            29 => self.btn_conflict_use_disk,
+            else => null,
+        };
+    }
+
+    fn controlIndex(self: *const SettingsWindow, hwnd: HWND) ?usize {
+        for (0..settings_control_count) |index| {
+            if (self.controlHwnd(index)) |control| {
+                if (control == hwnd) return index;
+            }
+        }
+        return null;
+    }
+
+    fn initializeControlUiaProviders(self: *SettingsWindow) void {
+        self.releaseControlUiaProviders();
+        if (!self.canInitializeCustomUiaProviders()) return;
+        for (settings_control_specs, 0..) |spec, index| {
+            const control = self.controlHwnd(index) orelse continue;
+            const provider = win32_uia.SettingsControlProvider.create(
+                std.heap.page_allocator,
+                control,
+                spec.role,
+                spec.name,
+            ) catch |err| {
+                std.log.warn("settings control UIA provider unavailable index={} err={}", .{ index, err });
+                continue;
+            };
+            const previous = SetWindowLongPtrW(
+                control,
+                GWLP_WNDPROC,
+                @as(LONG_PTR, @intCast(@intFromPtr(&settingsControlProc))),
+            );
+            if (previous == 0) {
+                _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+                continue;
+            }
+            self.control_uia_prev_procs[index] = @ptrFromInt(@as(usize, @intCast(previous)));
+            self.control_uia_providers[index] = provider;
+        }
+    }
+
     fn sectionButton(self: *const SettingsWindow, section: Section) ?HWND {
         return switch (section) {
             .appearance => self.btn_section_appearance,
@@ -1404,14 +1680,79 @@ pub const SettingsWindow = struct {
         };
     }
 
+    fn sectionProvider(self: *const SettingsWindow, section: Section) ?*win32_uia.SettingsSectionProvider {
+        return self.section_uia_providers[@intFromEnum(section)];
+    }
+
+    fn sectionForButton(self: *const SettingsWindow, hwnd: HWND) ?Section {
+        for (std.enums.values(Section)) |section| {
+            if (self.sectionButton(section)) |button| {
+                if (button == hwnd) return section;
+            }
+        }
+        return null;
+    }
+
+    fn initializeSectionUiaProviders(self: *SettingsWindow) void {
+        self.releaseSectionUiaProviders();
+        self.section_button_prev_proc = null;
+        if (!self.canInitializeCustomUiaProviders()) return;
+        const parent = self.hwnd orelse return;
+        const group = win32_uia.SettingsSectionGroupProvider.create(
+            std.heap.page_allocator,
+            parent,
+        ) catch |err| {
+            std.log.warn("settings section UIA group unavailable err={}", .{err});
+            return;
+        };
+        self.section_uia_group = group;
+        for (std.enums.values(Section)) |section| {
+            const button = self.sectionButton(section) orelse continue;
+            const provider = win32_uia.SettingsSectionProvider.create(
+                std.heap.page_allocator,
+                button,
+                section.headerText(),
+                @intFromEnum(section),
+                group,
+            ) catch |err| {
+                std.log.warn("settings section UIA provider unavailable section={s} err={}", .{ section.headerText(), err });
+                continue;
+            };
+            const previous = SetWindowLongPtrW(
+                button,
+                GWLP_WNDPROC,
+                @as(LONG_PTR, @intCast(@intFromPtr(&settingsSectionButtonProc))),
+            );
+            if (previous == 0) {
+                _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
+                continue;
+            }
+            const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
+            if (self.section_button_prev_proc) |existing| {
+                if (existing != proc) {
+                    _ = SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
+                    _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
+                    continue;
+                }
+            } else {
+                self.section_button_prev_proc = proc;
+            }
+            self.section_uia_providers[@intFromEnum(section)] = provider;
+            group.setSection(@intFromEnum(section), provider);
+        }
+        group.setSelected(@intFromEnum(self.active_section));
+    }
+
     fn setActiveSection(self: *SettingsWindow, next: Section) void {
         const changed = self.active_section != next;
         self.active_section = next;
+        if (self.section_uia_group) |group| group.setSelected(@intFromEnum(next));
         self.content_scroll_y = 0;
         self.applySectionVisibility();
         self.refreshNativeSectionText();
         layoutChildren(self);
         if (changed) {
+            if (self.sectionProvider(next)) |provider| provider.raiseSelected();
             if (self.hwnd) |h| _ = InvalidateRect(h, null, 1);
         }
     }
@@ -2568,6 +2909,7 @@ pub const SettingsWindow = struct {
         for (settings_label_specs, 0..) |spec, i| {
             self.field_labels[i] = makeStatic(hwnd, self.handle.hinstance, spec.text);
         }
+        self.initializeTextUiaProviders();
 
         // Left-rail section buttons. Clicks arrive via WM_COMMAND on
         // the parent; the id maps back to a `Section` via
@@ -2579,6 +2921,7 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.updates);
         self.btn_section_keybindings = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.keybindings);
         self.btn_section_advanced = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.advanced);
+        self.initializeSectionUiaProviders();
 
         // "Open in default editor" button — escape hatch for users
         // who prefer text-editing the config file directly. Lives
@@ -2829,6 +3172,7 @@ pub const SettingsWindow = struct {
         // through the UI Automation bridge. Values remain owned by the native
         // controls and are not conflated with their accessible names.
         annotateAccessibleControls(self);
+        self.initializeControlUiaProviders();
 
         self.refreshAllControls();
         self.refreshNativeSectionText();
@@ -3267,22 +3611,47 @@ fn sectionContentRows(section: Section, columns: usize) i32 {
     return @divTrunc(controls + @as(i32, @intCast(columns)) - 1, @as(i32, @intCast(columns)));
 }
 
-fn clipChildToViewport(parent: HWND, child: ?HWND, viewport_top: i32, viewport_bottom: i32) void {
-    const hwnd = child orelse return;
+fn confirmedStaAllowsCustomUiaProviders(confirmed_sta: bool) bool {
+    return confirmed_sta;
+}
+
+fn viewportRegionIsFullyClipped(width: i32, clip_top: i32, clip_bottom: i32) bool {
+    return width == 0 or clip_top == clip_bottom;
+}
+
+test "settings viewport exposes partially clipped controls as onscreen" {
+    try std.testing.expect(viewportRegionIsFullyClipped(100, 20, 20));
+    try std.testing.expect(viewportRegionIsFullyClipped(0, 0, 10));
+    try std.testing.expect(!viewportRegionIsFullyClipped(100, 20, 21));
+    try std.testing.expect(!viewportRegionIsFullyClipped(100, 0, 40));
+}
+
+test "settings custom UIA providers require confirmed STA initialization" {
+    try std.testing.expect(!confirmedStaAllowsCustomUiaProviders(false));
+    try std.testing.expect(confirmedStaAllowsCustomUiaProviders(true));
+}
+
+fn clipChildToViewport(parent: HWND, child: ?HWND, viewport_top: i32, viewport_bottom: i32) bool {
+    const hwnd = child orelse return true;
     var rect: RECT = undefined;
-    if (GetWindowRect(hwnd, &rect) == 0) return;
+    if (GetWindowRect(hwnd, &rect) == 0) return false;
     var origin: POINT = .{ .x = rect.left, .y = rect.top };
-    if (ScreenToClient(parent, &origin) == 0) return;
+    if (ScreenToClient(parent, &origin) == 0) return false;
     const width = @max(0, rect.right - rect.left);
     const height = @max(0, rect.bottom - rect.top);
     const clip_top = std.math.clamp(viewport_top - origin.y, 0, height);
     const clip_bottom = std.math.clamp(viewport_bottom - origin.y, clip_top, height);
     if (clip_top == 0 and clip_bottom == height) {
         _ = SetWindowRgn(hwnd, null, 1);
-        return;
+        return false;
     }
-    const region = CreateRectRgn(0, clip_top, width, clip_bottom) orelse return;
-    if (SetWindowRgn(hwnd, region, 1) == 0) _ = DeleteObject(region);
+    const fully_clipped = viewportRegionIsFullyClipped(width, clip_top, clip_bottom);
+    const region = CreateRectRgn(0, clip_top, width, clip_bottom) orelse return false;
+    if (SetWindowRgn(hwnd, region, 1) == 0) {
+        _ = DeleteObject(region);
+        return false;
+    }
+    return fully_clipped;
 }
 
 test "settings content extent preserves all rows at narrow and wide widths" {
@@ -3504,38 +3873,17 @@ fn layoutChildren(self: *SettingsWindow) void {
 
     const control_viewport_top = pane_top + stack_top;
     const viewport_bottom = rect.bottom - side;
-    for ([_]?HWND{
-        self.edit_scrollback,
-        self.combo_confirm_close,
-        self.combo_copy_on_select,
-        self.chk_trim_trail,
-        self.edit_font_family,
-        self.edit_font_size,
-        self.edit_theme,
-        self.edit_bg_opacity,
-        self.combo_window_theme,
-        self.combo_cursor_style,
-        self.edit_pad_x,
-        self.edit_pad_y,
-        self.combo_pad_balance,
-        self.chk_bg_blur,
-        self.edit_command,
-        self.combo_shell_integ,
-        self.combo_clipboard_read,
-        self.combo_clipboard_write,
-        self.combo_link_url,
-        self.combo_link_previews,
-        self.chk_desktop_notifications,
-        self.chk_app_notify_clipboard,
-        self.chk_app_notify_config,
-        self.combo_auto_update,
-        self.combo_auto_update_channel,
-        self.btn_keybindings_editor,
-        self.btn_open_editor,
-        self.text_help,
-    }) |child| clipChildToViewport(hwnd, child, control_viewport_top, viewport_bottom);
+    for (0..27) |index| {
+        const fully_clipped = clipChildToViewport(hwnd, self.controlHwnd(index), control_viewport_top, viewport_bottom);
+        if (self.control_uia_providers[index]) |provider| provider.setViewportFullyClipped(fully_clipped);
+    }
+    const help_fully_clipped = clipChildToViewport(hwnd, self.text_help, control_viewport_top, viewport_bottom);
+    if (self.text_uia_providers[3]) |provider| provider.setViewportFullyClipped(help_fully_clipped);
     const label_viewport_top = control_viewport_top - self.px(field_label_offset);
-    for (self.field_labels) |label| clipChildToViewport(hwnd, label, label_viewport_top, viewport_bottom);
+    for (self.field_labels, 0..) |label, index| {
+        const fully_clipped = clipChildToViewport(hwnd, label, label_viewport_top, viewport_bottom);
+        if (self.text_uia_providers[index + 4]) |provider| provider.setViewportFullyClipped(fully_clipped);
+    }
 }
 
 extern "user32" fn MoveWindow(
@@ -3547,6 +3895,75 @@ extern "user32" fn MoveWindow(
     bRepaint: BOOL,
 ) callconv(.winapi) BOOL;
 
+fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    if (owner) |settings| {
+        const previous = settings.text_uia_prev_proc;
+        if (settings.textIndex(hwnd)) |index| {
+            if (msg == WM_GETOBJECT) {
+                if (settings.text_uia_providers[index]) |provider| {
+                    if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
+                }
+            }
+            if (msg == WM_NCDESTROY) {
+                if (settings.text_uia_providers[index]) |provider| provider.detach();
+                if (previous) |proc| {
+                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                }
+            }
+        }
+        if (previous) |proc| return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    if (owner) |settings| {
+        if (settings.controlIndex(hwnd)) |index| {
+            const previous = settings.control_uia_prev_procs[index];
+            if (msg == WM_GETOBJECT) {
+                if (settings.control_uia_providers[index]) |provider| {
+                    if (win32_uia.returnSettingsControlProvider(hwnd, wParam, lParam, provider)) |result| return result;
+                }
+            }
+            if (msg == WM_NCDESTROY) {
+                if (settings.control_uia_providers[index]) |provider| provider.detach();
+                if (previous) |proc| {
+                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                }
+            }
+            if (previous) |proc| return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    if (owner) |settings| {
+        const previous = settings.section_button_prev_proc;
+        if (settings.sectionForButton(hwnd)) |section| {
+            if (msg == WM_GETOBJECT) {
+                if (settings.sectionProvider(section)) |provider| {
+                    if (win32_uia.returnSettingsSectionProvider(hwnd, wParam, lParam, provider)) |result| return result;
+                }
+            }
+            if (msg == WM_NCDESTROY) {
+                if (settings.sectionProvider(section)) |provider| provider.detach();
+                if (previous) |proc| {
+                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                }
+            }
+        }
+        if (previous) |proc| return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
@@ -3557,6 +3974,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
 
     const owner = recoverOwner(hwnd);
     switch (msg) {
+        WM_GETOBJECT => {
+            if (owner) |o| {
+                if (o.section_uia_group) |provider| {
+                    if (win32_uia.returnSettingsSectionGroupProvider(hwnd, wParam, lParam, provider)) |result| return result;
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
             if (owner) |o| paint(hwnd, o);
@@ -3821,6 +4246,33 @@ fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
     const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(raw)));
+}
+
+fn settingsSectionDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.SettingsSectionProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn settingsSectionRelease(ctx: *anyopaque) void {
+    const provider: *win32_uia.SettingsSectionProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
+}
+
+fn settingsSectionGroupDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.SettingsSectionGroupProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn settingsSectionGroupRelease(ctx: *anyopaque) void {
+    const provider: *win32_uia.SettingsSectionGroupProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.SettingsSectionGroupProvider.Release(&provider.base);
+}
+
+fn settingsControlDisconnect(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.SettingsControlProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn settingsControlRelease(ctx: *anyopaque) void {
+    const provider: *win32_uia.SettingsControlProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.SettingsControlProvider.Release(&provider.base);
 }
 
 fn paint(hwnd: HWND, owner: *SettingsWindow) void {

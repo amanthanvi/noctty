@@ -430,6 +430,10 @@ pub extern "user32" fn GetWindowTextW(
     lpString: [*]u16,
     nMaxCount: i32,
 ) callconv(.winapi) i32;
+pub extern "user32" fn SetWindowTextW(
+    hWnd: HWND,
+    lpString: [*:0]const u16,
+) callconv(.winapi) BOOL;
 
 test "HRESULT error constants" {
     try std.testing.expect(E_NOTIMPL != S_OK);

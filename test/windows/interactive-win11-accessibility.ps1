@@ -109,14 +109,14 @@ public static class WinghosttyAccessibilityNative {
     public static extern bool BringWindowToTop(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern uint SendInput(uint count, INPUT[] inputs, int size);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-    public static extern short VkKeyScanW(char value);
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
     [DllImport("user32.dll")]
     public static extern bool EnumWindows(EnumProc callback, IntPtr data);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassNameW(IntPtr hwnd, StringBuilder value, int capacity);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")]
+    public static extern IntPtr GetWindowLongPtrW(IntPtr hwnd, int index);
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")]
@@ -126,11 +126,16 @@ public static class WinghosttyAccessibilityNative {
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
+    [DllImport("user32.dll", SetLastError=true)]
     public static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
 
     private const uint INPUT_KEYBOARD = 1;
     private const uint INPUT_MOUSE = 0;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
     private static int textChangedCount;
@@ -407,21 +412,11 @@ public static class WinghosttyAccessibilityNative {
     private static bool Submit(INPUT[] inputs) {
         return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) == inputs.Length;
     }
-    public static bool SendAsciiText(string text) {
+    public static bool SendUnicodeText(string text) {
         System.Collections.Generic.List<INPUT> inputs = new System.Collections.Generic.List<INPUT>();
         foreach (char value in text) {
-            short encoded = VkKeyScanW(value);
-            if (encoded == -1) return false;
-            ushort virtualKey = (ushort)(encoded & 0xff);
-            int modifiers = (encoded >> 8) & 0xff;
-            if ((modifiers & 2) != 0) inputs.Add(Key(0x11, 0, 0));
-            if ((modifiers & 4) != 0) inputs.Add(Key(0x12, 0, 0));
-            if ((modifiers & 1) != 0) inputs.Add(Key(0x10, 0, 0));
-            inputs.Add(Key(virtualKey, 0, 0));
-            inputs.Add(Key(virtualKey, 0, KEYEVENTF_KEYUP));
-            if ((modifiers & 1) != 0) inputs.Add(Key(0x10, 0, KEYEVENTF_KEYUP));
-            if ((modifiers & 4) != 0) inputs.Add(Key(0x12, 0, KEYEVENTF_KEYUP));
-            if ((modifiers & 2) != 0) inputs.Add(Key(0x11, 0, KEYEVENTF_KEYUP));
+            inputs.Add(Key(0, value, KEYEVENTF_UNICODE));
+            inputs.Add(Key(0, value, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
         }
         return Submit(inputs.ToArray());
     }
@@ -486,6 +481,27 @@ public static class WinghosttyAccessibilityNative {
         StringBuilder value = new StringBuilder(128);
         return GetClassNameW(hwnd, value, value.Capacity) > 0 ? value.ToString() : "<unavailable>";
     }
+    public static uint WindowStyle(IntPtr hwnd) {
+        return unchecked((uint)GetWindowLongPtrW(hwnd, -16).ToInt64());
+    }
+    public static RECT ClientRectOnScreen(IntPtr hwnd) {
+        RECT rect;
+        if (!GetClientRect(hwnd, out rect)) throw new System.ComponentModel.Win32Exception();
+        POINT topLeft = new POINT();
+        topLeft.x = rect.left;
+        topLeft.y = rect.top;
+        POINT bottomRight = new POINT();
+        bottomRight.x = rect.right;
+        bottomRight.y = rect.bottom;
+        if (!ClientToScreen(hwnd, ref topLeft) || !ClientToScreen(hwnd, ref bottomRight)) {
+            throw new System.ComponentModel.Win32Exception();
+        }
+        rect.left = topLeft.x;
+        rect.top = topLeft.y;
+        rect.right = bottomRight.x;
+        rect.bottom = bottomRight.y;
+        return rect;
+    }
     public static bool ForceForeground(IntPtr hwnd) {
         // A synthetic Alt press temporarily satisfies the Win32 foreground-lock
         // rules for an interactive test process without stealing focus by
@@ -512,7 +528,11 @@ public static class WinghosttyAccessibilityNative {
 '@
 }
 
-function Assert-AccessibilityInputOwner([System.Diagnostics.Process] $Process, [string] $Description) {
+function Assert-AccessibilityInputOwner(
+    [System.Diagnostics.Process] $Process,
+    [string] $Description,
+    [IntPtr] $ExpectedFocusedHwnd = [IntPtr]::Zero
+) {
     $deadline = [DateTime]::UtcNow.AddSeconds(3)
     $maxAttempts = 30
     $attempts = 0
@@ -526,7 +546,6 @@ function Assert-AccessibilityInputOwner([System.Diagnostics.Process] $Process, [
         if ($Process.HasExited -or $Process.MainWindowHandle -eq [IntPtr]::Zero) {
             throw "winghostty is unavailable before $Description."
         }
-
         $attempts++
         $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
         $foregroundOwner = 0
@@ -543,7 +562,8 @@ function Assert-AccessibilityInputOwner([System.Diagnostics.Process] $Process, [
         if ($foregroundHwnd -eq $Process.MainWindowHandle -and
             $foregroundOwner -eq [uint32]$Process.Id -and
             $focusedHwnd -ne [IntPtr]::Zero -and
-            $focusedOwner -eq [uint32]$Process.Id) {
+            $focusedOwner -eq [uint32]$Process.Id -and
+            ($ExpectedFocusedHwnd -eq [IntPtr]::Zero -or $focusedHwnd -eq $ExpectedFocusedHwnd)) {
             return
         }
 
@@ -566,30 +586,37 @@ function Assert-AccessibilityInputOwner([System.Diagnostics.Process] $Process, [
     if ($foregroundHwnd -eq $Process.MainWindowHandle -and
         $foregroundOwner -eq [uint32]$Process.Id -and
         $focusedHwnd -ne [IntPtr]::Zero -and
-        $focusedOwner -eq [uint32]$Process.Id) {
+        $focusedOwner -eq [uint32]$Process.Id -and
+        ($ExpectedFocusedHwnd -eq [IntPtr]::Zero -or $focusedHwnd -eq $ExpectedFocusedHwnd)) {
         return
     }
 
-    throw "winghostty does not own foreground keyboard focus before $Description (attempts=$attempts/$maxAttempts foreground_hwnd=$foregroundHwnd foreground_owner=$foregroundOwner focused_hwnd=$focusedHwnd focused_owner=$focusedOwner expected=$($Process.Id))."
+    throw "winghostty does not own expected foreground keyboard focus before $Description (attempts=$attempts/$maxAttempts foreground_hwnd=$foregroundHwnd foreground_owner=$foregroundOwner focused_hwnd=$focusedHwnd focused_owner=$focusedOwner expected_process=$($Process.Id) expected_focused_hwnd=$ExpectedFocusedHwnd)."
 }
 
-function Send-AccessibilityChord([uint16[]] $Keys, [string] $Description, [System.Diagnostics.Process] $Process) {
-    Assert-AccessibilityInputOwner -Process $Process -Description $Description
+function Send-AccessibilityChord(
+    [uint16[]] $Keys,
+    [string] $Description,
+    [System.Diagnostics.Process] $Process,
+    [IntPtr] $ExpectedFocusedHwnd = [IntPtr]::Zero
+) {
+    Assert-AccessibilityInputOwner -Process $Process -Description $Description -ExpectedFocusedHwnd $ExpectedFocusedHwnd
     if (-not [WinghosttyAccessibilityNative]::SendChord($Keys)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Start-Sleep -Milliseconds 150
-    Assert-AccessibilityInputOwner -Process $Process -Description "post-$Description"
+    Assert-AccessibilityInputOwner -Process $Process -Description "post-$Description" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
 }
 
 function Send-AccessibilityOutputMarker(
     [System.Diagnostics.Process] $Process,
     $TextPattern,
     [string] $Marker,
-    [string] $Description
+    [string] $Description,
+    [IntPtr] $ExpectedFocusedHwnd = [IntPtr]::Zero
 ) {
-    if ([string]::IsNullOrEmpty($Marker) -or $Marker.Length -lt 2) {
-        throw "Output marker for $Description is too short."
+    if ($Marker -notmatch '^[A-Za-z0-9_]{12,}$') {
+        throw "Output marker for $Description must be at least 12 command-safe alphanumeric/underscore characters."
     }
     $split = [int][Math]::Floor($Marker.Length / 2)
     $command = 'cmd.exe /d /c "echo ' + $Marker.Substring(0, $split) + '^' + $Marker.Substring($split) + '"'
@@ -597,15 +624,36 @@ function Send-AccessibilityOutputMarker(
         throw "Output marker command for $Description contains its literal marker."
     }
 
-    Assert-AccessibilityInputOwner -Process $Process -Description "$Description text"
-    if (-not [WinghosttyAccessibilityNative]::SendAsciiText($command)) {
+    Assert-AccessibilityInputOwner -Process $Process -Description "$Description text" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
+    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     $preEnterText = $TextPattern.DocumentRange.GetText(-1)
     if ($preEnterText.Contains($Marker)) {
         throw "Terminal exposed output marker for $Description before Enter."
     }
-    Send-AccessibilityChord -Keys @([uint16]0x0D) -Description "$Description Enter" -Process $Process
+    Send-AccessibilityChord -Keys @([uint16]0x0D) -Description "$Description Enter" -Process $Process -ExpectedFocusedHwnd $ExpectedFocusedHwnd
+}
+
+function Send-AccessibilityBlindOutputMarker(
+    [System.Diagnostics.Process] $Process,
+    [string] $Marker,
+    [string] $Description,
+    [IntPtr] $ExpectedFocusedHwnd
+) {
+    if ($Marker -notmatch '^[A-Za-z0-9_]{12,}$') {
+        throw "Blind output marker for $Description must be at least 12 command-safe alphanumeric/underscore characters."
+    }
+    $split = [int][Math]::Floor($Marker.Length / 2)
+    $command = 'cmd.exe /d /c "echo ' + $Marker.Substring(0, $split) + '^' + $Marker.Substring($split) + '"'
+    if ($command.Contains($Marker)) {
+        throw "Blind output marker command for $Description contains its literal marker."
+    }
+    Assert-AccessibilityInputOwner -Process $Process -Description "$Description text" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
+    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
+        throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    Send-AccessibilityChord -Keys @([uint16]0x0D) -Description "$Description Enter" -Process $Process -ExpectedFocusedHwnd $ExpectedFocusedHwnd
 }
 
 function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadline, [string] $Description) {
@@ -618,6 +666,16 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $effectiveDeadline)
     throw "Timed out waiting for $Description."
+}
+
+function Test-AccessibilityAncestor($Ancestor, $Descendant) {
+    $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+    $candidate = $walker.GetParent($Descendant)
+    while ($null -ne $candidate) {
+        if ([System.Windows.Automation.Automation]::Compare($Ancestor, $candidate)) { return $true }
+        $candidate = $walker.GetParent($candidate)
+    }
+    return $false
 }
 
 function Get-ExactAccessibilityNotification(
@@ -811,6 +869,8 @@ $terminalLineText = ''
 $terminalRectCount = 0
 $queryOnlyMarker = "${marker}_QUERY_ONLY"
 $queryOnlyRangeRefreshed = $false
+$coldQueryMarker = "${marker}_COLD_QUERY"
+$coldQueryFirstRangeFresh = $false
 $splitBaseline = 0
 $splitAfterRight = 0
 $splitAfterDown = 0
@@ -1029,7 +1089,7 @@ try {
     $textChangedRegistered = $true
 
     $textChangedObservationStart = [DateTime]::UtcNow
-    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $marker -Description 'terminal marker'
+    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $marker -Description 'terminal marker' -ExpectedFocusedHwnd $focusedHwnd
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'terminal marker through TextPattern' -Condition {
             $script:terminalTextProbe = $textPattern.DocumentRange.GetText(-1)
@@ -1078,10 +1138,10 @@ try {
     }
 
     # A query-only client must receive fresh text through the same acquired
-    # TextPattern even when no UIA text event listener keeps refresh polling
-    # alive. Remove the sole listener before producing the marker so this
-    # cannot pass through an event-driven pattern reacquisition path. Each
-    # DocumentRange remains an intentionally immutable snapshot.
+    # TextPattern after this client's text event handler is removed. This does
+    # not imply that the process-global UiaClientsAreListening signal is false.
+    # Each DocumentRange remains an intentionally immutable snapshot.
+    $queryOnlyPreviousRange = $textPattern.DocumentRange
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
         [System.Windows.Automation.TextPattern]::TextChangedEvent,
         $document,
@@ -1089,15 +1149,43 @@ try {
     )
     $textChangedRegistered = $false
     [WinghosttyAccessibilityNative]::ResetTextChangedCount()
-    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $queryOnlyMarker -Description 'query-only TextPattern marker'
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'already-acquired query-only TextPattern refresh' -Condition {
-        $script:queryOnlyTextProbe = $textPattern.DocumentRange.GetText(-1)
-        return $script:queryOnlyTextProbe.Contains($queryOnlyMarker)
+    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $queryOnlyMarker -Description 'query-only TextPattern marker' -ExpectedFocusedHwnd $focusedHwnd
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'already-acquired query-only TextPattern refresh' -Condition {
+            $script:queryOnlyTextProbe = $textPattern.DocumentRange.GetText(-1)
+            return $script:queryOnlyTextProbe.Contains($queryOnlyMarker)
+        }
+    }
+    catch {
+        $queryProbe = if ($null -eq $script:queryOnlyTextProbe) { '<null>' } else { $script:queryOnlyTextProbe.Replace("`r", '\r').Replace("`n", '\n') }
+        throw "$($_.Exception.Message) Last query-only TextPattern text='$queryProbe'."
+    }
+    if ($queryOnlyPreviousRange.GetText(-1).Contains($queryOnlyMarker)) {
+        throw 'Previously acquired terminal DocumentRange mutated after query-only output.'
     }
     if ([WinghosttyAccessibilityNative]::TextChangedCount -ne 0) {
         throw "TextChanged callback ran after listener removal during query-only validation."
     }
     $queryOnlyRangeRefreshed = $true
+
+    # Prove the first read after UIA inactivity is fresh. Do not touch the
+    # TextPattern while the query window expires or while output is emitted.
+    Start-Sleep -Milliseconds 1200
+    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
+    Send-AccessibilityBlindOutputMarker `
+        -Process $process `
+        -Marker $coldQueryMarker `
+        -Description 'cold first-read TextPattern marker' `
+        -ExpectedFocusedHwnd $focusedHwnd
+    Start-Sleep -Milliseconds 500
+    $coldQueryFirstText = $textPattern.DocumentRange.GetText(-1)
+    if (-not $coldQueryFirstText.Contains($coldQueryMarker)) {
+        throw "First cold TextPattern DocumentRange was stale after output (text='$($coldQueryFirstText.Replace("`r", '\r').Replace("`n", '\n'))')."
+    }
+    if ([WinghosttyAccessibilityNative]::TextChangedCount -ne 0) {
+        throw 'TextChanged callback ran during cold-query validation after listener removal.'
+    }
+    $coldQueryFirstRangeFresh = $true
     [System.Windows.Automation.Automation]::AddAutomationEventHandler(
         [System.Windows.Automation.TextPattern]::TextChangedEvent,
         $document,
@@ -1181,6 +1269,7 @@ try {
         ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
     } while ($null -eq $palette -and [DateTime]::UtcNow -lt $paletteDeadline)
     if ($null -eq $palette) { throw 'UIA tree contains no command palette List element.' }
+    $script:palette = $palette
     $paletteName = $palette.Current.Name
     $paletteBounds = $palette.Current.BoundingRectangle
     if ($paletteBounds.Width -le 0 -or $paletteBounds.Height -le 0) { throw 'Command palette List has empty UIA bounds.' }
@@ -1343,9 +1432,9 @@ try {
     $paletteInitialQuerySelection = @($paletteQueryTextPattern.GetSelection())
     if ($paletteInitialQuerySelection.Count -ne 1 -or
         $paletteInitialQuerySelection[0].CompareEndpoints(
-            [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
             $paletteInitialQuerySelection[0],
-            [System.Windows.Automation.TextPatternRangeEndpoint]::End
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End
         ) -ne 0) {
         throw 'Command palette query Edit did not expose one degenerate initial caret range.'
     }
@@ -1422,19 +1511,45 @@ try {
 
     [WinghosttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x41) -Description 'select command palette query for unavailable outcome' -Process $process
-    if (-not [WinghosttyAccessibilityNative]::SendAsciiText($paletteUnavailableQuery)) {
+    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($paletteUnavailableQuery)) {
         throw "SendInput failed for command palette unavailable query: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette unavailable no-match notification' -Condition {
-        $script:paletteUnavailableItems = @($palette.FindAll(
-            [System.Windows.Automation.TreeScope]::Children,
-            [System.Windows.Automation.PropertyCondition]::new(
-                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                [System.Windows.Automation.ControlType]::ListItem
-            )
-        ) | ForEach-Object { $_ })
-        return $script:paletteUnavailableItems.Count -eq 0 -and
-            [WinghosttyAccessibilityNative]::NotificationCount -gt 0
+    $script:paletteUnavailableLastTransient = $null
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette unavailable no-match notification' -Condition {
+            try {
+                $script:paletteUnavailableItems = @($script:palette.FindAll(
+                    [System.Windows.Automation.TreeScope]::Children,
+                    [System.Windows.Automation.PropertyCondition]::new(
+                        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [System.Windows.Automation.ControlType]::ListItem
+                    )
+                ) | ForEach-Object { $_ })
+            }
+            catch {
+                $hresult = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$_.Exception.HResult), 0)
+                $script:paletteUnavailableLastTransient = ('0x{0:X8}: {1}' -f $hresult, $_.Exception.Message)
+                if ($hresult -eq 0x80010001 -or $hresult -eq 0x8001010A) {
+                    return $false
+                }
+                if ($hresult -eq 0x80040201) {
+                    $script:palette = @($root.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        [System.Windows.Automation.PropertyCondition]::new(
+                            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                            [System.Windows.Automation.ControlType]::List
+                        )
+                    ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
+                    return $false
+                }
+                throw
+            }
+            return $script:paletteUnavailableItems.Count -eq 0 -and
+                [WinghosttyAccessibilityNative]::NotificationCount -gt 0
+        }
+    }
+    catch {
+        throw "$($_.Exception.Message) Last transient UIA error: $($script:paletteUnavailableLastTransient)."
     }
     $unavailableNotification = Get-ExactAccessibilityNotification `
         -Description 'No-match notification' `
@@ -1571,9 +1686,9 @@ try {
     $searchInitialSelection = @($searchTextPattern.GetSelection())
     if ($searchInitialSelection.Count -ne 1 -or
         $searchInitialSelection[0].CompareEndpoints(
-            [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
             $searchInitialSelection[0],
-            [System.Windows.Automation.TextPatternRangeEndpoint]::End
+            [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End
         ) -ne 0) {
         throw 'Docked search query Edit did not expose one degenerate initial caret range.'
     }
@@ -1655,7 +1770,61 @@ try {
         if ($null -eq $settingsElement -or $settingsElement.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window) {
             throw "Settings cycle $settingsCycle exposes no UIA Window root."
         }
+        if ($settingsElement.Current.Name -ne 'winghostty settings') {
+            throw "Settings cycle $settingsCycle root name is '$($settingsElement.Current.Name)'; expected 'winghostty settings'."
+        }
+        $settingsClientRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($settingsHwnd)
         $settingsSectionNames = @('Appearance', 'Terminal', 'Shell', 'Privacy', 'Updates', 'Keybindings', 'Advanced')
+        $settingsExpectedControls = [ordered]@{
+            Appearance = @(
+                @{ Name = 'Font family fallbacks'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Font size'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Terminal theme'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Background opacity'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Window theme'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Cursor style'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Window padding X'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Window padding Y'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Window padding balance'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Background blur'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Terminal = @(
+                @{ Name = 'Scrollback limit'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Close confirmation'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Copy on select'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Clipboard trimming'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Shell = @(
+                @{ Name = 'Default command'; Type = [System.Windows.Automation.ControlType]::Edit },
+                @{ Name = 'Shell integration'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Privacy = @(
+                @{ Name = 'OSC 52 clipboard read requests'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'OSC 52 clipboard write requests'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Clickable URL opening'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Link preview popups'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Terminal notifications'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Clipboard-copy notification'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Config-reload notification'; Type = [System.Windows.Automation.ControlType]::CheckBox },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Updates = @(
+                @{ Name = 'Auto-update mode'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Auto-update channel'; Type = [System.Windows.Automation.ControlType]::ComboBox },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Keybindings = @(
+                @{ Name = 'Keybind configuration'; Type = [System.Windows.Automation.ControlType]::Button },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+            Advanced = @(
+                @{ Name = 'Full config editor'; Type = [System.Windows.Automation.ControlType]::Button },
+                @{ Name = 'Save'; Type = [System.Windows.Automation.ControlType]::Button }
+            )
+        }
         $settingsElements = @($settingsElement.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
             [System.Windows.Automation.Condition]::TrueCondition
@@ -1667,13 +1836,22 @@ try {
         $observedSectionNames = @($sectionButtons | ForEach-Object { $_.Current.Name } | Sort-Object -Unique)
         if ($sectionButtons.Count -ne $settingsSectionNames.Count -or
             @($settingsSectionNames | Where-Object { $observedSectionNames -notcontains $_ }).Count -ne 0) {
-            throw "Settings cycle $settingsCycle section buttons were '$($observedSectionNames -join ', ')'; expected all seven named sections."
+            $sectionDiagnostics = @($settingsElements | Where-Object {
+                $settingsSectionNames -contains $_.Current.Name
+            } | ForEach-Object {
+                $sectionHwnd = [IntPtr]$_.Current.NativeWindowHandle
+                "$($_.Current.Name):$($_.Current.ControlType.ProgrammaticName):class=$([WinghosttyAccessibilityNative]::WindowClass($sectionHwnd)):style=0x$([WinghosttyAccessibilityNative]::WindowStyle($sectionHwnd).ToString('X')):offscreen=$($_.Current.IsOffscreen)"
+            })
+            throw "Settings cycle $settingsCycle section buttons were '$($observedSectionNames -join ', ')'; expected all seven named sections. Matching elements: $($sectionDiagnostics -join '; ')"
         }
 
         $settingsSectionEvidence = @()
         $settingsNamedTextTotal = 0
         $settingsLabelOverlapComparisons = 0
         $settingsOverlapComparisons = 0
+        $settingsControlOverlapComparisons = 0
+        $settingsContainmentChecks = 0
+        $settingsSharedSectionContainer = $null
         foreach ($sectionName in $settingsSectionNames) {
             $sectionButton = @($sectionButtons | Where-Object { $_.Current.Name -eq $sectionName })[0]
             $sectionSelection = $null
@@ -1682,6 +1860,28 @@ try {
                 [ref]$sectionSelection
             )) {
                 throw "Settings section '$sectionName' exposes no SelectionItemPattern."
+            }
+            $sectionContainer = $sectionSelection.Current.SelectionContainer
+            $containerSelection = $null
+            if ($null -eq $sectionContainer -or
+                -not $sectionContainer.TryGetCurrentPattern(
+                    [System.Windows.Automation.SelectionPattern]::Pattern,
+                    [ref]$containerSelection
+                )) {
+                throw "Settings section '$sectionName' exposes no SelectionPattern container."
+            }
+            if ($containerSelection.Current.CanSelectMultiple -or
+                -not $containerSelection.Current.IsSelectionRequired) {
+                throw "Settings section '$sectionName' exposes invalid single-selection container semantics."
+            }
+            if ($null -eq $settingsSharedSectionContainer) {
+                $settingsSharedSectionContainer = $sectionContainer
+            }
+            elseif (-not [System.Windows.Automation.Automation]::Compare(
+                $settingsSharedSectionContainer,
+                $sectionContainer
+            )) {
+                throw "Settings section '$sectionName' exposes a different SelectionPattern container."
             }
             $sectionSelection.Select()
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description "settings section $sectionName selection" -Condition {
@@ -1692,21 +1892,30 @@ try {
                         [ref]$candidateSectionSelection
                     ) -and $candidateSectionSelection.Current.IsSelected
                 } | ForEach-Object { $_.Current.Name })
-                $script:settingsSectionHeaders = @($settingsElement.FindAll(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    [System.Windows.Automation.PropertyCondition]::new(
-                        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                        [System.Windows.Automation.ControlType]::Text
-                    )
-                ) | Where-Object {
-                    $_.Current.Name -eq $sectionName -and
-                    -not $_.Current.IsOffscreen -and
-                    $_.Current.BoundingRectangle.Width -gt 0 -and
-                    $_.Current.BoundingRectangle.Height -gt 0
-                })
                 return $script:settingsSelectedSectionNames.Count -eq 1 -and
-                    $script:settingsSelectedSectionNames[0] -eq $sectionName -and
-                    $script:settingsSectionHeaders.Count -ge 1
+                    $script:settingsSelectedSectionNames[0] -eq $sectionName
+            }
+            $containerSelectedItems = @($containerSelection.Current.GetSelection())
+            if ($containerSelectedItems.Count -ne 1 -or
+                -not [System.Windows.Automation.Automation]::Compare($containerSelectedItems[0], $sectionButton)) {
+                throw "Settings section '$sectionName' container returned $($containerSelectedItems.Count) inconsistent selected items."
+            }
+            $settingsSectionHeaders = @($settingsElement.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.Condition]::TrueCondition
+            ) | Where-Object {
+                $_.Current.Name -eq $sectionName -and
+                -not $_.Current.IsOffscreen -and
+                $_.Current.BoundingRectangle.Width -gt 0 -and
+                $_.Current.BoundingRectangle.Height -gt 0
+            })
+            if (@($settingsSectionHeaders | Where-Object {
+                $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text
+            }).Count -lt 1) {
+                $headerRoles = @($settingsSectionHeaders | ForEach-Object {
+                    "$($_.Current.ControlType.ProgrammaticName):class=$([WinghosttyAccessibilityNative]::WindowClass([IntPtr]$_.Current.NativeWindowHandle))"
+                })
+                throw "Settings section '$sectionName' header roles were '$($headerRoles -join ', ')'; expected a visible UIA Text header."
             }
 
             $visibleSectionElements = @($settingsElement.FindAll(
@@ -1743,11 +1952,29 @@ try {
                 $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -or
                 $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ComboBox -or
                 $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::CheckBox -or
-                $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::RadioButton -or
                 $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
             })
-            if ($interactiveSettingsControls.Count -lt 8) {
-                throw "Settings section '$sectionName' exposes only $($interactiveSettingsControls.Count) visible interactive controls; expected seven section buttons plus content/action controls."
+            $unnamedSettingsControls = @($interactiveSettingsControls | Where-Object {
+                [string]::IsNullOrWhiteSpace($_.Current.Name)
+            })
+            if ($unnamedSettingsControls.Count -ne 0) {
+                throw "Settings section '$sectionName' exposes $($unnamedSettingsControls.Count) unnamed visible content controls."
+            }
+            $expectedControls = @($settingsExpectedControls[$sectionName])
+            foreach ($expectedControl in $expectedControls) {
+                $matches = @($interactiveSettingsControls | Where-Object {
+                    $_.Current.Name -eq $expectedControl.Name -and
+                    $_.Current.ControlType -eq $expectedControl.Type
+                })
+                if ($matches.Count -ne 1) {
+                    throw "Settings section '$sectionName' exposes $($matches.Count) '$($expectedControl.Name)' $($expectedControl.Type.ProgrammaticName) controls; expected exactly one."
+                }
+            }
+            if ($interactiveSettingsControls.Count -ne $expectedControls.Count) {
+                $observedControls = @($interactiveSettingsControls | ForEach-Object {
+                    "$($_.Current.Name):$($_.Current.ControlType.ProgrammaticName)"
+                })
+                throw "Settings section '$sectionName' exposes $($interactiveSettingsControls.Count) visible content controls; expected $($expectedControls.Count). Observed: $($observedControls -join ', ')."
             }
             foreach ($labelElement in $namedSettingsText) {
                 $labelBounds = $labelElement.Current.BoundingRectangle
@@ -1761,44 +1988,83 @@ try {
                     }
                 }
             }
+            $settingsLayoutControls = @($sectionButtons) + @($interactiveSettingsControls)
+            $containedElements = @($namedSettingsText) + @($settingsLayoutControls)
+            foreach ($containedElement in $containedElements) {
+                $bounds = $containedElement.Current.BoundingRectangle
+                $settingsContainmentChecks++
+                if ($bounds.Left -lt ($settingsClientRect.left - 3) -or
+                    $bounds.Top -lt ($settingsClientRect.top - 3) -or
+                    $bounds.Right -gt ($settingsClientRect.right + 3) -or
+                    $bounds.Bottom -gt ($settingsClientRect.bottom + 3)) {
+                    throw "Settings section '$sectionName' element '$($containedElement.Current.Name)' ($($containedElement.Current.ControlType.ProgrammaticName)) escapes the client bounds: element=$bounds client=[$($settingsClientRect.left),$($settingsClientRect.top),$($settingsClientRect.right),$($settingsClientRect.bottom)]."
+                }
+            }
+            for ($leftControlIndex = 0; $leftControlIndex -lt $settingsLayoutControls.Count; $leftControlIndex++) {
+                $leftControl = $settingsLayoutControls[$leftControlIndex]
+                $leftControlBounds = $leftControl.Current.BoundingRectangle
+                for ($rightControlIndex = $leftControlIndex + 1; $rightControlIndex -lt $settingsLayoutControls.Count; $rightControlIndex++) {
+                    $rightControl = $settingsLayoutControls[$rightControlIndex]
+                    if ((Test-AccessibilityAncestor -Ancestor $leftControl -Descendant $rightControl) -or
+                        (Test-AccessibilityAncestor -Ancestor $rightControl -Descendant $leftControl)) {
+                        continue
+                    }
+                    $rightControlBounds = $rightControl.Current.BoundingRectangle
+                    $overlapWidth = [Math]::Min($leftControlBounds.Right, $rightControlBounds.Right) - [Math]::Max($leftControlBounds.Left, $rightControlBounds.Left)
+                    $overlapHeight = [Math]::Min($leftControlBounds.Bottom, $rightControlBounds.Bottom) - [Math]::Max($leftControlBounds.Top, $rightControlBounds.Top)
+                    $settingsControlOverlapComparisons++
+                    if ($overlapWidth -gt 2 -and $overlapHeight -gt 2) {
+                        throw "Settings section '$sectionName' has overlapping controls '$($leftControl.Current.Name)' and '$($rightControl.Current.Name)' (${overlapWidth}x${overlapHeight}px)."
+                    }
+                }
+            }
             $settingsNamedTextTotal += $namedSettingsText.Count
             $settingsSectionEvidence += [ordered]@{
                 name = $sectionName
                 selected = $true
                 visible_named_text = $namedSettingsText.Count
-                visible_interactive_controls = $interactiveSettingsControls.Count
+                visible_content_controls = $interactiveSettingsControls.Count
             }
         }
-        $selectedBeforeFocusOnly = @($sectionButtons | Where-Object {
+        $selectedBeforeFocus = @($sectionButtons | Where-Object {
             $candidateSelection = $null
             $_.TryGetCurrentPattern(
                 [System.Windows.Automation.SelectionItemPattern]::Pattern,
                 [ref]$candidateSelection
             ) -and $candidateSelection.Current.IsSelected
         } | ForEach-Object { $_.Current.Name })
-        if ($selectedBeforeFocusOnly.Count -ne 1) {
-            throw "Settings cycle $settingsCycle has no unique section before focus-only probe."
+        if ($selectedBeforeFocus.Count -ne 1) {
+            throw "Settings cycle $settingsCycle has no unique section before focus probe."
         }
-        $focusOnlySection = @($sectionButtons | Where-Object {
-            $_.Current.Name -ne $selectedBeforeFocusOnly[0]
+        $focusSection = @($sectionButtons | Where-Object {
+            $_.Current.Name -ne $selectedBeforeFocus[0]
         })[0]
-        $focusOnlySectionHwnd = [IntPtr]$focusOnlySection.Current.NativeWindowHandle
-        $focusOnlySection.SetFocus()
-        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus-only ownership' -Condition {
-            $script:settingsFocusOnlyElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-            return $null -ne $script:settingsFocusOnlyElement -and
-                [System.Windows.Automation.Automation]::Compare($script:settingsFocusOnlyElement, $focusOnlySection) -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusOnlySectionHwnd
-        }
-        $selectedAfterFocusOnly = @($sectionButtons | Where-Object {
-            $candidateSelection = $null
-            $_.TryGetCurrentPattern(
-                [System.Windows.Automation.SelectionItemPattern]::Pattern,
-                [ref]$candidateSelection
-            ) -and $candidateSelection.Current.IsSelected
-        } | ForEach-Object { $_.Current.Name })
-        if ($selectedAfterFocusOnly.Count -ne 1 -or $selectedAfterFocusOnly[0] -ne $selectedBeforeFocusOnly[0]) {
-            throw "Focusing settings section '$($focusOnlySection.Current.Name)' changed selection from '$($selectedBeforeFocusOnly -join ', ')' to '$($selectedAfterFocusOnly -join ', ')'."
+        $focusSectionHwnd = [IntPtr]$focusSection.Current.NativeWindowHandle
+        $focusSection.SetFocus()
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
+            $script:settingsFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+            $script:settingsSelectedAfterFocus = @($sectionButtons | Where-Object {
+                $candidateSelection = $null
+                $_.TryGetCurrentPattern(
+                    [System.Windows.Automation.SelectionItemPattern]::Pattern,
+                    [ref]$candidateSelection
+                ) -and $candidateSelection.Current.IsSelected
+            } | ForEach-Object { $_.Current.Name })
+            $script:settingsFocusedSectionHeaders = @($settingsElement.FindAll(
+                [System.Windows.Automation.TreeScope]::Descendants,
+                [System.Windows.Automation.PropertyCondition]::new(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::Text
+                )
+            ) | Where-Object {
+                $_.Current.Name -eq $focusSection.Current.Name -and -not $_.Current.IsOffscreen
+            })
+            return $null -ne $script:settingsFocusedElement -and
+                [System.Windows.Automation.Automation]::Compare($script:settingsFocusedElement, $focusSection) -and
+                [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusSectionHwnd -and
+                $script:settingsSelectedAfterFocus.Count -eq 1 -and
+                $script:settingsSelectedAfterFocus[0] -eq $focusSection.Current.Name -and
+                $script:settingsFocusedSectionHeaders.Count -ge 1
         }
         $settingsCycles += [ordered]@{
             cycle = $settingsCycle
@@ -1807,7 +2073,9 @@ try {
             named_visible_text_labels = $settingsNamedTextTotal
             label_overlap_comparisons = $settingsLabelOverlapComparisons
             label_control_overlap_comparisons = $settingsOverlapComparisons
-            focus_only_preserved_section = $selectedBeforeFocusOnly[0]
+            control_overlap_comparisons = $settingsControlOverlapComparisons
+            client_containment_checks = $settingsContainmentChecks
+            focus_selected_section = $focusSection.Current.Name
             sections = $settingsSectionEvidence
             bounds = [ordered]@{
                 left = $settingsRect.left
@@ -1863,6 +2131,26 @@ try {
     $ownerSettingsHwnd = $script:ownerSettingsWindowsProbe[0]
     $ownerSettingsElement = [System.Windows.Automation.AutomationElement]::FromHandle($ownerSettingsHwnd)
     if ($null -eq $ownerSettingsElement) { throw 'Settings owner probe exposes no UIA root.' }
+    $ownerSettingsElements = @($ownerSettingsElement.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_ })
+    $ownerTerminalSection = @($ownerSettingsElements | Where-Object {
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::RadioButton -and
+        $_.Current.Name -eq 'Terminal'
+    }) | Select-Object -First 1
+    if ($null -eq $ownerTerminalSection) { throw 'Settings owner probe cannot find the Terminal section.' }
+    $ownerTerminalSelection = $null
+    if (-not $ownerTerminalSection.TryGetCurrentPattern(
+        [System.Windows.Automation.SelectionItemPattern]::Pattern,
+        [ref]$ownerTerminalSelection
+    )) {
+        throw 'Settings owner probe Terminal section has no SelectionItemPattern.'
+    }
+    $ownerTerminalSelection.Select()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings owner probe Terminal section' -Condition {
+        return $ownerTerminalSelection.Current.IsSelected
+    }
     $ownerSettingsElements = @($ownerSettingsElement.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
@@ -1983,48 +2271,65 @@ try {
         return [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $leftPane.Hwnd
     }
     $stressLineCount = 150
-    $stressPrefix = "${marker}_STRESS"
-    $stressFirstMarker = "${stressPrefix}_FIRST"
+    $stressPrefix = "whs$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
+    $stressFirstMarker = "${stressPrefix}_1"
     $stressFinalMarker = "${stressPrefix}_150"
-    $stressResponsiveMarker = "${stressPrefix}_RESPONSIVE"
-    $stressCommand = "cmd.exe /d /c `"echo $stressFirstMarker & for /L %i in (1,1,$stressLineCount) do @echo ${stressPrefix}_%i`""
+    $stressResponsiveMarker = "${stressPrefix}responsive"
+    $stressCommand = "cmd.exe /d /c `"for /L %i in (1,1,$stressLineCount) do @echo ${stressPrefix}_%i`""
+    if ($stressCommand.Contains($stressFirstMarker) -or $stressCommand.Contains($stressFinalMarker)) {
+        throw 'Sustained-output command contains a literal boundary marker before execution.'
+    }
     [WinghosttyAccessibilityNative]::ResetTextChangedCount()
     $process.Refresh()
     $stressBaselineHandles = $process.HandleCount
     $stressBaselineThreads = $process.Threads.Count
     $stressBaselinePrivateBytes = $process.PrivateMemorySize64
     $stressStartedAt = [DateTime]::UtcNow
-    Assert-AccessibilityInputOwner -Process $process -Description 'sustained output command'
-    if (-not [WinghosttyAccessibilityNative]::SendAsciiText($stressCommand)) {
+    Assert-AccessibilityInputOwner -Process $process -Description 'sustained output command' -ExpectedFocusedHwnd $leftPane.Hwnd
+    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($stressCommand)) {
         throw "SendInput failed for sustained output command: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'sustained output Enter' -Process $process
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(15)) -Description 'sustained output first and final markers through one fresh TextPattern range' -Condition {
-        $script:stressFirstMarkerVisible = $false
-        $script:stressFinalMarkerVisible = $false
-        foreach ($candidateDocument in $documents) {
-            $candidatePattern = $null
-            if (-not $candidateDocument.TryGetCurrentPattern(
-                [System.Windows.Automation.TextPattern]::Pattern,
-                [ref]$candidatePattern
-            )) { continue }
-            $candidateRange = $candidatePattern.DocumentRange
-            $candidateText = $candidateRange.GetText(-1)
-            if ($candidateText.Contains($stressFirstMarker) -and
-                $candidateText.Contains($stressFinalMarker)) {
-                $script:stressFirstMarkerVisible = $true
-                $script:stressFinalMarkerVisible = $true
-                break
+    Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'sustained output Enter' -Process $process -ExpectedFocusedHwnd $leftPane.Hwnd
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(15)) -Description 'sustained output first and final markers through one fresh TextPattern range' -Condition {
+            $script:stressFirstMarkerVisible = $false
+            $script:stressFinalMarkerVisible = $false
+            $script:stressCandidateDiagnostics = @()
+            $candidateIndex = 0
+            foreach ($candidateDocument in $documents) {
+                $candidatePattern = $null
+                if (-not $candidateDocument.TryGetCurrentPattern(
+                    [System.Windows.Automation.TextPattern]::Pattern,
+                    [ref]$candidatePattern
+                )) {
+                    $script:stressCandidateDiagnostics += "${candidateIndex}:no-text-pattern"
+                    $candidateIndex++
+                    continue
+                }
+                $candidateRange = $candidatePattern.DocumentRange
+                $candidateText = $candidateRange.GetText(-1)
+                $hasFirst = $candidateText.Contains($stressFirstMarker)
+                $hasFinal = $candidateText.Contains($stressFinalMarker)
+                $script:stressCandidateDiagnostics += "${candidateIndex}:len=$($candidateText.Length),first=$hasFirst,final=$hasFinal"
+                $candidateIndex++
+                if ($hasFirst -and $hasFinal) {
+                    $script:stressFirstMarkerVisible = $true
+                    $script:stressFinalMarkerVisible = $true
+                    break
+                }
             }
+            return $script:stressFinalMarkerVisible
         }
-        return $script:stressFinalMarkerVisible
+    }
+    catch {
+        throw "$($_.Exception.Message) Documents: $($script:stressCandidateDiagnostics -join '; ')."
     }
     $stressDurationMs = [Math]::Round(([DateTime]::UtcNow - $stressStartedAt).TotalMilliseconds)
     $stressEventCount = [WinghosttyAccessibilityNative]::TextChangedCount
     if ($stressEventCount -lt 1 -or $stressEventCount -gt 300) {
         throw "Sustained output emitted $stressEventCount TextChanged events; expected 1..300 for $stressLineCount lines."
     }
-    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $stressResponsiveMarker -Description 'post-stress responsiveness marker'
+    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $stressResponsiveMarker -Description 'post-stress responsiveness marker' -ExpectedFocusedHwnd $leftPane.Hwnd
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'post-stress responsiveness marker through TextPattern' -Condition {
         foreach ($candidateDocument in $documents) {
             $candidatePattern = $null
@@ -2110,21 +2415,6 @@ try {
     if ($idleHandleGrowth -gt 64 -or $idleThreadGrowth -gt 8 -or $idlePrivateGrowth -gt 134217728) {
         throw "winghostty resource growth exceeded idle limits (handles=+$idleHandleGrowth, threads=+$idleThreadGrowth, private_bytes=+$idlePrivateGrowth)."
     }
-
-    $idleMarker = "${marker}_IDLE"
-    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $idleMarker -Description 'post-idle liveness marker'
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'post-idle marker through TextPattern' -Condition {
-        $script:idleMarkerVisible = $false
-        foreach ($candidateDocument in $documents) {
-            $candidatePattern = $null
-            if ($candidateDocument.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$candidatePattern) -and
-                $candidatePattern.DocumentRange.GetText(-1).Contains($idleMarker)) {
-                $script:idleMarkerVisible = $true
-                break
-            }
-        }
-        return $script:idleMarkerVisible
-    }
     if ($idleSettingsElement.Current.Name -ne $idleSettingsName) {
         throw "Settings UIA root changed after idle soak; before='$idleSettingsName', after='$($idleSettingsElement.Current.Name)'."
     }
@@ -2136,8 +2426,25 @@ try {
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Process $process `
         -Description 'close settings after idle soak')
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction after idle soak' -Condition {
-        return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction and terminal focus restoration after idle soak' -Condition {
+        return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
+            [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
+            [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $leftPane.Hwnd
+    }
+
+    $idleMarker = "whi$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
+    Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $idleMarker -Description 'post-idle liveness marker' -ExpectedFocusedHwnd $leftPane.Hwnd
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'post-idle marker through TextPattern' -Condition {
+        $script:idleMarkerVisible = $false
+        foreach ($candidateDocument in $documents) {
+            $candidatePattern = $null
+            if ($candidateDocument.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$candidatePattern) -and
+                $candidatePattern.DocumentRange.GetText(-1).Contains($idleMarker)) {
+                $script:idleMarkerVisible = $true
+                break
+            }
+        }
+        return $script:idleMarkerVisible
     }
     $hc = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
@@ -2168,6 +2475,8 @@ try {
             selection_is_degenerate = $false
             query_only_marker = $queryOnlyMarker
             query_only_acquired_text_pattern_refreshed = $queryOnlyRangeRefreshed
+            cold_query_marker = $coldQueryMarker
+            cold_query_first_document_range_fresh = $coldQueryFirstRangeFresh
             text_pattern2_client_available = $false
             text_pattern2_client_limitation = 'Windows PowerShell UIAutomationClient 4.0 exposes no TextPattern2 type or registered pattern ID 10024.'
             sustained_output = $sustainedOutputEvidence
@@ -2297,8 +2606,9 @@ try {
         throw 'Relaunched terminal Document does not expose TextPattern.'
     }
     Assert-AccessibilityInputOwner -Process $relaunchProcess -Description 'relaunch liveness text'
-    $relaunchMarker = "${marker}_REOPEN"
-    Send-AccessibilityOutputMarker -Process $relaunchProcess -TextPattern $relaunchTextPattern -Marker $relaunchMarker -Description 'relaunch liveness marker'
+    $relaunchMarker = "whr$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
+    $relaunchDocumentHwnd = [IntPtr]$relaunchDocuments[0].Current.NativeWindowHandle
+    Send-AccessibilityOutputMarker -Process $relaunchProcess -TextPattern $relaunchTextPattern -Marker $relaunchMarker -Description 'relaunch liveness marker' -ExpectedFocusedHwnd $relaunchDocumentHwnd
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'relaunch marker through TextPattern' -Condition {
         return $relaunchTextPattern.DocumentRange.GetText(-1).Contains($relaunchMarker)
     }
@@ -2313,7 +2623,7 @@ finally {
             Stop-AccessibilityEditEventCapture
         }
         catch {
-            Write-Warning "Failed to remove Edit UIA handlers: $($_.Exception.Message)"
+            $cleanupFailures.Add("failed to remove Edit UIA handlers: $($_.Exception.Message)")
         }
     }
     if ($paletteSelectionRegistered -and $null -ne $paletteSelectionHandler -and $null -ne $root) {
@@ -2325,7 +2635,7 @@ finally {
             )
         }
         catch {
-            Write-Warning "Failed to remove palette SelectionItem handler: $($_.Exception.Message)"
+            $cleanupFailures.Add("failed to remove palette SelectionItem handler: $($_.Exception.Message)")
         }
     }
     if ($paletteNotificationRegistered) {
@@ -2333,7 +2643,7 @@ finally {
             [WinghosttyAccessibilityNative]::StopNotificationCapture()
         }
         catch {
-            Write-Warning "Failed to remove palette Notification handler: $($_.Exception.Message)"
+            $cleanupFailures.Add("failed to remove palette Notification handler: $($_.Exception.Message)")
         }
     }
     if ($textChangedRegistered -and $null -ne $textChangedHandler -and $null -ne $document) {
@@ -2345,7 +2655,7 @@ finally {
             )
         }
         catch {
-            Write-Warning "Failed to remove terminal TextChanged handler: $($_.Exception.Message)"
+            $cleanupFailures.Add("failed to remove terminal TextChanged handler: $($_.Exception.Message)")
         }
     }
     if ($null -ne $relaunchProcess) {
@@ -2447,7 +2757,14 @@ if ($null -ne $evidence) {
 }
 
 $failureMessages = [System.Collections.Generic.List[string]]::new()
-if ($null -ne $runFailure) { $failureMessages.Add($runFailure.Exception.Message) }
+if ($null -ne $runFailure) {
+    $failureLocation = if ($runFailure.InvocationInfo.ScriptLineNumber -gt 0) {
+        " at line $($runFailure.InvocationInfo.ScriptLineNumber)"
+    } else {
+        ''
+    }
+    $failureMessages.Add("$($runFailure.Exception.Message)$failureLocation")
+}
 foreach ($cleanupFailure in $cleanupFailures) { $failureMessages.Add($cleanupFailure) }
 if ($failureMessages.Count -gt 0) {
     throw "Accessibility validation failed: $($failureMessages -join ' | ')"

@@ -556,6 +556,10 @@ const WM_WINHOSTTY_UPDATE = WM_APP + 2;
 const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
 const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
 const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
+const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
+const SMTO_BLOCK: UINT = 0x0001;
+const SMTO_ABORTIFHUNG: UINT = 0x0002;
+const terminal_uia_cold_query_timeout_ms: UINT = 500;
 
 const DeferredUiaDisconnect = struct {
     ctx: *anyopaque,
@@ -1096,6 +1100,15 @@ extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PT
 extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?*anyopaque, X: i32, Y: i32, cx: i32, cy: i32, uFlags: UINT) callconv(.winapi) BOOL;
 extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+extern "user32" fn SendMessageTimeoutW(
+    hWnd: HWND,
+    Msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    fuFlags: UINT,
+    uTimeout: UINT,
+    lpdwResult: *usize,
+) callconv(.winapi) LRESULT;
 extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: LPCWSTR) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
 extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
@@ -2619,6 +2632,9 @@ pub const App = struct {
     /// Singleton settings window. Lazily created by the `open_config`
     /// action; `App.terminate` destroys the HWND if still alive.
     settings_window: win32_settings.SettingsWindow = undefined,
+    /// Stable core surface id that owned focus when Settings opened. Settings
+    /// itself clears terminal focus flags, so close must not guess host zero.
+    settings_restore_surface_id: ?u64 = null,
     /// Whether `CoInitializeEx` actually took responsibility for the
     /// apartment on this thread. `CoUninitialize` only pairs with a
     /// successful init (`S_OK` / `S_FALSE`) — `RPC_E_CHANGED_MODE`
@@ -2803,6 +2819,8 @@ pub const App = struct {
             .previewField = &settingsPreviewFieldThunk,
             .notifyConflict = &settingsNotifyConflictThunk,
             .notifySuccess = &settingsNotifySuccessThunk,
+            .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
+            .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
             .onClosed = &settingsOnClosedThunk,
         });
         self.link_hover_tracker = win32_link_preview.HoverTracker.init();
@@ -10868,6 +10886,22 @@ const Host = struct {
         return true;
     }
 
+    fn commandPaletteToggleKeyMessage(
+        self: *Host,
+        msg: UINT,
+        wParam: WPARAM,
+        lParam: LPARAM,
+    ) bool {
+        if (self.overlay_mode != .command_palette) return false;
+        const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
+        const entry = self.app.config.keybind.set.getEvent(event) orelse return false;
+        const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+            .leader => return false,
+            inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+        };
+        return bindingActionsToggleCommandPalette(actions);
+    }
+
     fn reloadProfiles(self: *Host) !bool {
         const replacing = self.profiles != null;
         const next_profiles = try windows_shell.listProfiles(self.app.core_app.alloc);
@@ -16818,8 +16852,48 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
 /// picked up on the next paint without cache invalidation.
 fn settingsOwnerWindowThunk(ctx: *anyopaque) ?HWND {
     const app: *App = @ptrCast(@alignCast(ctx));
-    const surface = app.focusedSurfaceForUndoRedo() orelse app.primarySurface() orelse return null;
+    const focused = app.focusedSurfaceForUndoRedo();
+    if (focused) |surface| app.settings_restore_surface_id = surface.core().id;
+    const surface = focused orelse
+        (if (app.settings_restore_surface_id) |id| app.findSurfaceById(id) else null) orelse
+        app.primarySurface() orelse return null;
     return surface.windowHwnd();
+}
+
+fn settingsCustomUiaProvidersEnabledThunk(ctx: *anyopaque) bool {
+    const app: *const App = @ptrCast(@alignCast(ctx));
+    return app.com_initialized;
+}
+
+fn settingsRestoreCandidateOrder(
+    saved: ?u64,
+    focused: ?u64,
+    primary: ?u64,
+) [3]?u64 {
+    return .{ saved, focused, primary };
+}
+
+test "settings close prefers the originating surface in a two-host session" {
+    const order = settingsRestoreCandidateOrder(202, null, 101);
+    try std.testing.expectEqual(@as(?u64, 202), order[0]);
+    try std.testing.expectEqual(@as(?u64, null), order[1]);
+    try std.testing.expectEqual(@as(?u64, 101), order[2]);
+}
+
+fn settingsRestoreSurface(app: *App, saved: ?u64) ?*Surface {
+    const focused = app.focusedSurfaceForUndoRedo();
+    const primary = app.primarySurface();
+    const order = settingsRestoreCandidateOrder(
+        saved,
+        if (focused) |surface| surface.core().id else null,
+        if (primary) |surface| surface.core().id else null,
+    );
+    for (order) |candidate| {
+        if (candidate) |id| {
+            if (app.findSurfaceById(id)) |surface| return surface;
+        }
+    }
+    return null;
 }
 
 fn settingsChromeBgThunk(ctx: *anyopaque) u32 {
@@ -16895,10 +16969,25 @@ fn settingsSaveAndReloadThunk(
 }
 fn settingsOnClosedThunk(ctx: *anyopaque) void {
     const app: *App = @ptrCast(@alignCast(ctx));
+    const restore_id = app.settings_restore_surface_id;
+    app.settings_restore_surface_id = null;
+    if (settingsRestoreSurface(app, restore_id)) |surface| {
+        app.activateSurface(surface);
+    }
     // Mirrors the kick after the last terminal window closes; the
     // quit timer observes `hasLiveUiWindows()` so this is a no-op
     // when any terminal HWND is still alive.
     if (app.running and !app.hasLiveUiWindows()) app.startQuitTimer();
+}
+
+fn settingsDeferUiaDisconnectThunk(
+    ctx: *anyopaque,
+    provider_ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    scheduleDeferredUiaDisconnect(app, provider_ctx, disconnect, release);
 }
 fn settingsNotifySuccessThunk(ctx: *anyopaque, title: []const u8, body: []const u8) void {
     const app: *App = @ptrCast(@alignCast(ctx));
@@ -18164,6 +18253,14 @@ fn commandButtonKeyAction(vk: WPARAM) ?CommandButtonKeyAction {
         VK_ESCAPE => .dismiss,
         else => null,
     };
+}
+
+fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) bool {
+    for (actions) |action| switch (action) {
+        .toggle_command_palette => return true,
+        else => {},
+    };
+    return false;
 }
 
 fn commandPaletteDirectionFromWheelDelta(delta: i16) bool {
@@ -20707,6 +20804,10 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         },
 
         WM_KEYDOWN, WM_SYSKEYDOWN => {
+            if (v.commandPaletteToggleKeyMessage(msg, wParam, lParam)) {
+                _ = v.dismissCommandPalette();
+                return 0;
+            }
             if (v.overlay_mode == .command_palette) {
                 if (wParam == VK_UP or wParam == VK_DOWN) {
                     // Up/Down move through the live result list instead of
@@ -22412,6 +22513,16 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
     switch (msg) {
         WM_WINHOSTTY_WAKE => return 0,
 
+        WM_WINHOSTTY_UIA_QUERY_REFRESH => {
+            if (surface) |v| {
+                if (v.terminal_uia_context) |context| {
+                    context.query_refresh_post_pending.store(false, .release);
+                    v.refreshTerminalUiaTextWithMode(wParam != 0);
+                }
+            }
+            return 0;
+        },
+
         WM_SETFOCUS => {
             if (surface) |v| v.focusChanged(true);
             return 0;
@@ -22736,6 +22847,12 @@ const TerminalUiaContext = struct {
     refcount: std.atomic.Value(u32),
     mutex: std.Thread.Mutex = .{},
     surface: ?*Surface,
+    /// UIA polling does not make `UiaClientsAreListening` return true. Record
+    /// recent text queries and coalesce a UI-thread refresh request so polling
+    /// clients see current text without keeping renderer snapshots alive after
+    /// the client goes idle.
+    last_query_ms: std.atomic.Value(u64) = .init(0),
+    query_refresh_post_pending: std.atomic.Value(bool) = .init(false),
     /// Bounded, immutable-to-readers terminal snapshot. UIA callbacks copy
     /// this cache and never acquire the renderer mutex.
     cached_text: []u8,
@@ -22790,6 +22907,39 @@ const TerminalUiaContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.surface = null;
+        self.query_refresh_post_pending.store(false, .release);
+    }
+
+    fn noteTextQuery(self: *TerminalUiaContext) void {
+        const now_ms = GetTickCount64();
+        const previous_query_ms = self.last_query_ms.swap(now_ms, .acq_rel);
+
+        self.mutex.lock();
+        const hwnd = if (self.surface) |surface| surface.hwnd else null;
+        self.mutex.unlock();
+
+        if (hwnd == null) return;
+        if (terminalUiaQueryNeedsSynchronousRefresh(previous_query_ms, now_ms)) {
+            var ignored: usize = 0;
+            if (SendMessageTimeoutW(
+                hwnd.?,
+                WM_WINHOSTTY_UIA_QUERY_REFRESH,
+                1,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                terminal_uia_cold_query_timeout_ms,
+                &ignored,
+            ) != 0) return;
+        }
+
+        if (self.query_refresh_post_pending.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+        if (PostMessageW(hwnd.?, WM_WINHOSTTY_UIA_QUERY_REFRESH, 0, 0) == 0) {
+            self.query_refresh_post_pending.store(false, .release);
+        }
+    }
+
+    fn queryRecentlyActive(self: *const TerminalUiaContext, now_ms: u64) bool {
+        return terminalUiaQueryRecentlyActive(self.last_query_ms.load(.acquire), now_ms);
     }
 
     /// Refresh on the application/UI thread after terminal mutations. The
@@ -22902,6 +23052,7 @@ const TerminalUiaContext = struct {
 
     fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
         return try alloc.dupe(u8, self.cached_text);
@@ -22909,6 +23060,7 @@ const TerminalUiaContext = struct {
 
     fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -22917,6 +23069,7 @@ const TerminalUiaContext = struct {
 
     fn terminalUiaVisibleRange(ctx: *anyopaque, alloc: Allocator) !win32_uia.OffsetRange {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -22926,6 +23079,7 @@ const TerminalUiaContext = struct {
 
     fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -22973,6 +23127,7 @@ fn terminalUiaCellsEqual(
 }
 
 const terminal_uia_refresh_interval_ms: u64 = 100;
+const terminal_uia_query_activity_window_ms: u64 = 1_000;
 
 fn terminalUiaRefreshDue(last_refresh_ms: u64, now_ms: u64) bool {
     return last_refresh_ms == 0 or now_ms -| last_refresh_ms >= terminal_uia_refresh_interval_ms;
@@ -22987,17 +23142,25 @@ fn terminalUiaSnapshotWasSlow(start_ms: u64, completed_ms: u64) bool {
     return completed_ms -| start_ms >= terminal_uia_refresh_interval_ms;
 }
 
+fn terminalUiaQueryRecentlyActive(last_query_ms: u64, now_ms: u64) bool {
+    return last_query_ms != 0 and now_ms -| last_query_ms <= terminal_uia_query_activity_window_ms;
+}
+
+fn terminalUiaQueryNeedsSynchronousRefresh(last_query_ms: u64, now_ms: u64) bool {
+    return !terminalUiaQueryRecentlyActive(last_query_ms, now_ms);
+}
+
 const TerminalUiaPublishPolicy = struct {
     refresh_snapshot: bool,
     emit_events: bool,
 };
 
-fn terminalUiaPublishPolicy(clients_listening_for_events: bool) TerminalUiaPublishPolicy {
+fn terminalUiaPublishPolicy(
+    clients_listening_for_events: bool,
+    query_recently_active: bool,
+) TerminalUiaPublishPolicy {
     return .{
-        // UiaClientsAreListening reports event subscriptions, not clients
-        // that poll an already-acquired TextPattern. Query-only clients still
-        // require the cached snapshot to advance after renderer updates.
-        .refresh_snapshot = true,
+        .refresh_snapshot = clients_listening_for_events or query_recently_active,
         .emit_events = clients_listening_for_events,
     };
 }
@@ -23013,11 +23176,22 @@ test "terminal UIA snapshots are rate limited while a client is connected" {
 }
 
 test "terminal UIA query-only clients refresh without event emission" {
-    const query_only = terminalUiaPublishPolicy(false);
+    try std.testing.expect(!terminalUiaQueryRecentlyActive(0, 1));
+    try std.testing.expect(terminalUiaQueryRecentlyActive(100, 1_100));
+    try std.testing.expect(!terminalUiaQueryRecentlyActive(100, 1_101));
+    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(0, 1));
+    try std.testing.expect(!terminalUiaQueryNeedsSynchronousRefresh(100, 1_100));
+    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(100, 1_101));
+
+    const idle = terminalUiaPublishPolicy(false, false);
+    try std.testing.expect(!idle.refresh_snapshot);
+    try std.testing.expect(!idle.emit_events);
+
+    const query_only = terminalUiaPublishPolicy(false, true);
     try std.testing.expect(query_only.refresh_snapshot);
     try std.testing.expect(!query_only.emit_events);
 
-    const subscribed = terminalUiaPublishPolicy(true);
+    const subscribed = terminalUiaPublishPolicy(true, false);
     try std.testing.expect(subscribed.refresh_snapshot);
     try std.testing.expect(subscribed.emit_events);
 }
@@ -23924,12 +24098,19 @@ pub const Surface = struct {
     /// Publish a bounded accessible-text snapshot after a coalesced renderer
     /// update. Provider calls never format terminal state themselves.
     fn refreshTerminalUiaText(self: *Surface) void {
+        self.refreshTerminalUiaTextWithMode(false);
+    }
+
+    fn refreshTerminalUiaTextWithMode(self: *Surface, force: bool) void {
         const context = self.terminal_uia_context orelse return;
         const provider = self.terminal_uia_provider orelse return;
-        const publish_policy = terminalUiaPublishPolicy(win32_uia.events.clientsAreListening());
-        if (!publish_policy.refresh_snapshot) return;
         const now_ms = GetTickCount64();
-        if (!terminalUiaRefreshDue(self.terminal_uia_last_refresh_ms, now_ms)) {
+        const publish_policy = terminalUiaPublishPolicy(
+            win32_uia.events.clientsAreListening(),
+            context.queryRecentlyActive(now_ms),
+        );
+        if (!publish_policy.refresh_snapshot) return;
+        if (!force and !terminalUiaRefreshDue(self.terminal_uia_last_refresh_ms, now_ms)) {
             if (!self.terminal_uia_refresh_timer_active) {
                 const hwnd = self.hwnd orelse return;
                 if (SetTimer(
@@ -35174,6 +35355,15 @@ test "win32 commandButtonKeyAction maps focused command button keys" {
     try std.testing.expectEqual(CommandButtonKeyAction.next, commandButtonKeyAction(VK_DOWN).?);
     try std.testing.expectEqual(CommandButtonKeyAction.dismiss, commandButtonKeyAction(VK_ESCAPE).?);
     try std.testing.expect(commandButtonKeyAction(VK_F2) == null);
+}
+
+test "win32 command palette toggle binding is recognized inside action chains" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const absent = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .paste_from_clipboard };
+    const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
+    try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
+    try std.testing.expect(bindingActionsToggleCommandPalette(&present));
 }
 
 test "win32 buildInspectorBannerText reflects host inspector context" {

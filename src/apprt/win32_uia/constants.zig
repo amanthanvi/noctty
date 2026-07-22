@@ -6,9 +6,14 @@
 // ── Control types ───────────────────────────────────────────────────────
 // UIA_ControlTypeId values. 50000-series.
 
+pub const UIA_ButtonControlTypeId: i32 = 50000;
+pub const UIA_CheckBoxControlTypeId: i32 = 50002;
+pub const UIA_ComboBoxControlTypeId: i32 = 50003;
 pub const UIA_ListControlTypeId: i32 = 50008;
 pub const UIA_ListItemControlTypeId: i32 = 50007;
 pub const UIA_EditControlTypeId: i32 = 50004;
+pub const UIA_RadioButtonControlTypeId: i32 = 50013;
+pub const UIA_TextControlTypeId: i32 = 50020;
 pub const UIA_DocumentControlTypeId: i32 = 50030;
 pub const UIA_WindowControlTypeId: i32 = 50032;
 
