@@ -32,6 +32,35 @@ function Get-AccessibilitySha256Hex {
     }
 }
 
+function Get-AccessibilityExceptionHResults {
+    param([Parameter(Mandatory)][Exception] $Exception)
+
+    $results = [System.Collections.Generic.List[int]]::new()
+    $cursor = $Exception
+    for ($depth = 0; $null -ne $cursor -and $depth -lt 16; $depth++) {
+        $results.Add([int]$cursor.HResult)
+        $cursor = $cursor.InnerException
+    }
+    return $results.ToArray()
+}
+
+function Test-AccessibilityTransientHResult {
+    param([Parameter(Mandatory)][int] $HResult)
+
+    return $HResult -eq 0x80010001 -or
+        $HResult -eq 0x8001010A -or
+        $HResult -eq 0x80040201
+}
+
+foreach ($knownTransient in @([int]0x80010001, [int]0x8001010A, [int]0x80040201)) {
+    if (-not (Test-AccessibilityTransientHResult -HResult $knownTransient)) {
+        throw ('Accessibility transient HRESULT classifier rejected 0x{0:X8}.' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes($knownTransient), 0))
+    }
+}
+if (Test-AccessibilityTransientHResult -HResult 0) {
+    throw 'Accessibility transient HRESULT classifier accepted an unknown result.'
+}
+
 if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED) {
     $forwarded = @('-TimeoutSeconds', $TimeoutSeconds.ToString(), '-IdleSoakSeconds', $IdleSoakSeconds.ToString())
     if ($Rebuild) { $forwarded += '-Rebuild' }
@@ -1527,12 +1556,21 @@ try {
                 ) | ForEach-Object { $_ })
             }
             catch {
-                $hresult = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$_.Exception.HResult), 0)
-                $script:paletteUnavailableLastTransient = ('0x{0:X8}: {1}' -f $hresult, $_.Exception.Message)
-                if ($hresult -eq 0x80010001 -or $hresult -eq 0x8001010A) {
+                $hresults = @(Get-AccessibilityExceptionHResults -Exception $_.Exception)
+                $hresultChain = ($hresults | ForEach-Object {
+                    '0x{0:X8}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$_), 0)
+                }) -join ' -> '
+                $script:paletteUnavailableLastTransient = ('HRESULT chain {0}: {1}' -f $hresultChain, $_.Exception.Message)
+                $transientHresult = $hresults | Where-Object {
+                    Test-AccessibilityTransientHResult -HResult $_
+                } | Select-Object -First 1
+                if ($null -eq $transientHresult) {
+                    throw
+                }
+                if ($transientHresult -eq 0x80010001 -or $transientHresult -eq 0x8001010A) {
                     return $false
                 }
-                if ($hresult -eq 0x80040201) {
+                if ($transientHresult -eq 0x80040201) {
                     $script:palette = @($root.FindAll(
                         [System.Windows.Automation.TreeScope]::Descendants,
                         [System.Windows.Automation.PropertyCondition]::new(
@@ -1542,7 +1580,6 @@ try {
                     ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
                     return $false
                 }
-                throw
             }
             return $script:paletteUnavailableItems.Count -eq 0 -and
                 [WinghosttyAccessibilityNative]::NotificationCount -gt 0
@@ -1962,12 +1999,12 @@ try {
             }
             $expectedControls = @($settingsExpectedControls[$sectionName])
             foreach ($expectedControl in $expectedControls) {
-                $matches = @($interactiveSettingsControls | Where-Object {
+                $controlMatches = @($interactiveSettingsControls | Where-Object {
                     $_.Current.Name -eq $expectedControl.Name -and
                     $_.Current.ControlType -eq $expectedControl.Type
                 })
-                if ($matches.Count -ne 1) {
-                    throw "Settings section '$sectionName' exposes $($matches.Count) '$($expectedControl.Name)' $($expectedControl.Type.ProgrammaticName) controls; expected exactly one."
+                if ($controlMatches.Count -ne 1) {
+                    throw "Settings section '$sectionName' exposes $($controlMatches.Count) '$($expectedControl.Name)' $($expectedControl.Type.ProgrammaticName) controls; expected exactly one."
                 }
             }
             if ($interactiveSettingsControls.Count -ne $expectedControls.Count) {

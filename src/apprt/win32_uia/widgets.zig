@@ -20,6 +20,7 @@
 const std = @import("std");
 const com = @import("com.zig");
 const constants = @import("constants.zig");
+const events = @import("events.zig");
 const terminal_text = @import("text.zig");
 
 const POINT = extern struct {
@@ -224,11 +225,7 @@ pub const PaletteListProvider = struct {
         if (com.UiaClientsAreListening() == 0) return;
         const row = self.createRow(index) orelse return;
         defer _ = PaletteRowProvider.Release(&row.base);
-        const hr = com.UiaRaiseAutomationEvent(
-            &row.base,
-            constants.UIA_SelectionItem_ElementSelectedEventId,
-        );
-        if (hr < 0) std.log.warn("uia: palette row selection event failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        events.raiseSelectionItemSelected(&row.base);
     }
 
     fn fromBase(p: *com.IRawElementProviderSimple) *PaletteListProvider {
@@ -1538,12 +1535,8 @@ pub const SettingsSectionProvider = struct {
     }
 
     pub fn raiseSelected(self: *SettingsSectionProvider) void {
-        if (!self.available() or com.UiaClientsAreListening() == 0) return;
-        const hr = com.UiaRaiseAutomationEvent(
-            &self.base,
-            constants.UIA_SelectionItem_ElementSelectedEventId,
-        );
-        if (hr < 0) std.log.warn("uia: settings section selection event failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        if (!self.available()) return;
+        events.raiseSelectionItemSelected(&self.base);
     }
 
     fn fromBase(p: *com.IRawElementProviderSimple) *SettingsSectionProvider {
@@ -2136,7 +2129,11 @@ pub const TerminalProvider = struct {
         out.* = null;
         const self = fromText(self_text);
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.state.role == .terminal) return com.S_OK;
+        if (self.state.role == .terminal) {
+            out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0) orelse
+                return com.E_OUTOFMEMORY;
+            return com.S_OK;
+        }
 
         var snapshot = self.terminalSnapshot() catch |err| return switch (err) {
             error.ElementNotAvailable => com.UIA_E_ELEMENTNOTAVAILABLE,
@@ -2287,17 +2284,17 @@ pub const TerminalProvider = struct {
     /// immutable snapshot.
     pub fn raiseTextChanged(self: *TerminalProvider) void {
         if (self.detached.load(.acquire)) return;
-        @import("events.zig").raiseTextChanged(&self.base);
+        events.raiseTextChanged(&self.base);
     }
 
     pub fn raiseTextSelectionChanged(self: *TerminalProvider) void {
         if (self.detached.load(.acquire)) return;
-        @import("events.zig").raiseTextSelectionChanged(&self.base);
+        events.raiseTextSelectionChanged(&self.base);
     }
 
     pub fn raiseValueChanged(self: *TerminalProvider) void {
         if (self.detached.load(.acquire) or self.state.role != .edit) return;
-        @import("events.zig").raisePropertyChanged(
+        events.raisePropertyChanged(
             &self.base,
             constants.UIA_ValueValuePropertyId,
             com.VARIANT.empty(),
@@ -4016,7 +4013,14 @@ test "TerminalProvider reports no legacy selection for a PTY-owned caret" {
 
     var ranges: ?*com.SAFEARRAY = @ptrFromInt(0x10);
     try std.testing.expectEqual(com.S_OK, TerminalProvider.GetSelection(&p.text_iface, &ranges));
-    try std.testing.expect(ranges == null);
+    defer _ = com.SafeArrayDestroy(ranges);
+    try std.testing.expect(ranges != null);
+    var lower: i32 = -1;
+    var upper: i32 = 0;
+    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetLBound(ranges.?, 1, &lower));
+    try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
+    try std.testing.expectEqual(@as(i32, 0), lower);
+    try std.testing.expectEqual(@as(i32, -1), upper);
 }
 
 test "TerminalProvider visible ranges returns a SAFEARRAY" {
@@ -5187,6 +5191,13 @@ test "detached terminal provider rejects late host provider queries" {
     );
     try std.testing.expectEqual(@as(com.BOOL, 0), active);
     try std.testing.expect(caret == null);
+
+    var selection: ?*com.SAFEARRAY = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        TerminalProvider.GetSelection(&provider.text_iface, &selection),
+    );
+    try std.testing.expect(selection == null);
 }
 
 test "retained terminal range rejects queries after provider detach" {

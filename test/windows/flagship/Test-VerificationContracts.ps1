@@ -580,6 +580,7 @@ $newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1
 $undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
 $resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
+$win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
 $win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
@@ -593,9 +594,20 @@ $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
+$win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
 $win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
+$accessibilityHarnessTokens = $null
+$accessibilityHarnessErrors = $null
+$accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $accessibilityHarnessText,
+    [ref]$accessibilityHarnessTokens,
+    [ref]$accessibilityHarnessErrors
+)
+if ($accessibilityHarnessErrors.Count -ne 0) {
+    throw "Accessibility harness does not parse: $($accessibilityHarnessErrors[0].Message)"
+}
 $resolutionSourceAsts = foreach ($source in @(
     [pscustomobject]@{ Path = $interactiveWin11Lib; Text = $interactiveWin11LibText },
     [pscustomobject]@{ Path = $statefulWin11Lib; Text = $statefulWin11LibText }
@@ -1340,12 +1352,58 @@ if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''
     $accessibilityHarnessText -notmatch '\$containerSelection\.Current\.GetSelection\(\)') {
     throw 'Accessibility settings evidence must assert root identity, named roles, shared selection semantics, peer overlap, and client containment.'
 }
+if ($accessibilityHarnessText -match '(?m)^\s*\$matches\s*=' -or
+    $accessibilityHarnessText -notmatch '\$controlMatches = @\(\$interactiveSettingsControls \| Where-Object' -or
+    $accessibilityHarnessText -notmatch '\$controlMatches\.Count -ne 1') {
+    throw 'Accessibility settings evidence must not overwrite the automatic $matches variable.'
+}
+if ($win32SettingsText -notmatch 'const settings_header_control_count = 3;' -or
+    $win32SettingsText -notmatch 'const settings_clipped_control_count = settings_control_count - settings_header_control_count;' -or
+    $win32SettingsText -notmatch 'for \(0\.\.settings_clipped_control_count\) \|index\|' -or
+    $win32SettingsText -match 'for \(0\.\.27\) \|index\|') {
+    throw 'Settings viewport clipping must derive its content-control bound from the fixed header-control count.'
+}
 if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
     $accessibilityHarnessText -notmatch '\$script:palette = @\(\$root\.FindAll' -or
-    $accessibilityHarnessText -notmatch '\$hresult -eq 0x80010001 -or \$hresult -eq 0x8001010A' -or
-    $accessibilityHarnessText -notmatch '\$hresult -eq 0x80040201') {
-    throw 'Accessibility palette recovery must use script-scoped reacquisition and retry only known transient HRESULTs.'
+    $accessibilityHarnessText -notmatch 'function Get-AccessibilityExceptionHResults' -or
+    $accessibilityHarnessText -notmatch '\$results = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)' -or
+    $accessibilityHarnessText -notmatch '\$cursor = \$cursor\.InnerException' -or
+    $accessibilityHarnessText -notmatch 'function Test-AccessibilityTransientHResult' -or
+    $accessibilityHarnessText -notmatch 'foreach \(\$knownTransient in @\(\[int\]0x80010001, \[int\]0x8001010A, \[int\]0x80040201\)\)' -or
+    $accessibilityHarnessText -notmatch 'Test-AccessibilityTransientHResult -HResult 0' -or
+    $accessibilityHarnessText -notmatch '\$hresults = @\(Get-AccessibilityExceptionHResults -Exception \$_\.Exception\)' -or
+    $accessibilityHarnessText -notmatch 'Test-AccessibilityTransientHResult -HResult \$_' -or
+    $accessibilityHarnessText -notmatch '\$null -eq \$transientHresult' -or
+    $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80010001 -or \$transientHresult -eq 0x8001010A' -or
+    $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80040201' -or
+    $accessibilityHarnessText -match '0x80131501') {
+    throw 'Accessibility palette recovery must unwrap exception chains, use script-scoped reacquisition, and retry only known UIA transient HRESULTs.'
+}
+$accessibilityHresultFunctions = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @('Get-AccessibilityExceptionHResults', 'Test-AccessibilityTransientHResult')
+}, $true))
+if ($accessibilityHresultFunctions.Count -ne 2) {
+    throw 'Accessibility harness must define exactly one exception-chain helper and one transient-HRESULT classifier.'
+}
+foreach ($function in $accessibilityHresultFunctions) {
+    Invoke-Expression $function.Extent.Text
+}
+foreach ($knownHresult in @([int]0x80010001, [int]0x8001010A, [int]0x80040201)) {
+    $knownException = [Runtime.InteropServices.COMException]::new('known transient', $knownHresult)
+    $directChain = @(Get-AccessibilityExceptionHResults -Exception $knownException)
+    $wrappedChain = @(Get-AccessibilityExceptionHResults -Exception ([Exception]::new('wrapper', $knownException)))
+    if ($directChain.Count -ne 1 -or $directChain[0] -ne $knownHresult -or
+        $wrappedChain.Count -ne 2 -or $wrappedChain[-1] -ne $knownHresult -or
+        -not (Test-AccessibilityTransientHResult -HResult $directChain[0]) -or
+        -not (Test-AccessibilityTransientHResult -HResult $wrappedChain[-1])) {
+        throw ('Accessibility transient HRESULT semantics failed for 0x{0:X8}.' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes($knownHresult), 0))
+    }
+}
+if (Test-AccessibilityTransientHResult -HResult ([int]0x80131501)) {
+    throw 'Accessibility transient HRESULT classifier must reject the generic .NET wrapper result 0x80131501.'
 }
 if ($accessibilityHarnessText -notmatch 'ExpectedFocusedHwnd' -or
     $accessibilityHarnessText -notmatch 'sustained output command'' -ExpectedFocusedHwnd \$leftPane\.Hwnd' -or
@@ -1361,6 +1419,12 @@ if (-not $settingsSectionProviderContract.Success -or
     $settingsSectionProviderContract.Groups['body'].Value -notmatch 'container\.selected_index\.load\(\.acquire\)' -or
     $settingsSectionProviderContract.Groups['body'].Value -notmatch 'PostMessageW\(self\.hwnd, BM_CLICK') {
     throw 'Settings section UIA callbacks must use atomic selection state and asynchronously marshal clicks to the UI thread.'
+}
+if ($win32UiaWidgetsText -match 'UiaRaiseAutomationEvent\(' -or
+    ([regex]::Matches($win32UiaWidgetsText, 'events\.raiseSelectionItemSelected\(')).Count -ne 2 -or
+    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&row\.base\)' -or
+    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&self\.base\)') {
+    throw 'Widget selection-item events must route through the shared UIA event helper.'
 }
 $timeoutFunctions = @($resolutionSourceAsts[0].Ast.FindAll({
     param($node)

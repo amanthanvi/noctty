@@ -642,6 +642,10 @@ const settings_control_specs = [_]struct { role: SettingsControlRole, name: []co
     .{ .role = .button, .name = "Use disk" },
 };
 const settings_control_count = settings_control_specs.len;
+// Save and the two conflict-resolution buttons remain fixed in the header;
+// only the leading content controls are clipped to the scrolling viewport.
+const settings_header_control_count = 3;
+const settings_clipped_control_count = settings_control_count - settings_header_control_count;
 
 /// Error set returned from `AppHandle.saveAndReload`. The settings
 /// window surfaces these inline so users can re-try without losing
@@ -3873,7 +3877,7 @@ fn layoutChildren(self: *SettingsWindow) void {
 
     const control_viewport_top = pane_top + stack_top;
     const viewport_bottom = rect.bottom - side;
-    for (0..27) |index| {
+    for (0..settings_clipped_control_count) |index| {
         const fully_clipped = clipChildToViewport(hwnd, self.controlHwnd(index), control_viewport_top, viewport_bottom);
         if (self.control_uia_providers[index]) |provider| provider.setViewportFullyClipped(fully_clipped);
     }

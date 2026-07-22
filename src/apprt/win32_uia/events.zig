@@ -31,6 +31,15 @@ pub fn raiseSelectionInvalidated(provider: *com.IRawElementProviderSimple) void 
     logIfFailed("UIA_Selection_InvalidatedEventId", hr);
 }
 
+pub fn raiseSelectionItemSelected(provider: *com.IRawElementProviderSimple) void {
+    if (!clientsAreListening()) return;
+    const hr = com.UiaRaiseAutomationEvent(
+        provider,
+        constants.UIA_SelectionItem_ElementSelectedEventId,
+    );
+    logIfFailed("UIA_SelectionItem_ElementSelectedEventId", hr);
+}
+
 /// Notify text clients that a document's content changed. Callers must
 /// coalesce byte-level terminal updates before raising this event.
 pub fn raiseTextChanged(provider: *com.IRawElementProviderSimple) void {
