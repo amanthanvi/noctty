@@ -1547,6 +1547,19 @@ try {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette unavailable no-match notification' -Condition {
             try {
+                if ($null -eq $script:palette) {
+                    $script:palette = @($root.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        [System.Windows.Automation.PropertyCondition]::new(
+                            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                            [System.Windows.Automation.ControlType]::List
+                        )
+                    ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
+                    if ($null -eq $script:palette) {
+                        $script:paletteUnavailableLastTransient = 'Palette reacquisition returned no matching List element.'
+                        return $false
+                    }
+                }
                 $script:paletteUnavailableItems = @($script:palette.FindAll(
                     [System.Windows.Automation.TreeScope]::Children,
                     [System.Windows.Automation.PropertyCondition]::new(
@@ -1571,13 +1584,7 @@ try {
                     return $false
                 }
                 if ($transientHresult -eq 0x80040201) {
-                    $script:palette = @($root.FindAll(
-                        [System.Windows.Automation.TreeScope]::Descendants,
-                        [System.Windows.Automation.PropertyCondition]::new(
-                            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                            [System.Windows.Automation.ControlType]::List
-                        )
-                    ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
+                    $script:palette = $null
                     return $false
                 }
             }

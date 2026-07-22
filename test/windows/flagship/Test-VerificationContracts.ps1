@@ -1366,6 +1366,7 @@ if ($win32SettingsText -notmatch 'const settings_header_control_count = 3;' -or
 if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
     $accessibilityHarnessText -notmatch '\$script:palette = @\(\$root\.FindAll' -or
+    $accessibilityHarnessText -notmatch '(?s)if \(\$null -eq \$script:palette\) \{\s*\$script:palette = @\(\$root\.FindAll.*?if \(\$null -eq \$script:palette\) \{.*?return \$false.*?\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
     $accessibilityHarnessText -notmatch 'function Get-AccessibilityExceptionHResults' -or
     $accessibilityHarnessText -notmatch '\$results = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)' -or
     $accessibilityHarnessText -notmatch '\$cursor = \$cursor\.InnerException' -or
@@ -1377,6 +1378,7 @@ if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$null -eq \$transientHresult' -or
     $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80010001 -or \$transientHresult -eq 0x8001010A' -or
     $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80040201' -or
+    $accessibilityHarnessText -notmatch '(?s)if \(\$transientHresult -eq 0x80040201\) \{\s*\$script:palette = \$null\s*return \$false' -or
     $accessibilityHarnessText -match '0x80131501') {
     throw 'Accessibility palette recovery must unwrap exception chains, use script-scoped reacquisition, and retry only known UIA transient HRESULTs.'
 }
