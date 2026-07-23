@@ -2887,6 +2887,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)SignedCms\s+signedCms\s*=.*?signedCms\.CheckSignature\(true\)'; Description = 'self-signed verifier validates the embedded PKCS#7 signature without machine trust' },
     @{ Pattern = '(?s)dwProvFlags\s*=\s*WtdRevocationCheckNone\s*\|\s*WtdHashOnlyFlag\s*\|.*?WinVerifyTrust.*?==\s*0'; Description = 'self-signed verifier binds the signed digest to the actual PE bytes' },
     @{ Pattern = 'CryptQueryObject'; Description = 'self-signed verifier reads the embedded Authenticode message from the target file' },
+    @{ Pattern = '(?s)CertFreeCertificateContext\(IntPtr pCertContext\).*?finally\s*\{\s*if \(context != IntPtr\.Zero\) CertFreeCertificateContext\(context\);.*?CryptMsgClose\(message\).*?CertCloseStore\(certificateStore, 0\)'; Description = 'self-signed verifier releases every native context returned by CryptQueryObject' },
     @{ Pattern = '(?s)StructureToPtr.*?fileInfoMarshalled = true.*?DestroyStructure\(fileInfoPointer, typeof\(WintrustFileInfo\)\).*?FreeCoTaskMem\(fileInfoPointer\)'; Description = 'self-signed verifier releases nested path marshalling before its outer buffer' }
 )) {
     Assert-TextContract `
