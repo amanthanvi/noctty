@@ -112,7 +112,11 @@ draw_now_c: xev.Completion = .{},
 /// The timer used for cursor blinking
 cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
-cursor_c_cancel: xev.Completion = .{},
+/// The most recent request to restart the cursor blink interval. We keep
+/// this as logical state instead of resetting the xev completion: on IOCP a
+/// completed timer remains `.active` until its callback is popped, so reusing
+/// it from another callback can corrupt libxev's intrusive completion queue.
+cursor_blink_reset_at: ?std.time.Instant = null,
 
 /// The surface we're rendering to.
 surface: *apprt.Surface,
@@ -440,48 +444,25 @@ fn drainMailbox(self: *Thread) !bool {
                 self.syncDrawTimer();
 
                 if (!v) {
-                    // If we're not focused, then we stop the cursor blink
-                    if (self.cursor_c.state() == .active and
-                        self.cursor_c_cancel.state() == .dead)
-                    {
-                        self.cursor_h.cancel(
-                            &self.loop,
-                            &self.cursor_c,
-                            &self.cursor_c_cancel,
-                            void,
-                            null,
-                            cursorCancelCallback,
-                        );
-                    }
+                    // Let an already-queued one-shot timer expire and disarm
+                    // itself. Reusing its completion here is unsafe on IOCP.
+                    self.flags.cursor_blink_visible = true;
+                    self.cursor_blink_reset_at = null;
                 } else {
                     // If we're focused, we immediately show the cursor again
-                    // and then restart the timer.
-                    if (self.cursor_c.state() != .active) {
-                        self.flags.cursor_blink_visible = true;
-                        self.cursor_h.run(
-                            &self.loop,
-                            &self.cursor_c,
-                            cursorBlinkInterval(),
-                            Thread,
-                            self,
-                            cursorTimerCallback,
-                        );
-                    }
+                    // and restart the logical interval. If the completion is
+                    // active, its callback owns the eventual rearm.
+                    self.flags.cursor_blink_visible = true;
+                    self.cursor_blink_reset_at = std.time.Instant.now() catch null;
+                    self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
             },
 
             .reset_cursor_blink => {
                 self.flags.cursor_blink_visible = true;
-                if (self.cursor_c.state() == .active) {
-                    self.cursor_h.reset(
-                        &self.loop,
-                        &self.cursor_c,
-                        &self.cursor_c_cancel,
-                        cursorBlinkInterval(),
-                        Thread,
-                        self,
-                        cursorTimerCallback,
-                    );
+                if (self.flags.focused) {
+                    self.cursor_blink_reset_at = std.time.Instant.now() catch null;
+                    self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
             },
 
@@ -605,6 +586,22 @@ fn scheduleRenderFollowup(self: *Thread) void {
         Thread,
         self,
         renderCallback,
+    );
+}
+
+/// Arm the cursor's one-shot timer only when libxev no longer owns the
+/// completion. In particular, `.active` can mean "already completed but still
+/// queued for its callback" on IOCP, so callers must never reset or reinitialize
+/// an active cursor completion.
+fn armCursorTimerIfDead(self: *Thread, delay_ms: u64) void {
+    if (self.cursor_c.state() != .dead) return;
+    self.cursor_h.run(
+        &self.loop,
+        &self.cursor_c,
+        delay_ms,
+        Thread,
+        self,
+        cursorTimerCallback,
     );
 }
 
@@ -767,43 +764,35 @@ fn cursorTimerCallback(
         return .disarm;
     };
 
+    // An unfocused surface needs no recurring cursor timer. Focus regain will
+    // arm a new one once this callback has been popped and the completion is
+    // therefore safe to reuse.
+    if (!t.flags.focused) {
+        t.flags.cursor_blink_visible = true;
+        t.cursor_blink_reset_at = null;
+        return .disarm;
+    }
+
+    // Input or focus regain may have requested a fresh interval while this
+    // completion was already queued. Honor the remaining logical delay here,
+    // from the timer's own callback, rather than resetting the queued object.
+    if (t.cursor_blink_reset_at) |reset_at| {
+        const elapsed_ms = elapsed: {
+            const now = std.time.Instant.now() catch break :elapsed 0;
+            break :elapsed now.since(reset_at) / std.time.ns_per_ms;
+        };
+        const remaining_ms = cursorBlinkRemainingMs(cursorBlinkInterval(), elapsed_ms);
+        if (remaining_ms > 0) {
+            t.armCursorTimerIfDead(remaining_ms);
+            return .disarm;
+        }
+        t.cursor_blink_reset_at = null;
+    }
+
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
     t.wakeup.notify() catch {};
 
-    t.cursor_h.run(
-        &t.loop,
-        &t.cursor_c,
-        cursorBlinkInterval(),
-        Thread,
-        t,
-        cursorTimerCallback,
-    );
-    return .disarm;
-}
-
-fn cursorCancelCallback(
-    _: ?*void,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.CancelError!void,
-) xev.CallbackAction {
-    // This makes it easier to work across platforms where different platforms
-    // support different sets of errors, so we just unify it.
-    const CancelError = xev.Timer.CancelError || error{
-        Canceled,
-        NotFound,
-        Unexpected,
-    };
-
-    _ = r catch |err| switch (@as(CancelError, @errorCast(err))) {
-        error.Canceled => {}, // success
-        error.NotFound => {}, // completed before it could cancel
-        else => {
-            log.warn("error in cursor cancel callback err={}", .{err});
-            unreachable;
-        },
-    };
-
+    t.armCursorTimerIfDead(cursorBlinkInterval());
     return .disarm;
 }
 
@@ -838,6 +827,19 @@ fn cursorBlinkInterval() u64 {
     }
 
     return CURSOR_BLINK_INTERVAL;
+}
+
+fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ms: u64) u64 {
+    return interval_ms -| elapsed_ms;
+}
+
+test "cursor blink reset deadline saturates safely" {
+    const testing = std.testing;
+
+    try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 0));
+    try testing.expectEqual(@as(u64, 1), cursorBlinkRemainingMs(500, 499));
+    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 500));
+    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 750));
 }
 
 test "renderer follow-up check tracks visible terminal dirtiness" {

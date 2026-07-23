@@ -2657,6 +2657,14 @@ foreach ($paletteActionHarness in @($newTabHarness, $undoHarness, $resizeHarness
     }
 }
 Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'src\renderer\Thread.zig') `
+    -Pattern '(?s)fn armCursorTimerIfDead\(.*?cursor_c\.state\(\) != \.dead.*?cursor_h\.run\(' `
+    -Description 'cursor blink completion is rearmed only after libxev releases it'
+Assert-WorkflowContractAbsent `
+    -Path (Join-Path $repoRoot 'src\renderer\Thread.zig') `
+    -Pattern '(?i)cursor_c_cancel|cursor_h\.(?:cancel|reset)\s*\(' `
+    -Description 'cursor blink never cancels or resets an IOCP-owned completion'
+Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)if \(\`$attempt -eq 2 -and \`$env:RUNNER_TEMP\).*?zig-global-cache-pr-smoke-retry-\`$PID.*?zig-local-cache-pr-smoke-retry-\`$PID" `
     -Description 'interactive PR smoke moves the retry to fresh runner-temp Zig cache directories'
