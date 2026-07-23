@@ -13,6 +13,7 @@ pub const BOOL = windows.BOOL;
 pub const LRESULT = isize;
 pub const WPARAM = usize;
 pub const LPARAM = isize;
+pub const BSTR = ?[*:0]u16;
 
 pub const S_OK: HRESULT = 0;
 pub const S_FALSE: HRESULT = 1;
@@ -22,15 +23,21 @@ pub const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
 pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000E));
 pub const E_INVALIDARG: HRESULT = @bitCast(@as(u32, 0x80070057));
 pub const UIA_E_ELEMENTNOTAVAILABLE: HRESULT = @bitCast(@as(u32, 0x80040201));
+pub const UIA_E_ELEMENTNOTENABLED: HRESULT = @bitCast(@as(u32, 0x80040200));
+pub const UIA_E_INVALIDOPERATION: HRESULT = @bitCast(@as(u32, 0x80131509));
+pub const RPC_E_CANTCALLOUT_ININPUTSYNCCALL: HRESULT = @bitCast(@as(u32, 0x8001010D));
 
 // COM GUIDs (IID = interface ID).
 pub const IID_IUnknown = GUID.parse("{00000000-0000-0000-C000-000000000046}");
 pub const IID_IRawElementProviderSimple = GUID.parse("{D6DD68D1-86FD-4332-8666-9ABEDEA2D24C}");
 pub const IID_IRawElementProviderFragment = GUID.parse("{F7063DA8-8359-439C-9297-BBC5299A7D87}");
 pub const IID_IRawElementProviderFragmentRoot = GUID.parse("{620CE2A5-AB8F-40A9-86CB-DE3C75599B58}");
+pub const IID_ISelectionProvider = GUID.parse("{FB8B03AF-3BDF-48D4-BD36-1A65793BE168}");
 pub const IID_ISelectionItemProvider = GUID.parse("{2ACAD808-B2D4-452D-A407-91FF1AD167B2}");
+pub const IID_IInvokeProvider = GUID.parse("{54FCB24B-E18E-47A2-B4D3-ECCBE77599A2}");
 pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 pub const IID_ITextProvider = GUID.parse("{3589C92C-63F3-4367-99BB-ADA653B77CF2}");
+pub const IID_ITextProvider2 = GUID.parse("{0DC5E6ED-3E16-4BF1-8F9A-A979878BC195}");
 pub const IID_ITextRangeProvider = GUID.parse("{5347AD7B-C355-46F8-AFF5-909033582F63}");
 
 /// UIA object IDs passed as WM_GETOBJECT.lParam by the system / client.
@@ -39,6 +46,7 @@ pub const UiaRootObjectId: LPARAM = -25;
 
 /// ProviderOptions flags for IRawElementProviderSimple::get_ProviderOptions.
 pub const ProviderOptions_ServerSideProvider: i32 = 0x2;
+pub const ProviderOptions_UseComThreading: i32 = 0x20;
 
 /// VARIANT variant-type tags that we actually emit.
 pub const VT_EMPTY: u16 = 0;
@@ -51,23 +59,27 @@ pub const VT_UNKNOWN: u16 = 13;
 pub const VARIANT_TRUE: i16 = -1;
 pub const VARIANT_FALSE: i16 = 0;
 
+pub const VARIANT_RECORD = extern struct {
+    value: ?*anyopaque,
+    info: ?*anyopaque,
+};
+
 /// Simplified VARIANT covering only the fields we populate (I4, BSTR, BOOL).
-/// The true OAIDL VARIANT is a 16-byte-header (vt + 3 reserved words) +
-/// 8-byte payload union on 64-bit Windows. We mirror that layout.
-///
-/// We deliberately do NOT include a `raw` fill member — adding a second
-/// pointer-sized field would blow the union past the real ABI size and
-/// corrupt VARIANTs returned to the UIA host.
+/// The two-pointer record arm preserves the full OAIDL payload-union size even
+/// though winghostty never emits VT_RECORD. The i64 arm preserves the SDK's
+/// eight-byte VARIANT alignment on 32-bit Windows.
 pub const VARIANT = extern struct {
     vt: u16,
     wReserved1: u16 = 0,
     wReserved2: u16 = 0,
     wReserved3: u16 = 0,
     value: extern union {
+        i64_val: i64,
         i4: i32,
-        bstr: ?[*:0]u16,
+        bstr: BSTR,
         bool_val: i16,
         unknown: ?*IUnknown,
+        record: VARIANT_RECORD,
     },
 
     pub fn empty() VARIANT {
@@ -78,7 +90,7 @@ pub const VARIANT = extern struct {
         return .{ .vt = VT_I4, .value = .{ .i4 = v } };
     }
 
-    pub fn fromBstr(s: ?[*:0]u16) VARIANT {
+    pub fn fromBstr(s: BSTR) VARIANT {
         return .{ .vt = VT_BSTR, .value = .{ .bstr = s } };
     }
 
@@ -93,10 +105,10 @@ pub const VARIANT = extern struct {
         return .{ .vt = VT_UNKNOWN, .value = .{ .unknown = p } };
     }
 
-    // Compile-time assertion that our VARIANT matches the Windows ABI
-    // layout: 8-byte header + 8-byte payload on x64 = 16 bytes.
+    // Compile-time assertion that our VARIANT matches the Windows ABI:
+    // 8-byte header + a two-pointer payload union.
     comptime {
-        const expected_size: usize = if (@sizeOf(usize) == 8) 16 else 16;
+        const expected_size: usize = if (@sizeOf(usize) == 8) 24 else 16;
         if (@sizeOf(VARIANT) != expected_size) {
             @compileError(std.fmt.comptimePrint(
                 "VARIANT size mismatch: got {d}, expected {d}",
@@ -181,7 +193,20 @@ pub const IRawElementProviderFragmentRoot = extern struct {
     vtbl: *const IRawElementProviderFragmentRootVtbl,
 };
 
-// ── ISelectionItemProvider ─────────────────────────────────────────────
+// ── ISelectionProvider / ISelectionItemProvider ────────────────────────
+
+pub const ISelectionProviderVtbl = extern struct {
+    QueryInterface: *const fn (*ISelectionProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ISelectionProvider) callconv(.winapi) u32,
+    Release: *const fn (*ISelectionProvider) callconv(.winapi) u32,
+    GetSelection: *const fn (*ISelectionProvider, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    get_CanSelectMultiple: *const fn (*ISelectionProvider, *BOOL) callconv(.winapi) HRESULT,
+    get_IsSelectionRequired: *const fn (*ISelectionProvider, *BOOL) callconv(.winapi) HRESULT,
+};
+
+pub const ISelectionProvider = extern struct {
+    vtbl: *const ISelectionProviderVtbl,
+};
 
 pub const ISelectionItemProviderVtbl = extern struct {
     QueryInterface: *const fn (*ISelectionItemProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -196,6 +221,19 @@ pub const ISelectionItemProviderVtbl = extern struct {
 
 pub const ISelectionItemProvider = extern struct {
     vtbl: *const ISelectionItemProviderVtbl,
+};
+
+// ── IInvokeProvider ────────────────────────────────────────────────────
+
+pub const IInvokeProviderVtbl = extern struct {
+    QueryInterface: *const fn (*IInvokeProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IInvokeProvider) callconv(.winapi) u32,
+    Release: *const fn (*IInvokeProvider) callconv(.winapi) u32,
+    Invoke: *const fn (*IInvokeProvider) callconv(.winapi) HRESULT,
+};
+
+pub const IInvokeProvider = extern struct {
+    vtbl: *const IInvokeProviderVtbl,
 };
 
 // ── IValueProvider ─────────────────────────────────────────────────────
@@ -259,6 +297,29 @@ pub const ITextProvider = extern struct {
     vtbl: *const ITextProviderVtbl,
 };
 
+pub const ITextProvider2Vtbl = extern struct {
+    // IUnknown
+    QueryInterface: *const fn (*ITextProvider2, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ITextProvider2) callconv(.winapi) u32,
+    Release: *const fn (*ITextProvider2) callconv(.winapi) u32,
+
+    // ITextProvider
+    GetSelection: *const fn (*ITextProvider2, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    GetVisibleRanges: *const fn (*ITextProvider2, *?*SAFEARRAY) callconv(.winapi) HRESULT,
+    RangeFromChild: *const fn (*ITextProvider2, ?*IRawElementProviderSimple, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    RangeFromPoint: *const fn (*ITextProvider2, UiaPoint, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    get_DocumentRange: *const fn (*ITextProvider2, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    get_SupportedTextSelection: *const fn (*ITextProvider2, *i32) callconv(.winapi) HRESULT,
+
+    // ITextProvider2
+    RangeFromAnnotation: *const fn (*ITextProvider2, ?*IRawElementProviderSimple, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    GetCaretRange: *const fn (*ITextProvider2, *BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+};
+
+pub const ITextProvider2 = extern struct {
+    vtbl: *const ITextProvider2Vtbl,
+};
+
 pub const ITextRangeProviderVtbl = extern struct {
     // IUnknown
     QueryInterface: *const fn (*ITextRangeProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -271,7 +332,7 @@ pub const ITextRangeProviderVtbl = extern struct {
     CompareEndpoints: *const fn (*ITextRangeProvider, i32, ?*ITextRangeProvider, i32, *i32) callconv(.winapi) HRESULT,
     ExpandToEnclosingUnit: *const fn (*ITextRangeProvider, i32) callconv(.winapi) HRESULT,
     FindAttribute: *const fn (*ITextRangeProvider, i32, VARIANT, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
-    FindText: *const fn (*ITextRangeProvider, ?[*:0]const u16, BOOL, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
+    FindText: *const fn (*ITextRangeProvider, ?[*]const u16, BOOL, BOOL, *?*ITextRangeProvider) callconv(.winapi) HRESULT,
     GetAttributeValue: *const fn (*ITextRangeProvider, i32, *VARIANT) callconv(.winapi) HRESULT,
     GetBoundingRectangles: *const fn (*ITextRangeProvider, *?*SAFEARRAY) callconv(.winapi) HRESULT,
     GetEnclosingElement: *const fn (*ITextRangeProvider, *?*IRawElementProviderSimple) callconv(.winapi) HRESULT,
@@ -300,6 +361,11 @@ pub const StructureChangeType_ChildrenInvalidated: i32 = 2;
 pub const StructureChangeType_ChildrenBulkAdded: i32 = 3;
 pub const StructureChangeType_ChildrenBulkRemoved: i32 = 4;
 pub const StructureChangeType_ChildrenReordered: i32 = 5;
+
+pub const NotificationKind_ActionCompleted: i32 = 2;
+pub const NotificationKind_ActionAborted: i32 = 3;
+pub const NotificationKind_Other: i32 = 4;
+pub const NotificationProcessing_MostRecent: i32 = 3;
 
 // ── UIA externs ─────────────────────────────────────────────────────────
 
@@ -339,7 +405,8 @@ pub extern "uiautomationcore" fn UiaRaiseStructureChangedEvent(
 ) callconv(.winapi) HRESULT;
 
 /// Raise a property-changed event (value toggles, name updates, etc.).
-/// The VARIANTs are passed by value; uiautomationcore owns no copies.
+/// The VARIANTs are passed by value; callers retain ownership of BSTR storage
+/// and may free it after the synchronous raise returns.
 pub extern "uiautomationcore" fn UiaRaiseAutomationPropertyChangedEvent(
     provider: *IRawElementProviderSimple,
     propertyId: i32,
@@ -347,17 +414,32 @@ pub extern "uiautomationcore" fn UiaRaiseAutomationPropertyChangedEvent(
     newValue: VARIANT,
 ) callconv(.winapi) HRESULT;
 
+pub extern "uiautomationcore" fn UiaRaiseNotificationEvent(
+    provider: *IRawElementProviderSimple,
+    notification_kind: i32,
+    notification_processing: i32,
+    display_string: BSTR,
+    activity_id: BSTR,
+) callconv(.winapi) HRESULT;
+
 /// Report whether a UIA client is currently listening for a given event
 /// so we can skip the raise entirely when nobody cares.
 pub extern "uiautomationcore" fn UiaClientsAreListening() callconv(.winapi) BOOL;
+pub extern "uiautomationcore" fn UiaDisconnectProvider(provider: *IRawElementProviderSimple) callconv(.winapi) HRESULT;
+pub extern "uiautomationcore" fn UiaDisconnectAllProviders() callconv(.winapi) HRESULT;
 pub extern "uiautomationcore" fn UiaGetReservedNotSupportedValue(value: *?*IUnknown) callconv(.winapi) HRESULT;
 
 /// BSTR alloc / free helpers for the string properties (Name, LocalizedControlType).
-pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) ?[*:0]u16;
-pub extern "oleaut32" fn SysFreeString(bstr: ?[*:0]u16) callconv(.winapi) void;
-pub extern "oleaut32" fn SysStringLen(bstr: ?[*:0]const u16) callconv(.winapi) u32;
+pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) BSTR;
+pub extern "oleaut32" fn SysAllocStringLen(psz: ?[*]const u16, len: u32) callconv(.winapi) BSTR;
+pub extern "oleaut32" fn SysFreeString(bstr: BSTR) callconv(.winapi) void;
+pub extern "oleaut32" fn SysStringLen(bstr: ?[*]const u16) callconv(.winapi) u32;
+pub extern "oleaut32" fn VariantClear(pvarg: *VARIANT) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayCreateVector(vt: u16, lLbound: i32, cElements: u32) callconv(.winapi) ?*SAFEARRAY;
 pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: ?*anyopaque) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetElement(psa: *SAFEARRAY, rgIndices: *i32, pv: *anyopaque) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetLBound(psa: *SAFEARRAY, nDim: u32, plLbound: *i32) callconv(.winapi) HRESULT;
+pub extern "oleaut32" fn SafeArrayGetUBound(psa: *SAFEARRAY, nDim: u32, plUbound: *i32) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayDestroy(psa: ?*SAFEARRAY) callconv(.winapi) HRESULT;
 
 /// Live HWND text query. Used by the UIA Name provider so screen
@@ -368,6 +450,10 @@ pub extern "user32" fn GetWindowTextW(
     lpString: [*]u16,
     nMaxCount: i32,
 ) callconv(.winapi) i32;
+pub extern "user32" fn SetWindowTextW(
+    hWnd: HWND,
+    lpString: [*:0]const u16,
+) callconv(.winapi) BOOL;
 
 test "HRESULT error constants" {
     try std.testing.expect(E_NOTIMPL != S_OK);
@@ -381,6 +467,21 @@ test "VARIANT empty has zero vt" {
     try std.testing.expectEqual(@as(u16, VT_EMPTY), v.vt);
 }
 
+test "VARIANT matches Windows ABI layout" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(VARIANT, "vt"));
+    try std.testing.expectEqual(@as(usize, 2), @offsetOf(VARIANT, "wReserved1"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(VARIANT, "wReserved2"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(VARIANT, "wReserved3"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(VARIANT, "value"));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(VARIANT));
+    try std.testing.expectEqual(@sizeOf(usize) * 2, @sizeOf(VARIANT_RECORD));
+    try std.testing.expectEqual(@sizeOf(usize), @offsetOf(VARIANT_RECORD, "info"));
+    try std.testing.expectEqual(
+        if (@sizeOf(usize) == 8) @as(usize, 24) else @as(usize, 16),
+        @sizeOf(VARIANT),
+    );
+}
+
 test "VARIANT fromI4 stores integer" {
     const v = VARIANT.fromI4(42);
     try std.testing.expectEqual(@as(u16, VT_I4), v.vt);
@@ -392,4 +493,13 @@ test "VARIANT fromBstr stores pointer" {
     const v = VARIANT.fromBstr(@constCast(sample));
     try std.testing.expectEqual(@as(u16, VT_BSTR), v.vt);
     try std.testing.expectEqual(@as(?[*:0]u16, @constCast(sample)), v.value.bstr);
+}
+
+test "VariantClear releases BSTR storage and resets the tag" {
+    const bstr = SysAllocString(std.unicode.utf8ToUtf16LeStringLiteral("owned")) orelse
+        return error.OutOfMemory;
+    var value = VARIANT.fromBstr(bstr);
+
+    try std.testing.expectEqual(S_OK, VariantClear(&value));
+    try std.testing.expectEqual(@as(u16, VT_EMPTY), value.vt);
 }

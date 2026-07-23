@@ -135,7 +135,7 @@ jobs:
       github.ref == 'refs/heads/main' ||
       (github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11)
     runs-on: [self-hosted, Windows, X64, winghostty-interactive]
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
@@ -171,7 +171,7 @@ jobs:
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+            ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

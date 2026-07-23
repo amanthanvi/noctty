@@ -94,10 +94,11 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows UI Automation (accessibility)
 
-UI Automation is **partial, not complete**. Terminal text is exposed
-read-only through `ITextProvider` / `ITextRangeProvider`, and the host and
-command palette expose providers, but broader per-widget coverage and
-complete screen-reader validation remain planned.
+UI Automation is **partial, not complete**. Terminal text is exposed read-only
+through TextPattern/TextPattern2 with bounded ranges, visible geometry, and an
+active caret anchor. The host and command palette expose focus and selection
+semantics, while standard settings controls use native HWND providers. Broader
+per-widget coverage and the full Narrator/NVDA release matrix remain required.
 
 ### Win32 runtime extraction
 

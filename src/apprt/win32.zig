@@ -528,6 +528,7 @@ const SC_MINIMIZE: WPARAM = 0xF020;
 const SC_MAXIMIZE: WPARAM = 0xF030;
 const SC_RESTORE: WPARAM = 0xF120;
 const WM_PAINT = 0x000F;
+const WM_QUIT = 0x0012;
 const WM_TIMER = 0x0113;
 const WM_CTLCOLOREDIT = 0x0133;
 const WM_CTLCOLORBTN = 0x0135;
@@ -554,7 +555,20 @@ const WM_WINHOSTTY_WAKE = WM_APP + 1;
 const WM_WINHOSTTY_UPDATE = WM_APP + 2;
 const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
 const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
+const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
+const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
+const SMTO_BLOCK: UINT = 0x0001;
+const SMTO_ABORTIFHUNG: UINT = 0x0002;
+const terminal_uia_cold_query_timeout_ms: UINT = 500;
+
+const DeferredUiaDisconnect = struct {
+    ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+    retries: u8 = 0,
+};
 const PM_NOREMOVE: UINT = 0x0000;
+const PM_REMOVE: UINT = 0x0001;
 const WS_OVERLAPPED = 0x00000000;
 const WS_CHILD = 0x40000000;
 const WS_CLIPCHILDREN = 0x02000000;
@@ -624,7 +638,11 @@ const SS_CENTERIMAGE = 0x00000200;
 const SS_OWNERDRAW = 0x0000000D;
 const ES_AUTOHSCROLL = 0x0080;
 const BN_CLICKED = 0;
+const BN_SETFOCUS = 6;
+const BN_KILLFOCUS = 7;
 const EM_SETSEL = 0x00B1;
+const EM_GETSEL = 0x00B0;
+const EM_CHARFROMPOS = 0x00D7;
 const EM_SETMARGINS = 0x00D3;
 const EM_SETCUEBANNER = 0x1501;
 const EC_LEFTMARGIN: usize = 0x0001;
@@ -677,10 +695,44 @@ const PaletteCatalog = win32_palette.catalog.Catalog;
 const PaletteItem = win32_palette.catalog.Item;
 const PalettePayload = win32_palette.catalog.Payload;
 const PaletteRanked = win32_palette.catalog.Ranked;
+const PaletteStableId = @TypeOf((@as(PaletteItem, undefined)).id);
 const palette_catalog_capacity: usize = 768;
 const palette_action_capacity: usize = 384;
 const palette_catalog_label_capacity: usize = 768;
 const palette_catalog_label_bytes: usize = 128;
+const PalettePresentation = struct {
+    match_count: usize = 0,
+    title: ?[]const u8 = null,
+    subtitle: ?[]const u8 = null,
+    available: bool = false,
+};
+const PaletteListTransition = struct {
+    relayout: bool,
+    exposes_content: bool,
+    announce_no_matches: bool,
+};
+const PaletteNoMatchNotificationTarget = enum { list, edit };
+const PaletteViewport = struct {
+    selected: usize,
+    scroll: usize,
+};
+const PaletteRowColumns = struct {
+    title: RECT,
+    subtitle: RECT,
+    shortcut: RECT,
+};
+const PaletteCatalogConfigSource = enum {
+    /// Catalog strings borrow the current `app.config`.
+    live,
+    /// Catalog strings borrow `palette_theme_preview_original`.
+    preview_original,
+    /// Catalog strings borrow `palette_catalog_retained_config`.
+    retained,
+};
+const PaletteCompletion = struct {
+    text: []const u8,
+    id: PaletteStableId,
+};
 const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
@@ -719,6 +771,7 @@ const SCROLLBAR_TIMER_ID: UINT_PTR = 0x77684703; // "whgT3" in 32-bit hex
 const SCROLLBAR_TIMER_INTERVAL_MS: UINT = 16;
 const RESIZE_SETTLE_TIMER_ID: UINT_PTR = 0x77684704; // "whgT4" in 32-bit hex
 const RESIZE_SETTLE_TIMER_INTERVAL_MS: UINT = 16;
+const TERMINAL_UIA_TIMER_ID: UINT_PTR = 0x77684705; // "whgT5" in 32-bit hex
 const RESIZE_SETTLE_REPAINT_TICKS: u8 = 12;
 const FW_NORMAL: i32 = 400;
 const DEFAULT_CHARSET: u8 = 1;
@@ -1074,12 +1127,22 @@ extern "user32" fn SetCursor(hCursor: HCURSOR) callconv(.winapi) HCURSOR;
 extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
+extern "user32" fn GetCaretPos(lpPoint: *POINT) callconv(.winapi) BOOL;
 extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) callconv(.winapi) ?*anyopaque;
 extern "user32" fn SetLayeredWindowAttributes(hwnd: HWND, crKey: u32, bAlpha: BYTE, dwFlags: u32) callconv(.winapi) BOOL;
 extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) callconv(.winapi) LONG_PTR;
 extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?*anyopaque, X: i32, Y: i32, cx: i32, cy: i32, uFlags: UINT) callconv(.winapi) BOOL;
 extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+extern "user32" fn SendMessageTimeoutW(
+    hWnd: HWND,
+    Msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    fuFlags: UINT,
+    uTimeout: UINT,
+    lpdwResult: *usize,
+) callconv(.winapi) LRESULT;
 extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: LPCWSTR) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
 extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
@@ -1100,14 +1163,15 @@ extern "user32" fn ToUnicode(
     wFlags: UINT,
 ) callconv(.winapi) i32;
 extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) BOOL;
+extern "user32" fn IsDialogMessageW(hDlg: HWND, lpMsg: *MSG) callconv(.winapi) BOOL;
 extern "user32" fn UnregisterHotKey(hWnd: ?HWND, id: i32) callconv(.winapi) BOOL;
 extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.winapi) BOOL;
 extern "user32" fn KillTimer(hWnd: ?HWND, uIDEvent: UINT_PTR) callconv(.winapi) BOOL;
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.winapi) HINSTANCE;
 /// Main-thread COM apartment for in-process STA clients (settings path
-/// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` and
-/// `RPC_E_CHANGED_MODE` are success values per the MS contract — they
-/// mean the thread already had an apartment in the desired mode.
+/// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means
+/// the desired STA already exists. `RPC_E_CHANGED_MODE` means the thread
+/// is already in a different apartment and is not safe for STA-only work.
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const RPC_E_CHANGED_MODE: i32 = @bitCast(@as(u32, 0x80010106));
 extern "ole32" fn CoInitializeEx(pvReserved: ?*anyopaque, dwCoInit: u32) callconv(.winapi) i32;
@@ -2369,6 +2433,49 @@ fn settingsFileSize(size: u64) win32_settings.SaveError!usize {
     return @intCast(size);
 }
 
+const SettingsConfigKey = @import("../config/key.zig").Key;
+const SettingsEditedKeySet = std.StaticBitSet(std.enums.values(SettingsConfigKey).len);
+const settings_explicit_optional_edit_keys = .{
+    SettingsConfigKey.theme,
+    SettingsConfigKey.command,
+    SettingsConfigKey.@"auto-update",
+    SettingsConfigKey.@"auto-update-channel",
+};
+
+fn settingsUserEditedKeys(
+    original: *const configpkg.Config,
+    pending: *const configpkg.Config,
+) SettingsEditedKeySet {
+    var edited: SettingsEditedKeySet = .initEmpty();
+    inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
+        if (field.name[0] == '_') continue;
+        switch (@typeInfo(field.type)) {
+            .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
+                const key = @field(SettingsConfigKey, field.name);
+                if (original.changed(pending, key)) edited.set(@intFromEnum(key));
+            },
+            else => {},
+        }
+    }
+    inline for (settings_explicit_optional_edit_keys) |key| {
+        if (original.changed(pending, key)) edited.set(@intFromEnum(key));
+    }
+    return edited;
+}
+
+fn settingsEditedValueMasked(
+    pending: *const configpkg.Config,
+    reloaded: *const configpkg.Config,
+    comptime key: SettingsConfigKey,
+) bool {
+    if (key == SettingsConfigKey.@"auto-update-channel") {
+        const expected = pending.@"auto-update-channel" orelse build_config.release_channel;
+        const actual = reloaded.@"auto-update-channel" orelse build_config.release_channel;
+        return expected != actual;
+    }
+    return pending.changed(reloaded, comptime key);
+}
+
 test "win32 render trace classifies gaps by start time" {
     try std.testing.expect(!RenderTrace.gapIsSustained(1250, 578));
     try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
@@ -2559,6 +2666,9 @@ pub const App = struct {
     /// Singleton settings window. Lazily created by the `open_config`
     /// action; `App.terminate` destroys the HWND if still alive.
     settings_window: win32_settings.SettingsWindow = undefined,
+    /// Stable core surface id that owned focus when Settings opened. Settings
+    /// itself clears terminal focus flags, so close must not guess host zero.
+    settings_restore_surface_id: ?u64 = null,
     /// Whether `CoInitializeEx` actually took responsibility for the
     /// apartment on this thread. `CoUninitialize` only pairs with a
     /// successful init (`S_OK` / `S_FALSE`) — `RPC_E_CHANGED_MODE`
@@ -2733,6 +2843,7 @@ pub const App = struct {
             .ctx = @ptrCast(self),
             .alloc = core_app.alloc,
             .hinstance = self.hinstance,
+            .ownerWindow = &settingsOwnerWindowThunk,
             .chromeBg = &settingsChromeBgThunk,
             .textPrimary = &settingsTextPrimaryThunk,
             .openInEditor = &settingsOpenInEditorThunk,
@@ -2742,6 +2853,8 @@ pub const App = struct {
             .previewField = &settingsPreviewFieldThunk,
             .notifyConflict = &settingsNotifyConflictThunk,
             .notifySuccess = &settingsNotifySuccessThunk,
+            .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
+            .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
             .onClosed = &settingsOnClosedThunk,
         });
         self.link_hover_tracker = win32_link_preview.HoverTracker.init();
@@ -2767,8 +2880,7 @@ pub const App = struct {
     /// OLE drag-drop). Safe to call multiple times —
     /// `S_FALSE` means "already initialised in this mode", and
     /// `RPC_E_CHANGED_MODE` means "already initialised in a different
-    /// mode" (a library probably did it first; still usable for STA
-    /// interop paths that don't care about the apartment type).
+    /// mode" and leaves STA-only consumers disabled.
     fn initComApartment(self: *App) void {
         const hr = CoInitializeEx(null, COINIT_APARTMENTTHREADED);
         switch (hr) {
@@ -2801,11 +2913,13 @@ pub const App = struct {
         }
 
         self.running = true;
-        @atomicStore(DWORD, &self.ui_thread_id, GetCurrentThreadId(), .release);
+        const ui_thread_id = GetCurrentThreadId();
+        @atomicStore(DWORD, &self.ui_thread_id, ui_thread_id, .release);
         self.ensureMessageQueue();
         defer {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
+            drainDeferredUiaDisconnects(ui_thread_id);
             @atomicStore(DWORD, &self.ui_thread_id, 0, .release);
             self.running = false;
         }
@@ -2879,6 +2993,16 @@ pub const App = struct {
                 continue;
             }
 
+            if (msg.message == WM_WINHOSTTY_UIA_DISCONNECT) {
+                if (msg.lParam == 0) {
+                    log.warn("win32 UIA deferred disconnect message had no context", .{});
+                    continue;
+                }
+                const pending: *DeferredUiaDisconnect = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+                processDeferredUiaDisconnect(self.ui_thread_id, pending);
+                continue;
+            }
+
             if (msg.message == WM_TIMER) {
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
@@ -2902,6 +3026,17 @@ pub const App = struct {
             if (msg.message == WM_HOTKEY) {
                 self.handleGlobalHotkey(@intCast(msg.wParam));
                 continue;
+            }
+
+            // The settings surface is a modeless native dialog. Route its
+            // keyboard messages through the system dialog manager so Tab,
+            // Shift+Tab, arrow-key radio navigation, and default buttons use
+            // standard Win32 accessibility semantics.
+            if (self.settings_window.hwnd) |settings_hwnd| {
+                if (IsDialogMessageW(settings_hwnd, &msg) != 0) {
+                    try self.core_app.tick(self);
+                    continue;
+                }
             }
 
             _ = TranslateMessage(&msg);
@@ -2957,6 +3092,10 @@ pub const App = struct {
             slot.* = null;
         }
         self.settings_window.deinit();
+        const uia_disconnect_hr = win32_uia.disconnectAllProviders();
+        if (uia_disconnect_hr != 0) {
+            log.warn("win32 UIA disconnect-all failed hr=0x{x}", .{@as(u32, @bitCast(uia_disconnect_hr))});
+        }
         if (self.winrt_toast) |*toast| {
             toast.deinit();
             self.winrt_toast = null;
@@ -4370,6 +4509,16 @@ pub const App = struct {
                 switch (target) {
                     .app => {
                         const config = try value.config.clone(self.core_app.alloc);
+                        // Palette theme preview owns a reversible baseline
+                        // around the app-global config. An external/settings
+                        // config change supersedes that transaction: dismiss
+                        // the palette first so it reverts and resets every
+                        // borrowed catalog before the incoming config replaces
+                        // the baseline. A later Escape can never resurrect the
+                        // stale pre-reload config.
+                        for (self.hosts.items) |host| {
+                            if (host.overlay_mode == .command_palette) host.hideOverlay();
+                        }
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
@@ -4633,11 +4782,13 @@ pub const App = struct {
                     .app => blk: {
                         for (self.windows.items) |surface| {
                             try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                            surface.refreshTerminalUiaText();
                         }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
                         try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
+                        surface.refreshTerminalUiaText();
                         break :blk true;
                     } else false,
                 };
@@ -5359,6 +5510,7 @@ pub const App = struct {
             }
         }
         for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
+        self.settings_window.themeChanged();
     }
 
     fn applyLauncherQuickSlotPreferences(self: *App, profiles: []windows_shell.Profile) void {
@@ -6965,65 +7117,6 @@ pub const App = struct {
         );
         defer alloc.free(tmp_path);
 
-        // Build a file-only baseline: `Config.default()` merged with
-        // `loadDefaultFiles()` but WITHOUT `loadCliArgs()` or
-        // `loadRecursiveFiles()`. This avoids three previously
-        // shipping-day bugs:
-        //   1. `-e`, `--working-directory`, `--class` and similar CLI
-        //      overrides from the current process launch would bake
-        //      into `ghostty.conf` the first time the user saved
-        //      (`Config.load()` already applied them to `pending`).
-        //   2. `config-file` includes would get flattened into the
-        //      primary file, leaving duplicate directives that fight
-        //      each other on the next reload.
-        //   3. Future new CLI-only flags would silently persist.
-        //
-        // Then copy every field the GUI user actually edited from
-        // `pending` into `file_cfg`, and use that as the source for
-        // patching the raw target file. The raw-text patcher below
-        // preserves comments, formatting, relative include paths, and
-        // unrelated fields.
-        //
-        // Field types we currently support as GUI edits are all value
-        // types (bool, int, float, enum, packed struct, tagged union
-        // with no pointer variants). Assigning via `@field` is a
-        // shallow bit-copy and is safe without arena-transfer. Any
-        // GUI-exposed pointer field (string / slice) needs an explicit
-        // string-dupe branch here.
-        var file_cfg = configpkg.Config.default(alloc) catch return error.SerializeFailed;
-        defer file_cfg.deinit();
-        // Seed the baseline from the ACTUAL target file, not the
-        // per-user default search path. When launched with
-        // `--config-file custom.conf`, `target_path` resolves to
-        // `custom.conf` (see `cliConfigFileOverride`), and we must
-        // load THAT file — loading `loadDefaultFiles` would write
-        // back a merge of `ghostty.conf` defaults + GUI edits into
-        // the custom file, dropping every key that existed only in
-        // the custom file.
-        //
-        // `loadFile` accepts an absolute path and merges its
-        // contents on top of `file_cfg` (already `default()`), so
-        // we get: defaults + target-file overrides, then the GUI
-        // edits patched on top below. If the target file doesn't
-        // exist yet (first-save case), `loadFile` returns early
-        // with a warn; `file_cfg` stays at defaults, which is the
-        // intended behaviour.
-        blk: {
-            const path_abs = std.fs.realpathAlloc(alloc, target_path) catch |err| {
-                if (err == error.FileNotFound) break :blk;
-                // Other real-path errors (permission denied, not-a-
-                // dir) leave us with the default-only baseline; log
-                // and proceed rather than erroring the save.
-                std.log.warn("settings: couldn't realpath target_path err={}; using default baseline", .{err});
-                break :blk;
-            };
-            defer alloc.free(path_abs);
-            file_cfg.loadFile(alloc, path_abs) catch |err| {
-                std.log.warn("settings: loadFile on target failed err={}; using default baseline", .{err});
-            };
-        }
-
-        const ConfigKey = @import("../config/key.zig").Key;
         // Diff pending against `original` (the snapshot from when
         // the settings window opened), NOT against the live
         // `self.config`. Otherwise a concurrent `reload_config` or
@@ -7038,27 +7131,7 @@ pub const App = struct {
         // default in Settings would NOT stick — FileFormatter's
         // default-drop would strip the reset line, and the include
         // would re-apply its non-default value on next reload.
-        var user_edited: std.StaticBitSet(std.enums.values(ConfigKey).len) = .initEmpty();
-        var any_edit = false;
-        inline for (@typeInfo(configpkg.Config).@"struct".fields) |field| {
-            if (field.name[0] == '_') continue;
-            switch (@typeInfo(field.type)) {
-                .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(ConfigKey, field.name);
-                    if (original.changed(pending, key)) {
-                        @field(file_cfg, field.name) = @field(pending, field.name);
-                        user_edited.set(@intFromEnum(key));
-                        any_edit = true;
-                    }
-                },
-                else => {}, // skip pointer / optional-pointer / array fields
-            }
-        }
-        const theme_key = ConfigKey.theme;
-        if (original.changed(pending, theme_key)) {
-            user_edited.set(@intFromEnum(theme_key));
-            any_edit = true;
-        }
+        const user_edited = settingsUserEditedKeys(original, pending);
         // No-op short-circuit: if the user pressed Save without
         // changing anything, don't touch the filesystem. On a
         // first-run machine with no existing config file, the write
@@ -7066,7 +7139,7 @@ pub const App = struct {
         // `error.FileIsEmpty` warnings on every subsequent load.
         // On an existing file, skipping also avoids an unnecessary
         // mtime bump.
-        if (!any_edit) return;
+        if (user_edited.count() == 0) return;
 
         // SURGICAL SAVE: read the raw target file text and patch
         // only GUI-edited field lines in place. This preserves
@@ -7081,12 +7154,9 @@ pub const App = struct {
         // serialised `key = value` emission. If no matching line
         // exists, append to the file end.
         //
-        // For fields NOT on disk but in `file_cfg` non-default
-        // (first-save case with no prior file content), emit them
-        // after the preserved content. `file_cfg` retains this
-        // information because `loadFile` already applied the
-        // target file; subtracting the raw-text lines from what
-        // `file_cfg` holds tells us what needs appending.
+        // Edited fields that are not already present are appended by
+        // `patchOrAppendEdits` below. No parsed-file baseline is needed:
+        // unedited source lines remain byte-for-byte intact.
         const raw_before: []u8 = blk: {
             const f = std.fs.cwd().openFile(target_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => break :blk try alloc.dupe(u8, ""),
@@ -7219,7 +7289,7 @@ pub const App = struct {
             if (field.name[0] == '_') continue;
             switch (@typeInfo(field.type)) {
                 .bool, .int, .float, .@"enum", .@"struct", .@"union" => {
-                    const key = @field(ConfigKey, field.name);
+                    const key = @field(SettingsConfigKey, field.name);
                     if (user_edited.isSet(@intFromEnum(key))) {
                         if (pending.changed(&reloaded, key)) {
                             std.log.warn(
@@ -7233,9 +7303,14 @@ pub const App = struct {
                 else => {},
             }
         }
-        if (user_edited.isSet(@intFromEnum(theme_key)) and pending.changed(&reloaded, theme_key)) {
-            std.log.warn("settings save: field 'theme' was saved but is masked by a later config-file layer", .{});
-            any_masked = true;
+        inline for (settings_explicit_optional_edit_keys) |key| {
+            if (user_edited.isSet(@intFromEnum(key)) and settingsEditedValueMasked(pending, &reloaded, key)) {
+                std.log.warn(
+                    "settings save: field '{s}' was saved but is masked by a later config-file layer",
+                    .{@tagName(key)},
+                );
+                any_masked = true;
+            }
         }
 
         self.core_app.updateConfig(self, &reloaded) catch return error.ReloadFailed;
@@ -8095,6 +8170,8 @@ const Host = struct {
     overlay_label_hwnd: ?HWND = null,
     overlay_edit_hwnd: ?HWND = null,
     overlay_edit_prev_proc: ?*const anyopaque = null,
+    overlay_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
+    overlay_edit_uia_selection: ?[2]u32 = null,
     cached_overlay_edit: ?[:0]const u8 = null,
     /// Guard flag: set true while `setOverlayEditText` drives a
     /// programmatic `SetWindowTextW` on the overlay EDIT. That call
@@ -8114,6 +8191,7 @@ const Host = struct {
     cached_overlay_cancel: ?[:0]const u8 = null,
     overlay_completion_seed: ?[:0]const u8 = null,
     overlay_completion_value: ?[:0]const u8 = null,
+    overlay_completion_result_id: ?PaletteStableId = null,
     profiles: ?[]windows_shell.Profile = null,
     selected_profile: usize = 0,
     selected_profile_key: ?[:0]const u8 = null,
@@ -8208,6 +8286,7 @@ const Host = struct {
     // current query's ranked matches so the paint path doesn't re-rank
     // on every WM_PAINT; rebuilt on EDIT text change.
     palette_list_hwnd: ?HWND = null,
+    root_uia_provider: ?*win32_uia.RootProvider = null,
     palette_list_uia_provider: ?*win32_uia.PaletteListProvider = null,
     palette_list_placement: ChildPlacement = .{},
     palette_catalog_items: [palette_catalog_capacity]PaletteItem = undefined,
@@ -8219,6 +8298,9 @@ const Host = struct {
     palette_installed_themes: ?[]themepkg.Entry = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
+    /// Rows that physically fit in the current palette List HWND. This can be
+    /// lower than `palette_max_visible_rows` at large DPI or in short windows.
+    palette_list_visible_rows: usize = 0,
     palette_list_scroll: usize = 0,
     /// Currently-selected row (absolute index into ranked). Enter runs
     /// this entry; click overrides both selection and invocation.
@@ -8226,6 +8308,10 @@ const Host = struct {
     /// Original app config while a palette theme row is being previewed.
     /// Owned by this host until committed or reverted.
     palette_theme_preview_original: ?configpkg.Config = null,
+    /// A swapped-out config kept alive only while current catalog strings
+    /// borrow it. Cleared immediately after the catalog resets or hides.
+    palette_catalog_retained_config: ?configpkg.Config = null,
+    palette_catalog_config_source: PaletteCatalogConfigSource = .live,
 
     // Single SetTimer-driven tween scheduler; see Tween scheduler block
     // in the method section. Matches Win32's main-thread-paint model.
@@ -9361,12 +9447,20 @@ const Host = struct {
         const edit_hwnd = self.overlay_edit_hwnd orelse return false;
         self.suppress_edit_events = true;
         defer self.suppress_edit_events = false;
-        return try syncWindowTextUtf8CachedAfterSet(
+        const changed = try syncWindowTextUtf8CachedAfterSet(
             self.app.core_app.alloc,
             edit_hwnd,
             &self.cached_overlay_edit,
             value,
         );
+        if (changed) {
+            if (self.overlay_edit_uia_provider) |provider| {
+                provider.raiseTextChanged();
+                provider.raiseValueChanged();
+            }
+            self.raiseOverlayEditSelectionChangedIfNeeded();
+        }
+        return changed;
     }
 
     /// Rebuild the ranked match cache for the current EDIT query and
@@ -9391,7 +9485,61 @@ const Host = struct {
         return true;
     }
 
+    fn releaseRetainedPaletteCatalogConfig(self: *Host) void {
+        if (self.palette_catalog_retained_config) |*value| value.deinit();
+        self.palette_catalog_retained_config = null;
+    }
+
+    fn resetPaletteCatalogConfigOwner(self: *Host) void {
+        // Call only after Catalog.reset() or after hiding the List: its
+        // borrowed slices must no longer be observable before this release.
+        self.releaseRetainedPaletteCatalogConfig();
+        self.palette_catalog_config_source = .live;
+    }
+
+    fn paletteListRowCapacity(self: *Host) usize {
+        const hwnd = self.hwnd orelse return 0;
+        var rect: RECT = undefined;
+        if (GetClientRect(hwnd, &rect) == 0) return 0;
+        const list_top = self.tabBarHeight() + self.scaled(host_overlay_height);
+        return paletteVisibleRowCapacity(
+            rect.bottom - list_top - self.scaled(8),
+            self.scaled(palette_row_height),
+        );
+    }
+
+    fn palettePresentation(self: *const Host) PalettePresentation {
+        if (self.palette_list_ranked_count == 0) return .{};
+        const row = @min(self.palette_list_selected, self.palette_list_ranked_count - 1);
+        const catalog = if (self.palette_catalog) |*value| value else return .{
+            .match_count = self.palette_list_ranked_count,
+            .available = self.palette_list_visible_rows > 0,
+        };
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return .{
+            .match_count = self.palette_list_ranked_count,
+            .available = self.palette_list_visible_rows > 0,
+        };
+        return .{
+            .match_count = self.palette_list_ranked_count,
+            .title = descriptor.item.title,
+            .subtitle = if (descriptor.item.enabled)
+                descriptor.item.subtitle
+            else
+                descriptor.item.disabled_reason orelse "Unavailable",
+            .available = self.palette_list_visible_rows > 0,
+        };
+    }
+
+    fn refreshPalettePresentation(self: *Host) void {
+        if (self.overlay_mode != .command_palette or self.overlay_edit_hwnd == null) return;
+        _ = self.syncOverlayLabel() catch false;
+        _ = self.syncOverlayHint() catch false;
+        _ = self.syncOverlayButtons() catch false;
+        self.invalidateOverlayText();
+    }
+
     fn rebuildPaletteList(self: *Host) void {
+        const previous_result_count = self.palette_list_ranked_count;
         // `overlayEditText` returns either a literal "" or a borrowed
         // view of `self.cached_overlay_edit`; the Host owns the cache
         // and frees it in deinit. Do NOT free here — that either
@@ -9410,6 +9558,7 @@ const Host = struct {
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
@@ -9573,12 +9722,57 @@ const Host = struct {
         self.palette_list_scroll = 0;
         self.palette_list_selected = 0;
 
+        const transition = paletteListTransition(
+            previous_result_count,
+            self.palette_list_ranked_count,
+            self.paletteListRowCapacity(),
+        );
+        // Raise the structure event before relayout can hide the List HWND.
+        // Route the notification through the List only while it is visible;
+        // otherwise use the still-focused query Edit as the live sender.
+        var structure_announced_before_layout = false;
+        if (transition.announce_no_matches) {
+            if (self.palette_list_uia_provider) |provider| {
+                win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+                structure_announced_before_layout = true;
+            }
+            const list_visible = if (self.palette_list_hwnd) |hwnd| IsWindowVisible(hwnd) != 0 else false;
+            if (paletteNoMatchNotificationTarget(
+                self.palette_list_uia_provider != null,
+                list_visible,
+                self.overlay_edit_uia_provider != null,
+            )) |target| switch (target) {
+                .list => if (self.palette_list_uia_provider) |provider| {
+                    win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+                },
+                .edit => if (self.overlay_edit_uia_provider) |provider| {
+                    win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+                },
+            };
+        }
+        if (transition.relayout) {
+            self.layout() catch |err| {
+                log.warn("palette result-list relayout failed err={}", .{err});
+            };
+            // The list is a child HWND above a WGL sibling. Shrinking or
+            // hiding it exposes terminal pixels that parent-only chrome
+            // invalidation cannot restore.
+            if (transition.exposes_content) {
+                self.invalidateVisibleSurfaceChildPaint(true, false);
+            }
+        }
+
         log.debug(
             "palette rebuild end ranked={d}",
             .{self.palette_list_ranked_count},
         );
 
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_uia_provider) |provider| {
+            if (!structure_announced_before_layout) {
+                win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+            }
+        }
         self.announcePaletteSelection();
         self.previewSelectedPaletteTheme();
     }
@@ -9586,18 +9780,21 @@ const Host = struct {
     fn setPaletteListSelection(self: *Host, next: usize) bool {
         if (self.overlay_mode != .command_palette) return false;
         if (next >= self.palette_list_ranked_count) return false;
+        const visible_rows = self.palette_list_visible_rows;
+        if (visible_rows == 0) return false;
 
         const changed = self.palette_list_selected != next;
         self.palette_list_selected = next;
         if (next < self.palette_list_scroll) {
             self.palette_list_scroll = next;
-        } else if (next >= self.palette_list_scroll + palette_max_visible_rows) {
-            self.palette_list_scroll = next - palette_max_visible_rows + 1;
+        } else if (next >= self.palette_list_scroll + visible_rows) {
+            self.palette_list_scroll = next - visible_rows + 1;
         }
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
         if (changed) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
+            self.refreshPalettePresentation();
         }
         return changed;
     }
@@ -9606,7 +9803,7 @@ const Host = struct {
     /// selection is off-screen. Returns true if the key was consumed.
     fn moveListSelection(self: *Host, reverse: bool) bool {
         if (self.overlay_mode != .command_palette) return false;
-        if (self.palette_list_ranked_count == 0) return false;
+        if (self.palette_list_ranked_count == 0 or self.palette_list_visible_rows == 0) return false;
         var next: usize = self.palette_list_selected;
         if (reverse) {
             if (next == 0) {
@@ -9622,77 +9819,143 @@ const Host = struct {
         return true;
     }
 
-    /// Describe the palette list's current state as a single string
-    /// suitable for `UIA_NamePropertyId`. The UIA host reads this
-    /// whenever a client queries the palette list's name, and the
-    /// selection-change path raises `NameChanged` so Narrator re-reads
-    /// after each ↑/↓ keystroke.
-    fn buildPaletteListName(self: *const Host, buf: []u8) []const u8 {
-        if (self.palette_list_ranked_count == 0) {
-            return std.fmt.bufPrint(
-                buf,
-                "Command palette, no matches",
-                .{},
-            ) catch "Command palette";
-        }
-        const idx = @min(
-            self.palette_list_selected,
-            self.palette_list_ranked_count - 1,
-        );
-        const catalog = if (self.palette_catalog) |*value| value else return "Command palette";
-        const descriptor = catalog.descriptorFor(self.palette_list_ranked[idx]) orelse return "Command palette";
-        return std.fmt.bufPrint(
-            buf,
-            "Command palette, {d} of {d}: {s} — {s}",
-            .{
-                idx + 1,
-                self.palette_list_ranked_count,
-                descriptor.item.title,
-                if (descriptor.item.enabled)
-                    descriptor.item.subtitle
-                else
-                    descriptor.item.disabled_reason orelse "Unavailable",
+    /// Stable list identity. Row selection is announced by the native
+    /// SelectionItem event, avoiding duplicate Name/Notification speech.
+    fn buildPaletteListName(_: *const Host, _: []u8) []const u8 {
+        return "Command palette results";
+    }
+
+    fn paletteShortcutLabel(
+        self: *const Host,
+        descriptor: win32_palette.catalog.Descriptor,
+        buf: []u8,
+    ) ?[]const u8 {
+        if (descriptor.item.shortcut) |shortcut| return shortcut.label;
+        return switch (descriptor.payload) {
+            .action => |payload| blk: {
+                const snapshot_index = payload.snapshot_index orelse break :blk null;
+                const snap = self.paletteSnapshot();
+                if (snapshot_index >= snap.commands.len) break :blk null;
+                const trigger = self.app.config.keybind.set.reverse.get(snap.commands[snapshot_index].action) orelse
+                    break :blk null;
+                break :blk std.fmt.bufPrint(buf, "{f}", .{trigger}) catch null;
             },
-        ) catch "Command palette";
+            else => null,
+        };
     }
 
     fn buildPaletteRowName(self: *const Host, index: usize, buf: []u8) []const u8 {
         if (index >= self.palette_list_ranked_count) return "Command palette row";
         const catalog = if (self.palette_catalog) |*value| value else return "Command palette row";
         const descriptor = catalog.descriptorFor(self.palette_list_ranked[index]) orelse return "Command palette row";
+        var shortcut_buf: [96]u8 = undefined;
+        const shortcut = self.paletteShortcutLabel(descriptor, &shortcut_buf);
+        const state = if (!descriptor.item.enabled)
+            ", unavailable"
+        else if (descriptor.item.destructive)
+            ", destructive"
+        else
+            "";
+        if (shortcut) |label| {
+            return std.fmt.bufPrint(
+                buf,
+                "{d} of {d}: {s} — {s}, shortcut {s}{s}",
+                .{
+                    index + 1,
+                    self.palette_list_ranked_count,
+                    descriptor.item.title,
+                    if (descriptor.item.enabled) descriptor.item.subtitle else descriptor.item.disabled_reason orelse "Unavailable",
+                    label,
+                    state,
+                },
+            ) catch "Command palette row";
+        }
         return std.fmt.bufPrint(
             buf,
-            "{d} of {d}: {s} — {s}",
+            "{d} of {d}: {s} — {s}{s}",
             .{
                 index + 1,
                 self.palette_list_ranked_count,
                 descriptor.item.title,
-                if (descriptor.item.enabled)
-                    descriptor.item.subtitle
-                else
-                    descriptor.item.disabled_reason orelse "Unavailable",
+                if (descriptor.item.enabled) descriptor.item.subtitle else descriptor.item.disabled_reason orelse "Unavailable",
+                state,
             },
         ) catch "Command palette row";
     }
 
     fn paletteListUiaState(self: *const Host) win32_uia.PaletteListState {
+        return self.paletteListUiaStateWithThreading(self.app.com_initialized);
+    }
+
+    fn paletteListUiaStateWithThreading(
+        self: *const Host,
+        use_com_threading: bool,
+    ) win32_uia.PaletteListState {
         return .{
             .ctx = @ptrCast(@constCast(self)),
             .name = &paletteListNameThunk,
             .row_count = &paletteListRowCountThunk,
             .selected_index = &paletteListSelectedIndexThunk,
             .row_name = &paletteListRowNameThunk,
+            .row_enabled = &paletteListRowEnabledThunk,
+            .row_id = &paletteListRowIdThunk,
             .select_row = &paletteListSelectRowThunk,
             .geometry = &paletteListGeometryThunk,
+            .use_com_threading = use_com_threading,
         };
+    }
+
+    fn overlayEditUiaState(self: *const Host) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(@constCast(self)),
+            .name = &overlayEditNameThunk,
+            .value = &overlayEditValueThunk,
+            .snapshot = &overlayEditSnapshotThunk,
+            .focused = &overlayEditFocusedThunk,
+            .role = .edit,
+            .use_com_threading = self.app.com_initialized,
+            .set_value = &overlayEditSetValueThunk,
+            .select_range = &overlayEditSelectRangeThunk,
+        };
+    }
+
+    fn raiseOverlayEditSelectionChangedIfNeeded(self: *Host) void {
+        const hwnd = self.overlay_edit_hwnd orelse return;
+        const provider = self.overlay_edit_uia_provider orelse return;
+        const selection = nativeEditSelection(hwnd);
+        if (self.overlay_edit_uia_selection) |previous| {
+            if (std.meta.eql(previous, selection)) return;
+        }
+        self.overlay_edit_uia_selection = selection;
+        provider.raiseTextSelectionChanged();
     }
 
     fn announcePaletteSelection(self: *const Host) void {
         const provider = self.palette_list_uia_provider orelse return;
-        win32_uia.events.raiseNameChanged(&provider.base);
         if (self.palette_list_ranked_count > 0) {
             provider.raiseSelectionChanged(@min(self.palette_list_selected, self.palette_list_ranked_count - 1));
         }
+    }
+
+    fn announcePaletteOutcome(
+        self: *const Host,
+        notification: win32_uia.events.Notification,
+        message: []const u8,
+    ) void {
+        const provider = self.palette_list_uia_provider orelse return;
+        win32_uia.events.raiseNotification(&provider.base, notification, message);
+    }
+
+    fn abortPaletteAction(self: *Host, message: []const u8) void {
+        self.setBanner(.err, message) catch {};
+        self.announcePaletteOutcome(.action_aborted, message);
+    }
+
+    fn showPaletteHelp(self: *Host, message: []const u8) void {
+        self.setBanner(.info, message) catch |err| {
+            log.warn("palette help banner failed err={}", .{err});
+        };
+        self.announcePaletteOutcome(.other, message);
     }
 
     /// Translate a y coordinate (client-area) into an absolute rank
@@ -9718,6 +9981,13 @@ const Host = struct {
         const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return;
         if (!descriptor.item.enabled) {
             try self.setBanner(.err, descriptor.item.disabled_reason orelse "This item is unavailable.");
+            if (self.palette_list_uia_provider) |provider| {
+                win32_uia.events.raiseNotification(
+                    &provider.base,
+                    .action_aborted,
+                    descriptor.item.disabled_reason orelse "Command unavailable",
+                );
+            }
             return;
         }
 
@@ -9726,40 +9996,73 @@ const Host = struct {
                 return self.invokePaletteAction(payload, true);
             },
             .tab => |tab_id| {
-                const index = self.findTabIndexById(@intCast(tab_id)) orelse return;
+                const index = self.findTabIndexById(@intCast(tab_id)) orelse {
+                    self.abortPaletteAction("Tab is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
                 _ = self.activateTabIndex(index);
             },
             .pane => |surface_id| {
-                const surface = self.app.findSurfaceById(surface_id) orelse return;
+                const surface = self.app.findSurfaceById(surface_id) orelse {
+                    self.abortPaletteAction("Pane is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
                 self.app.activateSurface(surface);
             },
             .profile => |key| {
-                const profiles = self.profiles orelse return;
-                const index = profileIndexByKey(profiles, key) orelse return;
-                _ = try self.setSelectedProfileIndex(index);
+                const profiles = self.profiles orelse {
+                    self.abortPaletteAction("Profile is no longer available; reopen the palette.");
+                    return;
+                };
+                const index = profileIndexByKey(profiles, key) orelse {
+                    self.abortPaletteAction("Profile is no longer available; reopen the palette.");
+                    return;
+                };
+                _ = self.setSelectedProfileIndex(index) catch |err| {
+                    log.warn("palette profile selection failed key={s} err={}", .{ key, err });
+                    self.abortPaletteAction("Profile selection failed; no profile was opened.");
+                    return;
+                };
                 self.hideOverlay();
-                _ = self.openSelectedProfile(.tab);
+                if (!self.openSelectedProfile(.tab)) {
+                    self.abortPaletteAction("Profile could not be opened; no terminal was changed.");
+                }
             },
             .setting => |key| {
-                const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse return;
+                const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse {
+                    self.abortPaletteAction("Setting is no longer available; reopen the palette.");
+                    return;
+                };
                 self.hideOverlay();
-                try self.app.settings_window.openField(field);
+                self.app.settings_window.openField(field) catch |err| {
+                    log.warn("palette settings open failed field={} err={}", .{ field, err });
+                    self.abortPaletteAction("Settings could not be opened.");
+                    return;
+                };
             },
             .theme => |name| {
-                try self.commitPaletteTheme(name);
+                self.commitPaletteTheme(name) catch |err| {
+                    log.warn("palette theme preflight failed theme={s} err={}", .{ name, err });
+                    self.abortPaletteAction("Theme could not be prepared; no setting was changed.");
+                    return;
+                };
             },
             .help => |target| switch (target) {
                 .settings => {
                     self.hideOverlay();
-                    try self.app.settings_window.openField(.font_size);
+                    self.app.settings_window.openField(.font_size) catch |err| {
+                        log.warn("palette help settings open failed err={}", .{err});
+                        self.abortPaletteAction("Settings help could not be opened.");
+                        return;
+                    };
                 },
-                .keyboard_shortcuts => try self.setBanner(.info, "Keyboard shortcuts are configured in Settings > Keybindings."),
-                .configuration => try self.setBanner(.info, "Open Settings, then Advanced, to edit the configuration file."),
-                .troubleshooting => try self.setBanner(.info, "Run winghostty +diagnostic-bundle when reporting a problem."),
-                .diagnostics => try self.setBanner(.info, "Run winghostty +diagnostic-bundle to export a redacted support bundle."),
-                .accessibility => try self.setBanner(.info, "winghostty supports keyboard navigation and Windows UI Automation."),
+                .keyboard_shortcuts => self.showPaletteHelp("Keyboard shortcuts are configured in Settings > Keybindings."),
+                .configuration => self.showPaletteHelp("Open Settings, then Advanced, to edit the configuration file."),
+                .troubleshooting => self.showPaletteHelp("Run winghostty +diagnostic-bundle when reporting a problem."),
+                .diagnostics => self.showPaletteHelp("Run winghostty +diagnostic-bundle to export a redacted support bundle."),
+                .accessibility => self.showPaletteHelp("Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes."),
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),
         }
@@ -9859,10 +10162,9 @@ const Host = struct {
         return preview;
     }
 
-    fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
-        var old = self.app.config;
+    fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
+        const old = self.app.config;
         self.app.config = new_config;
-        old.deinit();
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
@@ -9879,6 +10181,36 @@ const Host = struct {
                 log.warn("palette theme chrome refresh failed err={}", .{err});
             };
         }
+        return old;
+    }
+
+    fn preserveOrDeinitPaletteCatalogConfig(
+        self: *Host,
+        old: configpkg.Config,
+    ) void {
+        if (self.palette_catalog_config_source == .live) {
+            std.debug.assert(self.palette_catalog_retained_config == null);
+            self.palette_catalog_retained_config = old;
+            self.palette_catalog_config_source = .retained;
+        } else {
+            var disposable = old;
+            disposable.deinit();
+        }
+    }
+
+    fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
+        const old = self.swapRuntimeConfigFromPalette(new_config);
+        self.preserveOrDeinitPaletteCatalogConfig(old);
+    }
+
+    fn detachLivePaletteCatalogConfig(self: *Host) !void {
+        if (self.palette_catalog_config_source != .live) return;
+        var clone = try self.app.config.clone(self.app.core_app.alloc);
+        errdefer clone.deinit();
+        const old = self.swapRuntimeConfigFromPalette(clone);
+        std.debug.assert(self.palette_catalog_retained_config == null);
+        self.palette_catalog_retained_config = old;
+        self.palette_catalog_config_source = .retained;
     }
 
     fn previewSelectedPaletteTheme(self: *Host) void {
@@ -9903,45 +10235,115 @@ const Host = struct {
             if (std.mem.eql(u8, current.light, name) and std.mem.eql(u8, current.dark, name)) return;
         }
 
-        if (self.palette_theme_preview_original == null) {
-            self.palette_theme_preview_original = try self.app.config.clone(self.app.core_app.alloc);
-        }
-
         var preview = try self.loadPaletteThemeConfig(name);
         errdefer preview.deinit();
-        self.replaceRuntimeConfigFromPalette(preview);
+        if (self.palette_theme_preview_original == null) {
+            const original = self.swapRuntimeConfigFromPalette(preview);
+            self.palette_theme_preview_original = original;
+            if (self.palette_catalog_config_source == .live) {
+                self.palette_catalog_config_source = .preview_original;
+            }
+        } else {
+            self.replaceRuntimeConfigFromPalette(preview);
+        }
     }
 
     fn revertPaletteThemePreview(self: *Host) void {
         const original = self.palette_theme_preview_original orelse return;
         self.palette_theme_preview_original = null;
-        self.replaceRuntimeConfigFromPalette(original);
+        const old = self.swapRuntimeConfigFromPalette(original);
+        switch (self.palette_catalog_config_source) {
+            .live => {
+                std.debug.assert(self.palette_catalog_retained_config == null);
+                self.palette_catalog_retained_config = old;
+                self.palette_catalog_config_source = .retained;
+            },
+            .preview_original => {
+                var disposable = old;
+                disposable.deinit();
+                // The catalog still borrows the same original allocation,
+                // which is now the live app config.
+                self.palette_catalog_config_source = .live;
+            },
+            .retained => {
+                var disposable = old;
+                disposable.deinit();
+            },
+        }
     }
 
     fn commitPaletteTheme(self: *Host, name: []const u8) !void {
-        var original = if (self.palette_theme_preview_original) |value| blk: {
-            self.palette_theme_preview_original = null;
-            break :blk value;
-        } else try self.app.config.clone(self.app.core_app.alloc);
-        defer original.deinit();
+        // The save/reload path can synchronously rebuild the palette catalog.
+        // Keep logging and post-save messaging independent of its borrowed
+        // theme-name storage.
+        const theme_name = try self.app.core_app.alloc.dupe(u8, name);
+        defer self.app.core_app.alloc.free(theme_name);
+
+        // Clone the reversible baseline first. Do not detach the live preview
+        // owner until every fallible preflight allocation has succeeded;
+        // otherwise an OOM could strand the preview with no way to restore it.
+        var original = if (self.palette_theme_preview_original) |*value|
+            try value.clone(self.app.core_app.alloc)
+        else
+            try self.app.config.clone(self.app.core_app.alloc);
+        var original_owned = true;
+        defer if (original_owned) original.deinit();
 
         var pending = try original.clone(self.app.core_app.alloc);
         defer pending.deinit();
-        try setConfigTheme(&pending, name);
+        try setConfigTheme(&pending, theme_name);
 
-        self.app.settingsSaveAndReload(&pending, &original) catch |err| {
-            log.warn("palette theme save failed theme={s} err={}", .{ name, err });
-            const restored = original.clone(self.app.core_app.alloc) catch {
-                try self.setBanner(.err, "Theme save failed; restart or reload config to clear the preview.");
+        // settingsSaveAndReload may replace/deinit the live app config. Keep
+        // the generation borrowed by the visible palette alive first.
+        try self.detachLivePaletteCatalogConfig();
+
+        if (self.palette_theme_preview_original) |*value| {
+            if (self.palette_catalog_config_source == .preview_original) {
+                std.debug.assert(self.palette_catalog_retained_config == null);
+                self.palette_catalog_retained_config = value.*;
+                self.palette_catalog_config_source = .retained;
+            } else {
+                value.deinit();
+            }
+            self.palette_theme_preview_original = null;
+        }
+
+        const save_outcome = win32_settings.saveReloadOutcome(
+            self.app.settingsSaveAndReload(&pending, &original),
+        );
+        switch (save_outcome) {
+            .completed, .completed_masked => {},
+            .failed => |err| {
+                log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
+                // Roll back without another allocation: `original` is already
+                // an owned deep clone of the pre-preview baseline. Transfer it
+                // into the runtime config and suppress the local deferred deinit.
+                self.replaceRuntimeConfigFromPalette(original);
+                original_owned = false;
+                self.abortPaletteAction("Theme save failed; reverted preview.");
                 return;
-            };
-            self.replaceRuntimeConfigFromPalette(restored);
-            self.setBanner(.err, "Theme save failed; reverted preview.") catch {};
-            return;
-        };
+            },
+        }
+        const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
 
+        if (self.palette_list_uia_provider) |provider| {
+            win32_uia.events.raiseNotification(
+                &provider.base,
+                .action_completed,
+                if (saved_but_masked)
+                    "Theme saved; a later config layer masks it"
+                else
+                    "Theme applied",
+            );
+        }
         self.hideOverlay();
-        try self.layout();
+        if (saved_but_masked) {
+            log.warn("palette theme saved but masked by a later config layer theme={s}", .{theme_name});
+            self.setBanner(.info, "Theme saved, but a later config layer masks it.") catch {};
+        }
+        self.layout() catch |err| {
+            log.warn("palette theme post-save layout failed err={}", .{err});
+        };
     }
 
     fn invokePaletteAction(
@@ -9950,10 +10352,22 @@ const Host = struct {
         record_mru: bool,
     ) !void {
         if (payload.tab_transfer) |transfer| {
-            const source_index = self.findTabIndexById(@intCast(transfer.source_tab)) orelse return;
-            const target = self.app.findSurfaceById(transfer.target_pane) orelse return;
-            const target_found = self.app.findTabForSurface(target) orelse return;
-            if (target_found.host != self or target_found.index != self.active_tab) return;
+            const source_index = self.findTabIndexById(@intCast(transfer.source_tab)) orelse {
+                self.abortPaletteAction("Tab move is no longer available; reopen the palette.");
+                return;
+            };
+            const target = self.app.findSurfaceById(transfer.target_pane) orelse {
+                self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
+                return;
+            };
+            const target_found = self.app.findTabForSurface(target) orelse {
+                self.abortPaletteAction("Tab move target is no longer available; reopen the palette.");
+                return;
+            };
+            if (target_found.host != self or target_found.index != self.active_tab) {
+                self.abortPaletteAction("Tab move target changed; reopen the palette.");
+                return;
+            }
             self.tab_drop_target_surface = target;
             self.tab_drop_operation = switch (transfer.direction) {
                 .left => .split_left,
@@ -9962,21 +10376,40 @@ const Host = struct {
                 .down => .split_down,
             };
             if (!self.commitTabDropSplit(source_index)) {
-                try self.setBanner(.err, "Tab move could not be completed; no layout was changed.");
+                self.abortPaletteAction("Tab move could not be completed; no layout was changed.");
                 return;
             }
             self.hideOverlay();
             return;
         }
         const snap = self.paletteSnapshot();
-        const snapshot_index = payload.snapshot_index orelse return;
-        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) return;
+        const snapshot_index = payload.snapshot_index orelse {
+            self.abortPaletteAction("Command is no longer available; reopen the palette.");
+            return;
+        };
+        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) {
+            self.abortPaletteAction("Command is no longer available; reopen the palette.");
+            return;
+        }
         const current_text = std.mem.span(snap.cvals[snapshot_index].action);
-        if (!std.mem.eql(u8, current_text, payload.action)) return;
+        if (!std.mem.eql(u8, current_text, payload.action)) {
+            self.abortPaletteAction("Command changed; reopen the palette and try again.");
+            return;
+        }
         const action = snap.commands[snapshot_index].action;
-        const surface = self.activeSurface() orelse return;
+        const surface = self.activeSurface() orelse {
+            self.abortPaletteAction("No active terminal is available for this command.");
+            return;
+        };
         if (record_mru) self.app.pushPaletteMru(current_text) catch |err| {
             std.log.warn("palette MRU push failed err={}", .{err});
+        };
+        const outcome_provider = if (self.palette_list_uia_provider) |provider| blk: {
+            _ = provider.base.vtbl.AddRef(&provider.base);
+            break :blk &provider.base;
+        } else null;
+        defer if (outcome_provider) |provider| {
+            _ = provider.vtbl.Release(provider);
         };
         self.hideOverlay();
         runUiActionOrLog("palette layout refresh failed", self.layout());
@@ -9984,7 +10417,16 @@ const Host = struct {
             self.postDeferredNewTab();
             return;
         }
-        _ = try surface.core_surface.performBindingAction(action);
+        _ = surface.core_surface.performBindingAction(action) catch |err| {
+            if (outcome_provider) |provider| {
+                win32_uia.events.raiseNotification(
+                    provider,
+                    .action_aborted,
+                    "Command failed; no action was completed.",
+                );
+            }
+            return err;
+        };
         // Do NOT touch `self` after dispatch — the host may be freed.
     }
 
@@ -10017,11 +10459,13 @@ const Host = struct {
 
     /// Scroll the visible window by `delta` wheel units (120 = one line).
     fn scrollPaletteList(self: *Host, delta: i16) void {
-        if (self.palette_list_ranked_count <= palette_max_visible_rows) return;
+        const visible_rows = self.palette_list_visible_rows;
+        if (visible_rows == 0) return;
+        if (self.palette_list_ranked_count <= visible_rows) return;
         const lines_per_notch: i32 = 3;
         const step: i32 = @intFromFloat(@as(f32, @floatFromInt(delta)) / 120.0 * @as(f32, @floatFromInt(lines_per_notch)));
         if (step == 0) return;
-        const max_scroll = self.palette_list_ranked_count - palette_max_visible_rows;
+        const max_scroll = self.palette_list_ranked_count - visible_rows;
         var next: isize = @as(isize, @intCast(self.palette_list_scroll)) - step;
         if (next < 0) next = 0;
         if (next > @as(isize, @intCast(max_scroll))) next = @intCast(max_scroll);
@@ -10033,7 +10477,7 @@ const Host = struct {
         // possibly an off-screen action the user has no idea they're
         // launching. UIA Name updates follow from the reassignment.
         const previous_selection = self.palette_list_selected;
-        const visible_end = new_scroll + palette_max_visible_rows;
+        const visible_end = new_scroll + visible_rows;
         if (self.palette_list_selected < new_scroll) {
             self.palette_list_selected = new_scroll;
         } else if (self.palette_list_selected >= visible_end) {
@@ -10043,6 +10487,7 @@ const Host = struct {
         if (self.palette_list_selected != previous_selection) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
+            self.refreshPalettePresentation();
         }
     }
 
@@ -10060,14 +10505,13 @@ const Host = struct {
 
         const theme = &self.app.resolved_theme;
         fillSolidRect(hdc, rect, theme.overlay_bg);
+        defer drawRectBorder(hdc, rect, theme.overlay_border, @max(1, self.scaled(1)));
 
         if (self.palette_list_ranked_count == 0) return;
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         const row_h = self.scaled(palette_row_height);
         const padding = self.scaled(12);
-        const title_width = self.scaled(200);
-        const hint_width = self.scaled(140);
 
         _ = SetBkMode(hdc, TRANSPARENT);
         const old_font: ?HGDIOBJ = if (self.chrome_font) |f| SelectObject(hdc, f) else null;
@@ -10076,7 +10520,7 @@ const Host = struct {
         }
 
         const visible_end = @min(
-            self.palette_list_scroll + palette_max_visible_rows,
+            self.palette_list_scroll + self.palette_list_visible_rows,
             self.palette_list_ranked_count,
         );
         var i = self.palette_list_scroll;
@@ -10096,69 +10540,48 @@ const Host = struct {
             const descriptor = catalog.descriptorFor(self.palette_list_ranked[i]) orelse continue;
             const item = descriptor.item;
 
-            const title_color = if (item.destructive)
-                theme.error_fg
-            else if (is_selected)
-                theme.button_active_fg
-            else
-                theme.text_primary;
+            const title_color = paletteRowTitleColor(
+                item.destructive,
+                is_selected,
+                theme.text_primary,
+                theme.button_active_fg,
+                theme.error_fg,
+            );
             const secondary_color = if (is_selected) theme.button_active_fg else theme.text_secondary;
+            const columns = paletteRowColumns(
+                row_rect,
+                padding,
+                self.scaled(200),
+                self.scaled(80),
+                self.scaled(140),
+            );
 
-            drawPaletteRowText(
-                hdc,
-                item.title,
-                .{
-                    .left = row_rect.left + padding,
-                    .top = row_rect.top,
-                    .right = row_rect.left + padding + title_width,
-                    .bottom = row_rect.bottom,
-                },
-                title_color,
-            );
-            drawPaletteRowText(
-                hdc,
-                if (item.enabled) item.subtitle else item.disabled_reason orelse "Unavailable",
-                .{
-                    .left = row_rect.left + padding + title_width,
-                    .top = row_rect.top,
-                    .right = row_rect.right - padding - hint_width,
-                    .bottom = row_rect.bottom,
-                },
-                secondary_color,
-            );
+            if (columns.title.right > columns.title.left) {
+                drawPaletteRowText(hdc, item.title, columns.title, title_color);
+            }
+            if (columns.subtitle.right > columns.subtitle.left) {
+                drawPaletteRowText(
+                    hdc,
+                    if (item.enabled) item.subtitle else item.disabled_reason orelse "Unavailable",
+                    columns.subtitle,
+                    secondary_color,
+                );
+            }
 
             // Keybind hint: look up the primary trigger for this action
             // in the reverse index that `Binding.Set` already maintains.
             // Format into a stack buffer — the per-frame allocation
             // would otherwise stack up at every keystroke's WM_PAINT.
             var hint_buf: [96]u8 = undefined;
-            const hint: ?[]const u8 = if (item.shortcut) |shortcut|
-                shortcut.label
-            else switch (descriptor.payload) {
-                .action => |payload| blk: {
-                    const snapshot_index = payload.snapshot_index orelse break :blk null;
-                    const snap = self.paletteSnapshot();
-                    if (snapshot_index >= snap.commands.len) break :blk null;
-                    if (self.app.config.keybind.set.reverse.get(snap.commands[snapshot_index].action)) |trigger| {
-                        break :blk std.fmt.bufPrint(&hint_buf, "{f}", .{trigger}) catch null;
-                    }
-                    break :blk null;
-                },
-                else => null,
-            };
-            if (hint) |hint_text| {
+            const hint = self.paletteShortcutLabel(descriptor, &hint_buf);
+            if (hint) |hint_text| if (columns.shortcut.right > columns.shortcut.left) {
                 drawPaletteRowText(
                     hdc,
                     hint_text,
-                    .{
-                        .left = row_rect.right - padding - hint_width,
-                        .top = row_rect.top,
-                        .right = row_rect.right - padding,
-                        .bottom = row_rect.bottom,
-                    },
+                    columns.shortcut,
                     secondary_color,
                 );
-            }
+            };
         }
     }
 
@@ -10185,6 +10608,8 @@ const Host = struct {
         self.tween_sched.deinit();
 
         self.revertPaletteThemePreview();
+        if (self.palette_catalog) |*catalog| catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
         self.destroyChildControls();
 
@@ -10222,6 +10647,17 @@ const Host = struct {
         }
 
         destroyChildWindow(&self.overlay_label_hwnd);
+        if (self.overlay_edit_uia_provider) |provider| {
+            self.overlay_edit_uia_provider = null;
+            self.overlay_edit_uia_selection = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &terminalDisconnectThunk,
+                &terminalReleaseThunk,
+            );
+        }
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
         destroyChildWindow(&self.overlay_hint_hwnd);
 
@@ -10235,10 +10671,25 @@ const Host = struct {
         destroySubclassedWindowWithPrev(&self.new_tab_hwnd, chrome_prev);
         destroySubclassedWindowWithPrev(&self.overflow_hwnd, chrome_prev);
 
-        if (self.palette_list_uia_provider) |provider| {
+        if (self.root_uia_provider) |provider| {
+            self.root_uia_provider = null;
             provider.detach();
-            _ = win32_uia.PaletteListProvider.Release(&provider.base);
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &rootDisconnectThunk,
+                &rootReleaseThunk,
+            );
+        }
+        if (self.palette_list_uia_provider) |provider| {
             self.palette_list_uia_provider = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &paletteDisconnectThunk,
+                &paletteReleaseThunk,
+            );
         }
         destroyChildWindow(&self.palette_list_hwnd);
         destroyChildWindow(&self.tab_drop_preview_hwnd);
@@ -10670,6 +11121,22 @@ const Host = struct {
         self.forceHostCompositionPaint();
         refocusActiveSurface(self);
         return true;
+    }
+
+    fn commandPaletteToggleKeyMessage(
+        self: *Host,
+        msg: UINT,
+        wParam: WPARAM,
+        lParam: LPARAM,
+    ) bool {
+        if (self.overlay_mode != .command_palette) return false;
+        const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
+        const entry = self.app.config.keybind.set.getEvent(event) orelse return false;
+        const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+            .leader => return false,
+            inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+        };
+        return bindingActionsToggleCommandPalette(actions);
     }
 
     fn reloadProfiles(self: *Host) !bool {
@@ -11174,6 +11641,9 @@ const Host = struct {
         self.banner_kind = next_kind;
         try appendOwnedString(self.app.core_app.alloc, &self.banner_text, text);
         self.invalidateBannerText();
+        // While an overlay is open, banner text is rendered inside the
+        // overlay feedback lane rather than the ordinary host banner lane.
+        if (self.overlay_mode != .none) self.invalidateOverlayText();
     }
 
     fn clearUpdateActionRects(self: *Host) void {
@@ -11258,6 +11728,19 @@ const Host = struct {
             EC_LEFTMARGIN | EC_RIGHTMARGIN,
             packed_margins,
         );
+        self.overlay_edit_uia_provider = if (self.app.com_initialized)
+            win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                edit_hwnd,
+                self.overlayEditUiaState(),
+            ) catch |err| blk: {
+                log.warn("overlay edit UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("overlay edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            break :blk null;
+        };
 
         self.overlay_hint_hwnd = CreateWindowExW(
             0,
@@ -11328,12 +11811,17 @@ const Host = struct {
             GWLP_USERDATA,
             @as(LONG_PTR, @intCast(@intFromPtr(self))),
         );
-        self.palette_list_uia_provider = win32_uia.PaletteListProvider.create(
-            std.heap.page_allocator,
-            self.palette_list_hwnd.?,
-            self.paletteListUiaState(),
-        ) catch |err| blk: {
-            log.warn("palette UIA provider unavailable err={}", .{err});
+        self.palette_list_uia_provider = if (self.app.com_initialized)
+            win32_uia.PaletteListProvider.create(
+                std.heap.page_allocator,
+                self.palette_list_hwnd.?,
+                self.paletteListUiaState(),
+            ) catch |err| blk: {
+                log.warn("palette UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("palette UIA provider disabled: UI thread is not a confirmed STA", .{});
             break :blk null;
         };
 
@@ -11381,8 +11869,23 @@ const Host = struct {
     }
 
     fn showOverlay(self: *Host, mode: HostOverlayMode, initial: ?[]const u8) !void {
+        if (mode == .command_palette) {
+            // Theme previews replace the app-global config while palette
+            // catalogs borrow config strings. Keep exactly one palette live
+            // across all host windows so closing the prior palette reverts its
+            // preview and releases its catalog before this host builds one.
+            for (self.app.hosts.items) |other| {
+                if (other != self and other.overlay_mode == .command_palette) {
+                    other.hideOverlay();
+                }
+            }
+        }
         try self.ensureOverlayControls();
         self.overlay_mode = mode;
+        self.overlay_edit_uia_selection = null;
+        if (self.overlay_edit_uia_provider) |provider| {
+            win32_uia.events.raiseNameChanged(&provider.base);
+        }
         self.clearOverlayCompletion();
         try self.setOverlayDefaultBanner(mode);
 
@@ -11422,10 +11925,16 @@ const Host = struct {
         if (mode == .command_palette) self.rebuildPaletteList();
         try self.layout();
         if (is_confirm) {
-            // Show body as hint label. Prefer the Accept button as
-            // the keyboard-focus target so the destructive action is
-            // one explicit click/Enter away — never auto-triggered.
-            _ = SetFocus(accept_hwnd);
+            // Show body as hint label. Prefer the visible Accept button,
+            // then the visible Cancel button, as the keyboard-focus target.
+            // The destructive action remains one explicit click/Enter away.
+            const initial_target = if (IsWindowVisible(accept_hwnd) != 0)
+                accept_hwnd
+            else if (IsWindowVisible(cancel_hwnd) != 0)
+                cancel_hwnd
+            else
+                return;
+            _ = SetFocus(initial_target);
         } else {
             _ = SetFocus(edit_hwnd);
             _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
@@ -11435,6 +11944,14 @@ const Host = struct {
 
     fn hideOverlay(self: *Host) void {
         const was_confirm = self.overlay_mode == .confirm;
+        const was_palette = self.overlay_mode == .command_palette;
+        const restore_terminal_focus = shouldRefocusAfterOverlayHide(
+            GetFocus(),
+            self.overlay_edit_hwnd,
+            self.overlay_accept_hwnd,
+            self.overlay_cancel_hwnd,
+            self.palette_list_hwnd,
+        );
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
@@ -11455,12 +11972,18 @@ const Host = struct {
         if (self.overlay_cancel_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_cancel_placement, false);
         if (self.palette_list_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.palette_list_placement, false);
         self.palette_list_ranked_count = 0;
+        self.palette_list_visible_rows = 0;
         self.palette_list_scroll = 0;
+        if (self.palette_catalog) |*catalog| catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
+        self.clearPaletteInstalledThemes();
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
-        if (was_confirm) {
+        if (was_confirm or was_palette) {
             self.layout() catch {};
             self.forceVisibleSurfaceRepaintsNow();
+        }
+        if (restore_terminal_focus) {
             refocusActiveSurface(self);
         }
     }
@@ -11664,7 +12187,11 @@ const Host = struct {
             ),
             .command_palette => {
                 const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-                const label = try buildCommandPaletteOverlayLabel(alloc, self.paletteSnapshot(), text);
+                const label = try buildCommandPaletteOverlayLabel(
+                    alloc,
+                    text,
+                    self.palettePresentation(),
+                );
                 defer alloc.free(label);
                 return try syncWindowTextUtf8Cached(
                     alloc,
@@ -11777,7 +12304,7 @@ const Host = struct {
             if (surface) |value| value.search_needle else null,
             if (surface) |value| value.search_total else null,
             if (surface) |value| value.search_selected else null,
-            self.paletteSnapshot(),
+            self.palettePresentation(),
         );
         defer alloc.free(accept);
         changed = (try syncWindowTextUtf8Cached(
@@ -11813,6 +12340,22 @@ const Host = struct {
             );
         }
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
+        if (self.overlay_mode == .command_palette) {
+            var mru_buf: [5][]const u8 = undefined;
+            const hint = try buildCommandPaletteFeedbackText(
+                alloc,
+                text,
+                self.app.paletteMruSlice(&mru_buf),
+                self.palettePresentation(),
+            );
+            defer alloc.free(hint);
+            return try syncWindowTextUtf8Cached(
+                alloc,
+                hint_hwnd,
+                &self.cached_overlay_hint,
+                hint,
+            );
+        }
         if (self.overlay_mode == .profile) {
             const hint = try buildProfileHintText(
                 alloc,
@@ -11859,6 +12402,7 @@ const Host = struct {
         if (self.overlay_completion_value) |value| self.app.core_app.alloc.free(value);
         self.overlay_completion_seed = null;
         self.overlay_completion_value = null;
+        self.overlay_completion_result_id = null;
     }
 
     fn ensureThemeBrushes(self: *Host) !void {
@@ -12268,6 +12812,32 @@ const Host = struct {
     fn isOverlayButton(self: *const Host, child: HWND) bool {
         return (self.overlay_accept_hwnd != null and child == self.overlay_accept_hwnd.?) or
             (self.overlay_cancel_hwnd != null and child == self.overlay_cancel_hwnd.?);
+    }
+
+    fn overlayFocusSlot(self: *const Host, child: HWND) ?OverlayFocusSlot {
+        if (self.overlay_edit_hwnd != null and child == self.overlay_edit_hwnd.?) return .edit;
+        if (self.overlay_accept_hwnd != null and child == self.overlay_accept_hwnd.?) return .accept;
+        if (self.overlay_cancel_hwnd != null and child == self.overlay_cancel_hwnd.?) return .cancel;
+        return null;
+    }
+
+    fn focusRelativeOverlayControl(self: *Host, current: HWND, reverse: bool) bool {
+        const current_slot = self.overlayFocusSlot(current) orelse return false;
+        const target_slot = nextVisibleOverlayFocusSlot(
+            self.overlay_mode,
+            current_slot,
+            reverse,
+            self.overlay_edit_hwnd != null and IsWindowVisible(self.overlay_edit_hwnd.?) != 0,
+            self.overlay_accept_hwnd != null and IsWindowVisible(self.overlay_accept_hwnd.?) != 0,
+            self.overlay_cancel_hwnd != null and IsWindowVisible(self.overlay_cancel_hwnd.?) != 0,
+        ) orelse return false;
+        const target = switch (target_slot) {
+            .edit => self.overlay_edit_hwnd,
+            .accept => self.overlay_accept_hwnd,
+            .cancel => self.overlay_cancel_hwnd,
+        } orelse return false;
+        _ = SetFocus(target);
+        return GetFocus() == target;
     }
 
     fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
@@ -12951,24 +13521,68 @@ const Host = struct {
         };
         defer alloc.free(seed_owned);
 
-        const candidate = commandPaletteCompletionCandidate(
-            self.paletteSnapshot(),
+        const candidate = self.richPaletteCompletionCandidate(
             seed_owned,
             text_owned,
+            self.overlay_completion_result_id,
             reverse,
         ) orelse return false;
-        // `candidate` borrows from `snap.cvals` (config-owned,
-        // stable for this synchronous call's lifetime).
-        _ = try self.setOverlayEditText(candidate);
+        // `candidate` borrows from the current rich catalog. Preserve the
+        // completion state before `syncCommandPaletteBanner` rebuilds it.
+        _ = try self.setOverlayEditText(candidate.text);
         _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
         if (!ownedStringEquals(self.overlay_completion_seed, seed_owned)) {
             try appendOwnedString(alloc, &self.overlay_completion_seed, seed_owned);
         }
-        if (!ownedStringEquals(self.overlay_completion_value, candidate)) {
-            try appendOwnedString(alloc, &self.overlay_completion_value, candidate);
+        if (!ownedStringEquals(self.overlay_completion_value, candidate.text)) {
+            try appendOwnedString(alloc, &self.overlay_completion_value, candidate.text);
         }
+        self.overlay_completion_result_id = candidate.id;
         _ = try self.syncCommandPaletteBanner();
         return true;
+    }
+
+    fn richPaletteCompletionCandidate(
+        self: *const Host,
+        seed: []const u8,
+        current: []const u8,
+        current_id: ?PaletteStableId,
+        reverse: bool,
+    ) ?PaletteCompletion {
+        const catalog = if (self.palette_catalog) |*value| value else return null;
+        var ranked_buf: [win32_palette.max_ranked]PaletteRanked = undefined;
+        const ranked = catalog.rank(
+            seed,
+            .{ .max_results = ranked_buf.len },
+            &ranked_buf,
+        );
+        if (ranked.len == 0) return null;
+
+        var current_index: ?usize = null;
+        for (ranked, 0..) |result, index| {
+            const descriptor = catalog.descriptorFor(result) orelse continue;
+            const id_matches = if (current_id) |id| result.id.eql(id) else false;
+            if (id_matches or (current_id == null and
+                std.mem.eql(u8, paletteCompletionText(descriptor), current)))
+            {
+                current_index = index;
+                break;
+            }
+        }
+        const target = if (current_index) |index|
+            if (reverse)
+                (index + ranked.len - 1) % ranked.len
+            else
+                (index + 1) % ranked.len
+        else if (reverse)
+            ranked.len - 1
+        else
+            0;
+        const descriptor = catalog.descriptorFor(ranked[target]) orelse return null;
+        return .{
+            .text = paletteCompletionText(descriptor),
+            .id = ranked[target].id,
+        };
     }
 
     fn stepTabOverviewSelection(self: *Host, reverse: bool) !bool {
@@ -13015,19 +13629,14 @@ const Host = struct {
         if (self.overlay_mode != .command_palette) return false;
         _ = self.overlay_edit_hwnd orelse return false;
         self.rebuildPaletteList();
-        const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        var mru_buf: [5][]const u8 = undefined;
-        const mru = self.app.paletteMruSlice(&mru_buf);
-        const banner = try commandPaletteBannerText(self.app.core_app.alloc, self.paletteSnapshot(), text, mru);
-        defer if (banner) |value| self.app.core_app.alloc.free(value);
-        if (banner) |value| {
-            try self.setBanner(.info, value);
-        } else {
-            try self.setBanner(.none, null);
-        }
+        // Query guidance comes from the same rich catalog that owns the
+        // visible rows. Clear action-outcome banners from the previous query;
+        // `syncOverlayHint`/paint then render the current rich presentation.
+        try self.setBanner(.none, null);
         _ = try self.syncOverlayLabel();
         _ = try self.syncOverlayHint();
         _ = try self.syncOverlayButtons();
+        self.invalidateOverlayText();
         return true;
     }
 
@@ -13048,7 +13657,7 @@ const Host = struct {
                 // sees highlighted). Fall back to parsing the raw query
                 // so users who type a full action name and press Enter
                 // before the list rebuild completes still get dispatch.
-                if (self.palette_list_ranked_count > 0) {
+                if (self.palette_list_ranked_count > 0 and self.palette_list_visible_rows > 0) {
                     const row = @min(
                         self.palette_list_selected,
                         self.palette_list_ranked_count - 1,
@@ -13057,9 +13666,16 @@ const Host = struct {
                     // Do NOT access `self` after dispatch.
                     return true;
                 }
+                if (self.palette_list_ranked_count > 0) {
+                    self.abortPaletteAction("Make the window larger to show and activate palette results.");
+                    return false;
+                }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
                     try self.setBanner(.err, "Unknown Ghostty action. Example: new_tab or toggle_fullscreen");
+                    if (self.palette_list_uia_provider) |provider| {
+                        win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
+                    }
                     return false;
                 };
                 self.app.pushPaletteMru(text) catch |err| {
@@ -13934,17 +14550,25 @@ const Host = struct {
             const overlay_y = self.tabBarHeight();
             const padding = self.scaled(host_overlay_padding);
             const label_w = self.scaled(host_overlay_label_width);
-            const accept_visible = overlayAcceptButtonVisible(self.overlay_mode);
-            const accept_w = if (accept_visible) self.scaled(host_overlay_accept_width) else 0;
-            const cancel_w = self.scaled(host_overlay_cancel_width);
+            const accept_button_w = self.scaled(host_overlay_accept_width);
+            const cancel_button_w = self.scaled(host_overlay_cancel_width);
+            const action_layout = overlayActionLayoutForWidth(
+                self.overlay_mode,
+                width,
+                padding,
+                cancel_button_w,
+                accept_button_w,
+                self.current_dpi,
+            );
             const edit_frame = overlayEditFrameRect(
                 width,
                 overlay_y,
                 padding,
                 label_w,
-                cancel_w,
-                if (accept_visible) accept_w + padding else 0,
+                action_layout.cancel_width,
+                action_layout.accept_reservation_width,
                 self.scaled(host_overlay_row_height),
+                self.current_dpi,
             );
             const edit_rect = overlayEditChildRectFromFrame(edit_frame, self.scaled(8), self.scaled(6));
             changed.* = applyChildRect(
@@ -13952,14 +14576,14 @@ const Host = struct {
                 &self.overlay_edit_placement,
                 edit_rect,
             ) or changed.*;
-            if (accept_visible) {
+            if (action_layout.accept_visible) {
                 changed.* = applyChildRect(
                     accept_hwnd,
                     &self.overlay_accept_placement,
                     childRect(
-                        width - cancel_w - accept_w - (padding * 2),
+                        action_layout.accept_x,
                         overlay_y + self.scaled(4),
-                        accept_w,
+                        action_layout.accept_width,
                         self.scaled(host_overlay_row_height),
                     ),
                 ) or changed.*;
@@ -13975,20 +14599,22 @@ const Host = struct {
                     false,
                 ) or changed.*;
             }
-            changed.* = applyChildRect(
-                cancel_hwnd,
-                &self.overlay_cancel_placement,
-                childRect(
-                    width - cancel_w - padding,
-                    overlay_y + self.scaled(4),
-                    cancel_w,
-                    self.scaled(host_overlay_row_height),
-                ),
-            ) or changed.*;
+            if (action_layout.cancel_visible) {
+                changed.* = applyChildRect(
+                    cancel_hwnd,
+                    &self.overlay_cancel_placement,
+                    childRect(
+                        action_layout.cancel_x,
+                        overlay_y + self.scaled(4),
+                        action_layout.cancel_width,
+                        self.scaled(host_overlay_row_height),
+                    ),
+                ) or changed.*;
+            }
             changed.* = applyChildVisibility(
                 cancel_hwnd,
                 &self.overlay_cancel_placement,
-                true,
+                action_layout.cancel_visible,
             ) or changed.*;
 
             if (self.overlay_mode == .command_palette) {
@@ -13996,16 +14622,47 @@ const Host = struct {
                     // Anchor the list directly under the EDIT, left-
                     // aligned with it and right-aligned with the buttons
                     // so it reads as part of the same visual card.
-                    const list_x = padding + label_w + self.scaled(8);
-                    const list_width = @max(
-                        self.scaled(120),
-                        width - list_x - padding,
+                    const label_reservation = overlayLabelReservation(
+                        width,
+                        padding,
+                        label_w,
+                        action_layout.cancel_width,
+                        0,
+                        self.current_dpi,
                     );
-                    const list_y = overlay_y + self.scaled(host_overlay_row_height) + self.scaled(12);
-                    const visible_rows: i32 = @intCast(@min(
+                    const list_x = padding + label_reservation + self.scaled(8);
+                    // Keep results below the complete overlay/feedback band.
+                    // The old row-height + 12 anchor started at 36 px while
+                    // feedback was still painting there and terminal content
+                    // began at 58 px, producing the visible overlap reported
+                    // in the palette theme screenshot.
+                    const list_y = overlay_y + self.scaled(host_overlay_height);
+                    const list_width_bounds = paletteListRect(width, list_x, padding, list_y, 0);
+                    const has_list_width = paletteListWidthIsReadable(list_width_bounds, self.scaled(160));
+                    const row_capacity = if (has_list_width)
+                        paletteVisibleRowCapacity(
+                            rect.bottom - list_y - self.scaled(8),
+                            self.scaled(palette_row_height),
+                        )
+                    else
+                        0;
+                    const previous_visible_rows = self.palette_list_visible_rows;
+                    self.palette_list_visible_rows = @min(
                         self.palette_list_ranked_count,
-                        palette_max_visible_rows,
-                    ));
+                        row_capacity,
+                    );
+                    const viewport = clampPaletteViewport(
+                        self.palette_list_ranked_count,
+                        self.palette_list_visible_rows,
+                        self.palette_list_selected,
+                        self.palette_list_scroll,
+                    );
+                    self.palette_list_selected = viewport.selected;
+                    self.palette_list_scroll = viewport.scroll;
+                    if (self.palette_list_visible_rows != previous_visible_rows) {
+                        self.invalidateOverlayText();
+                    }
+                    const visible_rows: i32 = @intCast(self.palette_list_visible_rows);
                     const list_height = @max(
                         self.scaled(palette_row_height),
                         visible_rows * self.scaled(palette_row_height),
@@ -14013,15 +14670,16 @@ const Host = struct {
                     changed.* = applyChildRect(
                         list_hwnd,
                         &self.palette_list_placement,
-                        childRect(list_x, list_y, list_width, list_height),
+                        paletteListRect(width, list_x, padding, list_y, list_height),
                     ) or changed.*;
                     changed.* = applyChildVisibility(
                         list_hwnd,
                         &self.palette_list_placement,
-                        self.palette_list_ranked_count > 0,
+                        self.palette_list_visible_rows > 0 and has_list_width,
                     ) or changed.*;
                 }
             } else if (self.palette_list_hwnd) |list_hwnd| {
+                self.palette_list_visible_rows = 0;
                 changed.* = applyChildVisibility(
                     list_hwnd,
                     &self.palette_list_placement,
@@ -14029,6 +14687,7 @@ const Host = struct {
                 ) or changed.*;
             }
         } else if (self.palette_list_hwnd) |list_hwnd| {
+            self.palette_list_visible_rows = 0;
             changed.* = applyChildVisibility(
                 list_hwnd,
                 &self.palette_list_placement,
@@ -14535,7 +15194,7 @@ const Host = struct {
                         if (surface) |value| value.search_total else null,
                         if (surface) |value| value.search_selected else null,
                         overlay_status,
-                        self.paletteSnapshot(),
+                        self.palettePresentation(),
                     ) catch return;
                 defer alloc.free(overlay_label);
                 if (self.cached_overlay_paint_label_w) |old| alloc.free(old);
@@ -14573,6 +15232,7 @@ const Host = struct {
                         pane_count,
                         self.paletteSnapshot(),
                         mru,
+                        self.palettePresentation(),
                     ) catch return;
                 };
                 defer alloc.free(overlay_feedback);
@@ -14596,9 +15256,28 @@ const Host = struct {
                 self.chrome_text_dirty.overlay = false;
             }
             _ = SetBkMode(hdc, TRANSPARENT);
+            const overlay_padding = self.scaled(host_overlay_padding);
+            const overlay_accept_button_w = self.scaled(host_overlay_accept_width);
+            const overlay_cancel_button_w = self.scaled(host_overlay_cancel_width);
+            const overlay_action_layout = overlayActionLayoutForWidth(
+                self.overlay_mode,
+                client_rect.right,
+                overlay_padding,
+                overlay_cancel_button_w,
+                overlay_accept_button_w,
+                self.current_dpi,
+            );
+            const overlay_label_reservation = overlayLabelReservation(
+                client_rect.right,
+                overlay_padding,
+                self.scaled(host_overlay_label_width),
+                overlay_action_layout.cancel_width,
+                overlay_action_layout.accept_reservation_width,
+                self.current_dpi,
+            );
             var overlay_label_x: i32 = self.scaled(host_overlay_padding) + self.scaled(10);
             var overlay_label_color: u32 = theme.overlay_label_fg;
-            if (self.overlay_mode == .profile) {
+            if (overlay_label_reservation > 0 and self.overlay_mode == .profile) {
                 if (self.selectedProfile()) |profile| {
                     const badge_w = self.cached_overlay_paint_badge_w orelse return;
                     const badge_width = self.scaled(16) + @as(i32, @intCast(badge_w.len * @as(usize, @intCast(self.scaled(7)))));
@@ -14625,29 +15304,27 @@ const Host = struct {
                 }
             }
             _ = SetTextColor(hdc, overlay_label_color);
-            if (self.cached_overlay_paint_label_w) |overlay_label_w| {
+            if (overlay_label_reservation > 0) if (self.cached_overlay_paint_label_w) |overlay_label_w| {
                 textOutWz(hdc, overlay_label_x, overlay_rect.top + self.scaled(7), overlay_label_w);
-            }
+            };
 
-            const overlay_padding = self.scaled(host_overlay_padding);
-            const overlay_accept_w = if (overlayAcceptButtonVisible(self.overlay_mode))
-                self.scaled(host_overlay_accept_width) + overlay_padding
-            else
-                0;
-            const edit_frame = overlayEditFrameRect(
-                client_rect.right,
-                tab_h,
-                overlay_padding,
-                self.scaled(host_overlay_label_width),
-                self.scaled(host_overlay_cancel_width),
-                overlay_accept_w,
-                self.scaled(host_overlay_row_height),
-            );
-            const overlay_edit_focused = if (self.overlay_edit_hwnd) |edit_hwnd|
-                GetFocus() == edit_hwnd
-            else
-                false;
-            drawRoundedRect(hdc, edit_frame, theme.edit_frame_bg, overlayEditBorderColor(self.overlay_mode, overlay_edit_focused, theme.is_dark), self.scaled(4));
+            if (overlayEditFrameVisible(self.overlay_mode)) {
+                const edit_frame = overlayEditFrameRect(
+                    client_rect.right,
+                    tab_h,
+                    overlay_padding,
+                    self.scaled(host_overlay_label_width),
+                    overlay_action_layout.cancel_width,
+                    overlay_action_layout.accept_reservation_width,
+                    self.scaled(host_overlay_row_height),
+                    self.current_dpi,
+                );
+                const overlay_edit_focused = if (self.overlay_edit_hwnd) |edit_hwnd|
+                    GetFocus() == edit_hwnd
+                else
+                    false;
+                drawRoundedRect(hdc, edit_frame, theme.edit_frame_bg, overlayEditBorderColor(self.overlay_mode, overlay_edit_focused, theme.is_dark), self.scaled(4));
+            }
 
             _ = SetTextColor(hdc, if (self.overlay_mode == .profile and self.banner_text == null)
                 if (self.selectedProfile()) |profile|
@@ -14660,7 +15337,21 @@ const Host = struct {
                 .err => theme.error_fg,
             });
             if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
-                textOutWz(hdc, self.scaled(host_overlay_padding) + self.scaled(10), overlay_rect.top + self.scaled(34), overlay_feedback_w);
+                var feedback_rect = RECT{
+                    .left = self.scaled(host_overlay_padding) + self.scaled(10),
+                    .top = overlay_rect.top + self.scaled(31),
+                    .right = @max(
+                        self.scaled(host_overlay_padding) + self.scaled(40),
+                        client_rect.right - self.scaled(host_overlay_padding) - self.scaled(10),
+                    ),
+                    .bottom = overlay_rect.bottom - self.scaled(4),
+                };
+                drawTextWz(
+                    hdc,
+                    overlay_feedback_w,
+                    &feedback_rect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
             }
         }
 
@@ -15781,23 +16472,133 @@ fn overlayEditFrameRect(
     cancel_w: i32,
     accept_reservation_w: i32,
     row_h: i32,
+    dpi: u32,
 ) RECT {
-    const left = padding + label_w;
-    const right = width - cancel_w - accept_reservation_w - (padding * 2) - 6;
+    const top_offset = Host.scaledBy(4, dpi);
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const effective_label_w = overlayLabelReservation(
+        width,
+        padding,
+        label_w,
+        cancel_w,
+        accept_reservation_w,
+        dpi,
+    );
+    const bounded_width = @max(0, width);
+    const raw_right = width - cancel_w - accept_reservation_w - (padding * 2) - right_gap;
+    const right = @min(bounded_width, @max(@min(bounded_width, min_edit_width), raw_right));
+    const left = @min(
+        @max(0, padding + effective_label_w),
+        @max(0, right - min_edit_width),
+    );
     return .{
         .left = left,
-        .top = overlay_y + 4,
-        .right = @max(left + 24, right),
-        .bottom = overlay_y + 4 + row_h,
+        .top = overlay_y + top_offset,
+        .right = right,
+        .bottom = overlay_y + top_offset + row_h,
+    };
+}
+
+fn overlayLabelReservation(
+    width: i32,
+    padding: i32,
+    desired_label_w: i32,
+    cancel_w: i32,
+    accept_reservation_w: i32,
+    dpi: u32,
+) i32 {
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const desired = @max(0, desired_label_w);
+    const available_before_actions = width - @max(0, cancel_w) - @max(0, accept_reservation_w) -
+        2 * @max(0, padding) - right_gap;
+    return if (available_before_actions - @max(0, padding) >= desired + min_edit_width) desired else 0;
+}
+
+const OverlayActionVisibility = struct {
+    accept: bool,
+    cancel: bool,
+};
+
+fn overlayActionVisibilityForWidth(
+    width: i32,
+    padding: i32,
+    cancel_w: i32,
+    accept_w: i32,
+    accept_requested: bool,
+    dpi: u32,
+) OverlayActionVisibility {
+    const bounded_padding = @max(0, padding);
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const cancel = width >= @max(0, cancel_w) + 3 * bounded_padding + right_gap + min_edit_width;
+    const accept = cancel and accept_requested and
+        width >= @max(0, cancel_w) + @max(0, accept_w) + 4 * bounded_padding + right_gap + min_edit_width;
+    return .{ .accept = accept, .cancel = cancel };
+}
+
+const OverlayActionLayout = struct {
+    accept_visible: bool,
+    cancel_visible: bool,
+    compact_cancel: bool,
+    accept_x: i32,
+    cancel_x: i32,
+    accept_width: i32,
+    cancel_width: i32,
+    accept_reservation_width: i32,
+};
+
+fn overlayActionLayoutForWidth(
+    mode: HostOverlayMode,
+    width: i32,
+    padding: i32,
+    cancel_button_w: i32,
+    accept_button_w: i32,
+    dpi: u32,
+) OverlayActionLayout {
+    const bounded_padding = @max(0, padding);
+    const visibility = overlayActionVisibilityForWidth(
+        width,
+        bounded_padding,
+        cancel_button_w,
+        accept_button_w,
+        overlayAcceptButtonVisible(mode),
+        dpi,
+    );
+    const compact_cancel = mode == .confirm and !visibility.cancel and width > 0;
+    const compact_inset = if (compact_cancel)
+        @min(bounded_padding, @divTrunc(width - 1, 2))
+    else
+        bounded_padding;
+    const cancel_visible = visibility.cancel or compact_cancel;
+    const accept_width = if (visibility.accept) @max(0, accept_button_w) else 0;
+    const cancel_width = if (compact_cancel)
+        width - 2 * compact_inset
+    else if (cancel_visible)
+        @max(0, cancel_button_w)
+    else
+        0;
+    return .{
+        .accept_visible = visibility.accept,
+        .cancel_visible = cancel_visible,
+        .compact_cancel = compact_cancel,
+        .accept_x = @max(0, width - cancel_width - accept_width - 2 * bounded_padding),
+        .cancel_x = if (compact_cancel) compact_inset else width - cancel_width - bounded_padding,
+        .accept_width = accept_width,
+        .cancel_width = cancel_width,
+        .accept_reservation_width = if (visibility.accept) accept_width + bounded_padding else 0,
     };
 }
 
 fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RECT {
+    const left = @min(frame.right, frame.left + @max(0, inset_x));
+    const top = @min(frame.bottom, frame.top + @max(0, inset_y));
     return .{
-        .left = frame.left + inset_x,
-        .top = frame.top + inset_y,
-        .right = @max(frame.left + inset_x + 1, frame.right - inset_x),
-        .bottom = @max(frame.top + inset_y + 1, frame.bottom - inset_y),
+        .left = left,
+        .top = top,
+        .right = @max(left, frame.right - @max(0, inset_x)),
+        .bottom = @max(top, frame.bottom - @max(0, inset_y)),
     };
 }
 
@@ -15830,6 +16631,139 @@ fn applyChildVisibility(hwnd: HWND, placement: *ChildPlacement, visible: bool) b
     placement.visible = visible;
     placement.visible_known = true;
     return true;
+}
+
+fn paletteVisibleRowCapacity(available_height: i32, row_height: i32) usize {
+    if (row_height <= 0 or available_height < row_height) return 0;
+    const raw: usize = @intCast(@divTrunc(available_height, row_height));
+    return @min(raw, palette_max_visible_rows);
+}
+
+fn paletteListTransition(
+    previous_count: usize,
+    next_count: usize,
+    row_capacity: usize,
+) PaletteListTransition {
+    const previous_rows = @min(previous_count, row_capacity);
+    const next_rows = @min(next_count, row_capacity);
+    return .{
+        .relayout = previous_rows != next_rows,
+        .exposes_content = next_rows < previous_rows,
+        .announce_no_matches = previous_count > 0 and next_count == 0,
+    };
+}
+
+fn paletteNoMatchNotificationTarget(
+    list_available: bool,
+    list_visible: bool,
+    edit_available: bool,
+) ?PaletteNoMatchNotificationTarget {
+    if (list_available and list_visible) return .list;
+    if (edit_available) return .edit;
+    if (list_available) return .list;
+    return null;
+}
+
+fn paletteListRect(
+    client_width: i32,
+    desired_left: i32,
+    right_padding: i32,
+    top: i32,
+    height: i32,
+) RECT {
+    const client_right = @max(0, client_width);
+    const right = @max(0, client_right - @max(0, right_padding));
+    const left = @min(@max(0, desired_left), right);
+    return .{
+        .left = left,
+        .top = top,
+        .right = right,
+        .bottom = top + @max(0, height),
+    };
+}
+
+fn paletteListWidthIsReadable(rect: RECT, minimum_width: i32) bool {
+    return rect.right - rect.left >= @max(1, minimum_width);
+}
+
+fn paletteRowTitleColor(
+    destructive: bool,
+    selected: bool,
+    normal_color: u32,
+    selected_color: u32,
+    destructive_color: u32,
+) u32 {
+    if (destructive) return destructive_color;
+    if (selected) return selected_color;
+    return normal_color;
+}
+
+fn paletteRowColumns(
+    row: RECT,
+    padding: i32,
+    preferred_title_width: i32,
+    minimum_subtitle_width: i32,
+    preferred_shortcut_width: i32,
+) PaletteRowColumns {
+    const left = @min(@max(row.left, row.left + @max(0, padding)), row.right);
+    const right = @max(left, row.right - @max(0, padding));
+    const available = right - left;
+    const title_width = @min(available, @max(0, preferred_title_width));
+    const subtitle_reservation = @min(
+        available - title_width,
+        @max(0, minimum_subtitle_width),
+    );
+    const shortcut_room = available - title_width - subtitle_reservation;
+    const preferred_shortcut = @max(0, preferred_shortcut_width);
+    const minimum_legible_shortcut = @min(preferred_shortcut, @max(1, minimum_subtitle_width));
+    const shortcut_width = if (shortcut_room >= minimum_legible_shortcut)
+        @min(shortcut_room, preferred_shortcut)
+    else
+        0;
+    const title_right = left + title_width;
+    const shortcut_left = right - shortcut_width;
+    return .{
+        .title = .{
+            .left = left,
+            .top = row.top,
+            .right = title_right,
+            .bottom = row.bottom,
+        },
+        .subtitle = .{
+            .left = title_right,
+            .top = row.top,
+            .right = shortcut_left,
+            .bottom = row.bottom,
+        },
+        .shortcut = .{
+            .left = shortcut_left,
+            .top = row.top,
+            .right = right,
+            .bottom = row.bottom,
+        },
+    };
+}
+
+fn clampPaletteViewport(
+    result_count: usize,
+    visible_rows: usize,
+    selected: usize,
+    scroll: usize,
+) PaletteViewport {
+    if (result_count == 0) return .{ .selected = 0, .scroll = 0 };
+    if (visible_rows == 0) return .{
+        .selected = @min(selected, result_count - 1),
+        .scroll = 0,
+    };
+    const clamped_selected = @min(selected, result_count - 1);
+    const max_scroll = result_count - @min(result_count, visible_rows);
+    var clamped_scroll = @min(scroll, max_scroll);
+    if (clamped_selected < clamped_scroll) {
+        clamped_scroll = clamped_selected;
+    } else if (clamped_selected >= clamped_scroll + visible_rows) {
+        clamped_scroll = clamped_selected - visible_rows + 1;
+    }
+    return .{ .selected = clamped_selected, .scroll = clamped_scroll };
 }
 
 const SurfaceLayoutRuntimeSync = struct {
@@ -16237,6 +17171,15 @@ fn fillSolidRect(hdc: HDC, rect: RECT, color: u32) void {
     _ = FillRect(hdc, &rect, brush);
 }
 
+fn drawRectBorder(hdc: HDC, rect: RECT, color: u32, thickness: i32) void {
+    if (rect.right <= rect.left or rect.bottom <= rect.top or thickness <= 0) return;
+    const stroke = @min(thickness, @min(rect.right - rect.left, rect.bottom - rect.top));
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.top + stroke }, color);
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.bottom - stroke, .right = rect.right, .bottom = rect.bottom }, color);
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top + stroke, .right = rect.left + stroke, .bottom = rect.bottom - stroke }, color);
+    fillSolidRect(hdc, .{ .left = rect.right - stroke, .top = rect.top + stroke, .right = rect.right, .bottom = rect.bottom - stroke }, color);
+}
+
 fn utf16GdiTextLen(text: [:0]const u16) i32 {
     const max_len: usize = @intCast(std.math.maxInt(i32));
     return @intCast(@min(text.len, max_len));
@@ -16283,6 +17226,228 @@ fn getPaletteListHost(hwnd: HWND) ?*Host {
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
 
+fn utf16CodeUnitOffsetToUtf8ByteOffset(text: []const u8, target_units: usize) usize {
+    var byte_offset: usize = 0;
+    var utf16_units: usize = 0;
+    while (byte_offset < text.len) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return byte_offset;
+        const end = byte_offset + @as(usize, sequence_len);
+        if (end > text.len) return byte_offset;
+        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return byte_offset;
+        const codepoint_units: usize = if (codepoint > 0xFFFF) 2 else 1;
+        if (utf16_units + codepoint_units > target_units) return byte_offset;
+        utf16_units += codepoint_units;
+        byte_offset = end;
+        if (utf16_units == target_units) return byte_offset;
+    }
+    return text.len;
+}
+
+fn utf8ByteOffsetToUtf16CodeUnitOffset(text: []const u8, target_bytes: usize) usize {
+    const target = @min(target_bytes, text.len);
+    var byte_offset: usize = 0;
+    var utf16_units: usize = 0;
+    while (byte_offset < target) {
+        const sequence_len = std.unicode.utf8ByteSequenceLength(text[byte_offset]) catch return utf16_units;
+        const end = byte_offset + @as(usize, sequence_len);
+        if (end > target or end > text.len) return utf16_units;
+        const codepoint = std.unicode.utf8Decode(text[byte_offset..end]) catch return utf16_units;
+        utf16_units += if (codepoint > 0xFFFF) 2 else 1;
+        byte_offset = end;
+    }
+    return utf16_units;
+}
+
+test "Win32 edit offsets preserve supplementary Unicode boundaries" {
+    const text = "a🚀b";
+    const utf16_offsets = [_]usize{ 0, 1, 3, 4 };
+    const utf8_offsets = [_]usize{ 0, 1, 5, 6 };
+    for (utf16_offsets, utf8_offsets) |utf16_offset, utf8_offset| {
+        try std.testing.expectEqual(
+            utf8_offset,
+            utf16CodeUnitOffsetToUtf8ByteOffset(text, utf16_offset),
+        );
+        try std.testing.expectEqual(
+            utf16_offset,
+            utf8ByteOffsetToUtf16CodeUnitOffset(text, utf8_offset),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitOffsetToUtf8ByteOffset(text, 2));
+    try std.testing.expectEqual(@as(usize, 1), utf8ByteOffsetToUtf16CodeUnitOffset(text, 2));
+}
+
+test "Win32 edit caret chooses the active selection endpoint" {
+    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 2));
+    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 8));
+    try std.testing.expectEqual(@as(u32, 2), editSelectionCaretEndpoint(.{ 2, 8 }, 3));
+    try std.testing.expectEqual(@as(u32, 8), editSelectionCaretEndpoint(.{ 2, 8 }, 7));
+    try std.testing.expectEqual(@as(u32, 5), editSelectionCaretEndpoint(.{ 5, 5 }, 99));
+}
+
+fn nativeEditSelection(hwnd: HWND) [2]u32 {
+    var start: u32 = 0;
+    var end: u32 = 0;
+    _ = SendMessageW(
+        hwnd,
+        EM_GETSEL,
+        @intFromPtr(&start),
+        @bitCast(@intFromPtr(&end)),
+    );
+    return .{ start, end };
+}
+
+fn editSelectionCaretEndpoint(selection: [2]u32, native_caret: u32) u32 {
+    if (selection[0] == selection[1]) return selection[0];
+    const distance_to_start = if (native_caret >= selection[0])
+        native_caret - selection[0]
+    else
+        selection[0] - native_caret;
+    const distance_to_end = if (native_caret >= selection[1])
+        native_caret - selection[1]
+    else
+        selection[1] - native_caret;
+    return if (distance_to_start < distance_to_end) selection[0] else selection[1];
+}
+
+fn nativeEditCaret(hwnd: HWND, selection: [2]u32) u32 {
+    if (selection[0] == selection[1]) return selection[0];
+    if (GetFocus() != hwnd) return selection[1];
+    var point: POINT = undefined;
+    if (GetCaretPos(&point) == 0) return selection[1];
+    const x: u16 = @bitCast(@as(i16, @truncate(point.x)));
+    const y: u16 = @bitCast(@as(i16, @truncate(point.y)));
+    const packed_point: LPARAM = @bitCast(@as(usize, x) | (@as(usize, y) << 16));
+    const result = SendMessageW(hwnd, EM_CHARFROMPOS, 0, packed_point);
+    const native_caret: u32 = @intCast(@as(usize, @bitCast(result)) & 0xFFFF);
+    return editSelectionCaretEndpoint(selection, native_caret);
+}
+
+fn editSnapshot(
+    alloc: Allocator,
+    hwnd: HWND,
+    value: []const u8,
+) !win32_uia.TerminalSnapshot {
+    const document_text = try alloc.dupe(u8, value);
+    errdefer alloc.free(document_text);
+    const visible_text = try alloc.dupe(u8, value);
+    const selection = nativeEditSelection(hwnd);
+    const start = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[0]);
+    const end = utf16CodeUnitOffsetToUtf8ByteOffset(value, selection[1]);
+    const caret = utf16CodeUnitOffsetToUtf8ByteOffset(value, nativeEditCaret(hwnd, selection));
+    return .{
+        .document_text = document_text,
+        .visible_text = visible_text,
+        .visible_range = .{ .start = 0, .end = document_text.len },
+        .caret_offset = caret,
+        .selection_range = .{ .start = @min(start, end), .end = @max(start, end) },
+    };
+}
+
+fn selectNativeEditRange(
+    hwnd: HWND,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) void {
+    const start = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.start);
+    const end = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.end);
+    _ = SendMessageW(hwnd, EM_SETSEL, start, @intCast(end));
+    _ = SetFocus(hwnd);
+}
+
+fn overlayEditNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
+    _ = buf;
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    return switch (host.overlay_mode) {
+        .command_palette => "Command palette query",
+        .profile => "Profile filter",
+        .search => "Search query",
+        .surface_title => "Surface title",
+        .tab_title => "Tab title",
+        .tab_overview => "Tab overview filter",
+        .none, .confirm => "Overlay input",
+    };
+}
+
+fn overlayEditValueThunk(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const value = try overlayEditText(host);
+    return alloc.dupe(u8, value);
+}
+
+fn overlayEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.TerminalSnapshot {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    const value = try overlayEditText(host);
+    return editSnapshot(alloc, hwnd, value);
+}
+
+fn overlayEditFocusedThunk(ctx: *anyopaque) bool {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return false;
+    return GetFocus() == hwnd;
+}
+
+fn overlayEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(host.app.core_app.alloc, value);
+    defer host.app.core_app.alloc.free(value_w);
+    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+}
+
+fn overlayEditSelectRangeThunk(
+    ctx: *anyopaque,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) !void {
+    const host: *Host = @ptrCast(@alignCast(ctx));
+    const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
+    selectNativeEditRange(hwnd, snapshot_text, range);
+}
+
+fn searchEditNameThunk(_: *anyopaque, _: []u8) []const u8 {
+    return "Search query";
+}
+
+fn searchEditValueThunk(ctx: *anyopaque, alloc: Allocator) ![]u8 {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const value = try surface.readSearchBarEditText();
+    defer surface.app.core_app.alloc.free(value);
+    return alloc.dupe(u8, value);
+}
+
+fn searchEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.TerminalSnapshot {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    const value = try surface.readSearchBarEditText();
+    defer surface.app.core_app.alloc.free(value);
+    return editSnapshot(alloc, hwnd, value);
+}
+
+fn searchEditFocusedThunk(ctx: *anyopaque) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return false;
+    return GetFocus() == hwnd;
+}
+
+fn searchEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(surface.app.core_app.alloc, value);
+    defer surface.app.core_app.alloc.free(value_w);
+    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+}
+
+fn searchEditSelectRangeThunk(
+    ctx: *anyopaque,
+    snapshot_text: []const u8,
+    range: win32_uia.OffsetRange,
+) !void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
+    selectNativeEditRange(hwnd, snapshot_text, range);
+}
+
 /// Trampoline bridging `PaletteListState.name` (C-compatible fn
 /// pointer shape) into `Host.buildPaletteListName`. `ctx` is the
 /// const-erased `*Host` stashed on `PaletteListState`; the provider
@@ -16308,6 +17473,20 @@ fn paletteListRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 
     return host.buildPaletteRowName(index, buf);
 }
 
+fn paletteListRowEnabledThunk(ctx: *anyopaque, index: usize) bool {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    if (index >= host.palette_list_ranked_count) return false;
+    const catalog = if (host.palette_catalog) |*value| value else return true;
+    const descriptor = catalog.descriptorFor(host.palette_list_ranked[index]) orelse return false;
+    return descriptor.item.enabled;
+}
+
+fn paletteListRowIdThunk(ctx: *anyopaque, index: usize) u64 {
+    const host: *const Host = @ptrCast(@alignCast(ctx));
+    if (index >= host.palette_list_ranked_count) return 0;
+    return host.palette_list_ranked[index].id.value;
+}
+
 fn paletteListSelectRowThunk(ctx: *anyopaque, index: usize) void {
     const host: *Host = @ptrCast(@alignCast(ctx));
     _ = host.setPaletteListSelection(index);
@@ -16329,7 +17508,7 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
             .height = @floatFromInt(rect.bottom - rect.top),
         },
         .first_visible = host.palette_list_scroll,
-        .visible_count = @min(remaining, palette_max_visible_rows),
+        .visible_count = @min(remaining, host.palette_list_visible_rows),
         .row_height = @floatFromInt(row_height),
     };
 }
@@ -16337,6 +17516,52 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
 /// Thunks adapting `*App` into the `AppHandle` callback shape used by
 /// `win32_settings.SettingsWindow`. Kept inline so a theme swap is
 /// picked up on the next paint without cache invalidation.
+fn settingsOwnerWindowThunk(ctx: *anyopaque) ?HWND {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const focused = app.focusedSurfaceForUndoRedo();
+    if (focused) |surface| app.settings_restore_surface_id = surface.core().id;
+    const surface = focused orelse
+        (if (app.settings_restore_surface_id) |id| app.findSurfaceById(id) else null) orelse
+        app.primarySurface() orelse return null;
+    return surface.windowHwnd();
+}
+
+fn settingsCustomUiaProvidersEnabledThunk(ctx: *anyopaque) bool {
+    const app: *const App = @ptrCast(@alignCast(ctx));
+    return app.com_initialized;
+}
+
+fn settingsRestoreCandidateOrder(
+    saved: ?u64,
+    focused: ?u64,
+    primary: ?u64,
+) [3]?u64 {
+    return .{ saved, focused, primary };
+}
+
+test "settings close prefers the originating surface in a two-host session" {
+    const order = settingsRestoreCandidateOrder(202, null, 101);
+    try std.testing.expectEqual(@as(?u64, 202), order[0]);
+    try std.testing.expectEqual(@as(?u64, null), order[1]);
+    try std.testing.expectEqual(@as(?u64, 101), order[2]);
+}
+
+fn settingsRestoreSurface(app: *App, saved: ?u64) ?*Surface {
+    const focused = app.focusedSurfaceForUndoRedo();
+    const primary = app.primarySurface();
+    const order = settingsRestoreCandidateOrder(
+        saved,
+        if (focused) |surface| surface.core().id else null,
+        if (primary) |surface| surface.core().id else null,
+    );
+    for (order) |candidate| {
+        if (candidate) |id| {
+            if (app.findSurfaceById(id)) |surface| return surface;
+        }
+    }
+    return null;
+}
+
 fn settingsChromeBgThunk(ctx: *anyopaque) u32 {
     const app: *const App = @ptrCast(@alignCast(ctx));
     return app.resolved_theme.chrome_bg;
@@ -16410,10 +17635,25 @@ fn settingsSaveAndReloadThunk(
 }
 fn settingsOnClosedThunk(ctx: *anyopaque) void {
     const app: *App = @ptrCast(@alignCast(ctx));
+    const restore_id = app.settings_restore_surface_id;
+    app.settings_restore_surface_id = null;
+    if (settingsRestoreSurface(app, restore_id)) |surface| {
+        app.activateSurface(surface);
+    }
     // Mirrors the kick after the last terminal window closes; the
     // quit timer observes `hasLiveUiWindows()` so this is a no-op
     // when any terminal HWND is still alive.
     if (app.running and !app.hasLiveUiWindows()) app.startQuitTimer();
+}
+
+fn settingsDeferUiaDisconnectThunk(
+    ctx: *anyopaque,
+    provider_ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    scheduleDeferredUiaDisconnect(app, provider_ctx, disconnect, release);
 }
 fn settingsNotifySuccessThunk(ctx: *anyopaque, title: []const u8, body: []const u8) void {
     const app: *App = @ptrCast(@alignCast(ctx));
@@ -16921,24 +18161,6 @@ fn leadingIndentLen(line: []const u8) usize {
     return i;
 }
 
-/// Extract a trailing inline `#` / `;` comment from a key assignment.
-/// The scan starts after `=` to match the config grammar.
-fn trailingCommentOf(line: []const u8) []const u8 {
-    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return &.{};
-    var i: usize = eq + 1;
-    while (i < line.len) : (i += 1) {
-        if (line[i] == '#' or line[i] == ';') {
-            // Trim trailing \r (CRLF input) and trailing whitespace
-            // from the comment — we'll add our own single-space
-            // separator between value and comment.
-            var end: usize = line.len;
-            while (end > i and (line[end - 1] == '\r' or line[end - 1] == ' ' or line[end - 1] == '\t')) : (end -= 1) {}
-            return line[i..end];
-        }
-    }
-    return &.{};
-}
-
 /// Patch GUI-edited config keys while preserving unchanged source text.
 ///
 /// A line matches `<name>` when its trimmed-left form starts with
@@ -17021,17 +18243,13 @@ fn patchOrAppendEdits(
                     if (payload.len > 0 and payload[payload.len - 1] == '\n') {
                         payload = payload[0 .. payload.len - 1];
                     }
-                    // Preserve indentation and trailing inline comments
-                    // from the original assignment.
+                    // Preserve indentation from the original assignment. The
+                    // config grammar has no inline comments: `#` or `;` after
+                    // `=` is value data and must not survive replacement.
                     const indent_end = leadingIndentLen(line);
                     const leading = line[0..indent_end];
-                    const trailing = trailingCommentOf(line);
                     try out.appendSlice(alloc, leading);
                     try out.appendSlice(alloc, payload);
-                    if (trailing.len > 0) {
-                        try out.append(alloc, ' ');
-                        try out.appendSlice(alloc, trailing);
-                    }
                     written.set(@intFromEnum(key));
                     replaced = true;
                 }
@@ -17082,6 +18300,153 @@ test "win32 settings patch persists a palette theme selection" {
     );
     try testing.expect(std.mem.indexOf(u8, patched.items, "theme = 0x96f") != null);
     try testing.expect(std.mem.indexOf(u8, patched.items, "window-save-state = never") != null);
+}
+
+test "win32 settings patch persists optional command edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    var direct: configpkg.Config.Command = undefined;
+    try direct.parseCLI(pending._arena.?.allocator(), "direct:pwsh.exe -NoLogo");
+    pending.command = direct;
+
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.command)));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(
+        testing.allocator,
+        "font-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = direct:pwsh.exe -NoLogo") != null);
+
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "# Keep this whole-line comment.\n  command = cmd.exe /c echo #old\nfont-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expectEqualStrings(
+        "# Keep this whole-line comment.\n  command = direct:pwsh.exe -NoLogo\nfont-size = 12\n",
+        patched.items,
+    );
+
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "command = cmd.exe /c echo ;old\nfont-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expectEqualStrings(
+        "command = direct:pwsh.exe -NoLogo\nfont-size = 12\n",
+        patched.items,
+    );
+
+    original.command = try pending.command.?.clone(original._arena.?.allocator());
+    pending.command = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.command)));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "command = cmd.exe\nfont-size = 12\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = \n") != null);
+    try testing.expect(std.mem.indexOf(u8, patched.items, "command = cmd.exe") == null);
+}
+
+test "win32 settings patch persists optional update channel edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    pending.@"auto-update-channel" = .tip;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update-channel")));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
+    try testing.expectEqualStrings("auto-update-channel = tip\n", patched.items);
+
+    original.@"auto-update-channel" = .stable;
+    pending.@"auto-update-channel" = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.@"auto-update-channel")));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "auto-update-channel = stable\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expectEqualStrings("auto-update-channel = \n", patched.items);
+
+    var reloaded = try configpkg.Config.default(testing.allocator);
+    defer reloaded.deinit();
+    reloaded.@"auto-update-channel" = build_config.release_channel;
+    try testing.expect(!settingsEditedValueMasked(
+        &pending,
+        &reloaded,
+        SettingsConfigKey.@"auto-update-channel",
+    ));
+    reloaded.@"auto-update-channel" = if (build_config.release_channel == .stable) .tip else .stable;
+    try testing.expect(settingsEditedValueMasked(
+        &pending,
+        &reloaded,
+        SettingsConfigKey.@"auto-update-channel",
+    ));
+}
+
+test "win32 settings patch persists optional auto update edits" {
+    const testing = std.testing;
+
+    var original = try configpkg.Config.default(testing.allocator);
+    defer original.deinit();
+    var pending = try configpkg.Config.default(testing.allocator);
+    defer pending.deinit();
+
+    pending.@"auto-update" = .download;
+    const edited = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(edited.isSet(@intFromEnum(SettingsConfigKey.@"auto-update")));
+
+    var patched: std.ArrayListUnmanaged(u8) = .{};
+    defer patched.deinit(testing.allocator);
+    try patchOrAppendEdits(testing.allocator, "", &pending, edited, &patched);
+    try testing.expectEqualStrings("auto-update = download\n", patched.items);
+
+    original.@"auto-update" = .check;
+    pending.@"auto-update" = null;
+    const cleared = settingsUserEditedKeys(&original, &pending);
+    try testing.expect(cleared.isSet(@intFromEnum(SettingsConfigKey.@"auto-update")));
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "auto-update = check\n",
+        &pending,
+        cleared,
+        &patched,
+    );
+    try testing.expectEqualStrings("auto-update = \n", patched.items);
 }
 
 /// Strip HTML tags for the CF_UNICODETEXT fallback when core only
@@ -17255,6 +18620,7 @@ fn paletteListProc(
         },
         WM_GETOBJECT => {
             const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!host.app.com_initialized) return DefWindowProcW(hwnd, msg, wParam, lParam);
             if (host.palette_list_uia_provider) |provider| {
                 if (win32_uia.returnPaletteListProvider(
                     hwnd,
@@ -17481,6 +18847,62 @@ fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
     return mode != .command_palette;
 }
 
+fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
+    return mode != .confirm;
+}
+
+const OverlayFocusSlot = enum { edit, accept, cancel };
+
+fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
+    if (mode == .confirm) return if (current == .accept) .cancel else .accept;
+    if (!overlayAcceptButtonVisible(mode)) return if (current == .edit) .cancel else .edit;
+    return if (reverse)
+        switch (current) {
+            .edit => .cancel,
+            .accept => .edit,
+            .cancel => .accept,
+        }
+    else switch (current) {
+        .edit => .accept,
+        .accept => .cancel,
+        .cancel => .edit,
+    };
+}
+
+fn overlayFocusSlotVisible(
+    slot: OverlayFocusSlot,
+    edit_visible: bool,
+    accept_visible: bool,
+    cancel_visible: bool,
+) bool {
+    return switch (slot) {
+        .edit => edit_visible,
+        .accept => accept_visible,
+        .cancel => cancel_visible,
+    };
+}
+
+fn nextVisibleOverlayFocusSlot(
+    mode: HostOverlayMode,
+    current: OverlayFocusSlot,
+    reverse: bool,
+    edit_visible: bool,
+    accept_visible: bool,
+    cancel_visible: bool,
+) ?OverlayFocusSlot {
+    var candidate = current;
+    for (0..3) |_| {
+        candidate = nextOverlayFocusSlot(mode, candidate, reverse);
+        if (candidate != current and overlayFocusSlotVisible(
+            candidate,
+            edit_visible,
+            accept_visible,
+            cancel_visible,
+        )) return candidate;
+    }
+    return null;
+}
+
 fn inspectorChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
     return win32_chrome_state.inspectorVisible(overlay_mode, status_bar_height);
 }
@@ -17540,6 +18962,14 @@ fn commandButtonKeyAction(vk: WPARAM) ?CommandButtonKeyAction {
         VK_ESCAPE => .dismiss,
         else => null,
     };
+}
+
+fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) bool {
+    for (actions) |action| switch (action) {
+        .toggle_command_palette => return true,
+        else => {},
+    };
+    return false;
 }
 
 fn commandPaletteDirectionFromWheelDelta(delta: i16) bool {
@@ -18277,13 +19707,17 @@ fn buildOverlayPaintLabelText(
     search_total: ?usize,
     search_selected: ?usize,
     host_status: HostTabStatus,
-    palette: PaletteSnapshot,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, ""),
         .surface_title => try alloc.dupe(u8, "Window title"),
         .tab_title => try alloc.dupe(u8, "Tab title"),
-        .command_palette => try buildCommandPaletteOverlayLabel(alloc, palette, input_text),
+        .command_palette => try buildCommandPaletteOverlayLabel(
+            alloc,
+            input_text,
+            palette_presentation,
+        ),
         .profile => try alloc.dupe(u8, "Profile"),
         .search => try buildSearchOverlayLabel(alloc, search_total, search_selected),
         .tab_overview => try buildTabOverviewOverlayLabel(alloc, host_status.index, host_status.total),
@@ -18307,6 +19741,7 @@ fn buildOverlayFeedbackText(
     pane_count: usize,
     palette: PaletteSnapshot,
     mru: []const []const u8,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     if (banner_text) |value| {
         return switch (banner_kind) {
@@ -18314,6 +19749,14 @@ fn buildOverlayFeedbackText(
             .info => try std.fmt.allocPrint(alloc, "Info: {s}", .{value}),
             .none => try alloc.dupe(u8, value),
         };
+    }
+    if (mode == .command_palette) {
+        return try buildCommandPaletteFeedbackText(
+            alloc,
+            input_text,
+            mru,
+            palette_presentation,
+        );
     }
     return try buildOverlayHintText(
         alloc,
@@ -18336,16 +19779,16 @@ fn buildOverlayAcceptLabel(
     active_search_needle: ?[]const u8,
     search_total: ?usize,
     search_selected: ?usize,
-    palette: PaletteSnapshot,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, "OK"),
         .command_palette => blk: {
             if (input_text.len == 0) break :blk try alloc.dupe(u8, "Close");
-            if (input.Binding.Action.parse(input_text)) |_| {
-                break :blk try alloc.dupe(u8, "Run");
-            } else |_| {}
-            if (commandPaletteUniqueMatch(palette, input_text) != null) break :blk try alloc.dupe(u8, "Run");
+            if (palette_presentation.match_count > 0 and !palette_presentation.available) {
+                break :blk try alloc.dupe(u8, "Resize");
+            }
+            if (palette_presentation.match_count > 0) break :blk try alloc.dupe(u8, "Activate");
             break :blk try alloc.dupe(u8, "Check");
         },
         .profile => try alloc.dupe(u8, "Open"),
@@ -19318,19 +20761,88 @@ fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
 
 fn buildCommandPaletteOverlayLabel(
     alloc: Allocator,
-    snap: PaletteSnapshot,
     input_text: []const u8,
+    presentation: PalettePresentation,
 ) ![]u8 {
     if (input_text.len == 0) return try alloc.dupe(u8, "Command");
-    if (input.Binding.Action.parse(input_text)) |_| {
-        return try alloc.dupe(u8, "Run action");
-    } else |_| {}
-    if (commandPaletteUniqueMatch(snap, input_text) != null) {
-        return try alloc.dupe(u8, "Run action");
+    if (presentation.match_count > 0) {
+        return try std.fmt.allocPrint(alloc, "Command {d}", .{presentation.match_count});
     }
-    const matches = commandPaletteMatchCount(snap, input_text);
-    if (matches > 0) return try std.fmt.allocPrint(alloc, "Command {d}", .{matches});
     return try alloc.dupe(u8, "Command ?");
+}
+
+fn buildCommandPaletteFeedbackText(
+    alloc: Allocator,
+    input_text: []const u8,
+    mru: []const []const u8,
+    presentation: PalettePresentation,
+) ![]u8 {
+    if (input_text.len == 0) {
+        if (mru.len > 0) {
+            return try std.fmt.allocPrint(
+                alloc,
+                "Recent: {s}. Type to search actions, themes, tabs, panes, settings, and help.",
+                .{mru[0]},
+            );
+        }
+        return try alloc.dupe(
+            u8,
+            "Type to search actions, themes, tabs, panes, settings, and help.",
+        );
+    }
+    if (presentation.match_count == 0) {
+        return try alloc.dupe(
+            u8,
+            "No matching command. Try > actions, % themes, @ tabs, / panes, : settings, or ? help.",
+        );
+    }
+    if (!presentation.available) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "{d} matches. Make the window larger to show and activate results.",
+            .{presentation.match_count},
+        );
+    }
+
+    const title = presentation.title orelse "Selected result";
+    const subtitle = presentation.subtitle orelse "";
+    if (presentation.match_count == 1) {
+        if (subtitle.len > 0) {
+            return try std.fmt.allocPrint(
+                alloc,
+                "{s} — {s}. Enter activates; Escape closes.",
+                .{ title, subtitle },
+            );
+        }
+        return try std.fmt.allocPrint(
+            alloc,
+            "{s}. Enter activates; Escape closes.",
+            .{title},
+        );
+    }
+    if (subtitle.len > 0) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "{d} matches. Selected: {s} — {s}. Up/Down selects; Enter activates.",
+            .{ presentation.match_count, title, subtitle },
+        );
+    }
+    return try std.fmt.allocPrint(
+        alloc,
+        "{d} matches. Selected: {s}. Up/Down selects; Enter activates.",
+        .{ presentation.match_count, title },
+    );
+}
+
+fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
+    return switch (descriptor.payload) {
+        .action => |payload| payload.action,
+        .recent_command => |payload| payload.action,
+        .profile => |key| key,
+        .setting => |key| key,
+        .theme => |name| name,
+        .tab, .pane, .help => descriptor.item.title,
+    };
 }
 
 fn commandPaletteBannerText(
@@ -19421,6 +20933,10 @@ fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
     return @ptrFromInt(@as(usize, @intCast(lParam)));
 }
 
+fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
+    return notify == BN_CLICKED and child != null and expected != null and child.? == expected.?;
+}
+
 fn getHost(hwnd: HWND) ?*Host {
     const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
@@ -19431,6 +20947,195 @@ fn refocusActiveSurface(host: *Host) void {
     if (host.activeSurface()) |surface| {
         if (surface.hwnd) |surface_hwnd| _ = SetFocus(surface_hwnd);
     }
+}
+
+fn hostActivationFocusTarget(
+    mode: HostOverlayMode,
+    edit: ?HWND,
+    accept: ?HWND,
+    cancel: ?HWND,
+    surface: ?HWND,
+) ?HWND {
+    return switch (mode) {
+        .none => surface,
+        .command_palette,
+        .profile,
+        .search,
+        .surface_title,
+        .tab_title,
+        .tab_overview,
+        => edit orelse surface,
+        .confirm => accept orelse cancel orelse surface,
+    };
+}
+
+fn refocusHostAfterActivation(host: *Host) void {
+    const surface_hwnd = if (host.activeSurface()) |surface| surface.hwnd else null;
+    if (hostActivationFocusTarget(
+        host.overlay_mode,
+        host.overlay_edit_hwnd,
+        host.overlay_accept_hwnd,
+        host.overlay_cancel_hwnd,
+        surface_hwnd,
+    )) |target| {
+        _ = SetFocus(target);
+    }
+}
+
+fn postDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) bool {
+    if (thread_id == 0) return false;
+    return PostThreadMessageW(
+        thread_id,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        0,
+        @as(LPARAM, @bitCast(@as(usize, @intFromPtr(pending)))),
+    ) != 0;
+}
+
+fn processDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) void {
+    const hr = pending.disconnect(pending.ctx);
+    if (hr == win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL and pending.retries < 3) {
+        pending.retries += 1;
+        if (postDeferredUiaDisconnect(thread_id, pending)) return;
+    }
+    if (hr != win32_uia.S_OK) {
+        log.warn("win32 UIA deferred disconnect failed hr=0x{x} retries={d}", .{
+            @as(u32, @bitCast(hr)),
+            pending.retries,
+        });
+    }
+    pending.release(pending.ctx);
+    std.heap.page_allocator.destroy(pending);
+}
+
+fn drainDeferredUiaDisconnects(thread_id: DWORD) void {
+    var msg: MSG = undefined;
+    while (PeekMessageW(
+        &msg,
+        null,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        WM_WINHOSTTY_UIA_DISCONNECT,
+        PM_REMOVE,
+    ) != 0) {
+        // PeekMessage always returns WM_QUIT regardless of the filter.
+        // Consume it during shutdown, but never interpret its lParam as a
+        // deferred-disconnect pointer.
+        if (msg.message != WM_WINHOSTTY_UIA_DISCONNECT) continue;
+        if (msg.lParam == 0) {
+            log.warn("win32 UIA deferred disconnect message had no context", .{});
+            continue;
+        }
+        const pending: *DeferredUiaDisconnect = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
+        processDeferredUiaDisconnect(thread_id, pending);
+    }
+}
+
+fn scheduleDeferredUiaDisconnect(
+    app: *App,
+    ctx: *anyopaque,
+    disconnect: *const fn (*anyopaque) win32_uia.HRESULT,
+    release: *const fn (*anyopaque) void,
+) void {
+    const pending = std.heap.page_allocator.create(DeferredUiaDisconnect) catch {
+        log.warn("win32 UIA deferred disconnect allocation failed", .{});
+        const hr = disconnect(ctx);
+        if (hr != win32_uia.S_OK) {
+            log.warn("win32 UIA immediate disconnect fallback failed hr=0x{x}", .{@as(u32, @bitCast(hr))});
+        }
+        release(ctx);
+        return;
+    };
+    pending.* = .{ .ctx = ctx, .disconnect = disconnect, .release = release };
+    if (!postDeferredUiaDisconnect(app.ui_thread_id, pending)) {
+        log.warn("win32 UIA deferred disconnect post failed", .{});
+        processDeferredUiaDisconnect(0, pending);
+    }
+}
+
+test "win32 deferred UIA disconnect drain retries and releases once" {
+    const Fake = struct {
+        disconnects: usize = 0,
+        releases: usize = 0,
+        always_rpc: bool = false,
+
+        fn disconnect(raw: *anyopaque) win32_uia.HRESULT {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.disconnects += 1;
+            return if (self.always_rpc or self.disconnects == 1)
+                win32_uia.RPC_E_CANTCALLOUT_ININPUTSYNCCALL
+            else
+                win32_uia.S_OK;
+        }
+
+        fn release(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.releases += 1;
+        }
+    };
+
+    var fake: Fake = .{};
+    var queue_probe: MSG = undefined;
+    _ = PeekMessageW(&queue_probe, null, 0, 0, PM_NOREMOVE);
+    const pending = try std.heap.page_allocator.create(DeferredUiaDisconnect);
+    pending.* = .{
+        .ctx = @ptrCast(&fake),
+        .disconnect = &Fake.disconnect,
+        .release = &Fake.release,
+    };
+    const thread_id = GetCurrentThreadId();
+    PostQuitMessage(0);
+    try std.testing.expect(postDeferredUiaDisconnect(thread_id, pending));
+    drainDeferredUiaDisconnects(thread_id);
+    try std.testing.expectEqual(@as(usize, 2), fake.disconnects);
+    try std.testing.expectEqual(@as(usize, 1), fake.releases);
+
+    var exhausted: Fake = .{ .always_rpc = true };
+    const retry_pending = try std.heap.page_allocator.create(DeferredUiaDisconnect);
+    retry_pending.* = .{
+        .ctx = @ptrCast(&exhausted),
+        .disconnect = &Fake.disconnect,
+        .release = &Fake.release,
+    };
+    try std.testing.expect(postDeferredUiaDisconnect(thread_id, retry_pending));
+    drainDeferredUiaDisconnects(thread_id);
+    try std.testing.expectEqual(@as(usize, 4), exhausted.disconnects);
+    try std.testing.expectEqual(@as(usize, 1), exhausted.releases);
+}
+
+fn rootDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.RootProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn rootReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.RootProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.RootProvider.Release(&provider.base);
+}
+fn paletteDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.PaletteListProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn paletteReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.PaletteListProvider.Release(&provider.base);
+}
+fn terminalDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.TerminalProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn terminalReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.TerminalProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.TerminalProvider.Release(&provider.base);
+}
+
+fn shouldRefocusAfterOverlayHide(
+    focused: ?HWND,
+    edit: ?HWND,
+    accept: ?HWND,
+    cancel: ?HWND,
+    list: ?HWND,
+) bool {
+    const hwnd = focused orelse return false;
+    return (edit != null and hwnd == edit.?) or
+        (accept != null and hwnd == accept.?) or
+        (cancel != null and hwnd == cancel.?) or
+        (list != null and hwnd == list.?);
 }
 
 fn logUiActionError(comptime context: []const u8, err: anyerror) void {
@@ -19462,13 +21167,8 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     return 0;
                 },
                 VK_TAB, VK_LEFT, VK_RIGHT => {
-                    const target: ?HWND = if (hwnd == v.overlay_accept_hwnd)
-                        v.overlay_cancel_hwnd
-                    else if (hwnd == v.overlay_cancel_hwnd)
-                        v.overlay_accept_hwnd
-                    else
-                        null;
-                    if (target) |t| _ = SetFocus(t);
+                    const reverse = if (wParam == VK_TAB) keyPressed(VK_SHIFT) else wParam == VK_LEFT;
+                    _ = v.focusRelativeOverlayControl(hwnd, reverse);
                     return 0;
                 },
                 VK_RETURN, VK_SPACE => {
@@ -19798,6 +21498,15 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
 
 fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
+    if (msg == WM_GETOBJECT) {
+        if (host) |v| {
+            if (v.searchControlSurface(hwnd)) |surface| {
+                if (surface.search_bar_edit_uia_provider) |provider| {
+                    if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+                }
+            }
+        }
+    }
     if (host) |v| {
         if (v.searchControlSurface(hwnd)) |surface| switch (msg) {
             WM_SETFOCUS => {
@@ -19845,18 +21554,35 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         };
     }
 
-    if (host) |v| {
+    const result = if (host) |v| blk: {
         if (v.searchControlSurface(hwnd)) |surface| {
             if (surface.search_bar_edit_prev_proc) |proc| {
-                return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
             }
         }
+        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (host) |v| {
+        if (v.searchControlSurface(hwnd)) |surface| {
+            if (surface.search_bar_edit_uia_provider) |provider| switch (msg) {
+                WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+                WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => surface.raiseSearchEditSelectionChangedIfNeeded(),
+                else => {},
+            };
+        }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return result;
 }
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
+    if (msg == WM_GETOBJECT) {
+        if (host) |v| {
+            if (v.overlay_edit_uia_provider) |provider| {
+                if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
+            }
+        }
+    }
     if (host) |v| switch (msg) {
         WM_CHAR => {
             if (wParam == VK_ESCAPE) return 0;
@@ -19869,6 +21595,10 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         },
 
         WM_KEYDOWN, WM_SYSKEYDOWN => {
+            if (v.commandPaletteToggleKeyMessage(msg, wParam, lParam)) {
+                _ = v.dismissCommandPalette();
+                return 0;
+            }
             if (v.overlay_mode == .command_palette) {
                 if (wParam == VK_UP or wParam == VK_DOWN) {
                     // Up/Down move through the live result list instead of
@@ -19880,6 +21610,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                     if ((v.completeCommandPalette(reverse) catch false)) return 0;
                 }
             }
+            if (wParam == VK_TAB and v.focusRelativeOverlayControl(hwnd, keyPressed(VK_SHIFT))) return 0;
             if (v.overlay_mode == .tab_overview) {
                 if (wParam == VK_UP or wParam == VK_DOWN) {
                     if ((v.stepTabOverviewSelection(wParam == VK_UP) catch false)) return 0;
@@ -19947,12 +21678,20 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         else => {},
     };
 
-    if (host) |v| {
+    const result = if (host) |v| blk: {
         if (v.overlay_edit_prev_proc) |proc| {
-            return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
+        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (host) |v| {
+        if (v.overlay_edit_uia_provider) |provider| switch (msg) {
+            WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+            WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
+            else => {},
+        };
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return result;
 }
 
 fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -20103,10 +21842,19 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
         WM_GETOBJECT => {
-            if (host != null) {
-                if (win32_uia.handleGetObject(std.heap.page_allocator, hwnd, wParam, lParam)) |lr| {
-                    return lr;
-                }
+            if (host) |v| {
+                const provider = v.root_uia_provider orelse provider: {
+                    const created = win32_uia.RootProvider.create(
+                        std.heap.page_allocator,
+                        hwnd,
+                    ) catch |err| {
+                        log.warn("uia: root provider init failed err={}", .{err});
+                        return DefWindowProcW(hwnd, msg, wParam, lParam);
+                    };
+                    v.root_uia_provider = created;
+                    break :provider created;
+                };
+                if (win32_uia.returnRootProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -20229,6 +21977,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             // caused palette edit re-entry crashes.
                             if (v.suppress_edit_events) return 0;
                             appendOwnedString(v.app.core_app.alloc, &v.cached_overlay_edit, null) catch {};
+                            if (v.overlay_edit_uia_provider) |provider| {
+                                provider.raiseTextChanged();
+                                provider.raiseValueChanged();
+                            }
+                            v.raiseOverlayEditSelectionChangedIfNeeded();
                             if (v.overlay_mode == .search) {
                                 _ = v.syncSearchOverlay() catch {};
                             } else if (v.overlay_mode == .command_palette) {
@@ -20247,6 +22000,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             if (v.suppress_edit_events) return 0;
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
+                                    if (surface.search_bar_edit_uia_provider) |provider| {
+                                        provider.raiseTextChanged();
+                                        provider.raiseValueChanged();
+                                    }
+                                    surface.raiseSearchEditSelectionChangedIfNeeded();
                                     _ = surface.handleSearchBarEditChanged() catch |err| {
                                         logUiActionError("docked search edit update failed", err);
                                     };
@@ -20255,7 +22013,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             }
                         }
                     },
-                    2003 => {
+                    2003 => if (expectedButtonClick(notify_code, child_hwnd, v.overlay_accept_hwnd)) {
                         if (v.overlay_mode == .confirm) {
                             // MUST NOT touch `v` after the callback
                             // — a destructive accept (close-surface)
@@ -20277,7 +22035,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         }
                         return 0;
                     },
-                    2004 => {
+                    2004 => if (expectedButtonClick(notify_code, child_hwnd, v.overlay_cancel_hwnd)) {
                         if (v.overlay_mode == .confirm) {
                             // Cancel callbacks can mutate or destroy
                             // the Host. Use the same no-access-after
@@ -20409,7 +22167,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
         WM_SETFOCUS => {
             if (host) |v| {
-                refocusActiveSurface(v);
+                refocusHostAfterActivation(v);
             }
             return 0;
         },
@@ -21546,6 +23304,16 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
     switch (msg) {
         WM_WINHOSTTY_WAKE => return 0,
 
+        WM_WINHOSTTY_UIA_QUERY_REFRESH => {
+            if (surface) |v| {
+                if (v.terminal_uia_context) |context| {
+                    context.query_refresh_post_pending.store(false, .release);
+                    v.refreshTerminalUiaTextWithMode(wParam != 0);
+                }
+            }
+            return 0;
+        },
+
         WM_SETFOCUS => {
             if (surface) |v| v.focusChanged(true);
             return 0;
@@ -21559,6 +23327,17 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         WM_SIZE => {
             if (surface) |v| v.windowSizeChanged();
             return 0;
+        },
+
+        WM_TIMER => {
+            if (wParam == TERMINAL_UIA_TIMER_ID) {
+                if (surface) |v| {
+                    v.cancelTerminalUiaRefreshTimer();
+                    v.refreshTerminalUiaText();
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
         WM_GETOBJECT => {
@@ -21859,13 +23638,42 @@ const TerminalUiaContext = struct {
     refcount: std.atomic.Value(u32),
     mutex: std.Thread.Mutex = .{},
     surface: ?*Surface,
+    /// UIA polling does not make `UiaClientsAreListening` return true. Record
+    /// recent text queries and coalesce a UI-thread refresh request so polling
+    /// clients see current text without keeping renderer snapshots alive after
+    /// the client goes idle.
+    last_query_ms: std.atomic.Value(u64) = .init(0),
+    query_refresh_post_pending: std.atomic.Value(bool) = .init(false),
+    /// Bounded, immutable-to-readers terminal snapshot. UIA callbacks copy
+    /// this cache and never acquire the renderer mutex.
+    cached_text: []u8,
+    cached_visible_text: []u8,
+    cached_visible_range: win32_uia.OffsetRange = .{ .start = 0, .end = 0 },
+    cached_caret_offset: usize = 0,
+    cached_cells: []win32_uia.TerminalCellPosition,
+    viewport_rows: u32 = 0,
+    viewport_columns: u32 = 0,
+    cell_width: f64 = 0,
+    cell_height: f64 = 0,
+    origin_x: f64 = 0,
+    origin_y: f64 = 0,
 
     fn create(alloc: Allocator, surface: *Surface) !*TerminalUiaContext {
         const self = try alloc.create(TerminalUiaContext);
+        errdefer alloc.destroy(self);
+        const cached_text = try alloc.dupe(u8, "");
+        errdefer alloc.free(cached_text);
+        const cached_visible_text = try alloc.dupe(u8, "");
+        errdefer alloc.free(cached_visible_text);
+        const cached_cells = try alloc.alloc(win32_uia.TerminalCellPosition, 0);
+        errdefer alloc.free(cached_cells);
         self.* = .{
             .alloc = alloc,
             .refcount = std.atomic.Value(u32).init(1),
             .surface = surface,
+            .cached_text = cached_text,
+            .cached_visible_text = cached_visible_text,
+            .cached_cells = cached_cells,
         };
         return self;
     }
@@ -21878,13 +23686,135 @@ const TerminalUiaContext = struct {
     fn release(ctx: *anyopaque) void {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
         const prev = self.refcount.fetchSub(1, .acq_rel);
-        if (prev == 1) self.alloc.destroy(self);
+        if (prev == 1) {
+            self.alloc.free(self.cached_cells);
+            self.alloc.free(self.cached_visible_text);
+            self.alloc.free(self.cached_text);
+            self.alloc.destroy(self);
+        }
     }
 
     fn detachSurface(self: *TerminalUiaContext) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.surface = null;
+        self.query_refresh_post_pending.store(false, .release);
+    }
+
+    fn noteTextQuery(self: *TerminalUiaContext) void {
+        const now_ms = GetTickCount64();
+        const previous_query_ms = self.last_query_ms.swap(now_ms, .acq_rel);
+
+        self.mutex.lock();
+        const hwnd = if (self.surface) |surface| surface.hwnd else null;
+        self.mutex.unlock();
+
+        if (hwnd == null) return;
+        if (terminalUiaQueryNeedsSynchronousRefresh(previous_query_ms, now_ms)) {
+            var ignored: usize = 0;
+            if (SendMessageTimeoutW(
+                hwnd.?,
+                WM_WINHOSTTY_UIA_QUERY_REFRESH,
+                1,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                terminal_uia_cold_query_timeout_ms,
+                &ignored,
+            ) != 0) return;
+        }
+
+        if (self.query_refresh_post_pending.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+        if (PostMessageW(hwnd.?, WM_WINHOSTTY_UIA_QUERY_REFRESH, 0, 0) == 0) {
+            self.query_refresh_post_pending.store(false, .release);
+        }
+    }
+
+    fn queryRecentlyActive(self: *const TerminalUiaContext, now_ms: u64) bool {
+        return terminalUiaQueryRecentlyActive(self.last_query_ms.load(.acquire), now_ms);
+    }
+
+    /// Refresh on the application/UI thread after terminal mutations. The
+    /// renderer lock is never held together with the context lock.
+    const Change = enum { unchanged, geometry, caret, text, text_and_caret };
+
+    fn refresh(self: *TerminalUiaContext, surface: *Surface) !Change {
+        if (!surface.core_initialized) return .unchanged;
+
+        surface.core_surface.renderer_state.mutex.lock();
+        var snapshot = win32_uia.snapshotTerminalAccessiblePlainText(
+            self.alloc,
+            surface.core_surface.renderer_state.terminal,
+        ) catch |err| {
+            surface.core_surface.renderer_state.mutex.unlock();
+            return err;
+        };
+        const renderer_size = surface.core_surface.size;
+        surface.core_surface.renderer_state.mutex.unlock();
+        defer snapshot.deinit();
+
+        const text = snapshot.text;
+        snapshot.text = text[0..0];
+        errdefer self.alloc.free(text);
+        const cells = snapshot.cell_for_byte;
+        snapshot.cell_for_byte = cells[0..0];
+        errdefer self.alloc.free(cells);
+        const visible_range = snapshot.visible_range;
+        const caret_offset = snapshot.caret_offset;
+        const visible_text = try self.alloc.dupe(u8, text[visible_range.start..visible_range.end]);
+        errdefer self.alloc.free(visible_text);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.surface != surface) {
+            self.alloc.free(visible_text);
+            self.alloc.free(cells);
+            self.alloc.free(text);
+            return .unchanged;
+        }
+        const text_changed = !std.mem.eql(u8, self.cached_text, text) or
+            self.cached_visible_range.start != visible_range.start or
+            self.cached_visible_range.end != visible_range.end;
+        const caret_changed = self.cached_caret_offset != caret_offset;
+        const unchanged = std.mem.eql(u8, self.cached_text, text) and
+            self.cached_visible_range.start == visible_range.start and
+            self.cached_visible_range.end == visible_range.end and
+            self.cached_caret_offset == caret_offset and
+            self.viewport_rows == snapshot.viewport_rows and
+            self.viewport_columns == snapshot.viewport_columns and
+            self.cell_width == @as(f64, @floatFromInt(renderer_size.cell.width)) and
+            self.cell_height == @as(f64, @floatFromInt(renderer_size.cell.height)) and
+            self.origin_x == @as(f64, @floatFromInt(renderer_size.padding.left)) and
+            self.origin_y == @as(f64, @floatFromInt(renderer_size.padding.top)) and
+            terminalUiaCellsEqual(self.cached_cells, cells);
+        if (unchanged) {
+            self.alloc.free(visible_text);
+            self.alloc.free(cells);
+            self.alloc.free(text);
+            return .unchanged;
+        }
+
+        self.alloc.free(self.cached_cells);
+        self.alloc.free(self.cached_visible_text);
+        self.alloc.free(self.cached_text);
+        self.cached_text = text;
+        self.cached_visible_text = visible_text;
+        self.cached_visible_range = visible_range;
+        self.cached_caret_offset = caret_offset;
+        self.cached_cells = cells;
+        self.viewport_rows = snapshot.viewport_rows;
+        self.viewport_columns = snapshot.viewport_columns;
+        self.cell_width = @floatFromInt(renderer_size.cell.width);
+        self.cell_height = @floatFromInt(renderer_size.cell.height);
+        self.origin_x = @floatFromInt(renderer_size.padding.left);
+        self.origin_y = @floatFromInt(renderer_size.padding.top);
+        return if (text_changed and caret_changed)
+            .text_and_caret
+        else if (text_changed)
+            .text
+        else if (caret_changed)
+            .caret
+        else
+            .geometry;
     }
 
     fn state(self: *TerminalUiaContext) win32_uia.TerminalState {
@@ -21894,8 +23824,6 @@ const TerminalUiaContext = struct {
             .release = release,
             .name = terminalUiaName,
             .value = terminalUiaValue,
-            .visible_value = terminalUiaVisibleValue,
-            .visible_range = terminalUiaVisibleRange,
             .snapshot = terminalUiaSnapshot,
             .focused = terminalUiaFocused,
         };
@@ -21913,110 +23841,37 @@ const TerminalUiaContext = struct {
 
     fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        const surface = self.surface orelse return try alloc.dupe(u8, "");
-        if (!surface.core_initialized) return try alloc.dupe(u8, "");
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var snapshot = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer snapshot.deinit();
-
-        return snapshot.takeText();
-    }
-
-    fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const surface = self.surface orelse return try alloc.dupe(u8, "");
-        if (!surface.core_initialized) return try alloc.dupe(u8, "");
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var snapshot = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer snapshot.deinit();
-
-        return snapshot.takeText();
-    }
-
-    fn terminalUiaVisibleRange(ctx: *anyopaque, alloc: Allocator) !win32_uia.OffsetRange {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const surface = self.surface orelse return .{ .start = 0, .end = 0 };
-        if (!surface.core_initialized) return .{ .start = 0, .end = 0 };
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var document = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer document.deinit();
-
-        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer visible.deinit();
-
-        return win32_uia.visibleRangeInDocument(&document, &visible) orelse .{ .start = 0, .end = 0 };
+        return try alloc.dupe(u8, self.cached_text);
     }
 
     fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
         const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
+        self.noteTextQuery();
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const surface = self.surface orelse return try terminalUiaEmptySnapshot(alloc);
-        if (!surface.core_initialized) return try terminalUiaEmptySnapshot(alloc);
-
-        surface.core_surface.renderer_state.mutex.lock();
-        defer surface.core_surface.renderer_state.mutex.unlock();
-
-        var document = try win32_uia.snapshotTerminalPlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer document.deinit();
-
-        var visible = try win32_uia.snapshotTerminalVisiblePlainText(
-            alloc,
-            surface.core_surface.renderer_state.terminal,
-        );
-        defer visible.deinit();
-
-        const visible_range = win32_uia.visibleRangeInDocument(&document, &visible) orelse win32_uia.OffsetRange{ .start = 0, .end = 0 };
-
-        return .{
-            .document_text = document.takeText(),
-            .visible_text = visible.takeText(),
-            .visible_range = visible_range,
-        };
-    }
-
-    fn terminalUiaEmptySnapshot(alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
-        const document_text = try alloc.dupe(u8, "");
+        const document_text = try alloc.dupe(u8, self.cached_text);
         errdefer alloc.free(document_text);
-        const visible_text = try alloc.dupe(u8, "");
+        const visible_text = try alloc.dupe(u8, self.cached_visible_text);
+        errdefer alloc.free(visible_text);
+        const cells = try alloc.dupe(win32_uia.TerminalCellPosition, self.cached_cells);
         return .{
             .document_text = document_text,
             .visible_text = visible_text,
-            .visible_range = .{ .start = 0, .end = 0 },
+            .visible_range = self.cached_visible_range,
+            .caret_offset = self.cached_caret_offset,
+            .geometry = .{
+                .cell_for_byte = cells,
+                .viewport_rows = self.viewport_rows,
+                .viewport_columns = self.viewport_columns,
+                .cell_width = self.cell_width,
+                .cell_height = self.cell_height,
+                .origin_x = self.origin_x,
+                .origin_y = self.origin_y,
+            },
         };
     }
 
@@ -22029,6 +23884,113 @@ const TerminalUiaContext = struct {
         return surface.app.isSurfaceFocused(surface);
     }
 };
+
+fn terminalUiaCellsEqual(
+    lhs: []const win32_uia.TerminalCellPosition,
+    rhs: []const win32_uia.TerminalCellPosition,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |a, b| {
+        if (a.row != b.row or a.column != b.column or a.width != b.width) return false;
+    }
+    return true;
+}
+
+const terminal_uia_refresh_interval_ms: u64 = 100;
+const terminal_uia_query_activity_window_ms: u64 = 1_000;
+
+fn terminalUiaRefreshDue(last_refresh_ms: u64, now_ms: u64) bool {
+    return last_refresh_ms == 0 or now_ms -| last_refresh_ms >= terminal_uia_refresh_interval_ms;
+}
+
+fn terminalUiaRefreshDelay(last_refresh_ms: u64, now_ms: u64) UINT {
+    const elapsed = now_ms -| last_refresh_ms;
+    return @intCast(@max(1, terminal_uia_refresh_interval_ms -| elapsed));
+}
+
+fn terminalUiaSnapshotWasSlow(start_ms: u64, completed_ms: u64) bool {
+    return completed_ms -| start_ms >= terminal_uia_refresh_interval_ms;
+}
+
+fn terminalUiaQueryRecentlyActive(last_query_ms: u64, now_ms: u64) bool {
+    return last_query_ms != 0 and now_ms -| last_query_ms <= terminal_uia_query_activity_window_ms;
+}
+
+fn terminalUiaQueryNeedsSynchronousRefresh(last_query_ms: u64, now_ms: u64) bool {
+    return !terminalUiaQueryRecentlyActive(last_query_ms, now_ms);
+}
+
+const TerminalUiaPublishPolicy = struct {
+    refresh_snapshot: bool,
+    emit_events: bool,
+};
+
+fn terminalUiaPublishPolicy(
+    clients_listening_for_events: bool,
+    query_recently_active: bool,
+) TerminalUiaPublishPolicy {
+    return .{
+        .refresh_snapshot = clients_listening_for_events or query_recently_active,
+        .emit_events = clients_listening_for_events,
+    };
+}
+
+test "terminal UIA snapshots are rate limited while a client is connected" {
+    try std.testing.expect(terminalUiaRefreshDue(0, 1));
+    try std.testing.expect(!terminalUiaRefreshDue(100, 199));
+    try std.testing.expect(terminalUiaRefreshDue(100, 200));
+    try std.testing.expectEqual(@as(UINT, 1), terminalUiaRefreshDelay(100, 199));
+    try std.testing.expectEqual(@as(UINT, 80), terminalUiaRefreshDelay(100, 120));
+    try std.testing.expect(!terminalUiaSnapshotWasSlow(100, 199));
+    try std.testing.expect(terminalUiaSnapshotWasSlow(100, 200));
+}
+
+test "terminal UIA query-only clients refresh without event emission" {
+    try std.testing.expect(!terminalUiaQueryRecentlyActive(0, 1));
+    try std.testing.expect(terminalUiaQueryRecentlyActive(100, 1_100));
+    try std.testing.expect(!terminalUiaQueryRecentlyActive(100, 1_101));
+    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(0, 1));
+    try std.testing.expect(!terminalUiaQueryNeedsSynchronousRefresh(100, 1_100));
+    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(100, 1_101));
+
+    const idle = terminalUiaPublishPolicy(false, false);
+    try std.testing.expect(!idle.refresh_snapshot);
+    try std.testing.expect(!idle.emit_events);
+
+    const query_only = terminalUiaPublishPolicy(false, true);
+    try std.testing.expect(query_only.refresh_snapshot);
+    try std.testing.expect(!query_only.emit_events);
+
+    const subscribed = terminalUiaPublishPolicy(true, false);
+    try std.testing.expect(subscribed.refresh_snapshot);
+    try std.testing.expect(subscribed.emit_events);
+}
+
+test "terminal UIA document callback and snapshot expose distinct cached ranges" {
+    var context = TerminalUiaContext{
+        .alloc = std.testing.allocator,
+        .refcount = std.atomic.Value(u32).init(1),
+        .surface = null,
+        .cached_text = try std.testing.allocator.dupe(u8, "history\nvisible"),
+        .cached_visible_text = try std.testing.allocator.dupe(u8, "visible"),
+        .cached_visible_range = .{ .start = 8, .end = 15 },
+        .cached_cells = try std.testing.allocator.alloc(win32_uia.TerminalCellPosition, 0),
+    };
+    defer std.testing.allocator.free(context.cached_cells);
+    defer std.testing.allocator.free(context.cached_visible_text);
+    defer std.testing.allocator.free(context.cached_text);
+
+    const document = try TerminalUiaContext.terminalUiaValue(&context, std.testing.allocator);
+    defer std.testing.allocator.free(document);
+    const snapshot = try TerminalUiaContext.terminalUiaSnapshot(&context, std.testing.allocator);
+    defer std.testing.allocator.free(snapshot.geometry.?.cell_for_byte);
+    defer std.testing.allocator.free(snapshot.visible_text);
+    defer std.testing.allocator.free(snapshot.document_text);
+    try std.testing.expectEqualStrings("history\nvisible", document);
+    try std.testing.expectEqualStrings("history\nvisible", snapshot.document_text);
+    try std.testing.expectEqualStrings("visible", snapshot.visible_text);
+    try std.testing.expectEqual(win32_uia.OffsetRange{ .start = 8, .end = 15 }, snapshot.visible_range);
+}
 
 pub const Surface = struct {
     app: *App,
@@ -22126,6 +24088,8 @@ pub const Surface = struct {
     search_bar_bg_placement: ChildPlacement = .{},
     search_bar_edit_hwnd: ?HWND = null,
     search_bar_edit_prev_proc: ?*const anyopaque = null,
+    search_bar_edit_uia_provider: ?*win32_uia.TerminalProvider = null,
+    search_bar_edit_uia_selection: ?[2]u32 = null,
     search_bar_edit_placement: ChildPlacement = .{},
     search_bar_prev_hwnd: ?HWND = null,
     search_bar_next_hwnd: ?HWND = null,
@@ -22163,6 +24127,8 @@ pub const Surface = struct {
     pending_clipboard_op: ?PendingClipboardOp = null,
     terminal_uia_context: ?*TerminalUiaContext = null,
     terminal_uia_provider: ?*win32_uia.TerminalProvider = null,
+    terminal_uia_last_refresh_ms: u64 = 0,
+    terminal_uia_refresh_timer_active: bool = false,
     /// Close preflight ownership. Normal close paths build both candidates
     /// before HWND/core teardown; `windowDestroyed` consumes them without
     /// allocating after the Surface is already dead.
@@ -22178,6 +24144,31 @@ pub const Surface = struct {
             .whole_word => self.search_bar_word_hwnd,
             .close => self.search_bar_close_hwnd,
         };
+    }
+
+    fn searchEditUiaState(self: *Surface) win32_uia.TerminalState {
+        return .{
+            .ctx = @ptrCast(self),
+            .name = &searchEditNameThunk,
+            .value = &searchEditValueThunk,
+            .snapshot = &searchEditSnapshotThunk,
+            .focused = &searchEditFocusedThunk,
+            .role = .edit,
+            .use_com_threading = self.app.com_initialized,
+            .set_value = &searchEditSetValueThunk,
+            .select_range = &searchEditSelectRangeThunk,
+        };
+    }
+
+    fn raiseSearchEditSelectionChangedIfNeeded(self: *Surface) void {
+        const hwnd = self.search_bar_edit_hwnd orelse return;
+        const provider = self.search_bar_edit_uia_provider orelse return;
+        const selection = nativeEditSelection(hwnd);
+        if (self.search_bar_edit_uia_selection) |previous| {
+            if (std.meta.eql(previous, selection)) return;
+        }
+        self.search_bar_edit_uia_selection = selection;
+        provider.raiseTextSelectionChanged();
     }
 
     fn searchBarButtonPlacement(self: *Surface, role: SearchBarButtonRole) *ChildPlacement {
@@ -22857,13 +24848,84 @@ pub const Surface = struct {
     fn terminalUiaProvider(self: *Surface) !*win32_uia.TerminalProvider {
         if (self.terminal_uia_provider == null) {
             const hwnd = self.hwnd orelse return error.NoWindow;
+            const context = self.terminal_uia_context orelse context: {
+                _ = try self.terminalUiaState();
+                break :context self.terminal_uia_context.?;
+            };
+            _ = try context.refresh(self);
+            self.terminal_uia_last_refresh_ms = GetTickCount64();
             self.terminal_uia_provider = try win32_uia.TerminalProvider.create(
                 std.heap.page_allocator,
                 hwnd,
-                try self.terminalUiaState(),
+                context.state(),
             );
+        } else if (self.terminal_uia_context) |context| {
+            // WM_GETOBJECT is also delivered when a client reconnects after
+            // terminal output occurred with no UIA listeners. Refresh here so
+            // the first TextPattern query cannot observe that stale cache.
+            _ = try context.refresh(self);
+            self.terminal_uia_last_refresh_ms = GetTickCount64();
         }
         return self.terminal_uia_provider.?;
+    }
+
+    /// Publish a bounded accessible-text snapshot after a coalesced renderer
+    /// update. Provider calls never format terminal state themselves.
+    fn refreshTerminalUiaText(self: *Surface) void {
+        self.refreshTerminalUiaTextWithMode(false);
+    }
+
+    fn refreshTerminalUiaTextWithMode(self: *Surface, force: bool) void {
+        const context = self.terminal_uia_context orelse return;
+        const provider = self.terminal_uia_provider orelse return;
+        const now_ms = GetTickCount64();
+        const publish_policy = terminalUiaPublishPolicy(
+            win32_uia.events.clientsAreListening(),
+            context.queryRecentlyActive(now_ms),
+        );
+        if (!publish_policy.refresh_snapshot) return;
+        if (!force and !terminalUiaRefreshDue(self.terminal_uia_last_refresh_ms, now_ms)) {
+            if (!self.terminal_uia_refresh_timer_active) {
+                const hwnd = self.hwnd orelse return;
+                if (SetTimer(
+                    hwnd,
+                    TERMINAL_UIA_TIMER_ID,
+                    terminalUiaRefreshDelay(self.terminal_uia_last_refresh_ms, now_ms),
+                    null,
+                ) != 0) self.terminal_uia_refresh_timer_active = true;
+            }
+            return;
+        }
+        self.cancelTerminalUiaRefreshTimer();
+        const refresh_started_ms = now_ms;
+        const refresh_result = context.refresh(self);
+        const refresh_completed_ms = GetTickCount64();
+        self.terminal_uia_last_refresh_ms = refresh_completed_ms;
+        if (terminalUiaSnapshotWasSlow(refresh_started_ms, refresh_completed_ms)) {
+            log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{refresh_completed_ms -| refresh_started_ms});
+        }
+        if (refresh_result) |change| {
+            // Query-only clients do not make UiaClientsAreListening return
+            // true. Keep their snapshot current and gate only event emission.
+            if (!publish_policy.emit_events) return;
+            switch (change) {
+                .text => provider.raiseTextChanged(),
+                .caret => provider.raiseTextSelectionChanged(),
+                .text_and_caret => {
+                    provider.raiseTextChanged();
+                    provider.raiseTextSelectionChanged();
+                },
+                .unchanged, .geometry => {},
+            }
+        } else |err| {
+            log.warn("win32 terminal UIA snapshot refresh failed err={}", .{err});
+        }
+    }
+
+    fn cancelTerminalUiaRefreshTimer(self: *Surface) void {
+        if (!self.terminal_uia_refresh_timer_active) return;
+        if (self.hwnd) |hwnd| _ = KillTimer(hwnd, TERMINAL_UIA_TIMER_ID);
+        self.terminal_uia_refresh_timer_active = false;
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -24103,6 +26165,19 @@ pub const Surface = struct {
             packed_margins,
         );
         _ = SendMessageW(edit_hwnd, EM_SETCUEBANNER, 0, @as(LPARAM, @intCast(@intFromPtr(search_edit_cue.ptr))));
+        self.search_bar_edit_uia_provider = if (self.app.com_initialized)
+            win32_uia.TerminalProvider.create(
+                std.heap.page_allocator,
+                edit_hwnd,
+                self.searchEditUiaState(),
+            ) catch |err| blk: {
+                log.warn("search edit UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("search edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            break :blk null;
+        };
 
         self.search_bar_prev_hwnd = try self.createSearchBarButton(host, hwnd, .prev);
         self.search_bar_next_hwnd = try self.createSearchBarButton(host, hwnd, .next);
@@ -24133,6 +26208,17 @@ pub const Surface = struct {
 
     fn destroySearchBarControls(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
+        if (self.search_bar_edit_uia_provider) |provider| {
+            self.search_bar_edit_uia_provider = null;
+            self.search_bar_edit_uia_selection = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &terminalDisconnectThunk,
+                &terminalReleaseThunk,
+            );
+        }
         if (self.search_bar_results_cache) |value| {
             alloc.free(value);
             self.search_bar_results_cache = null;
@@ -24312,12 +26398,22 @@ pub const Surface = struct {
     fn setSearchBarEditText(self: *Surface, value: []const u8) !bool {
         const edit_hwnd = self.search_bar_edit_hwnd orelse return false;
         const host = self.host orelse return false;
+        const current = try self.readSearchBarEditText();
+        defer self.app.core_app.alloc.free(current);
+        if (std.mem.eql(u8, current, value)) return false;
         host.suppress_edit_events = true;
         defer host.suppress_edit_events = false;
 
         const value_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, value);
         defer self.app.core_app.alloc.free(value_w);
-        _ = SetWindowTextW(edit_hwnd, value_w.ptr);
+        if (SetWindowTextW(edit_hwnd, value_w.ptr) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        if (self.search_bar_edit_uia_provider) |provider| {
+            provider.raiseTextChanged();
+            provider.raiseValueChanged();
+        }
+        self.raiseSearchEditSelectionChangedIfNeeded();
         return true;
     }
 
@@ -25431,12 +27527,18 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
 
+        self.cancelTerminalUiaRefreshTimer();
         if (self.terminal_uia_context) |ctx| {
             ctx.detachSurface();
             if (self.terminal_uia_provider) |provider| {
-                provider.detach();
-                _ = win32_uia.TerminalProvider.Release(&provider.base);
                 self.terminal_uia_provider = null;
+                provider.detach();
+                scheduleDeferredUiaDisconnect(
+                    self.app,
+                    @ptrCast(provider),
+                    &terminalDisconnectThunk,
+                    &terminalReleaseThunk,
+                );
             }
             TerminalUiaContext.release(@ptrCast(ctx));
             self.terminal_uia_context = null;
@@ -33221,22 +35323,27 @@ test "win32 palette UIA state exposes rows and can select a row" {
     var host: Host = undefined;
     host.overlay_mode = .command_palette;
     host.palette_list_ranked_count = 4;
+    host.palette_list_visible_rows = 4;
     host.palette_list_selected = 1;
     host.palette_list_scroll = 0;
     host.palette_list_hwnd = null;
+    host.overlay_edit_hwnd = null;
     host.palette_list_uia_provider = null;
     host.palette_catalog = null;
     host.palette_theme_preview_original = null;
 
-    const state = host.paletteListUiaState();
+    const state = host.paletteListUiaStateWithThreading(true);
+    try std.testing.expect(state.use_com_threading);
     try std.testing.expectEqual(@as(usize, 4), state.row_count.?(state.ctx));
     try std.testing.expectEqual(@as(?usize, 1), state.selected_index.?(state.ctx));
 
     var name_buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("Command palette", state.name(state.ctx, &name_buf));
+    try std.testing.expectEqualStrings("Command palette results", state.name(state.ctx, &name_buf));
 
     var row_buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("Command palette row", state.row_name.?(state.ctx, 2, &row_buf));
+    try std.testing.expect(state.row_enabled.?(state.ctx, 2));
+    try std.testing.expect(!state.row_enabled.?(state.ctx, 9));
 
     state.select_row.?(state.ctx, 3);
     try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
@@ -33244,6 +35351,165 @@ test "win32 palette UIA state exposes rows and can select a row" {
 
     state.select_row.?(state.ctx, 9);
     try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
+}
+
+test "win32 palette list geometry clamps rows and detects exposed content" {
+    try std.testing.expectEqual(@as(usize, 7), paletteVisibleRowCapacity(2000, 36));
+    try std.testing.expectEqual(@as(usize, 3), paletteVisibleRowCapacity(110, 36));
+    try std.testing.expectEqual(@as(usize, 0), paletteVisibleRowCapacity(10, 36));
+
+    try std.testing.expectEqual(
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = false,
+            .announce_no_matches = false,
+        },
+        paletteListTransition(0, 1, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = true,
+            .announce_no_matches = false,
+        },
+        paletteListTransition(7, 1, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = true,
+            .announce_no_matches = true,
+        },
+        paletteListTransition(1, 0, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{
+            .relayout = false,
+            .exposes_content = false,
+            .announce_no_matches = false,
+        },
+        paletteListTransition(20, 10, 7),
+    );
+    try std.testing.expect(
+        paletteListTransition(1, 0, 0).announce_no_matches,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.list,
+        paletteNoMatchNotificationTarget(true, true, true).?,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.edit,
+        paletteNoMatchNotificationTarget(true, false, true).?,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.list,
+        paletteNoMatchNotificationTarget(true, false, false).?,
+    );
+    try std.testing.expectEqual(
+        @as(?PaletteNoMatchNotificationTarget, null),
+        paletteNoMatchNotificationTarget(false, false, false),
+    );
+
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 6 },
+        clampPaletteViewport(10, 1, 6, 0),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 9, .scroll = 3 },
+        clampPaletteViewport(10, 7, 99, 99),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 0 },
+        clampPaletteViewport(10, 0, 6, 4),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 0 },
+        clampPaletteViewport(10, 7, clampPaletteViewport(10, 0, 6, 4).selected, 0),
+    );
+}
+
+test "win32 palette list and columns stay inside narrow client bounds" {
+    const list = paletteListRect(160, 220, 12, 58, 36);
+    try std.testing.expectEqual(RECT{
+        .left = 148,
+        .top = 58,
+        .right = 148,
+        .bottom = 94,
+    }, list);
+
+    const wide = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 560, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 12), wide.title.left);
+    try std.testing.expectEqual(@as(i32, 212), wide.title.right);
+    try std.testing.expectEqual(@as(i32, 408), wide.shortcut.left);
+    try std.testing.expectEqual(@as(i32, 548), wide.shortcut.right);
+
+    // Shortcut collapses first while title and the minimum subtitle lane
+    // remain intact.
+    const narrowing = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 324, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 212), narrowing.title.right);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.subtitle.right);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.shortcut.left);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.shortcut.right);
+
+    // Once the shortcut is gone, subtitle then title consume only the
+    // remaining nonnegative space.
+    const narrow = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 180, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 168), narrow.title.right);
+    try std.testing.expectEqual(narrow.title.right, narrow.subtitle.left);
+    try std.testing.expectEqual(narrow.subtitle.left, narrow.subtitle.right);
+    try std.testing.expectEqual(narrow.subtitle.right, narrow.shortcut.left);
+    try std.testing.expectEqual(narrow.shortcut.left, narrow.shortcut.right);
+    try std.testing.expect(narrow.title.left <= narrow.title.right);
+    try std.testing.expect(narrow.title.right <= narrow.subtitle.left);
+    try std.testing.expect(narrow.subtitle.right <= narrow.shortcut.left);
+    try std.testing.expect(narrow.shortcut.right <= 180);
+
+    for ([_]u32{ 96, 192, 288 }) |dpi| {
+        for ([_]i32{ 120, 240, 364, 600 }) |logical_width| {
+            const physical_width = Host.scaledBy(logical_width, dpi);
+            const scaled_padding = Host.scaledBy(12, dpi);
+            const columns = paletteRowColumns(
+                .{ .left = 0, .top = 0, .right = physical_width, .bottom = Host.scaledBy(36, dpi) },
+                scaled_padding,
+                Host.scaledBy(200, dpi),
+                Host.scaledBy(80, dpi),
+                Host.scaledBy(140, dpi),
+            );
+            try std.testing.expect(columns.title.left >= 0);
+            try std.testing.expect(columns.title.left <= columns.title.right);
+            try std.testing.expect(columns.title.right <= columns.subtitle.left);
+            try std.testing.expect(columns.subtitle.left <= columns.subtitle.right);
+            try std.testing.expect(columns.subtitle.right <= columns.shortcut.left);
+            try std.testing.expect(columns.shortcut.left <= columns.shortcut.right);
+            try std.testing.expect(columns.shortcut.right <= physical_width);
+        }
+    }
+
+    try std.testing.expect(!paletteListWidthIsReadable(list, 160));
+    try std.testing.expect(paletteListWidthIsReadable(
+        .{ .left = 20, .top = 0, .right = 180, .bottom = 36 },
+        160,
+    ));
+    try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, true, 0x11, 0x22, 0x33));
+    try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, false, 0x11, 0x22, 0x33));
 }
 
 test "win32 surface size-change repaint stays synchronous during live resize" {
@@ -33452,8 +35718,6 @@ test "win32 buildTabOverviewOverlayLabel reflects current host tab" {
 test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
     const command = try buildOverlayPaintLabelText(
         std.testing.allocator,
         .command_palette,
@@ -33461,12 +35725,10 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         null,
         .{},
-        snap,
+        .{ .match_count = 4, .title = "Toggle fullscreen", .subtitle = "Fullscreen", .available = true },
     );
     defer std.testing.allocator.free(command);
-    // Any fuzzy match yields "Run action" since Enter runs the top
-    // candidate.
-    try std.testing.expectEqualStrings("Run action", command);
+    try std.testing.expectEqualStrings("Command 4", command);
 
     const search = try buildOverlayPaintLabelText(
         std.testing.allocator,
@@ -33475,7 +35737,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         8,
         2,
         .{},
-        snap,
+        .{},
     );
     defer std.testing.allocator.free(search);
     try std.testing.expectEqualStrings("Find 2/8", search);
@@ -33487,7 +35749,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         null,
         .{},
-        snap,
+        .{},
     );
     defer std.testing.allocator.free(title);
     try std.testing.expectEqualStrings("Window title", title);
@@ -33512,6 +35774,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(info);
     try std.testing.expectEqualStrings("Info: Try: new_tab", info);
@@ -33529,6 +35792,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(err);
     try std.testing.expectEqualStrings("Error: Unknown Ghostty action", err);
@@ -33546,6 +35810,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(fallback);
     try std.testing.expect(std.mem.indexOf(u8, fallback, "next match") != null);
@@ -33641,6 +35906,44 @@ test "win32 overlayEditBorderColor reflects mode and focus" {
     try std.testing.expectEqual(overlayAccentColor(.search, false), overlayEditBorderColor(.search, true, false));
     try std.testing.expectEqual(rgb(140, 140, 140), overlayEditBorderColor(.search, false, false));
     try std.testing.expectEqual(rgb(180, 180, 180), overlayEditBorderColor(.none, false, false));
+}
+
+test "win32 overlay dismissal restores focus only from owned controls" {
+    const edit: HWND = @ptrFromInt(0x10);
+    const accept: HWND = @ptrFromInt(0x20);
+    const cancel: HWND = @ptrFromInt(0x30);
+    const list: HWND = @ptrFromInt(0x40);
+    const external: HWND = @ptrFromInt(0x50);
+
+    try std.testing.expect(shouldRefocusAfterOverlayHide(edit, edit, accept, cancel, list));
+    try std.testing.expect(shouldRefocusAfterOverlayHide(accept, edit, accept, cancel, list));
+    try std.testing.expect(shouldRefocusAfterOverlayHide(list, edit, accept, cancel, list));
+    try std.testing.expect(!shouldRefocusAfterOverlayHide(external, edit, accept, cancel, list));
+    try std.testing.expect(!shouldRefocusAfterOverlayHide(null, edit, accept, cancel, list));
+}
+
+test "win32 host activation keeps focus within transient UI" {
+    const edit: HWND = @ptrFromInt(0x10);
+    const accept: HWND = @ptrFromInt(0x20);
+    const cancel: HWND = @ptrFromInt(0x30);
+    const surface: HWND = @ptrFromInt(0x40);
+
+    try std.testing.expectEqual(surface, hostActivationFocusTarget(.none, edit, accept, cancel, surface).?);
+    inline for (.{
+        HostOverlayMode.command_palette,
+        HostOverlayMode.profile,
+        HostOverlayMode.search,
+        HostOverlayMode.surface_title,
+        HostOverlayMode.tab_title,
+        HostOverlayMode.tab_overview,
+    }) |mode| {
+        try std.testing.expectEqual(edit, hostActivationFocusTarget(mode, edit, accept, cancel, surface).?);
+        try std.testing.expectEqual(surface, hostActivationFocusTarget(mode, null, accept, cancel, surface).?);
+    }
+    try std.testing.expectEqual(accept, hostActivationFocusTarget(.confirm, edit, accept, cancel, surface).?);
+    try std.testing.expectEqual(cancel, hostActivationFocusTarget(.confirm, edit, null, cancel, surface).?);
+    try std.testing.expectEqual(surface, hostActivationFocusTarget(.confirm, edit, null, null, surface).?);
+    try std.testing.expect(hostActivationFocusTarget(.none, null, null, null, null) == null);
 }
 
 test "win32 buttonColorsFromTheme reflects hover and active states" {
@@ -33989,6 +36292,15 @@ test "win32 commandButtonKeyAction maps focused command button keys" {
     try std.testing.expect(commandButtonKeyAction(VK_F2) == null);
 }
 
+test "win32 command palette toggle binding is recognized inside action chains" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const absent = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .paste_from_clipboard };
+    const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
+    try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
+    try std.testing.expect(bindingActionsToggleCommandPalette(&present));
+}
+
 test "win32 buildInspectorBannerText reflects host inspector context" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -34088,6 +36400,100 @@ test "win32 overlay edit child rect preserves frame border" {
     try std.testing.expect(child.bottom < frame.bottom);
 }
 
+test "win32 overlay edit frame offsets scale with DPI" {
+    const dpis = [_]u32{ 96, 192, 288 };
+    for (dpis, 1..) |dpi, scale| {
+        const scale_i32: i32 = @intCast(scale);
+        const padding = 10 * scale_i32;
+        const label_w = 100 * scale_i32;
+        const cancel_w = 80 * scale_i32;
+        const row_h = 30 * scale_i32;
+        const overlay_y = 20 * scale_i32;
+        const frame = overlayEditFrameRect(
+            800 * scale_i32,
+            overlay_y,
+            padding,
+            label_w,
+            cancel_w,
+            0,
+            row_h,
+            dpi,
+        );
+        try std.testing.expectEqual(overlay_y + 4 * scale_i32, frame.top);
+        try std.testing.expectEqual(frame.top + row_h, frame.bottom);
+        try std.testing.expectEqual(
+            800 * scale_i32 - cancel_w - padding * 2 - 6 * scale_i32,
+            frame.right,
+        );
+    }
+
+    const narrow = overlayEditFrameRect(220, 20, 10, 100, 80, 0, 30, 96);
+    const close_left = 220 - 80 - 10;
+    try std.testing.expectEqual(@as(i32, 10), narrow.left);
+    try std.testing.expect(narrow.right <= close_left);
+    try std.testing.expect(narrow.right >= narrow.left);
+
+    for ([_]i32{ 80, 100, 120, 140 }) |width| {
+        const visibility = overlayActionVisibilityForWidth(width, 10, 80, 80, false, 96);
+        const effective_cancel: i32 = if (visibility.cancel) 80 else 0;
+        const frame = overlayEditFrameRect(width, 20, 10, 100, effective_cancel, 0, 30, 96);
+        const child = overlayEditChildRectFromFrame(frame, 8, 6);
+        try std.testing.expect(child.left >= frame.left);
+        try std.testing.expect(child.right <= frame.right);
+        try std.testing.expect(child.left <= child.right);
+        if (visibility.cancel) try std.testing.expect(child.right <= width - 80 - 10);
+    }
+    for ([_]i32{ 1, 10, 20, 30 }) |width| {
+        const frame = overlayEditFrameRect(width, 20, 10, 100, 0, 0, 30, 96);
+        try std.testing.expect(frame.left >= 0);
+        try std.testing.expect(frame.right <= width);
+        try std.testing.expect(frame.right > frame.left);
+    }
+    try std.testing.expect(!overlayActionVisibilityForWidth(220, 10, 80, 80, true, 96).accept);
+    try std.testing.expect(overlayActionVisibilityForWidth(230, 10, 80, 80, true, 96).accept);
+}
+
+test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_]i32{ 1, 2, 20, 80, 100, 120, 140, 220 }) |width| {
+        const actions = overlayActionLayoutForWidth(.confirm, width, 10, 80, 80, 96);
+        try std.testing.expect(actions.cancel_visible);
+        try std.testing.expect(!actions.accept_visible);
+        try std.testing.expect(actions.cancel_x >= 0);
+        try std.testing.expect(actions.cancel_width > 0);
+        try std.testing.expect(actions.cancel_x + actions.cancel_width <= width);
+        try std.testing.expectEqual(
+            OverlayFocusSlot.cancel,
+            nextVisibleOverlayFocusSlot(
+                .confirm,
+                .edit,
+                false,
+                false,
+                actions.accept_visible,
+                actions.cancel_visible,
+            ),
+        );
+        if (width < 140) {
+            const expected_inset = @min(@as(i32, 10), @divTrunc(width - 1, 2));
+            try std.testing.expect(actions.compact_cancel);
+            try std.testing.expectEqual(expected_inset, actions.cancel_x);
+            try std.testing.expectEqual(width - 2 * expected_inset, actions.cancel_width);
+        } else {
+            try std.testing.expect(!actions.compact_cancel);
+            try std.testing.expectEqual(@as(i32, 80), actions.cancel_width);
+        }
+    }
+
+    const wide = overlayActionLayoutForWidth(.confirm, 230, 10, 80, 80, 96);
+    try std.testing.expect(wide.accept_visible);
+    try std.testing.expect(wide.cancel_visible);
+    try std.testing.expect(!wide.compact_cancel);
+    try std.testing.expect(wide.accept_x >= 0);
+    try std.testing.expect(wide.accept_x + wide.accept_width <= wide.cancel_x);
+    try std.testing.expect(wide.cancel_x + wide.cancel_width <= 230);
+}
+
 test "win32 GDI text length accepts empty sentinel slices" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -34108,6 +36514,58 @@ test "win32 command palette hides duplicate accept button" {
     try std.testing.expect(overlayAcceptButtonVisible(.profile));
     try std.testing.expect(overlayAcceptButtonVisible(.search));
     try std.testing.expect(overlayAcceptButtonVisible(.confirm));
+    try std.testing.expect(!overlayEditFrameVisible(.confirm));
+    try std.testing.expect(overlayEditFrameVisible(.command_palette));
+    try std.testing.expect(overlayEditFrameVisible(.profile));
+}
+
+test "win32 transient overlay focus ring includes every visible control" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .edit, false));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .accept, false));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .cancel, false));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .edit, true));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .accept, true));
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .cancel, true));
+
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.command_palette, .edit, false));
+    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.command_palette, .cancel, true));
+    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.confirm, .accept, false));
+    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.confirm, .cancel, true));
+
+    try std.testing.expectEqual(
+        OverlayFocusSlot.cancel,
+        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, true),
+    );
+    try std.testing.expectEqual(
+        OverlayFocusSlot.cancel,
+        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, true),
+    );
+    try std.testing.expectEqual(
+        OverlayFocusSlot.accept,
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, true, true),
+    );
+    try std.testing.expectEqual(
+        null,
+        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false),
+    );
+    try std.testing.expectEqual(
+        null,
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, true),
+    );
+}
+
+test "win32 overlay buttons activate only for their exact click notification" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const accept: HWND = @ptrFromInt(0x10);
+    const cancel: HWND = @ptrFromInt(0x20);
+    try std.testing.expect(expectedButtonClick(BN_CLICKED, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_SETFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_KILLFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(BN_CLICKED, cancel, accept));
+    try std.testing.expect(!expectedButtonClick(BN_CLICKED, null, accept));
 }
 
 test "win32 inspectorBannerStateChanged only trips on actual banner deltas" {
@@ -34187,35 +36645,59 @@ test "win32 buildSearchDetailText reflects live search context" {
 test "win32 buildOverlayAcceptLabel reflects overlay action state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
-    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, snap);
+    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, .{});
     defer std.testing.allocator.free(palette_idle);
     try std.testing.expectEqualStrings("Close", palette_idle);
 
-    const palette_run = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "new_tab", null, null, null, snap);
+    const palette_run = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "new_tab",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "New tab", .subtitle = "Action", .available = true },
+    );
     defer std.testing.allocator.free(palette_run);
-    try std.testing.expectEqualStrings("Run", palette_run);
+    try std.testing.expectEqualStrings("Activate", palette_run);
 
-    // Under fuzzy ranking, any non-empty match yields "Run" because
-    // Enter submits the top-ranked candidate.
-    const palette_matches = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "toggle_", null, null, null, snap);
+    const palette_matches = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "0x96f",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
     defer std.testing.allocator.free(palette_matches);
-    try std.testing.expectEqualStrings("Run", palette_matches);
+    try std.testing.expectEqualStrings("Activate", palette_matches);
 
-    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, snap);
+    const palette_hidden = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "0x96f",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
+    );
+    defer std.testing.allocator.free(palette_hidden);
+    try std.testing.expectEqualStrings("Resize", palette_hidden);
+
+    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, .{});
     defer std.testing.allocator.free(search_next);
     try std.testing.expectEqualStrings("Next", search_next);
 
-    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, snap);
+    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, .{});
     defer std.testing.allocator.free(search_find);
     try std.testing.expectEqualStrings("Find", search_find);
 
-    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, snap);
+    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, .{});
     defer std.testing.allocator.free(tab_go);
     try std.testing.expectEqualStrings("Go", tab_go);
 
-    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, snap);
+    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, .{});
     defer std.testing.allocator.free(title_apply);
     try std.testing.expectEqualStrings("Apply", title_apply);
 }
@@ -34360,28 +36842,49 @@ test "win32 palette theme commit mutates pending without losing rollback source"
 test "win32 buildCommandPaletteOverlayLabel reflects palette state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
-    const idle = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "");
+    const idle = try buildCommandPaletteOverlayLabel(std.testing.allocator, "", .{});
     defer std.testing.allocator.free(idle);
     try std.testing.expectEqualStrings("Command", idle);
 
-    const exact = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "new_tab");
-    defer std.testing.allocator.free(exact);
-    try std.testing.expectEqualStrings("Run action", exact);
-
-    const unique = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "reload_");
-    defer std.testing.allocator.free(unique);
-    try std.testing.expectEqualStrings("Run action", unique);
-
-    const matches = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "toggle_");
+    const matches = try buildCommandPaletteOverlayLabel(
+        std.testing.allocator,
+        "0x96f",
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
     defer std.testing.allocator.free(matches);
-    // Multiple fuzzy matches — top is runnable, so label says "Run action".
-    try std.testing.expectEqualStrings("Run action", matches);
+    try std.testing.expectEqualStrings("Command 1", matches);
 
-    const invalid = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "definitely_not_real");
+    const invalid = try buildCommandPaletteOverlayLabel(
+        std.testing.allocator,
+        "definitely_not_real",
+        .{},
+    );
     defer std.testing.allocator.free(invalid);
     try std.testing.expectEqualStrings("Command ?", invalid);
+}
+
+test "win32 command palette rich feedback never calls a theme an action miss" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const feedback = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "0x96f",
+        &.{},
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
+    defer std.testing.allocator.free(feedback);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "0x96f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "Bundled theme") != null);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "No matching action") == null);
+
+    const hidden_feedback = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "0x96f",
+        &.{},
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
+    );
+    defer std.testing.allocator.free(hidden_feedback);
+    try std.testing.expect(std.mem.indexOf(u8, hidden_feedback, "window larger") != null);
 }
 
 test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {
@@ -34406,6 +36909,36 @@ test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {
     const reverse = commandPaletteCompletionCandidate(snap, "toggle_", first, true).?;
     try std.testing.expect(std.mem.startsWith(u8, reverse, "toggle_"));
     try std.testing.expect(!std.mem.eql(u8, reverse, first));
+}
+
+test "win32 rich palette completion cycles duplicate display text by stable id" {
+    var items: [2]PaletteItem = undefined;
+    var payloads: [2]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.tab, "tab-one"),
+            .title = "Same title",
+            .keywords = "same",
+        },
+        .payload = .{ .tab = 1 },
+    });
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.tab, "tab-two"),
+            .title = "Same title",
+            .keywords = "same",
+        },
+        .payload = .{ .tab = 2 },
+    });
+
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    const first = host.richPaletteCompletionCandidate("same", "same", null, false).?;
+    const second = host.richPaletteCompletionCandidate("same", first.text, first.id, false).?;
+    try std.testing.expectEqualStrings("Same title", first.text);
+    try std.testing.expectEqualStrings("Same title", second.text);
+    try std.testing.expect(!first.id.eql(second.id));
 }
 
 test "win32 commandPaletteBannerText shows ready banner for valid action" {

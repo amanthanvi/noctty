@@ -88,11 +88,11 @@ $wmEnterSizeMove = 0x0231
 $wmExitSizeMove = 0x0232
 $wmCommand = 0x0111
 $wmChar = 0x0102
+$vkReturn = 0x0D
 $showWindowRestore = 9
 $hostCommandPaletteCommandId = 1901
 $hostNewTabCommandId = 1904
 $paletteEditControlId = 2002
-$paletteConfirmCommandId = 2003
 $tabControlIdMin = 1000
 $tabControlIdMaxExclusive = 1900
 $surfaceWindowClassName = 'winghostty.win32'
@@ -250,7 +250,7 @@ function Invoke-CommandPaletteAction {
         [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message $wmChar -WParam ([UIntPtr]([uint64]([int][char]$ch))) -Deadline $Deadline -Description "palette WM_CHAR '$ch'" -Process $Process)
     }
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId $paletteConfirmCommandId -Deadline $Deadline -Process $Process
+    [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message $wmChar -WParam ([UIntPtr]([uint64]$vkReturn)) -Deadline $Deadline -Description 'palette WM_CHAR Enter' -Process $Process)
 }
 
 function Show-ResizeHarnessWindow {

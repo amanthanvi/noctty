@@ -285,7 +285,7 @@ function Invoke-CommandPaletteAction {
         [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64]([int][char]$ch))) -Deadline $Deadline -Description "palette WM_CHAR '$ch'" -Process $Process)
     }
 
-    Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 2003 -Deadline $Deadline -Process $Process
+    [void] (Invoke-InteractiveWin11Message -Hwnd $edit.Hwnd -Message 0x0102 -WParam ([UIntPtr]([uint64]0x0D)) -Deadline $Deadline -Description 'palette WM_CHAR Enter' -Process $Process)
 }
 
 function Invoke-CloseSecondTab {

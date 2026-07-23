@@ -21,10 +21,66 @@ function Assert-ThrowsLike {
     throw "Expected error like '$Pattern', but the command succeeded."
 }
 
+function Set-TestFileByte {
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [long] $Offset
+    )
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+    )
+    try {
+        if ($Offset -lt 0 -or $Offset -ge $stream.Length) {
+            throw "Test mutation offset $Offset is outside $Path."
+        }
+        $stream.Position = $Offset
+        $value = $stream.ReadByte()
+        $stream.Position = $Offset
+        $stream.WriteByte($value -bxor 1)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-PeCertificateTableOffset {
+    param([Parameter(Mandatory)] [string] $Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $reader = [System.IO.BinaryReader]::new($stream)
+    try {
+        $stream.Position = 0x3c
+        $peOffset = $reader.ReadUInt32()
+        $optionalHeaderOffset = $peOffset + 24
+        $stream.Position = $optionalHeaderOffset
+        $magic = $reader.ReadUInt16()
+        $dataDirectoryOffset = switch ($magic) {
+            0x10b { $optionalHeaderOffset + 96 }
+            0x20b { $optionalHeaderOffset + 112 }
+            default { throw "Unsupported PE optional-header magic 0x$($magic.ToString('x'))." }
+        }
+        # IMAGE_DIRECTORY_ENTRY_SECURITY is directory index 4. Its address is
+        # a file offset rather than an RVA.
+        $stream.Position = $dataDirectoryOffset + (4 * 8)
+        $certificateTableOffset = $reader.ReadUInt32()
+        if ($certificateTableOffset -eq 0) {
+            throw "Signed test PE has no certificate table: $Path"
+        }
+        return [long]$certificateTableOffset
+    }
+    finally {
+        $reader.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-signing-trust-$([Guid]::NewGuid().ToString('N'))"
 [System.IO.Directory]::CreateDirectory($tempRoot) | Out-Null
-$rsa = [System.Security.Cryptography.RSA]::Create()
-$rsa.KeySize = 2048
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
 $certificate = $null
 try {
     $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
@@ -32,6 +88,14 @@ try {
         $rsa,
         [System.Security.Cryptography.HashAlgorithmName]::SHA256,
         [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+    )
+    $codeSigningOids = [System.Security.Cryptography.OidCollection]::new()
+    [void]$codeSigningOids.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))
+    $request.CertificateExtensions.Add(
+        [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new(
+            $codeSigningOids,
+            $false
+        )
     )
     $created = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(365))
     try {
@@ -68,6 +132,47 @@ const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
     }
     Assert-ThrowsLike -Pattern '*validity days remaining*' -Script {
         Assert-CodeSigningCertificatePolicy -Certificate $certificate -UpdaterSourcePath $updaterSource -MinimumValidityDays 366
+    }
+
+    $signedPath = Join-Path $tempRoot 'signed-host.exe'
+    Copy-Item -LiteralPath (Get-Process -Id $PID).Path -Destination $signedPath
+    $signedResult = Set-AuthenticodeSignature `
+        -LiteralPath $signedPath `
+        -Certificate $certificate `
+        -HashAlgorithm SHA256 `
+        -IncludeChain NotRoot
+    $signature = Get-AuthenticodeSignature -LiteralPath $signedPath
+    if ($null -eq $signature.SignerCertificate -or
+        $signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint -or
+        -not (Test-SelfSignedTrustStatus -Signature $signature -Path $signedPath)) {
+        throw "Cryptographic self-signed verification rejected an intact signed PE: $($signedResult.Status) $($signedResult.StatusMessage)"
+    }
+    Initialize-WinghosttyAuthenticodeVerifier
+    if (-not [WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)) {
+        throw 'Direct Authenticode verifier rejected an intact signed PE.'
+    }
+
+    $bodyTamperedPath = Join-Path $tempRoot 'body-tampered-host.exe'
+    Copy-Item -LiteralPath $signedPath -Destination $bodyTamperedPath
+    Set-TestFileByte -Path $bodyTamperedPath -Offset 4096
+    $bodyTamperedSignature = Get-AuthenticodeSignature -LiteralPath $bodyTamperedPath
+    if (Test-SelfSignedTrustStatus -Signature $bodyTamperedSignature -Path $bodyTamperedPath) {
+        throw 'Self-signed verification accepted a PE with a modified signed body.'
+    }
+    if ([WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($bodyTamperedPath)) {
+        throw 'Direct Authenticode verifier accepted a PE with a modified signed body.'
+    }
+
+    $signatureTamperedPath = Join-Path $tempRoot 'signature-tampered-host.exe'
+    Copy-Item -LiteralPath $signedPath -Destination $signatureTamperedPath
+    $certificateTableOffset = Get-PeCertificateTableOffset -Path $signatureTamperedPath
+    Set-TestFileByte -Path $signatureTamperedPath -Offset ($certificateTableOffset + 16)
+    $signatureTamperedSignature = Get-AuthenticodeSignature -LiteralPath $signatureTamperedPath
+    if (Test-SelfSignedTrustStatus -Signature $signatureTamperedSignature -Path $signatureTamperedPath) {
+        throw 'Self-signed verification accepted a PE with a modified PKCS#7 signature.'
+    }
+    if ([WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signatureTamperedPath)) {
+        throw 'Direct Authenticode verifier accepted a PE with a modified PKCS#7 signature.'
     }
 }
 finally {

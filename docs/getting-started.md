@@ -110,10 +110,14 @@ The defaults you'll reach for daily:
 | New tab                  | `Ctrl+Shift+T`                  |
 | Close tab                | `Ctrl+Shift+W`                  |
 | Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab`   |
-| Split right / down       | `Ctrl+Shift+O` / `Ctrl+Shift+E` |
+| Split right / down       | `Ctrl+Shift+Backslash` / `Ctrl+Shift+E` |
+| Move between panes       | `Alt+Arrow`                     |
 | Start search             | `Ctrl+Shift+F`                  |
 | Increase / decrease font | `Ctrl+=` / `Ctrl+-`             |
 | Reload config            | `Ctrl+Shift+,`                  |
+
+`Ctrl+Shift+O` remains a split-right alias. The Backslash chord is the
+advertised Windows default because Narrator can reserve O-based commands.
 
 Rebind anything:
 

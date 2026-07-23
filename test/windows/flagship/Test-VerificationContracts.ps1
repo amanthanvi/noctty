@@ -576,10 +576,19 @@ $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful
 $accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
+$newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1'
+$undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
+$resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
+$win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
+$win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
+$win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
+$publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
+$signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
@@ -587,8 +596,35 @@ $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
+$publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
+$windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
+$signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
+$win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
+$win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
+$win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
+$accessibilityHarnessTokens = $null
+$accessibilityHarnessErrors = $null
+$accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $accessibilityHarnessText,
+    [ref]$accessibilityHarnessTokens,
+    [ref]$accessibilityHarnessErrors
+)
+if ($accessibilityHarnessErrors.Count -ne 0) {
+    throw "Accessibility harness does not parse: $($accessibilityHarnessErrors[0].Message)"
+}
+$publishedReleaseVerifierTokens = $null
+$publishedReleaseVerifierErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(
+    $publishedReleaseVerifierText,
+    [ref]$publishedReleaseVerifierTokens,
+    [ref]$publishedReleaseVerifierErrors
+)
+if ($publishedReleaseVerifierErrors.Count -ne 0) {
+    throw "Published release verifier does not parse: $($publishedReleaseVerifierErrors[0].Message)"
+}
 $resolutionSourceAsts = foreach ($source in @(
     [pscustomobject]@{ Path = $interactiveWin11Lib; Text = $interactiveWin11LibText },
     [pscustomobject]@{ Path = $statefulWin11Lib; Text = $statefulWin11LibText }
@@ -1282,6 +1318,389 @@ $accessibilityUIntPtrConversions = @($accessibilityAst.FindAll({
 if ($accessibilityErrors.Count -ne 0 -or $accessibilityUIntPtrConversions.Count -ne 0) {
     throw 'Accessibility harness must parse and construct nonzero WPARAM values through UIntPtr::new([uint64] ...).'
 }
+$textRangeEndpointReferences = [regex]::Matches(
+    $accessibilityHarnessText,
+    '\[System\.Windows\.Automation\.Text\.TextPatternRangeEndpoint\]::(?:Start|End)'
+)
+if ($textRangeEndpointReferences.Count -ne 4 -or
+    $accessibilityHarnessText -match '\[System\.Windows\.Automation\.TextPatternRangeEndpoint\]') {
+    throw 'Accessibility caret assertions must use the installed UIAutomation Text.TextPatternRangeEndpoint type.'
+}
+if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
+    $accessibilityHarnessText -notmatch 'private const uint KEYEVENTF_UNICODE = 0x0004;' -or
+    ([regex]::Matches($accessibilityHarnessText, 'inputs\.Add\(Key\(0, value, KEYEVENTF_UNICODE(?: \| KEYEVENTF_KEYUP)?\)\);')).Count -ne 2) {
+    throw 'Accessibility text injection must use layout-independent KEYEVENTF_UNICODE key down/up pairs.'
+}
+$queryOnlyTextPatternContract = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)\$queryOnlyPreviousRange = \$textPattern\.DocumentRange.*?RemoveAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent.*?Send-AccessibilityOutputMarker .*?-TextPattern \$textPattern .*?-Marker \$queryOnlyMarker.*?\$script:queryOnlyTextProbe = \$textPattern\.DocumentRange\.GetText\(-1\).*?\$queryOnlyPreviousRange\.GetText\(-1\)\.Contains\(\$queryOnlyMarker\).*?AddAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent'
+)
+if (-not $queryOnlyTextPatternContract.Success) {
+    throw 'Accessibility query-only contract must remove this client handler, request fresh ranges through the retained TextPattern, preserve the prior immutable range, and restore the handler.'
+}
+if ($accessibilityHarnessText -notmatch '\$queryOnlyMarker = "whq\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"' -or
+    $accessibilityHarnessText -notmatch '\$coldQueryMarker = "whc\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"') {
+    throw 'Accessibility query-only markers must remain short enough to avoid viewport soft-wrap false negatives.'
+}
+$outputMarkerInputDrainContract = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)function Send-AccessibilityOutputMarker\(.*?SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?\$preEnterText = \$TextPattern\.DocumentRange\.GetText\(-1\).*?Send-AccessibilityChord .*?Enter'
+)
+if (-not $outputMarkerInputDrainContract.Success) {
+    throw 'Accessibility output markers must drain queued Unicode input and reassert focus before the pre-Enter UIA check and Enter.'
+}
+if ($win32RuntimeText -notmatch 'WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP \+ 6' -or
+    $win32RuntimeText -notmatch 'SendMessageTimeoutW\(\s*hwnd\.\?,\s*WM_WINHOSTTY_UIA_QUERY_REFRESH,\s*1,' -or
+    $win32RuntimeText -notmatch 'refreshTerminalUiaTextWithMode\(wParam != 0\)' -or
+    $win32RuntimeText -notmatch 'if \(!force and !terminalUiaRefreshDue' -or
+    $win32RuntimeText -notmatch 'query_refresh_post_pending\.cmpxchgStrong\(false, true' -or
+    $win32RuntimeText -notmatch 'PostMessageW\(hwnd\.\?, WM_WINHOSTTY_UIA_QUERY_REFRESH' -or
+    $win32RuntimeText -notmatch 'refresh_snapshot = clients_listening_for_events or query_recently_active') {
+    throw 'Terminal UIA polling must use a coalesced query-driven UI-thread refresh and stop snapshots when clients are idle.'
+}
+if ($accessibilityHarnessText -notmatch 'Send-AccessibilityBlindOutputMarker' -or
+    $accessibilityHarnessText -notmatch 'Start-Sleep -Milliseconds 1200' -or
+    $accessibilityHarnessText -notmatch '\$coldQueryFirstText = \$textPattern\.DocumentRange\.GetText\(-1\)' -or
+    $accessibilityHarnessText -notmatch 'cold_query_first_document_range_fresh') {
+    throw 'Accessibility evidence must prove the first TextPattern range after a cold query is fresh without pre-querying.'
+}
+$blindMarkerFunctions = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Send-AccessibilityBlindOutputMarker'
+}, $true))
+if ($blindMarkerFunctions.Count -ne 1) {
+    throw 'Accessibility harness must define exactly one blind output-marker helper.'
+}
+$blindMarkerBody = $blindMarkerFunctions[0].Body.Extent.Text
+$blindTextPatternReads = @($blindMarkerFunctions[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $node.VariablePath.UserPath -eq 'TextPattern'
+}, $true))
+if ($blindTextPatternReads.Count -ne 0 -or
+    $blindMarkerBody -notmatch '(?s)SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?Send-AccessibilityChord .*?Enter') {
+    throw 'Blind output validation must drain queued Unicode before Enter without warming TextPattern.'
+}
+$stressBoundaryContract = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)\$stressFirstMarker = "\$\{stressPrefix\}_1".*?\$stressFinalMarker = "\$\{stressPrefix\}_150".*?for /L %i in \(1,1,\$stressLineCount\) do @echo \$\{stressPrefix\}_%i.*?\$stressCommand\.Contains\(\$stressFirstMarker\).*?\$stressCommand\.Contains\(\$stressFinalMarker\)'
+)
+if (-not $stressBoundaryContract.Success -or $accessibilityHarnessText -match 'echo \$stressFirstMarker') {
+    throw 'Accessibility sustained-output boundaries must be generated only by command execution, never echoed literally in the typed command.'
+}
+if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''winghostty settings''' -or
+    $accessibilityHarnessText -notmatch '\$settingsExpectedControls = \[ordered\]@\{' -or
+    $accessibilityHarnessText -notmatch 'settingsControlOverlapComparisons' -or
+    $accessibilityHarnessText -notmatch 'settingsContainmentChecks' -or
+    $accessibilityHarnessText -notmatch '\$settingsLayoutControls = @\(\$sectionButtons\) \+ @\(\$interactiveSettingsControls\)' -or
+    $accessibilityHarnessText -notmatch 'Automation\]::Compare\(\s*\$settingsSharedSectionContainer' -or
+    $accessibilityHarnessText -notmatch '\$containerSelection\.Current\.GetSelection\(\)' -or
+    $accessibilityHarnessText -notmatch '\$focusSection\.SetFocus\(\)\s*\$focusSectionSelection\.Select\(\)' -or
+    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds = @\(\[WinghosttyAccessibilityNative\]::VisibleTerminalChildren' -or
+    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds -notcontains \$settingsOpenFocusedHwnd') {
+    throw 'Accessibility settings evidence must assert root identity, named roles, shared selection semantics, peer overlap, and client containment.'
+}
+if ($accessibilityHarnessText -notmatch 'command palette unavailable no-match notification''[\s\S]*?\$paletteNativeFocusBeforeRecovery -ne \$paletteQueryHwnd[\s\S]*?ForceForeground\(\$process\.MainWindowHandle\)' -or
+    $accessibilityHarnessText -match 'command palette unavailable no-match notification''[\s\S]{0,1800}?\$paletteFocused\.SetFocus\(\)') {
+    throw 'Accessibility no-match recovery must prove native query focus before restoring only the foreground window.'
+}
+if ($accessibilityHarnessText -notmatch 'command palette query global UIA focus''[\s\S]*?\$paletteNativeFocusElement\.Current\.Name -ne ''Command palette query''[\s\S]*?ForceForeground\(\$process\.MainWindowHandle\)' -or
+    $accessibilityHarnessText -match 'command palette query global UIA focus''[\s\S]{0,1600}?\.SetFocus\(\)') {
+    throw 'Accessibility palette recovery must validate the native query target without manufacturing UIA focus.'
+}
+if ($accessibilityHarnessText -notmatch 'command palette native List recovery after zero matches''[\s\S]*?\$paletteNativeFocusBeforeRecovery -ne \$paletteQueryHwnd[\s\S]*?ForceForeground\(\$process\.MainWindowHandle\)' -or
+    $accessibilityHarnessText -match 'command palette native List recovery after zero matches''[\s\S]{0,1800}?\$paletteFocused\.SetFocus\(\)') {
+    throw 'Accessibility palette recovery must prove native query focus before restoring only foreground ownership.'
+}
+if ($accessibilityHarnessText -notmatch 'docked search query UIA focus''[\s\S]*?\$searchNativeFocusBeforeRecovery -ne \$searchNativeHwnd[\s\S]*?ForceForeground\(\$process\.MainWindowHandle\)' -or
+    $accessibilityHarnessText -match 'docked search query UIA focus''[\s\S]{0,1200}?\$searchQueryEdit\.SetFocus\(\)') {
+    throw 'Accessibility docked-search recovery must prove native query focus before restoring only foreground ownership.'
+}
+if ($accessibilityHarnessText -notmatch 'settings section focus and selection ownership''[\s\S]*?\$sectionNativeFocusBeforeRecovery -ne \$focusSectionHwnd[\s\S]*?ForceForeground\(\$settingsHwnd\)' -or
+    $accessibilityHarnessText -match 'settings section focus and selection ownership''[\s\S]{0,1200}?\$focusSection\.SetFocus\(\)' -or
+    $accessibilityHarnessText -notmatch 'ForceForeground\(\$ownerSettingsHwnd\)[\s\S]*?PostMessageW\(\s*\$ownerSettingsHwnd[\s\S]*?settings conservative dirty-close focus' -or
+    $accessibilityHarnessText -match 'settings conservative dirty-close focus''[\s\S]{0,900}?(ForceForeground|SetFocus)\(') {
+    throw 'Accessibility settings evidence must validate focus without repairing the exact target under test.'
+}
+if ($accessibilityHarnessText -notmatch 'settings destruction and terminal focus restoration after idle soak''[\s\S]*?\$script:idleRestoreForegroundHwnd -eq \$idleTerminalHostHwnd[\s\S]*?\$script:idleRestoreFocusedHwnd -eq \$leftPane\.Hwnd' -or
+    $accessibilityHarnessText -match 'settings destruction and terminal focus restoration after idle soak''[\s\S]{0,1000}?ForceForeground\(') {
+    throw 'Accessibility idle-close evidence must observe product focus restoration without activating the expected host itself.'
+}
+if ($accessibilityHarnessText -match '(?m)^\s*\$matches\s*=' -or
+    $accessibilityHarnessText -notmatch '\$controlMatches = @\(\$interactiveSettingsControls \| Where-Object' -or
+    $accessibilityHarnessText -notmatch '\$controlMatches\.Count -ne 1') {
+    throw 'Accessibility settings evidence must not overwrite the automatic $matches variable.'
+}
+if ($win32SettingsText -notmatch 'const settings_header_control_count = 6;' -or
+    $win32SettingsText -notmatch 'const settings_clipped_control_count = settings_control_count - settings_header_control_count;' -or
+    $win32SettingsText -notmatch 'for \(0\.\.settings_clipped_control_count\) \|index\|' -or
+    $win32SettingsText -match 'for \(0\.\.27\) \|index\|') {
+    throw 'Settings viewport clipping must derive its content-control bound from the fixed header-control count.'
+}
+Assert-WorkflowContractAbsent `
+    -Path $win32Settings `
+    -Pattern '(?i)MessageBoxW|MB_YESNOCANCEL|MB_DEFBUTTON3' `
+    -Description 'settings dirty close never falls back to an inaccessible modal message box'
+Assert-TextContract `
+    -Content $win32UiaWidgetsText `
+    -Pattern '(?s)fn postButtonClicked\(hwnd: com\.HWND\).*?GetParent\(hwnd\).*?GetDlgCtrlID\(hwnd\).*?PostMessageW\(\s*parent,\s*WM_COMMAND,\s*@intCast\(control_id\).*?invoke_iface: com\.IInvokeProvider.*?self\.role == \.button and pattern_id == constants\.UIA_InvokePatternId.*?out\.\* = @ptrCast\(&self\.invoke_iface\).*?fn Invoke\(p: \*com\.IInvokeProvider\).*?return postButtonClicked\(self\.hwnd\)' `
+    -Description 'settings buttons expose asynchronous foreground-independent native InvokePattern activation' `
+    -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32UiaWidgetsText `
+    -Pattern '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(.*?SMTO_BLOCK \| SMTO_ABORTIFHUNG.*?settings_selection_timeout_ms.*?UIA_E_ELEMENTNOTAVAILABLE.*?fn Select\(p: \*com\.ISelectionItemProvider\).*?const result = sendButtonClicked\(self\.hwnd\).*?if \(!self\.available\(\)\).*?self\.isSelected\(\)' `
+    -Description 'settings section selection is synchronous, bounded, and postcondition checked' `
+    -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32UiaWidgetsText `
+    -Pattern '(?s)fn hwndHasKeyboardFocus\(hwnd: com\.HWND\).*?GetWindowThreadProcessId\(hwnd, null\).*?GetGUIThreadInfo\(thread_id, &info\).*?IsChild\(hwnd, focused\).*?pub fn raiseFocusChanged\(self: \*SettingsControlProvider\).*?events\.raiseFocusChanged\(&self\.base\).*?UIA_HasKeyboardFocusPropertyId.*?hwndHasKeyboardFocus\(self\.hwnd\).*?pub fn raiseFocusChanged\(self: \*SettingsSectionProvider\)' `
+    -Description 'custom settings providers expose and publish thread-correct keyboard focus' `
+    -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)const WM_SETTINGS_CLOSE_NOW: UINT = WM_APP \+ 0x100;.*?"Save and close".*?"Discard changes".*?"Keep editing".*?PostMessageW\(hwnd, WM_SETTINGS_CLOSE_NOW.*?WM_CLOSE => \{.*?showClosePrompt\(\).*?WM_SETTINGS_CLOSE_NOW => \{' `
+    -Description 'settings dirty close is a posted, inline three-action workflow' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)id == BTN_CLOSE_KEEP_EDITING and lParam == 0.*?clickedButton\(id, notify, BTN_CLOSE_KEEP_EDITING\)' `
+    -Description 'settings Keep editing separates synthetic Escape from native focus and click notifications' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn ensureControlVisible\(self: \*SettingsWindow.*?settingsContentViewportTop\(self, client_rect\).*?fn closePromptMeasuredHeight\(self: \*SettingsWindow.*?close_prompt_measure_width == pane_width.*?fn closePromptLayoutGeometry\(self: \*SettingsWindow.*?self\.px\(field_label_offset \+ 8\).*?fn settingsContentViewportTop\(self: \*SettingsWindow.*?closePromptLayoutGeometry\(self, pane_width\)\.stack_top.*?fn layoutChildren\(self: \*SettingsWindow.*?closePromptLayoutGeometry\(self, pane_width\)' `
+    -Description 'settings focus viewport and layout share cached close-prompt geometry with field-label clearance' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn setSaveInFlight\(self: \*SettingsWindow.*?moveFocusBeforeDisablingMutableControls\(\).*?setMutableControlsEnabled\(!in_flight\).*?fn syncClosePromptText\(self: \*SettingsWindow.*?NotifyWinEvent\(EVENT_OBJECT_NAMECHANGE.*?fn showClosePrompt\(self: \*SettingsWindow.*?syncClosePromptText\(true\).*?fn cancelClosePrompt\(self: \*SettingsWindow.*?closePromptCanCancel\(self\.close_prompt_visible, self\.close_posted\)' `
+    -Description 'settings save focus, prompt announcement, and posted-close cancellation remain safe' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn syncClosePromptText\(self: \*SettingsWindow.*?setWindowTextUtf8\(text, closePromptText\(self\.save_in_flight\)\).*?fn closePromptText\(save_in_flight: bool\) \[\]const u8.*?fn closePromptMeasuredHeight\(self: \*SettingsWindow.*?utf8ToW\(&text_w, closePromptText\(self\.save_in_flight\)\)' `
+    -Description 'settings close-prompt display and measurement share one text source' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)pub fn open\(self: \*SettingsWindow\).*?pendingCloseReopenAction\(self\.close_posted, self\.close_after_save\).*?\.cancel_saved_close =>.*?self\.close_posted = false;.*?\.cancel_discard_close =>.*?self\.adoptCurrentConfig\(\).*?self\.refreshAllControls\(\).*?self\.close_posted = false;.*?self\.cancelClosePrompt\(\)' `
+    -Description 'reopening settings cancels a stale posted close and honors an explicit discard' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)clickedButton\(id, notify, BTN_SAVE\).*?IsWindowEnabled\(button\).*?IsWindowVisible\(button\).*?saveCommandCanDispatch\(\s*o\.close_prompt_visible,\s*o\.save_in_flight,\s*o\.close_posted,\s*button_enabled,\s*button_visible,\s*\).*?o\.save\(\)' `
+    -Description 'settings Save rechecks visibility, enabled state, and lifecycle guards at command dispatch' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn moveFocusBeforeDisablingMutableControls\(self: \*SettingsWindow\).*?self\.mutableControls\(\).*?self\.btn_save.*?self\.btn_close_save.*?self\.btn_close_discard.*?self\.btn_close_keep_editing.*?fn failApply\(self: \*SettingsWindow, apply_id: ApplyId\) bool.*?return false;.*?return true;.*?\.failed => \|err\| \{\s*if \(!self\.failApply\(apply_id\)\) return;\s*self\.setSaveInFlight\(false\)' `
+    -Description 'async save evacuates every disabled focus source and rejects stale failed completions before UI mutation' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn settingsControlProc\(.*?msg == WM_SETFOCUS.*?provider\.raiseFocusChanged\(\).*?fn settingsSectionButtonProc\(.*?msg == WM_SETFOCUS.*?provider\.raiseFocusChanged\(\)' `
+    -Description 'settings HWND focus transitions raise events from their matching custom providers' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32RuntimeText `
+    -Pattern '(?s)fn overlayEditFrameRect\(.*?const min_edit_width = Host\.scaledBy\(24, dpi\).*?const bounded_width = @max\(0, width\).*?@max\(0, right - min_edit_width\)' `
+    -Description 'transient overlay edits retain visible bounded width at extreme client sizes' `
+    -Context $win32Runtime
+Assert-TextContract `
+    -Content $win32RuntimeText `
+    -Pattern '(?s)if \(overlayEditFrameVisible\(self\.overlay_mode\)\) \{.*?drawRoundedRect\(hdc, edit_frame.*?fn overlayEditFrameVisible\(mode: HostOverlayMode\) bool \{\s*return mode != \.confirm;' `
+    -Description 'confirm overlays never paint the hidden edit frame beneath compact actions' `
+    -Context $win32Runtime
+Assert-TextContract `
+    -Content $win32RuntimeText `
+    -Pattern '(?s)fn paletteRowTitleColor\(.*?if \(destructive\) return destructive_color;\s*if \(selected\) return selected_color;.*?paletteRowTitleColor\(true, true, 0x11, 0x22, 0x33\)' `
+    -Description 'selected destructive palette actions retain the destructive foreground cue' `
+    -Context $win32Runtime
+Assert-TextContract `
+    -Content $accessibilityHarnessText `
+    -Pattern '(?s)settings inline dirty-close prompt.*?''#32770''.*?''Save changes before closing\?''.*?''Save and close''.*?''Discard changes''.*?''Keep editing''.*?settings conservative dirty-close focus.*?\$keepEditingInvoke\.Invoke\(\).*?settings keep-editing draft preservation.*?\$scrollbackValuePattern\.Current\.Value -eq \$draftScrollbackText.*?settings inline dirty-close prompt reopens.*?\$discardInvoke\.Invoke\(\)' `
+    -Description 'accessibility evidence rejects modal close UI and proves conservative inline keep-editing/discard behavior' `
+    -Context $accessibilityHarness
+Assert-TextContract `
+    -Content $accessibilityHarnessText `
+    -Pattern '(?s)ResetAutomationFocusChangedCount\(\).*?AddAutomationFocusChangedEventHandler\(\$settingsFocusHandler\).*?settings conservative dirty-close focus.*?AutomationFocusChangedSenders.*?Automation\]::Compare\(\$_, \$ownerKeepEditingButton\).*?\$ownerKeepEditingButton\.Current\.HasKeyboardFocus.*?RemoveAutomationFocusChangedEventHandler\(\$settingsFocusHandler\).*?finally \{.*?\$settingsFocusRegistered.*?RemoveAutomationFocusChangedEventHandler' `
+    -Description 'dirty-close evidence requires exact UIA focus event and provider focus without mutating the target' `
+    -Context $accessibilityHarness
+Assert-TextContract `
+    -Content $accessibilityHarnessText `
+    -Pattern '(?s)Invoke-AccessibilitySettingsCloseAction.*?-ActionName ''Save and close''.*?settings save-and-close completion.*?settings persisted config bytes.*?settings persistence verifier.*?Save and close did not survive a same-sandbox process relaunch.*?settings persistence baseline restoration.*?save_and_close_invoked.*?persisted_after_process_relaunch.*?original_value_restored' `
+    -Description 'accessibility evidence invokes Save and close, proves same-sandbox process persistence, and restores the baseline' `
+    -Context $accessibilityHarness
+Assert-TextContract `
+    -Content $accessibilityHarnessText `
+    -Pattern '(?s)function Start-AccessibilityProcessWithEnvironment.*?\$baseline = \[ordered\]@\{\}.*?SetEnvironmentVariable\(.*?try \{.*?Start-Process.*?finally \{.*?\$baseline\.GetEnumerator\(\).*?SetEnvironmentVariable\(.*?settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout.*?settingsProbeEnvironment = Get-InteractiveWin11Environment.*?sandboxConfigPath = Join-Path \$settingsPersistenceLayout\.LocalAppData.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveProbeArguments.*?-EnvironmentVariables \$settingsProbeEnvironment.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveVerifyArguments.*?-EnvironmentVariables \$settingsProbeEnvironment' `
+    -Description 'settings persistence probes use a dedicated sandbox and cannot trigger the primary accessibility process config watcher' `
+    -Context $accessibilityHarness
+$settingsPersistenceBlock = [regex]::Match(
+    $accessibilityHarnessText,
+    '(?s)\$saveProbe = Open-AccessibilitySettingsProbe.*?(?=\r?\n\s*Send-AccessibilityChord -Keys)'
+)
+if (-not $settingsPersistenceBlock.Success -or
+    $settingsPersistenceBlock.Value -notmatch '(?s)TryParse\(\s*\$saveScrollback\.Value\.Current\.Value,\s*\[ref\]\$settingsPersistenceOriginalScrollback.*?\$settingsPersistenceDraftText.*?SetValue\(\$settingsPersistenceDraftText\).*?SetValue\(\$settingsPersistenceOriginalScrollbackText\)' -or
+    $settingsPersistenceBlock.Value -match '\$originalScrollback|\$draftScrollbackText') {
+    throw 'Settings persistence evidence must derive draft and restore values only from its dedicated sandbox.'
+}
+Assert-TextContract `
+    -Content $accessibilityHarnessText `
+    -Pattern '(?s)function Restore-AccessibilityConfigBaseline.*?\[AllowNull\(\)\]\[AllowEmptyCollection\(\)\]\[byte\[\]\] \$Bytes.*?File\]::Delete\(\$Path\).*?File\]::Replace\(\$temporary, \$Path, \$backup\).*?File\]::Delete\(\$backup\).*?\$expectedBase64 = if \(\$null -eq \$Bytes\).*?ToBase64String\(\$restored\).*?settingsConfigBaselineExisted = \[System\.IO\.File\]::Exists.*?ReadAllBytes\(\$sandboxConfigPath\).*?restoredAssignments\.Count -ne 1.*?Restore-AccessibilityConfigBaseline.*?settingsConfigBaselineRestored = \$true.*?finally \{.*?settingsConfigBaselineCaptured -and -not \$settingsConfigBaselineRestored.*?Restore-AccessibilityConfigBaseline' `
+    -Description 'settings persistence evidence restores the exact config baseline on success and failure' `
+    -Context $accessibilityHarness
+$restoreBaselineFunctions = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Restore-AccessibilityConfigBaseline'
+}, $true))
+if ($restoreBaselineFunctions.Count -ne 1) {
+    throw "Expected exactly one Restore-AccessibilityConfigBaseline definition; found $($restoreBaselineFunctions.Count)."
+}
+. ([scriptblock]::Create($restoreBaselineFunctions[0].Extent.Text))
+$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winghostty-config-restore-' + [Guid]::NewGuid().ToString('N'))
+$restoreProbePath = Join-Path $restoreProbeDirectory 'config.ghostty'
+[System.IO.Directory]::CreateDirectory($restoreProbeDirectory) | Out-Null
+try {
+    [System.IO.File]::WriteAllBytes($restoreProbePath, [byte[]](1, 2, 3))
+    Restore-AccessibilityConfigBaseline -Path $restoreProbePath -Existed $false -Bytes ([byte[]]@())
+    if ([System.IO.File]::Exists($restoreProbePath)) {
+        throw 'Accessibility baseline helper did not restore an absent file.'
+    }
+
+    [System.IO.File]::WriteAllBytes($restoreProbePath, [byte[]](1, 2, 3))
+    [byte[]]$restoreProbeEmptyBytes = @()
+    Restore-AccessibilityConfigBaseline -Path $restoreProbePath -Existed $true -Bytes $restoreProbeEmptyBytes
+    if (-not [System.IO.File]::Exists($restoreProbePath) -or [System.IO.File]::ReadAllBytes($restoreProbePath).Length -ne 0) {
+        throw 'Accessibility baseline helper did not restore a zero-byte file.'
+    }
+
+    $restoreProbeBytes = [byte[]](0, 1, 127, 128, 255)
+    [System.IO.File]::WriteAllBytes($restoreProbePath, [byte[]](9, 9, 9))
+    Restore-AccessibilityConfigBaseline -Path $restoreProbePath -Existed $true -Bytes $restoreProbeBytes
+    if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($restoreProbePath)) -cne
+        [Convert]::ToBase64String($restoreProbeBytes)) {
+        throw 'Accessibility baseline helper did not restore nonempty bytes exactly.'
+    }
+}
+finally {
+    if ([System.IO.File]::Exists($restoreProbePath)) { [System.IO.File]::Delete($restoreProbePath) }
+    if ([System.IO.Directory]::Exists($restoreProbeDirectory)) { [System.IO.Directory]::Delete($restoreProbeDirectory) }
+}
+$paletteRebuildBlock = [regex]::Match(
+    $win32RuntimeText,
+    '(?s)fn rebuildPaletteList\(self: \*Host\) void \{.*?(?=\r?\n    fn setPaletteListSelection)'
+)
+if (-not $paletteRebuildBlock.Success) {
+    throw 'Unable to isolate Host.rebuildPaletteList for notification-order verification.'
+}
+$paletteNoMatchIndex = $paletteRebuildBlock.Value.IndexOf('if (transition.announce_no_matches)')
+$paletteRelayoutIndex = $paletteRebuildBlock.Value.IndexOf('if (transition.relayout)')
+$palettePreHideEventOrder = $paletteRebuildBlock.Value -match
+    '(?s)if \(transition\.announce_no_matches\) \{.*?raiseStructureChanged\(&provider\.base, \.children_invalidated, null\);.*?structure_announced_before_layout = true;.*?paletteNoMatchNotificationTarget\(.*?\)\) \|target\| switch \(target\).*?\.list =>.*?raiseNotification\(&provider\.base, \.other, "No matches"\);.*?\.edit =>.*?raiseNotification\(&provider\.base, \.other, "No matches"\);.*?if \(transition\.relayout\)'
+$paletteNotificationTargetBlock = [regex]::Match(
+    $win32RuntimeText,
+    '(?s)fn paletteNoMatchNotificationTarget\(.*?\) \?PaletteNoMatchNotificationTarget \{.*?(?=\r?\n\})'
+)
+$paletteNotificationTargetContract = $paletteNotificationTargetBlock.Success -and
+    $paletteNotificationTargetBlock.Value -match
+        '(?s)if \(list_available and list_visible\) return \.list;.*?if \(edit_available\) return \.edit;.*?if \(list_available\) return \.list;.*?return null;'
+if ($paletteNoMatchIndex -lt 0 -or
+    $paletteRelayoutIndex -lt 0 -or
+    $paletteNoMatchIndex -ge $paletteRelayoutIndex -or
+    -not $palettePreHideEventOrder -or
+    -not $paletteNotificationTargetContract) {
+    throw 'Palette no-match UIA events must precede relayout and route notifications through the visible List or focused Edit fallback.'
+}
+Assert-TextContract `
+    -Content $win32RuntimeText `
+    -Pattern '(?s)fn paintPaletteList\(self: \*Host\) void \{.*?defer drawRectBorder\(hdc, rect, theme\.overlay_border.*?const columns = paletteRowColumns\(.*?if \(columns\.title\.right > columns\.title\.left\).*?if \(columns\.subtitle\.right > columns\.subtitle\.left\).*?paletteListRect\(width, list_x, padding, list_y, list_height\).*?self\.palette_list_visible_rows > 0 and has_list_width.*?overlayEditFrameRect\(.*?self\.current_dpi' `
+    -Description 'palette rows, list bounds, visibility, and edit frame stay responsive and DPI-aware' `
+    -Context $win32Runtime
+if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
+    $accessibilityHarnessText -notmatch '\$script:palette = @\(\$root\.FindAll' -or
+    $accessibilityHarnessText -notmatch '(?s)if \(\$null -eq \$script:palette\) \{\s*\$script:palette = @\(\$root\.FindAll.*?if \(\$null -eq \$script:palette\) \{.*?\$script:paletteUnavailableItems = @\(\).*?\$queryStillFocused.*?NotificationCount -gt 0.*?return \$true.*?\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query''' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus' -or
+    $accessibilityHarnessText -notmatch '(?s)\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll.*?\$script:paletteUnavailableFocused = \[System\.Windows\.Automation\.AutomationElement\]::FocusedElement.*?\$queryStillFocused = \$null -ne \$script:paletteUnavailableFocused -and\s*\$script:paletteUnavailableFocused\.Current\.ProcessId -eq \$process\.Id -and\s*\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit -and\s*\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query'' -and\s*\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus.*?return \$script:paletteUnavailableItems\.Count -eq 0 -and\s*\$queryStillFocused -and' -or
+    $accessibilityHarnessText -notmatch '-not \[WinghosttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
+    $accessibilityHarnessText -notmatch "-Description 'command palette native List recovery after zero matches'" -or
+    $accessibilityHarnessText -notmatch '\$paletteRecoveredSelectionPattern\.Current\.GetSelection\(\)' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteRecoveredFocus\.Current\.HasKeyboardFocus' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteRecoveryLastTransient' -or
+    $accessibilityHarnessText -notmatch '(?s)command palette native List recovery after zero matches.*?Test-AccessibilityTransientHResult -HResult \$_.*?\$transientHresult -eq 0x80040201.*?\$script:paletteRecovered = \$null' -or
+    $accessibilityHarnessText -notmatch 'function Get-AccessibilityExceptionHResults' -or
+    $accessibilityHarnessText -notmatch '\$results = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)' -or
+    $accessibilityHarnessText -notmatch '\$cursor = \$cursor\.InnerException' -or
+    $accessibilityHarnessText -notmatch 'function Test-AccessibilityTransientHResult' -or
+    $accessibilityHarnessText -notmatch 'foreach \(\$knownTransient in @\(\[int\]0x80010001, \[int\]0x8001010A, \[int\]0x80040201\)\)' -or
+    $accessibilityHarnessText -notmatch 'Test-AccessibilityTransientHResult -HResult 0' -or
+    $accessibilityHarnessText -notmatch '\$hresults = @\(Get-AccessibilityExceptionHResults -Exception \$_\.Exception\)' -or
+    $accessibilityHarnessText -notmatch 'Test-AccessibilityTransientHResult -HResult \$_' -or
+    $accessibilityHarnessText -notmatch '\$null -eq \$transientHresult' -or
+    $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80010001 -or \$transientHresult -eq 0x8001010A' -or
+    $accessibilityHarnessText -notmatch '\$transientHresult -eq 0x80040201' -or
+    $accessibilityHarnessText -notmatch '(?s)if \(\$transientHresult -eq 0x80040201\) \{\s*\$script:palette = \$null\s*return \$false' -or
+    $accessibilityHarnessText -match '0x80131501') {
+    throw 'Accessibility palette recovery must unwrap exception chains, use script-scoped reacquisition, and retry only known UIA transient HRESULTs.'
+}
+$accessibilityHresultFunctions = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @('Get-AccessibilityExceptionHResults', 'Test-AccessibilityTransientHResult')
+}, $true))
+if ($accessibilityHresultFunctions.Count -ne 2) {
+    throw 'Accessibility harness must define exactly one exception-chain helper and one transient-HRESULT classifier.'
+}
+foreach ($function in $accessibilityHresultFunctions) {
+    . ([scriptblock]::Create($function.Extent.Text))
+}
+foreach ($knownHresult in @([int]0x80010001, [int]0x8001010A, [int]0x80040201)) {
+    $knownException = [Runtime.InteropServices.COMException]::new('known transient', $knownHresult)
+    $directChain = @(Get-AccessibilityExceptionHResults -Exception $knownException)
+    $wrappedChain = @(Get-AccessibilityExceptionHResults -Exception ([Exception]::new('wrapper', $knownException)))
+    if ($directChain.Count -ne 1 -or $directChain[0] -ne $knownHresult -or
+        $wrappedChain.Count -ne 2 -or $wrappedChain[-1] -ne $knownHresult -or
+        -not (Test-AccessibilityTransientHResult -HResult $directChain[0]) -or
+        -not (Test-AccessibilityTransientHResult -HResult $wrappedChain[-1])) {
+        throw ('Accessibility transient HRESULT semantics failed for 0x{0:X8}.' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes($knownHresult), 0))
+    }
+}
+if (Test-AccessibilityTransientHResult -HResult ([int]0x80131501)) {
+    throw 'Accessibility transient HRESULT classifier must reject the generic .NET wrapper result 0x80131501.'
+}
+if ($accessibilityHarnessText -notmatch 'ExpectedFocusedHwnd' -or
+    $accessibilityHarnessText -notmatch 'sustained output command'' -ExpectedFocusedHwnd \$leftPane\.Hwnd' -or
+    $accessibilityHarnessText -notmatch 'failed to remove terminal TextChanged handler') {
+    throw 'Accessibility input ownership and UIA cleanup must remain exact and fail closed.'
+}
+if ($accessibilityHarnessText -notmatch '\$idleTerminalHostHwnd = \$process\.MainWindowHandle' -or
+    $accessibilityHarnessText -notmatch 'ForceForeground\(\$idleTerminalHostHwnd\)' -or
+    $accessibilityHarnessText -notmatch '\$script:idleRestoreForegroundHwnd -eq \$idleTerminalHostHwnd' -or
+    $accessibilityHarnessText -notmatch '\$script:idleRestoreFocusedHwnd -eq \$leftPane\.Hwnd' -or
+    $accessibilityHarnessText -match '(?s)settings-open idle soak.*?ForceForeground\(\$process\.MainWindowHandle\)') {
+    throw 'Accessibility settings idle-soak focus checks must retain the terminal host HWND before Process.Refresh can recache the independent Settings window.'
+}
+$settingsSectionProviderContract = [regex]::Match(
+    $win32UiaWidgetsText,
+    '(?ms)^pub const SettingsSectionProvider = struct \{(?<body>.*?)^\};\s*$'
+)
+if (-not $settingsSectionProviderContract.Success -or
+    $settingsSectionProviderContract.Groups['body'].Value -match 'SetFocus' -or
+    $settingsSectionProviderContract.Groups['body'].Value -notmatch 'container\.selected_index\.load\(\.acquire\)' -or
+    $settingsSectionProviderContract.Groups['body'].Value -notmatch 'sendButtonClicked\(self\.hwnd\)') {
+    throw 'Settings section UIA callbacks must synchronously marshal selection to the UI thread and retain atomic state.'
+}
+if ($win32UiaWidgetsText -match 'UiaRaiseAutomationEvent\(' -or
+    ([regex]::Matches($win32UiaWidgetsText, 'events\.raiseSelectionItemSelected\(')).Count -ne 2 -or
+    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&row\.base\)' -or
+    $win32UiaWidgetsText -notmatch 'events\.raiseSelectionItemSelected\(&self\.base\)') {
+    throw 'Widget selection-item events must route through the shared UIA event helper.'
+}
 $timeoutFunctions = @($resolutionSourceAsts[0].Ast.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -1388,9 +1807,11 @@ $paletteThemeFunctions = @($paletteThemeAst.FindAll({
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
 }, $true))
 $openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
+$themePaletteDismissedFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Test-ThemePaletteDismissed')
 $postHighContrastFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Invoke-PostHighContrastPresentationCanary')
-if ($paletteThemeFunctions.Count -ne 2 -or $openThemeQueryFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
-    throw 'Palette theme harness must define only its exact query and post-High-Contrast presentation functions.'
+if ($paletteThemeFunctions.Count -ne 3 -or $openThemeQueryFunctions.Count -ne 1 -or
+    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only its exact query, dismissal, and post-High-Contrast presentation functions.'
 }
 $openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
 if ($openThemeQueryParameters.Count -ne 4 -or
@@ -1743,14 +2164,14 @@ $highContrastCloseCalls = @($paletteThemeAst.FindAll({
 $highContrastDismissCalls = @($paletteThemeAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $hcHost 2004 $deadline $hcRun.Process'
+        $node.Extent.Text.Trim() -eq 'Invoke-StatefulButton $hcHost 2004 $deadline $hcRun.Process'
 }, $true))
 $highContrastDismissWaits = @($paletteThemeAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -eq 'Wait-InteractiveWin11Until' -and
         $node.Extent.Text -match "-Description 'High Contrast palette dismissal'" -and
-        $node.Extent.Text -match 'Where-Object Id -eq 2002\)\.Count -eq 0'
+        $node.Extent.Text -match 'Test-ThemePaletteDismissed \$script:PaletteThemeHighContrastHost'
 }, $true))
 if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 1 -or
     $highContrastDismissWaits.Count -ne 1 -or
@@ -1764,6 +2185,30 @@ if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 
     $highContrastCloseCalls[0].Parent.Parent.Parent.CatchClauses[0].Body.Extent.Text -notmatch
         '(?s)Stop-InteractiveWin11Process -Process \$hcRun\.Process -Contained.*?Write-Warning') {
     throw 'High Contrast palette dismissal must stay strict; only host-close timeout may become a warning after contained termination.'
+}
+if ($paletteThemeHarnessText -notmatch 'Invoke-StatefulButton \$hostHwnd 2004 \$deadline \$run\.Process' -or
+    $paletteThemeHarnessText -match 'Invoke-Stateful(?:Posted)?Command \$\w+ 2004' -or
+    $paletteThemeHarnessText -notmatch "-Description 'theme palette dismissal after preview'" -or
+    $themePaletteDismissedFunctions[0].Body.Extent.Text -notmatch '(?s)\.Id -ge 2001 -and \$_.Id -le 2006.*?\.Count -eq 0' -or
+    $paletteThemeHarnessText -notmatch '(?s)-Description ''theme palette dismissal after preview''.*?Test-ThemePaletteDismissed \$hostHwnd.*?\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\s*Wait-InteractiveWin11Until -Deadline \$deadline -Description ''Dracula preview rollback''' -or
+    $paletteThemeHarnessText -notmatch '\$themeListRect\.Top -lt \$themeSurfaceRect\.Top' -or
+    $paletteThemeHarnessText -notmatch '(?s)Dracula preview rollback.*?\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\s*\$edit = Open-ThemeQuery' -or
+    $paletteThemeHarnessText -notmatch 'Dismissal changed persisted theme instead of reverting preview') {
+    throw 'Palette theme validation must prove rich-result geometry and click the real Close button before framebuffer/config rollback.'
+}
+if ($win32RuntimeText -notmatch 'const list_y = overlay_y \+ self\.scaled\(host_overlay_height\);' -or
+    $win32RuntimeText -notmatch 'paletteListTransition\(' -or
+    $win32RuntimeText -notmatch 'if \(transition\.exposes_content\) \{\s*self\.invalidateVisibleSurfaceChildPaint\(true, false\);' -or
+    $win32RuntimeText -notmatch 'const was_palette = self\.overlay_mode == \.command_palette;' -or
+    $win32RuntimeText -notmatch 'if \(was_confirm or was_palette\)' -or
+    $win32RuntimeText -notmatch 'palette_catalog_retained_config' -or
+    $win32RuntimeText -notmatch 'palette_catalog_config_source' -or
+    $win32RuntimeText -notmatch '(?s)other != self and other\.overlay_mode == \.command_palette.*?other\.hideOverlay\(\);' -or
+    $win32RuntimeText -notmatch '(?s)\.config_change =>.*?if \(host\.overlay_mode == \.command_palette\) host\.hideOverlay\(\);.*?self\.config\.deinit\(\);\s*self\.config = config;' -or
+    $win32RuntimeText -notmatch 'self\.refreshPalettePresentation\(\);' -or
+    $win32RuntimeText -notmatch 'Make the window larger to show and activate palette results\.' -or
+    $win32RuntimeText -notmatch 'DT_LEFT \| DT_VCENTER \| DT_SINGLELINE \| DT_NOPREFIX \| DT_END_ELLIPSIS') {
+    throw 'Palette list layout must sit below feedback and repaint exposed terminal content on shrink, hide, and dismissal.'
 }
 $sessionRestoreTabSeedLoop = Get-PowerShellBlockText `
     -Content $sessionRestoreHarnessText `
@@ -2299,9 +2744,192 @@ Assert-TextContract `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
-    -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
-    -Description 'post-publish remote verification authenticates gh' `
+    -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
+    -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
+Assert-TextContract `
+    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
+    -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'GitHub release commands pin the fork and mutations fail closed' `
+    -Context "$releaseWorkflow :: Publish GitHub Release"
+$signedArtifactStep = Get-YamlStepText `
+    -Content $releaseWorkflowText `
+    -Name 'Verify signed release artifacts' `
+    -Source $releaseWorkflow
+$signingTrustConsumers = @(
+    [pscustomobject]@{
+        Context = $publishedReleaseVerifier
+        Content = $publishedReleaseVerifierText
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PSScriptRoot\s+[''"]signing-trust\.ps1[''"]\s*\)$'
+        ExpectedPath = '$Path'
+        PinPattern = 'Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin'
+    },
+    [pscustomobject]@{
+        Context = $windowsPackager
+        Content = $windowsPackagerText
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PSScriptRoot\s+[''"]signing-trust\.ps1[''"]\s*\)$'
+        ExpectedPath = '$PathToCheck'
+        PinPattern = 'SignerCertificate\.Thumbprint -ne \$SigningConfig\.CertificateThumbprint'
+    },
+    [pscustomobject]@{
+        Context = "$releaseWorkflow :: Verify signed release artifacts"
+        Content = ((Get-YamlLiteralRunScript `
+            -Content $signedArtifactStep `
+            -Source "$releaseWorkflow :: Verify signed release artifacts") -replace '\$\{\{[^}]+\}\}', 'GITHUB_EXPRESSION')
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PWD\s+[''"]scripts[/\\]signing-trust\.ps1[''"]\s*\)$'
+        ExpectedPath = '$Path'
+        PinPattern = 'Get-CertificateSpkiSha256.*?\$allowedPins -notcontains \$pin'
+    }
+)
+$signingTrustSources = @(
+    [pscustomobject]@{ Context = $signingTrust; Content = $signingTrustText; IsCanonical = $true }
+) + @($signingTrustConsumers | ForEach-Object {
+    [pscustomobject]@{
+        Context = $_.Context
+        Content = $_.Content
+        IsCanonical = $false
+        ImportPattern = $_.ImportPattern
+        ExpectedPath = $_.ExpectedPath
+        PinPattern = $_.PinPattern
+    }
+})
+foreach ($source in $signingTrustSources) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $source.Content,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "Signing-trust contract source does not parse: $($source.Context) ($($errors[0].Message))"
+    }
+    $definitions = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            ($node.Name -replace '^(?i)(?:global|script|local|private):', '') -eq 'Test-SelfSignedTrustStatus'
+    }, $true))
+    if ($source.IsCanonical) {
+        if ($definitions.Count -ne 1 -or
+            -not [object]::ReferenceEquals($definitions[0].Parent, $ast.EndBlock)) {
+            throw 'scripts/signing-trust.ps1 must own exactly one top-level Test-SelfSignedTrustStatus definition.'
+        }
+        $trustStatusBody = $definitions[0].Body.Extent.Text
+        if ($trustStatusBody -match 'StatusMessage' -or
+            $trustStatusBody -notmatch 'SignatureStatus\]::UnknownError' -or
+            $trustStatusBody -notmatch 'VerifyEmbeddedSignatureAndFileHash' -or
+            $trustStatusBody -notmatch '\[string\]\s+\$Path') {
+            throw 'UnknownError self-signed trust must require a file path and cryptographic verification, never localized status text.'
+        }
+        continue
+    }
+    $imports = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
+            $node.Extent.Text.Trim() -match $source.ImportPattern -and
+            [object]::ReferenceEquals($node.Parent.Parent, $ast.EndBlock)
+    }, $true))
+    $trustStatusCalls = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Test-SelfSignedTrustStatus'
+    }, $true))
+    $expectedPathPattern = [regex]::Escape($source.ExpectedPath)
+    $consumerFunction = if ($trustStatusCalls.Count -eq 1) { $trustStatusCalls[0].Parent } else { $null }
+    while ($null -ne $consumerFunction -and
+        $consumerFunction -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        $consumerFunction = $consumerFunction.Parent
+    }
+    $authenticodeCalls = if ($null -ne $consumerFunction) {
+        @($consumerFunction.Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Get-AuthenticodeSignature'
+        }, $true))
+    }
+    else { @() }
+    $pinEvidence = if ($null -ne $consumerFunction) {
+        @($consumerFunction.Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -or
+                $node -is [System.Management.Automation.Language.BinaryExpressionAst]
+        }, $true) | ForEach-Object { $_.Extent.Text }) -join "`n"
+    }
+    else { '' }
+    if ($definitions.Count -ne 0 -or $imports.Count -ne 1 -or
+        $trustStatusCalls.Count -ne 1 -or
+        $null -eq $consumerFunction -or
+        $trustStatusCalls[0].Extent.Text -notmatch "(?s)-Path\s+$expectedPathPattern(?:\s|\)|$)" -or
+        $authenticodeCalls.Count -ne 1 -or
+        $authenticodeCalls[0].Extent.Text -notmatch "(?s)-LiteralPath\s+$expectedPathPattern(?:\s|\)|$)" -or
+        $pinEvidence -notmatch "(?s)$($source.PinPattern)") {
+        throw "Authenticode self-signed trust classification must be imported once, not redefined: $($source.Context)"
+    }
+}
+$signingTestTokens = $null
+$signingTestErrors = $null
+$signingTestAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $signingTrustTestText,
+    [ref]$signingTestTokens,
+    [ref]$signingTestErrors
+)
+$signingTestInitializers = @($signingTestAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Initialize-WinghosttyAuthenticodeVerifier'
+}, $true))
+$firstDirectVerifierIndex = $signingTrustTestText.IndexOf(
+    '[WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)'
+)
+if ($signingTestErrors.Count -ne 0 -or
+    $signingTestInitializers.Count -ne 1 -or
+    $firstDirectVerifierIndex -lt 0 -or
+    $signingTestInitializers[0].Extent.StartOffset -ge $firstDirectVerifierIndex) {
+    throw 'Signing policy tests must explicitly initialize the direct Authenticode verifier before its first assertion.'
+}
+foreach ($contract in @(
+    @{ Pattern = '(?s)SignedCms\s+signedCms\s*=.*?signedCms\.CheckSignature\(true\)'; Description = 'self-signed verifier validates the embedded PKCS#7 signature without machine trust' },
+    @{ Pattern = '(?s)dwProvFlags\s*=\s*WtdRevocationCheckNone\s*\|\s*WtdHashOnlyFlag\s*\|.*?WinVerifyTrust.*?==\s*0'; Description = 'self-signed verifier binds the signed digest to the actual PE bytes' },
+    @{ Pattern = 'CryptQueryObject'; Description = 'self-signed verifier reads the embedded Authenticode message from the target file' },
+    @{ Pattern = '(?s)out IntPtr phCertStore,\s*out IntPtr phMsg,\s*IntPtr ppvContext\);.*?CertQueryContentFlagPkcs7SignedEmbed,.*?out certificateStore,\s*out message,\s*IntPtr\.Zero\)'; Description = 'embedded PKCS#7 query declines the content-type-specific ppvContext output' },
+    @{ Pattern = '(?s)StructureToPtr.*?fileInfoMarshalled = true.*?DestroyStructure\(fileInfoPointer, typeof\(WintrustFileInfo\)\).*?FreeCoTaskMem\(fileInfoPointer\)'; Description = 'self-signed verifier releases nested path marshalling before its outer buffer' }
+)) {
+    Assert-TextContract `
+        -Content $signingTrustText `
+        -Pattern $contract.Pattern `
+        -Description $contract.Description `
+        -Context $signingTrust
+}
+foreach ($contract in @(
+    @{ Pattern = '(?s)VerifyEmbeddedSignatureAndFileHash\(\$signedPath\).*?Direct Authenticode verifier rejected an intact signed PE'; Description = 'signing policy test directly accepts an intact signed PE' },
+    @{ Pattern = '(?s)VerifyEmbeddedSignatureAndFileHash\(\$bodyTamperedPath\).*?Direct Authenticode verifier accepted a PE with a modified signed body'; Description = 'signing policy test directly rejects modified signed PE bytes' },
+    @{ Pattern = '(?s)VerifyEmbeddedSignatureAndFileHash\(\$signatureTamperedPath\).*?Direct Authenticode verifier accepted a PE with a modified PKCS#7 signature'; Description = 'signing policy test directly rejects modified embedded signature bytes' },
+    @{ Pattern = 'Set-AuthenticodeSignature'; Description = 'signing policy test exercises a real Authenticode-signed PE' }
+)) {
+    Assert-TextContract `
+        -Content $signingTrustTestText `
+        -Pattern $contract.Pattern `
+        -Description $contract.Description `
+        -Context $signingTrustTest
+}
+foreach ($contract in @(
+    @{ Pattern = '\$expectedNames\.Count -ne 8'; Description = 'published verifier requires the exact eight-asset set' },
+    @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
+    @{ Pattern = '(?s)\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
+    @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
+    @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
+    @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
+    @{ Pattern = "winghostty/winghostty\.com'.*?winghostty/winghostty\.exe'.*?winghostty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
+    @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
+)) {
+    Assert-TextContract `
+        -Content $publishedReleaseVerifierText `
+        -Pattern $contract.Pattern `
+        -Description $contract.Description `
+        -Context $publishedReleaseVerifier
+}
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
@@ -2339,6 +2967,11 @@ Assert-TextContract `
     -Pattern '(?ms)with:\s+version: 0\.15\.2\s+.*?use-cache: false' `
     -Description 'ephemeral interactive retries cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-interactive :: Setup Zig"
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
+    -Pattern '(?m)^\s*timeout-minutes:\s+60\s*$' `
+    -Description 'full interactive validation has enough job budget for the accessibility soak' `
+    -Context "$testWorkflow :: windows-interactive"
 $interactiveRunStep = Get-YamlStepText `
     -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
     -Name 'Run interactive Win11 composite' `
@@ -2360,7 +2993,7 @@ if ($quick) {
 } else {
   ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  ./test/windows/interactive-win11-accessibility.ps1 -ResetState
+  ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -2397,6 +3030,50 @@ Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)\`$originalErrorActionPreference = \`$ErrorActionPreference\s*try \{\s*\`$ErrorActionPreference = 'Continue'\s*\`$buildOutput = @\(& \(Join-Path \`$repoRoot 'scripts\\dev-windows\.cmd'\) zig build -Demit-exe=true 2>&1\)\s*\`$buildExitCode = \`$LASTEXITCODE\s*\}\s*finally \{\s*\`$ErrorActionPreference = \`$originalErrorActionPreference\s*\}" `
     -Description 'interactive PR smoke captures native build stderr without bypassing exit-code retry logic on PowerShell 7.0'
+foreach ($paletteActionHarness in @($newTabHarness, $undoHarness, $resizeHarness)) {
+    $tokens = $null
+    $errors = $null
+    $paletteActionAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        $paletteActionHarness,
+        [ref] $tokens,
+        [ref] $errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "Palette action harness does not parse: $paletteActionHarness ($($errors[0].Message))"
+    }
+    $paletteActionFunctions = @($paletteActionAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Invoke-CommandPaletteAction'
+    }, $true))
+    if ($paletteActionFunctions.Count -ne 1) {
+        throw "Palette action harness must define exactly one Invoke-CommandPaletteAction helper: $paletteActionHarness"
+    }
+    $paletteActionBody = $paletteActionFunctions[0].Body
+    $paletteSubmitCalls = @($paletteActionBody.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Invoke-InteractiveWin11Message' -and
+            $node.Extent.Text -match '-Hwnd\s+\$edit\.Hwnd' -and
+            $node.Extent.Text -match '-Message\s+(?:\$wmChar|0x0102)' -and
+            $node.Extent.Text -match '-WParam\s+\(\[UIntPtr\]\(\[uint64\](?:\$vkReturn|0x0D)\)\)' -and
+            $node.Extent.Text -match '-Description\s+[''\"]palette WM_CHAR Enter[''\"]'
+    }, $true))
+    if ($paletteSubmitCalls.Count -ne 1) {
+        throw "Palette action helper must submit exactly once through WM_CHAR Enter on its edit HWND: $paletteActionHarness"
+    }
+    if ($paletteActionBody.Extent.Text -match '(?i)paletteConfirmCommandId|\b2003\b') {
+        throw "Palette action helper cannot reference the hidden accept-button command ID: $paletteActionHarness"
+    }
+}
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot 'src\renderer\Thread.zig') `
+    -Pattern '(?s)fn armCursorTimerIfDead\(.*?cursor_c\.state\(\) != \.dead.*?cursor_h\.run\(' `
+    -Description 'cursor blink completion is rearmed only after libxev releases it'
+Assert-WorkflowContractAbsent `
+    -Path (Join-Path $repoRoot 'src\renderer\Thread.zig') `
+    -Pattern '(?i)cursor_c_cancel|cursor_h\.(?:cancel|reset)\s*\(' `
+    -Description 'cursor blink never cancels or resets an IOCP-owned completion'
 Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)if \(\`$attempt -eq 2 -and \`$env:RUNNER_TEMP\).*?zig-global-cache-pr-smoke-retry-\`$PID.*?zig-local-cache-pr-smoke-retry-\`$PID" `
@@ -2405,6 +3082,10 @@ Assert-WorkflowContract `
     -Path $interactivePrSmoke `
     -Pattern "(?ms)finally \{\s*\`$env:ZIG_GLOBAL_CACHE_DIR = \`$originalZigGlobalCache\s*\`$env:ZIG_LOCAL_CACHE_DIR = \`$originalZigLocalCache\s*\}" `
     -Description 'interactive PR smoke restores caller-provided Zig cache directories after rebuild retry'
+Assert-WorkflowContract `
+    -Path $accessibilityHarness `
+    -Pattern '\[Math\]::Max\(90, \(\$TimeoutSeconds \* 3\) \+ \$IdleSoakSeconds \+ 60\)' `
+    -Description 'accessibility harness budgets all three timeout-bearing launch phases plus idle soak'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
     -Pattern '\[DateTimeOffset\]::TryParse\(' `

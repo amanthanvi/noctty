@@ -32,6 +32,8 @@ pub const RootProvider = struct {
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
 
     /// The singleton vtable pointer. All RootProvider instances share it.
     const vtbl: com.IRawElementProviderSimpleVtbl = .{
@@ -51,8 +53,24 @@ pub const RootProvider = struct {
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .hwnd = hwnd,
+            .detached = std.atomic.Value(bool).init(false),
+            .disconnected = std.atomic.Value(bool).init(false),
         };
         return self;
+    }
+
+    pub fn detach(self: *RootProvider) void {
+        self.detached.store(true, .release);
+    }
+
+    pub fn disconnect(self: *RootProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        const hr = com.UiaDisconnectProvider(&self.base);
+        if (hr == com.S_OK) {
+            self.disconnected.store(true, .release);
+        }
+        return hr;
     }
 
     fn fromBase(p: *com.IRawElementProviderSimple) *RootProvider {
@@ -129,13 +147,14 @@ pub const RootProvider = struct {
     }
 
     fn GetPatternProvider(
-        _: *com.IRawElementProviderSimple,
+        self_base: *com.IRawElementProviderSimple,
         _: i32,
         out: *?*com.IUnknown,
     ) callconv(.winapi) com.HRESULT {
         // No control patterns are exposed. Per the UIA contract, return
         // S_OK with out=null rather than E_NOTIMPL.
         out.* = null;
+        if (fromBase(self_base).detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         return com.S_OK;
     }
 
@@ -146,21 +165,25 @@ pub const RootProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         out.* = com.VARIANT.empty();
+        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
 
         switch (prop_id) {
             constants.UIA_ControlTypePropertyId => {
                 out.* = com.VARIANT.fromI4(constants.UIA_WindowControlTypeId);
             },
             constants.UIA_NamePropertyId => {
-                out.* = com.VARIANT.fromBstr(self.allocNameBstr());
+                const bstr = self.allocNameBstr() orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_LocalizedControlTypePropertyId => {
                 const literal = std.unicode.utf8ToUtf16LeStringLiteral("terminal window");
-                out.* = com.VARIANT.fromBstr(allocBstrFromLiteral(literal));
+                const bstr = allocBstrFromLiteral(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_FrameworkIdPropertyId => {
                 const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
-                out.* = com.VARIANT.fromBstr(allocBstrFromLiteral(literal));
+                const bstr = allocBstrFromLiteral(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_IsControlElementPropertyId,
             constants.UIA_IsContentElementPropertyId,
@@ -182,6 +205,8 @@ pub const RootProvider = struct {
         out: *?*com.IRawElementProviderSimple,
     ) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
+        out.* = null;
+        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         // Chain the system's default provider so the caption buttons,
         // system menu, and window-level accessibility tree come through
         // unchanged. We do NOT hold onto the returned provider — the
@@ -192,6 +217,17 @@ pub const RootProvider = struct {
 
 fn iidEqual(a: *const com.GUID, b: *const com.GUID) bool {
     return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
+}
+
+pub fn returnProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *RootProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    if (provider.detached.load(.acquire)) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
 test "RootProvider create / release balances refcount" {
@@ -226,4 +262,17 @@ test "RootProvider QueryInterface rejects unknown IID" {
     const hr = RootProvider.QueryInterface(&rp.base, &bogus, &out);
     try std.testing.expectEqual(com.E_NOINTERFACE, hr);
     try std.testing.expect(out == null);
+}
+
+test "RootProvider detach is idempotent and rejects late queries" {
+    var rp = try RootProvider.create(std.testing.allocator, @ptrFromInt(0x1));
+    defer _ = RootProvider.Release(&rp.base);
+    rp.detach();
+    rp.detach();
+
+    var value = com.VARIANT.empty();
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        RootProvider.GetPropertyValue(&rp.base, constants.UIA_NamePropertyId, &value),
+    );
 }

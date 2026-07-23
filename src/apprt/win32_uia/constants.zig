@@ -6,15 +6,24 @@
 // ── Control types ───────────────────────────────────────────────────────
 // UIA_ControlTypeId values. 50000-series.
 
+pub const UIA_ButtonControlTypeId: i32 = 50000;
+pub const UIA_CheckBoxControlTypeId: i32 = 50002;
+pub const UIA_ComboBoxControlTypeId: i32 = 50003;
 pub const UIA_ListControlTypeId: i32 = 50008;
 pub const UIA_ListItemControlTypeId: i32 = 50007;
+pub const UIA_EditControlTypeId: i32 = 50004;
+pub const UIA_RadioButtonControlTypeId: i32 = 50013;
+pub const UIA_TextControlTypeId: i32 = 50020;
 pub const UIA_DocumentControlTypeId: i32 = 50030;
 pub const UIA_WindowControlTypeId: i32 = 50032;
 
 // ── Pattern IDs ────────────────────────────────────────────────────────
 
 pub const UIA_ValuePatternId: i32 = 10002;
+pub const UIA_InvokePatternId: i32 = 10000;
+pub const UIA_SelectionPatternId: i32 = 10001;
 pub const UIA_TextPatternId: i32 = 10014;
+pub const UIA_TextPattern2Id: i32 = 10024;
 pub const UIA_SelectionItemPatternId: i32 = 10010;
 
 // ── Properties ──────────────────────────────────────────────────────────
@@ -41,3 +50,5 @@ pub const UIA_AutomationFocusChangedEventId: i32 = 20005;
 pub const UIA_StructureChangedEventId: i32 = 20002;
 pub const UIA_Selection_InvalidatedEventId: i32 = 20013;
 pub const UIA_SelectionItem_ElementSelectedEventId: i32 = 20012;
+pub const UIA_Text_TextChangedEventId: i32 = 20015;
+pub const UIA_Text_TextSelectionChangedEventId: i32 = 20014;

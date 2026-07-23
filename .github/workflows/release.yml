@@ -268,26 +268,11 @@ jobs:
         shell: pwsh
         run: |
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
+          . (Join-Path $PWD "scripts/signing-trust.ps1")
           $version = "${{ steps.meta.outputs.version }}"
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
-          function Test-SelfSignedTrustStatus {
-            param([System.Management.Automation.Signature]$Signature)
-
-            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
-              return $true
-            }
-
-            if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
-              return $true
-            }
-
-            if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
-              return $false
-            }
-
-            $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
-            return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
-          }
+          $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PWD "src/update/github_releases.zig"))
+          if ($allowedPins.Count -eq 0) { throw "Updater publisher-pin allowlist is empty." }
 
           function Assert-ReleaseSignature {
             param(
@@ -296,18 +281,23 @@ jobs:
             )
 
             $sig = Get-AuthenticodeSignature -LiteralPath $Path
-            if ($sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
-              return
-            }
-
-            if ($trustSelfSigned -and
+            $statusAccepted = $sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+            if (-not $statusAccepted -and $trustSelfSigned -and
                 $sig.SignerCertificate -and
                 $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
-                (Test-SelfSignedTrustStatus -Signature $sig)) {
-              return
+                (Test-SelfSignedTrustStatus -Signature $sig -Path $Path)) {
+              $statusAccepted = $true
             }
-
-            throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
+            if (-not $statusAccepted) {
+              throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
+            }
+            if (-not $sig.SignerCertificate) {
+              throw "$Label has no Authenticode signer certificate: $Path"
+            }
+            $pin = Get-CertificateSpkiSha256 -Certificate $sig.SignerCertificate
+            if ($allowedPins -notcontains $pin) {
+              throw "$Label signer SPKI SHA-256 is not allowed: $pin"
+            }
           }
 
           foreach ($arch in (Get-WindowsPackageArchitectures)) {
@@ -357,6 +347,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         shell: pwsh
         run: |
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
@@ -392,16 +383,19 @@ jobs:
           Versioning: major.minor follow the Ghostty upstream line; patch is the winghostty release number on that line.
           "@
 
-          & gh release view $tag *> $null
+          & gh release view $tag --repo $env:GH_REPO *> $null
           if ($LASTEXITCODE -ne 0) {
             $extra = @()
             if ("${{ steps.meta.outputs.prerelease }}" -eq "true") {
               $extra += "--prerelease"
             }
-            & gh release create $tag --title $title --generate-notes --notes $notesPrefix @extra @assets
+            & gh release create $tag --repo $env:GH_REPO --title $title --generate-notes --notes $notesPrefix @extra @assets
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release $tag." }
           } else {
-            & gh release edit $tag --title $title
-            & gh release upload $tag @assets --clobber
+            & gh release edit $tag --repo $env:GH_REPO --title $title
+            if ($LASTEXITCODE -ne 0) { throw "Failed to edit GitHub release $tag." }
+            & gh release upload $tag --repo $env:GH_REPO @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload assets for GitHub release $tag." }
           }
 
       - name: Verify published release copy and assets
@@ -410,7 +404,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-        run: ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
+        run: |
+          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
         shell: pwsh
