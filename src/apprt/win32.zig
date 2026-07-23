@@ -17867,24 +17867,6 @@ fn leadingIndentLen(line: []const u8) usize {
     return i;
 }
 
-/// Extract a trailing inline `#` / `;` comment from a key assignment.
-/// The scan starts after `=` to match the config grammar.
-fn trailingCommentOf(line: []const u8) []const u8 {
-    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return &.{};
-    var i: usize = eq + 1;
-    while (i < line.len) : (i += 1) {
-        if (line[i] == '#' or line[i] == ';') {
-            // Trim trailing \r (CRLF input) and trailing whitespace
-            // from the comment — we'll add our own single-space
-            // separator between value and comment.
-            var end: usize = line.len;
-            while (end > i and (line[end - 1] == '\r' or line[end - 1] == ' ' or line[end - 1] == '\t')) : (end -= 1) {}
-            return line[i..end];
-        }
-    }
-    return &.{};
-}
-
 /// Patch GUI-edited config keys while preserving unchanged source text.
 ///
 /// A line matches `<name>` when its trimmed-left form starts with
@@ -17967,17 +17949,13 @@ fn patchOrAppendEdits(
                     if (payload.len > 0 and payload[payload.len - 1] == '\n') {
                         payload = payload[0 .. payload.len - 1];
                     }
-                    // Preserve indentation and trailing inline comments
-                    // from the original assignment.
+                    // Preserve indentation from the original assignment. The
+                    // config grammar has no inline comments: `#` or `;` after
+                    // `=` is value data and must not survive replacement.
                     const indent_end = leadingIndentLen(line);
                     const leading = line[0..indent_end];
-                    const trailing = trailingCommentOf(line);
                     try out.appendSlice(alloc, leading);
                     try out.appendSlice(alloc, payload);
-                    if (trailing.len > 0) {
-                        try out.append(alloc, ' ');
-                        try out.appendSlice(alloc, trailing);
-                    }
                     written.set(@intFromEnum(key));
                     replaced = true;
                 }
@@ -18055,6 +18033,32 @@ test "win32 settings patch persists optional command edits" {
         &patched,
     );
     try testing.expect(std.mem.indexOf(u8, patched.items, "command = direct:pwsh.exe -NoLogo") != null);
+
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "# Keep this whole-line comment.\n  command = cmd.exe /c echo #old\nfont-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expectEqualStrings(
+        "# Keep this whole-line comment.\n  command = direct:pwsh.exe -NoLogo\nfont-size = 12\n",
+        patched.items,
+    );
+
+    patched.clearRetainingCapacity();
+    try patchOrAppendEdits(
+        testing.allocator,
+        "command = cmd.exe /c echo ;old\nfont-size = 12\n",
+        &pending,
+        edited,
+        &patched,
+    );
+    try testing.expectEqualStrings(
+        "command = direct:pwsh.exe -NoLogo\nfont-size = 12\n",
+        patched.items,
+    );
 
     original.command = try pending.command.?.clone(original._arena.?.allocator());
     pending.command = null;
