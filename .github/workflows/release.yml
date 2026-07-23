@@ -357,6 +357,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         shell: pwsh
         run: |
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
@@ -392,16 +393,19 @@ jobs:
           Versioning: major.minor follow the Ghostty upstream line; patch is the winghostty release number on that line.
           "@
 
-          & gh release view $tag *> $null
+          & gh release view $tag --repo $env:GH_REPO *> $null
           if ($LASTEXITCODE -ne 0) {
             $extra = @()
             if ("${{ steps.meta.outputs.prerelease }}" -eq "true") {
               $extra += "--prerelease"
             }
-            & gh release create $tag --title $title --generate-notes --notes $notesPrefix @extra @assets
+            & gh release create $tag --repo $env:GH_REPO --title $title --generate-notes --notes $notesPrefix @extra @assets
+            if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release $tag." }
           } else {
-            & gh release edit $tag --title $title
-            & gh release upload $tag @assets --clobber
+            & gh release edit $tag --repo $env:GH_REPO --title $title
+            if ($LASTEXITCODE -ne 0) { throw "Failed to edit GitHub release $tag." }
+            & gh release upload $tag --repo $env:GH_REPO @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload assets for GitHub release $tag." }
           }
 
       - name: Verify published release copy and assets
@@ -410,7 +414,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-        run: ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
+        run: |
+          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION -CheckRemoteLatest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/verify-published-release.ps1 -Version $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
         shell: pwsh

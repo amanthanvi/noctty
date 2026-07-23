@@ -1556,7 +1556,22 @@ try {
                         )
                     ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
                     if ($null -eq $script:palette) {
-                        $script:paletteUnavailableLastTransient = 'Palette reacquisition returned no matching List element.'
+                        # Zero matches intentionally hides the palette List
+                        # HWND, so it disappears from the control view after
+                        # UIA invalidates the previously cached fragment. The
+                        # no-match state is still valid when the live query
+                        # Edit owns focus and the fresh notification arrived.
+                        $script:paletteUnavailableItems = @()
+                        $script:paletteUnavailableFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                        $queryStillFocused = $null -ne $script:paletteUnavailableFocused -and
+                            $script:paletteUnavailableFocused.Current.ProcessId -eq $process.Id -and
+                            $script:paletteUnavailableFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+                            $script:paletteUnavailableFocused.Current.Name -eq 'Command palette query' -and
+                            $script:paletteUnavailableFocused.Current.HasKeyboardFocus
+                        if ($queryStillFocused -and [WinghosttyAccessibilityNative]::NotificationCount -gt 0) {
+                            return $true
+                        }
+                        $script:paletteUnavailableLastTransient = 'Palette List is absent without a focused command query and notification.'
                         return $false
                     }
                 }

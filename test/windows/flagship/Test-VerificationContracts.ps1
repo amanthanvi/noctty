@@ -585,6 +585,7 @@ $win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
+$publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
@@ -593,6 +594,7 @@ $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
+$publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
 $win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
 $win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
@@ -607,6 +609,16 @@ $accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::Parse
 )
 if ($accessibilityHarnessErrors.Count -ne 0) {
     throw "Accessibility harness does not parse: $($accessibilityHarnessErrors[0].Message)"
+}
+$publishedReleaseVerifierTokens = $null
+$publishedReleaseVerifierErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(
+    $publishedReleaseVerifierText,
+    [ref]$publishedReleaseVerifierTokens,
+    [ref]$publishedReleaseVerifierErrors
+)
+if ($publishedReleaseVerifierErrors.Count -ne 0) {
+    throw "Published release verifier does not parse: $($publishedReleaseVerifierErrors[0].Message)"
 }
 $resolutionSourceAsts = foreach ($source in @(
     [pscustomobject]@{ Path = $interactiveWin11Lib; Text = $interactiveWin11LibText },
@@ -1366,7 +1378,10 @@ if ($win32SettingsText -notmatch 'const settings_header_control_count = 3;' -or
 if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
     $accessibilityHarnessText -notmatch '\$script:palette = @\(\$root\.FindAll' -or
-    $accessibilityHarnessText -notmatch '(?s)if \(\$null -eq \$script:palette\) \{\s*\$script:palette = @\(\$root\.FindAll.*?if \(\$null -eq \$script:palette\) \{.*?return \$false.*?\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
+    $accessibilityHarnessText -notmatch '(?s)if \(\$null -eq \$script:palette\) \{\s*\$script:palette = @\(\$root\.FindAll.*?if \(\$null -eq \$script:palette\) \{.*?\$script:paletteUnavailableItems = @\(\).*?\$queryStillFocused.*?NotificationCount -gt 0.*?return \$true.*?\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query''' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus' -or
     $accessibilityHarnessText -notmatch 'function Get-AccessibilityExceptionHResults' -or
     $accessibilityHarnessText -notmatch '\$results = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)' -or
     $accessibilityHarnessText -notmatch '\$cursor = \$cursor\.InnerException' -or
@@ -2445,9 +2460,31 @@ Assert-TextContract `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
-    -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
-    -Description 'post-publish remote verification authenticates gh' `
+    -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
+    -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
+Assert-TextContract `
+    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
+    -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'GitHub release commands pin the fork and mutations fail closed' `
+    -Context "$releaseWorkflow :: Publish GitHub Release"
+foreach ($contract in @(
+    @{ Pattern = '\$expectedNames\.Count -ne 8'; Description = 'published verifier requires the exact eight-asset set' },
+    @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
+    @{ Pattern = '(?s)\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
+    @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
+    @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
+    @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
+    @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
+    @{ Pattern = "winghostty/winghostty\.com'.*?winghostty/winghostty\.exe'.*?winghostty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
+    @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
+)) {
+    Assert-TextContract `
+        -Content $publishedReleaseVerifierText `
+        -Pattern $contract.Pattern `
+        -Description $contract.Description `
+        -Context $publishedReleaseVerifier
+}
 Assert-TextContract `
     -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
