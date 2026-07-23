@@ -59,23 +59,27 @@ pub const VT_UNKNOWN: u16 = 13;
 pub const VARIANT_TRUE: i16 = -1;
 pub const VARIANT_FALSE: i16 = 0;
 
+pub const VARIANT_RECORD = extern struct {
+    value: ?*anyopaque,
+    info: ?*anyopaque,
+};
+
 /// Simplified VARIANT covering only the fields we populate (I4, BSTR, BOOL).
-/// The true OAIDL VARIANT is a 16-byte-header (vt + 3 reserved words) +
-/// 8-byte payload union on 64-bit Windows. We mirror that layout.
-///
-/// We deliberately do NOT include a `raw` fill member — adding a second
-/// pointer-sized field would blow the union past the real ABI size and
-/// corrupt VARIANTs returned to the UIA host.
+/// The two-pointer record arm preserves the full OAIDL payload-union size even
+/// though winghostty never emits VT_RECORD. The i64 arm preserves the SDK's
+/// eight-byte VARIANT alignment on 32-bit Windows.
 pub const VARIANT = extern struct {
     vt: u16,
     wReserved1: u16 = 0,
     wReserved2: u16 = 0,
     wReserved3: u16 = 0,
     value: extern union {
+        i64_val: i64,
         i4: i32,
         bstr: BSTR,
         bool_val: i16,
         unknown: ?*IUnknown,
+        record: VARIANT_RECORD,
     },
 
     pub fn empty() VARIANT {
@@ -101,10 +105,10 @@ pub const VARIANT = extern struct {
         return .{ .vt = VT_UNKNOWN, .value = .{ .unknown = p } };
     }
 
-    // Compile-time assertion that our VARIANT matches the Windows ABI
-    // layout: 8-byte header + 8-byte payload on x64 = 16 bytes.
+    // Compile-time assertion that our VARIANT matches the Windows ABI:
+    // 8-byte header + a two-pointer payload union.
     comptime {
-        const expected_size: usize = if (@sizeOf(usize) == 8) 16 else 16;
+        const expected_size: usize = if (@sizeOf(usize) == 8) 24 else 16;
         if (@sizeOf(VARIANT) != expected_size) {
             @compileError(std.fmt.comptimePrint(
                 "VARIANT size mismatch: got {d}, expected {d}",
@@ -461,6 +465,21 @@ test "HRESULT error constants" {
 test "VARIANT empty has zero vt" {
     const v = VARIANT.empty();
     try std.testing.expectEqual(@as(u16, VT_EMPTY), v.vt);
+}
+
+test "VARIANT matches Windows ABI layout" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(VARIANT, "vt"));
+    try std.testing.expectEqual(@as(usize, 2), @offsetOf(VARIANT, "wReserved1"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(VARIANT, "wReserved2"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(VARIANT, "wReserved3"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(VARIANT, "value"));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(VARIANT));
+    try std.testing.expectEqual(@sizeOf(usize) * 2, @sizeOf(VARIANT_RECORD));
+    try std.testing.expectEqual(@sizeOf(usize), @offsetOf(VARIANT_RECORD, "info"));
+    try std.testing.expectEqual(
+        if (@sizeOf(usize) == 8) @as(usize, 24) else @as(usize, 16),
+        @sizeOf(VARIANT),
+    );
 }
 
 test "VARIANT fromI4 stores integer" {
