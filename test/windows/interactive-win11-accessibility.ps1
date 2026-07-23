@@ -1568,7 +1568,9 @@ try {
                             $script:paletteUnavailableFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
                             $script:paletteUnavailableFocused.Current.Name -eq 'Command palette query' -and
                             $script:paletteUnavailableFocused.Current.HasKeyboardFocus
-                        if ($queryStillFocused -and [WinghosttyAccessibilityNative]::NotificationCount -gt 0) {
+                        if ($queryStillFocused -and
+                            [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
+                            -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
                             return $true
                         }
                         $script:paletteUnavailableLastTransient = 'Palette List is absent without a focused command query and notification.'
@@ -1604,7 +1606,8 @@ try {
                 }
             }
             return $script:paletteUnavailableItems.Count -eq 0 -and
-                [WinghosttyAccessibilityNative]::NotificationCount -gt 0
+                [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
+                -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)
         }
     }
     catch {
@@ -1617,6 +1620,9 @@ try {
     $paletteUnavailableNotificationCount = $unavailableNotification.Count
     $paletteUnavailableNotificationKind = $unavailableNotification.Kind
     $paletteUnavailableNotificationDisplayString = $unavailableNotification.DisplayString
+    if ([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
+        throw 'Zero-result command palette left its native List HWND visible over terminal content.'
+    }
 
     # With zero ranked rows, Enter falls back to parsing the query as a
     # binding action. This deliberately invalid identifier is rejected before
@@ -1633,6 +1639,67 @@ try {
     $paletteActionAbortedNotificationCount = $actionAbortedNotification.Count
     $paletteActionAbortedNotificationKind = $actionAbortedNotification.Kind
     $paletteActionAbortedNotificationDisplayString = $actionAbortedNotification.DisplayString
+
+    $paletteQueryValuePattern.SetValue('Accessibility')
+    $script:paletteRecoveryLastTransient = $null
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette native List recovery after zero matches' -Condition {
+            try {
+                $script:paletteRecovered = @($root.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.PropertyCondition]::new(
+                        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [System.Windows.Automation.ControlType]::List
+                    )
+                ) | Where-Object { $_.Current.ProcessId -eq $process.Id }) | Select-Object -First 1
+                if ($null -eq $script:paletteRecovered) { return $false }
+                $script:paletteRecoveredItems = @($script:paletteRecovered.FindAll(
+                    [System.Windows.Automation.TreeScope]::Children,
+                    [System.Windows.Automation.PropertyCondition]::new(
+                        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [System.Windows.Automation.ControlType]::ListItem
+                    )
+                ) | ForEach-Object { $_ })
+                $script:paletteRecoveredFocus = [System.Windows.Automation.AutomationElement]::FocusedElement
+                return [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd) -and
+                    $script:paletteRecoveredItems.Count -gt 0 -and
+                    $null -ne $script:paletteRecoveredFocus -and
+                    $script:paletteRecoveredFocus.Current.ProcessId -eq $process.Id -and
+                    $script:paletteRecoveredFocus.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+                    $script:paletteRecoveredFocus.Current.Name -eq 'Command palette query' -and
+                    $script:paletteRecoveredFocus.Current.HasKeyboardFocus
+            }
+            catch {
+                $hresults = @(Get-AccessibilityExceptionHResults -Exception $_.Exception)
+                $script:paletteRecoveryLastTransient = (($hresults | ForEach-Object {
+                    '0x{0:X8}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$_), 0)
+                }) -join ' -> ') + ": $($_.Exception.Message)"
+                $transientHresult = $hresults | Where-Object {
+                    Test-AccessibilityTransientHResult -HResult $_
+                } | Select-Object -First 1
+                if ($null -eq $transientHresult) { throw }
+                if ($transientHresult -eq 0x80040201) {
+                    $script:paletteRecovered = $null
+                }
+                return $false
+            }
+        }
+    }
+    catch {
+        throw "$($_.Exception.Message) Last transient UIA recovery error: $($script:paletteRecoveryLastTransient)."
+    }
+    $paletteRecoveredSelectionPattern = $null
+    if (-not $script:paletteRecovered.TryGetCurrentPattern(
+        [System.Windows.Automation.SelectionPattern]::Pattern,
+        [ref]$paletteRecoveredSelectionPattern
+    )) {
+        throw 'Recovered command palette List does not expose SelectionPattern.'
+    }
+    $paletteRecoveredSelection = @($paletteRecoveredSelectionPattern.Current.GetSelection())
+    if ($paletteRecoveredSelection.Count -ne 1 -or
+        $paletteRecoveredSelection[0].Current.Name -notmatch 'Accessibility') {
+        throw 'Recovered command palette List does not expose its selected Accessibility row.'
+    }
 
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler(
         [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent,
@@ -2420,6 +2487,14 @@ try {
     }
 
     Assert-AccessibilityInputOwner -Process $process -Description 'settings-open idle soak'
+    # Settings is an independent WS_EX_APPWINDOW. Process.Refresh() can make
+    # MainWindowHandle follow it while it owns the foreground, so retain the
+    # terminal host that must receive the midpoint and close-time focus restore.
+    $idleTerminalHostHwnd = $process.MainWindowHandle
+    if ($idleTerminalHostHwnd -eq [IntPtr]::Zero -or
+        -not [WinghosttyAccessibilityNative]::IsWindow($idleTerminalHostHwnd)) {
+        throw 'Terminal host HWND was unavailable before the settings idle soak.'
+    }
     if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
         throw "SendInput failed while opening settings for idle soak: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
@@ -2458,7 +2533,7 @@ try {
         }
         if ($IdleSoakSeconds -gt 1 -and $second -eq [Math]::Floor($IdleSoakSeconds / 2)) {
             if (-not [WinghosttyAccessibilityNative]::ForceForeground($idleSettingsHwnd) -or
-                -not [WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)) {
+                -not [WinghosttyAccessibilityNative]::ForceForeground($idleTerminalHostHwnd)) {
                 throw "Settings/main-window focus round trip failed during UIA idle soak at ${second}s."
             }
         }
@@ -2487,8 +2562,8 @@ try {
         -Description 'close settings after idle soak')
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction and terminal focus restoration after idle soak' -Condition {
         return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
-            [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $leftPane.Hwnd
+            [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $idleTerminalHostHwnd -and
+            [WinghosttyAccessibilityNative]::FocusedWindowFor($idleTerminalHostHwnd) -eq $leftPane.Hwnd
     }
 
     $idleMarker = "whi$([Guid]::NewGuid().ToString('N').Substring(0, 12))"

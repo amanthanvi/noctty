@@ -130,9 +130,24 @@ try {
     Start-Sleep -Milliseconds 750
     Write-Host ('theme preview framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f preview render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
+    $themeList = Get-StatefulChildren $hostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
+    if ($null -eq $themeList) { throw '0x96f rich theme result List was not visible.' }
+    $themeListRect = Get-StatefulWindowRect $themeList.Hwnd
+    $themeSurfaceRect = Get-StatefulWindowRect $surface.Hwnd
+    if ($null -eq $themeListRect -or $null -eq $themeSurfaceRect -or
+        $themeListRect.Top -lt $themeSurfaceRect.Top) {
+        throw "Theme result List overlaps the command-palette feedback band (listTop=$($themeListRect.Top), surfaceTop=$($themeSurfaceRect.Top))."
+    }
     if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*Dracula') { throw 'Preview mutated config before commit.' }
-    Invoke-StatefulCommand $hostHwnd 2004 $deadline $run.Process
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-StatefulButton $hostHwnd 2004 $deadline $run.Process
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme palette dismissal after preview' -Process $run.Process -Condition {
+        @(Get-StatefulChildren $hostHwnd | Where-Object Id -eq 2002).Count -eq 0
+    }
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula preview rollback' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
+    if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*Dracula') { throw 'Dismissal changed persisted theme instead of reverting preview.' }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f commit preview' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
     $script:PaletteThemeHost = $hostHwnd
@@ -190,9 +205,11 @@ try {
         }
         if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-        Invoke-StatefulPostedCommand $hcHost 2004 $deadline $hcRun.Process
+        Invoke-StatefulButton $hcHost 2004 $deadline $hcRun.Process
+        $script:PaletteThemeHighContrastHost = $hcHost
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         Wait-InteractiveWin11Until -Deadline $deadline -Description 'High Contrast palette dismissal' -Process $hcRun.Process -Condition {
-            @(Get-StatefulChildren $script:PaletteThemeHost | Where-Object Id -eq 2002).Count -eq 0
+            @(Get-StatefulChildren $script:PaletteThemeHighContrastHost | Where-Object Id -eq 2002).Count -eq 0
         }
         try {
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

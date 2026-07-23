@@ -1382,6 +1382,12 @@ if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query''' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus' -or
+    $accessibilityHarnessText -notmatch '-not \[WinghosttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
+    $accessibilityHarnessText -notmatch "-Description 'command palette native List recovery after zero matches'" -or
+    $accessibilityHarnessText -notmatch '\$paletteRecoveredSelectionPattern\.Current\.GetSelection\(\)' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteRecoveredFocus\.Current\.HasKeyboardFocus' -or
+    $accessibilityHarnessText -notmatch '\$script:paletteRecoveryLastTransient' -or
+    $accessibilityHarnessText -notmatch '(?s)command palette native List recovery after zero matches.*?Test-AccessibilityTransientHResult -HResult \$_.*?\$transientHresult -eq 0x80040201.*?\$script:paletteRecovered = \$null' -or
     $accessibilityHarnessText -notmatch 'function Get-AccessibilityExceptionHResults' -or
     $accessibilityHarnessText -notmatch '\$results = \[System\.Collections\.Generic\.List\[int\]\]::new\(\)' -or
     $accessibilityHarnessText -notmatch '\$cursor = \$cursor\.InnerException' -or
@@ -1426,6 +1432,13 @@ if ($accessibilityHarnessText -notmatch 'ExpectedFocusedHwnd' -or
     $accessibilityHarnessText -notmatch 'sustained output command'' -ExpectedFocusedHwnd \$leftPane\.Hwnd' -or
     $accessibilityHarnessText -notmatch 'failed to remove terminal TextChanged handler') {
     throw 'Accessibility input ownership and UIA cleanup must remain exact and fail closed.'
+}
+if ($accessibilityHarnessText -notmatch '\$idleTerminalHostHwnd = \$process\.MainWindowHandle' -or
+    $accessibilityHarnessText -notmatch 'ForceForeground\(\$idleTerminalHostHwnd\)' -or
+    $accessibilityHarnessText -notmatch 'GetForegroundWindow\(\) -eq \$idleTerminalHostHwnd' -or
+    $accessibilityHarnessText -notmatch 'FocusedWindowFor\(\$idleTerminalHostHwnd\) -eq \$leftPane\.Hwnd' -or
+    $accessibilityHarnessText -match '(?s)settings-open idle soak.*?ForceForeground\(\$process\.MainWindowHandle\)') {
+    throw 'Accessibility settings idle-soak focus checks must retain the terminal host HWND before Process.Refresh can recache the independent Settings window.'
 }
 $settingsSectionProviderContract = [regex]::Match(
     $win32UiaWidgetsText,
@@ -1904,7 +1917,7 @@ $highContrastCloseCalls = @($paletteThemeAst.FindAll({
 $highContrastDismissCalls = @($paletteThemeAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.Extent.Text.Trim() -eq 'Invoke-StatefulPostedCommand $hcHost 2004 $deadline $hcRun.Process'
+        $node.Extent.Text.Trim() -eq 'Invoke-StatefulButton $hcHost 2004 $deadline $hcRun.Process'
 }, $true))
 $highContrastDismissWaits = @($paletteThemeAst.FindAll({
     param($node)
@@ -1925,6 +1938,28 @@ if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 
     $highContrastCloseCalls[0].Parent.Parent.Parent.CatchClauses[0].Body.Extent.Text -notmatch
         '(?s)Stop-InteractiveWin11Process -Process \$hcRun\.Process -Contained.*?Write-Warning') {
     throw 'High Contrast palette dismissal must stay strict; only host-close timeout may become a warning after contained termination.'
+}
+if ($paletteThemeHarnessText -notmatch 'Invoke-StatefulButton \$hostHwnd 2004 \$deadline \$run\.Process' -or
+    $paletteThemeHarnessText -match 'Invoke-Stateful(?:Posted)?Command \$\w+ 2004' -or
+    $paletteThemeHarnessText -notmatch "-Description 'theme palette dismissal after preview'" -or
+    $paletteThemeHarnessText -notmatch '\$themeListRect\.Top -lt \$themeSurfaceRect\.Top' -or
+    $paletteThemeHarnessText -notmatch '(?s)Dracula preview rollback.*?\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\s*\$edit = Open-ThemeQuery' -or
+    $paletteThemeHarnessText -notmatch 'Dismissal changed persisted theme instead of reverting preview') {
+    throw 'Palette theme validation must prove rich-result geometry and click the real Close button before framebuffer/config rollback.'
+}
+if ($win32RuntimeText -notmatch 'const list_y = overlay_y \+ self\.scaled\(host_overlay_height\);' -or
+    $win32RuntimeText -notmatch 'paletteListTransition\(' -or
+    $win32RuntimeText -notmatch 'if \(transition\.exposes_content\) \{\s*self\.invalidateVisibleSurfaceChildPaint\(true, false\);' -or
+    $win32RuntimeText -notmatch 'const was_palette = self\.overlay_mode == \.command_palette;' -or
+    $win32RuntimeText -notmatch 'if \(was_confirm or was_palette\)' -or
+    $win32RuntimeText -notmatch 'palette_catalog_retained_config' -or
+    $win32RuntimeText -notmatch 'palette_catalog_config_source' -or
+    $win32RuntimeText -notmatch '(?s)other != self and other\.overlay_mode == \.command_palette.*?other\.hideOverlay\(\);' -or
+    $win32RuntimeText -notmatch '(?s)\.config_change =>.*?if \(host\.overlay_mode == \.command_palette\) host\.hideOverlay\(\);.*?self\.config\.deinit\(\);\s*self\.config = config;' -or
+    $win32RuntimeText -notmatch 'self\.refreshPalettePresentation\(\);' -or
+    $win32RuntimeText -notmatch 'Make the window taller to show and activate palette results\.' -or
+    $win32RuntimeText -notmatch 'DT_LEFT \| DT_VCENTER \| DT_SINGLELINE \| DT_NOPREFIX \| DT_END_ELLIPSIS') {
+    throw 'Palette list layout must sit below feedback and repaint exposed terminal content on shrink, hide, and dismissal.'
 }
 $sessionRestoreTabSeedLoop = Get-PowerShellBlockText `
     -Content $sessionRestoreHarnessText `

@@ -695,10 +695,37 @@ const PaletteCatalog = win32_palette.catalog.Catalog;
 const PaletteItem = win32_palette.catalog.Item;
 const PalettePayload = win32_palette.catalog.Payload;
 const PaletteRanked = win32_palette.catalog.Ranked;
+const PaletteStableId = @TypeOf((@as(PaletteItem, undefined)).id);
 const palette_catalog_capacity: usize = 768;
 const palette_action_capacity: usize = 384;
 const palette_catalog_label_capacity: usize = 768;
 const palette_catalog_label_bytes: usize = 128;
+const PalettePresentation = struct {
+    match_count: usize = 0,
+    title: ?[]const u8 = null,
+    subtitle: ?[]const u8 = null,
+    available: bool = false,
+};
+const PaletteListTransition = struct {
+    relayout: bool,
+    exposes_content: bool,
+};
+const PaletteViewport = struct {
+    selected: usize,
+    scroll: usize,
+};
+const PaletteCatalogConfigSource = enum {
+    /// Catalog strings borrow the current `app.config`.
+    live,
+    /// Catalog strings borrow `palette_theme_preview_original`.
+    preview_original,
+    /// Catalog strings borrow `palette_catalog_retained_config`.
+    retained,
+};
+const PaletteCompletion = struct {
+    text: []const u8,
+    id: PaletteStableId,
+};
 const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
@@ -4475,6 +4502,16 @@ pub const App = struct {
                 switch (target) {
                     .app => {
                         const config = try value.config.clone(self.core_app.alloc);
+                        // Palette theme preview owns a reversible baseline
+                        // around the app-global config. An external/settings
+                        // config change supersedes that transaction: dismiss
+                        // the palette first so it reverts and resets every
+                        // borrowed catalog before the incoming config replaces
+                        // the baseline. A later Escape can never resurrect the
+                        // stale pre-reload config.
+                        for (self.hosts.items) |host| {
+                            if (host.overlay_mode == .command_palette) host.hideOverlay();
+                        }
                         self.unregisterGlobalHotkeys();
                         self.config.deinit();
                         self.config = config;
@@ -8147,6 +8184,7 @@ const Host = struct {
     cached_overlay_cancel: ?[:0]const u8 = null,
     overlay_completion_seed: ?[:0]const u8 = null,
     overlay_completion_value: ?[:0]const u8 = null,
+    overlay_completion_result_id: ?PaletteStableId = null,
     profiles: ?[]windows_shell.Profile = null,
     selected_profile: usize = 0,
     selected_profile_key: ?[:0]const u8 = null,
@@ -8253,6 +8291,9 @@ const Host = struct {
     palette_installed_themes: ?[]themepkg.Entry = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
+    /// Rows that physically fit in the current palette List HWND. This can be
+    /// lower than `palette_max_visible_rows` at large DPI or in short windows.
+    palette_list_visible_rows: usize = 0,
     palette_list_scroll: usize = 0,
     /// Currently-selected row (absolute index into ranked). Enter runs
     /// this entry; click overrides both selection and invocation.
@@ -8260,6 +8301,10 @@ const Host = struct {
     /// Original app config while a palette theme row is being previewed.
     /// Owned by this host until committed or reverted.
     palette_theme_preview_original: ?configpkg.Config = null,
+    /// A swapped-out config kept alive only while current catalog strings
+    /// borrow it. Cleared immediately after the catalog resets or hides.
+    palette_catalog_retained_config: ?configpkg.Config = null,
+    palette_catalog_config_source: PaletteCatalogConfigSource = .live,
 
     // Single SetTimer-driven tween scheduler; see Tween scheduler block
     // in the method section. Matches Win32's main-thread-paint model.
@@ -9433,6 +9478,59 @@ const Host = struct {
         return true;
     }
 
+    fn releaseRetainedPaletteCatalogConfig(self: *Host) void {
+        if (self.palette_catalog_retained_config) |*value| value.deinit();
+        self.palette_catalog_retained_config = null;
+    }
+
+    fn resetPaletteCatalogConfigOwner(self: *Host) void {
+        // Call only after Catalog.reset() or after hiding the List: its
+        // borrowed slices must no longer be observable before this release.
+        self.releaseRetainedPaletteCatalogConfig();
+        self.palette_catalog_config_source = .live;
+    }
+
+    fn paletteListRowCapacity(self: *Host) usize {
+        const hwnd = self.hwnd orelse return 0;
+        var rect: RECT = undefined;
+        if (GetClientRect(hwnd, &rect) == 0) return 0;
+        const list_top = self.tabBarHeight() + self.scaled(host_overlay_height);
+        return paletteVisibleRowCapacity(
+            rect.bottom - list_top - self.scaled(8),
+            self.scaled(palette_row_height),
+        );
+    }
+
+    fn palettePresentation(self: *const Host) PalettePresentation {
+        if (self.palette_list_ranked_count == 0) return .{};
+        const row = @min(self.palette_list_selected, self.palette_list_ranked_count - 1);
+        const catalog = if (self.palette_catalog) |*value| value else return .{
+            .match_count = self.palette_list_ranked_count,
+            .available = self.palette_list_visible_rows > 0,
+        };
+        const descriptor = catalog.descriptorFor(self.palette_list_ranked[row]) orelse return .{
+            .match_count = self.palette_list_ranked_count,
+            .available = self.palette_list_visible_rows > 0,
+        };
+        return .{
+            .match_count = self.palette_list_ranked_count,
+            .title = descriptor.item.title,
+            .subtitle = if (descriptor.item.enabled)
+                descriptor.item.subtitle
+            else
+                descriptor.item.disabled_reason orelse "Unavailable",
+            .available = self.palette_list_visible_rows > 0,
+        };
+    }
+
+    fn refreshPalettePresentation(self: *Host) void {
+        if (self.overlay_mode != .command_palette or self.overlay_edit_hwnd == null) return;
+        _ = self.syncOverlayLabel() catch false;
+        _ = self.syncOverlayHint() catch false;
+        _ = self.syncOverlayButtons() catch false;
+        self.invalidateOverlayText();
+    }
+
     fn rebuildPaletteList(self: *Host) void {
         const previous_result_count = self.palette_list_ranked_count;
         // `overlayEditText` returns either a literal "" or a borrowed
@@ -9453,6 +9551,7 @@ const Host = struct {
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
@@ -9616,6 +9715,23 @@ const Host = struct {
         self.palette_list_scroll = 0;
         self.palette_list_selected = 0;
 
+        const transition = paletteListTransition(
+            previous_result_count,
+            self.palette_list_ranked_count,
+            self.paletteListRowCapacity(),
+        );
+        if (transition.relayout) {
+            self.layout() catch |err| {
+                log.warn("palette result-list relayout failed err={}", .{err});
+            };
+            // The list is a child HWND above a WGL sibling. Shrinking or
+            // hiding it exposes terminal pixels that parent-only chrome
+            // invalidation cannot restore.
+            if (transition.exposes_content) {
+                self.invalidateVisibleSurfaceChildPaint(true, false);
+            }
+        }
+
         log.debug(
             "palette rebuild end ranked={d}",
             .{self.palette_list_ranked_count},
@@ -9635,18 +9751,21 @@ const Host = struct {
     fn setPaletteListSelection(self: *Host, next: usize) bool {
         if (self.overlay_mode != .command_palette) return false;
         if (next >= self.palette_list_ranked_count) return false;
+        const visible_rows = self.palette_list_visible_rows;
+        if (visible_rows == 0) return false;
 
         const changed = self.palette_list_selected != next;
         self.palette_list_selected = next;
         if (next < self.palette_list_scroll) {
             self.palette_list_scroll = next;
-        } else if (next >= self.palette_list_scroll + palette_max_visible_rows) {
-            self.palette_list_scroll = next - palette_max_visible_rows + 1;
+        } else if (next >= self.palette_list_scroll + visible_rows) {
+            self.palette_list_scroll = next - visible_rows + 1;
         }
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
         if (changed) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
+            self.refreshPalettePresentation();
         }
         return changed;
     }
@@ -9655,7 +9774,7 @@ const Host = struct {
     /// selection is off-screen. Returns true if the key was consumed.
     fn moveListSelection(self: *Host, reverse: bool) bool {
         if (self.overlay_mode != .command_palette) return false;
-        if (self.palette_list_ranked_count == 0) return false;
+        if (self.palette_list_ranked_count == 0 or self.palette_list_visible_rows == 0) return false;
         var next: usize = self.palette_list_selected;
         if (reverse) {
             if (next == 0) {
@@ -10006,10 +10125,9 @@ const Host = struct {
         return preview;
     }
 
-    fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
-        var old = self.app.config;
+    fn swapRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) configpkg.Config {
+        const old = self.app.config;
         self.app.config = new_config;
-        old.deinit();
         self.app.config_revision +%= 1;
         if (self.app.config_revision == 0) self.app.config_revision = 1;
         self.app.reconfigureTheme();
@@ -10026,6 +10144,36 @@ const Host = struct {
                 log.warn("palette theme chrome refresh failed err={}", .{err});
             };
         }
+        return old;
+    }
+
+    fn preserveOrDeinitPaletteCatalogConfig(
+        self: *Host,
+        old: configpkg.Config,
+    ) void {
+        if (self.palette_catalog_config_source == .live) {
+            std.debug.assert(self.palette_catalog_retained_config == null);
+            self.palette_catalog_retained_config = old;
+            self.palette_catalog_config_source = .retained;
+        } else {
+            var disposable = old;
+            disposable.deinit();
+        }
+    }
+
+    fn replaceRuntimeConfigFromPalette(self: *Host, new_config: configpkg.Config) void {
+        const old = self.swapRuntimeConfigFromPalette(new_config);
+        self.preserveOrDeinitPaletteCatalogConfig(old);
+    }
+
+    fn detachLivePaletteCatalogConfig(self: *Host) !void {
+        if (self.palette_catalog_config_source != .live) return;
+        var clone = try self.app.config.clone(self.app.core_app.alloc);
+        errdefer clone.deinit();
+        const old = self.swapRuntimeConfigFromPalette(clone);
+        std.debug.assert(self.palette_catalog_retained_config == null);
+        self.palette_catalog_retained_config = old;
+        self.palette_catalog_config_source = .retained;
     }
 
     fn previewSelectedPaletteTheme(self: *Host) void {
@@ -10050,19 +10198,41 @@ const Host = struct {
             if (std.mem.eql(u8, current.light, name) and std.mem.eql(u8, current.dark, name)) return;
         }
 
-        if (self.palette_theme_preview_original == null) {
-            self.palette_theme_preview_original = try self.app.config.clone(self.app.core_app.alloc);
-        }
-
         var preview = try self.loadPaletteThemeConfig(name);
         errdefer preview.deinit();
-        self.replaceRuntimeConfigFromPalette(preview);
+        if (self.palette_theme_preview_original == null) {
+            const original = self.swapRuntimeConfigFromPalette(preview);
+            self.palette_theme_preview_original = original;
+            if (self.palette_catalog_config_source == .live) {
+                self.palette_catalog_config_source = .preview_original;
+            }
+        } else {
+            self.replaceRuntimeConfigFromPalette(preview);
+        }
     }
 
     fn revertPaletteThemePreview(self: *Host) void {
         const original = self.palette_theme_preview_original orelse return;
         self.palette_theme_preview_original = null;
-        self.replaceRuntimeConfigFromPalette(original);
+        const old = self.swapRuntimeConfigFromPalette(original);
+        switch (self.palette_catalog_config_source) {
+            .live => {
+                std.debug.assert(self.palette_catalog_retained_config == null);
+                self.palette_catalog_retained_config = old;
+                self.palette_catalog_config_source = .retained;
+            },
+            .preview_original => {
+                var disposable = old;
+                disposable.deinit();
+                // The catalog still borrows the same original allocation,
+                // which is now the live app config.
+                self.palette_catalog_config_source = .live;
+            },
+            .retained => {
+                var disposable = old;
+                disposable.deinit();
+            },
+        }
     }
 
     fn commitPaletteTheme(self: *Host, name: []const u8) !void {
@@ -10080,8 +10250,18 @@ const Host = struct {
         defer pending.deinit();
         try setConfigTheme(&pending, name);
 
+        // settingsSaveAndReload may replace/deinit the live app config. Keep
+        // the generation borrowed by the visible palette alive first.
+        try self.detachLivePaletteCatalogConfig();
+
         if (self.palette_theme_preview_original) |*value| {
-            value.deinit();
+            if (self.palette_catalog_config_source == .preview_original) {
+                std.debug.assert(self.palette_catalog_retained_config == null);
+                self.palette_catalog_retained_config = value.*;
+                self.palette_catalog_config_source = .retained;
+            } else {
+                value.deinit();
+            }
             self.palette_theme_preview_original = null;
         }
 
@@ -10218,11 +10398,13 @@ const Host = struct {
 
     /// Scroll the visible window by `delta` wheel units (120 = one line).
     fn scrollPaletteList(self: *Host, delta: i16) void {
-        if (self.palette_list_ranked_count <= palette_max_visible_rows) return;
+        const visible_rows = self.palette_list_visible_rows;
+        if (visible_rows == 0) return;
+        if (self.palette_list_ranked_count <= visible_rows) return;
         const lines_per_notch: i32 = 3;
         const step: i32 = @intFromFloat(@as(f32, @floatFromInt(delta)) / 120.0 * @as(f32, @floatFromInt(lines_per_notch)));
         if (step == 0) return;
-        const max_scroll = self.palette_list_ranked_count - palette_max_visible_rows;
+        const max_scroll = self.palette_list_ranked_count - visible_rows;
         var next: isize = @as(isize, @intCast(self.palette_list_scroll)) - step;
         if (next < 0) next = 0;
         if (next > @as(isize, @intCast(max_scroll))) next = @intCast(max_scroll);
@@ -10234,7 +10416,7 @@ const Host = struct {
         // possibly an off-screen action the user has no idea they're
         // launching. UIA Name updates follow from the reassignment.
         const previous_selection = self.palette_list_selected;
-        const visible_end = new_scroll + palette_max_visible_rows;
+        const visible_end = new_scroll + visible_rows;
         if (self.palette_list_selected < new_scroll) {
             self.palette_list_selected = new_scroll;
         } else if (self.palette_list_selected >= visible_end) {
@@ -10244,6 +10426,7 @@ const Host = struct {
         if (self.palette_list_selected != previous_selection) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
+            self.refreshPalettePresentation();
         }
     }
 
@@ -10277,7 +10460,7 @@ const Host = struct {
         }
 
         const visible_end = @min(
-            self.palette_list_scroll + palette_max_visible_rows,
+            self.palette_list_scroll + self.palette_list_visible_rows,
             self.palette_list_ranked_count,
         );
         var i = self.palette_list_scroll;
@@ -10373,6 +10556,8 @@ const Host = struct {
         self.tween_sched.deinit();
 
         self.revertPaletteThemePreview();
+        if (self.palette_catalog) |*catalog| catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
         self.destroyChildControls();
 
@@ -11404,6 +11589,9 @@ const Host = struct {
         self.banner_kind = next_kind;
         try appendOwnedString(self.app.core_app.alloc, &self.banner_text, text);
         self.invalidateBannerText();
+        // While an overlay is open, banner text is rendered inside the
+        // overlay feedback lane rather than the ordinary host banner lane.
+        if (self.overlay_mode != .none) self.invalidateOverlayText();
     }
 
     fn clearUpdateActionRects(self: *Host) void {
@@ -11624,6 +11812,17 @@ const Host = struct {
     }
 
     fn showOverlay(self: *Host, mode: HostOverlayMode, initial: ?[]const u8) !void {
+        if (mode == .command_palette) {
+            // Theme previews replace the app-global config while palette
+            // catalogs borrow config strings. Keep exactly one palette live
+            // across all host windows so closing the prior palette reverts its
+            // preview and releases its catalog before this host builds one.
+            for (self.app.hosts.items) |other| {
+                if (other != self and other.overlay_mode == .command_palette) {
+                    other.hideOverlay();
+                }
+            }
+        }
         try self.ensureOverlayControls();
         self.overlay_mode = mode;
         self.overlay_edit_uia_selection = null;
@@ -11682,6 +11881,7 @@ const Host = struct {
 
     fn hideOverlay(self: *Host) void {
         const was_confirm = self.overlay_mode == .confirm;
+        const was_palette = self.overlay_mode == .command_palette;
         const restore_terminal_focus = shouldRefocusAfterOverlayHide(
             GetFocus(),
             self.overlay_edit_hwnd,
@@ -11709,10 +11909,14 @@ const Host = struct {
         if (self.overlay_cancel_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.overlay_cancel_placement, false);
         if (self.palette_list_hwnd) |hwnd| _ = applyChildVisibility(hwnd, &self.palette_list_placement, false);
         self.palette_list_ranked_count = 0;
+        self.palette_list_visible_rows = 0;
         self.palette_list_scroll = 0;
+        if (self.palette_catalog) |*catalog| catalog.reset();
+        self.resetPaletteCatalogConfigOwner();
+        self.clearPaletteInstalledThemes();
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
-        if (was_confirm) {
+        if (was_confirm or was_palette) {
             self.layout() catch {};
             self.forceVisibleSurfaceRepaintsNow();
         }
@@ -11920,7 +12124,11 @@ const Host = struct {
             ),
             .command_palette => {
                 const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-                const label = try buildCommandPaletteOverlayLabel(alloc, self.paletteSnapshot(), text);
+                const label = try buildCommandPaletteOverlayLabel(
+                    alloc,
+                    text,
+                    self.palettePresentation(),
+                );
                 defer alloc.free(label);
                 return try syncWindowTextUtf8Cached(
                     alloc,
@@ -12033,7 +12241,7 @@ const Host = struct {
             if (surface) |value| value.search_needle else null,
             if (surface) |value| value.search_total else null,
             if (surface) |value| value.search_selected else null,
-            self.paletteSnapshot(),
+            self.palettePresentation(),
         );
         defer alloc.free(accept);
         changed = (try syncWindowTextUtf8Cached(
@@ -12069,6 +12277,22 @@ const Host = struct {
             );
         }
         const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
+        if (self.overlay_mode == .command_palette) {
+            var mru_buf: [5][]const u8 = undefined;
+            const hint = try buildCommandPaletteFeedbackText(
+                alloc,
+                text,
+                self.app.paletteMruSlice(&mru_buf),
+                self.palettePresentation(),
+            );
+            defer alloc.free(hint);
+            return try syncWindowTextUtf8Cached(
+                alloc,
+                hint_hwnd,
+                &self.cached_overlay_hint,
+                hint,
+            );
+        }
         if (self.overlay_mode == .profile) {
             const hint = try buildProfileHintText(
                 alloc,
@@ -12115,6 +12339,7 @@ const Host = struct {
         if (self.overlay_completion_value) |value| self.app.core_app.alloc.free(value);
         self.overlay_completion_seed = null;
         self.overlay_completion_value = null;
+        self.overlay_completion_result_id = null;
     }
 
     fn ensureThemeBrushes(self: *Host) !void {
@@ -13225,24 +13450,68 @@ const Host = struct {
         };
         defer alloc.free(seed_owned);
 
-        const candidate = commandPaletteCompletionCandidate(
-            self.paletteSnapshot(),
+        const candidate = self.richPaletteCompletionCandidate(
             seed_owned,
             text_owned,
+            self.overlay_completion_result_id,
             reverse,
         ) orelse return false;
-        // `candidate` borrows from `snap.cvals` (config-owned,
-        // stable for this synchronous call's lifetime).
-        _ = try self.setOverlayEditText(candidate);
+        // `candidate` borrows from the current rich catalog. Preserve the
+        // completion state before `syncCommandPaletteBanner` rebuilds it.
+        _ = try self.setOverlayEditText(candidate.text);
         _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
         if (!ownedStringEquals(self.overlay_completion_seed, seed_owned)) {
             try appendOwnedString(alloc, &self.overlay_completion_seed, seed_owned);
         }
-        if (!ownedStringEquals(self.overlay_completion_value, candidate)) {
-            try appendOwnedString(alloc, &self.overlay_completion_value, candidate);
+        if (!ownedStringEquals(self.overlay_completion_value, candidate.text)) {
+            try appendOwnedString(alloc, &self.overlay_completion_value, candidate.text);
         }
+        self.overlay_completion_result_id = candidate.id;
         _ = try self.syncCommandPaletteBanner();
         return true;
+    }
+
+    fn richPaletteCompletionCandidate(
+        self: *const Host,
+        seed: []const u8,
+        current: []const u8,
+        current_id: ?PaletteStableId,
+        reverse: bool,
+    ) ?PaletteCompletion {
+        const catalog = if (self.palette_catalog) |*value| value else return null;
+        var ranked_buf: [win32_palette.max_ranked]PaletteRanked = undefined;
+        const ranked = catalog.rank(
+            seed,
+            .{ .max_results = ranked_buf.len },
+            &ranked_buf,
+        );
+        if (ranked.len == 0) return null;
+
+        var current_index: ?usize = null;
+        for (ranked, 0..) |result, index| {
+            const descriptor = catalog.descriptorFor(result) orelse continue;
+            const id_matches = if (current_id) |id| result.id.eql(id) else false;
+            if (id_matches or (current_id == null and
+                std.mem.eql(u8, paletteCompletionText(descriptor), current)))
+            {
+                current_index = index;
+                break;
+            }
+        }
+        const target = if (current_index) |index|
+            if (reverse)
+                (index + ranked.len - 1) % ranked.len
+            else
+                (index + 1) % ranked.len
+        else if (reverse)
+            ranked.len - 1
+        else
+            0;
+        const descriptor = catalog.descriptorFor(ranked[target]) orelse return null;
+        return .{
+            .text = paletteCompletionText(descriptor),
+            .id = ranked[target].id,
+        };
     }
 
     fn stepTabOverviewSelection(self: *Host, reverse: bool) !bool {
@@ -13289,19 +13558,14 @@ const Host = struct {
         if (self.overlay_mode != .command_palette) return false;
         _ = self.overlay_edit_hwnd orelse return false;
         self.rebuildPaletteList();
-        const text = std.mem.trim(u8, try overlayEditText(self), " \t\r\n");
-        var mru_buf: [5][]const u8 = undefined;
-        const mru = self.app.paletteMruSlice(&mru_buf);
-        const banner = try commandPaletteBannerText(self.app.core_app.alloc, self.paletteSnapshot(), text, mru);
-        defer if (banner) |value| self.app.core_app.alloc.free(value);
-        if (banner) |value| {
-            try self.setBanner(.info, value);
-        } else {
-            try self.setBanner(.none, null);
-        }
+        // Query guidance comes from the same rich catalog that owns the
+        // visible rows. Clear action-outcome banners from the previous query;
+        // `syncOverlayHint`/paint then render the current rich presentation.
+        try self.setBanner(.none, null);
         _ = try self.syncOverlayLabel();
         _ = try self.syncOverlayHint();
         _ = try self.syncOverlayButtons();
+        self.invalidateOverlayText();
         return true;
     }
 
@@ -13322,7 +13586,7 @@ const Host = struct {
                 // sees highlighted). Fall back to parsing the raw query
                 // so users who type a full action name and press Enter
                 // before the list rebuild completes still get dispatch.
-                if (self.palette_list_ranked_count > 0) {
+                if (self.palette_list_ranked_count > 0 and self.palette_list_visible_rows > 0) {
                     const row = @min(
                         self.palette_list_selected,
                         self.palette_list_ranked_count - 1,
@@ -13330,6 +13594,10 @@ const Host = struct {
                     try self.invokePaletteRow(row);
                     // Do NOT access `self` after dispatch.
                     return true;
+                }
+                if (self.palette_list_ranked_count > 0) {
+                    self.abortPaletteAction("Make the window taller to show and activate palette results.");
+                    return false;
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
@@ -14278,11 +14546,33 @@ const Host = struct {
                         self.scaled(120),
                         width - list_x - padding,
                     );
-                    const list_y = overlay_y + self.scaled(host_overlay_row_height) + self.scaled(12);
-                    const visible_rows: i32 = @intCast(@min(
+                    // Keep results below the complete overlay/feedback band.
+                    // The old row-height + 12 anchor started at 36 px while
+                    // feedback was still painting there and terminal content
+                    // began at 58 px, producing the visible overlap reported
+                    // in the palette theme screenshot.
+                    const list_y = overlay_y + self.scaled(host_overlay_height);
+                    const row_capacity = paletteVisibleRowCapacity(
+                        rect.bottom - list_y - self.scaled(8),
+                        self.scaled(palette_row_height),
+                    );
+                    const previous_visible_rows = self.palette_list_visible_rows;
+                    self.palette_list_visible_rows = @min(
                         self.palette_list_ranked_count,
-                        palette_max_visible_rows,
-                    ));
+                        row_capacity,
+                    );
+                    const viewport = clampPaletteViewport(
+                        self.palette_list_ranked_count,
+                        self.palette_list_visible_rows,
+                        self.palette_list_selected,
+                        self.palette_list_scroll,
+                    );
+                    self.palette_list_selected = viewport.selected;
+                    self.palette_list_scroll = viewport.scroll;
+                    if (self.palette_list_visible_rows != previous_visible_rows) {
+                        self.invalidateOverlayText();
+                    }
+                    const visible_rows: i32 = @intCast(self.palette_list_visible_rows);
                     const list_height = @max(
                         self.scaled(palette_row_height),
                         visible_rows * self.scaled(palette_row_height),
@@ -14295,10 +14585,11 @@ const Host = struct {
                     changed.* = applyChildVisibility(
                         list_hwnd,
                         &self.palette_list_placement,
-                        self.palette_list_ranked_count > 0,
+                        self.palette_list_visible_rows > 0,
                     ) or changed.*;
                 }
             } else if (self.palette_list_hwnd) |list_hwnd| {
+                self.palette_list_visible_rows = 0;
                 changed.* = applyChildVisibility(
                     list_hwnd,
                     &self.palette_list_placement,
@@ -14306,6 +14597,7 @@ const Host = struct {
                 ) or changed.*;
             }
         } else if (self.palette_list_hwnd) |list_hwnd| {
+            self.palette_list_visible_rows = 0;
             changed.* = applyChildVisibility(
                 list_hwnd,
                 &self.palette_list_placement,
@@ -14812,7 +15104,7 @@ const Host = struct {
                         if (surface) |value| value.search_total else null,
                         if (surface) |value| value.search_selected else null,
                         overlay_status,
-                        self.paletteSnapshot(),
+                        self.palettePresentation(),
                     ) catch return;
                 defer alloc.free(overlay_label);
                 if (self.cached_overlay_paint_label_w) |old| alloc.free(old);
@@ -14850,6 +15142,7 @@ const Host = struct {
                         pane_count,
                         self.paletteSnapshot(),
                         mru,
+                        self.palettePresentation(),
                     ) catch return;
                 };
                 defer alloc.free(overlay_feedback);
@@ -14937,7 +15230,21 @@ const Host = struct {
                 .err => theme.error_fg,
             });
             if (self.cached_overlay_paint_feedback_w) |overlay_feedback_w| {
-                textOutWz(hdc, self.scaled(host_overlay_padding) + self.scaled(10), overlay_rect.top + self.scaled(34), overlay_feedback_w);
+                var feedback_rect = RECT{
+                    .left = self.scaled(host_overlay_padding) + self.scaled(10),
+                    .top = overlay_rect.top + self.scaled(31),
+                    .right = @max(
+                        self.scaled(host_overlay_padding) + self.scaled(40),
+                        client_rect.right - self.scaled(host_overlay_padding) - self.scaled(10),
+                    ),
+                    .bottom = overlay_rect.bottom - self.scaled(4),
+                };
+                drawTextWz(
+                    hdc,
+                    overlay_feedback_w,
+                    &feedback_rect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
             }
         }
 
@@ -16109,6 +16416,47 @@ fn applyChildVisibility(hwnd: HWND, placement: *ChildPlacement, visible: bool) b
     return true;
 }
 
+fn paletteVisibleRowCapacity(available_height: i32, row_height: i32) usize {
+    if (row_height <= 0 or available_height < row_height) return 0;
+    const raw: usize = @intCast(@divTrunc(available_height, row_height));
+    return @min(raw, palette_max_visible_rows);
+}
+
+fn paletteListTransition(
+    previous_count: usize,
+    next_count: usize,
+    row_capacity: usize,
+) PaletteListTransition {
+    const previous_rows = @min(previous_count, row_capacity);
+    const next_rows = @min(next_count, row_capacity);
+    return .{
+        .relayout = previous_rows != next_rows,
+        .exposes_content = next_rows < previous_rows,
+    };
+}
+
+fn clampPaletteViewport(
+    result_count: usize,
+    visible_rows: usize,
+    selected: usize,
+    scroll: usize,
+) PaletteViewport {
+    if (result_count == 0) return .{ .selected = 0, .scroll = 0 };
+    if (visible_rows == 0) return .{
+        .selected = @min(selected, result_count - 1),
+        .scroll = 0,
+    };
+    const clamped_selected = @min(selected, result_count - 1);
+    const max_scroll = result_count - @min(result_count, visible_rows);
+    var clamped_scroll = @min(scroll, max_scroll);
+    if (clamped_selected < clamped_scroll) {
+        clamped_scroll = clamped_selected;
+    } else if (clamped_selected >= clamped_scroll + visible_rows) {
+        clamped_scroll = clamped_selected - visible_rows + 1;
+    }
+    return .{ .selected = clamped_selected, .scroll = clamped_scroll };
+}
+
 const SurfaceLayoutRuntimeSync = struct {
     scrollbar_refresh: bool,
     core_size_sync: bool,
@@ -16842,7 +17190,7 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
             .height = @floatFromInt(rect.bottom - rect.top),
         },
         .first_visible = host.palette_list_scroll,
-        .visible_count = @min(remaining, palette_max_visible_rows),
+        .visible_count = @min(remaining, host.palette_list_visible_rows),
         .row_height = @floatFromInt(row_height),
     };
 }
@@ -18998,13 +19346,17 @@ fn buildOverlayPaintLabelText(
     search_total: ?usize,
     search_selected: ?usize,
     host_status: HostTabStatus,
-    palette: PaletteSnapshot,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, ""),
         .surface_title => try alloc.dupe(u8, "Window title"),
         .tab_title => try alloc.dupe(u8, "Tab title"),
-        .command_palette => try buildCommandPaletteOverlayLabel(alloc, palette, input_text),
+        .command_palette => try buildCommandPaletteOverlayLabel(
+            alloc,
+            input_text,
+            palette_presentation,
+        ),
         .profile => try alloc.dupe(u8, "Profile"),
         .search => try buildSearchOverlayLabel(alloc, search_total, search_selected),
         .tab_overview => try buildTabOverviewOverlayLabel(alloc, host_status.index, host_status.total),
@@ -19028,6 +19380,7 @@ fn buildOverlayFeedbackText(
     pane_count: usize,
     palette: PaletteSnapshot,
     mru: []const []const u8,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     if (banner_text) |value| {
         return switch (banner_kind) {
@@ -19035,6 +19388,14 @@ fn buildOverlayFeedbackText(
             .info => try std.fmt.allocPrint(alloc, "Info: {s}", .{value}),
             .none => try alloc.dupe(u8, value),
         };
+    }
+    if (mode == .command_palette) {
+        return try buildCommandPaletteFeedbackText(
+            alloc,
+            input_text,
+            mru,
+            palette_presentation,
+        );
     }
     return try buildOverlayHintText(
         alloc,
@@ -19057,16 +19418,16 @@ fn buildOverlayAcceptLabel(
     active_search_needle: ?[]const u8,
     search_total: ?usize,
     search_selected: ?usize,
-    palette: PaletteSnapshot,
+    palette_presentation: PalettePresentation,
 ) ![]u8 {
     return switch (mode) {
         .none => try alloc.dupe(u8, "OK"),
         .command_palette => blk: {
             if (input_text.len == 0) break :blk try alloc.dupe(u8, "Close");
-            if (input.Binding.Action.parse(input_text)) |_| {
-                break :blk try alloc.dupe(u8, "Run");
-            } else |_| {}
-            if (commandPaletteUniqueMatch(palette, input_text) != null) break :blk try alloc.dupe(u8, "Run");
+            if (palette_presentation.match_count > 0 and !palette_presentation.available) {
+                break :blk try alloc.dupe(u8, "Resize");
+            }
+            if (palette_presentation.match_count > 0) break :blk try alloc.dupe(u8, "Activate");
             break :blk try alloc.dupe(u8, "Check");
         },
         .profile => try alloc.dupe(u8, "Open"),
@@ -20039,19 +20400,88 @@ fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
 
 fn buildCommandPaletteOverlayLabel(
     alloc: Allocator,
-    snap: PaletteSnapshot,
     input_text: []const u8,
+    presentation: PalettePresentation,
 ) ![]u8 {
     if (input_text.len == 0) return try alloc.dupe(u8, "Command");
-    if (input.Binding.Action.parse(input_text)) |_| {
-        return try alloc.dupe(u8, "Run action");
-    } else |_| {}
-    if (commandPaletteUniqueMatch(snap, input_text) != null) {
-        return try alloc.dupe(u8, "Run action");
+    if (presentation.match_count > 0) {
+        return try std.fmt.allocPrint(alloc, "Command {d}", .{presentation.match_count});
     }
-    const matches = commandPaletteMatchCount(snap, input_text);
-    if (matches > 0) return try std.fmt.allocPrint(alloc, "Command {d}", .{matches});
     return try alloc.dupe(u8, "Command ?");
+}
+
+fn buildCommandPaletteFeedbackText(
+    alloc: Allocator,
+    input_text: []const u8,
+    mru: []const []const u8,
+    presentation: PalettePresentation,
+) ![]u8 {
+    if (input_text.len == 0) {
+        if (mru.len > 0) {
+            return try std.fmt.allocPrint(
+                alloc,
+                "Recent: {s}. Type to search actions, themes, tabs, panes, settings, and help.",
+                .{mru[0]},
+            );
+        }
+        return try alloc.dupe(
+            u8,
+            "Type to search actions, themes, tabs, panes, settings, and help.",
+        );
+    }
+    if (presentation.match_count == 0) {
+        return try alloc.dupe(
+            u8,
+            "No matching command. Try > actions, % themes, @ tabs, / panes, : settings, or ? help.",
+        );
+    }
+    if (!presentation.available) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "{d} matches. Make the window taller to show and activate results.",
+            .{presentation.match_count},
+        );
+    }
+
+    const title = presentation.title orelse "Selected result";
+    const subtitle = presentation.subtitle orelse "";
+    if (presentation.match_count == 1) {
+        if (subtitle.len > 0) {
+            return try std.fmt.allocPrint(
+                alloc,
+                "{s} — {s}. Enter activates; Escape closes.",
+                .{ title, subtitle },
+            );
+        }
+        return try std.fmt.allocPrint(
+            alloc,
+            "{s}. Enter activates; Escape closes.",
+            .{title},
+        );
+    }
+    if (subtitle.len > 0) {
+        return try std.fmt.allocPrint(
+            alloc,
+            "{d} matches. Selected: {s} — {s}. Up/Down selects; Enter activates.",
+            .{ presentation.match_count, title, subtitle },
+        );
+    }
+    return try std.fmt.allocPrint(
+        alloc,
+        "{d} matches. Selected: {s}. Up/Down selects; Enter activates.",
+        .{ presentation.match_count, title },
+    );
+}
+
+fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
+    return switch (descriptor.payload) {
+        .action => |payload| payload.action,
+        .recent_command => |payload| payload.action,
+        .profile => |key| key,
+        .setting => |key| key,
+        .theme => |name| name,
+        .tab, .pane, .help => descriptor.item.title,
+    };
 }
 
 fn commandPaletteBannerText(
@@ -34549,9 +34979,11 @@ test "win32 palette UIA state exposes rows and can select a row" {
     var host: Host = undefined;
     host.overlay_mode = .command_palette;
     host.palette_list_ranked_count = 4;
+    host.palette_list_visible_rows = 4;
     host.palette_list_selected = 1;
     host.palette_list_scroll = 0;
     host.palette_list_hwnd = null;
+    host.overlay_edit_hwnd = null;
     host.palette_list_uia_provider = null;
     host.palette_catalog = null;
     host.palette_theme_preview_original = null;
@@ -34574,6 +35006,46 @@ test "win32 palette UIA state exposes rows and can select a row" {
 
     state.select_row.?(state.ctx, 9);
     try std.testing.expectEqual(@as(usize, 3), host.palette_list_selected);
+}
+
+test "win32 palette list geometry clamps rows and detects exposed content" {
+    try std.testing.expectEqual(@as(usize, 7), paletteVisibleRowCapacity(2000, 36));
+    try std.testing.expectEqual(@as(usize, 3), paletteVisibleRowCapacity(110, 36));
+    try std.testing.expectEqual(@as(usize, 0), paletteVisibleRowCapacity(10, 36));
+
+    try std.testing.expectEqual(
+        PaletteListTransition{ .relayout = true, .exposes_content = false },
+        paletteListTransition(0, 1, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{ .relayout = true, .exposes_content = true },
+        paletteListTransition(7, 1, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{ .relayout = true, .exposes_content = true },
+        paletteListTransition(1, 0, 7),
+    );
+    try std.testing.expectEqual(
+        PaletteListTransition{ .relayout = false, .exposes_content = false },
+        paletteListTransition(20, 10, 7),
+    );
+
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 6 },
+        clampPaletteViewport(10, 1, 6, 0),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 9, .scroll = 3 },
+        clampPaletteViewport(10, 7, 99, 99),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 0 },
+        clampPaletteViewport(10, 0, 6, 4),
+    );
+    try std.testing.expectEqual(
+        PaletteViewport{ .selected = 6, .scroll = 0 },
+        clampPaletteViewport(10, 7, clampPaletteViewport(10, 0, 6, 4).selected, 0),
+    );
 }
 
 test "win32 surface size-change repaint stays synchronous during live resize" {
@@ -34782,8 +35254,6 @@ test "win32 buildTabOverviewOverlayLabel reflects current host tab" {
 test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
     const command = try buildOverlayPaintLabelText(
         std.testing.allocator,
         .command_palette,
@@ -34791,12 +35261,10 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         null,
         .{},
-        snap,
+        .{ .match_count = 4, .title = "Toggle fullscreen", .subtitle = "Fullscreen", .available = true },
     );
     defer std.testing.allocator.free(command);
-    // Any fuzzy match yields "Run action" since Enter runs the top
-    // candidate.
-    try std.testing.expectEqualStrings("Run action", command);
+    try std.testing.expectEqualStrings("Command 4", command);
 
     const search = try buildOverlayPaintLabelText(
         std.testing.allocator,
@@ -34805,7 +35273,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         8,
         2,
         .{},
-        snap,
+        .{},
     );
     defer std.testing.allocator.free(search);
     try std.testing.expectEqualStrings("Find 2/8", search);
@@ -34817,7 +35285,7 @@ test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
         null,
         null,
         .{},
-        snap,
+        .{},
     );
     defer std.testing.allocator.free(title);
     try std.testing.expectEqualStrings("Window title", title);
@@ -34842,6 +35310,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(info);
     try std.testing.expectEqualStrings("Info: Try: new_tab", info);
@@ -34859,6 +35328,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(err);
     try std.testing.expectEqualStrings("Error: Unknown Ghostty action", err);
@@ -34876,6 +35346,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         1,
         snap,
         empty_mru,
+        .{},
     );
     defer std.testing.allocator.free(fallback);
     try std.testing.expect(std.mem.indexOf(u8, fallback, "next match") != null);
@@ -35592,35 +36063,59 @@ test "win32 buildSearchDetailText reflects live search context" {
 test "win32 buildOverlayAcceptLabel reflects overlay action state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
-    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, snap);
+    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, .{});
     defer std.testing.allocator.free(palette_idle);
     try std.testing.expectEqualStrings("Close", palette_idle);
 
-    const palette_run = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "new_tab", null, null, null, snap);
+    const palette_run = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "new_tab",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "New tab", .subtitle = "Action", .available = true },
+    );
     defer std.testing.allocator.free(palette_run);
-    try std.testing.expectEqualStrings("Run", palette_run);
+    try std.testing.expectEqualStrings("Activate", palette_run);
 
-    // Under fuzzy ranking, any non-empty match yields "Run" because
-    // Enter submits the top-ranked candidate.
-    const palette_matches = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "toggle_", null, null, null, snap);
+    const palette_matches = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "0x96f",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
     defer std.testing.allocator.free(palette_matches);
-    try std.testing.expectEqualStrings("Run", palette_matches);
+    try std.testing.expectEqualStrings("Activate", palette_matches);
 
-    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, snap);
+    const palette_hidden = try buildOverlayAcceptLabel(
+        std.testing.allocator,
+        .command_palette,
+        "0x96f",
+        null,
+        null,
+        null,
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
+    );
+    defer std.testing.allocator.free(palette_hidden);
+    try std.testing.expectEqualStrings("Resize", palette_hidden);
+
+    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, .{});
     defer std.testing.allocator.free(search_next);
     try std.testing.expectEqualStrings("Next", search_next);
 
-    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, snap);
+    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, .{});
     defer std.testing.allocator.free(search_find);
     try std.testing.expectEqualStrings("Find", search_find);
 
-    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, snap);
+    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, .{});
     defer std.testing.allocator.free(tab_go);
     try std.testing.expectEqualStrings("Go", tab_go);
 
-    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, snap);
+    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, .{});
     defer std.testing.allocator.free(title_apply);
     try std.testing.expectEqualStrings("Apply", title_apply);
 }
@@ -35765,28 +36260,49 @@ test "win32 palette theme commit mutates pending without losing rollback source"
 test "win32 buildCommandPaletteOverlayLabel reflects palette state" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const snap = PaletteSnapshot.fromDefaults();
-
-    const idle = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "");
+    const idle = try buildCommandPaletteOverlayLabel(std.testing.allocator, "", .{});
     defer std.testing.allocator.free(idle);
     try std.testing.expectEqualStrings("Command", idle);
 
-    const exact = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "new_tab");
-    defer std.testing.allocator.free(exact);
-    try std.testing.expectEqualStrings("Run action", exact);
-
-    const unique = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "reload_");
-    defer std.testing.allocator.free(unique);
-    try std.testing.expectEqualStrings("Run action", unique);
-
-    const matches = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "toggle_");
+    const matches = try buildCommandPaletteOverlayLabel(
+        std.testing.allocator,
+        "0x96f",
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
     defer std.testing.allocator.free(matches);
-    // Multiple fuzzy matches — top is runnable, so label says "Run action".
-    try std.testing.expectEqualStrings("Run action", matches);
+    try std.testing.expectEqualStrings("Command 1", matches);
 
-    const invalid = try buildCommandPaletteOverlayLabel(std.testing.allocator, snap, "definitely_not_real");
+    const invalid = try buildCommandPaletteOverlayLabel(
+        std.testing.allocator,
+        "definitely_not_real",
+        .{},
+    );
     defer std.testing.allocator.free(invalid);
     try std.testing.expectEqualStrings("Command ?", invalid);
+}
+
+test "win32 command palette rich feedback never calls a theme an action miss" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const feedback = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "0x96f",
+        &.{},
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
+    );
+    defer std.testing.allocator.free(feedback);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "0x96f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "Bundled theme") != null);
+    try std.testing.expect(std.mem.indexOf(u8, feedback, "No matching action") == null);
+
+    const hidden_feedback = try buildCommandPaletteFeedbackText(
+        std.testing.allocator,
+        "0x96f",
+        &.{},
+        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
+    );
+    defer std.testing.allocator.free(hidden_feedback);
+    try std.testing.expect(std.mem.indexOf(u8, hidden_feedback, "window taller") != null);
 }
 
 test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {
@@ -35811,6 +36327,36 @@ test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {
     const reverse = commandPaletteCompletionCandidate(snap, "toggle_", first, true).?;
     try std.testing.expect(std.mem.startsWith(u8, reverse, "toggle_"));
     try std.testing.expect(!std.mem.eql(u8, reverse, first));
+}
+
+test "win32 rich palette completion cycles duplicate display text by stable id" {
+    var items: [2]PaletteItem = undefined;
+    var payloads: [2]PalettePayload = undefined;
+    var catalog = try PaletteCatalog.init(&items, &payloads);
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.tab, "tab-one"),
+            .title = "Same title",
+            .keywords = "same",
+        },
+        .payload = .{ .tab = 1 },
+    });
+    try catalog.append(.{
+        .item = .{
+            .id = win32_palette.catalog.stableStringId(.tab, "tab-two"),
+            .title = "Same title",
+            .keywords = "same",
+        },
+        .payload = .{ .tab = 2 },
+    });
+
+    var host: Host = undefined;
+    host.palette_catalog = catalog;
+    const first = host.richPaletteCompletionCandidate("same", "same", null, false).?;
+    const second = host.richPaletteCompletionCandidate("same", first.text, first.id, false).?;
+    try std.testing.expectEqualStrings("Same title", first.text);
+    try std.testing.expectEqualStrings("Same title", second.text);
+    try std.testing.expect(!first.id.eql(second.id));
 }
 
 test "win32 commandPaletteBannerText shows ready banner for valid action" {
