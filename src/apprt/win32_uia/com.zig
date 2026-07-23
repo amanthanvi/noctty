@@ -401,7 +401,8 @@ pub extern "uiautomationcore" fn UiaRaiseStructureChangedEvent(
 ) callconv(.winapi) HRESULT;
 
 /// Raise a property-changed event (value toggles, name updates, etc.).
-/// The VARIANTs are passed by value; uiautomationcore owns no copies.
+/// The VARIANTs are passed by value; callers retain ownership of BSTR storage
+/// and may free it after the synchronous raise returns.
 pub extern "uiautomationcore" fn UiaRaiseAutomationPropertyChangedEvent(
     provider: *IRawElementProviderSimple,
     propertyId: i32,
@@ -429,6 +430,7 @@ pub extern "oleaut32" fn SysAllocString(psz: [*:0]const u16) callconv(.winapi) B
 pub extern "oleaut32" fn SysAllocStringLen(psz: ?[*]const u16, len: u32) callconv(.winapi) BSTR;
 pub extern "oleaut32" fn SysFreeString(bstr: BSTR) callconv(.winapi) void;
 pub extern "oleaut32" fn SysStringLen(bstr: ?[*]const u16) callconv(.winapi) u32;
+pub extern "oleaut32" fn VariantClear(pvarg: *VARIANT) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayCreateVector(vt: u16, lLbound: i32, cElements: u32) callconv(.winapi) ?*SAFEARRAY;
 pub extern "oleaut32" fn SafeArrayPutElement(psa: *SAFEARRAY, rgIndices: *i32, pv: ?*anyopaque) callconv(.winapi) HRESULT;
 pub extern "oleaut32" fn SafeArrayGetElement(psa: *SAFEARRAY, rgIndices: *i32, pv: *anyopaque) callconv(.winapi) HRESULT;
@@ -472,4 +474,13 @@ test "VARIANT fromBstr stores pointer" {
     const v = VARIANT.fromBstr(@constCast(sample));
     try std.testing.expectEqual(@as(u16, VT_BSTR), v.vt);
     try std.testing.expectEqual(@as(?[*:0]u16, @constCast(sample)), v.value.bstr);
+}
+
+test "VariantClear releases BSTR storage and resets the tag" {
+    const bstr = SysAllocString(std.unicode.utf8ToUtf16LeStringLiteral("owned")) orelse
+        return error.OutOfMemory;
+    var value = VARIANT.fromBstr(bstr);
+
+    try std.testing.expectEqual(S_OK, VariantClear(&value));
+    try std.testing.expectEqual(@as(u16, VT_EMPTY), value.vt);
 }

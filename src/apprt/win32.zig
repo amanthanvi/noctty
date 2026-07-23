@@ -9884,6 +9884,13 @@ const Host = struct {
     }
 
     fn paletteListUiaState(self: *const Host) win32_uia.PaletteListState {
+        return self.paletteListUiaStateWithThreading(self.app.com_initialized);
+    }
+
+    fn paletteListUiaStateWithThreading(
+        self: *const Host,
+        use_com_threading: bool,
+    ) win32_uia.PaletteListState {
         return .{
             .ctx = @ptrCast(@constCast(self)),
             .name = &paletteListNameThunk,
@@ -9894,6 +9901,7 @@ const Host = struct {
             .row_id = &paletteListRowIdThunk,
             .select_row = &paletteListSelectRowThunk,
             .geometry = &paletteListGeometryThunk,
+            .use_com_threading = use_com_threading,
         };
     }
 
@@ -11803,12 +11811,17 @@ const Host = struct {
             GWLP_USERDATA,
             @as(LONG_PTR, @intCast(@intFromPtr(self))),
         );
-        self.palette_list_uia_provider = win32_uia.PaletteListProvider.create(
-            std.heap.page_allocator,
-            self.palette_list_hwnd.?,
-            self.paletteListUiaState(),
-        ) catch |err| blk: {
-            log.warn("palette UIA provider unavailable err={}", .{err});
+        self.palette_list_uia_provider = if (self.app.com_initialized)
+            win32_uia.PaletteListProvider.create(
+                std.heap.page_allocator,
+                self.palette_list_hwnd.?,
+                self.paletteListUiaState(),
+            ) catch |err| blk: {
+                log.warn("palette UIA provider unavailable err={}", .{err});
+                break :blk null;
+            }
+        else blk: {
+            log.warn("palette UIA provider disabled: UI thread is not a confirmed STA", .{});
             break :blk null;
         };
 
@@ -18607,6 +18620,7 @@ fn paletteListProc(
         },
         WM_GETOBJECT => {
             const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!host.app.com_initialized) return DefWindowProcW(hwnd, msg, wParam, lParam);
             if (host.palette_list_uia_provider) |provider| {
                 if (win32_uia.returnPaletteListProvider(
                     hwnd,
@@ -23810,8 +23824,6 @@ const TerminalUiaContext = struct {
             .release = release,
             .name = terminalUiaName,
             .value = terminalUiaValue,
-            .visible_value = terminalUiaVisibleValue,
-            .visible_range = terminalUiaVisibleRange,
             .snapshot = terminalUiaSnapshot,
             .focused = terminalUiaFocused,
         };
@@ -23833,25 +23845,6 @@ const TerminalUiaContext = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return try alloc.dupe(u8, self.cached_text);
-    }
-
-    fn terminalUiaVisibleValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        return try alloc.dupe(u8, self.cached_visible_text);
-    }
-
-    fn terminalUiaVisibleRange(ctx: *anyopaque, alloc: Allocator) !win32_uia.OffsetRange {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        _ = alloc;
-        return self.cached_visible_range;
     }
 
     fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
@@ -23973,7 +23966,7 @@ test "terminal UIA query-only clients refresh without event emission" {
     try std.testing.expect(subscribed.emit_events);
 }
 
-test "terminal UIA document and visible callbacks expose distinct cached ranges" {
+test "terminal UIA document callback and snapshot expose distinct cached ranges" {
     var context = TerminalUiaContext{
         .alloc = std.testing.allocator,
         .refcount = std.atomic.Value(u32).init(1),
@@ -23989,10 +23982,14 @@ test "terminal UIA document and visible callbacks expose distinct cached ranges"
 
     const document = try TerminalUiaContext.terminalUiaValue(&context, std.testing.allocator);
     defer std.testing.allocator.free(document);
-    const visible = try TerminalUiaContext.terminalUiaVisibleValue(&context, std.testing.allocator);
-    defer std.testing.allocator.free(visible);
+    const snapshot = try TerminalUiaContext.terminalUiaSnapshot(&context, std.testing.allocator);
+    defer std.testing.allocator.free(snapshot.geometry.?.cell_for_byte);
+    defer std.testing.allocator.free(snapshot.visible_text);
+    defer std.testing.allocator.free(snapshot.document_text);
     try std.testing.expectEqualStrings("history\nvisible", document);
-    try std.testing.expectEqualStrings("visible", visible);
+    try std.testing.expectEqualStrings("history\nvisible", snapshot.document_text);
+    try std.testing.expectEqualStrings("visible", snapshot.visible_text);
+    try std.testing.expectEqual(win32_uia.OffsetRange{ .start = 8, .end = 15 }, snapshot.visible_range);
 }
 
 pub const Surface = struct {
@@ -35335,7 +35332,8 @@ test "win32 palette UIA state exposes rows and can select a row" {
     host.palette_catalog = null;
     host.palette_theme_preview_original = null;
 
-    const state = host.paletteListUiaState();
+    const state = host.paletteListUiaStateWithThreading(true);
+    try std.testing.expect(state.use_com_threading);
     try std.testing.expectEqual(@as(usize, 4), state.row_count.?(state.ctx));
     try std.testing.expectEqual(@as(?usize, 1), state.selected_index.?(state.ctx));
 

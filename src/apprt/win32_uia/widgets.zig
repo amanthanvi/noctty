@@ -161,6 +161,7 @@ pub const PaletteListState = struct {
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+    use_com_threading: bool = false,
 };
 
 pub const PaletteListGeometry = struct {
@@ -178,8 +179,6 @@ pub const TerminalState = struct {
     release: ?*const fn (ctx: *anyopaque) void = null,
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
     value: *const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8,
-    visible_value: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8 = null,
-    visible_range: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!terminal_text.OffsetRange = null,
     snapshot: ?*const fn (ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!TerminalSnapshot = null,
     focused: *const fn (ctx: *anyopaque) bool,
     role: Role = .terminal,
@@ -431,10 +430,12 @@ pub const PaletteListProvider = struct {
     }
 
     fn get_ProviderOptions(
-        _: *com.IRawElementProviderSimple,
+        self_base: *com.IRawElementProviderSimple,
         out: *i32,
     ) callconv(.winapi) com.HRESULT {
-        out.* = com.ProviderOptions_ServerSideProvider;
+        const self = fromBase(self_base);
+        out.* = com.ProviderOptions_ServerSideProvider |
+            (if (self.state.use_com_threading) com.ProviderOptions_UseComThreading else 0);
         return com.S_OK;
     }
 
@@ -817,8 +818,10 @@ const PaletteRowProvider = struct {
     fn SelectionRelease(p: *com.ISelectionItemProvider) callconv(.winapi) u32 {
         return fromSelection(p).release();
     }
-    fn getProviderOptions(_: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
-        out.* = com.ProviderOptions_ServerSideProvider;
+    fn getProviderOptions(p: *com.IRawElementProviderSimple, out: *i32) callconv(.winapi) com.HRESULT {
+        const self = fromBase(p);
+        out.* = com.ProviderOptions_ServerSideProvider |
+            (if (self.parent.state.use_com_threading) com.ProviderOptions_UseComThreading else 0);
         return com.S_OK;
     }
     fn GetPatternProvider(p: *com.IRawElementProviderSimple, pattern: i32, out: *?*com.IUnknown) callconv(.winapi) com.HRESULT {
@@ -2249,6 +2252,7 @@ pub const TerminalProvider = struct {
     ) callconv(.winapi) com.HRESULT {
         const self = fromValue(self_value);
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.state.role != .edit) return com.UIA_E_INVALIDOPERATION;
         const set_value = self.state.set_value orelse return com.UIA_E_INVALIDOPERATION;
         const value_len = std.mem.len(value_w);
         const value = std.unicode.utf16LeToUtf8Alloc(self.alloc, value_w[0..value_len]) catch |err| {
@@ -2268,6 +2272,7 @@ pub const TerminalProvider = struct {
         const self = fromValue(self_value);
         out.* = null;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.state.role != .edit) return com.UIA_E_INVALIDOPERATION;
         out.* = self.allocCurrentValueBstr() orelse return com.E_OUTOFMEMORY;
         return com.S_OK;
     }
@@ -2279,6 +2284,7 @@ pub const TerminalProvider = struct {
         const self = fromValue(self_value);
         out.* = 0;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (self.state.role != .edit) return com.UIA_E_INVALIDOPERATION;
         out.* = if (self.state.set_value == null) 1 else 0;
         return com.S_OK;
     }
@@ -2456,12 +2462,7 @@ pub const TerminalProvider = struct {
 
     pub fn raiseValueChanged(self: *TerminalProvider) void {
         if (self.detached.load(.acquire) or self.state.role != .edit) return;
-        events.raisePropertyChanged(
-            &self.base,
-            constants.UIA_ValueValuePropertyId,
-            com.VARIANT.empty(),
-            com.VARIANT.empty(),
-        );
+        events.raiseCurrentStringPropertyChanged(&self.base, constants.UIA_ValueValuePropertyId);
     }
 
     fn singleVisibleRangeArray(self: *TerminalProvider, out: *?*com.SAFEARRAY) com.HRESULT {
@@ -2514,20 +2515,6 @@ pub const TerminalProvider = struct {
         );
     }
 
-    fn createRange(
-        self: *TerminalProvider,
-        range_offsets: terminal_text.OffsetRange,
-        out: *?*com.ITextRangeProvider,
-    ) com.HRESULT {
-        out.* = null;
-        const text = self.state.value(self.state.ctx, self.alloc) catch |err| {
-            std.log.warn("uia: TerminalProvider text snapshot failed err={}", .{err});
-            return com.E_OUTOFMEMORY;
-        };
-
-        return self.createRangeFromText(text, range_offsets, out);
-    }
-
     fn createRangeFromPoint(
         self: *TerminalProvider,
         point: com.UiaPoint,
@@ -2548,17 +2535,9 @@ pub const TerminalProvider = struct {
         );
     }
 
-    fn visibleText(self: *TerminalProvider) ![]u8 {
-        const value_fn = self.state.visible_value orelse self.state.value;
-        return value_fn(self.state.ctx, self.alloc) catch |err| {
-            std.log.warn("uia: TerminalProvider visible text snapshot failed err={}", .{err});
-            return err;
-        };
-    }
-
     fn terminalSnapshot(self: *TerminalProvider) !TerminalSnapshot {
         if (self.detached.load(.acquire)) return error.ElementNotAvailable;
-        const raw_snapshot = if (self.state.snapshot) |snapshot_fn| snapshot: {
+        var raw_snapshot = if (self.state.snapshot) |snapshot_fn| snapshot: {
             break :snapshot try snapshot_fn(self.state.ctx, self.alloc);
         } else snapshot: {
             const document_text = try self.state.value(self.state.ctx, self.alloc);
@@ -2577,8 +2556,18 @@ pub const TerminalProvider = struct {
         errdefer self.alloc.free(raw_snapshot.visible_text);
         errdefer if (raw_snapshot.geometry) |geometry| self.alloc.free(geometry.cell_for_byte);
 
-        const start = @min(raw_snapshot.visible_range.start, raw_snapshot.document_text.len);
-        const end = @min(@max(start, raw_snapshot.visible_range.end), raw_snapshot.document_text.len);
+        const raw_start = @min(raw_snapshot.visible_range.start, raw_snapshot.document_text.len);
+        const raw_end = @min(@max(raw_start, raw_snapshot.visible_range.end), raw_snapshot.document_text.len);
+        const visible_start = utf8BoundaryAtOrBefore(raw_snapshot.document_text, raw_start);
+        const visible_end = utf8BoundaryAtOrBefore(raw_snapshot.document_text, raw_end);
+        if (visible_start != raw_start or visible_end != raw_end) {
+            const normalized_visible_text = try self.alloc.dupe(
+                u8,
+                raw_snapshot.document_text[visible_start..visible_end],
+            );
+            self.alloc.free(raw_snapshot.visible_text);
+            raw_snapshot.visible_text = normalized_visible_text;
+        }
         const caret_offset = utf8BoundaryAtOrBefore(
             raw_snapshot.document_text,
             @min(raw_snapshot.caret_offset, raw_snapshot.document_text.len),
@@ -2594,7 +2583,7 @@ pub const TerminalProvider = struct {
         return .{
             .document_text = raw_snapshot.document_text,
             .visible_text = raw_snapshot.visible_text,
-            .visible_range = .{ .start = start, .end = end },
+            .visible_range = .{ .start = visible_start, .end = visible_end },
             .caret_offset = caret_offset,
             .selection_range = .{
                 .start = @min(selection_start, selection_end),
@@ -2629,25 +2618,6 @@ pub const TerminalProvider = struct {
 
         const visible_offset = byteOffsetForClientPoint(snapshot.visible_text, client_rect, client_point);
         return visibleOffsetToDocumentOffset(snapshot.document_text, snapshot.visible_range, visible_offset);
-    }
-
-    fn createRangeFromText(
-        self: *TerminalProvider,
-        text: []u8,
-        range_offsets: terminal_text.OffsetRange,
-        out: *?*com.ITextRangeProvider,
-    ) com.HRESULT {
-        const range = TerminalTextRangeProvider.createOwned(
-            self.alloc,
-            self,
-            text,
-            range_offsets,
-        ) catch |err| {
-            std.log.warn("uia: TerminalTextRangeProvider.create failed err={}", .{err});
-            return com.E_OUTOFMEMORY;
-        };
-        out.* = &range.base;
-        return com.S_OK;
     }
 
     fn createRangeFromSnapshot(
@@ -3717,6 +3687,32 @@ test "PaletteListProvider QueryInterface accepts IUnknown" {
     _ = PaletteListProvider.Release(&p.base); // Drop the QI ref.
 }
 
+test "palette list and row providers propagate COM threading options" {
+    var state_data = TestPaletteState{ .count = 1, .selected = 0 };
+    var provider = try PaletteListProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        state_data.state(),
+    );
+    defer _ = PaletteListProvider.Release(&provider.base);
+    const row = provider.createRow(0).?;
+    defer _ = PaletteRowProvider.Release(&row.base);
+
+    var list_options: i32 = 0;
+    var row_options: i32 = 0;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.get_ProviderOptions(&provider.base, &list_options));
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.getProviderOptions(&row.base, &row_options));
+    try std.testing.expectEqual(com.ProviderOptions_ServerSideProvider, list_options);
+    try std.testing.expectEqual(com.ProviderOptions_ServerSideProvider, row_options);
+
+    provider.state.use_com_threading = true;
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.get_ProviderOptions(&provider.base, &list_options));
+    try std.testing.expectEqual(com.S_OK, PaletteRowProvider.getProviderOptions(&row.base, &row_options));
+    const expected = com.ProviderOptions_ServerSideProvider | com.ProviderOptions_UseComThreading;
+    try std.testing.expectEqual(expected, list_options);
+    try std.testing.expectEqual(expected, row_options);
+}
+
 const TestPaletteState = struct {
     count: usize = 3,
     selected: ?usize = 1,
@@ -4224,7 +4220,7 @@ test "TerminalProvider visible ranges returns a SAFEARRAY" {
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(ranges != null);
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
-    try std.testing.expectEqual(@as(u32, 1), state_data.visible_value_calls);
+    try std.testing.expectEqual(@as(u32, 1), state_data.snapshot_calls);
 }
 
 test "TerminalProvider reports document control type" {
@@ -4956,7 +4952,7 @@ test "TerminalProvider RangeFromPoint returns document-coordinate offsets" {
     const concrete: *TerminalTextRangeProvider = @ptrCast(@alignCast(range.?));
     try std.testing.expectEqual(terminal_text.OffsetRange{ .start = 11, .end = 11 }, concrete.range);
     try std.testing.expectEqual(@as(u32, 1), state_data.value_calls);
-    try std.testing.expectEqual(@as(u32, 1), state_data.visible_value_calls);
+    try std.testing.expectEqual(@as(u32, 1), state_data.snapshot_calls);
 }
 
 test "TerminalProvider point mapping uses client coordinates and UTF-8 boundaries" {
@@ -5087,8 +5083,7 @@ test "TerminalProvider HelpTextProperty reports user-facing terminal help" {
 const TestTerminalStateData = struct {
     name_calls: u32 = 0,
     value_calls: u32 = 0,
-    visible_value_calls: u32 = 0,
-    visible_range_calls: u32 = 0,
+    snapshot_calls: u32 = 0,
     retains: u32 = 0,
     releases: u32 = 0,
     value_text: []const u8 = "hello\nworld",
@@ -5172,6 +5167,73 @@ const TestEditStateData = struct {
         };
     }
 };
+
+test "terminal role rejects direct Value vtable calls" {
+    var data = TestEditStateData{};
+    data.assign("must stay private");
+    var state = data.state();
+    state.role = .terminal;
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        state,
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var value: com.BSTR = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        TerminalProvider.GetValue(&provider.value_iface, &value),
+    );
+    try std.testing.expectEqual(@as(com.BSTR, null), value);
+
+    var read_only: com.BOOL = 1;
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        TerminalProvider.GetIsReadOnly(&provider.value_iface, &read_only),
+    );
+    try std.testing.expectEqual(@as(com.BOOL, 0), read_only);
+
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        TerminalProvider.SetValue(
+            &provider.value_iface,
+            std.unicode.utf8ToUtf16LeStringLiteral("must not replace").ptr,
+        ),
+    );
+    try std.testing.expectEqualStrings("must stay private", data.value());
+    try std.testing.expectEqual(@as(u32, 0), data.set_value_calls);
+}
+
+test "TerminalProvider normalizes visible range to UTF-8 boundaries" {
+    var data = TestTerminalStateData{
+        .value_text = "A🔥B界C",
+        .visible_value_text = "🔥B",
+        .visible_range = .{ .start = 2, .end = 8 },
+    };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var range: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(com.S_OK, provider.createVisibleRange(&range));
+    defer _ = TerminalTextRangeProvider.Release(range.?);
+
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 1, .end = 6 },
+        TerminalTextRangeProvider.fromBase(range.?).range,
+    );
+
+    var text: ?[*:0]u16 = null;
+    try std.testing.expectEqual(com.S_OK, TerminalTextRangeProvider.GetText(range.?, -1, &text));
+    defer com.SysFreeString(text);
+    const expected = std.unicode.utf8ToUtf16LeStringLiteral("🔥B");
+    try std.testing.expectEqual(@as(u32, expected.len), com.SysStringLen(text));
+    try std.testing.expectEqualSlices(u16, expected, text.?[0..expected.len]);
+}
 
 test "edit provider exposes Edit Text Text2 and writable Value contracts" {
     var data = TestEditStateData{};
@@ -5642,23 +5704,10 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
             return try alloc.dupe(u8, d.value_text);
         }
 
-        fn visibleValue(ctx: *anyopaque, alloc: std.mem.Allocator) ![]u8 {
-            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
-            d.visible_value_calls += 1;
-            return try alloc.dupe(u8, d.visible_value_text);
-        }
-
-        fn visibleRange(ctx: *anyopaque, _: std.mem.Allocator) !terminal_text.OffsetRange {
-            const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
-            d.visible_range_calls += 1;
-            return d.visible_range;
-        }
-
         fn snapshot(ctx: *anyopaque, alloc: std.mem.Allocator) !TerminalSnapshot {
             const d: *TestTerminalStateData = @ptrCast(@alignCast(ctx));
             d.value_calls += 1;
-            d.visible_value_calls += 1;
-            d.visible_range_calls += 1;
+            d.snapshot_calls += 1;
 
             const document_text = try alloc.dupe(u8, d.value_text);
             errdefer alloc.free(document_text);
@@ -5682,8 +5731,6 @@ fn testTerminalState(data: *TestTerminalStateData) TerminalState {
         .release = callbacks.release,
         .name = callbacks.name,
         .value = callbacks.value,
-        .visible_value = callbacks.visibleValue,
-        .visible_range = callbacks.visibleRange,
         .snapshot = callbacks.snapshot,
         .focused = callbacks.focused,
     };

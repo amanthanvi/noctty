@@ -110,16 +110,39 @@ fn allocNotificationBstr(
     return com.SysAllocStringLen(message_w.ptr, len) orelse error.OutOfMemory;
 }
 
-/// Notify clients that a widget's live accessible name changed. Empty
-/// VARIANTs intentionally ask clients to re-query the provider; this avoids
-/// allocating duplicate BSTRs solely for an event whose value is already
-/// available through `GetPropertyValue`.
 pub fn raiseNameChanged(provider: *com.IRawElementProviderSimple) void {
+    raiseCurrentStringPropertyChanged(provider, constants.UIA_NamePropertyId);
+}
+
+/// Query and publish the current BSTR for a string-valued property. UIA
+/// property-change handlers receive `newValue` directly; VT_EMPTY is not a
+/// request to re-query. The old value may be unavailable, so it remains empty.
+pub fn raiseCurrentStringPropertyChanged(
+    provider: *com.IRawElementProviderSimple,
+    property_id: i32,
+) void {
+    if (!clientsAreListening()) return;
+
+    var new_value = com.VARIANT.empty();
+    const query_hr = provider.vtbl.GetPropertyValue(provider, property_id, &new_value);
+    if (query_hr != com.S_OK) {
+        logIfFailed("UIA property value query", query_hr);
+        return;
+    }
+    defer logIfFailed("VariantClear(event property value)", com.VariantClear(&new_value));
+    if (new_value.vt != com.VT_BSTR or new_value.value.bstr == null) {
+        std.log.warn("uia: string property event has invalid new value property_id={d} vt={d}", .{
+            property_id,
+            new_value.vt,
+        });
+        return;
+    }
+
     raisePropertyChanged(
         provider,
-        constants.UIA_NamePropertyId,
+        property_id,
         com.VARIANT.empty(),
-        com.VARIANT.empty(),
+        new_value,
     );
 }
 
