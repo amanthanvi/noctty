@@ -2869,13 +2869,7 @@ pub const SettingsWindow = struct {
 
     fn syncClosePromptText(self: *SettingsWindow, announce: bool) void {
         const text = self.text_close_prompt orelse return;
-        setWindowTextUtf8(
-            text,
-            if (self.save_in_flight)
-                "Saving changes. Settings will close when saving finishes. Choose Keep editing to keep it open."
-            else
-                "Save changes before closing?",
-        );
+        setWindowTextUtf8(text, closePromptText(self.save_in_flight));
         if (announce) {
             NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, text, @bitCast(OBJID_CLIENT), @bitCast(CHILDID_SELF));
         }
@@ -3979,6 +3973,13 @@ fn closePromptCanCancel(visible: bool, close_posted: bool) bool {
     return visible and !close_posted;
 }
 
+fn closePromptText(save_in_flight: bool) []const u8 {
+    return if (save_in_flight)
+        "Saving changes. Settings will close when saving finishes. Choose Keep editing to keep it open."
+    else
+        "Save changes before closing?";
+}
+
 fn pendingCloseReopenAction(close_posted: bool, close_after_save: bool) PendingCloseReopenAction {
     if (!close_posted) return .none;
     return if (close_after_save) .cancel_saved_close else .cancel_discard_close;
@@ -4000,6 +4001,14 @@ test "settings dirty close transition is conservative and idempotent" {
     try std.testing.expectEqual(CloseRequestAction.focus_prompt, closeRequestAction(true, true, false));
     try std.testing.expectEqual(CloseRequestAction.ignore, closeRequestAction(true, true, true));
     try std.testing.expectEqual(CloseRequestAction.ignore, closeRequestAction(false, false, true));
+}
+
+test "settings close prompt uses one display and measurement text source" {
+    try std.testing.expectEqualStrings("Save changes before closing?", closePromptText(false));
+    try std.testing.expectEqualStrings(
+        "Saving changes. Settings will close when saving finishes. Choose Keep editing to keep it open.",
+        closePromptText(true),
+    );
 }
 
 test "settings dirty close actions prevent discard during save" {
@@ -4341,10 +4350,8 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
         if (previous_font) |font| _ = SelectObject(hdc, font);
     }
 
-    const text = if (self.save_in_flight)
-        std.unicode.utf8ToUtf16LeStringLiteral("Saving changes. Settings will close when saving finishes. Choose Keep editing to keep it open.")
-    else
-        std.unicode.utf8ToUtf16LeStringLiteral("Save changes before closing?");
+    var text_w: [256]u16 = undefined;
+    const text = std.mem.span(utf8ToW(&text_w, closePromptText(self.save_in_flight)));
     var measure = RECT{
         .left = 0,
         .top = 0,

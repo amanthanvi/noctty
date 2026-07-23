@@ -1479,6 +1479,11 @@ Assert-TextContract `
     -Context $win32Settings
 Assert-TextContract `
     -Content $win32SettingsText `
+    -Pattern '(?s)fn syncClosePromptText\(self: \*SettingsWindow.*?setWindowTextUtf8\(text, closePromptText\(self\.save_in_flight\)\).*?fn closePromptText\(save_in_flight: bool\) \[\]const u8.*?fn closePromptMeasuredHeight\(self: \*SettingsWindow.*?utf8ToW\(&text_w, closePromptText\(self\.save_in_flight\)\)' `
+    -Description 'settings close-prompt display and measurement share one text source' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
     -Pattern '(?s)pub fn open\(self: \*SettingsWindow\).*?pendingCloseReopenAction\(self\.close_posted, self\.close_after_save\).*?\.cancel_saved_close =>.*?self\.close_posted = false;.*?\.cancel_discard_close =>.*?self\.adoptCurrentConfig\(\).*?self\.refreshAllControls\(\).*?self\.close_posted = false;.*?self\.cancelClosePrompt\(\)' `
     -Description 'reopening settings cancels a stale posted close and honors an explicit discard' `
     -Context $win32Settings
