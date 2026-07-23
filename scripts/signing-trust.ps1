@@ -56,6 +56,25 @@ function Get-CertificateSpkiSha256 {
     }
 }
 
+function Test-SelfSignedTrustStatus {
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Signature] $Signature
+    )
+
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
+        return $true
+    }
+    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
+        return $true
+    }
+    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+        return $false
+    }
+    $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { '' }
+    return $message -match 'root certificate.*not trusted|self-signed|not trusted by the trust provider'
+}
+
 function Import-CodeSigningCertificate {
     param(
         [string] $PfxBase64,

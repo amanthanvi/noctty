@@ -17,6 +17,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
+. (Join-Path $PSScriptRoot "signing-trust.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -239,25 +240,6 @@ function ConvertTo-Boolean {
             throw "Expected WINDOWS_CODESIGN_TRUST_SELF_SIGNED to be one of: true, false, 1, 0, yes, no, on, off."
         }
     }
-}
-
-function Test-SelfSignedTrustStatus {
-    param([System.Management.Automation.Signature]$Signature)
-
-    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
-        return $true
-    }
-
-    if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
-        return $true
-    }
-
-    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
-        return $false
-    }
-
-    $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { "" }
-    return $message -match "root certificate.*not trusted|self-signed|not trusted by the trust provider"
 }
 
 function New-TemporaryPfxFile {

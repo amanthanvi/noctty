@@ -587,6 +587,7 @@ $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
@@ -595,6 +596,8 @@ $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
+$windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
 $win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
 $win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
@@ -1413,7 +1416,7 @@ if ($accessibilityHresultFunctions.Count -ne 2) {
     throw 'Accessibility harness must define exactly one exception-chain helper and one transient-HRESULT classifier.'
 }
 foreach ($function in $accessibilityHresultFunctions) {
-    Invoke-Expression $function.Extent.Text
+    . ([scriptblock]::Create($function.Extent.Text))
 }
 foreach ($knownHresult in @([int]0x80010001, [int]0x8001010A, [int]0x80040201)) {
     $knownException = [Runtime.InteropServices.COMException]::new('known transient', $knownHresult)
@@ -1563,9 +1566,11 @@ $paletteThemeFunctions = @($paletteThemeAst.FindAll({
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
 }, $true))
 $openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
+$themePaletteDismissedFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Test-ThemePaletteDismissed')
 $postHighContrastFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Invoke-PostHighContrastPresentationCanary')
-if ($paletteThemeFunctions.Count -ne 2 -or $openThemeQueryFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
-    throw 'Palette theme harness must define only its exact query and post-High-Contrast presentation functions.'
+if ($paletteThemeFunctions.Count -ne 3 -or $openThemeQueryFunctions.Count -ne 1 -or
+    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only its exact query, dismissal, and post-High-Contrast presentation functions.'
 }
 $openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
 if ($openThemeQueryParameters.Count -ne 4 -or
@@ -1925,7 +1930,7 @@ $highContrastDismissWaits = @($paletteThemeAst.FindAll({
     $node -is [System.Management.Automation.Language.CommandAst] -and
         $node.GetCommandName() -eq 'Wait-InteractiveWin11Until' -and
         $node.Extent.Text -match "-Description 'High Contrast palette dismissal'" -and
-        $node.Extent.Text -match 'Where-Object Id -eq 2002\)\.Count -eq 0'
+        $node.Extent.Text -match 'Test-ThemePaletteDismissed \$script:PaletteThemeHighContrastHost'
 }, $true))
 if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 1 -or
     $highContrastDismissWaits.Count -ne 1 -or
@@ -1943,6 +1948,8 @@ if ($highContrastCloseCalls.Count -ne 1 -or $highContrastDismissCalls.Count -ne 
 if ($paletteThemeHarnessText -notmatch 'Invoke-StatefulButton \$hostHwnd 2004 \$deadline \$run\.Process' -or
     $paletteThemeHarnessText -match 'Invoke-Stateful(?:Posted)?Command \$\w+ 2004' -or
     $paletteThemeHarnessText -notmatch "-Description 'theme palette dismissal after preview'" -or
+    $themePaletteDismissedFunctions[0].Body.Extent.Text -notmatch '(?s)\.Id -ge 2001 -and \$_.Id -le 2006.*?\.Count -eq 0' -or
+    $paletteThemeHarnessText -notmatch '(?s)-Description ''theme palette dismissal after preview''.*?Test-ThemePaletteDismissed \$hostHwnd.*?\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\s*Wait-InteractiveWin11Until -Deadline \$deadline -Description ''Dracula preview rollback''' -or
     $paletteThemeHarnessText -notmatch '\$themeListRect\.Top -lt \$themeSurfaceRect\.Top' -or
     $paletteThemeHarnessText -notmatch '(?s)Dracula preview rollback.*?\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)\s*\$edit = Open-ThemeQuery' -or
     $paletteThemeHarnessText -notmatch 'Dismissal changed persisted theme instead of reverting preview') {
@@ -2504,6 +2511,68 @@ Assert-TextContract `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
+$signedArtifactStep = Get-YamlStepText `
+    -Content $releaseWorkflowText `
+    -Name 'Verify signed release artifacts' `
+    -Source $releaseWorkflow
+$signingTrustConsumers = @(
+    [pscustomobject]@{
+        Context = $publishedReleaseVerifier
+        Content = $publishedReleaseVerifierText
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PSScriptRoot\s+[''"]signing-trust\.ps1[''"]\s*\)$'
+    },
+    [pscustomobject]@{
+        Context = $windowsPackager
+        Content = $windowsPackagerText
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PSScriptRoot\s+[''"]signing-trust\.ps1[''"]\s*\)$'
+    },
+    [pscustomobject]@{
+        Context = "$releaseWorkflow :: Verify signed release artifacts"
+        Content = ((Get-YamlLiteralRunScript `
+            -Content $signedArtifactStep `
+            -Source "$releaseWorkflow :: Verify signed release artifacts") -replace '\$\{\{[^}]+\}\}', 'GITHUB_EXPRESSION')
+        ImportPattern = '^\.\s+\(\s*Join-Path\s+\$PWD\s+[''"]scripts[/\\]signing-trust\.ps1[''"]\s*\)$'
+    }
+)
+$signingTrustSources = @(
+    [pscustomobject]@{ Context = $signingTrust; Content = $signingTrustText; IsCanonical = $true }
+) + @($signingTrustConsumers | ForEach-Object {
+    [pscustomobject]@{ Context = $_.Context; Content = $_.Content; IsCanonical = $false; ImportPattern = $_.ImportPattern }
+})
+foreach ($source in $signingTrustSources) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $source.Content,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "Signing-trust contract source does not parse: $($source.Context) ($($errors[0].Message))"
+    }
+    $definitions = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            ($node.Name -replace '^(?i)(?:global|script|local|private):', '') -eq 'Test-SelfSignedTrustStatus'
+    }, $true))
+    if ($source.IsCanonical) {
+        if ($definitions.Count -ne 1 -or
+            -not [object]::ReferenceEquals($definitions[0].Parent, $ast.EndBlock)) {
+            throw 'scripts/signing-trust.ps1 must own exactly one top-level Test-SelfSignedTrustStatus definition.'
+        }
+        continue
+    }
+    $imports = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
+            $node.Extent.Text.Trim() -match $source.ImportPattern -and
+            [object]::ReferenceEquals($node.Parent.Parent, $ast.EndBlock)
+    }, $true))
+    if ($definitions.Count -ne 0 -or $imports.Count -ne 1) {
+        throw "Authenticode self-signed trust classification must be imported once, not redefined: $($source.Context)"
+    }
+}
 foreach ($contract in @(
     @{ Pattern = '\$expectedNames\.Count -ne 8'; Description = 'published verifier requires the exact eight-asset set' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },

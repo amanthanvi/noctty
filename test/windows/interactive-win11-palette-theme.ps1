@@ -34,6 +34,12 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
     return $edit.Hwnd
 }
 
+function Test-ThemePaletteDismissed([IntPtr]$HostHwnd) {
+    return @(Get-StatefulChildren $HostHwnd | Where-Object {
+        $_.Id -ge 2001 -and $_.Id -le 2006
+    }).Count -eq 0
+}
+
 function Invoke-PostHighContrastPresentationCanary([string]$Name, [int]$ExpectedRgb) {
     $lastError = $null
     foreach ($attempt in 1..2) {
@@ -143,8 +149,9 @@ try {
     Invoke-StatefulButton $hostHwnd 2004 $deadline $run.Process
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'theme palette dismissal after preview' -Process $run.Process -Condition {
-        @(Get-StatefulChildren $hostHwnd | Where-Object Id -eq 2002).Count -eq 0
+        Test-ThemePaletteDismissed $hostHwnd
     }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula preview rollback' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*Dracula') { throw 'Dismissal changed persisted theme instead of reverting preview.' }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -209,7 +216,7 @@ try {
         $script:PaletteThemeHighContrastHost = $hcHost
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         Wait-InteractiveWin11Until -Deadline $deadline -Description 'High Contrast palette dismissal' -Process $hcRun.Process -Condition {
-            @(Get-StatefulChildren $script:PaletteThemeHighContrastHost | Where-Object Id -eq 2002).Count -eq 0
+            Test-ThemePaletteDismissed $script:PaletteThemeHighContrastHost
         }
         try {
             $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
