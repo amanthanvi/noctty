@@ -364,7 +364,7 @@ function Assert-ValidSignature {
             throw "Expected signer thumbprint $($SigningConfig.CertificateThumbprint) on $PathToCheck, but got $($signature.SignerCertificate.Thumbprint)."
         }
 
-        if (-not (Test-SelfSignedTrustStatus -Signature $signature)) {
+        if (-not (Test-SelfSignedTrustStatus -Signature $signature -Path $PathToCheck)) {
             throw "Expected a self-signed Authenticode signature on $PathToCheck, but got $($signature.Status): $($signature.StatusMessage)"
         }
 

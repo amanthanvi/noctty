@@ -34,6 +34,7 @@ pub const IID_IRawElementProviderFragment = GUID.parse("{F7063DA8-8359-439C-9297
 pub const IID_IRawElementProviderFragmentRoot = GUID.parse("{620CE2A5-AB8F-40A9-86CB-DE3C75599B58}");
 pub const IID_ISelectionProvider = GUID.parse("{FB8B03AF-3BDF-48D4-BD36-1A65793BE168}");
 pub const IID_ISelectionItemProvider = GUID.parse("{2ACAD808-B2D4-452D-A407-91FF1AD167B2}");
+pub const IID_IInvokeProvider = GUID.parse("{54FCB24B-E18E-47A2-B4D3-ECCBE77599A2}");
 pub const IID_IValueProvider = GUID.parse("{C7935180-6FB3-4201-B174-7DF73ADBF64A}");
 pub const IID_ITextProvider = GUID.parse("{3589C92C-63F3-4367-99BB-ADA653B77CF2}");
 pub const IID_ITextProvider2 = GUID.parse("{0DC5E6ED-3E16-4BF1-8F9A-A979878BC195}");
@@ -216,6 +217,19 @@ pub const ISelectionItemProviderVtbl = extern struct {
 
 pub const ISelectionItemProvider = extern struct {
     vtbl: *const ISelectionItemProviderVtbl,
+};
+
+// ── IInvokeProvider ────────────────────────────────────────────────────
+
+pub const IInvokeProviderVtbl = extern struct {
+    QueryInterface: *const fn (*IInvokeProvider, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IInvokeProvider) callconv(.winapi) u32,
+    Release: *const fn (*IInvokeProvider) callconv(.winapi) u32,
+    Invoke: *const fn (*IInvokeProvider) callconv(.winapi) HRESULT,
+};
+
+pub const IInvokeProvider = extern struct {
+    vtbl: *const IInvokeProviderVtbl,
 };
 
 // ── IValueProvider ─────────────────────────────────────────────────────

@@ -56,10 +56,212 @@ function Get-CertificateSpkiSha256 {
     }
 }
 
+function Initialize-WinghosttyAuthenticodeVerifier {
+    if ('WinghosttyAuthenticodeVerifier' -as [type]) {
+        return
+    }
+
+    try {
+        Add-Type -AssemblyName System.Security.Cryptography.Pkcs -ErrorAction Stop
+    }
+    catch {
+        # Windows PowerShell 5.1 exposes SignedCms from System.Security.
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+    }
+    $pkcsAssembly = [System.Security.Cryptography.Pkcs.SignedCms].Assembly.Location
+
+    Add-Type -ReferencedAssemblies $pkcsAssembly -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.Pkcs;
+
+public static class WinghosttyAuthenticodeVerifier
+{
+    private const uint CertQueryObjectFile = 1;
+    private const uint CertQueryContentFlagPkcs7SignedEmbed = 0x00000400;
+    private const uint CertQueryFormatFlagBinary = 0x00000002;
+    private const uint CmsgEncodedMessage = 29;
+    private const uint WtdUiNone = 2;
+    private const uint WtdChoiceFile = 1;
+    private const uint WtdRevocationCheckNone = 0x00000010;
+    private const uint WtdHashOnlyFlag = 0x00000200;
+    private const uint WtdCacheOnlyUrlRetrieval = 0x00001000;
+    private const uint WtdDisableMd2Md4 = 0x00002000;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WintrustFileInfo
+    {
+        internal uint cbStruct;
+        [MarshalAs(UnmanagedType.LPWStr)] internal string pcwszFilePath;
+        internal IntPtr hFile;
+        internal IntPtr pgKnownSubject;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WintrustData
+    {
+        internal uint cbStruct;
+        internal IntPtr pPolicyCallbackData;
+        internal IntPtr pSIPClientData;
+        internal uint dwUIChoice;
+        internal uint fdwRevocationChecks;
+        internal uint dwUnionChoice;
+        internal IntPtr pFile;
+        internal uint dwStateAction;
+        internal IntPtr hWVTStateData;
+        internal IntPtr pwszURLReference;
+        internal uint dwProvFlags;
+        internal uint dwUIContext;
+        internal IntPtr pSignatureSettings;
+    }
+
+    [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CryptQueryObject(
+        uint dwObjectType,
+        [MarshalAs(UnmanagedType.LPWStr)] string pvObject,
+        uint dwExpectedContentTypeFlags,
+        uint dwExpectedFormatTypeFlags,
+        uint dwFlags,
+        out uint pdwMsgAndCertEncodingType,
+        out uint pdwContentType,
+        out uint pdwFormatType,
+        out IntPtr phCertStore,
+        out IntPtr phMsg,
+        out IntPtr ppvContext);
+
+    [DllImport("crypt32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CryptMsgGetParam(
+        IntPtr hCryptMsg,
+        uint dwParamType,
+        uint dwIndex,
+        IntPtr pvData,
+        ref uint pcbData);
+
+    [DllImport("crypt32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CryptMsgClose(IntPtr hCryptMsg);
+
+    [DllImport("crypt32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CertCloseStore(IntPtr hCertStore, uint dwFlags);
+
+    [DllImport("wintrust.dll", ExactSpelling = true)]
+    private static extern int WinVerifyTrust(
+        IntPtr hwnd,
+        [In] ref Guid pgActionID,
+        ref WintrustData pWVTData);
+
+    public static bool VerifyEmbeddedSignatureAndFileHash(string path)
+    {
+        IntPtr certificateStore = IntPtr.Zero;
+        IntPtr message = IntPtr.Zero;
+        IntPtr context = IntPtr.Zero;
+        try
+        {
+            uint encoding;
+            uint contentType;
+            uint formatType;
+            if (!CryptQueryObject(
+                    CertQueryObjectFile,
+                    path,
+                    CertQueryContentFlagPkcs7SignedEmbed,
+                    CertQueryFormatFlagBinary,
+                    0,
+                    out encoding,
+                    out contentType,
+                    out formatType,
+                    out certificateStore,
+                    out message,
+                    out context))
+            {
+                return false;
+            }
+
+            uint encodedSize = 0;
+            if (!CryptMsgGetParam(message, CmsgEncodedMessage, 0, IntPtr.Zero, ref encodedSize) ||
+                encodedSize == 0)
+            {
+                return false;
+            }
+
+            IntPtr encoded = Marshal.AllocCoTaskMem((int)encodedSize);
+            try
+            {
+                if (!CryptMsgGetParam(message, CmsgEncodedMessage, 0, encoded, ref encodedSize))
+                {
+                    return false;
+                }
+                byte[] bytes = new byte[encodedSize];
+                Marshal.Copy(encoded, bytes, 0, (int)encodedSize);
+                SignedCms signedCms = new SignedCms();
+                signedCms.Decode(bytes);
+                // Verify the PKCS#7 signer without imposing machine trust roots.
+                signedCms.CheckSignature(true);
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(encoded);
+            }
+
+            WintrustFileInfo fileInfo = new WintrustFileInfo
+            {
+                cbStruct = (uint)Marshal.SizeOf(typeof(WintrustFileInfo)),
+                pcwszFilePath = path,
+                hFile = IntPtr.Zero,
+                pgKnownSubject = IntPtr.Zero,
+            };
+            IntPtr fileInfoPointer = Marshal.AllocCoTaskMem(Marshal.SizeOf(typeof(WintrustFileInfo)));
+            bool fileInfoMarshalled = false;
+            try
+            {
+                Marshal.StructureToPtr(fileInfo, fileInfoPointer, false);
+                fileInfoMarshalled = true;
+                WintrustData trustData = new WintrustData
+                {
+                    cbStruct = (uint)Marshal.SizeOf(typeof(WintrustData)),
+                    dwUIChoice = WtdUiNone,
+                    fdwRevocationChecks = 0,
+                    dwUnionChoice = WtdChoiceFile,
+                    pFile = fileInfoPointer,
+                    dwProvFlags = WtdRevocationCheckNone |
+                        WtdHashOnlyFlag |
+                        WtdCacheOnlyUrlRetrieval |
+                        WtdDisableMd2Md4,
+                };
+                Guid action = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+                return WinVerifyTrust(new IntPtr(-1), ref action, ref trustData) == 0;
+            }
+            finally
+            {
+                if (fileInfoMarshalled)
+                {
+                    Marshal.DestroyStructure(fileInfoPointer, typeof(WintrustFileInfo));
+                }
+                Marshal.FreeCoTaskMem(fileInfoPointer);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (message != IntPtr.Zero) CryptMsgClose(message);
+            if (certificateStore != IntPtr.Zero) CertCloseStore(certificateStore, 0);
+        }
+    }
+}
+'@
+}
+
 function Test-SelfSignedTrustStatus {
     param(
         [Parameter(Mandatory)]
-        [System.Management.Automation.Signature] $Signature
+        [System.Management.Automation.Signature] $Signature,
+        [Parameter(Mandatory)]
+        [string] $Path
     )
 
     if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
@@ -68,11 +270,14 @@ function Test-SelfSignedTrustStatus {
     if ($Signature.Status -eq [System.Management.Automation.SignatureStatus]::NotTrusted) {
         return $true
     }
-    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError) {
+    if ($Signature.Status -ne [System.Management.Automation.SignatureStatus]::UnknownError -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $false
     }
-    $message = if ($Signature.StatusMessage) { $Signature.StatusMessage } else { '' }
-    return $message -match 'root certificate.*not trusted|self-signed|not trusted by the trust provider'
+    Initialize-WinghosttyAuthenticodeVerifier
+    return [WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash(
+        [System.IO.Path]::GetFullPath($Path)
+    )
 }
 
 function Import-CodeSigningCertificate {

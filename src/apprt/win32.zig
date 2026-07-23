@@ -709,10 +709,17 @@ const PalettePresentation = struct {
 const PaletteListTransition = struct {
     relayout: bool,
     exposes_content: bool,
+    announce_no_matches: bool,
 };
+const PaletteNoMatchNotificationTarget = enum { list, edit };
 const PaletteViewport = struct {
     selected: usize,
     scroll: usize,
+};
+const PaletteRowColumns = struct {
+    title: RECT,
+    subtitle: RECT,
+    shortcut: RECT,
 };
 const PaletteCatalogConfigSource = enum {
     /// Catalog strings borrow the current `app.config`.
@@ -9720,6 +9727,29 @@ const Host = struct {
             self.palette_list_ranked_count,
             self.paletteListRowCapacity(),
         );
+        // Raise the structure event before relayout can hide the List HWND.
+        // Route the notification through the List only while it is visible;
+        // otherwise use the still-focused query Edit as the live sender.
+        var structure_announced_before_layout = false;
+        if (transition.announce_no_matches) {
+            if (self.palette_list_uia_provider) |provider| {
+                win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+                structure_announced_before_layout = true;
+            }
+            const list_visible = if (self.palette_list_hwnd) |hwnd| IsWindowVisible(hwnd) != 0 else false;
+            if (paletteNoMatchNotificationTarget(
+                self.palette_list_uia_provider != null,
+                list_visible,
+                self.overlay_edit_uia_provider != null,
+            )) |target| switch (target) {
+                .list => if (self.palette_list_uia_provider) |provider| {
+                    win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+                },
+                .edit => if (self.overlay_edit_uia_provider) |provider| {
+                    win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+                },
+            };
+        }
         if (transition.relayout) {
             self.layout() catch |err| {
                 log.warn("palette result-list relayout failed err={}", .{err});
@@ -9739,9 +9769,8 @@ const Host = struct {
 
         if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
         if (self.palette_list_uia_provider) |provider| {
-            win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
-            if (previous_result_count > 0 and self.palette_list_ranked_count == 0) {
-                win32_uia.events.raiseNotification(&provider.base, .other, "No matches");
+            if (!structure_announced_before_layout) {
+                win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
             }
         }
         self.announcePaletteSelection();
@@ -10468,14 +10497,13 @@ const Host = struct {
 
         const theme = &self.app.resolved_theme;
         fillSolidRect(hdc, rect, theme.overlay_bg);
+        defer drawRectBorder(hdc, rect, theme.overlay_border, @max(1, self.scaled(1)));
 
         if (self.palette_list_ranked_count == 0) return;
 
         const catalog = if (self.palette_catalog) |*value| value else return;
         const row_h = self.scaled(palette_row_height);
         const padding = self.scaled(12);
-        const title_width = self.scaled(200);
-        const hint_width = self.scaled(140);
 
         _ = SetBkMode(hdc, TRANSPARENT);
         const old_font: ?HGDIOBJ = if (self.chrome_font) |f| SelectObject(hdc, f) else null;
@@ -10504,36 +10532,33 @@ const Host = struct {
             const descriptor = catalog.descriptorFor(self.palette_list_ranked[i]) orelse continue;
             const item = descriptor.item;
 
-            const title_color = if (item.destructive)
-                theme.error_fg
-            else if (is_selected)
-                theme.button_active_fg
-            else
-                theme.text_primary;
+            const title_color = paletteRowTitleColor(
+                item.destructive,
+                is_selected,
+                theme.text_primary,
+                theme.button_active_fg,
+                theme.error_fg,
+            );
             const secondary_color = if (is_selected) theme.button_active_fg else theme.text_secondary;
+            const columns = paletteRowColumns(
+                row_rect,
+                padding,
+                self.scaled(200),
+                self.scaled(80),
+                self.scaled(140),
+            );
 
-            drawPaletteRowText(
-                hdc,
-                item.title,
-                .{
-                    .left = row_rect.left + padding,
-                    .top = row_rect.top,
-                    .right = row_rect.left + padding + title_width,
-                    .bottom = row_rect.bottom,
-                },
-                title_color,
-            );
-            drawPaletteRowText(
-                hdc,
-                if (item.enabled) item.subtitle else item.disabled_reason orelse "Unavailable",
-                .{
-                    .left = row_rect.left + padding + title_width,
-                    .top = row_rect.top,
-                    .right = row_rect.right - padding - hint_width,
-                    .bottom = row_rect.bottom,
-                },
-                secondary_color,
-            );
+            if (columns.title.right > columns.title.left) {
+                drawPaletteRowText(hdc, item.title, columns.title, title_color);
+            }
+            if (columns.subtitle.right > columns.subtitle.left) {
+                drawPaletteRowText(
+                    hdc,
+                    if (item.enabled) item.subtitle else item.disabled_reason orelse "Unavailable",
+                    columns.subtitle,
+                    secondary_color,
+                );
+            }
 
             // Keybind hint: look up the primary trigger for this action
             // in the reverse index that `Binding.Set` already maintains.
@@ -10541,19 +10566,14 @@ const Host = struct {
             // would otherwise stack up at every keystroke's WM_PAINT.
             var hint_buf: [96]u8 = undefined;
             const hint = self.paletteShortcutLabel(descriptor, &hint_buf);
-            if (hint) |hint_text| {
+            if (hint) |hint_text| if (columns.shortcut.right > columns.shortcut.left) {
                 drawPaletteRowText(
                     hdc,
                     hint_text,
-                    .{
-                        .left = row_rect.right - padding - hint_width,
-                        .top = row_rect.top,
-                        .right = row_rect.right - padding,
-                        .bottom = row_rect.bottom,
-                    },
+                    columns.shortcut,
                     secondary_color,
                 );
-            }
+            };
         }
     }
 
@@ -11892,10 +11912,16 @@ const Host = struct {
         if (mode == .command_palette) self.rebuildPaletteList();
         try self.layout();
         if (is_confirm) {
-            // Show body as hint label. Prefer the Accept button as
-            // the keyboard-focus target so the destructive action is
-            // one explicit click/Enter away — never auto-triggered.
-            _ = SetFocus(accept_hwnd);
+            // Show body as hint label. Prefer the visible Accept button,
+            // then the visible Cancel button, as the keyboard-focus target.
+            // The destructive action remains one explicit click/Enter away.
+            const initial_target = if (IsWindowVisible(accept_hwnd) != 0)
+                accept_hwnd
+            else if (IsWindowVisible(cancel_hwnd) != 0)
+                cancel_hwnd
+            else
+                return;
+            _ = SetFocus(initial_target);
         } else {
             _ = SetFocus(edit_hwnd);
             _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
@@ -12784,13 +12810,21 @@ const Host = struct {
 
     fn focusRelativeOverlayControl(self: *Host, current: HWND, reverse: bool) bool {
         const current_slot = self.overlayFocusSlot(current) orelse return false;
-        const target = switch (nextOverlayFocusSlot(self.overlay_mode, current_slot, reverse)) {
+        const target_slot = nextVisibleOverlayFocusSlot(
+            self.overlay_mode,
+            current_slot,
+            reverse,
+            self.overlay_edit_hwnd != null and IsWindowVisible(self.overlay_edit_hwnd.?) != 0,
+            self.overlay_accept_hwnd != null and IsWindowVisible(self.overlay_accept_hwnd.?) != 0,
+            self.overlay_cancel_hwnd != null and IsWindowVisible(self.overlay_cancel_hwnd.?) != 0,
+        ) orelse return false;
+        const target = switch (target_slot) {
             .edit => self.overlay_edit_hwnd,
             .accept => self.overlay_accept_hwnd,
             .cancel => self.overlay_cancel_hwnd,
         } orelse return false;
         _ = SetFocus(target);
-        return true;
+        return GetFocus() == target;
     }
 
     fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
@@ -13620,7 +13654,7 @@ const Host = struct {
                     return true;
                 }
                 if (self.palette_list_ranked_count > 0) {
-                    self.abortPaletteAction("Make the window taller to show and activate palette results.");
+                    self.abortPaletteAction("Make the window larger to show and activate palette results.");
                     return false;
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
@@ -14503,17 +14537,25 @@ const Host = struct {
             const overlay_y = self.tabBarHeight();
             const padding = self.scaled(host_overlay_padding);
             const label_w = self.scaled(host_overlay_label_width);
-            const accept_visible = overlayAcceptButtonVisible(self.overlay_mode);
-            const accept_w = if (accept_visible) self.scaled(host_overlay_accept_width) else 0;
-            const cancel_w = self.scaled(host_overlay_cancel_width);
+            const accept_button_w = self.scaled(host_overlay_accept_width);
+            const cancel_button_w = self.scaled(host_overlay_cancel_width);
+            const action_layout = overlayActionLayoutForWidth(
+                self.overlay_mode,
+                width,
+                padding,
+                cancel_button_w,
+                accept_button_w,
+                self.current_dpi,
+            );
             const edit_frame = overlayEditFrameRect(
                 width,
                 overlay_y,
                 padding,
                 label_w,
-                cancel_w,
-                if (accept_visible) accept_w + padding else 0,
+                action_layout.cancel_width,
+                action_layout.accept_reservation_width,
                 self.scaled(host_overlay_row_height),
+                self.current_dpi,
             );
             const edit_rect = overlayEditChildRectFromFrame(edit_frame, self.scaled(8), self.scaled(6));
             changed.* = applyChildRect(
@@ -14521,14 +14563,14 @@ const Host = struct {
                 &self.overlay_edit_placement,
                 edit_rect,
             ) or changed.*;
-            if (accept_visible) {
+            if (action_layout.accept_visible) {
                 changed.* = applyChildRect(
                     accept_hwnd,
                     &self.overlay_accept_placement,
                     childRect(
-                        width - cancel_w - accept_w - (padding * 2),
+                        action_layout.accept_x,
                         overlay_y + self.scaled(4),
-                        accept_w,
+                        action_layout.accept_width,
                         self.scaled(host_overlay_row_height),
                     ),
                 ) or changed.*;
@@ -14544,20 +14586,22 @@ const Host = struct {
                     false,
                 ) or changed.*;
             }
-            changed.* = applyChildRect(
-                cancel_hwnd,
-                &self.overlay_cancel_placement,
-                childRect(
-                    width - cancel_w - padding,
-                    overlay_y + self.scaled(4),
-                    cancel_w,
-                    self.scaled(host_overlay_row_height),
-                ),
-            ) or changed.*;
+            if (action_layout.cancel_visible) {
+                changed.* = applyChildRect(
+                    cancel_hwnd,
+                    &self.overlay_cancel_placement,
+                    childRect(
+                        action_layout.cancel_x,
+                        overlay_y + self.scaled(4),
+                        action_layout.cancel_width,
+                        self.scaled(host_overlay_row_height),
+                    ),
+                ) or changed.*;
+            }
             changed.* = applyChildVisibility(
                 cancel_hwnd,
                 &self.overlay_cancel_placement,
-                true,
+                action_layout.cancel_visible,
             ) or changed.*;
 
             if (self.overlay_mode == .command_palette) {
@@ -14565,21 +14609,30 @@ const Host = struct {
                     // Anchor the list directly under the EDIT, left-
                     // aligned with it and right-aligned with the buttons
                     // so it reads as part of the same visual card.
-                    const list_x = padding + label_w + self.scaled(8);
-                    const list_width = @max(
-                        self.scaled(120),
-                        width - list_x - padding,
+                    const label_reservation = overlayLabelReservation(
+                        width,
+                        padding,
+                        label_w,
+                        action_layout.cancel_width,
+                        0,
+                        self.current_dpi,
                     );
+                    const list_x = padding + label_reservation + self.scaled(8);
                     // Keep results below the complete overlay/feedback band.
                     // The old row-height + 12 anchor started at 36 px while
                     // feedback was still painting there and terminal content
                     // began at 58 px, producing the visible overlap reported
                     // in the palette theme screenshot.
                     const list_y = overlay_y + self.scaled(host_overlay_height);
-                    const row_capacity = paletteVisibleRowCapacity(
-                        rect.bottom - list_y - self.scaled(8),
-                        self.scaled(palette_row_height),
-                    );
+                    const list_width_bounds = paletteListRect(width, list_x, padding, list_y, 0);
+                    const has_list_width = paletteListWidthIsReadable(list_width_bounds, self.scaled(160));
+                    const row_capacity = if (has_list_width)
+                        paletteVisibleRowCapacity(
+                            rect.bottom - list_y - self.scaled(8),
+                            self.scaled(palette_row_height),
+                        )
+                    else
+                        0;
                     const previous_visible_rows = self.palette_list_visible_rows;
                     self.palette_list_visible_rows = @min(
                         self.palette_list_ranked_count,
@@ -14604,12 +14657,12 @@ const Host = struct {
                     changed.* = applyChildRect(
                         list_hwnd,
                         &self.palette_list_placement,
-                        childRect(list_x, list_y, list_width, list_height),
+                        paletteListRect(width, list_x, padding, list_y, list_height),
                     ) or changed.*;
                     changed.* = applyChildVisibility(
                         list_hwnd,
                         &self.palette_list_placement,
-                        self.palette_list_visible_rows > 0,
+                        self.palette_list_visible_rows > 0 and has_list_width,
                     ) or changed.*;
                 }
             } else if (self.palette_list_hwnd) |list_hwnd| {
@@ -15190,9 +15243,28 @@ const Host = struct {
                 self.chrome_text_dirty.overlay = false;
             }
             _ = SetBkMode(hdc, TRANSPARENT);
+            const overlay_padding = self.scaled(host_overlay_padding);
+            const overlay_accept_button_w = self.scaled(host_overlay_accept_width);
+            const overlay_cancel_button_w = self.scaled(host_overlay_cancel_width);
+            const overlay_action_layout = overlayActionLayoutForWidth(
+                self.overlay_mode,
+                client_rect.right,
+                overlay_padding,
+                overlay_cancel_button_w,
+                overlay_accept_button_w,
+                self.current_dpi,
+            );
+            const overlay_label_reservation = overlayLabelReservation(
+                client_rect.right,
+                overlay_padding,
+                self.scaled(host_overlay_label_width),
+                overlay_action_layout.cancel_width,
+                overlay_action_layout.accept_reservation_width,
+                self.current_dpi,
+            );
             var overlay_label_x: i32 = self.scaled(host_overlay_padding) + self.scaled(10);
             var overlay_label_color: u32 = theme.overlay_label_fg;
-            if (self.overlay_mode == .profile) {
+            if (overlay_label_reservation > 0 and self.overlay_mode == .profile) {
                 if (self.selectedProfile()) |profile| {
                     const badge_w = self.cached_overlay_paint_badge_w orelse return;
                     const badge_width = self.scaled(16) + @as(i32, @intCast(badge_w.len * @as(usize, @intCast(self.scaled(7)))));
@@ -15219,29 +15291,27 @@ const Host = struct {
                 }
             }
             _ = SetTextColor(hdc, overlay_label_color);
-            if (self.cached_overlay_paint_label_w) |overlay_label_w| {
+            if (overlay_label_reservation > 0) if (self.cached_overlay_paint_label_w) |overlay_label_w| {
                 textOutWz(hdc, overlay_label_x, overlay_rect.top + self.scaled(7), overlay_label_w);
-            }
+            };
 
-            const overlay_padding = self.scaled(host_overlay_padding);
-            const overlay_accept_w = if (overlayAcceptButtonVisible(self.overlay_mode))
-                self.scaled(host_overlay_accept_width) + overlay_padding
-            else
-                0;
-            const edit_frame = overlayEditFrameRect(
-                client_rect.right,
-                tab_h,
-                overlay_padding,
-                self.scaled(host_overlay_label_width),
-                self.scaled(host_overlay_cancel_width),
-                overlay_accept_w,
-                self.scaled(host_overlay_row_height),
-            );
-            const overlay_edit_focused = if (self.overlay_edit_hwnd) |edit_hwnd|
-                GetFocus() == edit_hwnd
-            else
-                false;
-            drawRoundedRect(hdc, edit_frame, theme.edit_frame_bg, overlayEditBorderColor(self.overlay_mode, overlay_edit_focused, theme.is_dark), self.scaled(4));
+            if (overlayEditFrameVisible(self.overlay_mode)) {
+                const edit_frame = overlayEditFrameRect(
+                    client_rect.right,
+                    tab_h,
+                    overlay_padding,
+                    self.scaled(host_overlay_label_width),
+                    overlay_action_layout.cancel_width,
+                    overlay_action_layout.accept_reservation_width,
+                    self.scaled(host_overlay_row_height),
+                    self.current_dpi,
+                );
+                const overlay_edit_focused = if (self.overlay_edit_hwnd) |edit_hwnd|
+                    GetFocus() == edit_hwnd
+                else
+                    false;
+                drawRoundedRect(hdc, edit_frame, theme.edit_frame_bg, overlayEditBorderColor(self.overlay_mode, overlay_edit_focused, theme.is_dark), self.scaled(4));
+            }
 
             _ = SetTextColor(hdc, if (self.overlay_mode == .profile and self.banner_text == null)
                 if (self.selectedProfile()) |profile|
@@ -16389,23 +16459,133 @@ fn overlayEditFrameRect(
     cancel_w: i32,
     accept_reservation_w: i32,
     row_h: i32,
+    dpi: u32,
 ) RECT {
-    const left = padding + label_w;
-    const right = width - cancel_w - accept_reservation_w - (padding * 2) - 6;
+    const top_offset = Host.scaledBy(4, dpi);
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const effective_label_w = overlayLabelReservation(
+        width,
+        padding,
+        label_w,
+        cancel_w,
+        accept_reservation_w,
+        dpi,
+    );
+    const bounded_width = @max(0, width);
+    const raw_right = width - cancel_w - accept_reservation_w - (padding * 2) - right_gap;
+    const right = @min(bounded_width, @max(@min(bounded_width, min_edit_width), raw_right));
+    const left = @min(
+        @max(0, padding + effective_label_w),
+        @max(0, right - min_edit_width),
+    );
     return .{
         .left = left,
-        .top = overlay_y + 4,
-        .right = @max(left + 24, right),
-        .bottom = overlay_y + 4 + row_h,
+        .top = overlay_y + top_offset,
+        .right = right,
+        .bottom = overlay_y + top_offset + row_h,
+    };
+}
+
+fn overlayLabelReservation(
+    width: i32,
+    padding: i32,
+    desired_label_w: i32,
+    cancel_w: i32,
+    accept_reservation_w: i32,
+    dpi: u32,
+) i32 {
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const desired = @max(0, desired_label_w);
+    const available_before_actions = width - @max(0, cancel_w) - @max(0, accept_reservation_w) -
+        2 * @max(0, padding) - right_gap;
+    return if (available_before_actions - @max(0, padding) >= desired + min_edit_width) desired else 0;
+}
+
+const OverlayActionVisibility = struct {
+    accept: bool,
+    cancel: bool,
+};
+
+fn overlayActionVisibilityForWidth(
+    width: i32,
+    padding: i32,
+    cancel_w: i32,
+    accept_w: i32,
+    accept_requested: bool,
+    dpi: u32,
+) OverlayActionVisibility {
+    const bounded_padding = @max(0, padding);
+    const right_gap = Host.scaledBy(6, dpi);
+    const min_edit_width = Host.scaledBy(24, dpi);
+    const cancel = width >= @max(0, cancel_w) + 3 * bounded_padding + right_gap + min_edit_width;
+    const accept = cancel and accept_requested and
+        width >= @max(0, cancel_w) + @max(0, accept_w) + 4 * bounded_padding + right_gap + min_edit_width;
+    return .{ .accept = accept, .cancel = cancel };
+}
+
+const OverlayActionLayout = struct {
+    accept_visible: bool,
+    cancel_visible: bool,
+    compact_cancel: bool,
+    accept_x: i32,
+    cancel_x: i32,
+    accept_width: i32,
+    cancel_width: i32,
+    accept_reservation_width: i32,
+};
+
+fn overlayActionLayoutForWidth(
+    mode: HostOverlayMode,
+    width: i32,
+    padding: i32,
+    cancel_button_w: i32,
+    accept_button_w: i32,
+    dpi: u32,
+) OverlayActionLayout {
+    const bounded_padding = @max(0, padding);
+    const visibility = overlayActionVisibilityForWidth(
+        width,
+        bounded_padding,
+        cancel_button_w,
+        accept_button_w,
+        overlayAcceptButtonVisible(mode),
+        dpi,
+    );
+    const compact_cancel = mode == .confirm and !visibility.cancel and width > 0;
+    const compact_inset = if (compact_cancel)
+        @min(bounded_padding, @divTrunc(width - 1, 2))
+    else
+        bounded_padding;
+    const cancel_visible = visibility.cancel or compact_cancel;
+    const accept_width = if (visibility.accept) @max(0, accept_button_w) else 0;
+    const cancel_width = if (compact_cancel)
+        width - 2 * compact_inset
+    else if (cancel_visible)
+        @max(0, cancel_button_w)
+    else
+        0;
+    return .{
+        .accept_visible = visibility.accept,
+        .cancel_visible = cancel_visible,
+        .compact_cancel = compact_cancel,
+        .accept_x = @max(0, width - cancel_width - accept_width - 2 * bounded_padding),
+        .cancel_x = if (compact_cancel) compact_inset else width - cancel_width - bounded_padding,
+        .accept_width = accept_width,
+        .cancel_width = cancel_width,
+        .accept_reservation_width = if (visibility.accept) accept_width + bounded_padding else 0,
     };
 }
 
 fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RECT {
+    const left = @min(frame.right, frame.left + @max(0, inset_x));
+    const top = @min(frame.bottom, frame.top + @max(0, inset_y));
     return .{
-        .left = frame.left + inset_x,
-        .top = frame.top + inset_y,
-        .right = @max(frame.left + inset_x + 1, frame.right - inset_x),
-        .bottom = @max(frame.top + inset_y + 1, frame.bottom - inset_y),
+        .left = left,
+        .top = top,
+        .right = @max(left, frame.right - @max(0, inset_x)),
+        .bottom = @max(top, frame.bottom - @max(0, inset_y)),
     };
 }
 
@@ -16456,6 +16636,98 @@ fn paletteListTransition(
     return .{
         .relayout = previous_rows != next_rows,
         .exposes_content = next_rows < previous_rows,
+        .announce_no_matches = previous_count > 0 and next_count == 0,
+    };
+}
+
+fn paletteNoMatchNotificationTarget(
+    list_available: bool,
+    list_visible: bool,
+    edit_available: bool,
+) ?PaletteNoMatchNotificationTarget {
+    if (list_available and list_visible) return .list;
+    if (edit_available) return .edit;
+    if (list_available) return .list;
+    return null;
+}
+
+fn paletteListRect(
+    client_width: i32,
+    desired_left: i32,
+    right_padding: i32,
+    top: i32,
+    height: i32,
+) RECT {
+    const client_right = @max(0, client_width);
+    const right = @max(0, client_right - @max(0, right_padding));
+    const left = @min(@max(0, desired_left), right);
+    return .{
+        .left = left,
+        .top = top,
+        .right = right,
+        .bottom = top + @max(0, height),
+    };
+}
+
+fn paletteListWidthIsReadable(rect: RECT, minimum_width: i32) bool {
+    return rect.right - rect.left >= @max(1, minimum_width);
+}
+
+fn paletteRowTitleColor(
+    destructive: bool,
+    selected: bool,
+    normal_color: u32,
+    selected_color: u32,
+    destructive_color: u32,
+) u32 {
+    if (destructive) return destructive_color;
+    if (selected) return selected_color;
+    return normal_color;
+}
+
+fn paletteRowColumns(
+    row: RECT,
+    padding: i32,
+    preferred_title_width: i32,
+    minimum_subtitle_width: i32,
+    preferred_shortcut_width: i32,
+) PaletteRowColumns {
+    const left = @min(@max(row.left, row.left + @max(0, padding)), row.right);
+    const right = @max(left, row.right - @max(0, padding));
+    const available = right - left;
+    const title_width = @min(available, @max(0, preferred_title_width));
+    const subtitle_reservation = @min(
+        available - title_width,
+        @max(0, minimum_subtitle_width),
+    );
+    const shortcut_room = available - title_width - subtitle_reservation;
+    const preferred_shortcut = @max(0, preferred_shortcut_width);
+    const minimum_legible_shortcut = @min(preferred_shortcut, @max(1, minimum_subtitle_width));
+    const shortcut_width = if (shortcut_room >= minimum_legible_shortcut)
+        @min(shortcut_room, preferred_shortcut)
+    else
+        0;
+    const title_right = left + title_width;
+    const shortcut_left = right - shortcut_width;
+    return .{
+        .title = .{
+            .left = left,
+            .top = row.top,
+            .right = title_right,
+            .bottom = row.bottom,
+        },
+        .subtitle = .{
+            .left = title_right,
+            .top = row.top,
+            .right = shortcut_left,
+            .bottom = row.bottom,
+        },
+        .shortcut = .{
+            .left = shortcut_left,
+            .top = row.top,
+            .right = right,
+            .bottom = row.bottom,
+        },
     };
 }
 
@@ -16884,6 +17156,15 @@ fn fillSolidRect(hdc: HDC, rect: RECT, color: u32) void {
     const brush = GetStockObject(DC_BRUSH) orelse return;
     _ = SetDCBrushColor(hdc, color);
     _ = FillRect(hdc, &rect, brush);
+}
+
+fn drawRectBorder(hdc: HDC, rect: RECT, color: u32, thickness: i32) void {
+    if (rect.right <= rect.left or rect.bottom <= rect.top or thickness <= 0) return;
+    const stroke = @min(thickness, @min(rect.right - rect.left, rect.bottom - rect.top));
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.top + stroke }, color);
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.bottom - stroke, .right = rect.right, .bottom = rect.bottom }, color);
+    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top + stroke, .right = rect.left + stroke, .bottom = rect.bottom - stroke }, color);
+    fillSolidRect(hdc, .{ .left = rect.right - stroke, .top = rect.top + stroke, .right = rect.right, .bottom = rect.bottom - stroke }, color);
 }
 
 fn utf16GdiTextLen(text: [:0]const u16) i32 {
@@ -18552,6 +18833,10 @@ fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
     return mode != .command_palette;
 }
 
+fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
+    return mode != .confirm;
+}
+
 const OverlayFocusSlot = enum { edit, accept, cancel };
 
 fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
@@ -18568,6 +18853,40 @@ fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, revers
         .accept => .cancel,
         .cancel => .edit,
     };
+}
+
+fn overlayFocusSlotVisible(
+    slot: OverlayFocusSlot,
+    edit_visible: bool,
+    accept_visible: bool,
+    cancel_visible: bool,
+) bool {
+    return switch (slot) {
+        .edit => edit_visible,
+        .accept => accept_visible,
+        .cancel => cancel_visible,
+    };
+}
+
+fn nextVisibleOverlayFocusSlot(
+    mode: HostOverlayMode,
+    current: OverlayFocusSlot,
+    reverse: bool,
+    edit_visible: bool,
+    accept_visible: bool,
+    cancel_visible: bool,
+) ?OverlayFocusSlot {
+    var candidate = current;
+    for (0..3) |_| {
+        candidate = nextOverlayFocusSlot(mode, candidate, reverse);
+        if (candidate != current and overlayFocusSlotVisible(
+            candidate,
+            edit_visible,
+            accept_visible,
+            cancel_visible,
+        )) return candidate;
+    }
+    return null;
 }
 
 fn inspectorChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
@@ -20466,7 +20785,7 @@ fn buildCommandPaletteFeedbackText(
     if (!presentation.available) {
         return try std.fmt.allocPrint(
             alloc,
-            "{d} matches. Make the window taller to show and activate results.",
+            "{d} matches. Make the window larger to show and activate results.",
             .{presentation.match_count},
         );
     }
@@ -35042,20 +35361,55 @@ test "win32 palette list geometry clamps rows and detects exposed content" {
     try std.testing.expectEqual(@as(usize, 0), paletteVisibleRowCapacity(10, 36));
 
     try std.testing.expectEqual(
-        PaletteListTransition{ .relayout = true, .exposes_content = false },
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = false,
+            .announce_no_matches = false,
+        },
         paletteListTransition(0, 1, 7),
     );
     try std.testing.expectEqual(
-        PaletteListTransition{ .relayout = true, .exposes_content = true },
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = true,
+            .announce_no_matches = false,
+        },
         paletteListTransition(7, 1, 7),
     );
     try std.testing.expectEqual(
-        PaletteListTransition{ .relayout = true, .exposes_content = true },
+        PaletteListTransition{
+            .relayout = true,
+            .exposes_content = true,
+            .announce_no_matches = true,
+        },
         paletteListTransition(1, 0, 7),
     );
     try std.testing.expectEqual(
-        PaletteListTransition{ .relayout = false, .exposes_content = false },
+        PaletteListTransition{
+            .relayout = false,
+            .exposes_content = false,
+            .announce_no_matches = false,
+        },
         paletteListTransition(20, 10, 7),
+    );
+    try std.testing.expect(
+        paletteListTransition(1, 0, 0).announce_no_matches,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.list,
+        paletteNoMatchNotificationTarget(true, true, true).?,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.edit,
+        paletteNoMatchNotificationTarget(true, false, true).?,
+    );
+    try std.testing.expectEqual(
+        PaletteNoMatchNotificationTarget.list,
+        paletteNoMatchNotificationTarget(true, false, false).?,
+    );
+    try std.testing.expectEqual(
+        @as(?PaletteNoMatchNotificationTarget, null),
+        paletteNoMatchNotificationTarget(false, false, false),
     );
 
     try std.testing.expectEqual(
@@ -35074,6 +35428,90 @@ test "win32 palette list geometry clamps rows and detects exposed content" {
         PaletteViewport{ .selected = 6, .scroll = 0 },
         clampPaletteViewport(10, 7, clampPaletteViewport(10, 0, 6, 4).selected, 0),
     );
+}
+
+test "win32 palette list and columns stay inside narrow client bounds" {
+    const list = paletteListRect(160, 220, 12, 58, 36);
+    try std.testing.expectEqual(RECT{
+        .left = 148,
+        .top = 58,
+        .right = 148,
+        .bottom = 94,
+    }, list);
+
+    const wide = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 560, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 12), wide.title.left);
+    try std.testing.expectEqual(@as(i32, 212), wide.title.right);
+    try std.testing.expectEqual(@as(i32, 408), wide.shortcut.left);
+    try std.testing.expectEqual(@as(i32, 548), wide.shortcut.right);
+
+    // Shortcut collapses first while title and the minimum subtitle lane
+    // remain intact.
+    const narrowing = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 324, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 212), narrowing.title.right);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.subtitle.right);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.shortcut.left);
+    try std.testing.expectEqual(@as(i32, 312), narrowing.shortcut.right);
+
+    // Once the shortcut is gone, subtitle then title consume only the
+    // remaining nonnegative space.
+    const narrow = paletteRowColumns(
+        .{ .left = 0, .top = 0, .right = 180, .bottom = 36 },
+        12,
+        200,
+        80,
+        140,
+    );
+    try std.testing.expectEqual(@as(i32, 168), narrow.title.right);
+    try std.testing.expectEqual(narrow.title.right, narrow.subtitle.left);
+    try std.testing.expectEqual(narrow.subtitle.left, narrow.subtitle.right);
+    try std.testing.expectEqual(narrow.subtitle.right, narrow.shortcut.left);
+    try std.testing.expectEqual(narrow.shortcut.left, narrow.shortcut.right);
+    try std.testing.expect(narrow.title.left <= narrow.title.right);
+    try std.testing.expect(narrow.title.right <= narrow.subtitle.left);
+    try std.testing.expect(narrow.subtitle.right <= narrow.shortcut.left);
+    try std.testing.expect(narrow.shortcut.right <= 180);
+
+    for ([_]u32{ 96, 192, 288 }) |dpi| {
+        for ([_]i32{ 120, 240, 364, 600 }) |logical_width| {
+            const physical_width = Host.scaledBy(logical_width, dpi);
+            const scaled_padding = Host.scaledBy(12, dpi);
+            const columns = paletteRowColumns(
+                .{ .left = 0, .top = 0, .right = physical_width, .bottom = Host.scaledBy(36, dpi) },
+                scaled_padding,
+                Host.scaledBy(200, dpi),
+                Host.scaledBy(80, dpi),
+                Host.scaledBy(140, dpi),
+            );
+            try std.testing.expect(columns.title.left >= 0);
+            try std.testing.expect(columns.title.left <= columns.title.right);
+            try std.testing.expect(columns.title.right <= columns.subtitle.left);
+            try std.testing.expect(columns.subtitle.left <= columns.subtitle.right);
+            try std.testing.expect(columns.subtitle.right <= columns.shortcut.left);
+            try std.testing.expect(columns.shortcut.left <= columns.shortcut.right);
+            try std.testing.expect(columns.shortcut.right <= physical_width);
+        }
+    }
+
+    try std.testing.expect(!paletteListWidthIsReadable(list, 160));
+    try std.testing.expect(paletteListWidthIsReadable(
+        .{ .left = 20, .top = 0, .right = 180, .bottom = 36 },
+        160,
+    ));
+    try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, true, 0x11, 0x22, 0x33));
+    try std.testing.expectEqual(@as(u32, 0x33), paletteRowTitleColor(true, false, 0x11, 0x22, 0x33));
 }
 
 test "win32 surface size-change repaint stays synchronous during live resize" {
@@ -35964,6 +36402,100 @@ test "win32 overlay edit child rect preserves frame border" {
     try std.testing.expect(child.bottom < frame.bottom);
 }
 
+test "win32 overlay edit frame offsets scale with DPI" {
+    const dpis = [_]u32{ 96, 192, 288 };
+    for (dpis, 1..) |dpi, scale| {
+        const scale_i32: i32 = @intCast(scale);
+        const padding = 10 * scale_i32;
+        const label_w = 100 * scale_i32;
+        const cancel_w = 80 * scale_i32;
+        const row_h = 30 * scale_i32;
+        const overlay_y = 20 * scale_i32;
+        const frame = overlayEditFrameRect(
+            800 * scale_i32,
+            overlay_y,
+            padding,
+            label_w,
+            cancel_w,
+            0,
+            row_h,
+            dpi,
+        );
+        try std.testing.expectEqual(overlay_y + 4 * scale_i32, frame.top);
+        try std.testing.expectEqual(frame.top + row_h, frame.bottom);
+        try std.testing.expectEqual(
+            800 * scale_i32 - cancel_w - padding * 2 - 6 * scale_i32,
+            frame.right,
+        );
+    }
+
+    const narrow = overlayEditFrameRect(220, 20, 10, 100, 80, 0, 30, 96);
+    const close_left = 220 - 80 - 10;
+    try std.testing.expectEqual(@as(i32, 10), narrow.left);
+    try std.testing.expect(narrow.right <= close_left);
+    try std.testing.expect(narrow.right >= narrow.left);
+
+    for ([_]i32{ 80, 100, 120, 140 }) |width| {
+        const visibility = overlayActionVisibilityForWidth(width, 10, 80, 80, false, 96);
+        const effective_cancel: i32 = if (visibility.cancel) 80 else 0;
+        const frame = overlayEditFrameRect(width, 20, 10, 100, effective_cancel, 0, 30, 96);
+        const child = overlayEditChildRectFromFrame(frame, 8, 6);
+        try std.testing.expect(child.left >= frame.left);
+        try std.testing.expect(child.right <= frame.right);
+        try std.testing.expect(child.left <= child.right);
+        if (visibility.cancel) try std.testing.expect(child.right <= width - 80 - 10);
+    }
+    for ([_]i32{ 1, 10, 20, 30 }) |width| {
+        const frame = overlayEditFrameRect(width, 20, 10, 100, 0, 0, 30, 96);
+        try std.testing.expect(frame.left >= 0);
+        try std.testing.expect(frame.right <= width);
+        try std.testing.expect(frame.right > frame.left);
+    }
+    try std.testing.expect(!overlayActionVisibilityForWidth(220, 10, 80, 80, true, 96).accept);
+    try std.testing.expect(overlayActionVisibilityForWidth(230, 10, 80, 80, true, 96).accept);
+}
+
+test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    for ([_]i32{ 1, 2, 20, 80, 100, 120, 140, 220 }) |width| {
+        const actions = overlayActionLayoutForWidth(.confirm, width, 10, 80, 80, 96);
+        try std.testing.expect(actions.cancel_visible);
+        try std.testing.expect(!actions.accept_visible);
+        try std.testing.expect(actions.cancel_x >= 0);
+        try std.testing.expect(actions.cancel_width > 0);
+        try std.testing.expect(actions.cancel_x + actions.cancel_width <= width);
+        try std.testing.expectEqual(
+            OverlayFocusSlot.cancel,
+            nextVisibleOverlayFocusSlot(
+                .confirm,
+                .edit,
+                false,
+                false,
+                actions.accept_visible,
+                actions.cancel_visible,
+            ),
+        );
+        if (width < 140) {
+            const expected_inset = @min(@as(i32, 10), @divTrunc(width - 1, 2));
+            try std.testing.expect(actions.compact_cancel);
+            try std.testing.expectEqual(expected_inset, actions.cancel_x);
+            try std.testing.expectEqual(width - 2 * expected_inset, actions.cancel_width);
+        } else {
+            try std.testing.expect(!actions.compact_cancel);
+            try std.testing.expectEqual(@as(i32, 80), actions.cancel_width);
+        }
+    }
+
+    const wide = overlayActionLayoutForWidth(.confirm, 230, 10, 80, 80, 96);
+    try std.testing.expect(wide.accept_visible);
+    try std.testing.expect(wide.cancel_visible);
+    try std.testing.expect(!wide.compact_cancel);
+    try std.testing.expect(wide.accept_x >= 0);
+    try std.testing.expect(wide.accept_x + wide.accept_width <= wide.cancel_x);
+    try std.testing.expect(wide.cancel_x + wide.cancel_width <= 230);
+}
+
 test "win32 GDI text length accepts empty sentinel slices" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -35984,6 +36516,9 @@ test "win32 command palette hides duplicate accept button" {
     try std.testing.expect(overlayAcceptButtonVisible(.profile));
     try std.testing.expect(overlayAcceptButtonVisible(.search));
     try std.testing.expect(overlayAcceptButtonVisible(.confirm));
+    try std.testing.expect(!overlayEditFrameVisible(.confirm));
+    try std.testing.expect(overlayEditFrameVisible(.command_palette));
+    try std.testing.expect(overlayEditFrameVisible(.profile));
 }
 
 test "win32 transient overlay focus ring includes every visible control" {
@@ -36000,6 +36535,27 @@ test "win32 transient overlay focus ring includes every visible control" {
     try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.command_palette, .cancel, true));
     try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.confirm, .accept, false));
     try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.confirm, .cancel, true));
+
+    try std.testing.expectEqual(
+        OverlayFocusSlot.cancel,
+        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, true),
+    );
+    try std.testing.expectEqual(
+        OverlayFocusSlot.cancel,
+        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, true),
+    );
+    try std.testing.expectEqual(
+        OverlayFocusSlot.accept,
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, true, true),
+    );
+    try std.testing.expectEqual(
+        null,
+        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false),
+    );
+    try std.testing.expectEqual(
+        null,
+        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, true),
+    );
 }
 
 test "win32 overlay buttons activate only for their exact click notification" {
@@ -36330,7 +36886,7 @@ test "win32 command palette rich feedback never calls a theme an action miss" {
         .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
     );
     defer std.testing.allocator.free(hidden_feedback);
-    try std.testing.expect(std.mem.indexOf(u8, hidden_feedback, "window taller") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hidden_feedback, "window larger") != null);
 }
 
 test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {

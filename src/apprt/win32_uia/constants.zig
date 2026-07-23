@@ -20,6 +20,7 @@ pub const UIA_WindowControlTypeId: i32 = 50032;
 // ── Pattern IDs ────────────────────────────────────────────────────────
 
 pub const UIA_ValuePatternId: i32 = 10002;
+pub const UIA_InvokePatternId: i32 = 10000;
 pub const UIA_SelectionPatternId: i32 = 10001;
 pub const UIA_TextPatternId: i32 = 10014;
 pub const UIA_TextPattern2Id: i32 = 10024;

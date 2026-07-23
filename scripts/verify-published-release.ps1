@@ -29,7 +29,7 @@ function Assert-PublishedSignature {
     $statusAccepted = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
     if (-not $statusAccepted -and $TrustSelfSigned -and
         $certificate.Subject -eq $certificate.Issuer -and
-        (Test-SelfSignedTrustStatus -Signature $signature)) {
+        (Test-SelfSignedTrustStatus -Signature $signature -Path $Path)) {
         $statusAccepted = $true
     }
     if (-not $statusAccepted) {

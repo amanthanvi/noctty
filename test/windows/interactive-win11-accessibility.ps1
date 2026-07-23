@@ -178,6 +178,9 @@ public static class WinghosttyAccessibilityNative {
     private static int selectionItemSelectedCount;
     private static readonly object selectionItemSelectedSync = new object();
     private static readonly List<object> selectionItemSelectedSenders = new List<object>();
+    private static int automationFocusChangedCount;
+    private static readonly object automationFocusChangedSync = new object();
+    private static readonly List<object> automationFocusChangedSenders = new List<object>();
     private static int notificationCount;
     private static readonly object notificationSync = new object();
     private static string notificationKind = "";
@@ -322,6 +325,32 @@ public static class WinghosttyAccessibilityNative {
         get {
             lock (selectionItemSelectedSync) {
                 return selectionItemSelectedSenders.ToArray();
+            }
+        }
+    }
+    public static void OnAutomationFocusChanged(object sender, EventArgs args) {
+        lock (automationFocusChangedSync) {
+            automationFocusChangedSenders.Add(sender);
+            automationFocusChangedCount++;
+        }
+    }
+    public static void ResetAutomationFocusChangedCount() {
+        lock (automationFocusChangedSync) {
+            automationFocusChangedSenders.Clear();
+            automationFocusChangedCount = 0;
+        }
+    }
+    public static int AutomationFocusChangedCount {
+        get {
+            lock (automationFocusChangedSync) {
+                return automationFocusChangedCount;
+            }
+        }
+    }
+    public static object[] AutomationFocusChangedSenders {
+        get {
+            lock (automationFocusChangedSync) {
+                return automationFocusChangedSenders.ToArray();
             }
         }
     }
@@ -657,6 +686,11 @@ function Send-AccessibilityOutputMarker(
     if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
+    # SendInput queues packets; a busy Debug UI thread may not have consumed
+    # the full command yet. Keep Enter behind the same drain/focus boundary as
+    # the blind helper, then prove the marker is still absent before execution.
+    Start-Sleep -Milliseconds 250
+    Assert-AccessibilityInputOwner -Process $Process -Description "$Description pre-Enter" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
     $preEnterText = $TextPattern.DocumentRange.GetText(-1)
     if ($preEnterText.Contains($Marker)) {
         throw "Terminal exposed output marker for $Description before Enter."
@@ -682,6 +716,13 @@ function Send-AccessibilityBlindOutputMarker(
     if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
+    # SendInput returning means the keyboard packets entered the system queue,
+    # not that the terminal child consumed the full command. Keep this blind
+    # (no TextPattern query) while giving the UI thread time to drain all
+    # Unicode packets before Enter, or a busy Debug build can execute only
+    # the leading `cmd` and launch a nested shell.
+    Start-Sleep -Milliseconds 250
+    Assert-AccessibilityInputOwner -Process $Process -Description "$Description pre-Enter" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description "$Description Enter" -Process $Process -ExpectedFocusedHwnd $ExpectedFocusedHwnd
 }
 
@@ -695,6 +736,199 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $effectiveDeadline)
     throw "Timed out waiting for $Description."
+}
+
+function Open-AccessibilitySettingsProbe {
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    Assert-AccessibilityInputOwner -Process $Process -Description "$Description open"
+    if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+        throw "SendInput failed while opening ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "$Description HWND" -Condition {
+        $script:settingsProbeWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            [uint32]$Process.Id,
+            'winghostty.win32.settings'
+        ))
+        return $script:settingsProbeWindows.Count -eq 1
+    }
+    $hwnd = $script:settingsProbeWindows[0]
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+    if ($null -eq $element) { throw "$Description exposes no UIA root." }
+    return [pscustomobject]@{ Hwnd = $hwnd; Element = $element }
+}
+
+function Get-AccessibilityScrollbackProbe {
+    param(
+        [Parameter(Mandatory)] $SettingsProbe,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    $elements = @($SettingsProbe.Element.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_ })
+    $terminal = @($elements | Where-Object {
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::RadioButton -and
+        $_.Current.Name -eq 'Terminal'
+    }) | Select-Object -First 1
+    $terminalSelection = $null
+    if ($null -eq $terminal -or -not $terminal.TryGetCurrentPattern(
+        [System.Windows.Automation.SelectionItemPattern]::Pattern,
+        [ref]$terminalSelection
+    )) {
+        throw "$Description cannot select the Terminal settings section."
+    }
+    $terminalSelection.Select()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description "$Description Terminal section" -Condition {
+        return $terminalSelection.Current.IsSelected
+    }
+    $elements = @($SettingsProbe.Element.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_ })
+    $edit = @($elements | Where-Object {
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+        $_.Current.Name -eq 'Scrollback limit'
+    }) | Select-Object -First 1
+    $value = $null
+    if ($null -eq $edit -or -not $edit.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$value
+    )) {
+        throw "$Description exposes no Scrollback limit ValuePattern."
+    }
+    $save = @($elements | Where-Object {
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+        $_.Current.Name -eq 'Save'
+    }) | Select-Object -First 1
+    if ($null -eq $save) { throw "$Description exposes no Save button." }
+    return [pscustomobject]@{ Edit = $edit; Value = $value; Save = $save }
+}
+
+function Invoke-AccessibilitySettingsCloseAction {
+    param(
+        [Parameter(Mandatory)] $SettingsProbe,
+        [Parameter(Mandatory)][string] $ActionName,
+        [Parameter(Mandatory)][string] $Description
+    )
+
+    if (-not [WinghosttyAccessibilityNative]::ForceForeground($SettingsProbe.Hwnd)) {
+        throw "Unable to foreground $Description before its dirty-close request."
+    }
+    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+        $SettingsProbe.Hwnd,
+        0x0010,
+        [UIntPtr]::Zero,
+        [IntPtr]::Zero
+    )) {
+        throw "PostMessageW failed while closing ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "$Description inline dirty-close action" -Condition {
+        $script:settingsCloseAction = @($SettingsProbe.Element.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        ) | Where-Object {
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+            $_.Current.Name -eq $ActionName -and
+            -not $_.Current.IsOffscreen
+        }) | Select-Object -First 1
+        return $null -ne $script:settingsCloseAction -and $script:settingsCloseAction.Current.IsEnabled
+    }
+    $invoke = $null
+    if (-not $script:settingsCloseAction.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$invoke
+    )) {
+        throw "$Description action '$ActionName' exposes no InvokePattern."
+    }
+    $invoke.Invoke()
+}
+
+function Restore-AccessibilityConfigBaseline {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [Parameter(Mandatory)][bool] $Existed,
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][byte[]] $Bytes
+    )
+
+    if (-not $Existed) {
+        if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Delete($Path) }
+        if ([System.IO.File]::Exists($Path)) { throw "Failed to restore absent config baseline at '$Path'." }
+        return
+    }
+
+    $directory = [System.IO.Path]::GetDirectoryName($Path)
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    $temporary = Join-Path $directory ('.config-restore-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $backup = Join-Path $directory ('.config-restore-' + [Guid]::NewGuid().ToString('N') + '.bak')
+    try {
+        if ($null -eq $Bytes) {
+            [System.IO.File]::WriteAllBytes($temporary, [byte[]]::new(0))
+        } else {
+            [System.IO.File]::WriteAllBytes($temporary, $Bytes)
+        }
+        if ([System.IO.File]::Exists($Path)) {
+            [System.IO.File]::Replace($temporary, $Path, $backup)
+        } else {
+            [System.IO.File]::Move($temporary, $Path)
+        }
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporary)) { [System.IO.File]::Delete($temporary) }
+        if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+    }
+    $restored = [System.IO.File]::ReadAllBytes($Path)
+    $expectedBase64 = if ($null -eq $Bytes) { '' } else { [Convert]::ToBase64String($Bytes) }
+    if ([Convert]::ToBase64String($restored) -cne $expectedBase64) {
+        throw "Config baseline bytes were not restored exactly at '$Path'."
+    }
+}
+
+function Start-AccessibilityProcessWithEnvironment {
+    param(
+        [Parameter(Mandatory)][string] $FilePath,
+        [Parameter(Mandatory)][object[]] $ArgumentList,
+        [Parameter(Mandatory)][string] $WorkingDirectory,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $EnvironmentVariables,
+        [Parameter(Mandatory)][string] $RedirectStandardOutput,
+        [Parameter(Mandatory)][string] $RedirectStandardError
+    )
+
+    $baseline = [ordered]@{}
+    foreach ($entry in $EnvironmentVariables.GetEnumerator()) {
+        $name = [string]$entry.Key
+        $baseline[$name] = [System.Environment]::GetEnvironmentVariable(
+            $name,
+            [System.EnvironmentVariableTarget]::Process
+        )
+        [System.Environment]::SetEnvironmentVariable(
+            $name,
+            [string]$entry.Value,
+            [System.EnvironmentVariableTarget]::Process
+        )
+    }
+    try {
+        return Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -WorkingDirectory $WorkingDirectory `
+            -RedirectStandardOutput $RedirectStandardOutput `
+            -RedirectStandardError $RedirectStandardError `
+            -PassThru
+    }
+    finally {
+        foreach ($entry in $baseline.GetEnumerator()) {
+            [System.Environment]::SetEnvironmentVariable(
+                [string]$entry.Key,
+                $entry.Value,
+                [System.EnvironmentVariableTarget]::Process
+            )
+        }
+    }
 }
 
 function Test-AccessibilityAncestor($Ancestor, $Descendant) {
@@ -884,6 +1118,8 @@ $textChangedHandler = $null
 $textChangedRegistered = $false
 $paletteSelectionHandler = $null
 $paletteSelectionRegistered = $false
+$settingsFocusHandler = $null
+$settingsFocusRegistered = $false
 $paletteNotificationRegistered = $false
 $editTextChangedHandler = $null
 $editTextSelectionChangedHandler = $null
@@ -892,13 +1128,25 @@ $editEventElement = $null
 $editEventsRegistered = $false
 $relaunchProcess = $null
 $ownerProbeProcess = $null
+$saveProbeProcess = $null
+$saveVerifyProcess = $null
+$settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout `
+    -RepoRoot $repoRoot `
+    -SandboxName "accessibility-save-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+New-InteractiveWin11Sandbox -Layout $settingsPersistenceLayout
+$settingsProbeEnvironment = Get-InteractiveWin11Environment -Layout $settingsPersistenceLayout
+$sandboxConfigPath = Join-Path $settingsPersistenceLayout.LocalAppData 'winghostty\config.ghostty'
+$settingsConfigBaselineCaptured = $false
+$settingsConfigBaselineExisted = $false
+[byte[]]$settingsConfigBaselineBytes = @()
+$settingsConfigBaselineRestored = $false
 $marker = "WINGHOSTTY_UIA_$([Guid]::NewGuid().ToString('N'))"
 $terminalText = ''
 $terminalLineText = ''
 $terminalRectCount = 0
-$queryOnlyMarker = "${marker}_QUERY_ONLY"
+$queryOnlyMarker = "whq$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
 $queryOnlyRangeRefreshed = $false
-$coldQueryMarker = "${marker}_COLD_QUERY"
+$coldQueryMarker = "whc$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
 $coldQueryFirstRangeFresh = $false
 $splitBaseline = 0
 $splitAfterRight = 0
@@ -1394,7 +1642,29 @@ try {
     if ($palette.Current.HasKeyboardFocus -or $selectedItems[0].Current.HasKeyboardFocus) {
         throw 'Command palette list or row fabricates keyboard focus while the query edit owns focus.'
     }
-    $paletteFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'command palette query global UIA focus' -Condition {
+        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+            $paletteNativeFocus = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+            $paletteNativeFocusElement = if ($paletteNativeFocus -ne [IntPtr]::Zero) {
+                [System.Windows.Automation.AutomationElement]::FromHandle($paletteNativeFocus)
+            } else {
+                $null
+            }
+            if ($null -eq $paletteNativeFocusElement -or
+                $paletteNativeFocusElement.Current.ControlType -ne [System.Windows.Automation.ControlType]::Edit -or
+                $paletteNativeFocusElement.Current.Name -ne 'Command palette query') {
+                throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocus)."
+            }
+            [void][WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+            return $false
+        }
+        $script:paletteFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        return $null -ne $script:paletteFocused -and
+            $script:paletteFocused.Current.ProcessId -eq $process.Id -and
+            $script:paletteFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+            $script:paletteFocused.Current.Name -eq 'Command palette query'
+    }
+    $paletteFocused = $script:paletteFocused
     if ($null -eq $paletteFocused -or $paletteFocused.Current.ProcessId -ne $process.Id -or
         $paletteFocused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Edit) {
         $focusedWin32Hwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
@@ -1433,6 +1703,7 @@ try {
     if ($paletteFocused.Current.Name -ne 'Command palette query') {
         throw "Command palette query Edit name was '$($paletteFocused.Current.Name)'."
     }
+    $paletteQueryHwnd = [IntPtr]$paletteFocused.Current.NativeWindowHandle
     $paletteFocusedControlType = $paletteFocused.Current.ControlType.ProgrammaticName
     $paletteQueryBounds = $paletteFocused.Current.BoundingRectangle
     if ($paletteQueryBounds.Width -le 0 -or $paletteQueryBounds.Height -le 0 -or $paletteFocused.Current.IsOffscreen) {
@@ -1547,6 +1818,14 @@ try {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette unavailable no-match notification' -Condition {
             try {
+                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+                    $paletteNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                    if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
+                        throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
+                    }
+                    [void][WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+                    return $false
+                }
                 if ($null -eq $script:palette) {
                     $script:palette = @($root.FindAll(
                         [System.Windows.Automation.TreeScope]::Descendants,
@@ -1568,12 +1847,18 @@ try {
                             $script:paletteUnavailableFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
                             $script:paletteUnavailableFocused.Current.Name -eq 'Command palette query' -and
                             $script:paletteUnavailableFocused.Current.HasKeyboardFocus
+                        $uiaFocusSummary = if ($null -eq $script:paletteUnavailableFocused) {
+                            '<none>'
+                        } else {
+                            "type=$($script:paletteUnavailableFocused.Current.ControlType.ProgrammaticName) name='$($script:paletteUnavailableFocused.Current.Name)' hwnd=$($script:paletteUnavailableFocused.Current.NativeWindowHandle) has_focus=$($script:paletteUnavailableFocused.Current.HasKeyboardFocus)"
+                        }
+                        $win32FocusHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
                         if ($queryStillFocused -and
                             [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
                             -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
                             return $true
                         }
-                        $script:paletteUnavailableLastTransient = 'Palette List is absent without a focused command query and notification.'
+                        $script:paletteUnavailableLastTransient = "list=absent query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([WinghosttyAccessibilityNative]::NotificationCount) native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
                         return $false
                     }
                 }
@@ -1590,6 +1875,13 @@ try {
                     $script:paletteUnavailableFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
                     $script:paletteUnavailableFocused.Current.Name -eq 'Command palette query' -and
                     $script:paletteUnavailableFocused.Current.HasKeyboardFocus
+                $uiaFocusSummary = if ($null -eq $script:paletteUnavailableFocused) {
+                    '<none>'
+                } else {
+                    "type=$($script:paletteUnavailableFocused.Current.ControlType.ProgrammaticName) name='$($script:paletteUnavailableFocused.Current.Name)' hwnd=$($script:paletteUnavailableFocused.Current.NativeWindowHandle) has_focus=$($script:paletteUnavailableFocused.Current.HasKeyboardFocus)"
+                }
+                $win32FocusHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                $script:paletteUnavailableLastTransient = "items=$($script:paletteUnavailableItems.Count) query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([WinghosttyAccessibilityNative]::NotificationCount) native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
             }
             catch {
                 $hresults = @(Get-AccessibilityExceptionHResults -Exception $_.Exception)
@@ -1652,6 +1944,14 @@ try {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette native List recovery after zero matches' -Condition {
             try {
+                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+                    $paletteNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                    if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
+                        throw "Recovered command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
+                    }
+                    [void][WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+                    return $false
+                }
                 $script:paletteRecovered = @($root.FindAll(
                     [System.Windows.Automation.TreeScope]::Descendants,
                     [System.Windows.Automation.PropertyCondition]::new(
@@ -1668,6 +1968,13 @@ try {
                     )
                 ) | ForEach-Object { $_ })
                 $script:paletteRecoveredFocus = [System.Windows.Automation.AutomationElement]::FocusedElement
+                $recoveredFocusSummary = if ($null -eq $script:paletteRecoveredFocus) {
+                    '<none>'
+                }
+                else {
+                    "$($script:paletteRecoveredFocus.Current.Name):$($script:paletteRecoveredFocus.Current.ControlType.ProgrammaticName):pid=$($script:paletteRecoveredFocus.Current.ProcessId)"
+                }
+                $script:paletteRecoveryLastTransient = "native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) items=$($script:paletteRecoveredItems.Count) focus=$recoveredFocusSummary"
                 return [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd) -and
                     $script:paletteRecoveredItems.Count -gt 0 -and
                     $null -ne $script:paletteRecoveredFocus -and
@@ -1794,6 +2101,14 @@ try {
         throw 'Docked search query Edit is not visible with positive UIA bounds.'
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search query UIA focus' -Condition {
+        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+            $searchNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+            if ($searchNativeFocusBeforeRecovery -ne $searchNativeHwnd) {
+                throw "Docked search query lost native focus before foreground recovery (focused=$searchNativeFocusBeforeRecovery expected=$searchNativeHwnd)."
+            }
+            [void][WinghosttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+            return $false
+        }
         $script:searchFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
         return $null -ne $script:searchFocused -and
             [System.Windows.Automation.Automation]::Compare($script:searchFocused, $searchQueryEdit)
@@ -1884,15 +2199,31 @@ try {
     $settingsCycles = @()
     for ($settingsCycle = 1; $settingsCycle -le 2; $settingsCycle++) {
         Assert-AccessibilityInputOwner -Process $process -Description "settings lifecycle open $settingsCycle"
+        $settingsOpenFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $settingsOpenTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        if ($settingsOpenTerminalHwnds -notcontains $settingsOpenFocusedHwnd) {
+            throw "Settings cycle $settingsCycle did not start from a focused terminal child (focused=$settingsOpenFocusedHwnd visible_terminals=$($settingsOpenTerminalHwnds -join ', '))."
+        }
         if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
             throw "SendInput failed while opening settings cycle ${settingsCycle}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
-        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "settings HWND cycle $settingsCycle" -Condition {
-            $script:settingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
-                [uint32]$process.Id,
-                'winghostty.win32.settings'
-            ))
-            return $script:settingsWindowsProbe.Count -eq 1
+        try {
+            Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "settings HWND cycle $settingsCycle" -Condition {
+                $script:settingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                    [uint32]$process.Id,
+                    'winghostty.win32.settings'
+                ))
+                return $script:settingsWindowsProbe.Count -eq 1
+            }
+        }
+        catch {
+            $settingsOpenForegroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+            [uint32]$settingsOpenForegroundOwner = 0
+            if ($settingsOpenForegroundHwnd -ne [IntPtr]::Zero) {
+                [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($settingsOpenForegroundHwnd, [ref]$settingsOpenForegroundOwner)
+            }
+            $settingsOpenFocusedAfterHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+            throw "Settings cycle $settingsCycle did not create its HWND: initial_focused=$settingsOpenFocusedHwnd; focused_after=$settingsOpenFocusedAfterHwnd; foreground=$settingsOpenForegroundHwnd owner=$settingsOpenForegroundOwner; visible_terminals=$($settingsOpenTerminalHwnds -join ', '). $($_.Exception.Message)"
         }
         $settingsHwnd = $script:settingsWindowsProbe[0]
         $settingsRect = [WinghosttyAccessibilityNative]::WindowRect($settingsHwnd)
@@ -2173,31 +2504,63 @@ try {
             $_.Current.Name -ne $selectedBeforeFocus[0]
         })[0]
         $focusSectionHwnd = [IntPtr]$focusSection.Current.NativeWindowHandle
+        $focusSectionSelection = $null
+        if (-not $focusSection.TryGetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern,
+            [ref]$focusSectionSelection
+        )) {
+            throw "Settings focus probe section '$($focusSection.Current.Name)' exposes no SelectionItemPattern."
+        }
         $focusSection.SetFocus()
-        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
-            $script:settingsFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-            $script:settingsSelectedAfterFocus = @($sectionButtons | Where-Object {
-                $candidateSelection = $null
-                $_.TryGetCurrentPattern(
-                    [System.Windows.Automation.SelectionItemPattern]::Pattern,
-                    [ref]$candidateSelection
-                ) -and $candidateSelection.Current.IsSelected
-            } | ForEach-Object { $_.Current.Name })
-            $script:settingsFocusedSectionHeaders = @($settingsElement.FindAll(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                [System.Windows.Automation.PropertyCondition]::new(
-                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-                    [System.Windows.Automation.ControlType]::Text
-                )
-            ) | Where-Object {
-                $_.Current.Name -eq $focusSection.Current.Name -and -not $_.Current.IsOffscreen
-            })
-            return $null -ne $script:settingsFocusedElement -and
-                [System.Windows.Automation.Automation]::Compare($script:settingsFocusedElement, $focusSection) -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusSectionHwnd -and
-                $script:settingsSelectedAfterFocus.Count -eq 1 -and
-                $script:settingsSelectedAfterFocus[0] -eq $focusSection.Current.Name -and
-                $script:settingsFocusedSectionHeaders.Count -ge 1
+        $focusSectionSelection.Select()
+        try {
+            Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
+                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $settingsHwnd) {
+                    $sectionNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd)
+                    if ($sectionNativeFocusBeforeRecovery -ne $focusSectionHwnd) {
+                        throw "Settings section lost native focus before foreground recovery (focused=$sectionNativeFocusBeforeRecovery expected=$focusSectionHwnd)."
+                    }
+                    [void][WinghosttyAccessibilityNative]::ForceForeground($settingsHwnd)
+                    return $false
+                }
+                $script:settingsFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+                $script:settingsSelectedAfterFocus = @($sectionButtons | Where-Object {
+                    $candidateSelection = $null
+                    $_.TryGetCurrentPattern(
+                        [System.Windows.Automation.SelectionItemPattern]::Pattern,
+                        [ref]$candidateSelection
+                    ) -and $candidateSelection.Current.IsSelected
+                } | ForEach-Object { $_.Current.Name })
+                $script:settingsFocusedSectionHeaders = @($settingsElement.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    [System.Windows.Automation.PropertyCondition]::new(
+                        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [System.Windows.Automation.ControlType]::Text
+                    )
+                ) | Where-Object {
+                    $_.Current.Name -eq $focusSection.Current.Name -and -not $_.Current.IsOffscreen
+                })
+                return $null -ne $script:settingsFocusedElement -and
+                    [System.Windows.Automation.Automation]::Compare($script:settingsFocusedElement, $focusSection) -and
+                    [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusSectionHwnd -and
+                    $script:settingsSelectedAfterFocus.Count -eq 1 -and
+                    $script:settingsSelectedAfterFocus[0] -eq $focusSection.Current.Name -and
+                    $script:settingsFocusedSectionHeaders.Count -ge 1
+            }
+        }
+        catch {
+            $focusedSummary = if ($null -eq $script:settingsFocusedElement) {
+                '<none>'
+            }
+            else {
+                "$($script:settingsFocusedElement.Current.Name):$($script:settingsFocusedElement.Current.ControlType.ProgrammaticName):hwnd=$($script:settingsFocusedElement.Current.NativeWindowHandle)"
+            }
+            $nativeFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd)
+            $selectedSummary = @($script:settingsSelectedAfterFocus) -join ', '
+            $headerSummary = @($script:settingsFocusedSectionHeaders | ForEach-Object {
+                "$($_.Current.Name):offscreen=$($_.Current.IsOffscreen)"
+            }) -join ', '
+            throw "Settings focus/selection probe failed for '$($focusSection.Current.Name)': focused=$focusedSummary; native_focused_hwnd=$nativeFocusedHwnd; expected_hwnd=$focusSectionHwnd; selected=$selectedSummary; headers=$headerSummary. $($_.Exception.Message)"
         }
         $settingsCycles += [ordered]@{
             cycle = $settingsCycle
@@ -2314,6 +2677,14 @@ try {
     $ownerSaveButton.SetFocus()
     $ownerSaveHwnd = [IntPtr]$ownerSaveButton.Current.NativeWindowHandle
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings Save focus-only ownership' -Condition {
+        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $ownerSettingsHwnd) {
+            $saveNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)
+            if ($saveNativeFocusBeforeRecovery -ne $ownerSaveHwnd) {
+                throw "Settings Save lost native focus before foreground recovery (focused=$saveNativeFocusBeforeRecovery expected=$ownerSaveHwnd)."
+            }
+            [void][WinghosttyAccessibilityNative]::ForceForeground($ownerSettingsHwnd)
+            return $false
+        }
         $script:ownerSaveFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         return $null -ne $script:ownerSaveFocusedElement -and
             [System.Windows.Automation.Automation]::Compare($script:ownerSaveFocusedElement, $ownerSaveButton) -and
@@ -2357,6 +2728,16 @@ try {
         throw 'Settings owner probe lost its dirty Scrollback limit draft after owner close.'
     }
 
+    [WinghosttyAccessibilityNative]::ResetAutomationFocusChangedCount()
+    $settingsFocusHandler = [Delegate]::CreateDelegate(
+        [System.Windows.Automation.AutomationFocusChangedEventHandler],
+        [WinghosttyAccessibilityNative].GetMethod('OnAutomationFocusChanged')
+    )
+    [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($settingsFocusHandler)
+    $settingsFocusRegistered = $true
+    if (-not [WinghosttyAccessibilityNative]::ForceForeground($ownerSettingsHwnd)) {
+        throw 'Unable to foreground surviving Settings before its dirty-close request.'
+    }
     if (-not [WinghosttyAccessibilityNative]::PostMessageW(
         $ownerSettingsHwnd,
         0x0010,
@@ -2365,24 +2746,136 @@ try {
     )) {
         throw "PostMessageW failed while explicitly closing surviving settings: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings dirty-close dialog' -Condition {
-        $script:ownerSettingsDialogsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings inline dirty-close prompt' -Condition {
+        $modalDialogs = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$ownerProbeProcess.Id,
             '#32770'
         ))
-        return $script:ownerSettingsDialogsProbe.Count -eq 1
+        if ($modalDialogs.Count -ne 0) {
+            throw 'Settings dirty close opened a modal #32770 dialog instead of its inline confirmation surface.'
+        }
+        if (-not [WinghosttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)) {
+            throw 'Settings dirty close destroyed the window before confirmation.'
+        }
+        $script:ownerClosePromptElements = @($ownerSettingsElement.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        ) | ForEach-Object { $_ })
+        $script:ownerClosePromptText = @($script:ownerClosePromptElements | Where-Object {
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and
+            $_.Current.Name -eq 'Save changes before closing?' -and
+            -not $_.Current.IsOffscreen
+        }) | Select-Object -First 1
+        $script:ownerClosePromptButtons = @($script:ownerClosePromptElements | Where-Object {
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+            $_.Current.Name -in @('Save and close', 'Discard changes', 'Keep editing') -and
+            -not $_.Current.IsOffscreen
+        })
+        return $null -ne $script:ownerClosePromptText -and $script:ownerClosePromptButtons.Count -eq 3
     }
-    [void](Invoke-InteractiveWin11Message `
-        -Hwnd $script:ownerSettingsDialogsProbe[0] `
-        -Message 0x0111 `
-        -WParam ([UIntPtr]::new([uint64]7)) `
-        -LParam ([IntPtr]::Zero) `
-        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
-        -Process $ownerProbeProcess `
-        -Description 'discard surviving settings dirty draft')
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings owner probe clean exit' -Condition {
+    $ownerKeepEditingButton = @($script:ownerClosePromptButtons | Where-Object { $_.Current.Name -eq 'Keep editing' }) | Select-Object -First 1
+    $ownerDiscardButton = @($script:ownerClosePromptButtons | Where-Object { $_.Current.Name -eq 'Discard changes' }) | Select-Object -First 1
+    $ownerSaveAndCloseButton = @($script:ownerClosePromptButtons | Where-Object { $_.Current.Name -eq 'Save and close' }) | Select-Object -First 1
+    $ownerKeepEditingHwnd = [IntPtr]$ownerKeepEditingButton.Current.NativeWindowHandle
+    foreach ($closePromptButton in @($ownerSaveAndCloseButton, $ownerDiscardButton, $ownerKeepEditingButton)) {
+        if ($null -eq $closePromptButton -or -not $closePromptButton.Current.IsEnabled) {
+            throw 'Settings inline dirty-close prompt has a missing or disabled action.'
+        }
+        $closePromptInvoke = $null
+        if (-not $closePromptButton.TryGetCurrentPattern(
+            [System.Windows.Automation.InvokePattern]::Pattern,
+            [ref]$closePromptInvoke
+        )) {
+            throw "Settings inline dirty-close action '$($closePromptButton.Current.Name)' has no InvokePattern."
+        }
+    }
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings conservative dirty-close focus' -Condition {
+            $script:ownerClosePromptFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+            $script:ownerClosePromptFocusEvent = @([WinghosttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object {
+                $_ -is [System.Windows.Automation.AutomationElement] -and
+                [System.Windows.Automation.Automation]::Compare($_, $ownerKeepEditingButton)
+            }) | Select-Object -First 1
+            return [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $ownerSettingsHwnd -and
+                [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerKeepEditingHwnd -and
+                $ownerKeepEditingButton.Current.HasKeyboardFocus -and
+                $null -ne $script:ownerClosePromptFocusEvent
+        }
+    }
+    catch {
+        $focusDiagnostic = [System.Windows.Automation.AutomationElement]::FocusedElement
+        $focusDiagnosticName = if ($null -ne $focusDiagnostic) { $focusDiagnostic.Current.Name } else { '<none>' }
+        $focusDiagnosticHwnd = if ($null -ne $focusDiagnostic) { $focusDiagnostic.Current.NativeWindowHandle } else { 0 }
+        throw "Settings conservative dirty-close focus mismatch: foreground=$([WinghosttyAccessibilityNative]::GetForegroundWindow()); expected_foreground=$ownerSettingsHwnd; native_focus=$([WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)); expected_native_focus=$ownerKeepEditingHwnd; target_has_uia_focus=$($ownerKeepEditingButton.Current.HasKeyboardFocus); exact_focus_events=$(@([WinghosttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object { $_ -is [System.Windows.Automation.AutomationElement] -and [System.Windows.Automation.Automation]::Compare($_, $ownerKeepEditingButton) }).Count); global_uia_focus_hwnd=$focusDiagnosticHwnd; global_uia_focus_name='$focusDiagnosticName'. $($_.Exception.Message)"
+    }
+    [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($settingsFocusHandler)
+    $settingsFocusRegistered = $false
+    $keepEditingInvoke = $null
+    if (-not $ownerKeepEditingButton.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$keepEditingInvoke
+    )) {
+        throw "Settings inline dirty-close action 'Keep editing' lost InvokePattern."
+    }
+    $keepEditingInvoke.Invoke()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings keep-editing draft preservation' -Condition {
+        $visibleCloseActions = @($ownerSettingsElement.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        ) | Where-Object {
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+            $_.Current.Name -in @('Save and close', 'Discard changes', 'Keep editing') -and
+            -not $_.Current.IsOffscreen
+        })
+        return $visibleCloseActions.Count -eq 0 -and
+            $scrollbackValuePattern.Current.Value -eq $draftScrollbackText -and
+            $ownerSaveButton.Current.IsEnabled
+    }
+    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+        $ownerSettingsHwnd,
+        0x0010,
+        [UIntPtr]::Zero,
+        [IntPtr]::Zero
+    )) {
+        throw "PostMessageW failed while reopening the inline settings close prompt: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings inline dirty-close prompt reopens' -Condition {
+        $script:ownerClosePromptButtons = @($ownerSettingsElement.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        ) | Where-Object {
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+            $_.Current.Name -in @('Save and close', 'Discard changes', 'Keep editing') -and
+            -not $_.Current.IsOffscreen
+        })
+        return $script:ownerClosePromptButtons.Count -eq 3
+    }
+    $ownerDiscardButton = @($script:ownerClosePromptButtons | Where-Object { $_.Current.Name -eq 'Discard changes' }) | Select-Object -First 1
+    $discardInvoke = $null
+    if ($null -eq $ownerDiscardButton -or -not $ownerDiscardButton.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$discardInvoke
+    )) {
+        throw "Settings inline dirty-close action 'Discard changes' has no InvokePattern."
+    }
+    $discardInvoke.Invoke()
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings owner probe clean exit' -Condition {
+            $ownerProbeProcess.Refresh()
+            return $ownerProbeProcess.HasExited
+        }
+    }
+    catch {
         $ownerProbeProcess.Refresh()
-        return $ownerProbeProcess.HasExited
+        $ownerSettingsAfterDiscard = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            [uint32]$ownerProbeProcess.Id,
+            'winghostty.win32.settings'
+        ))
+        $ownerHostsAfterDiscard = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            [uint32]$ownerProbeProcess.Id,
+            'winghostty.win32.host'
+        ))
+        throw "Settings owner probe did not exit after Discard: exited=$($ownerProbeProcess.HasExited); settings_windows=$($ownerSettingsAfterDiscard -join ', '); host_windows=$($ownerHostsAfterDiscard -join ', '); settings_hwnd_alive=$([WinghosttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)); settings_hwnd_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($ownerSettingsHwnd).ToString()). $($_.Exception.Message)"
     }
     $ownerProbeExitCode = Get-InteractiveWin11ProcessExitCode -Process $ownerProbeProcess -ProcessHandle $ownerProbeHandle
     if ($ownerProbeExitCode -ne 0) { throw "Settings owner probe exited with code $ownerProbeExitCode." }
@@ -2395,9 +2888,148 @@ try {
         dirty_value_preserved = $true
         save_focus_preserved_dirty_draft = $true
         save_enabled_after_owner_close = $true
+        inline_close_prompt = $true
+        no_modal_close_dialog = $true
+        keep_editing_default_focus = $true
+        keep_editing_preserved_dirty_draft = $true
         explicitly_discarded = $true
         exit_code = $ownerProbeExitCode
     }
+
+    # Exercise the third inline outcome end-to-end. Persist through the UIA
+    # Invoke provider, terminate the writer, and prove a new process in the
+    # same isolated sandbox observes the value before restoring the baseline.
+    $settingsConfigBaselineExisted = [System.IO.File]::Exists($sandboxConfigPath)
+    $settingsConfigBaselineBytes = if ($settingsConfigBaselineExisted) {
+        [System.IO.File]::ReadAllBytes($sandboxConfigPath)
+    } else {
+        [byte[]]@()
+    }
+    $settingsConfigBaselineCaptured = $true
+    $saveProbeClass = "winghostty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
+    $saveProbeArguments = @(
+        Get-InteractiveWin11ContainmentArguments
+        '--single-instance=false'
+        "--class=$saveProbeClass"
+    )
+    $saveProbeProcess = Start-AccessibilityProcessWithEnvironment `
+        -FilePath $exe `
+        -ArgumentList $saveProbeArguments `
+        -WorkingDirectory $repoRoot `
+        -EnvironmentVariables $settingsProbeEnvironment `
+        -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stdout.log') `
+        -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-stderr.log')
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings save probe main HWND' -Condition {
+        $saveProbeProcess.Refresh()
+        return -not $saveProbeProcess.HasExited -and $saveProbeProcess.MainWindowHandle -ne [IntPtr]::Zero
+    }
+    $saveProbe = Open-AccessibilitySettingsProbe -Process $saveProbeProcess -Description 'settings save probe'
+    $saveScrollback = Get-AccessibilityScrollbackProbe -SettingsProbe $saveProbe -Description 'settings save probe'
+    [uint64]$settingsPersistenceOriginalScrollback = 0
+    if (-not [uint64]::TryParse(
+        $saveScrollback.Value.Current.Value,
+        [ref]$settingsPersistenceOriginalScrollback
+    )) {
+        throw "Settings persistence sandbox exposed a nonnumeric scrollback baseline: $($saveScrollback.Value.Current.Value)."
+    }
+    $settingsPersistenceOriginalScrollbackText = $settingsPersistenceOriginalScrollback.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $settingsPersistenceDraft = if ($settingsPersistenceOriginalScrollback -lt [uint64]::MaxValue) {
+        $settingsPersistenceOriginalScrollback + 1
+    } else {
+        $settingsPersistenceOriginalScrollback - 1
+    }
+    $settingsPersistenceDraftText = $settingsPersistenceDraft.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $saveScrollback.Value.SetValue($settingsPersistenceDraftText)
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings save probe dirty draft' -Condition {
+        return $saveScrollback.Value.Current.Value -eq $settingsPersistenceDraftText -and $saveScrollback.Save.Current.IsEnabled
+    }
+    Invoke-AccessibilitySettingsCloseAction `
+        -SettingsProbe $saveProbe `
+        -ActionName 'Save and close' `
+        -Description 'settings save probe'
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings save-and-close completion' -Condition {
+        return -not [WinghosttyAccessibilityNative]::IsWindow($saveProbe.Hwnd)
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings persisted config bytes' -Condition {
+        if (-not (Test-Path -LiteralPath $sandboxConfigPath -PathType Leaf)) { return $false }
+        return (Get-Content -LiteralPath $sandboxConfigPath -Raw) -match "(?m)^scrollback-limit\s*=\s*$([regex]::Escape($settingsPersistenceDraftText))\s*$"
+    }
+    Stop-InteractiveWin11Process -Process $saveProbeProcess -Contained
+    $saveProbeProcess = $null
+
+    $saveVerifyClass = "winghostty-accessibility-settings-save-verify-$([Guid]::NewGuid().ToString('N'))"
+    $saveVerifyArguments = @(
+        Get-InteractiveWin11ContainmentArguments
+        '--single-instance=false'
+        "--class=$saveVerifyClass"
+    )
+    $saveVerifyProcess = Start-AccessibilityProcessWithEnvironment `
+        -FilePath $exe `
+        -ArgumentList $saveVerifyArguments `
+        -WorkingDirectory $repoRoot `
+        -EnvironmentVariables $settingsProbeEnvironment `
+        -RedirectStandardOutput (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stdout.log') `
+        -RedirectStandardError (Join-Path $layout.Logs 'interactive-win11-accessibility-settings-save-verify-stderr.log')
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings persistence verifier main HWND' -Condition {
+        $saveVerifyProcess.Refresh()
+        return -not $saveVerifyProcess.HasExited -and $saveVerifyProcess.MainWindowHandle -ne [IntPtr]::Zero
+    }
+    $saveVerifyProbe = Open-AccessibilitySettingsProbe -Process $saveVerifyProcess -Description 'settings persistence verifier'
+    $verifyScrollback = Get-AccessibilityScrollbackProbe -SettingsProbe $saveVerifyProbe -Description 'settings persistence verifier'
+    if ($verifyScrollback.Value.Current.Value -ne $settingsPersistenceDraftText) {
+        throw "Save and close did not survive a same-sandbox process relaunch; expected=$settingsPersistenceDraftText actual=$($verifyScrollback.Value.Current.Value)."
+    }
+    $verifyScrollback.Value.SetValue($settingsPersistenceOriginalScrollbackText)
+    $restoreInvoke = $null
+    if (-not $verifyScrollback.Save.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$restoreInvoke
+    )) {
+        throw 'Settings persistence verifier Save button exposes no InvokePattern.'
+    }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings persistence restore draft' -Condition {
+        return $verifyScrollback.Save.Current.IsEnabled
+    }
+    $restoreInvoke.Invoke()
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings persistence baseline restoration' -Condition {
+        if ($verifyScrollback.Save.Current.IsEnabled) { return $false }
+        return (Get-Content -LiteralPath $sandboxConfigPath -Raw) -match "(?m)^scrollback-limit\s*=\s*$([regex]::Escape($settingsPersistenceOriginalScrollbackText))\s*$"
+    }
+    $restoredAssignments = [regex]::Matches(
+        (Get-Content -LiteralPath $sandboxConfigPath -Raw),
+        '(?m)^scrollback-limit\s*=\s*(?<value>\d+)\s*$'
+    )
+    if ($restoredAssignments.Count -ne 1 -or
+        $restoredAssignments[0].Groups['value'].Value -cne $settingsPersistenceOriginalScrollbackText) {
+        throw "Settings persistence restore left ambiguous scrollback assignments (count=$($restoredAssignments.Count))."
+    }
+    [void](Invoke-InteractiveWin11Message `
+        -Hwnd $saveVerifyProbe.Hwnd `
+        -Message 0x0010 `
+        -WParam ([UIntPtr]::Zero) `
+        -LParam ([IntPtr]::Zero) `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
+        -Process $saveVerifyProcess `
+        -Description 'close restored settings persistence verifier')
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'restored settings verifier destruction' -Condition {
+        return -not [WinghosttyAccessibilityNative]::IsWindow($saveVerifyProbe.Hwnd)
+    }
+    Stop-InteractiveWin11Process -Process $saveVerifyProcess -Contained
+    $saveVerifyProcess = $null
+    Restore-AccessibilityConfigBaseline `
+        -Path $sandboxConfigPath `
+        -Existed $settingsConfigBaselineExisted `
+        -Bytes $settingsConfigBaselineBytes
+    $settingsConfigBaselineRestored = $true
+    $settingsOwnerLifecycle['save_and_close_invoked'] = $true
+    $settingsOwnerLifecycle['persisted_after_process_relaunch'] = $true
+    $settingsOwnerLifecycle['original_value_restored'] = $true
+    $settingsOwnerLifecycle['persistence_original_value'] = $settingsPersistenceOriginalScrollbackText
+    $settingsOwnerLifecycle['persistence_dirty_value'] = $settingsPersistenceDraftText
 
     Send-AccessibilityChord -Keys @([uint16]0x12, [uint16]0x25) -Description 'Alt+Left before sustained output' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'left pane focus before sustained output' -Condition {
@@ -2567,10 +3199,18 @@ try {
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Process $process `
         -Description 'close settings after idle soak')
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction and terminal focus restoration after idle soak' -Condition {
-        return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
-            [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $idleTerminalHostHwnd -and
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($idleTerminalHostHwnd) -eq $leftPane.Hwnd
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction and terminal focus restoration after idle soak' -Condition {
+            $script:idleRestoreForegroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+            $script:idleRestoreFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($idleTerminalHostHwnd)
+            return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
+                $script:idleRestoreForegroundHwnd -eq $idleTerminalHostHwnd -and
+                $script:idleRestoreFocusedHwnd -eq $leftPane.Hwnd
+        }
+    }
+    catch {
+        $idleRestoreTerminals = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($idleTerminalHostHwnd))
+        throw "Idle Settings close focus restoration failed: settings_alive=$([WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)); foreground=$($script:idleRestoreForegroundHwnd); expected_host=$idleTerminalHostHwnd; focused=$($script:idleRestoreFocusedHwnd); expected_pane=$($leftPane.Hwnd); visible_terminals=$($idleRestoreTerminals -join ', '). $($_.Exception.Message)"
     }
 
     $idleMarker = "whi$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -2759,6 +3399,14 @@ catch {
     $runFailure = $_
 }
 finally {
+    if ($settingsFocusRegistered -and $null -ne $settingsFocusHandler) {
+        try {
+            [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($settingsFocusHandler)
+        }
+        catch {
+            $cleanupFailures.Add("failed to remove Settings focus handler: $($_.Exception.Message)")
+        }
+    }
     if ($editEventsRegistered) {
         try {
             Stop-AccessibilityEditEventCapture
@@ -2806,6 +3454,26 @@ finally {
     if ($null -ne $ownerProbeProcess) {
         try { Stop-InteractiveWin11Process -Process $ownerProbeProcess -Contained }
         catch { $cleanupFailures.Add("settings owner probe cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($null -ne $saveProbeProcess) {
+        try { Stop-InteractiveWin11Process -Process $saveProbeProcess -Contained }
+        catch { $cleanupFailures.Add("settings save probe cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($null -ne $saveVerifyProcess) {
+        try { Stop-InteractiveWin11Process -Process $saveVerifyProcess -Contained }
+        catch { $cleanupFailures.Add("settings persistence verifier cleanup failed: $($_.Exception.Message)") }
+    }
+    if ($settingsConfigBaselineCaptured -and -not $settingsConfigBaselineRestored) {
+        try {
+            Restore-AccessibilityConfigBaseline `
+                -Path $sandboxConfigPath `
+                -Existed $settingsConfigBaselineExisted `
+                -Bytes $settingsConfigBaselineBytes
+            $settingsConfigBaselineRestored = $true
+        }
+        catch {
+            $cleanupFailures.Add("settings config baseline cleanup failed: $($_.Exception.Message)")
+        }
     }
     try { Stop-InteractiveWin11Process -Process $process -Contained }
     catch { $cleanupFailures.Add("primary cleanup failed: $($_.Exception.Message)") }

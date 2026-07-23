@@ -271,6 +271,8 @@ jobs:
           . (Join-Path $PWD "scripts/signing-trust.ps1")
           $version = "${{ steps.meta.outputs.version }}"
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
+          $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PWD "src/update/github_releases.zig"))
+          if ($allowedPins.Count -eq 0) { throw "Updater publisher-pin allowlist is empty." }
 
           function Assert-ReleaseSignature {
             param(
@@ -279,18 +281,23 @@ jobs:
             )
 
             $sig = Get-AuthenticodeSignature -LiteralPath $Path
-            if ($sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid) {
-              return
-            }
-
-            if ($trustSelfSigned -and
+            $statusAccepted = $sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+            if (-not $statusAccepted -and $trustSelfSigned -and
                 $sig.SignerCertificate -and
                 $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
-                (Test-SelfSignedTrustStatus -Signature $sig)) {
-              return
+                (Test-SelfSignedTrustStatus -Signature $sig -Path $Path)) {
+              $statusAccepted = $true
             }
-
-            throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
+            if (-not $statusAccepted) {
+              throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
+            }
+            if (-not $sig.SignerCertificate) {
+              throw "$Label has no Authenticode signer certificate: $Path"
+            }
+            $pin = Get-CertificateSpkiSha256 -Certificate $sig.SignerCertificate
+            if ($allowedPins -notcontains $pin) {
+              throw "$Label signer SPKI SHA-256 is not allowed: $pin"
+            }
           }
 
           foreach ($arch in (Get-WindowsPackageArchitectures)) {

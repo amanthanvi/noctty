@@ -35,11 +35,37 @@ const RECT = extern struct {
     bottom: i32,
 };
 
+const GUITHREADINFO = extern struct {
+    cbSize: u32,
+    flags: u32,
+    hwndActive: ?com.HWND,
+    hwndFocus: ?com.HWND,
+    hwndCapture: ?com.HWND,
+    hwndMenuOwner: ?com.HWND,
+    hwndMoveSize: ?com.HWND,
+    hwndCaret: ?com.HWND,
+    rcCaret: RECT,
+};
+
 extern "user32" fn GetClientRect(hWnd: com.HWND, lpRect: *RECT) callconv(.winapi) com.BOOL;
+extern "user32" fn GetDlgCtrlID(hWnd: com.HWND) callconv(.winapi) i32;
 extern "user32" fn GetParent(hWnd: com.HWND) callconv(.winapi) ?com.HWND;
 extern "user32" fn IsWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
 extern "user32" fn IsWindowEnabled(hWnd: com.HWND) callconv(.winapi) com.BOOL;
 extern "user32" fn IsWindowVisible(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+extern "user32" fn IsChild(hWndParent: com.HWND, hWnd: com.HWND) callconv(.winapi) com.BOOL;
+extern "user32" fn GetGUIThreadInfo(idThread: u32, pgui: *GUITHREADINFO) callconv(.winapi) com.BOOL;
+extern "user32" fn GetWindowThreadProcessId(hWnd: com.HWND, lpdwProcessId: ?*u32) callconv(.winapi) u32;
+extern "user32" fn SendMessageW(hWnd: com.HWND, Msg: u32, wParam: com.WPARAM, lParam: com.LPARAM) callconv(.winapi) com.LRESULT;
+extern "user32" fn SendMessageTimeoutW(
+    hWnd: com.HWND,
+    Msg: u32,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    fuFlags: u32,
+    uTimeout: u32,
+    lpdwResult: *usize,
+) callconv(.winapi) com.LRESULT;
 extern "user32" fn PostMessageW(hWnd: com.HWND, Msg: u32, wParam: com.WPARAM, lParam: com.LPARAM) callconv(.winapi) com.BOOL;
 extern "user32" fn ScreenToClient(hWnd: com.HWND, lpPoint: *POINT) callconv(.winapi) com.BOOL;
 extern "user32" fn ClientToScreen(hWnd: com.HWND, lpPoint: *POINT) callconv(.winapi) com.BOOL;
@@ -59,7 +85,64 @@ fn settingsControlIsOffscreen(visible: com.BOOL, viewport_fully_clipped: bool) b
     return windowVisibilityIsOffscreen(visible) or viewport_fully_clipped;
 }
 
-const BM_CLICK: u32 = 0x00F5;
+fn hwndHasKeyboardFocus(hwnd: com.HWND) bool {
+    const thread_id = GetWindowThreadProcessId(hwnd, null);
+    if (thread_id == 0) return false;
+    var info: GUITHREADINFO = .{
+        .cbSize = @sizeOf(GUITHREADINFO),
+        .flags = 0,
+        .hwndActive = null,
+        .hwndFocus = null,
+        .hwndCapture = null,
+        .hwndMenuOwner = null,
+        .hwndMoveSize = null,
+        .hwndCaret = null,
+        .rcCaret = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+    };
+    if (GetGUIThreadInfo(thread_id, &info) == 0) return false;
+    const focused = info.hwndFocus orelse return false;
+    return focused == hwnd or IsChild(hwnd, focused) != 0;
+}
+
+const WM_COMMAND: u32 = 0x0111;
+const SMTO_BLOCK: u32 = 0x0001;
+const SMTO_ABORTIFHUNG: u32 = 0x0002;
+const settings_selection_timeout_ms: u32 = 2000;
+
+/// Asynchronously route a native BUTTON activation to its parent. BM_CLICK
+/// can silently fail while the top-level window is inactive; UIA Invoke must
+/// remain operable in that state without blocking its caller.
+fn postButtonClicked(hwnd: com.HWND) com.HRESULT {
+    const parent = GetParent(hwnd) orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+    const control_id = GetDlgCtrlID(hwnd);
+    if (control_id <= 0) return com.E_INVALIDARG;
+    return if (PostMessageW(
+        parent,
+        WM_COMMAND,
+        @intCast(control_id),
+        @bitCast(@intFromPtr(hwnd)),
+    ) != 0) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
+}
+
+/// SelectionItem.Select is synchronous: once it returns, the provider's
+/// selected state must already reflect the request. SendMessageTimeout
+/// marshals to the owning UI thread without hanging assistive technology on
+/// an unresponsive settings thread.
+fn sendButtonClicked(hwnd: com.HWND) com.HRESULT {
+    const parent = GetParent(hwnd) orelse return com.UIA_E_ELEMENTNOTAVAILABLE;
+    const control_id = GetDlgCtrlID(hwnd);
+    if (control_id <= 0) return com.E_INVALIDARG;
+    var ignored: usize = 0;
+    return if (SendMessageTimeoutW(
+        parent,
+        WM_COMMAND,
+        @intCast(control_id),
+        @bitCast(@intFromPtr(hwnd)),
+        SMTO_BLOCK | SMTO_ABORTIFHUNG,
+        settings_selection_timeout_ms,
+        &ignored,
+    ) != 0) com.S_OK else com.UIA_E_ELEMENTNOTAVAILABLE;
+}
 
 /// Shape-of-life contract callers implement so the provider can ask
 /// the owning widget for its current live text. Decouples the
@@ -905,6 +988,7 @@ pub const SettingsControlProvider = struct {
 
     base: com.IRawElementProviderSimple,
     value_iface: com.IValueProvider,
+    invoke_iface: com.IInvokeProvider,
     refcount: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     hwnd: com.HWND,
@@ -933,6 +1017,13 @@ pub const SettingsControlProvider = struct {
         .get_IsReadOnly = GetIsReadOnly,
     };
 
+    const invoke_vtbl: com.IInvokeProviderVtbl = .{
+        .QueryInterface = InvokeQueryInterface,
+        .AddRef = InvokeAddRef,
+        .Release = InvokeRelease,
+        .Invoke = Invoke,
+    };
+
     pub fn create(
         alloc: std.mem.Allocator,
         hwnd: com.HWND,
@@ -943,6 +1034,7 @@ pub const SettingsControlProvider = struct {
         self.* = .{
             .base = .{ .vtbl = &vtbl },
             .value_iface = .{ .vtbl = &value_vtbl },
+            .invoke_iface = .{ .vtbl = &invoke_vtbl },
             .refcount = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .hwnd = hwnd,
@@ -961,6 +1053,11 @@ pub const SettingsControlProvider = struct {
 
     pub fn setViewportFullyClipped(self: *SettingsControlProvider, fully_clipped: bool) void {
         self.viewport_fully_clipped.store(fully_clipped, .release);
+    }
+
+    pub fn raiseFocusChanged(self: *SettingsControlProvider) void {
+        if (!self.available()) return;
+        events.raiseFocusChanged(&self.base);
     }
 
     pub fn disconnect(self: *SettingsControlProvider) com.HRESULT {
@@ -985,6 +1082,10 @@ pub const SettingsControlProvider = struct {
         return @fieldParentPtr("value_iface", p);
     }
 
+    fn fromInvoke(p: *com.IInvokeProvider) *SettingsControlProvider {
+        return @fieldParentPtr("invoke_iface", p);
+    }
+
     fn available(self: *const SettingsControlProvider) bool {
         return !self.detached.load(.acquire) and IsWindow(self.hwnd) != 0;
     }
@@ -1002,6 +1103,8 @@ pub const SettingsControlProvider = struct {
             out.* = @ptrCast(p);
         } else if (self.role == .edit and iidEqual(iid, &com.IID_IValueProvider)) {
             out.* = @ptrCast(&self.value_iface);
+        } else if (self.role == .button and iidEqual(iid, &com.IID_IInvokeProvider)) {
+            out.* = @ptrCast(&self.invoke_iface);
         } else return com.E_NOINTERFACE;
         _ = AddRef(p);
         return com.S_OK;
@@ -1015,12 +1118,24 @@ pub const SettingsControlProvider = struct {
         return QueryInterface(&fromValue(p).base, iid, out);
     }
 
+    fn InvokeQueryInterface(
+        p: *com.IInvokeProvider,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        return QueryInterface(&fromInvoke(p).base, iid, out);
+    }
+
     fn AddRef(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
         return fromBase(p).refcount.fetchAdd(1, .monotonic) + 1;
     }
 
     fn ValueAddRef(p: *com.IValueProvider) callconv(.winapi) u32 {
         return AddRef(&fromValue(p).base);
+    }
+
+    fn InvokeAddRef(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return AddRef(&fromInvoke(p).base);
     }
 
     pub fn Release(p: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
@@ -1035,6 +1150,10 @@ pub const SettingsControlProvider = struct {
 
     fn ValueRelease(p: *com.IValueProvider) callconv(.winapi) u32 {
         return Release(&fromValue(p).base);
+    }
+
+    fn InvokeRelease(p: *com.IInvokeProvider) callconv(.winapi) u32 {
+        return Release(&fromInvoke(p).base);
     }
 
     fn getProviderOptions(
@@ -1056,6 +1175,11 @@ pub const SettingsControlProvider = struct {
         if (self.role == .text) return com.S_OK;
         if (self.role == .edit and pattern_id == constants.UIA_ValuePatternId) {
             out.* = @ptrCast(&self.value_iface);
+            _ = AddRef(&self.base);
+            return com.S_OK;
+        }
+        if (self.role == .button and pattern_id == constants.UIA_InvokePatternId) {
+            out.* = @ptrCast(&self.invoke_iface);
             _ = AddRef(&self.base);
             return com.S_OK;
         }
@@ -1112,6 +1236,9 @@ pub const SettingsControlProvider = struct {
             => out.* = com.VARIANT.fromBool(true),
             constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
             constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(self.role != .text),
+            constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(
+                self.role != .text and hwndHasKeyboardFocus(self.hwnd),
+            ),
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(settingsControlIsOffscreen(
                 IsWindowVisible(self.hwnd),
                 self.viewport_fully_clipped.load(.acquire),
@@ -1134,6 +1261,29 @@ pub const SettingsControlProvider = struct {
         if (role != .edit) return com.UIA_E_INVALIDOPERATION;
         if (!enabled) return com.UIA_E_ELEMENTNOTENABLED;
         return com.S_OK;
+    }
+
+    fn invokePrecondition(provider_available: bool, role: Role, enabled: bool) com.HRESULT {
+        if (!provider_available) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        if (role != .button) return com.UIA_E_INVALIDOPERATION;
+        if (!enabled) return com.UIA_E_ELEMENTNOTENABLED;
+        return com.S_OK;
+    }
+
+    fn Invoke(p: *com.IInvokeProvider) callconv(.winapi) com.HRESULT {
+        const self = fromInvoke(p);
+        const precondition = invokePrecondition(
+            self.available(),
+            self.role,
+            IsWindowEnabled(self.hwnd) != 0,
+        );
+        if (precondition != com.S_OK) return precondition;
+        // IInvokeProvider.Invoke must return without waiting for the UI
+        // thread. BM_CLICK can silently fail for an inactive top-level
+        // window, which is exactly when assistive technology may invoke a
+        // surviving Settings window after its terminal owner closes. Marshal
+        // the native BN_CLICKED command directly to the parent instead.
+        return postButtonClicked(self.hwnd);
     }
 
     fn SetValue(
@@ -1542,6 +1692,11 @@ pub const SettingsSectionProvider = struct {
         events.raiseSelectionItemSelected(&self.base);
     }
 
+    pub fn raiseFocusChanged(self: *SettingsSectionProvider) void {
+        if (!self.available()) return;
+        events.raiseFocusChanged(&self.base);
+    }
+
     fn fromBase(p: *com.IRawElementProviderSimple) *SettingsSectionProvider {
         return @fieldParentPtr("base", p);
     }
@@ -1643,6 +1798,7 @@ pub const SettingsSectionProvider = struct {
             constants.UIA_IsKeyboardFocusablePropertyId,
             => out.* = com.VARIANT.fromBool(true),
             constants.UIA_IsEnabledPropertyId => out.* = com.VARIANT.fromBool(IsWindowEnabled(self.hwnd) != 0),
+            constants.UIA_HasKeyboardFocusPropertyId => out.* = com.VARIANT.fromBool(hwndHasKeyboardFocus(self.hwnd)),
             constants.UIA_IsOffscreenPropertyId => out.* = com.VARIANT.fromBool(windowVisibilityIsOffscreen(IsWindowVisible(self.hwnd))),
             constants.UIA_SelectionItemIsSelectedPropertyId => out.* = com.VARIANT.fromBool(self.isSelected()),
             else => {},
@@ -1685,10 +1841,10 @@ pub const SettingsSectionProvider = struct {
         const self = fromSelection(p);
         if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (IsWindowEnabled(self.hwnd) == 0) return com.UIA_E_ELEMENTNOTENABLED;
-        return if (PostMessageW(self.hwnd, BM_CLICK, 0, 0) != 0)
-            com.S_OK
-        else
-            com.UIA_E_ELEMENTNOTAVAILABLE;
+        const result = sendButtonClicked(self.hwnd);
+        if (result != com.S_OK) return result;
+        if (!self.available()) return com.UIA_E_ELEMENTNOTAVAILABLE;
+        return if (self.isSelected()) com.S_OK else com.UIA_E_INVALIDOPERATION;
     }
 
     fn AddToSelection(p: *com.ISelectionItemProvider) callconv(.winapi) com.HRESULT {
@@ -5367,6 +5523,55 @@ test "SettingsControlProvider exposes ValueProvider only for edit controls" {
         SettingsControlProvider.QueryInterface(&text.base, &com.IID_IValueProvider, &value),
     );
     try std.testing.expect(value == null);
+}
+
+test "SettingsControlProvider exposes InvokeProvider only for buttons" {
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        SettingsControlProvider.invokePrecondition(false, .button, true),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        SettingsControlProvider.invokePrecondition(true, .edit, true),
+    );
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTENABLED,
+        SettingsControlProvider.invokePrecondition(true, .button, false),
+    );
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsControlProvider.invokePrecondition(true, .button, true),
+    );
+
+    var button = try SettingsControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(1),
+        .button,
+        "Save and close",
+    );
+    defer _ = SettingsControlProvider.Release(&button.base);
+
+    var invoke: ?*anyopaque = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsControlProvider.QueryInterface(&button.base, &com.IID_IInvokeProvider, &invoke),
+    );
+    try std.testing.expect(invoke == @as(?*anyopaque, @ptrCast(&button.invoke_iface)));
+    try std.testing.expectEqual(@as(u32, 1), SettingsControlProvider.InvokeRelease(@ptrCast(@alignCast(invoke.?))));
+
+    var edit = try SettingsControlProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(1),
+        .edit,
+        "Scrollback limit",
+    );
+    defer _ = SettingsControlProvider.Release(&edit.base);
+    invoke = @ptrFromInt(0x10);
+    try std.testing.expectEqual(
+        com.E_NOINTERFACE,
+        SettingsControlProvider.QueryInterface(&edit.base, &com.IID_IInvokeProvider, &invoke),
+    );
+    try std.testing.expect(invoke == null);
 }
 
 test "SettingsSectionProvider preserves required single-selection semantics" {
