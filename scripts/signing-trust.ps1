@@ -128,7 +128,7 @@ public static class WinghosttyAuthenticodeVerifier
         out uint pdwFormatType,
         out IntPtr phCertStore,
         out IntPtr phMsg,
-        out IntPtr ppvContext);
+        IntPtr ppvContext);
 
     [DllImport("crypt32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -147,10 +147,6 @@ public static class WinghosttyAuthenticodeVerifier
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CertCloseStore(IntPtr hCertStore, uint dwFlags);
 
-    [DllImport("crypt32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CertFreeCertificateContext(IntPtr pCertContext);
-
     [DllImport("wintrust.dll", ExactSpelling = true)]
     private static extern int WinVerifyTrust(
         IntPtr hwnd,
@@ -161,7 +157,6 @@ public static class WinghosttyAuthenticodeVerifier
     {
         IntPtr certificateStore = IntPtr.Zero;
         IntPtr message = IntPtr.Zero;
-        IntPtr context = IntPtr.Zero;
         try
         {
             uint encoding;
@@ -178,7 +173,7 @@ public static class WinghosttyAuthenticodeVerifier
                     out formatType,
                     out certificateStore,
                     out message,
-                    out context))
+                    IntPtr.Zero))
             {
                 return false;
             }
@@ -252,7 +247,6 @@ public static class WinghosttyAuthenticodeVerifier
         }
         finally
         {
-            if (context != IntPtr.Zero) CertFreeCertificateContext(context);
             if (message != IntPtr.Zero) CryptMsgClose(message);
             if (certificateStore != IntPtr.Zero) CertCloseStore(certificateStore, 0);
         }
