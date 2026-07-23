@@ -2121,8 +2121,10 @@ pub const TerminalProvider = struct {
         out: *com.BOOL,
     ) callconv(.winapi) com.HRESULT {
         const self = fromValue(self_value);
+        out.* = 0;
+        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         out.* = if (self.state.set_value == null) 1 else 0;
-        return if (self.detached.load(.acquire)) com.UIA_E_ELEMENTNOTAVAILABLE else com.S_OK;
+        return com.S_OK;
     }
 
     fn GetSelection(
@@ -2199,11 +2201,12 @@ pub const TerminalProvider = struct {
         out: *i32,
     ) callconv(.winapi) com.HRESULT {
         const self = fromText(self_text);
+        out.* = com.SupportedTextSelection_None;
+        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         out.* = if (self.state.role == .edit)
             com.SupportedTextSelection_Single
         else
             com.SupportedTextSelection_None;
-        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         return com.S_OK;
     }
 
@@ -5226,6 +5229,20 @@ test "detached terminal provider rejects late host provider queries" {
         TerminalProvider.GetSelection(&provider.text_iface, &selection),
     );
     try std.testing.expect(selection == null);
+
+    var read_only: com.BOOL = 1;
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        TerminalProvider.GetIsReadOnly(&provider.value_iface, &read_only),
+    );
+    try std.testing.expectEqual(@as(com.BOOL, 0), read_only);
+
+    var supported_selection: i32 = com.SupportedTextSelection_Single;
+    try std.testing.expectEqual(
+        com.UIA_E_ELEMENTNOTAVAILABLE,
+        TerminalProvider.get_SupportedTextSelection(&provider.text_iface, &supported_selection),
+    );
+    try std.testing.expectEqual(com.SupportedTextSelection_None, supported_selection);
 }
 
 test "retained terminal range rejects queries after provider detach" {

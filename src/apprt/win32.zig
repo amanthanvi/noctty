@@ -10236,6 +10236,12 @@ const Host = struct {
     }
 
     fn commitPaletteTheme(self: *Host, name: []const u8) !void {
+        // The save/reload path can synchronously rebuild the palette catalog.
+        // Keep logging and post-save messaging independent of its borrowed
+        // theme-name storage.
+        const theme_name = try self.app.core_app.alloc.dupe(u8, name);
+        defer self.app.core_app.alloc.free(theme_name);
+
         // Clone the reversible baseline first. Do not detach the live preview
         // owner until every fallible preflight allocation has succeeded;
         // otherwise an OOM could strand the preview with no way to restore it.
@@ -10248,7 +10254,7 @@ const Host = struct {
 
         var pending = try original.clone(self.app.core_app.alloc);
         defer pending.deinit();
-        try setConfigTheme(&pending, name);
+        try setConfigTheme(&pending, theme_name);
 
         // settingsSaveAndReload may replace/deinit the live app config. Keep
         // the generation borrowed by the visible palette alive first.
@@ -10265,21 +10271,39 @@ const Host = struct {
             self.palette_theme_preview_original = null;
         }
 
-        self.app.settingsSaveAndReload(&pending, &original) catch |err| {
-            log.warn("palette theme save failed theme={s} err={}", .{ name, err });
-            // Roll back without another allocation: `original` is already an
-            // owned deep clone of the pre-preview baseline. Transfer it into
-            // the runtime config and suppress the local deferred deinit.
-            self.replaceRuntimeConfigFromPalette(original);
-            original_owned = false;
-            self.abortPaletteAction("Theme save failed; reverted preview.");
-            return;
-        };
+        const save_outcome = win32_settings.saveReloadOutcome(
+            self.app.settingsSaveAndReload(&pending, &original),
+        );
+        switch (save_outcome) {
+            .completed, .completed_masked => {},
+            .failed => |err| {
+                log.warn("palette theme save failed theme={s} err={}", .{ theme_name, err });
+                // Roll back without another allocation: `original` is already
+                // an owned deep clone of the pre-preview baseline. Transfer it
+                // into the runtime config and suppress the local deferred deinit.
+                self.replaceRuntimeConfigFromPalette(original);
+                original_owned = false;
+                self.abortPaletteAction("Theme save failed; reverted preview.");
+                return;
+            },
+        }
+        const saved_but_masked = std.meta.activeTag(save_outcome) == .completed_masked;
 
         if (self.palette_list_uia_provider) |provider| {
-            win32_uia.events.raiseNotification(&provider.base, .action_completed, "Theme applied");
+            win32_uia.events.raiseNotification(
+                &provider.base,
+                .action_completed,
+                if (saved_but_masked)
+                    "Theme saved; a later config layer masks it"
+                else
+                    "Theme applied",
+            );
         }
         self.hideOverlay();
+        if (saved_but_masked) {
+            log.warn("palette theme saved but masked by a later config layer theme={s}", .{theme_name});
+            self.setBanner(.info, "Theme saved, but a later config layer masks it.") catch {};
+        }
         self.layout() catch |err| {
             log.warn("palette theme post-save layout failed err={}", .{err});
         };

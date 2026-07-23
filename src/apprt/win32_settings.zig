@@ -327,6 +327,14 @@ const RawScalarField = enum {
 
 const raw_scalar_field_count = std.enums.values(RawScalarField).len;
 
+const SettingsStatus = union(enum) {
+    raw_validation: RawScalarField,
+    owned_validation: HWND,
+    conflict: SettingField,
+    owned_conflict: OwnedSettingField,
+    none,
+};
+
 pub const SettingValue = union(SettingField) {
     scrollback_limit: @FieldType(Config, "scrollback-limit"),
     font_size: @FieldType(Config, "font-size"),
@@ -666,6 +674,20 @@ pub const SaveError = error{
     /// generic write failure.
     SavedButMasked,
 };
+
+pub const SaveReloadOutcome = union(enum) {
+    completed,
+    completed_masked,
+    failed: SaveError,
+};
+
+pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
+    result catch |err| return switch (err) {
+        error.SavedButMasked => .completed_masked,
+        else => .{ .failed = err },
+    };
+    return .completed;
+}
 
 /// Minimal hook into the apprt `App` so the settings module can fetch
 /// the chrome brush colors without pulling in the whole app type.
@@ -1053,9 +1075,7 @@ pub const SettingsWindow = struct {
     fn setValidationError(self: *SettingsWindow, control: HWND, message: []const u8) void {
         self.owned_validation_control = control;
         self.owned_validation_message = message;
-        self.validation_control = control;
-        self.setStatus(message);
-        self.updateSaveEnabled();
+        self.surfaceNextValidation(false);
     }
 
     fn clearValidationError(self: *SettingsWindow, control: HWND) void {
@@ -1079,10 +1099,21 @@ pub const SettingsWindow = struct {
     }
 
     fn nextRawScalarValidation(self: *const SettingsWindow) ?RawScalarField {
+        if (self.active_raw_validation) |field| {
+            if (self.raw_scalar_error[@intFromEnum(field)] != null) return field;
+        }
         for (std.enums.values(RawScalarField)) |field| {
             if (self.raw_scalar_error[@intFromEnum(field)] != null) return field;
         }
         return null;
+    }
+
+    fn nextStatus(self: *const SettingsWindow) SettingsStatus {
+        if (self.nextRawScalarValidation()) |field| return .{ .raw_validation = field };
+        if (self.owned_validation_control) |control| return .{ .owned_validation = control };
+        if (self.active_conflict_field) |field| return .{ .conflict = field };
+        if (self.active_owned_conflict_field) |field| return .{ .owned_conflict = field };
+        return .none;
     }
 
     fn rawScalarDestination(self: *const SettingsWindow, field: RawScalarField) struct { section: Section, hwnd: ?HWND } {
@@ -1096,28 +1127,47 @@ pub const SettingsWindow = struct {
     }
 
     fn surfaceNextValidation(self: *SettingsWindow, focus: bool) void {
-        if (self.nextRawScalarValidation()) |field| {
-            const destination = self.rawScalarDestination(field);
-            self.active_raw_validation = field;
-            self.validation_control = destination.hwnd;
-            self.setStatus(self.raw_scalar_error[@intFromEnum(field)].?);
-            if (focus) if (destination.hwnd) |control| {
-                self.setActiveSection(destination.section);
-                _ = SetFocus(control);
-                self.ensureControlVisible(control);
-            };
-        } else if (self.owned_validation_control) |control| {
-            self.active_raw_validation = null;
-            self.validation_control = control;
-            self.setStatus(self.owned_validation_message orelse "A settings value is invalid.");
-            if (focus) {
-                _ = SetFocus(control);
-                self.ensureControlVisible(control);
-            }
-        } else {
-            self.active_raw_validation = null;
-            self.validation_control = null;
-            self.setStatus("");
+        self.syncConflictControls();
+        switch (self.nextStatus()) {
+            .raw_validation => |field| {
+                const destination = self.rawScalarDestination(field);
+                self.active_raw_validation = field;
+                self.validation_control = destination.hwnd;
+                self.setStatus(self.raw_scalar_error[@intFromEnum(field)].?);
+                if (focus) if (destination.hwnd) |control| {
+                    self.setActiveSection(destination.section);
+                    _ = SetFocus(control);
+                    self.ensureControlVisible(control);
+                };
+            },
+            .owned_validation => |control| {
+                self.active_raw_validation = null;
+                self.validation_control = control;
+                self.setStatus(self.owned_validation_message orelse "A settings value is invalid.");
+                if (focus) {
+                    _ = SetFocus(control);
+                    self.ensureControlVisible(control);
+                }
+            },
+            .conflict => |field| {
+                self.active_raw_validation = null;
+                self.validation_control = null;
+                var buf: [256]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{s} also changed on disk. Choose Keep mine or Use disk.", .{@tagName(field)}) catch "A setting also changed on disk.";
+                self.setStatus(text);
+            },
+            .owned_conflict => |field| {
+                self.active_raw_validation = null;
+                self.validation_control = null;
+                var buf: [256]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "{s} also changed on disk. Choose Keep mine or Use disk.", .{field.label()}) catch "A setting also changed on disk.";
+                self.setStatus(text);
+            },
+            .none => {
+                self.active_raw_validation = null;
+                self.validation_control = null;
+                self.setStatus("");
+            },
         }
         self.updateSaveEnabled();
     }
@@ -1161,7 +1211,7 @@ pub const SettingsWindow = struct {
             self.owned_dirty[index] = true;
             self.owned_conflict[index] = !ownedSettingEql(current, original, field);
         }
-        self.showNextConflict();
+        self.surfaceNextValidation(false);
         self.refreshNativeSectionText();
         self.updateSaveEnabled();
     }
@@ -1267,7 +1317,7 @@ pub const SettingsWindow = struct {
             }
         }
         self.refreshAllControls();
-        self.showNextConflict();
+        self.surfaceNextValidation(false);
         self.updateSaveEnabled();
     }
 
@@ -1331,10 +1381,10 @@ pub const SettingsWindow = struct {
             self.refreshAllControls();
         }
         self.updateSaveEnabled();
-        self.showNextConflict();
+        self.surfaceNextValidation(false);
     }
 
-    fn showNextConflict(self: *SettingsWindow) void {
+    fn syncConflictControls(self: *SettingsWindow) void {
         const transaction = &(self.transaction orelse return);
         var next: ?SettingField = null;
         for (transaction.entries) |entry| if (entry.conflict) {
@@ -1356,17 +1406,6 @@ pub const SettingsWindow = struct {
         const show: i32 = if (next != null or next_owned != null) SW_SHOWNORMAL else SW_HIDE;
         if (self.btn_conflict_keep) |button| _ = ShowWindow(button, show);
         if (self.btn_conflict_use_disk) |button| _ = ShowWindow(button, show);
-        if (next) |field| {
-            var buf: [256]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{s} also changed on disk. Choose Keep mine or Use disk.", .{@tagName(field)}) catch "A setting also changed on disk.";
-            self.setStatus(text);
-        } else if (next_owned) |field| {
-            var buf: [256]u8 = undefined;
-            const text = std.fmt.bufPrint(&buf, "{s} also changed on disk. Choose Keep mine or Use disk.", .{field.label()}) catch "A setting also changed on disk.";
-            self.setStatus(text);
-        } else if (self.validation_control == null) {
-            self.setStatus("");
-        }
         if (show == SW_HIDE and conflict_button_focused) self.focusAfterConflictResolution();
     }
 
@@ -1415,13 +1454,13 @@ pub const SettingsWindow = struct {
         self.owned_dirty[index] = !ownedSettingEql(pending, original, field);
         self.owned_conflict[index] = false;
         self.updateSaveEnabled();
-        self.showNextConflict();
+        self.surfaceNextValidation(false);
     }
 
     /// Surface an external-edit conflict inline without stealing focus.
     pub fn promptConflict(self: *SettingsWindow, field: SettingField) void {
         self.active_conflict_field = field;
-        self.showNextConflict();
+        self.surfaceNextValidation(false);
         self.updateSaveEnabled();
     }
 
@@ -2609,7 +2648,7 @@ pub const SettingsWindow = struct {
             return;
         }
         if (self.conflictCount() != 0) {
-            self.showNextConflict();
+            self.surfaceNextValidation(false);
             return;
         }
         const p = self.pending orelse return;
@@ -2642,11 +2681,9 @@ pub const SettingsWindow = struct {
             return;
         };
 
-        const result = self.handle.saveAndReload(self.handle.ctx, &p, &o);
-        if (result) |_| {
-            self.completeSynchronousSave(apply_id, false);
-        } else |err| switch (err) {
-            error.SavedButMasked => {
+        switch (saveReloadOutcome(self.handle.saveAndReload(self.handle.ctx, &p, &o))) {
+            .completed => self.completeSynchronousSave(apply_id, false),
+            .completed_masked => {
                 // Persisted bytes are correct but a later config
                 // layer is masking one or more edits. Same baseline
                 // refresh as success since the file IS written.
@@ -2654,7 +2691,7 @@ pub const SettingsWindow = struct {
                 // to disk but the effective value differs.
                 self.completeSynchronousSave(apply_id, true);
             },
-            else => {
+            .failed => |err| {
                 // Write failed. DO NOT discard `pending` — the user's
                 // edits are still in memory; losing them on every
                 // transient disk error (permission denied, sharing
@@ -3519,6 +3556,49 @@ test "settings conflict focus fallback never targets a hidden action" {
     try std.testing.expectEqual(ConflictFocusTarget.save, conflictFocusTarget(false, true, true));
     try std.testing.expectEqual(ConflictFocusTarget.section, conflictFocusTarget(false, false, true));
     try std.testing.expectEqual(ConflictFocusTarget.none, conflictFocusTarget(false, false, false));
+}
+
+test "settings status priority survives validation and conflict mutations" {
+    var settings: SettingsWindow = .{ .handle = undefined };
+    const raw_control: HWND = @ptrFromInt(0x101);
+    const owned_control: HWND = @ptrFromInt(0x102);
+    settings.edit_font_size = raw_control;
+
+    settings.setRawScalarValidationError(.font_size, raw_control, "Font size is required.");
+    settings.setValidationError(owned_control, "Terminal theme is invalid.");
+    settings.active_conflict_field = .background_opacity;
+    try std.testing.expectEqual(
+        SettingsStatus{ .raw_validation = .font_size },
+        settings.nextStatus(),
+    );
+    try std.testing.expectEqual(raw_control, settings.validation_control.?);
+
+    settings.raw_scalar_error[@intFromEnum(RawScalarField.font_size)] = null;
+    settings.active_raw_validation = null;
+    settings.surfaceNextValidation(false);
+    try std.testing.expectEqual(
+        SettingsStatus{ .owned_validation = owned_control },
+        settings.nextStatus(),
+    );
+    try std.testing.expectEqual(owned_control, settings.validation_control.?);
+
+    settings.clearValidationError(owned_control);
+    try std.testing.expectEqual(
+        SettingsStatus{ .conflict = .background_opacity },
+        settings.nextStatus(),
+    );
+    try std.testing.expect(settings.validation_control == null);
+
+    settings.active_conflict_field = null;
+    try std.testing.expectEqual(SettingsStatus.none, settings.nextStatus());
+}
+
+test "settings save reload outcome treats masked persistence as completed" {
+    try std.testing.expect(std.meta.activeTag(saveReloadOutcome({})) == .completed);
+    try std.testing.expect(std.meta.activeTag(saveReloadOutcome(error.SavedButMasked)) == .completed_masked);
+    const failed = saveReloadOutcome(error.ReloadFailed);
+    try std.testing.expect(std.meta.activeTag(failed) == .failed);
+    try std.testing.expectEqual(error.ReloadFailed, failed.failed);
 }
 
 test "settings invalid raw scalar edits require dirty close confirmation" {

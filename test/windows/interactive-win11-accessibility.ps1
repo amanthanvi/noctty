@@ -1584,6 +1584,12 @@ try {
                         [System.Windows.Automation.ControlType]::ListItem
                     )
                 ) | ForEach-Object { $_ })
+                $script:paletteUnavailableFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                $queryStillFocused = $null -ne $script:paletteUnavailableFocused -and
+                    $script:paletteUnavailableFocused.Current.ProcessId -eq $process.Id -and
+                    $script:paletteUnavailableFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Edit -and
+                    $script:paletteUnavailableFocused.Current.Name -eq 'Command palette query' -and
+                    $script:paletteUnavailableFocused.Current.HasKeyboardFocus
             }
             catch {
                 $hresults = @(Get-AccessibilityExceptionHResults -Exception $_.Exception)
@@ -1606,6 +1612,7 @@ try {
                 }
             }
             return $script:paletteUnavailableItems.Count -eq 0 -and
+                $queryStillFocused -and
                 [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
                 -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)
         }
