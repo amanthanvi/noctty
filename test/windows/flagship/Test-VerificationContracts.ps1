@@ -1924,10 +1924,15 @@ function Test-CommandResolutionMutationNode {
             return $true
         }
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv', 'Set-Variable', 'sv', 'set', 'New-Variable', 'nv', 'Remove-Variable', 'rv', 'Clear-Variable', 'clv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex') -or
             ($RejectUnresolvedCommands -and
                 $leafName -in @(
                     'Get-Command', 'gcm',
+                    'Get-Variable', 'gv',
+                    'Set-Variable', 'sv', 'set',
+                    'New-Variable', 'nv',
+                    'Remove-Variable', 'rv',
+                    'Clear-Variable', 'clv',
                     'Set-Item', 'si', 'Clear-Item', 'cli',
                     'Remove-Item', 'del', 'erase', 'rd', 'ri', 'rm', 'rmdir',
                     'Copy-Item', 'copy', 'cp', 'cpi',
@@ -2033,7 +2038,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
-    [pscustomobject]@{ Reject = $true; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $false; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$(Get-Item variable:ExecutionContext).Value.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ss = $ExecutionContext.SessionState; $ss.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$member = "Create"; [ScriptBlock]::$member("1+1")' }
@@ -2089,6 +2094,46 @@ foreach ($probe in $commandResolutionProbes) {
     }
     if ($probeRejected -ne $probe.Reject) {
         throw "Command-resolution probe contract failed: $($probe.Text) (contract result: $probeFailure)"
+    }
+}
+
+$strictOnlyVariableCommandProbes = @(
+    'Get-Variable value',
+    'gv value',
+    'Set-Variable value 1',
+    'sv value 1',
+    'set value 1',
+    'New-Variable value 1',
+    'nv value 1',
+    'Remove-Variable value',
+    'rv value',
+    'Clear-Variable value',
+    'clv value'
+)
+foreach ($probeText in $strictOnlyVariableCommandProbes) {
+    $probeTokens = $null
+    $probeErrors = $null
+    $probeAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        $probeText,
+        [ref]$probeTokens,
+        [ref]$probeErrors
+    )
+    if ($probeErrors.Count -ne 0) {
+        throw "Strict variable-command probe does not parse: $probeText"
+    }
+    $generalRejections = @($probeAst.FindAll({
+        param($node)
+        Test-CommandResolutionMutationNode -Node $node
+    }, $true))
+    $strictRejections = @($probeAst.FindAll({
+        param($node)
+        Test-CommandResolutionMutationNode `
+            -Node $node `
+            -RejectUnresolvedCommands
+    }, $true))
+    if ($generalRejections.Count -ne 0 -or
+        $strictRejections.Count -ne 1) {
+        throw "Variable-command mode contract failed: $probeText"
     }
 }
 
