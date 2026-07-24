@@ -220,6 +220,113 @@ function Get-YamlLiteralRunScript {
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
 }
 
+function Test-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            (($node.GetCommandName() -replace '\\', '/') -eq
+                './scripts/release-preflight.ps1')
+    }, $true))
+    if ($commands.Count -ne 1 -or $commands[0].CommandElements.Count -ne 2) {
+        return $false
+    }
+    $splat = $commands[0].CommandElements[1]
+    if ($splat -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        -not $splat.Splatted) {
+        return $false
+    }
+    $splatName = ($splat.VariablePath.UserPath -split ':')[-1]
+
+    $assignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    if ($assignments.Count -ne 1 -or
+        $assignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $assignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.HashtableAst]) {
+        return $false
+    }
+
+    $actualExpressions = @{}
+    foreach ($pair in $assignments[0].Right.Expression.KeyValuePairs) {
+        if ($pair.Item1 -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            return $false
+        }
+        $key = [string]$pair.Item1.Value
+        if ($actualExpressions.ContainsKey($key)) { return $false }
+        $actualExpressions[$key] = $pair.Item2.Extent.Text.Trim()
+    }
+    if ($actualExpressions.Count -ne $ExpectedExpressions.Count) {
+        return $false
+    }
+    foreach ($key in $ExpectedExpressions.Keys) {
+        if (-not $actualExpressions.ContainsKey($key) -or
+            $actualExpressions[$key] -cne $ExpectedExpressions[$key]) {
+            return $false
+        }
+    }
+
+    $variableUses = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    $assignmentUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $assignments[0].Left)
+    })
+    $invocationUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $splat)
+    })
+    return $variableUses.Count -eq 2 -and
+        $assignmentUses.Count -eq 1 -and
+        $invocationUses.Count -eq 1
+}
+
+function Assert-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $scriptText = Get-YamlLiteralRunScript `
+        -Content $StepText `
+        -Source $Context
+    if (-not (Test-NamedReleasePreflightSplat `
+        -ScriptText $scriptText `
+        -ExpectedExpressions $ExpectedExpressions)) {
+        throw "Release preflight workflow must use one immutable exact named splat: $Context"
+    }
+}
+
+function Test-ReleaseInteractiveResultSelectionContract {
+    param([Parameter(Mandatory)] [string] $ScriptText)
+
+    return $ScriptText -notmatch '(?m)Select-Object\s+-First' -and
+        $ScriptText -match '(?ms)\$resultFiles\s*=\s*@\(\s*Get-ChildItem -LiteralPath \$artifactRoot -Filter result\.json -File -Recurse\s*\)\s*if \(\$resultFiles\.Count -ne 1\) \{ continue \}\s*\$resultPath = \$resultFiles\[0\]\.FullName\s*\$result = Get-Content -LiteralPath \$resultPath -Raw \| ConvertFrom-Json\s*if \(\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''\) \{ continue \}'
+}
+
 function Get-PowerShellBlockText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -5098,23 +5205,112 @@ $releaseInteractiveEvidenceStep = Get-YamlStepText `
     -Content $releaseWorkflowText `
     -Name 'Require successful Test workflow for release SHA' `
     -Source $releaseWorkflow
-Assert-TextContract `
-    -Content $releasePreflightStep `
-    -Pattern '(?ms)\$preflightArgs\s*=\s*@\{\s*Version\s*=\s*\$env:RELEASE_VERSION\s*RequireSigning\s*=\s*\$true\s*RequirePackageManagers\s*=\s*\$true\s*\}.*?release-preflight\.ps1 @preflightArgs' `
-    -Description 'release preflight uses a three-key named hashtable splat' `
+$releasePreflightExpected = @{
+    Version = '$env:RELEASE_VERSION'
+    RequireSigning = '$true'
+    RequirePackageManagers = '$true'
+}
+Assert-NamedReleasePreflightSplat `
+    -StepText $releasePreflightStep `
+    -ExpectedExpressions $releasePreflightExpected `
     -Context "$releaseWorkflow :: Release preflight"
-Assert-TextContract `
-    -Content $readinessPreflightStep `
-    -Pattern '(?ms)\$scriptArgs\s*=\s*@\{\s*Version\s*=\s*\$env:RELEASE_VERSION\s*RequireSigning\s*=\s*\$true\s*RequirePackageManagers\s*=\s*\$env:REQUIRE_PACKAGE_MANAGERS -eq [''"]true[''"]\s*\}.*?release-preflight\.ps1 @scriptArgs' `
-    -Description 'release readiness uses a three-key named hashtable splat' `
+Assert-NamedReleasePreflightSplat `
+    -StepText $readinessPreflightStep `
+    -ExpectedExpressions @{
+        Version = '$env:RELEASE_VERSION'
+        RequireSigning = '$true'
+        RequirePackageManagers =
+            '$env:REQUIRE_PACKAGE_MANAGERS -eq ''true'''
+    } `
     -Context "$readinessWorkflow :: Validate release configuration"
-if (($releasePreflightStep + $readinessPreflightStep) -match
-    '(?ms)=\s*@\(\s*[''"]-Version[''"]|RequireAccessibilityEvidence') {
-    throw 'Release workflows cannot use flat preflight argument arrays or require manual accessibility attestation.'
+
+$reorderedSplatProbe = @'
+$preflightArgs = @{
+    RequirePackageManagers = $true
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+if (-not (Test-NamedReleasePreflightSplat `
+    -ScriptText $reorderedSplatProbe `
+    -ExpectedExpressions $releasePreflightExpected)) {
+    throw 'Named release-preflight splat contract must accept reordered keys.'
+}
+$invalidSplatMutants = @{
+    'later signing mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$preflightArgs.RequireSigning = $false
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'flat argument array' = @'
+$preflightArgs = @('-Version', $env:RELEASE_VERSION, '-RequireSigning', '-RequirePackageManagers')
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra invocation argument' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs -RequireSigning
+'@
+    'missing key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+    RequireAccessibilityEvidence = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+}
+foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
+    if (Test-NamedReleasePreflightSplat `
+        -ScriptText $mutant.Value `
+        -ExpectedExpressions $releasePreflightExpected) {
+        throw "Named release-preflight splat contract accepted mutant: $($mutant.Key)"
+    }
+}
+
+$releaseInteractiveEvidenceScript = Get-YamlLiteralRunScript `
+    -Content $releaseInteractiveEvidenceStep `
+    -Source "$releaseWorkflow :: Require successful Test workflow for release SHA"
+if (-not (Test-ReleaseInteractiveResultSelectionContract `
+    -ScriptText $releaseInteractiveEvidenceScript)) {
+    throw 'Release interactive evidence must select one composite result without arbitrary first-match fallback.'
+}
+$invalidResultSelectionMutants = @{
+    'zero-only count' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultFiles.Count -ne 1',
+        '$resultFiles.Count -eq 0'
+    )
+    'wrong scenario' = $releaseInteractiveEvidenceScript.Replace(
+        'windows.interactive-win11.composite',
+        'windows.interactive-win11.other'
+    )
+    'arbitrary first match' =
+        $releaseInteractiveEvidenceScript + "`nSelect-Object -First 1"
+}
+foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
+        throw "Release result-selection contract accepted mutant: $($mutant.Key)"
+    }
 }
 Assert-TextContract `
     -Content $releaseInteractiveEvidenceStep `
-    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
+    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$resultFiles\.Count -ne 1.*?\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
     -Description 'release remains gated on successful exact-SHA hash-bound interactive evidence' `
     -Context "$releaseWorkflow :: Require successful Test workflow for release SHA"
 Assert-TextContract `
