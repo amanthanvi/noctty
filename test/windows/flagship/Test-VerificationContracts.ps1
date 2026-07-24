@@ -1997,7 +1997,7 @@ function Test-CommandResolutionMutationNode {
     }
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
-        if ($RejectUnresolvedCommands -and $null -eq $name -and
+        if ($RejectUnresolvedCommands -and
             $Node.InvocationOperator -in @(
                 [System.Management.Automation.Language.TokenKind]::Ampersand,
                 [System.Management.Automation.Language.TokenKind]::Dot
@@ -2178,7 +2178,7 @@ foreach ($probe in $commandResolutionProbes) {
     }
 }
 
-$strictOnlyVariableCommandProbes = @(
+$strictOnlyCommandProbes = @(
     'Get-Variable value',
     'gv value',
     'Set-Variable value 1',
@@ -2189,9 +2189,11 @@ $strictOnlyVariableCommandProbes = @(
     'Remove-Variable value',
     'rv value',
     'Clear-Variable value',
-    'clv value'
+    'clv value',
+    '. ./scripts/replace-release-evidence.ps1',
+    '& Write-Output harmless'
 )
-foreach ($probeText in $strictOnlyVariableCommandProbes) {
+foreach ($probeText in $strictOnlyCommandProbes) {
     $probeTokens = $null
     $probeErrors = $null
     $probeAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -2200,7 +2202,7 @@ foreach ($probeText in $strictOnlyVariableCommandProbes) {
         [ref]$probeErrors
     )
     if ($probeErrors.Count -ne 0) {
-        throw "Strict variable-command probe does not parse: $probeText"
+        throw "Strict command probe does not parse: $probeText"
     }
     $generalRejections = @($probeAst.FindAll({
         param($node)
@@ -2214,7 +2216,7 @@ foreach ($probeText in $strictOnlyVariableCommandProbes) {
     }, $true))
     if ($generalRejections.Count -ne 0 -or
         $strictRejections.Count -ne 1) {
-        throw "Variable-command mode contract failed: $probeText"
+        throw "Strict command mode contract failed: $probeText"
     }
 }
 
@@ -6602,6 +6604,24 @@ $mutator = 'Set-Variable'
 & $mutator -Name preflightArgs -Value @{}
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'static dot-source mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+. ./scripts/replace-release-evidence.ps1
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'static call-operator mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+& Write-Output harmless
+./scripts/release-preflight.ps1 @preflightArgs
+'@
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
@@ -6882,6 +6902,16 @@ $invalidSuccessSourceMutants = @{
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
             "`$mutator = 'Microsoft.PowerShell.Utility\Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'static dot-source mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            ". ./scripts/replace-release-evidence.ps1`n$matchingCountTarget"
+        )
+    'static call-operator mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& Write-Output harmless`n$matchingCountTarget"
         )
     'stored provider path Set-Item mutation' =
         $releaseInteractiveEvidenceScript.Replace(
