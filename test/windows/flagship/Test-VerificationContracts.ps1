@@ -220,6 +220,22 @@ function Get-YamlLiteralRunScript {
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
 }
 
+function Get-CanonicalScriptTextSha256 {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $ScriptText)
+
+    $normalized = (($ScriptText -replace "`r`n", "`n") -replace "`r", "`n").
+        TrimEnd([char[]]"`n")
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($normalized)
+        return (([BitConverter]::ToString($sha256.ComputeHash($bytes))) -replace
+            '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 function Get-NamedVariableAssignments {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
@@ -272,7 +288,8 @@ function Test-ExactVariableUseSet {
 function Test-NamedReleasePreflightSplat {
     param(
         [Parameter(Mandatory)] [string] $ScriptText,
-        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
     )
 
     $tokens = $null
@@ -370,15 +387,25 @@ function Test-NamedReleasePreflightSplat {
     $invocationUses = @($variableUses | Where-Object {
         [object]::ReferenceEquals($_, $splat)
     })
+    $allSplats = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
+    }, $true))
     return $variableUses.Count -eq 2 -and
         $assignmentUses.Count -eq 1 -and
-        $invocationUses.Count -eq 1
+        $invocationUses.Count -eq 1 -and
+        $allSplats.Count -eq 1 -and
+        [object]::ReferenceEquals($allSplats[0], $splat) -and
+        (Get-CanonicalScriptTextSha256 -ScriptText $ScriptText) -ceq
+            $ExpectedScriptSha256
 }
 
 function Assert-NamedReleasePreflightSplat {
     param(
         [Parameter(Mandatory)] [string] $StepText,
         [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256,
         [Parameter(Mandatory)] [string] $Context
     )
 
@@ -387,7 +414,8 @@ function Assert-NamedReleasePreflightSplat {
         -Source $Context
     if (-not (Test-NamedReleasePreflightSplat `
         -ScriptText $scriptText `
-        -ExpectedExpressions $ExpectedExpressions)) {
+        -ExpectedExpressions $ExpectedExpressions `
+        -ExpectedScriptSha256 $ExpectedScriptSha256)) {
         throw "Release preflight workflow must use one immutable exact named splat: $Context"
     }
 }
@@ -632,7 +660,10 @@ function Test-CommandArgumentPair {
 }
 
 function Test-ReleaseInteractiveSuccessPredicates {
-    param([Parameter(Mandatory)] [string] $ScriptText)
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
+    )
 
     $tokens = $null
     $errors = $null
@@ -647,6 +678,13 @@ function Test-ReleaseInteractiveSuccessPredicates {
         Test-CommandResolutionMutationNode `
             -Node $node `
             -StrictReleaseContract
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+    if (@($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
     }, $true)).Count -ne 0) {
         return $false
     }
@@ -1436,7 +1474,8 @@ function Test-ReleaseInteractiveSuccessPredicates {
             return $false
         }
     }
-    return $true
+    return (Get-CanonicalScriptTextSha256 -ScriptText $ScriptText) -ceq
+        $ExpectedScriptSha256
 }
 
 function Get-PowerShellBlockText {
@@ -1873,7 +1912,7 @@ function Test-DynamicScriptTypeExpression {
         (Test-DynamicScriptTypeName -TypeName $Node.TypeName.FullName)
 }
 
-function Test-StrictReleaseStateTypeName {
+function Test-StrictReleaseForbiddenTypeName {
     param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
 
     $typeName = ((($TypeName -split ',', 2)[0] -replace '\s', '')).ToLowerInvariant()
@@ -1885,8 +1924,46 @@ function Test-StrictReleaseStateTypeName {
         'initialsessionstate',
         'system.management.automation.runspaces.runspace',
         'system.management.automation.runspaces.runspacefactory',
-        'system.management.automation.runspaces.initialsessionstate'
+        'system.management.automation.runspaces.initialsessionstate',
+        'microsoft.csharp.csharpcodeprovider',
+        'system.codedom.compiler.codedomprovider',
+        'system.codedom.compiler.compilerparameters',
+        'microsoft.codeanalysis.compilation',
+        'microsoft.codeanalysis.csharp.csharpcompilation',
+        'assembly',
+        'reflection.assembly',
+        'system.reflection.assembly',
+        'system.reflection.emit.assemblybuilder',
+        'system.reflection.emit.modulebuilder',
+        'system.reflection.emit.typebuilder',
+        'system.reflection.emit.methodbuilder',
+        'system.reflection.emit.dynamicmethod'
     )
+}
+
+function Test-StrictReleaseForbiddenParameterName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $ParameterName)
+
+    if ($ParameterName.Length -eq 0) { return $false }
+    if ($ParameterName -in @('ov', 'pv', 'ev', 'wv', 'iv')) {
+        return $true
+    }
+    foreach ($canonicalName in @(
+        'OutVariable',
+        'PipelineVariable',
+        'ErrorVariable',
+        'WarningVariable',
+        'InformationVariable',
+        'MemberName'
+    )) {
+        if ($canonicalName.StartsWith(
+            $ParameterName,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Test-ExecutionContextRoot {
@@ -1935,13 +2012,19 @@ function Test-CommandResolutionMutationNode {
     )
 
     if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.CommandParameterAst] -and
+        (Test-StrictReleaseForbiddenParameterName `
+            -ParameterName $Node.ParameterName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
         $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
-        (Test-StrictReleaseStateTypeName -TypeName $Node.TypeName.FullName)) {
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.TypeName.FullName)) {
         return $true
     }
     if ($StrictReleaseContract -and
         $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-        (Test-StrictReleaseStateTypeName -TypeName $Node.Value)) {
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.Value)) {
         return $true
     }
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
@@ -1958,8 +2041,9 @@ function Test-CommandResolutionMutationNode {
     }
     if ($StrictReleaseContract -and
         $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        (($Node.VariablePath.UserPath -split ':')[-1]) -eq
-            'ExecutionContext') {
+        (($Node.VariablePath.UserPath -split ':')[-1]) -in @(
+            'ExecutionContext', 'PSCmdlet', 'Host', 'MyInvocation'
+        )) {
         return $true
     }
     if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
@@ -1999,7 +2083,19 @@ function Test-CommandResolutionMutationNode {
         if ($StrictReleaseContract -and
             $memberName -in @(
                 'DefaultRunspace', 'SessionStateProxy',
-                'SetVariable', 'GetVariable', 'RemoveVariable'
+                'SetVariable', 'GetVariable', 'RemoveVariable',
+                'SessionState', 'PSVariable',
+                'PSObject', 'PSBase', 'PSAdapted',
+                'Members', 'Methods', 'Properties',
+                'CompileAssemblyFromSource',
+                'CompileAssemblyFromFile',
+                'CompileAssemblyFromDom',
+                'CreateCompiler', 'CreateProvider',
+                'DefineDynamicAssembly', 'DefineDynamicModule',
+                'DefineType', 'DefineMethod',
+                'CreateType', 'CreateTypeInfo',
+                'BakeByteArray', 'Emit',
+                'Load', 'LoadFile', 'LoadFrom', 'UnsafeLoadFrom', 'LoadModule'
             )) {
             return $true
         }
@@ -2058,6 +2154,9 @@ function Test-CommandResolutionMutationNode {
             ($StrictReleaseContract -and
                 $leafName -in @(
                     'Get-Command', 'gcm',
+                    'Add-Type',
+                    'Tee-Object', 'tee',
+                    'Get-Member', 'gm',
                     'Get-Variable', 'gv',
                     'Set-Variable', 'sv', 'set',
                     'New-Variable', 'nv',
@@ -2264,7 +2363,20 @@ $strictOnlyCommandProbes += @(
         'initialsessionstate',
         'System.Management.Automation.Runspaces.Runspace',
         'System.Management.Automation.Runspaces.RunspaceFactory',
-        'System.Management.Automation.Runspaces.InitialSessionState'
+        'System.Management.Automation.Runspaces.InitialSessionState',
+        'Microsoft.CSharp.CSharpCodeProvider',
+        'System.CodeDom.Compiler.CodeDomProvider',
+        'System.CodeDom.Compiler.CompilerParameters',
+        'Microsoft.CodeAnalysis.Compilation',
+        'Microsoft.CodeAnalysis.CSharp.CSharpCompilation',
+        'Assembly',
+        'Reflection.Assembly',
+        'System.Reflection.Assembly',
+        'System.Reflection.Emit.AssemblyBuilder',
+        'System.Reflection.Emit.ModuleBuilder',
+        'System.Reflection.Emit.TypeBuilder',
+        'System.Reflection.Emit.MethodBuilder',
+        'System.Reflection.Emit.DynamicMethod'
     ) | ForEach-Object {
         "'$_'"
         "[$_]::Name"
@@ -2278,6 +2390,65 @@ $strictOnlyCommandProbes += @(
         'GetVariable',
         'RemoveVariable'
     ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    'Tee-Object -Variable value',
+    'tee -Variable value',
+    'Write-Output x -OutVariable value',
+    'Write-Output x -ov value',
+    'Write-Output x -PipelineVariable value',
+    'Write-Output x -pv value',
+    'Write-Output x -ErrorVariable value',
+    'Write-Output x -ev value',
+    'Write-Output x -WarningVariable value',
+    'Write-Output x -wv value',
+    'Write-Output x -InformationVariable value',
+    'Write-Output x -iv value',
+    'Write-Output x -OutV value',
+    'Write-Output x -PipelineV value',
+    'Write-Output x | ForEach-Object -MemberName ToString',
+    'Write-Output x | ForEach-Object -MemberN ToString',
+    'Write-Output x | % -M ToString',
+    'Get-Member -InputObject value',
+    'gm -InputObject value',
+    'Add-Type -TypeDefinition ''public class StrictProbe {}''',
+    'Microsoft.PowerShell.Utility\Add-Type -TypeDefinition ''public class StrictProbe {}'''
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'PSObject',
+        'PSBase',
+        'PSAdapted',
+        'Members',
+        'Methods',
+        'Properties',
+        'CompileAssemblyFromSource',
+        'CompileAssemblyFromFile',
+        'CompileAssemblyFromDom',
+        'CreateCompiler',
+        'CreateProvider',
+        'DefineDynamicAssembly',
+        'DefineDynamicModule',
+        'DefineType',
+        'DefineMethod',
+        'CreateType',
+        'CreateTypeInfo',
+        'BakeByteArray',
+        'Emit',
+        'Load',
+        'LoadFile',
+        'LoadFrom',
+        'UnsafeLoadFrom',
+        'LoadModule'
+    ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    '$PSCmdlet',
+    '$script:PSCmdlet',
+    '$Host',
+    '$MyInvocation',
+    '$value.SessionState',
+    '$value.PSVariable'
 )
 foreach ($probeText in $strictOnlyCommandProbes) {
     $probeTokens = $null
@@ -6491,9 +6662,16 @@ $releasePreflightExpected = @{
     RequireSigning = '$true'
     RequirePackageManagers = '$true'
 }
+$releasePreflightScriptSha256 =
+    '11cef0f8ad78ad165cb61aa6a06a74cca36e523a84a2d2162a6d9b940c426065'
+$readinessPreflightScriptSha256 =
+    '9e08d1fca871d8eb340ee88057e66b4472cef074eb0cab4ff728537ed439c7dc'
+$releaseInteractiveEvidenceScriptSha256 =
+    '2bc265c1052c000e5f8ea599d2f5e2002dec3d3dc893bff0b8ecd72da739bb92'
 Assert-NamedReleasePreflightSplat `
     -StepText $releasePreflightStep `
     -ExpectedExpressions $releasePreflightExpected `
+    -ExpectedScriptSha256 $releasePreflightScriptSha256 `
     -Context "$releaseWorkflow :: Release preflight"
 Assert-NamedReleasePreflightSplat `
     -StepText $readinessPreflightStep `
@@ -6503,20 +6681,30 @@ Assert-NamedReleasePreflightSplat `
         RequirePackageManagers =
             '$env:REQUIRE_PACKAGE_MANAGERS -eq ''true'''
     } `
+    -ExpectedScriptSha256 $readinessPreflightScriptSha256 `
     -Context "$readinessWorkflow :: Validate release configuration"
 
-$reorderedSplatProbe = @'
-$preflightArgs = @{
-    RequirePackageManagers = $true
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-}
-./scripts/release-preflight.ps1 @preflightArgs
-'@
+$releasePreflightScript = Get-YamlLiteralRunScript `
+    -Content $releasePreflightStep `
+    -Source "$releaseWorkflow :: Release preflight"
 if (-not (Test-NamedReleasePreflightSplat `
-    -ScriptText $reorderedSplatProbe `
-    -ExpectedExpressions $releasePreflightExpected)) {
-    throw 'Named release-preflight splat contract must accept reordered keys.'
+    -ScriptText $releasePreflightScript `
+    -ExpectedExpressions $releasePreflightExpected `
+    -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
+    throw 'Canonical release-preflight script digest must pass.'
+}
+# Intentional workflow-script edits require reviewing semantics and updating the
+# corresponding literal digest; formatting changes are contract changes too.
+$releasePreflightWhitespaceMutant = $releasePreflightScript.Replace(
+    '$preflightArgs = @{',
+    '$preflightArgs  = @{'
+)
+if ($releasePreflightWhitespaceMutant -ceq $releasePreflightScript -or
+    (Test-NamedReleasePreflightSplat `
+        -ScriptText $releasePreflightWhitespaceMutant `
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
+    throw 'Release-preflight script digest accepted a whitespace mutation.'
 }
 $invalidSplatMutants = @{
     'later signing mutation' = @'
@@ -6729,11 +6917,143 @@ $preflightArgs = @{
 [runspace]::DefaultRunspace.SessionStateProxy.SetVariable('preflightArgs', @{})
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'Tee-Object variable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Output @{} | Tee-Object -Variable preflightArgs | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'OutVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Output @{} -OutVariable preflightArgs | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'OutVariable prefix mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Output @{} -OutV preflightArgs | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'PipelineVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Output @{} -PipelineVariable preflightArgs | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'PipelineVariable prefix mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Output @{} -PipelineV preflightArgs | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'ErrorVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Write-Error forged -ErrorVariable preflightArgs -ErrorAction SilentlyContinue
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'PSObject member dispatch mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$dispatch = [pscustomobject]@{
+    mutate = { Set-Variable -Scope 1 -Name preflightArgs -Value @{} }
+}
+$dispatch.PSObject.Properties['mutate'].Value.Invoke()
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Add-Type static method mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Add-Type -TypeDefinition @"
+using System.Management.Automation.Runspaces;
+public static class PreflightMutator {
+    public static void Set(string name, object value) {
+        Runspace.DefaultRunspace.SessionStateProxy.SetVariable(name, value);
+    }
+}
+"@
+[PreflightMutator]::Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Assembly Load mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'ForEach-Object MemberName dispatch mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$scriptBlockType = [PSObject].Assembly |
+    ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'
+$createMethod = $scriptBlockType |
+    ForEach-Object -MemberName ('Get' + 'Method') -ArgumentList 'Create', [type[]]@([string])
+$payload = $createMethod |
+    ForEach-Object -MemberName ('In' + 'voke') -ArgumentList $null, @('Set-Variable -Scope 1 -Name preflightArgs -Value @{}')
+$payload | ForEach-Object -MemberName ('In' + 'voke') | Out-Null
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'PSCmdlet session-state mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+function Invoke-PreflightMutation {
+    [CmdletBinding()]
+    param()
+    $PSCmdlet.SessionState.PSVariable.Set('script:preflightArgs', @{})
+}
+Invoke-PreflightMutation
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'splatted PipelineVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$writeParams = @{ PipelineVariable = 'preflightArgs' }
+Write-Output @{} @writeParams
+./scripts/release-preflight.ps1 @preflightArgs
+'@
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
         -ScriptText $mutant.Value `
-        -ExpectedExpressions $releasePreflightExpected) {
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256) {
         throw "Named release-preflight splat contract accepted mutant: $($mutant.Key)"
     }
 }
@@ -6826,7 +7146,8 @@ foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
     }
 }
 if (-not (Test-ReleaseInteractiveSuccessPredicates `
-    -ScriptText $releaseInteractiveEvidenceScript)) {
+    -ScriptText $releaseInteractiveEvidenceScript `
+    -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256)) {
     throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
 }
 $runsSourceTarget = '$runs = @($runsJson | ConvertFrom-Json)'
@@ -6877,6 +7198,26 @@ if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
     -not $releaseInteractiveEvidenceScript.Contains($hashMismatchGuardTarget)) {
     throw 'Release success-predicate source-binding mutation target is missing.'
 }
+$addTypeEvidenceMutation = @'
+Add-Type -TypeDefinition @"
+using System.Management.Automation.Runspaces;
+public static class EvidenceMutator {
+    public static void Set(string name, object value) {
+        Runspace.DefaultRunspace.SessionStateProxy.SetVariable(name, value);
+    }
+}
+"@
+[EvidenceMutator]::Set('matching', @())
+'@
+$memberDispatchEvidenceMutation = @'
+$scriptBlockType = [PSObject].Assembly |
+    ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'
+$createMethod = $scriptBlockType |
+    ForEach-Object -MemberName ('Get' + 'Method') -ArgumentList 'Create', [type[]]@([string])
+$payload = $createMethod |
+    ForEach-Object -MemberName ('In' + 'voke') -ArgumentList $null, @('Set-Variable -Scope 1 -Name matching -Value @()')
+$payload | ForEach-Object -MemberName ('In' + 'voke') | Out-Null
+'@
 $invalidSuccessSourceMutants = @{
     'runs JSON source substitution' = $otherJsonSourceScript
     'runs JSON source comment decoy' =
@@ -7030,6 +7371,66 @@ $invalidSuccessSourceMutants = @{
             $matchingCountTarget,
             "[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('matching', @(`$otherRun))`n$matchingCountTarget"
         )
+    'Tee-Object variable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) | Tee-Object -Variable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutV matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineV matching | Out-Null`n$matchingCountTarget"
+        )
+    'ErrorVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Error forged -ErrorVariable matching -ErrorAction SilentlyContinue`n$matchingCountTarget"
+        )
+    'PSObject member dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name matching -Value @() } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$matchingCountTarget"
+        )
+    'Add-Type static method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $addTypeEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'Assembly Load mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$matchingCountTarget"
+        )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $memberDispatchEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'PSCmdlet session-state mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "function Invoke-EvidenceMutation {`n    [CmdletBinding()]`n    param()`n    `$PSCmdlet.SessionState.PSVariable.Set('script:matching', @())`n}`nInvoke-EvidenceMutation`n$matchingCountTarget"
+        )
+    'splatted OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$writeParams = @{ OutVariable = 'matching' }`nWrite-Output ([pscustomobject]@{ databaseId = 4242 }) @writeParams`n$matchingCountTarget"
+        )
     'stored provider path Set-Item mutation' =
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
@@ -7160,7 +7561,9 @@ $invalidSuccessSourceMutants = @{
         )
 }
 foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
-    if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
+    if (Test-ReleaseInteractiveSuccessPredicates `
+        -ScriptText $mutant.Value `
+        -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
         throw "Release success-predicate contract accepted source mutant: $($mutant.Key)"
     }
 }
@@ -7254,7 +7657,9 @@ foreach ($spec in $successPredicateMutationSpecs) {
         }
     )
     foreach ($mutant in $mutants) {
-        if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Script) {
+        if (Test-ReleaseInteractiveSuccessPredicates `
+            -ScriptText $mutant.Script `
+            -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
             throw "Release success-predicate contract accepted mutant: $($mutant.Label)"
         }
     }
