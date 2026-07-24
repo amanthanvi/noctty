@@ -332,11 +332,34 @@ function Test-ReleaseInteractiveResultSelectionContract {
     )
     if ($errors.Count -ne 0) { return $false }
 
-    $resultFileAssignments = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text -ceq '$resultFiles'
-    }, $true))
+    $runLoops = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$run' -and
+                $node.Condition.Extent.Text.Trim() -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($runLoops.Count -ne 1) { return $false }
+    $runBody = $runLoops[0].Body
+
+    $resultFileAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultFiles'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
     if ($resultFileAssignments.Count -ne 1 -or
         $resultFileAssignments[0].Right -isnot
             [System.Management.Automation.Language.CommandExpressionAst] -or
@@ -419,25 +442,46 @@ function Test-ReleaseInteractiveResultSelectionContract {
         return $false
     }
 
-    $countGates = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.IfStatementAst] -and
-            (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
-                'if ($resultFiles.Count -ne 1) { continue }'
-    }, $true))
-    $resultPathAssignments = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text -ceq '$resultPath' -and
-            $node.Right.Extent.Text.Trim() -ceq '$resultFiles[0].FullName'
-    }, $true))
-    $resultAssignments = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left.Extent.Text -ceq '$result' -and
-            (($node.Right.Extent.Text -replace '\s+', ' ').Trim()) -ceq
-                'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
-    }, $true))
+    $countGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultPathAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultPath' -and
+                $node.Right.Extent.Text.Trim() -ceq '$resultFiles[0].FullName'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$result' -and
+                (($node.Right.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
     $arbitraryFirst = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and
@@ -5660,6 +5704,18 @@ $invalidResultSelectionMutants = @{
     'fail-open catch' = $releaseInteractiveEvidenceScript.Replace(
         'catch { $false }',
         'catch { $true }'
+    )
+    'nested count gate' = $releaseInteractiveEvidenceScript.Replace(
+        'if ($resultFiles.Count -ne 1) { continue }',
+        'if ($false) { if ($resultFiles.Count -ne 1) { continue } }'
+    )
+    'nested result path' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultPath = $resultFiles[0].FullName',
+        'if ($false) { $resultPath = $resultFiles[0].FullName }'
+    )
+    'nested result parse' = $releaseInteractiveEvidenceScript.Replace(
+        '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json',
+        'if ($false) { $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }'
     )
 }
 foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
