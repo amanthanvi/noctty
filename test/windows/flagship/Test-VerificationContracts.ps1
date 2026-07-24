@@ -327,19 +327,181 @@ function Test-ReleaseInteractiveResultSelectionContract {
         $ScriptText -match '(?ms)\$resultFiles\s*=\s*@\(\s*Get-ChildItem -LiteralPath \$artifactRoot -Filter result\.json -File -Recurse\s*\)\s*if \(\$resultFiles\.Count -ne 1\) \{ continue \}\s*\$resultPath = \$resultFiles\[0\]\.FullName\s*\$result = Get-Content -LiteralPath \$resultPath -Raw \| ConvertFrom-Json\s*if \(\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''\) \{ continue \}'
 }
 
+function Get-LogicalAndLeaves {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $Node.Operator -eq [System.Management.Automation.Language.TokenKind]::And) {
+        Get-LogicalAndLeaves -Node $Node.Left
+        Get-LogicalAndLeaves -Node $Node.Right
+        return
+    }
+    return ,$Node
+}
+
+function Get-SinglePipelineExpression {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $Node.PipelineElements.Count -ne 1 -or
+        $Node.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $null
+    }
+    return $Node.PipelineElements[0].Expression
+}
+
+function Test-ExactExpressionSet {
+    param(
+        [System.Management.Automation.Language.Ast] $Root,
+        [Parameter(Mandatory)] [string[]] $Expected
+    )
+
+    if ($null -eq $Root) { return $false }
+    $actual = @(
+        Get-LogicalAndLeaves -Node $Root |
+            ForEach-Object { ($_.Extent.Text -replace '\s+', ' ').Trim() }
+    )
+    return $actual.Count -eq $Expected.Count -and
+        @($Expected | Where-Object { $actual -cnotcontains $_ }).Count -eq 0
+}
+
+function Test-CommandArgumentPair {
+    param(
+        [Parameter(Mandatory)] [string[]] $Elements,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    $matchCount = 0
+    for ($index = 0; $index -lt ($Elements.Count - 1); $index++) {
+        if ($Elements[$index] -ceq $Name -and
+            $Elements[$index + 1] -ceq $Value) {
+            $matchCount++
+        }
+    }
+    return $matchCount -eq 1 -and
+        @($Elements | Where-Object { $_ -ceq $Name }).Count -eq 1
+}
+
 function Test-ReleaseInteractiveSuccessPredicates {
     param([Parameter(Mandatory)] [string] $ScriptText)
 
-    $requiredPredicates = @(
-        '--status success',
-        '$_.headSha -eq $sha',
-        '$_.status -eq "completed"',
-        '$_.conclusion -eq "success"',
-        '$result.status -eq ''pass'''
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
     )
-    return @($requiredPredicates | Where-Object {
-        -not $ScriptText.Contains($_)
-    }).Count -eq 0
+    if ($errors.Count -ne 0) { return $false }
+
+    $runListCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -ne 'gh' -or
+            $node.CommandElements.Count -lt 3) {
+            return $false
+        }
+        return $node.CommandElements[1].Extent.Text -ceq 'run' -and
+            $node.CommandElements[2].Extent.Text -ceq 'list'
+    }, $true))
+    if ($runListCommands.Count -ne 1) { return $false }
+    $runList = $runListCommands[0]
+    $runListAssignment = $runList
+    while ($null -ne $runListAssignment -and
+        $runListAssignment -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst]) {
+        $runListAssignment = $runListAssignment.Parent
+    }
+    if ($null -eq $runListAssignment -or
+        $runListAssignment.Left -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        (($runListAssignment.Left.VariablePath.UserPath -split ':')[-1]) -cne
+            'runsJson' -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runListAssignment `
+            -NamedBlock $ast.EndBlock)) {
+        return $false
+    }
+    $runListElements = @(
+        $runList.CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    foreach ($pair in @(
+        @('--workflow', 'Test'),
+        @('--commit', '$sha'),
+        @('--status', 'success')
+    )) {
+        if (-not (Test-CommandArgumentPair `
+            -Elements $runListElements `
+            -Name $pair[0] `
+            -Value $pair[1])) {
+            return $false
+        }
+    }
+
+    $matchingAssignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'matching'
+    }, $true) | Where-Object {
+        Test-DirectNamedBlockChild -Node $_ -NamedBlock $ast.EndBlock
+    })
+    if ($matchingAssignments.Count -ne 1) { return $false }
+    $whereCommands = @($matchingAssignments[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($whereCommands.Count -ne 1 -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        -not (Test-ExactExpressionSet `
+            -Root (Get-SinglePipelineExpression -Node $filterStatements[0]) `
+            -Expected @(
+                '$_.headSha -eq $sha',
+                '$_.status -eq "completed"',
+                '$_.conclusion -eq "success"'
+            ))) {
+        return $false
+    }
+
+    $evidenceIfs = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.IfStatementAst] -or
+            $node.Clauses.Count -ne 1) {
+            return $false
+        }
+        $body = $node.Clauses[0].Item2
+        return @($body.FindAll({
+            param($child)
+            $child -is
+                [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $child.Left.Extent.Text -ceq '$evidenceRun' -and
+                $child.Right.Extent.Text -ceq '$run'
+        }, $true) | Where-Object {
+            Test-DirectStatementBlockChild -Node $_ -StatementBlock $body
+        }).Count -eq 1
+    }, $true))
+    if ($evidenceIfs.Count -ne 1) { return $false }
+    return Test-ExactExpressionSet `
+        -Root (Get-SinglePipelineExpression `
+            -Node $evidenceIfs[0].Clauses[0].Item1) `
+        -Expected @(
+            '$result.status -eq ''pass''',
+            '$result.implementation_commit -eq $sha',
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId',
+            '$hashesBound'
+        )
 }
 
 function Get-PowerShellBlockText {
@@ -5327,31 +5489,99 @@ if (-not (Test-ReleaseInteractiveSuccessPredicates `
     -ScriptText $releaseInteractiveEvidenceScript)) {
     throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
 }
-$invalidSuccessPredicateMutants = @{
-    'GitHub success filter' = $releaseInteractiveEvidenceScript.Replace(
-        '--status success',
-        '--status failure'
+$successPredicateMutationSpecs = @(
+    [pscustomobject]@{
+        Label = 'GitHub success filter'
+        Active = '--status success'
+        Removed = '--status queued'
+        Inverted = '--status failure'
+        Dead = 'if ($false) { ''--status success'' }'
+    },
+    [pscustomobject]@{
+        Label = 'exact candidate head'
+        Active = '$_.headSha -eq $sha'
+        Removed = '$true'
+        Inverted = '$_.headSha -ne $sha'
+        Dead = 'if ($false) { $_.headSha -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'completed candidate'
+        Active = '$_.status -eq "completed"'
+        Removed = '$true'
+        Inverted = '$_.status -ne "completed"'
+        Dead = 'if ($false) { $_.status -eq "completed" }'
+    },
+    [pscustomobject]@{
+        Label = 'successful candidate'
+        Active = '$_.conclusion -eq "success"'
+        Removed = '$true'
+        Inverted = '$_.conclusion -ne "success"'
+        Dead = 'if ($false) { $_.conclusion -eq "success" }'
+    },
+    [pscustomobject]@{
+        Label = 'passing result'
+        Active = '$result.status -eq ''pass'''
+        Removed = '$true'
+        Inverted = '$result.status -ne ''pass'''
+        Dead = 'if ($false) { $result.status -eq ''pass'' }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence implementation SHA'
+        Active = '$result.implementation_commit -eq $sha'
+        Removed = '$true'
+        Inverted = '$result.implementation_commit -ne $sha'
+        Dead = 'if ($false) { $result.implementation_commit -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence workflow run'
+        Active =
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId'
+        Removed = '$true'
+        Inverted =
+            '[string]$result.workflow_run_id -ne [string]$run.databaseId'
+        Dead =
+            'if ($false) { [string]$result.workflow_run_id -eq [string]$run.databaseId }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence artifact hashes'
+        Active = '$hashesBound'
+        Removed = '$true'
+        Inverted = '-not $hashesBound'
+        Dead = 'if ($false) { $hashesBound }'
+    }
+)
+foreach ($spec in $successPredicateMutationSpecs) {
+    $targetIndex = $releaseInteractiveEvidenceScript.LastIndexOf(
+        $spec.Active,
+        [StringComparison]::Ordinal
     )
-    'exact candidate head' = $releaseInteractiveEvidenceScript.Replace(
-        '$_.headSha -eq $sha',
-        '$_.headSha -ne $sha'
+    if ($targetIndex -lt 0) {
+        throw "Release success-predicate mutation target is missing: $($spec.Label)"
+    }
+    $prefix = $releaseInteractiveEvidenceScript.Substring(0, $targetIndex)
+    $suffix = $releaseInteractiveEvidenceScript.Substring(
+        $targetIndex + $spec.Active.Length
     )
-    'completed candidate' = $releaseInteractiveEvidenceScript.Replace(
-        '$_.status -eq "completed"',
-        '$_.status -ne "completed"'
+    $removedScript = $prefix + $spec.Removed + $suffix
+    $invertedScript = $prefix + $spec.Inverted + $suffix
+    $mutants = @(
+        [pscustomobject]@{
+            Label = "$($spec.Label) inversion"
+            Script = $invertedScript
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) comment decoy"
+            Script = $removedScript + "`n# $($spec.Active)"
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) dead-code decoy"
+            Script = $removedScript + "`n$($spec.Dead)"
+        }
     )
-    'successful candidate' = $releaseInteractiveEvidenceScript.Replace(
-        '$_.conclusion -eq "success"',
-        '$_.conclusion -ne "success"'
-    )
-    'passing result' = $releaseInteractiveEvidenceScript.Replace(
-        '$result.status -eq ''pass''',
-        '$result.status -ne ''pass'''
-    )
-}
-foreach ($mutant in $invalidSuccessPredicateMutants.GetEnumerator()) {
-    if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
-        throw "Release success-predicate contract accepted mutant: $($mutant.Key)"
+    foreach ($mutant in $mutants) {
+        if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Script) {
+            throw "Release success-predicate contract accepted mutant: $($mutant.Label)"
+        }
     }
 }
 Assert-TextContract `
