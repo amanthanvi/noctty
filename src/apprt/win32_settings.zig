@@ -22,6 +22,7 @@ const windows = std.os.windows;
 const Config = @import("../config/Config.zig");
 const cli_help = @import("../cli/help.zig");
 const win32_types = @import("win32_types.zig");
+const win32_theme = @import("win32_theme.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
 
@@ -85,6 +86,12 @@ const WM_SETFONT: UINT = 0x0030;
 const WM_SETTINGCHANGE: UINT = 0x001A;
 const WM_SYSCOLORCHANGE: UINT = 0x0015;
 const WM_THEMECHANGED: UINT = 0x031A;
+const WM_CTLCOLORMSGBOX: UINT = 0x0132;
+const WM_CTLCOLOREDIT: UINT = 0x0133;
+const WM_CTLCOLORLISTBOX: UINT = 0x0134;
+const WM_CTLCOLORBTN: UINT = 0x0135;
+const WM_CTLCOLORDLG: UINT = 0x0136;
+const WM_CTLCOLORSTATIC: UINT = 0x0138;
 const WM_APP: UINT = 0x8000;
 // Keep Settings-private window messages out of the App pump's reserved
 // WM_APP+1..+6 range; the pump consumes those before DispatchMessageW.
@@ -261,6 +268,12 @@ fn clickedButton(id: usize, notify: u16, expected_id: usize) bool {
 fn clickedSection(id: usize, notify: u16) ?Section {
     if (notify != BN_CLICKED) return null;
     return Section.fromButtonId(id);
+}
+
+fn validatedSectionClickFocusTarget(source: ?HWND, expected: ?HWND) ?HWND {
+    const source_hwnd = source orelse return null;
+    const expected_hwnd = expected orelse return null;
+    return if (source_hwnd == expected_hwnd) source_hwnd else null;
 }
 
 fn backgroundBlurFromCheckbox(
@@ -571,9 +584,17 @@ extern "kernel32" fn MulDiv(nNumber: i32, nNumerator: i32, nDenominator: i32) ca
 extern "gdi32" fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
 extern "gdi32" fn GetStockObject(i: i32) callconv(.winapi) HGDIOBJ;
 extern "gdi32" fn SetDCBrushColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
+extern "gdi32" fn CreateSolidBrush(color: COLORREF) callconv(.winapi) HBRUSH;
+extern "gdi32" fn SetBkColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
+extern "gdi32" fn SetTextColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
+extern "gdi32" fn SetBkMode(hdc: HDC, mode: c_int) callconv(.winapi) c_int;
 const DC_BRUSH: i32 = 18;
+const TRANSPARENT: c_int = 1;
 const COLOR_WINDOW: c_int = 5;
+const COLOR_WINDOWTEXT: c_int = 8;
 const COLOR_BTNFACE: c_int = 15;
+const COLOR_GRAYTEXT: c_int = 17;
+const COLOR_BTNTEXT: c_int = 18;
 
 const PAINTSTRUCT = win32_types.PAINTSTRUCT;
 const CREATESTRUCTW = win32_types.CREATESTRUCTW;
@@ -705,6 +726,95 @@ pub fn saveReloadOutcome(result: SaveError!void) SaveReloadOutcome {
     return .completed;
 }
 
+const SettingsThemeAdapter = struct {
+    colors: win32_theme.SettingsColors = win32_theme.settingsColors(
+        win32_theme.lightTheme(),
+        .{
+            .window = 0,
+            .window_text = 0,
+            .button_face = 0,
+            .button_text = 0,
+            .gray_text = 0,
+        },
+        false,
+    ),
+    window_brush: HBRUSH = null,
+    rail_brush: HBRUSH = null,
+    edit_brush: HBRUSH = null,
+    button_brush: HBRUSH = null,
+    applying: bool = false,
+
+    fn deinit(self: *SettingsThemeAdapter) void {
+        self.deleteBrushes();
+    }
+
+    fn deleteBrushes(self: *SettingsThemeAdapter) void {
+        if (self.window_brush) |brush| _ = DeleteObject(brush);
+        if (self.rail_brush) |brush| _ = DeleteObject(brush);
+        if (self.edit_brush) |brush| _ = DeleteObject(brush);
+        if (self.button_brush) |brush| _ = DeleteObject(brush);
+        self.window_brush = null;
+        self.rail_brush = null;
+        self.edit_brush = null;
+        self.button_brush = null;
+    }
+
+    fn apply(
+        self: *SettingsThemeAdapter,
+        hwnd: HWND,
+        colors: win32_theme.SettingsColors,
+    ) void {
+        if (self.applying) return;
+        self.applying = true;
+        defer self.applying = false;
+        self.deleteBrushes();
+        self.colors = colors;
+        self.window_brush = CreateSolidBrush(colors.window_bg);
+        self.rail_brush = CreateSolidBrush(colors.rail_bg);
+        self.edit_brush = CreateSolidBrush(colors.edit_bg);
+        self.button_brush = CreateSolidBrush(colors.button_bg);
+
+        win32_theme.WindowThemeAdapter.applySettings(hwnd, colors);
+        applyNativeControlTheme(hwnd, colors);
+        _ = EnumChildWindows(
+            hwnd,
+            applyNativeControlThemeToChild,
+            @bitCast(@intFromPtr(&self.colors)),
+        );
+        _ = InvalidateRect(hwnd, null, 1);
+        _ = EnumChildWindows(hwnd, invalidateThemeChild, 0);
+    }
+
+    fn controlBrush(self: *const SettingsThemeAdapter, message: UINT) HBRUSH {
+        return switch (message) {
+            WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX => self.edit_brush,
+            WM_CTLCOLORBTN => self.button_brush,
+            WM_CTLCOLORMSGBOX, WM_CTLCOLORDLG, WM_CTLCOLORSTATIC => self.window_brush,
+            else => null,
+        };
+    }
+};
+
+fn applyNativeControlTheme(hwnd: HWND, colors: win32_theme.SettingsColors) void {
+    win32_theme.WindowThemeAdapter.applyNativeControl(hwnd, colors);
+}
+
+fn applyNativeControlThemeToChild(hwnd: HWND, lParam: LPARAM) callconv(.winapi) BOOL {
+    const colors: *const win32_theme.SettingsColors =
+        @ptrFromInt(@as(usize, @bitCast(lParam)));
+    applyNativeControlTheme(hwnd, colors.*);
+    return 1;
+}
+
+fn invalidateThemeChild(hwnd: HWND, _: LPARAM) callconv(.winapi) BOOL {
+    _ = InvalidateRect(hwnd, null, 1);
+    return 1;
+}
+
+fn pointerLresult(pointer: anytype) LRESULT {
+    return @bitCast(@intFromPtr(pointer));
+}
+
 /// Minimal hook into the apprt `App` so the settings module can fetch
 /// the chrome brush colors without pulling in the whole app type.
 pub const AppHandle = struct {
@@ -721,6 +831,10 @@ pub const AppHandle = struct {
     chromeBg: *const fn (ctx: *anyopaque) COLORREF,
     /// Primary text color.
     textPrimary: *const fn (ctx: *anyopaque) COLORREF,
+    /// Full resolved app palette and High Contrast state for native Settings
+    /// theming. Optional defaults retain compatibility with model-only tests.
+    themeColors: ?*const fn (ctx: *anyopaque) win32_theme.ThemeColors = null,
+    highContrast: ?*const fn (ctx: *anyopaque) bool = null,
     /// Fire-and-forget shell-out to the OS default text editor with
     /// the resolved `ghostty.conf` path. Used by the Advanced-pane
     /// escape hatch.
@@ -821,6 +935,7 @@ pub const SettingsWindow = struct {
     control_uia_providers: [settings_control_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_control_count,
     ui_font: HGDIOBJ = null,
     header_font: HGDIOBJ = null,
+    theme_adapter: SettingsThemeAdapter = .{},
     close_prompt_measure_width: i32 = -1,
     close_prompt_measure_dpi: u32 = 0,
     close_prompt_measure_saving: bool = false,
@@ -929,6 +1044,7 @@ pub const SettingsWindow = struct {
         self.releaseControlUiaProviders();
         self.hwnd = null;
         self.deleteUiFont();
+        self.theme_adapter.deinit();
         self.btn_open_editor = null;
         self.btn_section_appearance = null;
         self.btn_section_terminal = null;
@@ -1577,6 +1693,7 @@ pub const SettingsWindow = struct {
     /// both WM_CLOSE and WM_NCDESTROY so the next `open()` recreates
     /// fresh children and clones.
     fn clearChildRefs(self: *SettingsWindow) void {
+        self.theme_adapter.deinit();
         self.releaseSectionUiaProviders();
         self.releaseTextUiaProviders();
         self.releaseControlUiaProviders();
@@ -1996,9 +2113,38 @@ pub const SettingsWindow = struct {
     }
 
     pub fn themeChanged(self: *SettingsWindow) void {
+        if (self.hwnd) |hwnd| {
+            self.theme_adapter.apply(hwnd, self.resolveThemeColors());
+        }
         self.recreateUiFont();
         layoutChildren(self);
         if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 1);
+    }
+
+    fn resolveThemeColors(self: *const SettingsWindow) win32_theme.SettingsColors {
+        var theme = if (self.handle.themeColors) |resolve|
+            resolve(self.handle.ctx)
+        else
+            win32_theme.lightTheme();
+        if (self.handle.themeColors == null) {
+            theme.chrome_bg = self.handle.chromeBg(self.handle.ctx);
+            theme.text_primary = self.handle.textPrimary(self.handle.ctx);
+        }
+        const high_contrast = if (self.handle.highContrast) |probe|
+            probe(self.handle.ctx)
+        else
+            false;
+        return win32_theme.settingsColors(
+            theme,
+            .{
+                .window = GetSysColor(COLOR_WINDOW),
+                .window_text = GetSysColor(COLOR_WINDOWTEXT),
+                .button_face = GetSysColor(COLOR_BTNFACE),
+                .button_text = GetSysColor(COLOR_BTNTEXT),
+                .gray_text = GetSysColor(COLOR_GRAYTEXT),
+            },
+            high_contrast,
+        );
     }
 
     fn ensureControlVisible(self: *SettingsWindow, control: HWND) void {
@@ -3549,6 +3695,7 @@ pub const SettingsWindow = struct {
 
         self.refreshAllControls();
         self.refreshNativeSectionText();
+        self.theme_adapter.apply(hwnd, self.resolveThemeColors());
         self.recreateUiFont();
 
         layoutChildren(self);
@@ -4760,6 +4907,45 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             if (owner) |o| paint(hwnd, o);
             return 0;
         },
+        WM_CTLCOLORMSGBOX,
+        WM_CTLCOLOREDIT,
+        WM_CTLCOLORLISTBOX,
+        WM_CTLCOLORBTN,
+        WM_CTLCOLORDLG,
+        WM_CTLCOLORSTATIC,
+        => {
+            if (owner) |o| {
+                const hdc: HDC = @ptrFromInt(wParam);
+                const child: ?HWND = if (lParam == 0)
+                    null
+                else
+                    @ptrFromInt(@as(usize, @bitCast(lParam)));
+                const colors = o.theme_adapter.colors;
+                const edit_like = msg == WM_CTLCOLOREDIT or msg == WM_CTLCOLORLISTBOX;
+                const background = if (edit_like) colors.edit_bg else if (msg == WM_CTLCOLORBTN)
+                    colors.button_bg
+                else
+                    colors.window_bg;
+                const foreground = if (child) |control|
+                    if (IsWindowEnabled(control) == 0)
+                        colors.disabled_text
+                    else if (edit_like)
+                        colors.edit_text
+                    else if (msg == WM_CTLCOLORBTN)
+                        colors.button_text
+                    else
+                        colors.text
+                else
+                    colors.text;
+                _ = SetTextColor(hdc, foreground);
+                _ = SetBkColor(hdc, background);
+                if (msg == WM_CTLCOLORSTATIC) _ = SetBkMode(hdc, TRANSPARENT);
+                if (o.theme_adapter.controlBrush(msg)) |brush| {
+                    return pointerLresult(brush);
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
         WM_DPICHANGED => {
             if (owner) |o| {
                 o.dpi = normalizedDpi(@intCast(wParam & 0xFFFF));
@@ -5013,7 +5199,19 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 return 0;
             }
             if (clickedSection(id, notify)) |section| {
-                if (owner) |o| o.setActiveSection(section);
+                if (owner) |o| {
+                    const source: ?HWND = if (lParam == 0)
+                        null
+                    else
+                        @ptrFromInt(@as(usize, @bitCast(lParam)));
+                    if (validatedSectionClickFocusTarget(
+                        source,
+                        o.sectionButton(section),
+                    )) |button| {
+                        _ = SetFocus(button);
+                    }
+                    o.setActiveSection(section);
+                }
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -5091,18 +5289,21 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     var rect: RECT = undefined;
     if (GetClientRect(hwnd, &rect) == 0) return;
 
-    // Standard dialog background keeps native STATIC/BUTTON controls visually
-    // coherent, including High Contrast. EDIT/COMBO fields retain COLOR_WINDOW.
-    const bg = GetSysColor(COLOR_BTNFACE);
-    const brush = GetStockObject(DC_BRUSH);
-    _ = SetDCBrushColor(hdc, bg);
-    _ = FillRect(hdc, &rect, brush);
+    const colors = owner.theme_adapter.colors;
+    const fallback_brush = GetStockObject(DC_BRUSH);
+    const window_brush = owner.theme_adapter.window_brush orelse fallback_brush;
+    if (owner.theme_adapter.window_brush == null) {
+        _ = SetDCBrushColor(hdc, colors.window_bg);
+    }
+    _ = FillRect(hdc, &rect, window_brush);
 
-    // A light system-role rail preserves hierarchy without custom theme colors.
     var rail_rect = rect;
     rail_rect.right = owner.px(left_rail_width);
-    _ = SetDCBrushColor(hdc, GetSysColor(COLOR_WINDOW));
-    _ = FillRect(hdc, &rail_rect, brush);
+    const rail_brush = owner.theme_adapter.rail_brush orelse fallback_brush;
+    if (owner.theme_adapter.rail_brush == null) {
+        _ = SetDCBrushColor(hdc, colors.rail_bg);
+    }
+    _ = FillRect(hdc, &rail_rect, rail_brush);
 }
 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
@@ -5295,6 +5496,11 @@ test "win32_settings: utf8ToW never splits a supplementary scalar" {
     try std.testing.expectEqual(@as(u16, 0), fits[2]);
 }
 
+test "settings pointer result preserves high-bit handle bits" {
+    const pointer: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
+    try std.testing.expectEqual(@as(LRESULT, -1), pointerLresult(pointer));
+}
+
 test "settings background blur checkbox preserves enabled radius" {
     try std.testing.expectEqual(
         Config.BackgroundBlur{ .radius = 42 },
@@ -5354,6 +5560,21 @@ test "settings action and section buttons activate only on click" {
     try std.testing.expectEqual(Section.appearance, clickedSection(BTN_SECTION_APPEARANCE, BN_CLICKED).?);
     try std.testing.expectEqual(@as(?Section, null), clickedSection(BTN_SECTION_APPEARANCE, BN_SETFOCUS));
     try std.testing.expectEqual(@as(?Section, null), clickedSection(BTN_SECTION_APPEARANCE, BN_KILLFOCUS));
+
+    const section_hwnd: HWND = @ptrFromInt(1);
+    const other_hwnd: HWND = @ptrFromInt(2);
+    try std.testing.expectEqual(
+        section_hwnd,
+        validatedSectionClickFocusTarget(section_hwnd, section_hwnd).?,
+    );
+    try std.testing.expectEqual(
+        @as(?HWND, null),
+        validatedSectionClickFocusTarget(null, section_hwnd),
+    );
+    try std.testing.expectEqual(
+        @as(?HWND, null),
+        validatedSectionClickFocusTarget(other_hwnd, section_hwnd),
+    );
 }
 
 test "win32_settings: every tracked field maps to its matching config value" {

@@ -22,6 +22,7 @@ const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 const win32_theme = @import("win32_theme.zig");
 const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
+const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
 const win32_palette = @import("win32_palette.zig");
 const win32_layout = @import("win32_layout.zig");
 const win32_settings = @import("win32_settings.zig");
@@ -491,6 +492,7 @@ const WM_DRAWITEM = 0x002B;
 const WM_ERASEBKGND = 0x0014;
 const WM_GETMINMAXINFO = 0x0024;
 const WM_CHAR = 0x0102;
+const WM_DEADCHAR = 0x0103;
 const WM_HOTKEY = 0x0312;
 const WM_IME_SETCONTEXT = 0x0281;
 const WM_IME_STARTCOMPOSITION = 0x010D;
@@ -551,15 +553,13 @@ const SIZE_MINIMIZED: u32 = 1;
 const SIZE_RESTORED: u32 = 0;
 const WM_SYSKEYDOWN = 0x0104;
 const WM_SYSKEYUP = 0x0105;
+const WM_SYSDEADCHAR = 0x0107;
 const WM_WINHOSTTY_WAKE = WM_APP + 1;
 const WM_WINHOSTTY_UPDATE = WM_APP + 2;
 const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
 const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
 const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
 const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
-const SMTO_BLOCK: UINT = 0x0001;
-const SMTO_ABORTIFHUNG: UINT = 0x0002;
-const terminal_uia_cold_query_timeout_ms: UINT = 500;
 
 const DeferredUiaDisconnect = struct {
     ctx: *anyopaque,
@@ -741,11 +741,6 @@ const WM_THEMECHANGED = 0x031A;
 const WM_SYSCOLORCHANGE = 0x0015;
 const WM_DWMCOLORIZATIONCOLORCHANGED: UINT = 0x0320;
 const WM_DPICHANGED: UINT = 0x02E0;
-const DWMWA_USE_IMMERSIVE_DARK_MODE_V1: DWORD = 19;
-const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;
-const DWMWA_CAPTION_COLOR: DWORD = 35;
-const DWMWA_TEXT_COLOR: DWORD = 36;
-const DWMWA_SYSTEMBACKDROP_TYPE: DWORD = 38;
 const DWMSBT_NONE: u32 = 1;
 /// Mica-tabbed backdrop for main windows with visible tab strips.
 /// Win11 22H2+ (build >= 22621).
@@ -904,6 +899,7 @@ const VK_OEM_4 = 0xDB;
 const VK_OEM_5 = 0xDC;
 const VK_OEM_6 = 0xDD;
 const VK_OEM_7 = 0xDE;
+const VK_PACKET = 0xE7;
 
 const KF_EXTENDED = 1 << 24;
 const KF_REPEAT = 1 << 30;
@@ -1134,15 +1130,6 @@ extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PT
 extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?*anyopaque, X: i32, Y: i32, cx: i32, cy: i32, uFlags: UINT) callconv(.winapi) BOOL;
 extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn SendMessageTimeoutW(
-    hWnd: HWND,
-    Msg: UINT,
-    wParam: WPARAM,
-    lParam: LPARAM,
-    fuFlags: UINT,
-    uTimeout: UINT,
-    lpdwResult: *usize,
-) callconv(.winapi) LRESULT;
 extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: LPCWSTR) callconv(.winapi) BOOL;
 extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
 extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
@@ -1304,7 +1291,6 @@ extern "opengl32" fn wglGetCurrentDC() callconv(.winapi) HDC;
 extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 extern "opengl32" fn wglMakeCurrent(hdc: HDC, hglrc: HGLRC) callconv(.winapi) BOOL;
 extern "dwmapi" fn DwmDefWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM, plResult: *LRESULT) callconv(.winapi) BOOL;
-extern "dwmapi" fn DwmSetWindowAttribute(hwnd: HWND, dwAttribute: DWORD, pvAttribute: *const anyopaque, cbAttribute: DWORD) callconv(.winapi) i32;
 extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
 extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
 extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?[*]u16, dwBufLen: u32) callconv(.winapi) i32;
@@ -2846,6 +2832,8 @@ pub const App = struct {
             .ownerWindow = &settingsOwnerWindowThunk,
             .chromeBg = &settingsChromeBgThunk,
             .textPrimary = &settingsTextPrimaryThunk,
+            .themeColors = &settingsThemeColorsThunk,
+            .highContrast = &settingsHighContrastThunk,
             .openInEditor = &settingsOpenInEditorThunk,
             .currentConfig = &settingsCurrentConfigThunk,
             .saveAndReload = &settingsSaveAndReloadThunk,
@@ -4782,13 +4770,15 @@ pub const App = struct {
                     .app => blk: {
                         for (self.windows.items) |surface| {
                             try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
-                            surface.refreshTerminalUiaText();
+                            surface.drainTerminalAccessibilityOutput();
+                            if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         }
                         break :blk true;
                     },
                     .surface => if (self.findSurfaceForTarget(target)) |surface| blk: {
                         try surface.requestRepaintWithMode(rendererRepaintRequestMode(surface.host));
-                        surface.refreshTerminalUiaText();
+                        surface.drainTerminalAccessibilityOutput();
+                        if (surface.terminal_accessibility) |session| session.rendererUpdated();
                         break :blk true;
                     } else false,
                 };
@@ -5505,8 +5495,18 @@ pub const App = struct {
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
                     host.layout() catch {};
-                    host.invalidateChrome();
                 }
+                // Theme resource replacement always invalidates the full host
+                // chrome plus native child controls. A System->Dark swap does
+                // not necessarily change frame mode, but every retained pixel
+                // still belongs to the previous palette.
+                host.invalidateChrome();
+                _ = RedrawWindow(
+                    hwnd,
+                    null,
+                    null,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
             }
         }
         for (self.windows.items) |surface| surface.invalidateScrollbarWindow();
@@ -10723,8 +10723,8 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.activeSurface() != null) return false;
-        const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
-        return self.app.core_app.keyEvent(self.app, event);
+        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
+        return self.app.core_app.keyEvent(self.app, message.event);
     }
 
     fn prepareActiveTabVisibility(self: *Host, active_index: usize) void {
@@ -11130,7 +11130,7 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.overlay_mode != .command_palette) return false;
-        const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
+        const event = (keyEventFromWin32Message(msg, wParam, lParam) orelse return false).event;
         const entry = self.app.config.keybind.set.getEvent(event) orelse return false;
         const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
             .leader => return false,
@@ -17123,25 +17123,17 @@ fn titlebarTextColor(theme: *const ThemeColors, config: *const configpkg.Config)
 }
 
 fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const configpkg.Config, os_build: u32) void {
-    if (isHighContrastActive()) return; // Let system control title bar in HC mode
-    const dark_mode: u32 = if (theme.is_dark) 1 else 0;
-    // Try attribute 20 first (Win10 20H1+), fall back to 19 (Win10 1809-20H1)
-    const hr = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, @ptrCast(&dark_mode), @sizeOf(u32));
-    if (hr == @as(i32, @bitCast(@as(u32, 0x80070057)))) { // E_INVALIDARG
-        _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_V1, @ptrCast(&dark_mode), @sizeOf(u32));
-    }
-    // Set caption color to match chrome (Win11 only; fails silently on Win10)
     const caption_color = titlebarCaptionColor(theme, config);
     const text_color = titlebarTextColor(theme, config);
-    _ = DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, @ptrCast(&caption_color), @sizeOf(u32));
-    _ = DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, @ptrCast(&text_color), @sizeOf(u32));
-    // Toggle system backdrop blur through DWMWA_SYSTEMBACKDROP_TYPE. That
-    // attribute is supported starting with Windows 11 22H2 (build 22621);
-    // older builds skip the call entirely.
-    if (supportsDwmSystemBackdropAttribute(os_build)) {
-        const backdrop_type: u32 = systemBackdropTypeForBuild(config, os_build);
-        _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, @ptrCast(&backdrop_type), @sizeOf(u32));
-    }
+    win32_theme.WindowThemeAdapter.applyHost(
+        hwnd,
+        theme.*,
+        isHighContrastActive(),
+        caption_color,
+        text_color,
+        systemBackdropTypeForBuild(config, os_build),
+        supportsDwmSystemBackdropAttribute(os_build),
+    );
 }
 
 /// Linear-interpolate two `COLORREF`-shaped values (`0x00BBGGRR` on
@@ -17569,6 +17561,13 @@ fn settingsChromeBgThunk(ctx: *anyopaque) u32 {
 fn settingsTextPrimaryThunk(ctx: *anyopaque) u32 {
     const app: *const App = @ptrCast(@alignCast(ctx));
     return app.resolved_theme.text_primary;
+}
+fn settingsThemeColorsThunk(ctx: *anyopaque) win32_theme.ThemeColors {
+    const app: *const App = @ptrCast(@alignCast(ctx));
+    return app.resolved_theme;
+}
+fn settingsHighContrastThunk(_: *anyopaque) bool {
+    return isHighContrastActive();
 }
 fn settingsOpenInEditorThunk(ctx: *anyopaque) void {
     const app: *App = @ptrCast(@alignCast(ctx));
@@ -23167,10 +23166,16 @@ const KeyText = struct {
     len: usize = 0,
     consumed_mods: input.Mods = .{},
     unshifted_codepoint: u21 = 0,
+    deferred_utf16_units: usize = 0,
 };
 
 fn isControlCodepoint(codepoint: u21) bool {
     return codepoint < 0x20 or codepoint == 0x7F;
+}
+
+fn utf16CodeUnitCount(codepoint: u21) usize {
+    if (codepoint == 0) return 0;
+    return if (codepoint <= std.math.maxInt(u16)) 1 else 2;
 }
 
 fn shouldDeferTextToCharMessage(
@@ -23188,13 +23193,85 @@ fn shouldDeferTextToCharMessage(
         else => {},
     }
 
+    if (translated.deferred_utf16_units == 0) return false;
     if (translated.len > 0) return true;
-    if (translated.unshifted_codepoint == 0) return false;
+    if (translated.unshifted_codepoint == 0) return true;
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
-fn shouldCommitDeferredCharMessage(pending_wm_char_text: bool, ime_composing: bool) bool {
-    return pending_wm_char_text and !ime_composing;
+const DeferredCharState = struct {
+    pending_units: usize = 0,
+    high_surrogate: ?u16 = null,
+
+    fn authorize(self: *DeferredCharState, expected_units: usize) void {
+        self.pending_units = self.pending_units +| expected_units;
+    }
+
+    fn clear(self: *DeferredCharState) void {
+        self.* = .{};
+    }
+
+    fn consumeDeadChar(self: *DeferredCharState) void {
+        if (self.pending_units > 0) self.pending_units -= 1;
+        self.high_surrogate = null;
+    }
+
+    fn consumeCodeUnit(
+        self: *DeferredCharState,
+        code_unit: u16,
+        ime_composing: bool,
+    ) ?u21 {
+        if (ime_composing) {
+            self.clear();
+            return null;
+        }
+        if (self.pending_units == 0) {
+            self.high_surrogate = null;
+            return null;
+        }
+        self.pending_units -= 1;
+
+        if (self.high_surrogate) |high| {
+            if (!std.unicode.utf16IsLowSurrogate(code_unit)) {
+                self.clear();
+                return null;
+            }
+            const codepoint = std.unicode.utf16DecodeSurrogatePair(
+                &.{ high, code_unit },
+            ) catch {
+                self.clear();
+                return null;
+            };
+            self.high_surrogate = null;
+            return codepoint;
+        }
+
+        if (std.unicode.utf16IsHighSurrogate(code_unit)) {
+            self.high_surrogate = code_unit;
+            return null;
+        }
+        if (std.unicode.utf16IsLowSurrogate(code_unit)) {
+            self.clear();
+            return null;
+        }
+
+        return code_unit;
+    }
+};
+
+fn charCommitEvent(
+    codepoint: u21,
+    lParam: LPARAM,
+    utf8_buf: *[8]u8,
+) ?input.KeyEvent {
+    const utf8_len = std.unicode.utf8Encode(codepoint, utf8_buf) catch return null;
+    return .{
+        .action = if (isRepeatedKey(lParam)) .repeat else .press,
+        .key = .unidentified,
+        .mods = .{},
+        .unshifted_codepoint = codepoint,
+        .utf8 = utf8_buf[0..utf8_len],
+    };
 }
 
 fn translateKeyTextToUnicode(
@@ -23216,17 +23293,28 @@ fn translateKeyText(
     keyboard_state: ?*const [256]u8,
 ) KeyText {
     const state = keyboard_state orelse {
-        return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
+        const unshifted = unshiftedCodepointForVirtualKey(vk);
+        return .{
+            .unshifted_codepoint = unshifted,
+            .deferred_utf16_units = utf16CodeUnitCount(unshifted),
+        };
     };
 
     var utf16: [4]u16 = [_]u16{0} ** 4;
     const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
-    if (count <= 0) {
+    if (count < 0) {
+        return .{
+            .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+            .deferred_utf16_units = 1,
+        };
+    }
+    if (count == 0) {
         return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
     }
 
     var result: KeyText = .{
         .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+        .deferred_utf16_units = @intCast(count),
     };
 
     const codepoint: u21 = cp: {
@@ -23247,11 +23335,32 @@ fn translateKeyText(
     return result;
 }
 
+const Win32KeyMessage = struct {
+    event: input.KeyEvent,
+    deferred_utf16_units: usize = 0,
+};
+
+fn packetKeyMessage(action: input.Action) Win32KeyMessage {
+    const commit_pending = action != .release;
+    return .{
+        .event = .{
+            .action = action,
+            .key = .unidentified,
+            .mods = .{},
+            .consumed_mods = .{},
+            .unshifted_codepoint = 0,
+            .utf8 = "",
+            .composing = commit_pending,
+        },
+        .deferred_utf16_units = if (commit_pending) 1 else 0,
+    };
+}
+
 fn keyEventFromWin32Message(
     msg: UINT,
     wParam: WPARAM,
     lParam: LPARAM,
-) ?input.KeyEvent {
+) ?Win32KeyMessage {
     const action: input.Action = switch (msg) {
         WM_KEYUP, WM_SYSKEYUP => .release,
         WM_KEYDOWN, WM_SYSKEYDOWN => if (isRepeatedKey(lParam)) .repeat else .press,
@@ -23259,36 +23368,42 @@ fn keyEventFromWin32Message(
     };
 
     const vk: UINT = @intCast(wParam & 0xFFFF);
+    // KEYEVENTF_UNICODE arrives as VK_PACKET followed by one WM_CHAR UTF-16
+    // code unit. Authorize that unit explicitly without consulting live
+    // keyboard modifiers or ToUnicode; both belong to physical-key handling.
+    if (vk == VK_PACKET) return packetKeyMessage(action);
+
     const key = keyFromVirtualKey(vk, lParam);
     var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
     const keyboard_state = currentKeyboardState(&keyboard_state_storage);
     const mods = currentModsFromKeyboardState(keyboard_state);
 
-    var event: input.KeyEvent = .{
+    var result: Win32KeyMessage = .{ .event = .{
         .action = action,
         .key = key,
         .mods = mods,
         .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-    };
+    } };
 
     if (action != .release) {
         const translated = translateKeyText(vk, lParam, mods, keyboard_state);
-        event.utf8 = translated.utf8[0..translated.len];
-        event.consumed_mods = translated.consumed_mods;
+        result.event.utf8 = translated.utf8[0..translated.len];
+        result.event.consumed_mods = translated.consumed_mods;
         if (translated.unshifted_codepoint != 0) {
-            event.unshifted_codepoint = translated.unshifted_codepoint;
+            result.event.unshifted_codepoint = translated.unshifted_codepoint;
         }
         if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
             // Keep the physical-key event visible to bindings/modifier state
             // but defer text emission to WM_CHAR so plain typing doesn't rely
             // on ToUnicode/GetKeyboardState timing.
-            event.utf8 = "";
-            event.consumed_mods = .{};
-            event.composing = true;
+            result.event.utf8 = "";
+            result.event.consumed_mods = .{};
+            result.event.composing = true;
+            result.deferred_utf16_units = translated.deferred_utf16_units;
         }
     }
 
-    return event;
+    return result;
 }
 
 fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -23306,10 +23421,8 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_WINHOSTTY_UIA_QUERY_REFRESH => {
             if (surface) |v| {
-                if (v.terminal_uia_context) |context| {
-                    context.query_refresh_post_pending.store(false, .release);
-                    v.refreshTerminalUiaTextWithMode(wParam != 0);
-                }
+                v.drainTerminalAccessibilityOutput();
+                if (v.terminal_accessibility) |session| session.handleQueryRefresh(wParam != 0);
             }
             return 0;
         },
@@ -23320,7 +23433,10 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         },
 
         WM_KILLFOCUS => {
-            if (surface) |v| v.focusChanged(false);
+            if (surface) |v| {
+                v.deferred_char.clear();
+                v.focusChanged(false);
+            }
             return 0;
         },
 
@@ -23332,8 +23448,8 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
         WM_TIMER => {
             if (wParam == TERMINAL_UIA_TIMER_ID) {
                 if (surface) |v| {
-                    v.cancelTerminalUiaRefreshTimer();
-                    v.refreshTerminalUiaText();
+                    v.drainTerminalAccessibilityOutput();
+                    if (v.terminal_accessibility) |session| session.handleTimer();
                 }
                 return 0;
             }
@@ -23398,6 +23514,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_IME_STARTCOMPOSITION => {
             if (surface) |v| {
+                v.deferred_char.clear();
                 v.ime_composing = true;
                 v.positionImeWindow();
             }
@@ -23406,6 +23523,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_IME_COMPOSITION => {
             if (surface) |v| {
+                v.deferred_char.clear();
                 // Handle finalized (committed) text first
                 if ((@as(u32, @intCast(lParam)) & GCS_RESULTSTR) != 0) {
                     v.handleImeResult();
@@ -23421,6 +23539,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         WM_IME_ENDCOMPOSITION => {
             if (surface) |v| {
+                v.deferred_char.clear();
                 v.ime_composing = false;
                 v.core_surface.preeditCallback(null) catch {};
             }
@@ -23437,6 +23556,11 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             if (surface) |v| {
                 v.handleCharMessage(wParam, lParam);
             }
+            return 0;
+        },
+
+        WM_DEADCHAR, WM_SYSDEADCHAR => {
+            if (surface) |v| v.deferred_char.consumeDeadChar();
             return 0;
         },
 
@@ -23633,363 +23757,72 @@ fn getSurface(hwnd: HWND) ?*Surface {
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
 
-const TerminalUiaContext = struct {
+fn terminalAccessibilityHwnd(ctx: *anyopaque) ?HWND {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    return surface.hwnd;
+}
+
+fn terminalAccessibilityName(ctx: *anyopaque, buf: []u8) []const u8 {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const title = surface.effectiveTitle() orelse "Terminal";
+    return std.fmt.bufPrint(buf, "Terminal: {s}", .{title}) catch "Terminal";
+}
+
+fn terminalAccessibilityFocused(ctx: *anyopaque) bool {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    return surface.app.isSurfaceFocused(surface);
+}
+
+fn terminalAccessibilityCapture(
+    ctx: *anyopaque,
     alloc: Allocator,
-    refcount: std.atomic.Value(u32),
-    mutex: std.Thread.Mutex = .{},
-    surface: ?*Surface,
-    /// UIA polling does not make `UiaClientsAreListening` return true. Record
-    /// recent text queries and coalesce a UI-thread refresh request so polling
-    /// clients see current text without keeping renderer snapshots alive after
-    /// the client goes idle.
-    last_query_ms: std.atomic.Value(u64) = .init(0),
-    query_refresh_post_pending: std.atomic.Value(bool) = .init(false),
-    /// Bounded, immutable-to-readers terminal snapshot. UIA callbacks copy
-    /// this cache and never acquire the renderer mutex.
-    cached_text: []u8,
-    cached_visible_text: []u8,
-    cached_visible_range: win32_uia.OffsetRange = .{ .start = 0, .end = 0 },
-    cached_caret_offset: usize = 0,
-    cached_cells: []win32_uia.TerminalCellPosition,
-    viewport_rows: u32 = 0,
-    viewport_columns: u32 = 0,
-    cell_width: f64 = 0,
-    cell_height: f64 = 0,
-    origin_x: f64 = 0,
-    origin_y: f64 = 0,
+) !win32_terminal_accessibility.Capture {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    if (!surface.core_initialized) return error.SurfaceNotInitialized;
 
-    fn create(alloc: Allocator, surface: *Surface) !*TerminalUiaContext {
-        const self = try alloc.create(TerminalUiaContext);
-        errdefer alloc.destroy(self);
-        const cached_text = try alloc.dupe(u8, "");
-        errdefer alloc.free(cached_text);
-        const cached_visible_text = try alloc.dupe(u8, "");
-        errdefer alloc.free(cached_visible_text);
-        const cached_cells = try alloc.alloc(win32_uia.TerminalCellPosition, 0);
-        errdefer alloc.free(cached_cells);
-        self.* = .{
-            .alloc = alloc,
-            .refcount = std.atomic.Value(u32).init(1),
-            .surface = surface,
-            .cached_text = cached_text,
-            .cached_visible_text = cached_visible_text,
-            .cached_cells = cached_cells,
-        };
-        return self;
-    }
-
-    fn retain(ctx: *anyopaque) void {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        _ = self.refcount.fetchAdd(1, .monotonic);
-    }
-
-    fn release(ctx: *anyopaque) void {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        const prev = self.refcount.fetchSub(1, .acq_rel);
-        if (prev == 1) {
-            self.alloc.free(self.cached_cells);
-            self.alloc.free(self.cached_visible_text);
-            self.alloc.free(self.cached_text);
-            self.alloc.destroy(self);
-        }
-    }
-
-    fn detachSurface(self: *TerminalUiaContext) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.surface = null;
-        self.query_refresh_post_pending.store(false, .release);
-    }
-
-    fn noteTextQuery(self: *TerminalUiaContext) void {
-        const now_ms = GetTickCount64();
-        const previous_query_ms = self.last_query_ms.swap(now_ms, .acq_rel);
-
-        self.mutex.lock();
-        const hwnd = if (self.surface) |surface| surface.hwnd else null;
-        self.mutex.unlock();
-
-        if (hwnd == null) return;
-        if (terminalUiaQueryNeedsSynchronousRefresh(previous_query_ms, now_ms)) {
-            var ignored: usize = 0;
-            if (SendMessageTimeoutW(
-                hwnd.?,
-                WM_WINHOSTTY_UIA_QUERY_REFRESH,
-                1,
-                0,
-                SMTO_BLOCK | SMTO_ABORTIFHUNG,
-                terminal_uia_cold_query_timeout_ms,
-                &ignored,
-            ) != 0) return;
-        }
-
-        if (self.query_refresh_post_pending.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
-        if (PostMessageW(hwnd.?, WM_WINHOSTTY_UIA_QUERY_REFRESH, 0, 0) == 0) {
-            self.query_refresh_post_pending.store(false, .release);
-        }
-    }
-
-    fn queryRecentlyActive(self: *const TerminalUiaContext, now_ms: u64) bool {
-        return terminalUiaQueryRecentlyActive(self.last_query_ms.load(.acquire), now_ms);
-    }
-
-    /// Refresh on the application/UI thread after terminal mutations. The
-    /// renderer lock is never held together with the context lock.
-    const Change = enum { unchanged, geometry, caret, text, text_and_caret };
-
-    fn refresh(self: *TerminalUiaContext, surface: *Surface) !Change {
-        if (!surface.core_initialized) return .unchanged;
-
-        surface.core_surface.renderer_state.mutex.lock();
-        var snapshot = win32_uia.snapshotTerminalAccessiblePlainText(
-            self.alloc,
-            surface.core_surface.renderer_state.terminal,
-        ) catch |err| {
-            surface.core_surface.renderer_state.mutex.unlock();
-            return err;
-        };
-        const renderer_size = surface.core_surface.size;
+    surface.core_surface.renderer_state.mutex.lock();
+    const snapshot = win32_uia.snapshotTerminalAccessiblePlainText(
+        alloc,
+        surface.core_surface.renderer_state.terminal,
+    ) catch |err| {
         surface.core_surface.renderer_state.mutex.unlock();
-        defer snapshot.deinit();
-
-        const text = snapshot.text;
-        snapshot.text = text[0..0];
-        errdefer self.alloc.free(text);
-        const cells = snapshot.cell_for_byte;
-        snapshot.cell_for_byte = cells[0..0];
-        errdefer self.alloc.free(cells);
-        const visible_range = snapshot.visible_range;
-        const caret_offset = snapshot.caret_offset;
-        const visible_text = try self.alloc.dupe(u8, text[visible_range.start..visible_range.end]);
-        errdefer self.alloc.free(visible_text);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.surface != surface) {
-            self.alloc.free(visible_text);
-            self.alloc.free(cells);
-            self.alloc.free(text);
-            return .unchanged;
-        }
-        const text_changed = !std.mem.eql(u8, self.cached_text, text) or
-            self.cached_visible_range.start != visible_range.start or
-            self.cached_visible_range.end != visible_range.end;
-        const caret_changed = self.cached_caret_offset != caret_offset;
-        const unchanged = std.mem.eql(u8, self.cached_text, text) and
-            self.cached_visible_range.start == visible_range.start and
-            self.cached_visible_range.end == visible_range.end and
-            self.cached_caret_offset == caret_offset and
-            self.viewport_rows == snapshot.viewport_rows and
-            self.viewport_columns == snapshot.viewport_columns and
-            self.cell_width == @as(f64, @floatFromInt(renderer_size.cell.width)) and
-            self.cell_height == @as(f64, @floatFromInt(renderer_size.cell.height)) and
-            self.origin_x == @as(f64, @floatFromInt(renderer_size.padding.left)) and
-            self.origin_y == @as(f64, @floatFromInt(renderer_size.padding.top)) and
-            terminalUiaCellsEqual(self.cached_cells, cells);
-        if (unchanged) {
-            self.alloc.free(visible_text);
-            self.alloc.free(cells);
-            self.alloc.free(text);
-            return .unchanged;
-        }
-
-        self.alloc.free(self.cached_cells);
-        self.alloc.free(self.cached_visible_text);
-        self.alloc.free(self.cached_text);
-        self.cached_text = text;
-        self.cached_visible_text = visible_text;
-        self.cached_visible_range = visible_range;
-        self.cached_caret_offset = caret_offset;
-        self.cached_cells = cells;
-        self.viewport_rows = snapshot.viewport_rows;
-        self.viewport_columns = snapshot.viewport_columns;
-        self.cell_width = @floatFromInt(renderer_size.cell.width);
-        self.cell_height = @floatFromInt(renderer_size.cell.height);
-        self.origin_x = @floatFromInt(renderer_size.padding.left);
-        self.origin_y = @floatFromInt(renderer_size.padding.top);
-        return if (text_changed and caret_changed)
-            .text_and_caret
-        else if (text_changed)
-            .text
-        else if (caret_changed)
-            .caret
-        else
-            .geometry;
-    }
-
-    fn state(self: *TerminalUiaContext) win32_uia.TerminalState {
-        return .{
-            .ctx = @ptrCast(self),
-            .retain = retain,
-            .release = release,
-            .name = terminalUiaName,
-            .value = terminalUiaValue,
-            .snapshot = terminalUiaSnapshot,
-            .focused = terminalUiaFocused,
-        };
-    }
-
-    fn terminalUiaName(ctx: *anyopaque, buf: []u8) []const u8 {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const surface = self.surface orelse return std.fmt.bufPrint(buf, "Terminal", .{}) catch "Terminal";
-        const title = surface.effectiveTitle() orelse "Terminal";
-        return std.fmt.bufPrint(buf, "Terminal: {s}", .{title}) catch "Terminal";
-    }
-
-    fn terminalUiaValue(ctx: *anyopaque, alloc: Allocator) ![]u8 {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return try alloc.dupe(u8, self.cached_text);
-    }
-
-    fn terminalUiaSnapshot(ctx: *anyopaque, alloc: Allocator) !win32_uia.widgets.TerminalSnapshot {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.noteTextQuery();
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const document_text = try alloc.dupe(u8, self.cached_text);
-        errdefer alloc.free(document_text);
-        const visible_text = try alloc.dupe(u8, self.cached_visible_text);
-        errdefer alloc.free(visible_text);
-        const cells = try alloc.dupe(win32_uia.TerminalCellPosition, self.cached_cells);
-        return .{
-            .document_text = document_text,
-            .visible_text = visible_text,
-            .visible_range = self.cached_visible_range,
-            .caret_offset = self.cached_caret_offset,
-            .geometry = .{
-                .cell_for_byte = cells,
-                .viewport_rows = self.viewport_rows,
-                .viewport_columns = self.viewport_columns,
-                .cell_width = self.cell_width,
-                .cell_height = self.cell_height,
-                .origin_x = self.origin_x,
-                .origin_y = self.origin_y,
-            },
-        };
-    }
-
-    fn terminalUiaFocused(ctx: *anyopaque) bool {
-        const self: *TerminalUiaContext = @ptrCast(@alignCast(ctx));
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const surface = self.surface orelse return false;
-        return surface.app.isSurfaceFocused(surface);
-    }
-};
-
-fn terminalUiaCellsEqual(
-    lhs: []const win32_uia.TerminalCellPosition,
-    rhs: []const win32_uia.TerminalCellPosition,
-) bool {
-    if (lhs.len != rhs.len) return false;
-    for (lhs, rhs) |a, b| {
-        if (a.row != b.row or a.column != b.column or a.width != b.width) return false;
-    }
-    return true;
-}
-
-const terminal_uia_refresh_interval_ms: u64 = 100;
-const terminal_uia_query_activity_window_ms: u64 = 1_000;
-
-fn terminalUiaRefreshDue(last_refresh_ms: u64, now_ms: u64) bool {
-    return last_refresh_ms == 0 or now_ms -| last_refresh_ms >= terminal_uia_refresh_interval_ms;
-}
-
-fn terminalUiaRefreshDelay(last_refresh_ms: u64, now_ms: u64) UINT {
-    const elapsed = now_ms -| last_refresh_ms;
-    return @intCast(@max(1, terminal_uia_refresh_interval_ms -| elapsed));
-}
-
-fn terminalUiaSnapshotWasSlow(start_ms: u64, completed_ms: u64) bool {
-    return completed_ms -| start_ms >= terminal_uia_refresh_interval_ms;
-}
-
-fn terminalUiaQueryRecentlyActive(last_query_ms: u64, now_ms: u64) bool {
-    return last_query_ms != 0 and now_ms -| last_query_ms <= terminal_uia_query_activity_window_ms;
-}
-
-fn terminalUiaQueryNeedsSynchronousRefresh(last_query_ms: u64, now_ms: u64) bool {
-    return !terminalUiaQueryRecentlyActive(last_query_ms, now_ms);
-}
-
-const TerminalUiaPublishPolicy = struct {
-    refresh_snapshot: bool,
-    emit_events: bool,
-};
-
-fn terminalUiaPublishPolicy(
-    clients_listening_for_events: bool,
-    query_recently_active: bool,
-) TerminalUiaPublishPolicy {
+        return err;
+    };
+    const renderer_size = surface.core_surface.size;
+    surface.core_surface.renderer_state.mutex.unlock();
     return .{
-        .refresh_snapshot = clients_listening_for_events or query_recently_active,
-        .emit_events = clients_listening_for_events,
+        .snapshot = snapshot,
+        .cell_width = @floatFromInt(renderer_size.cell.width),
+        .cell_height = @floatFromInt(renderer_size.cell.height),
+        .origin_x = @floatFromInt(renderer_size.padding.left),
+        .origin_y = @floatFromInt(renderer_size.padding.top),
     };
 }
 
-test "terminal UIA snapshots are rate limited while a client is connected" {
-    try std.testing.expect(terminalUiaRefreshDue(0, 1));
-    try std.testing.expect(!terminalUiaRefreshDue(100, 199));
-    try std.testing.expect(terminalUiaRefreshDue(100, 200));
-    try std.testing.expectEqual(@as(UINT, 1), terminalUiaRefreshDelay(100, 199));
-    try std.testing.expectEqual(@as(UINT, 80), terminalUiaRefreshDelay(100, 120));
-    try std.testing.expect(!terminalUiaSnapshotWasSlow(100, 199));
-    try std.testing.expect(terminalUiaSnapshotWasSlow(100, 200));
+fn terminalAccessibilityDeferProviderRelease(
+    ctx: *anyopaque,
+    provider: *win32_uia.TerminalProvider,
+) void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    scheduleDeferredUiaDisconnect(
+        surface.app,
+        @ptrCast(provider),
+        &terminalDisconnectThunk,
+        &terminalReleaseThunk,
+    );
 }
 
-test "terminal UIA query-only clients refresh without event emission" {
-    try std.testing.expect(!terminalUiaQueryRecentlyActive(0, 1));
-    try std.testing.expect(terminalUiaQueryRecentlyActive(100, 1_100));
-    try std.testing.expect(!terminalUiaQueryRecentlyActive(100, 1_101));
-    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(0, 1));
-    try std.testing.expect(!terminalUiaQueryNeedsSynchronousRefresh(100, 1_100));
-    try std.testing.expect(terminalUiaQueryNeedsSynchronousRefresh(100, 1_101));
-
-    const idle = terminalUiaPublishPolicy(false, false);
-    try std.testing.expect(!idle.refresh_snapshot);
-    try std.testing.expect(!idle.emit_events);
-
-    const query_only = terminalUiaPublishPolicy(false, true);
-    try std.testing.expect(query_only.refresh_snapshot);
-    try std.testing.expect(!query_only.emit_events);
-
-    const subscribed = terminalUiaPublishPolicy(true, false);
-    try std.testing.expect(subscribed.refresh_snapshot);
-    try std.testing.expect(subscribed.emit_events);
-}
-
-test "terminal UIA document callback and snapshot expose distinct cached ranges" {
-    var context = TerminalUiaContext{
-        .alloc = std.testing.allocator,
-        .refcount = std.atomic.Value(u32).init(1),
-        .surface = null,
-        .cached_text = try std.testing.allocator.dupe(u8, "history\nvisible"),
-        .cached_visible_text = try std.testing.allocator.dupe(u8, "visible"),
-        .cached_visible_range = .{ .start = 8, .end = 15 },
-        .cached_cells = try std.testing.allocator.alloc(win32_uia.TerminalCellPosition, 0),
-    };
-    defer std.testing.allocator.free(context.cached_cells);
-    defer std.testing.allocator.free(context.cached_visible_text);
-    defer std.testing.allocator.free(context.cached_text);
-
-    const document = try TerminalUiaContext.terminalUiaValue(&context, std.testing.allocator);
-    defer std.testing.allocator.free(document);
-    const snapshot = try TerminalUiaContext.terminalUiaSnapshot(&context, std.testing.allocator);
-    defer std.testing.allocator.free(snapshot.geometry.?.cell_for_byte);
-    defer std.testing.allocator.free(snapshot.visible_text);
-    defer std.testing.allocator.free(snapshot.document_text);
-    try std.testing.expectEqualStrings("history\nvisible", document);
-    try std.testing.expectEqualStrings("history\nvisible", snapshot.document_text);
-    try std.testing.expectEqualStrings("visible", snapshot.visible_text);
-    try std.testing.expectEqual(win32_uia.OffsetRange{ .start = 8, .end = 15 }, snapshot.visible_range);
+fn terminalAccessibilityOutputCallback(
+    ctx: *anyopaque,
+    item: apprt.surface.TerminalOutputTransport.Item,
+) void {
+    const session: *win32_terminal_accessibility.TerminalAccessibilitySession =
+        @ptrCast(@alignCast(ctx));
+    switch (item) {
+        .reset => session.resetSemanticOutputContinuity(),
+        .data => |output| session.noteSemanticOutput(output),
+        .omitted => session.noteOutputOmitted(),
+    }
 }
 
 pub const Surface = struct {
@@ -24069,8 +23902,7 @@ pub const Surface = struct {
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
     draw_in_progress: bool = false,
     ime_composing: bool = false,
-    pending_wm_char_text: bool = false,
-    pending_wm_char_high_surrogate: ?u16 = null,
+    deferred_char: DeferredCharState = .{},
     undo_capture_suspended: bool = false,
     render_trace: RenderTrace = .{},
     /// Per-surface bounded undo stack for terminal-local replayable
@@ -24125,10 +23957,7 @@ pub const Surface = struct {
     /// and by `Surface.destroyWindow` so a close-while-pending doesn't
     /// leak.
     pending_clipboard_op: ?PendingClipboardOp = null,
-    terminal_uia_context: ?*TerminalUiaContext = null,
-    terminal_uia_provider: ?*win32_uia.TerminalProvider = null,
-    terminal_uia_last_refresh_ms: u64 = 0,
-    terminal_uia_refresh_timer_active: bool = false,
+    terminal_accessibility: ?*win32_terminal_accessibility.TerminalAccessibilitySession = null,
     /// Close preflight ownership. Normal close paths build both candidates
     /// before HWND/core teardown; `windowDestroyed` consumes them without
     /// allocating after the Surface is already dead.
@@ -24838,94 +24667,48 @@ pub const Surface = struct {
         return self.effectiveTitle();
     }
 
-    fn terminalUiaState(self: *Surface) !win32_uia.TerminalState {
-        if (self.terminal_uia_context == null) {
-            self.terminal_uia_context = try TerminalUiaContext.create(std.heap.page_allocator, self);
-        }
-        return self.terminal_uia_context.?.state();
-    }
-
     fn terminalUiaProvider(self: *Surface) !*win32_uia.TerminalProvider {
-        if (self.terminal_uia_provider == null) {
-            const hwnd = self.hwnd orelse return error.NoWindow;
-            const context = self.terminal_uia_context orelse context: {
-                _ = try self.terminalUiaState();
-                break :context self.terminal_uia_context.?;
-            };
-            _ = try context.refresh(self);
-            self.terminal_uia_last_refresh_ms = GetTickCount64();
-            self.terminal_uia_provider = try win32_uia.TerminalProvider.create(
+        if (self.terminal_accessibility == null) {
+            self.terminal_accessibility = try win32_terminal_accessibility.TerminalAccessibilitySession.create(
                 std.heap.page_allocator,
-                hwnd,
-                context.state(),
-            );
-        } else if (self.terminal_uia_context) |context| {
-            // WM_GETOBJECT is also delivered when a client reconnects after
-            // terminal output occurred with no UIA listeners. Refresh here so
-            // the first TextPattern query cannot observe that stale cache.
-            _ = try context.refresh(self);
-            self.terminal_uia_last_refresh_ms = GetTickCount64();
-        }
-        return self.terminal_uia_provider.?;
-    }
-
-    /// Publish a bounded accessible-text snapshot after a coalesced renderer
-    /// update. Provider calls never format terminal state themselves.
-    fn refreshTerminalUiaText(self: *Surface) void {
-        self.refreshTerminalUiaTextWithMode(false);
-    }
-
-    fn refreshTerminalUiaTextWithMode(self: *Surface, force: bool) void {
-        const context = self.terminal_uia_context orelse return;
-        const provider = self.terminal_uia_provider orelse return;
-        const now_ms = GetTickCount64();
-        const publish_policy = terminalUiaPublishPolicy(
-            win32_uia.events.clientsAreListening(),
-            context.queryRecentlyActive(now_ms),
-        );
-        if (!publish_policy.refresh_snapshot) return;
-        if (!force and !terminalUiaRefreshDue(self.terminal_uia_last_refresh_ms, now_ms)) {
-            if (!self.terminal_uia_refresh_timer_active) {
-                const hwnd = self.hwnd orelse return;
-                if (SetTimer(
-                    hwnd,
-                    TERMINAL_UIA_TIMER_ID,
-                    terminalUiaRefreshDelay(self.terminal_uia_last_refresh_ms, now_ms),
-                    null,
-                ) != 0) self.terminal_uia_refresh_timer_active = true;
-            }
-            return;
-        }
-        self.cancelTerminalUiaRefreshTimer();
-        const refresh_started_ms = now_ms;
-        const refresh_result = context.refresh(self);
-        const refresh_completed_ms = GetTickCount64();
-        self.terminal_uia_last_refresh_ms = refresh_completed_ms;
-        if (terminalUiaSnapshotWasSlow(refresh_started_ms, refresh_completed_ms)) {
-            log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{refresh_completed_ms -| refresh_started_ms});
-        }
-        if (refresh_result) |change| {
-            // Query-only clients do not make UiaClientsAreListening return
-            // true. Keep their snapshot current and gate only event emission.
-            if (!publish_policy.emit_events) return;
-            switch (change) {
-                .text => provider.raiseTextChanged(),
-                .caret => provider.raiseTextSelectionChanged(),
-                .text_and_caret => {
-                    provider.raiseTextChanged();
-                    provider.raiseTextSelectionChanged();
+                .{
+                    .ctx = @ptrCast(self),
+                    .hwnd = terminalAccessibilityHwnd,
+                    .name = terminalAccessibilityName,
+                    .focused = terminalAccessibilityFocused,
+                    .capture = terminalAccessibilityCapture,
+                    .defer_provider_release = terminalAccessibilityDeferProviderRelease,
                 },
-                .unchanged, .geometry => {},
-            }
-        } else |err| {
-            log.warn("win32 terminal UIA snapshot refresh failed err={}", .{err});
+                WM_WINHOSTTY_UIA_QUERY_REFRESH,
+                TERMINAL_UIA_TIMER_ID,
+            );
         }
+        const provider = try self.terminal_accessibility.?.acquireProvider();
+        self.syncTerminalAccessibilityOutputInterest();
+        return provider;
     }
 
-    fn cancelTerminalUiaRefreshTimer(self: *Surface) void {
-        if (!self.terminal_uia_refresh_timer_active) return;
-        if (self.hwnd) |hwnd| _ = KillTimer(hwnd, TERMINAL_UIA_TIMER_ID);
-        self.terminal_uia_refresh_timer_active = false;
+    fn syncTerminalAccessibilityOutputInterest(self: *Surface) void {
+        const interested = if (self.terminal_accessibility) |session|
+            session.outputInterested()
+        else
+            false;
+        if (!interested) {
+            if (self.terminal_accessibility) |session| {
+                session.resetSemanticOutputContinuity();
+            }
+        }
+        self.core_surface.setTerminalOutputInterested(interested);
+    }
+
+    fn drainTerminalAccessibilityOutput(self: *Surface) void {
+        self.syncTerminalAccessibilityOutputInterest();
+        const session = self.terminal_accessibility orelse return;
+        if (!session.outputInterested()) return;
+        self.core_surface.drainTerminalOutput(
+            @ptrCast(session),
+            terminalAccessibilityOutputCallback,
+        );
     }
 
     pub fn getContentScale(self: *const Surface) !apprt.ContentScale {
@@ -25302,10 +25085,7 @@ pub const Surface = struct {
     }
 
     fn notifyTerminalUiaNameChanged(self: *Surface) void {
-        if (!win32_uia.events.clientsAreListening()) return;
-        const provider = self.terminal_uia_provider orelse return;
-        win32_uia.events.raiseNameChanged(&provider.base);
-        win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
+        if (self.terminal_accessibility) |session| session.nameChanged();
     }
 
     fn setTitleOverride(self: *Surface, title: ?[]const u8) !void {
@@ -27180,11 +26960,8 @@ pub const Surface = struct {
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("win32 focus callback failed err={}", .{err});
         };
-        if (focused and win32_uia.events.clientsAreListening()) {
-            if (self.terminal_uia_provider) |provider| {
-                win32_uia.events.raiseFocusChanged(&provider.base);
-            }
-        }
+        if (self.terminal_accessibility) |session| session.focusChanged(focused);
+        self.syncTerminalAccessibilityOutputInterest();
         // Host chrome only changes for split-pane focus borders.
         if (self.host) |host| {
             const pane_count = if (host.activeTab()) |tab| tab.leafCount() else 0;
@@ -27196,8 +26973,9 @@ pub const Surface = struct {
     fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
 
-        const event = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
-        self.pending_wm_char_text = event.composing and event.action != .release;
+        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
+        const event = message.event;
+        self.deferred_char.authorize(message.deferred_utf16_units);
 
         _ = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
@@ -27209,46 +26987,23 @@ pub const Surface = struct {
             });
             return;
         };
+        if (event.utf8.len != 0) {
+            if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
+        }
     }
 
     fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
-        if (!shouldCommitDeferredCharMessage(self.pending_wm_char_text, self.ime_composing)) {
-            self.pending_wm_char_text = false;
-            self.pending_wm_char_high_surrogate = null;
-            return;
-        }
 
         const code_unit: u16 = @intCast(wParam & 0xFFFF);
-        if (std.unicode.utf16IsHighSurrogate(code_unit)) {
-            self.pending_wm_char_high_surrogate = code_unit;
-            return;
-        }
-
-        const codepoint: u21 = cp: {
-            if (std.unicode.utf16IsLowSurrogate(code_unit)) {
-                const high = self.pending_wm_char_high_surrogate orelse return;
-                self.pending_wm_char_high_surrogate = null;
-                break :cp std.unicode.utf16DecodeSurrogatePair(&.{ high, code_unit }) catch return;
-            }
-
-            self.pending_wm_char_high_surrogate = null;
-            break :cp code_unit;
-        };
-        self.pending_wm_char_text = false;
-
-        if (isControlCodepoint(codepoint)) return;
+        const codepoint = self.deferred_char.consumeCodeUnit(
+            code_unit,
+            self.ime_composing,
+        ) orelse return;
 
         var utf8_buf: [8]u8 = undefined;
-        const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch return;
-
-        var event: input.KeyEvent = .{
-            .action = if (isRepeatedKey(lParam)) .repeat else .press,
-            .key = .unidentified,
-            .mods = .{},
-            .unshifted_codepoint = codepoint,
-        };
-        event.utf8 = utf8_buf[0..utf8_len];
+        const event = charCommitEvent(codepoint, lParam, &utf8_buf) orelse return;
+        if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
         _ = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 char commit failed err={} codepoint={}", .{ err, codepoint });
         };
@@ -27313,7 +27068,9 @@ pub const Surface = struct {
         event.utf8 = utf8_buf[0..utf8_len];
         _ = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 IME commit failed err={}", .{err});
+            return;
         };
+        if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
     }
 
     fn handleImeComposition(self: *Surface) void {
@@ -27526,22 +27283,12 @@ pub const Surface = struct {
     fn destroy(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
+        self.deferred_char.clear();
 
-        self.cancelTerminalUiaRefreshTimer();
-        if (self.terminal_uia_context) |ctx| {
-            ctx.detachSurface();
-            if (self.terminal_uia_provider) |provider| {
-                self.terminal_uia_provider = null;
-                provider.detach();
-                scheduleDeferredUiaDisconnect(
-                    self.app,
-                    @ptrCast(provider),
-                    &terminalDisconnectThunk,
-                    &terminalReleaseThunk,
-                );
-            }
-            TerminalUiaContext.release(@ptrCast(ctx));
-            self.terminal_uia_context = null;
+        if (self.terminal_accessibility) |session| {
+            self.core_surface.setTerminalOutputInterested(false);
+            self.terminal_accessibility = null;
+            session.deinit();
         }
 
         // Revoke the drop target BEFORE destroying the HWND — Ole
@@ -27640,6 +27387,7 @@ pub const Surface = struct {
     fn setVisible(self: *Surface, visible: bool) void {
         const visibility_changed = self.window_visible != visible;
         self.window_visible = visible;
+        if (!visible) self.deferred_char.clear();
 
         const hwnd = self.hwnd orelse return;
         const child_visibility_changed = applyChildVisibility(hwnd, &self.placement, visible);
@@ -31740,29 +31488,31 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(UINT, 0x0004), TO_UNICODE_NO_STATE_CHANGE);
+    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitCount('a'));
+    try std.testing.expectEqual(@as(usize, 2), utf16CodeUnitCount(0x1F642));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .key_a,
         .{},
-        .{ .len = 1, .unshifted_codepoint = 'a' },
+        .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .repeat,
         .space,
         .{},
-        .{ .len = 1, .unshifted_codepoint = ' ' },
+        .{ .len = 1, .unshifted_codepoint = ' ', .deferred_utf16_units = 1 },
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .quote,
         .{},
-        .{ .unshifted_codepoint = '\'' },
+        .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1 },
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .digit_2,
         .{ .ctrl = true, .alt = true },
-        .{ .unshifted_codepoint = '2' },
+        .{ .unshifted_codepoint = '2', .deferred_utf16_units = 1 },
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
@@ -31770,9 +31520,125 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .{},
         .{ .unshifted_codepoint = 0x0D },
     ));
-    try std.testing.expect(!shouldCommitDeferredCharMessage(false, false));
-    try std.testing.expect(!shouldCommitDeferredCharMessage(true, true));
-    try std.testing.expect(shouldCommitDeferredCharMessage(true, false));
+}
+
+test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
+    const message = keyEventFromWin32Message(WM_KEYDOWN, VK_PACKET, 0).?;
+    try std.testing.expectEqual(input.Action.press, message.event.action);
+    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expect(message.event.composing);
+    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
+    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
+}
+
+test "win32 VK_PACKET key up authorizes no units or text" {
+    const message = keyEventFromWin32Message(WM_KEYUP, VK_PACKET, 0).?;
+    try std.testing.expectEqual(input.Action.release, message.event.action);
+    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expect(!message.event.composing);
+    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
+    try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
+}
+
+test "win32 authorized char commit preserves packet control characters" {
+    var utf8_buf: [8]u8 = undefined;
+    const fixtures = [_]struct { codepoint: u21, expected: []const u8 }{
+        .{ .codepoint = '\r', .expected = "\r" },
+        .{ .codepoint = '\n', .expected = "\n" },
+        .{ .codepoint = '\t', .expected = "\t" },
+        .{ .codepoint = 0x08, .expected = "\x08" },
+        .{ .codepoint = 0x1B, .expected = "\x1B" },
+    };
+    for (fixtures) |fixture| {
+        const event = charCommitEvent(fixture.codepoint, 0, &utf8_buf).?;
+        try std.testing.expectEqual(input.Key.unidentified, event.key);
+        try std.testing.expectEqual(fixture.codepoint, event.unshifted_codepoint);
+        try std.testing.expectEqualStrings(fixture.expected, event.utf8);
+    }
+}
+
+test "win32 deferred char authorization preserves pending units across non-text events" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    // Release and unrelated non-text key messages authorize zero units.
+    state.authorize(0);
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char dead key and composition consume exact units" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    state.consumeDeadChar();
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, 0x00E9), state.consumeCodeUnit(0x00E9, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char authorization blocks unsolicited and IME text" {
+    var state: DeferredCharState = .{};
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', true));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+}
+
+test "win32 deferred char two surrogate keydowns consume two code units" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char supplementary expectation authorizes both units" {
+    var state: DeferredCharState = .{};
+    state.authorize(2);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char commits 256 delayed BMP authorizations" {
+    var state: DeferredCharState = .{};
+    for (0..256) |_| state.authorize(1);
+    try std.testing.expectEqual(@as(usize, 256), state.pending_units);
+
+    for (0..256) |_| {
+        try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char malformed surrogate clears authorization state" {
+    var state: DeferredCharState = .{};
+    state.authorize(3);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    try std.testing.expectEqual(@as(?u16, null), state.high_surrogate);
+}
+
+test "win32 deferred char authorization saturates only at usize maximum" {
+    var state: DeferredCharState = .{
+        .pending_units = std.math.maxInt(usize) - 1,
+    };
+    state.authorize(2);
+    try std.testing.expectEqual(std.math.maxInt(usize), state.pending_units);
 }
 
 test "win32 hotkeySpecForTrigger maps physical key triggers" {

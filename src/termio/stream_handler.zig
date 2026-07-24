@@ -11,6 +11,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const SemanticOutputCapture = @import("semantic_output_capture.zig").SemanticOutputCapture;
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -84,6 +85,9 @@ pub const StreamHandler = struct {
 
     /// This is set for the duration of a parse batch when we see 2026h.
     saw_synchronized_output_start: bool = false,
+
+    /// Semantic output committed during the current PTY read batch.
+    semantic_output: SemanticOutputCapture = .{},
 
     pub const Stream = terminal.Stream(StreamHandler);
 
@@ -208,20 +212,42 @@ pub const StreamHandler = struct {
         switch (action) {
             .print => {
                 @branchHint(.likely);
-                try self.terminal.print(value.cp);
+                const captured = self.terminal.status_display == .main;
+                self.terminal.print(value.cp) catch |err| {
+                    if (captured) self.semantic_output.omitRemainder();
+                    return err;
+                };
+                if (captured) {
+                    if (self.terminal.committedPrintCodepoint()) |cp| {
+                        self.semantic_output.recordPrint(cp);
+                    }
+                }
             },
-            .print_repeat => try self.terminal.printRepeat(value),
+            .print_repeat => try self.printRepeat(value),
             .bell => self.bell(),
             .backspace => self.terminal.backspace(),
-            .horizontal_tab => self.horizontalTab(value),
+            .horizontal_tab => {
+                const captured = self.terminal.status_display == .main;
+                const committed = self.horizontalTab(value);
+                if (captured) {
+                    for (0..committed) |_| self.semantic_output.recordTab();
+                }
+            },
             .horizontal_tab_back => self.horizontalTabBack(value),
             .linefeed => {
                 @branchHint(.likely);
-                try self.linefeed();
+                const captured = self.terminal.status_display == .main;
+                self.linefeed() catch |err| {
+                    if (captured) self.semantic_output.omitRemainder();
+                    return err;
+                };
+                if (captured) self.semantic_output.recordLinefeed();
             },
             .carriage_return => {
                 @branchHint(.likely);
+                const captured = self.terminal.status_display == .main;
                 self.terminal.carriageReturn();
+                if (captured) self.semantic_output.recordCarriageReturn();
             },
             .enquiry => try self.enquiry(),
             .invoke_charset => self.terminal.invokeCharset(value.bank, value.charset, value.locking),
@@ -270,7 +296,13 @@ pub const StreamHandler = struct {
             .index => try self.index(),
             .next_line => try self.nextLine(),
             .reverse_index => try self.reverseIndex(),
-            .full_reset => try self.fullReset(),
+            .full_reset => {
+                self.fullReset() catch |err| {
+                    self.semantic_output.omitRemainder();
+                    return err;
+                };
+                self.semantic_output.resetForFullReset();
+            },
             .set_mode => try self.setMode(value.mode, true),
             .reset_mode => try self.setMode(value.mode, false),
             .save_mode => self.terminal.modes.save(value.mode),
@@ -570,12 +602,15 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.ring_bell);
     }
 
-    inline fn horizontalTab(self: *StreamHandler, count: u16) void {
+    inline fn horizontalTab(self: *StreamHandler, count: u16) usize {
+        var committed: usize = 0;
         for (0..count) |_| {
             const x = self.terminal.screens.active.cursor.x;
             self.terminal.horizontalTab();
             if (x == self.terminal.screens.active.cursor.x) break;
+            committed += 1;
         }
+        return committed;
     }
 
     inline fn horizontalTabBack(self: *StreamHandler, count: u16) void {
@@ -590,6 +625,25 @@ pub const StreamHandler = struct {
         // Small optimization: call index instead of linefeed because they're
         // identical and this avoids one layer of function call overhead.
         try self.terminal.index();
+    }
+
+    inline fn printRepeat(self: *StreamHandler, count_req: usize) !void {
+        if (self.terminal.status_display != .main) {
+            try self.terminal.printRepeat(count_req);
+            return;
+        }
+
+        const cp = self.terminal.previous_char orelse return;
+        const count = @max(count_req, 1);
+        for (0..count) |_| {
+            self.terminal.print(cp) catch |err| {
+                self.semantic_output.omitRemainder();
+                return err;
+            };
+            if (self.terminal.committedPrintCodepoint()) |committed| {
+                self.semantic_output.recordPrint(committed);
+            }
+        }
     }
 
     pub inline fn reverseIndex(self: *StreamHandler) !void {
@@ -1568,6 +1622,120 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 };
+
+test "semantic output capture follows real stream handler parser" {
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    stream.handler.semantic_output.begin(false);
+    stream.nextSlice("uninterested");
+    const uninterested = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        uninterested.len,
+    );
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("A\xf0\x9f");
+    const split_lead = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("A", split_lead.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x99\x82B");
+    const split_tail = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("🙂B", split_tail.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[3b");
+    const repeated = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("BBB", repeated.slice());
+
+    term.fullReset();
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[2b");
+    const reset_repeat = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        reset_repeat.len,
+    );
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("X\r\n\tY");
+    const controls = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("X\r\n\tY", controls.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice(
+        "left\x1b[31mright" ++
+            "\x1b]8;;https://secret.example\x1b\\link\x1b]8;;\x1b\\" ++
+            "\x1bPqDCS-SECRET\x1b\\done",
+    );
+    const escaped = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("leftrightlinkdone", escaped.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b[1$}\r\n\thidden\x1b[0$}visible");
+    const status_display = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("visible", status_display.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\x1b(0`\x1b(B");
+    const special_graphics = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("◆", special_graphics.slice());
+
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("before\x1bcafter");
+    const full_reset = stream.handler.semantic_output.finish();
+    try std.testing.expectEqualStrings("after", full_reset.slice());
+    try std.testing.expect(full_reset.reset_before);
+    try std.testing.expect(!full_reset.omitted_after);
+
+    term.fullReset();
+    stream.handler.semantic_output.begin(true);
+    stream.nextSlice("\xcc\x81");
+    const combining_noop = stream.handler.semantic_output.finish();
+    try std.testing.expectEqual(@as(usize, 0), combining_noop.len);
+}
 
 test "decodeOsc7PathForPwd handles Windows file URI with a single fallback allocator" {
     const uri = try internal_os.uri.parse("file://localhost/C:/Users/test/project", .{

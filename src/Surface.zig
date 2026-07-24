@@ -128,6 +128,7 @@ last_binding_trigger: u64 = 0,
 io: termio.Termio,
 io_thread: termio.Thread,
 io_thr: std.Thread,
+terminal_output_transport: apprt.surface.TerminalOutputTransport = .{},
 
 /// Terminal inspector
 inspector: ?*inspectorpkg.Inspector = null,
@@ -746,6 +747,7 @@ pub fn init(
             .renderer_wakeup = render_thread.wakeup,
             .renderer_mailbox = render_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .terminal_output_transport = &self.terminal_output_transport,
         });
     }
     // Outside the block, IO has now taken ownership of our temporary state
@@ -902,6 +904,18 @@ inline fn surfaceMailbox(self: *Surface) Mailbox {
         .surface = self,
         .app = .{ .rt_app = self.rt_app, .mailbox = &self.app.mailbox },
     };
+}
+
+pub fn setTerminalOutputInterested(self: *Surface, interested: bool) void {
+    self.terminal_output_transport.setInterested(interested);
+}
+
+pub fn drainTerminalOutput(
+    self: *Surface,
+    ctx: *anyopaque,
+    callback: apprt.surface.TerminalOutputTransport.DrainCallback,
+) void {
+    self.terminal_output_transport.drain(ctx, callback);
 }
 
 /// Queue a message for the IO thread.
