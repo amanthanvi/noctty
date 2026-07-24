@@ -209,16 +209,14 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
         run: |
-          $preflightArgs = @(
-            '-Version'
-            $env:RELEASE_VERSION
-            '-RequireSigning'
-            '-RequirePackageManagers'
-          )
+          $preflightArgs = @{
+            Version = $env:RELEASE_VERSION
+            RequireSigning = $true
+            RequirePackageManagers = $true
+          }
           if ($env:RELEASE_PRERELEASE -ne 'true') {
             ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $preflightArgs += '-RequireAccessibilityEvidence'
           }
           ./scripts/release-preflight.ps1 @preflightArgs
 

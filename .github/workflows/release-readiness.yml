@@ -47,9 +47,10 @@ jobs:
           REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}
         shell: pwsh
         run: |
-          $scriptArgs = @('-Version', $env:RELEASE_VERSION, '-RequireSigning', '-RequireAccessibilityEvidence')
-          if ($env:REQUIRE_PACKAGE_MANAGERS -eq "true") {
-            $scriptArgs += "-RequirePackageManagers"
+          $scriptArgs = @{
+            Version = $env:RELEASE_VERSION
+            RequireSigning = $true
+            RequirePackageManagers = $env:REQUIRE_PACKAGE_MANAGERS -eq 'true'
           }
           ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

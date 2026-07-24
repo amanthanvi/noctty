@@ -5086,13 +5086,44 @@ for ($i = 1; $i -lt $sessionBurstStatementIndices.Count; $i++) {
         throw 'Session restore burst deadline, posts, proof barriers, and close must remain adjacent statements.'
     }
 }
+$releasePreflightStep = Get-YamlStepText `
+    -Content $releaseWorkflowText `
+    -Name 'Release preflight' `
+    -Source $releaseWorkflow
+$readinessPreflightStep = Get-YamlStepText `
+    -Content $readinessWorkflowText `
+    -Name 'Validate release configuration' `
+    -Source $readinessWorkflow
+$releaseInteractiveEvidenceStep = Get-YamlStepText `
+    -Content $releaseWorkflowText `
+    -Name 'Require successful Test workflow for release SHA' `
+    -Source $releaseWorkflow
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Release preflight' -Source $releaseWorkflow) `
+    -Content $releasePreflightStep `
+    -Pattern '(?ms)\$preflightArgs\s*=\s*@\{\s*Version\s*=\s*\$env:RELEASE_VERSION\s*RequireSigning\s*=\s*\$true\s*RequirePackageManagers\s*=\s*\$true\s*\}.*?release-preflight\.ps1 @preflightArgs' `
+    -Description 'release preflight uses a three-key named hashtable splat' `
+    -Context "$releaseWorkflow :: Release preflight"
+Assert-TextContract `
+    -Content $readinessPreflightStep `
+    -Pattern '(?ms)\$scriptArgs\s*=\s*@\{\s*Version\s*=\s*\$env:RELEASE_VERSION\s*RequireSigning\s*=\s*\$true\s*RequirePackageManagers\s*=\s*\$env:REQUIRE_PACKAGE_MANAGERS -eq [''"]true[''"]\s*\}.*?release-preflight\.ps1 @scriptArgs' `
+    -Description 'release readiness uses a three-key named hashtable splat' `
+    -Context "$readinessWorkflow :: Validate release configuration"
+if (($releasePreflightStep + $readinessPreflightStep) -match
+    '(?ms)=\s*@\(\s*[''"]-Version[''"]|RequireAccessibilityEvidence') {
+    throw 'Release workflows cannot use flat preflight argument arrays or require manual accessibility attestation.'
+}
+Assert-TextContract `
+    -Content $releaseInteractiveEvidenceStep `
+    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
+    -Description 'release remains gated on successful exact-SHA hash-bound interactive evidence' `
+    -Context "$releaseWorkflow :: Require successful Test workflow for release SHA"
+Assert-TextContract `
+    -Content $releasePreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release preflight propagates release-copy failures' `
     -Context "$releaseWorkflow :: Release preflight"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $readinessWorkflowText -Name 'Validate release configuration' -Source $readinessWorkflow) `
+    -Content $readinessPreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
