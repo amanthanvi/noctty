@@ -441,16 +441,17 @@ pub const TerminalAccessibilitySession = struct {
             self.origin_y == capture.origin_y and
             cellsEqual(self.cached_cells, cells);
         if (unchanged) {
+            const announcement = if (speech_mode == .emit)
+                try self.takePendingAnnouncement()
+            else
+                null;
             self.alloc.free(visible_text);
             self.alloc.free(cells);
             self.alloc.free(text);
             if (update_refresh_time) self.last_refresh_ms = GetTickCount64();
             return .{
                 .change = .unchanged,
-                .announcement = if (speech_mode == .emit)
-                    try self.takePendingAnnouncement()
-                else
-                    null,
+                .announcement = announcement,
                 .announcement_pending = self.hasPendingAnnouncement(),
             };
         }
@@ -1076,6 +1077,33 @@ test "terminal output announcement normalization allocation failure becomes orde
     const omission = (try session.takePendingAnnouncement()).?;
     defer std.testing.allocator.free(omission);
     try std.testing.expectEqualStrings(omitted_output_notice, omission);
+}
+
+test "unchanged terminal refresh emit handles every allocation failure" {
+    const run = struct {
+        fn testRefresh(alloc: Allocator) !void {
+            var ctx: u8 = 0;
+            const session = try TerminalAccessibilitySession.create(
+                alloc,
+                TestOps.ops(&ctx),
+                0,
+                0,
+            );
+            defer session.deinit();
+
+            session.enqueuePendingAnnouncements("pending");
+            const result = try session.refresh(.emit, false);
+            defer if (result.announcement) |announcement| alloc.free(announcement);
+            try std.testing.expectEqual(Change.unchanged, result.change);
+            try std.testing.expectEqualStrings("pending", result.announcement.?);
+        }
+    }.testRefresh;
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        run,
+        .{},
+    );
 }
 
 test "terminal output suppression normalizes per-key input and Enter" {

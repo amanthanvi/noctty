@@ -99,9 +99,9 @@ function Assert-ZigTestsDiscoveredAndRun {
         }
     }
     foreach ($expectedName in $ExpectedNames) {
-        $matches = @($declarations | Where-Object { $_.Name -ceq $expectedName })
-        if ($matches.Count -ne 1) {
-            throw "Expected exactly one Zig test declaration '$expectedName'; found $($matches.Count)."
+        $declMatches = @($declarations | Where-Object { $_.Name -ceq $expectedName })
+        if ($declMatches.Count -ne 1) {
+            throw "Expected exactly one Zig test declaration '$expectedName'; found $($declMatches.Count)."
         }
     }
 

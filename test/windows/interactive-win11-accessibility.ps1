@@ -1536,8 +1536,6 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             @($inactiveNotificationDiagnostic.raw_notification_history)
         $inactiveNotificationHistory =
             @($inactiveNotificationDiagnostic.notification_history)
-        $inactiveNotificationText =
-            $inactiveNotificationDiagnostic.notification_text
 
         Send-AccessibilityChord `
             -Keys @([uint16]0x11, [uint16]0x22) `
