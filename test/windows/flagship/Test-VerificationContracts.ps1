@@ -138,16 +138,6 @@ function Get-YamlStepBlock {
     $matches[0].Value
 }
 
-function Get-YamlStepText {
-    param(
-        [Parameter(Mandatory)] [string] $Content,
-        [Parameter(Mandatory)] [string] $Name,
-        [Parameter(Mandatory)] [string] $Source
-    )
-
-    Get-YamlStepBlock -Content $Content -Name $Name -Source $Source
-}
-
 function Assert-DeferredZigFixtureExecution {
     param(
         [Parameter(Mandatory)] [string] $WorkflowText,
@@ -158,15 +148,15 @@ function Assert-DeferredZigFixtureExecution {
         -Content $WorkflowText `
         -Name 'windows' `
         -Source $Source
-    $flagshipStep = Get-YamlStepText `
+    $flagshipStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Flagship verification contract checks' `
         -Source "$Source :: windows"
-    $setupStep = Get-YamlStepText `
+    $setupStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Setup Zig' `
         -Source "$Source :: windows"
-    $fullSuiteStep = Get-YamlStepText `
+    $fullSuiteStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Full Zig test suite' `
         -Source "$Source :: windows"
@@ -2494,7 +2484,7 @@ $stepBoundaryProbe = @'
       - name: Other
         run: outside-step
 '@
-if ((Get-YamlStepText -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a step boundary.'
 }
 $duplicateStepProbe = @'
@@ -2518,7 +2508,7 @@ if (-not $duplicateStepRejected) {
     throw 'Workflow step extraction accepted an ambiguous duplicate name.'
 }
 $stepTailProbe = "      - name: Target`n        run: inside-step`n    env: # job-level tail`n      VALUE: outside-step"
-if ((Get-YamlStepText -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a job-level key boundary.'
 }
 $jobBoundaryProbe = "  target:`n    value: inside-job`n  `"other.job`": # annotated`n    value: outside-job"
@@ -6684,6 +6674,122 @@ $releasePreflightStepSha256 =
     '0535add72682e9ee85894835766355e537d5a5a03174ed656e6365954d7f16eb'
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
+$releaseWorkflowSha256 =
+    '4cb17b2e84359fdbd199c5e0b65a7035a1409fe28ddb8cf199c1c9157d48dd76'
+$readinessWorkflowSha256 =
+    '2659a58baeffaa9861c33bd4cdcd7adc8838dd6f9e91d51dcffc338af906f303'
+# Full-file pins deliberately make every workflow edit a semantic-review event,
+# including triggers, permissions, inherited job metadata, and unprotected steps.
+$commonWorkflowBoundaryMutations = @(
+    @{
+        Label = 'WinGet package redirect'
+        Target = '      WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}'
+        Replacement = '      WINGET_PACKAGE_IDENTIFIER: attacker.forged.package'
+    },
+    @{
+        Label = 'Scoop repository redirect'
+        Target = '      SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}'
+        Replacement = '      SCOOP_BUCKET_REPO: attacker/forged-bucket'
+    },
+    @{
+        Label = 'Scoop branch redirect'
+        Target = '      SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}'
+        Replacement = '      SCOOP_BUCKET_BRANCH: forged-release'
+    },
+    @{
+        Label = 'runner redirect'
+        Target = '    runs-on: windows-latest'
+        Replacement = '    runs-on: [self-hosted, forged-release]'
+    },
+    @{
+        Label = 'environment redirect'
+        Target = '    environment: release'
+        Replacement = '    environment: forged-release'
+    }
+)
+$protectedWorkflowSpecs = @(
+    [pscustomobject]@{
+        Context = $releaseWorkflow
+        Content = $releaseWorkflowText
+        ExpectedSha256 = $releaseWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Require successful Test workflow for release SHA'
+                StepSha256 = $releaseInteractiveEvidenceStepSha256
+                BodySha256 = $releaseInteractiveEvidenceScriptSha256
+            },
+            @{
+                Name = 'Release preflight'
+                StepSha256 = $releasePreflightStepSha256
+                BodySha256 = $releasePreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'release permission reduction'
+                Target = '  contents: write'
+                Replacement = '  contents: read'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Context = $readinessWorkflow
+        Content = $readinessWorkflowText
+        ExpectedSha256 = $readinessWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Validate release configuration'
+                StepSha256 = $readinessPreflightStepSha256
+                BodySha256 = $readinessPreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'readiness permission escalation'
+                Target = '  contents: read'
+                Replacement = '  contents: write'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedWorkflowSpecs) {
+    if ((Get-CanonicalTextSha256 -Text $spec.Content) -cne
+        $spec.ExpectedSha256) {
+        throw "Protected workflow changed: $($spec.Context)"
+    }
+    $canonicalWorkflow = ConvertTo-CanonicalText -Text $spec.Content
+    foreach ($mutation in $spec.Mutations) {
+        if (@([regex]::Matches(
+            $canonicalWorkflow,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected workflow mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantWorkflow = $canonicalWorkflow.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        if ((Get-CanonicalTextSha256 -Text $mutantWorkflow) -ceq
+            $spec.ExpectedSha256) {
+            throw "Protected workflow accepted full-file mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+        foreach ($protectedStep in $spec.ProtectedSteps) {
+            $mutantStep = Get-YamlStepBlock `
+                -Content $mutantWorkflow `
+                -Name $protectedStep.Name `
+                -Source "$($spec.Context) :: $($mutation.Label)"
+            $mutantBody = Get-YamlLiteralRunScript `
+                -Content $mutantStep `
+                -Source "$($spec.Context) :: $($mutation.Label) :: $($protectedStep.Name)"
+            if ((Get-CanonicalTextSha256 -Text $mutantStep) -cne
+                    $protectedStep.StepSha256 -or
+                (Get-CanonicalTextSha256 -Text $mutantBody) -cne
+                    $protectedStep.BodySha256) {
+                throw "Full-file mutation unexpectedly changed a protected step: $($spec.Context) :: $($mutation.Label)"
+            }
+        }
+    }
+}
 $protectedStepEnvelopeSpecs = @(
     [pscustomobject]@{
         Name = 'Require successful Test workflow for release SHA'
@@ -7698,16 +7804,16 @@ Assert-TextContract `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
-$signedArtifactStep = Get-YamlStepText `
+$signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
     -Source $releaseWorkflow
@@ -7886,12 +7992,12 @@ foreach ($contract in @(
         -Context $publishedReleaseVerifier
 }
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
     -Description 'scheduled remote verification authenticates gh' `
     -Context "$testWorkflow :: Remote release copy checks"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows") `
@@ -7899,7 +8005,7 @@ Assert-TextContract `
     -Description 'hosted Windows tests cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-portable-smoke' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-portable-smoke") `
@@ -7907,7 +8013,7 @@ Assert-TextContract `
     -Description 'portable smoke cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-portable-smoke :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow) `
         -Name 'Setup Zig' `
         -Source "$releaseWorkflow :: windows-release") `
@@ -7915,7 +8021,7 @@ Assert-TextContract `
     -Description 'release builds cannot restore failed Zig build caches' `
     -Context "$releaseWorkflow :: windows-release :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-interactive") `
@@ -7927,7 +8033,7 @@ Assert-TextContract `
     -Pattern '(?m)^\s*timeout-minutes:\s+60\s*$' `
     -Description 'full interactive validation has enough job budget for the accessibility soak' `
     -Context "$testWorkflow :: windows-interactive"
-$interactiveRunStep = Get-YamlStepText `
+$interactiveRunStep = Get-YamlStepBlock `
     -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
     -Name 'Run interactive Win11 composite' `
     -Source "$testWorkflow :: windows-interactive"
@@ -7969,7 +8075,7 @@ Assert-WorkflowContract `
     -Pattern '(?s)IsNullOrWhiteSpace\(\$env:ZIG_GLOBAL_CACHE_DIR\).*?IsNullOrWhiteSpace\(\$env:ZIG_LOCAL_CACHE_DIR\)' `
     -Description 'PowerShell Windows bootstrap preserves caller-provided Zig cache isolation'
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
     -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
     -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
     -Context "$testWorkflow :: Upload interactive evidence"
