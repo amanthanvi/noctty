@@ -123,6 +123,21 @@ function Get-YamlJobText {
     $match.Value
 }
 
+function Get-YamlStepBlock {
+    param(
+        [Parameter(Mandatory)] [string] $Content,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $Source
+    )
+
+    $pattern = '(?ms)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?\n.*?(?=^      -[ \t]+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
+    $matches = [regex]::Matches($Content, $pattern)
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one workflow step '$Name'; found $($matches.Count): $Source"
+    }
+    $matches[0].Value
+}
+
 function Get-YamlStepText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -130,10 +145,7 @@ function Get-YamlStepText {
         [Parameter(Mandatory)] [string] $Source
     )
 
-    $pattern = '(?ms)^      - name:\s+' + [regex]::Escape($Name) + '\s*\r?\n.*?(?=^      -\s+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
-    $match = [regex]::Match($Content, $pattern)
-    if (-not $match.Success) { throw "Workflow step not found: $Name ($Source)" }
-    $match.Value
+    Get-YamlStepBlock -Content $Content -Name $Name -Source $Source
 }
 
 function Assert-DeferredZigFixtureExecution {
@@ -220,11 +232,17 @@ function Get-YamlLiteralRunScript {
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
 }
 
-function Get-CanonicalScriptTextSha256 {
-    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $ScriptText)
+function ConvertTo-CanonicalText {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
 
-    $normalized = (($ScriptText -replace "`r`n", "`n") -replace "`r", "`n").
+    (($Text -replace "`r`n", "`n") -replace "`r", "`n").
         TrimEnd([char[]]"`n")
+}
+
+function Get-CanonicalTextSha256 {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
+
+    $normalized = ConvertTo-CanonicalText -Text $Text
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [Text.UTF8Encoding]::new($false).GetBytes($normalized)
@@ -234,6 +252,15 @@ function Get-CanonicalScriptTextSha256 {
     finally {
         $sha256.Dispose()
     }
+}
+
+function Test-YamlStepEnvelopeDigest {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [string] $ExpectedSha256
+    )
+
+    (Get-CanonicalTextSha256 -Text $StepText) -ceq $ExpectedSha256
 }
 
 function Get-NamedVariableAssignments {
@@ -302,7 +329,7 @@ function Test-NamedReleasePreflightSplat {
     if ($errors.Count -ne 0) { return $false }
     if (@($ast.FindAll({
         param($node)
-        Test-CommandResolutionMutationNode `
+        Test-ForbiddenScriptMutationNode `
             -Node $node `
             -StrictReleaseContract
     }, $true)).Count -ne 0) {
@@ -397,7 +424,7 @@ function Test-NamedReleasePreflightSplat {
         $invocationUses.Count -eq 1 -and
         $allSplats.Count -eq 1 -and
         [object]::ReferenceEquals($allSplats[0], $splat) -and
-        (Get-CanonicalScriptTextSha256 -ScriptText $ScriptText) -ceq
+        (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
             $ExpectedScriptSha256
 }
 
@@ -675,7 +702,7 @@ function Test-ReleaseInteractiveSuccessPredicates {
     if ($errors.Count -ne 0) { return $false }
     if (@($ast.FindAll({
         param($node)
-        Test-CommandResolutionMutationNode `
+        Test-ForbiddenScriptMutationNode `
             -Node $node `
             -StrictReleaseContract
     }, $true)).Count -ne 0) {
@@ -1474,7 +1501,7 @@ function Test-ReleaseInteractiveSuccessPredicates {
             return $false
         }
     }
-    return (Get-CanonicalScriptTextSha256 -ScriptText $ScriptText) -ceq
+    return (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
         $ExpectedScriptSha256
 }
 
@@ -2005,7 +2032,7 @@ function Test-ExecutionContextMemberChain {
     return Test-ExecutionContextMemberChain -Node $Node.Expression -Members @($Members[0..($Members.Count - 2)])
 }
 
-function Test-CommandResolutionMutationNode {
+function Test-ForbiddenScriptMutationNode {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
         [switch] $StrictReleaseContract
@@ -2196,7 +2223,7 @@ function Assert-CommandResolutionContract {
         [string[]] $ExpectedAmpersandCommands = @()
     )
 
-    $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
+    $mutators = @($Ast.FindAll({ param($node) Test-ForbiddenScriptMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
     if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
         throw "Command-loading #requires directive is forbidden: $Context"
@@ -2426,11 +2453,11 @@ foreach ($probeText in $strictOnlyCommandProbes) {
     }
     $generalRejections = @($probeAst.FindAll({
         param($node)
-        Test-CommandResolutionMutationNode -Node $node
+        Test-ForbiddenScriptMutationNode -Node $node
     }, $true))
     $strictRejections = @($probeAst.FindAll({
         param($node)
-        Test-CommandResolutionMutationNode `
+        Test-ForbiddenScriptMutationNode `
             -Node $node `
             -StrictReleaseContract
     }, $true))
@@ -2469,6 +2496,26 @@ $stepBoundaryProbe = @'
 '@
 if ((Get-YamlStepText -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a step boundary.'
+}
+$duplicateStepProbe = @'
+      - name: Target
+        run: first
+      - name: Target
+        run: second
+'@
+$duplicateStepRejected = $false
+try {
+    Get-YamlStepBlock `
+        -Content $duplicateStepProbe `
+        -Name 'Target' `
+        -Source 'duplicate step probe' |
+        Out-Null
+}
+catch {
+    $duplicateStepRejected = $true
+}
+if (-not $duplicateStepRejected) {
+    throw 'Workflow step extraction accepted an ambiguous duplicate name.'
 }
 $stepTailProbe = "      - name: Target`n        run: inside-step`n    env: # job-level tail`n      VALUE: outside-step"
 if ((Get-YamlStepText -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
@@ -6608,15 +6655,15 @@ for ($i = 1; $i -lt $sessionBurstStatementIndices.Count; $i++) {
         throw 'Session restore burst deadline, posts, proof barriers, and close must remain adjacent statements.'
     }
 }
-$releasePreflightStep = Get-YamlStepText `
+$releasePreflightStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Release preflight' `
     -Source $releaseWorkflow
-$readinessPreflightStep = Get-YamlStepText `
+$readinessPreflightStep = Get-YamlStepBlock `
     -Content $readinessWorkflowText `
     -Name 'Validate release configuration' `
     -Source $readinessWorkflow
-$releaseInteractiveEvidenceStep = Get-YamlStepText `
+$releaseInteractiveEvidenceStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Require successful Test workflow for release SHA' `
     -Source $releaseWorkflow
@@ -6631,6 +6678,113 @@ $readinessPreflightScriptSha256 =
     '9e08d1fca871d8eb340ee88057e66b4472cef074eb0cab4ff728537ed439c7dc'
 $releaseInteractiveEvidenceScriptSha256 =
     '2bc265c1052c000e5f8ea599d2f5e2002dec3d3dc893bff0b8ecd72da739bb92'
+$releaseInteractiveEvidenceStepSha256 =
+    '88a9d8d525eca9bb31327fdad515af39488a63b418222036b82edf94db945b6f'
+$releasePreflightStepSha256 =
+    '0535add72682e9ee85894835766355e537d5a5a03174ed656e6365954d7f16eb'
+$readinessPreflightStepSha256 =
+    '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
+$protectedStepEnvelopeSpecs = @(
+    [pscustomobject]@{
+        Name = 'Require successful Test workflow for release SHA'
+        Context = "$releaseWorkflow :: Require successful Test workflow for release SHA"
+        StepText = $releaseInteractiveEvidenceStep
+        ExpectedSha256 = $releaseInteractiveEvidenceStepSha256
+        Mutations = @(
+            @{
+                Label = 'GH_REPOSITORY redirect'
+                Target = '          GH_REPOSITORY: ${{ github.repository }}'
+                Replacement = '          GH_REPOSITORY: attacker/forged-evidence'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Release preflight'
+        Context = "$releaseWorkflow :: Release preflight"
+        StepText = $releasePreflightStep
+        ExpectedSha256 = $releasePreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'release prerelease override'
+                Target = '          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}'
+                Replacement = '          RELEASE_PRERELEASE: true'
+            },
+            @{
+                Label = 'release version override'
+                Target = '          RELEASE_VERSION: ${{ steps.meta.outputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Validate release configuration'
+        Context = "$readinessWorkflow :: Validate release configuration"
+        StepText = $readinessPreflightStep
+        ExpectedSha256 = $readinessPreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'readiness version override'
+                Target = '          RELEASE_VERSION: ${{ inputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            },
+            @{
+                Label = 'readiness package-manager override'
+                Target = '          REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}'
+                Replacement = '          REQUIRE_PACKAGE_MANAGERS: false'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedStepEnvelopeSpecs) {
+    if (-not (Test-YamlStepEnvelopeDigest `
+        -StepText $spec.StepText `
+        -ExpectedSha256 $spec.ExpectedSha256)) {
+        throw "Protected workflow step envelope changed: $($spec.Context)"
+    }
+    $canonicalStep = ConvertTo-CanonicalText -Text $spec.StepText
+    $canonicalBody = Get-YamlLiteralRunScript `
+        -Content $canonicalStep `
+        -Source $spec.Context
+    $nameLine = "      - name: $($spec.Name)"
+    $mutations = @(
+        @{
+            Label = 'continue-on-error'
+            Target = $nameLine
+            Replacement = "$nameLine`n        continue-on-error: true"
+        },
+        @{
+            Label = 'if false'
+            Target = $nameLine
+            Replacement = "$nameLine`n        if: `${{ false }}"
+        },
+        @{
+            Label = 'GH_TOKEN redirect'
+            Target = '          GH_TOKEN: ${{ github.token }}'
+            Replacement = '          GH_TOKEN: ${{ secrets.FORGED_GH_TOKEN }}'
+        }
+    ) + @($spec.Mutations)
+    foreach ($mutation in $mutations) {
+        if (@([regex]::Matches(
+            $canonicalStep,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected step envelope mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantStep = $canonicalStep.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        $mutantBody = Get-YamlLiteralRunScript `
+            -Content $mutantStep `
+            -Source "$($spec.Context) :: $($mutation.Label)"
+        if ($mutantBody -cne $canonicalBody -or
+            (Test-YamlStepEnvelopeDigest `
+                -StepText $mutantStep `
+                -ExpectedSha256 $spec.ExpectedSha256)) {
+            throw "Protected workflow step envelope accepted metadata mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+    }
+}
 Assert-NamedReleasePreflightSplat `
     -StepText $releasePreflightStep `
     -ExpectedExpressions $releasePreflightExpected `
@@ -6650,8 +6804,8 @@ Assert-NamedReleasePreflightSplat `
 $releasePreflightScript = Get-YamlLiteralRunScript `
     -Content $releasePreflightStep `
     -Source "$releaseWorkflow :: Release preflight"
-# Intentional workflow-script edits require reviewing semantics and updating the
-# corresponding literal digest; formatting changes are contract changes too.
+# Intentional protected-step edits require semantic review plus body/envelope
+# digest updates; formatting changes are contract changes too.
 $releasePreflightWhitespaceMutant = $releasePreflightScript.Replace(
     '$preflightArgs = @{',
     '$preflightArgs  = @{'
