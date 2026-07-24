@@ -123,17 +123,19 @@ function Get-YamlJobText {
     $match.Value
 }
 
-function Get-YamlStepText {
+function Get-YamlStepBlock {
     param(
         [Parameter(Mandatory)] [string] $Content,
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [string] $Source
     )
 
-    $pattern = '(?ms)^      - name:\s+' + [regex]::Escape($Name) + '\s*\r?\n.*?(?=^      -\s+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
-    $match = [regex]::Match($Content, $pattern)
-    if (-not $match.Success) { throw "Workflow step not found: $Name ($Source)" }
-    $match.Value
+    $pattern = '(?ms)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?\n.*?(?=^      -[ \t]+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
+    $matches = [regex]::Matches($Content, $pattern)
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one workflow step '$Name'; found $($matches.Count): $Source"
+    }
+    $matches[0].Value
 }
 
 function Assert-DeferredZigFixtureExecution {
@@ -146,15 +148,15 @@ function Assert-DeferredZigFixtureExecution {
         -Content $WorkflowText `
         -Name 'windows' `
         -Source $Source
-    $flagshipStep = Get-YamlStepText `
+    $flagshipStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Flagship verification contract checks' `
         -Source "$Source :: windows"
-    $setupStep = Get-YamlStepText `
+    $setupStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Setup Zig' `
         -Source "$Source :: windows"
-    $fullSuiteStep = Get-YamlStepText `
+    $fullSuiteStep = Get-YamlStepBlock `
         -Content $windowsJob `
         -Name 'Full Zig test suite' `
         -Source "$Source :: windows"
@@ -218,6 +220,1279 @@ function Get-YamlLiteralRunScript {
         }
     )
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
+}
+
+function ConvertTo-CanonicalText {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
+
+    (($Text -replace "`r`n", "`n") -replace "`r", "`n").
+        TrimEnd([char[]]"`n")
+}
+
+function Get-CanonicalTextSha256 {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
+
+    $normalized = ConvertTo-CanonicalText -Text $Text
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($normalized)
+        return (([BitConverter]::ToString($sha256.ComputeHash($bytes))) -replace
+            '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Test-YamlStepEnvelopeDigest {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [string] $ExpectedSha256
+    )
+
+    (Get-CanonicalTextSha256 -Text $StepText) -ceq $ExpectedSha256
+}
+
+function Get-NamedVariableAssignments {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+    }, $true))
+}
+
+function Test-ExactVariableUseSet {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Language.Ast[]] $ExpectedContainers
+    )
+
+    $actualUses = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+    }, $true))
+    $expectedUses = @(
+        foreach ($container in $ExpectedContainers) {
+            $container.FindAll({
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                    (($node.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+            }, $true)
+        }
+    )
+    if ($actualUses.Count -ne $expectedUses.Count) { return $false }
+    foreach ($expected in $expectedUses) {
+        if (@($actualUses | Where-Object {
+            [object]::ReferenceEquals($_, $expected)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+    if (@($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'New-Item', 'ni',
+                'Get-ChildItem', 'dir', 'gci', 'ls',
+                'Get-Content', 'cat', 'gc', 'type'
+            )
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            (($node.GetCommandName() -replace '\\', '/') -eq
+                './scripts/release-preflight.ps1')
+    }, $true))
+    if ($commands.Count -ne 1 -or $commands[0].CommandElements.Count -ne 2) {
+        return $false
+    }
+    $splat = $commands[0].CommandElements[1]
+    if ($splat -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        -not $splat.Splatted) {
+        return $false
+    }
+    $splatName = ($splat.VariablePath.UserPath -split ':')[-1]
+
+    $assignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    if ($assignments.Count -ne 1 -or
+        $assignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $assignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.HashtableAst]) {
+        return $false
+    }
+
+    $actualExpressions = @{}
+    foreach ($pair in $assignments[0].Right.Expression.KeyValuePairs) {
+        if ($pair.Item1 -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            return $false
+        }
+        $key = [string]$pair.Item1.Value
+        if ($actualExpressions.ContainsKey($key)) { return $false }
+        $actualExpressions[$key] = $pair.Item2.Extent.Text.Trim()
+    }
+    if ($actualExpressions.Count -ne $ExpectedExpressions.Count) {
+        return $false
+    }
+    foreach ($key in $ExpectedExpressions.Keys) {
+        if (-not $actualExpressions.ContainsKey($key) -or
+            $actualExpressions[$key] -cne $ExpectedExpressions[$key]) {
+            return $false
+        }
+    }
+
+    $variableUses = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    $assignmentUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $assignments[0].Left)
+    })
+    $invocationUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $splat)
+    })
+    $allSplats = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
+    }, $true))
+    return $variableUses.Count -eq 2 -and
+        $assignmentUses.Count -eq 1 -and
+        $invocationUses.Count -eq 1 -and
+        $allSplats.Count -eq 1 -and
+        [object]::ReferenceEquals($allSplats[0], $splat) -and
+        (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
+            $ExpectedScriptSha256
+}
+
+function Assert-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $scriptText = Get-YamlLiteralRunScript `
+        -Content $StepText `
+        -Source $Context
+    if (-not (Test-NamedReleasePreflightSplat `
+        -ScriptText $scriptText `
+        -ExpectedExpressions $ExpectedExpressions `
+        -ExpectedScriptSha256 $ExpectedScriptSha256)) {
+        throw "Release preflight workflow must use one immutable exact named splat: $Context"
+    }
+}
+
+function Test-ReleaseInteractiveResultSelectionContract {
+    param([Parameter(Mandatory)] [string] $ScriptText)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+
+    $runLoops = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$run' -and
+                $node.Condition.Extent.Text.Trim() -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($runLoops.Count -ne 1) { return $false }
+    $runBody = $runLoops[0].Body
+
+    $resultFileAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultFiles'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($resultFileAssignments.Count -ne 1 -or
+        $resultFileAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $resultFileAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $resultFileAssignment = $resultFileAssignments[0]
+    $getChildCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-ChildItem'
+    }, $true))
+    $whereCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($getChildCommands.Count -ne 1 -or $whereCommands.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent,
+            $whereCommands[0].Parent
+        ) -or
+        $getChildCommands[0].Parent -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+        $getChildCommands[0].Parent.PipelineElements.Count -ne 2 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[0],
+            $getChildCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[1],
+            $whereCommands[0]
+        )) {
+        return $false
+    }
+    $getChildElements = @(
+        $getChildCommands[0].CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    if (-not (Test-CommandArgumentPair `
+        -Elements $getChildElements `
+        -Name '-LiteralPath' `
+        -Value '$artifactRoot') -or
+        -not (Test-CommandArgumentPair `
+            -Elements $getChildElements `
+            -Name '-Filter' `
+            -Value 'result.json') -or
+        @($getChildElements | Where-Object { $_ -ceq '-File' }).Count -ne 1 -or
+        @($getChildElements | Where-Object { $_ -ceq '-Recurse' }).Count -ne 1 -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        $filterStatements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $filterTry = $filterStatements[0]
+    if ($filterTry.Body.Statements.Count -ne 1 -or
+        $filterTry.CatchClauses.Count -ne 1 -or
+        $null -ne $filterTry.Finally -or
+        $filterTry.CatchClauses[0].Body.Statements.Count -ne 1) {
+        return $false
+    }
+    $filterExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.Body.Statements[0]
+    $catchExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.CatchClauses[0].Body.Statements[0]
+    if ($null -eq $filterExpression -or
+        (($filterExpression.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq ''windows.interactive-win11.composite''' -or
+        $null -eq $catchExpression -or
+        $catchExpression.Extent.Text.Trim() -cne '$false') {
+        return $false
+    }
+
+    $countGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultPathAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultPath' -and
+                $node.Right.Extent.Text.Trim() -ceq '$resultFiles[0].FullName'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$result' -and
+                (($node.Right.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $arbitraryFirst = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Select-Object' -and
+            @($node.CommandElements | Where-Object {
+                $_.Extent.Text -ceq '-First'
+            }).Count -gt 0
+    }, $true))
+    return $countGates.Count -eq 1 -and
+        $resultPathAssignments.Count -eq 1 -and
+        $resultAssignments.Count -eq 1 -and
+        $arbitraryFirst.Count -eq 0 -and
+        $resultFileAssignment.Extent.EndOffset -lt
+            $countGates[0].Extent.StartOffset -and
+        $countGates[0].Extent.EndOffset -lt
+            $resultPathAssignments[0].Extent.StartOffset -and
+        $resultPathAssignments[0].Extent.EndOffset -lt
+            $resultAssignments[0].Extent.StartOffset
+}
+
+function Get-LogicalAndLeaves {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $Node.Operator -eq [System.Management.Automation.Language.TokenKind]::And) {
+        Get-LogicalAndLeaves -Node $Node.Left
+        Get-LogicalAndLeaves -Node $Node.Right
+        return
+    }
+    return ,$Node
+}
+
+function Get-SinglePipelineExpression {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $Node.PipelineElements.Count -ne 1 -or
+        $Node.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $null
+    }
+    return $Node.PipelineElements[0].Expression
+}
+
+function Test-ExactExpressionSet {
+    param(
+        [System.Management.Automation.Language.Ast] $Root,
+        [Parameter(Mandatory)] [string[]] $Expected
+    )
+
+    if ($null -eq $Root) { return $false }
+    $actual = @(
+        Get-LogicalAndLeaves -Node $Root |
+            ForEach-Object { ($_.Extent.Text -replace '\s+', ' ').Trim() }
+    )
+    return $actual.Count -eq $Expected.Count -and
+        @($Expected | Where-Object { $actual -cnotcontains $_ }).Count -eq 0
+}
+
+function Test-CommandArgumentPair {
+    param(
+        [Parameter(Mandatory)] [string[]] $Elements,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    $matchCount = 0
+    for ($index = 0; $index -lt ($Elements.Count - 1); $index++) {
+        if ($Elements[$index] -ceq $Name -and
+            $Elements[$index + 1] -ceq $Value) {
+            $matchCount++
+        }
+    }
+    return $matchCount -eq 1 -and
+        @($Elements | Where-Object { $_ -ceq $Name }).Count -eq 1
+}
+
+function Test-ReleaseInteractiveSuccessPredicates {
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+    if (@($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+
+    $shaAssignments = @(Get-NamedVariableAssignments -Ast $ast -Name 'sha')
+    if ($shaAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $shaAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        (($shaAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(git rev-parse HEAD).Trim()') {
+        return $false
+    }
+    $shaAssignment = $shaAssignments[0]
+
+    $runListCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -ne 'gh' -or
+            $node.CommandElements.Count -lt 3) {
+            return $false
+        }
+        return $node.CommandElements[1].Extent.Text -ceq 'run' -and
+            $node.CommandElements[2].Extent.Text -ceq 'list'
+    }, $true))
+    if ($runListCommands.Count -ne 1) { return $false }
+    $runList = $runListCommands[0]
+    $runListAssignment = $runList
+    while ($null -ne $runListAssignment -and
+        $runListAssignment -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst]) {
+        $runListAssignment = $runListAssignment.Parent
+    }
+    if ($null -eq $runListAssignment -or
+        $runListAssignment.Left -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        (($runListAssignment.Left.VariablePath.UserPath -split ':')[-1]) -cne
+            'runsJson' -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runListAssignment `
+            -NamedBlock $ast.EndBlock)) {
+        return $false
+    }
+    $runsJsonAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'runsJson'
+        }, $true)
+    )
+    if ($runsJsonAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $runsJsonAssignments[0],
+            $runListAssignment
+        )) {
+        return $false
+    }
+    $runListElements = @(
+        $runList.CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    foreach ($pair in @(
+        @('--workflow', 'Test'),
+        @('--commit', '$sha'),
+        @('--status', 'success')
+    )) {
+        if (-not (Test-CommandArgumentPair `
+            -Elements $runListElements `
+            -Name $pair[0] `
+            -Value $pair[1])) {
+            return $false
+        }
+    }
+
+    $runsAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'runs'
+        }, $true)
+    )
+    if ($runsAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runsAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        $runsAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $runsAssignment = $runsAssignments[0]
+    $runsStatements = @(
+        $runsAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($runsStatements.Count -ne 1 -or
+        $runsStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $runsPipeline = $runsStatements[0]
+    if ($runsPipeline.PipelineElements.Count -ne 2 -or
+        $runsPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runsJson' -or
+        $runsPipeline.PipelineElements[1] -isnot
+            [System.Management.Automation.Language.CommandAst] -or
+        $runsPipeline.PipelineElements[1].GetCommandName() -ne
+            'ConvertFrom-Json' -or
+        $runsPipeline.PipelineElements[1].CommandElements.Count -ne 1) {
+        return $false
+    }
+
+    $matchingAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
+    if ($matchingAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $matchingAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        $matchingAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $matchingAssignment = $matchingAssignments[0]
+    $matchingStatements = @(
+        $matchingAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($matchingStatements.Count -ne 1 -or
+        $matchingStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $matchingPipeline = $matchingStatements[0]
+    $whereCommands = @($matchingAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($whereCommands.Count -ne 1 -or
+        $matchingPipeline.PipelineElements.Count -ne 2 -or
+        $matchingPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runs' -or
+        -not [object]::ReferenceEquals(
+            $matchingPipeline.PipelineElements[1],
+            $whereCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $whereCommands[0].Parent,
+            $matchingPipeline
+        ) -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+    if ($runListAssignment.Extent.EndOffset -ge
+            $runsAssignment.Extent.StartOffset -or
+        $runsAssignment.Extent.EndOffset -ge
+            $matchingAssignment.Extent.StartOffset) {
+        return $false
+    }
+    $runListToRunsStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge
+                    $runListAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $runsAssignment.Extent.StartOffset
+            }
+    )
+    $runsToMatchingStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge $runsAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $matchingAssignment.Extent.StartOffset
+            }
+    )
+    if ($runListToRunsStatements.Count -ne 1 -or
+        $runListToRunsStatements[0] -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        $runListToRunsStatements[0].Clauses.Count -ne 1 -or
+        $null -ne $runListToRunsStatements[0].ElseClause -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements[0] -isnot
+            [System.Management.Automation.Language.ThrowStatementAst] -or
+        $runsToMatchingStatements.Count -ne 0) {
+        return $false
+    }
+    $runListFailureCondition = Get-SinglePipelineExpression `
+        -Node $runListToRunsStatements[0].Clauses[0].Item1
+    if ($null -eq $runListFailureCondition -or
+        (($runListFailureCondition.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '$LASTEXITCODE -ne 0') {
+        return $false
+    }
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        -not (Test-ExactExpressionSet `
+            -Root (Get-SinglePipelineExpression -Node $filterStatements[0]) `
+            -Expected @(
+                '$_.headSha -eq $sha',
+                '$_.status -eq "completed"',
+                '$_.conclusion -eq "success"'
+            ))) {
+        return $false
+    }
+
+    $matchingCountIfs = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '$matching.Count -eq 0'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingCountIfs.Count -ne 1) { return $false }
+    $matchingCountUses = @(
+        $matchingCountIfs[0].Clauses[0].Item1.FindAll({
+            param($node)
+            $node -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
+    if ($matchingCountUses.Count -ne 1) { return $false }
+
+    $matchingLoops = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.ForEachStatementAst] -or
+                $node.Variable.Extent.Text -cne '$run') {
+                return $false
+            }
+            $source = Get-SinglePipelineExpression -Node $node.Condition
+            return $source -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                $source.Extent.Text -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingLoops.Count -ne 1) { return $false }
+    $runBody = $matchingLoops[0].Body
+    $matchingLoopSource = Get-SinglePipelineExpression `
+        -Node $matchingLoops[0].Condition
+    $newItemCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @('New-Item', 'ni')
+    }, $true))
+    if ($newItemCommands.Count -ne 1 -or
+        $newItemCommands[0].GetCommandName() -cne 'New-Item' -or
+        (($newItemCommands[0].Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'New-Item -ItemType Directory -Force -Path $artifactRoot' -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $newItemCommands[0].Parent `
+            -StatementBlock $runBody)) {
+        return $false
+    }
+
+    $chainVariableContracts = @(
+        [pscustomobject]@{
+            Name = 'runsJson'
+            Expected = @(
+                $runListAssignment.Left,
+                $runsPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'runs'
+            Expected = @(
+                $runsAssignment.Left,
+                $matchingPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'matching'
+            Expected = @(
+                $matchingAssignment.Left,
+                $matchingCountUses[0],
+                $matchingLoopSource
+            )
+        }
+    )
+    foreach ($contract in $chainVariableContracts) {
+        $uses = @(
+            $ast.FindAll({
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                    (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                        $contract.Name
+            }, $true)
+        )
+        if ($uses.Count -ne $contract.Expected.Count) { return $false }
+        foreach ($expected in $contract.Expected) {
+            if (@($uses | Where-Object {
+                [object]::ReferenceEquals($_, $expected)
+            }).Count -ne 1) {
+                return $false
+            }
+        }
+    }
+
+    $evidenceIfs = @(
+        $runBody.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $body = $node.Clauses[0].Item2
+            return @($body.FindAll({
+                param($child)
+                $child -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $child.Left.Extent.Text -ceq '$evidenceRun' -and
+                    $child.Right.Extent.Text -ceq '$run'
+            }, $true) | Where-Object {
+                Test-DirectStatementBlockChild -Node $_ -StatementBlock $body
+            }).Count -eq 1
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($evidenceIfs.Count -ne 1) { return $false }
+    $evidenceIf = $evidenceIfs[0]
+    if (-not (Test-ExactExpressionSet `
+        -Root (Get-SinglePipelineExpression -Node $evidenceIf.Clauses[0].Item1) `
+        -Expected @(
+            '$result.status -eq ''pass''',
+            '$result.implementation_commit -eq $sha',
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId',
+            '$hashesBound'
+        ))) {
+        return $false
+    }
+    $evidenceBodyStatements = @($evidenceIf.Clauses[0].Item2.Statements)
+    if ($evidenceBodyStatements.Count -ne 2 -or
+        $evidenceBodyStatements[0] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        $evidenceBodyStatements[0].Left.Extent.Text -cne '$evidenceRun' -or
+        $evidenceBodyStatements[0].Right.Extent.Text -cne '$run' -or
+        $evidenceBodyStatements[1] -isnot
+            [System.Management.Automation.Language.BreakStatementAst]) {
+        return $false
+    }
+    $evidenceSuccessAssignment = $evidenceBodyStatements[0]
+
+    $resultFilesAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultFiles'
+    )
+    $resultPathAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultPath'
+    )
+    $resultAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'result'
+    )
+    $resultDirAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultDir'
+    )
+    if ($resultFilesAssignments.Count -ne 1 -or
+        $resultPathAssignments.Count -ne 1 -or
+        $resultAssignments.Count -ne 1 -or
+        $resultDirAssignments.Count -ne 1 -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultFilesAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultPathAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultDirAssignments[0] `
+            -StatementBlock $runBody) -or
+        $resultPathAssignments[0].Right.Extent.Text.Trim() -cne
+            '$resultFiles[0].FullName' -or
+        (($resultAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json' -or
+        (($resultDirAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Split-Path -Parent $resultPath') {
+        return $false
+    }
+    $resultFilesAssignment = $resultFilesAssignments[0]
+    $resultPathAssignment = $resultPathAssignments[0]
+    $resultAssignment = $resultAssignments[0]
+    $resultDirAssignment = $resultDirAssignments[0]
+    $getChildItemCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-ChildItem', 'dir', 'gci', 'ls'
+            )
+    }, $true))
+    if ($getChildItemCommands.Count -ne 1 -or
+        $getChildItemCommands[0].GetCommandName() -cne 'Get-ChildItem' -or
+        (($getChildItemCommands[0].Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse' -or
+        $getChildItemCommands[0].Extent.StartOffset -le
+            $resultFilesAssignment.Extent.StartOffset -or
+        $getChildItemCommands[0].Extent.EndOffset -ge
+            $resultFilesAssignment.Extent.EndOffset) {
+        return $false
+    }
+    $getContentCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-Content', 'cat', 'gc', 'type'
+            )
+    }, $true))
+    $resultFileContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $_.FullName -Raw' -and
+            $_.Extent.StartOffset -gt
+                $resultFilesAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt
+                $resultFilesAssignment.Extent.EndOffset
+    })
+    $resultContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $resultPath -Raw' -and
+            $_.Extent.StartOffset -gt $resultAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt $resultAssignment.Extent.EndOffset
+    })
+    if ($getContentCommands.Count -ne 2 -or
+        $resultFileContentCommands.Count -ne 1 -or
+        $resultContentCommands.Count -ne 1) {
+        return $false
+    }
+    foreach ($command in @(
+        $resultFileContentCommands[0],
+        $resultContentCommands[0]
+    )) {
+        if (@($getContentCommands | Where-Object {
+            [object]::ReferenceEquals($_, $command)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+
+    $resultFilesCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if (@($result.artifacts).Count -eq 0) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactLoops = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$artifact' -and
+                (($node.Condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '@($result.artifacts)'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($resultFilesCountGates.Count -ne 1 -or
+        $artifactCountGates.Count -ne 1 -or
+        $artifactLoops.Count -ne 1 -or
+        $resultFilesAssignment.Extent.EndOffset -ge
+            $resultFilesCountGates[0].Extent.StartOffset -or
+        $resultFilesCountGates[0].Extent.EndOffset -ge
+            $resultPathAssignment.Extent.StartOffset -or
+        $resultPathAssignment.Extent.EndOffset -ge
+            $resultAssignment.Extent.StartOffset -or
+        $resultAssignment.Extent.EndOffset -ge
+            $artifactCountGates[0].Extent.StartOffset -or
+        $artifactCountGates[0].Extent.EndOffset -ge
+            $artifactLoops[0].Extent.StartOffset) {
+        return $false
+    }
+    $artifactLoop = $artifactLoops[0]
+    $resultDirJoinCommands = @(
+        $artifactLoop.Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Join-Path' -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Join-Path $resultDir ([string]$artifact.path)'
+        }, $true) |
+            Where-Object {
+                $_.Extent.StartOffset -ge
+                    $artifactLoop.Body.Extent.StartOffset -and
+                $_.Extent.EndOffset -le
+                    $artifactLoop.Body.Extent.EndOffset
+            }
+    )
+    if ($resultDirJoinCommands.Count -ne 1) { return $false }
+
+    $hashesBoundAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'hashesBound'
+    )
+    $hashesBoundInitializers = @(
+        $hashesBoundAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$true' -and
+                (Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody)
+            }
+    )
+    $hashesBoundFailures = @()
+    foreach ($conditionText in @(
+        '-not $artifact.sha256 -or -not $artifact.path',
+        '-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)',
+        '$actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()'
+    )) {
+        $failureGuards = @(
+            $artifactLoop.Body.FindAll({
+                param($node)
+                if ($node -isnot
+                        [System.Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause) {
+                    return $false
+                }
+                $condition = Get-SinglePipelineExpression `
+                    -Node $node.Clauses[0].Item1
+                return $null -ne $condition -and
+                    (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                        $conditionText
+            }, $true) |
+                Where-Object {
+                    Test-DirectStatementBlockChild `
+                        -Node $_ `
+                        -StatementBlock $artifactLoop.Body
+                }
+        )
+        if ($failureGuards.Count -ne 1) { return $false }
+        $failureStatements = @($failureGuards[0].Clauses[0].Item2.Statements)
+        if ($failureStatements.Count -ne 2 -or
+            $failureStatements[0] -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -or
+            $failureStatements[0].Left.Extent.Text -cne '$hashesBound' -or
+            $failureStatements[0].Right.Extent.Text -cne '$false' -or
+            $failureStatements[1] -isnot
+                [System.Management.Automation.Language.BreakStatementAst]) {
+            return $false
+        }
+        $hashesBoundFailures += $failureStatements[0]
+    }
+    if ($hashesBoundAssignments.Count -ne 4 -or
+        $hashesBoundInitializers.Count -ne 1 -or
+        $hashesBoundFailures.Count -ne 3) {
+        return $false
+    }
+    foreach ($assignment in @($hashesBoundInitializers) + $hashesBoundFailures) {
+        if (@($hashesBoundAssignments | Where-Object {
+            [object]::ReferenceEquals($_, $assignment)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+
+    $evidenceRunAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'evidenceRun'
+    )
+    $evidenceInitializers = @(
+        $evidenceRunAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$null' -and
+                (Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock)
+            }
+    )
+    $evidenceSuccessAssignments = @(
+        $evidenceRunAssignments |
+            Where-Object { $_.Right.Extent.Text -ceq '$run' }
+    )
+    if ($evidenceRunAssignments.Count -ne 2 -or
+        $evidenceInitializers.Count -ne 1 -or
+        $evidenceSuccessAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $evidenceSuccessAssignments[0],
+            $evidenceSuccessAssignment
+        )) {
+        return $false
+    }
+    $evidenceGuards = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '-not $evidenceRun' -and
+                $node.Clauses[0].Item2.Statements.Count -eq 1 -and
+                $node.Clauses[0].Item2.Statements[0] -is
+                    [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($evidenceGuards.Count -ne 1 -or
+        $evidenceInitializers[0].Extent.EndOffset -ge
+            $matchingLoops[0].Extent.StartOffset -or
+        $matchingLoops[0].Extent.EndOffset -ge
+            $evidenceGuards[0].Extent.StartOffset) {
+        return $false
+    }
+    $evidenceWriteHosts = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Write-Host' -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($evidenceWriteHosts.Count -ne 1 -or
+        $evidenceGuards[0].Extent.EndOffset -ge
+            $evidenceWriteHosts[0].Extent.StartOffset) {
+        return $false
+    }
+
+    $criticalVariableContracts = @(
+        [pscustomobject]@{
+            Name = 'sha'
+            Containers = @(
+                $shaAssignment,
+                $runList,
+                $runListToRunsStatements[0],
+                $matchingAssignment,
+                $matchingCountIfs[0],
+                $evidenceIf,
+                $evidenceGuards[0],
+                $evidenceWriteHosts[0]
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultFiles'
+            Containers = @(
+                $resultFilesAssignment,
+                $resultFilesCountGates[0],
+                $resultPathAssignment
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultPath'
+            Containers = @(
+                $resultPathAssignment,
+                $resultAssignment,
+                $resultDirAssignment
+            )
+        },
+        [pscustomobject]@{
+            Name = 'result'
+            Containers = @(
+                $resultAssignment,
+                $artifactCountGates[0],
+                $artifactLoop.Condition,
+                $evidenceIf
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultDir'
+            Containers = @(
+                $resultDirAssignment,
+                $resultDirJoinCommands[0]
+            )
+        },
+        [pscustomobject]@{
+            Name = 'hashesBound'
+            Containers = @(
+                $hashesBoundInitializers[0],
+                $hashesBoundFailures[0],
+                $hashesBoundFailures[1],
+                $hashesBoundFailures[2],
+                $evidenceIf
+            )
+        },
+        [pscustomobject]@{
+            Name = 'evidenceRun'
+            Containers = @(
+                $evidenceInitializers[0],
+                $evidenceSuccessAssignment,
+                $evidenceGuards[0],
+                $evidenceWriteHosts[0]
+            )
+        }
+    )
+    foreach ($contract in $criticalVariableContracts) {
+        if (-not (Test-ExactVariableUseSet `
+            -Ast $ast `
+            -Name $contract.Name `
+            -ExpectedContainers $contract.Containers)) {
+            return $false
+        }
+    }
+    return (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
+        $ExpectedScriptSha256
 }
 
 function Get-PowerShellBlockText {
@@ -654,6 +1929,60 @@ function Test-DynamicScriptTypeExpression {
         (Test-DynamicScriptTypeName -TypeName $Node.TypeName.FullName)
 }
 
+function Test-StrictReleaseForbiddenTypeName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
+
+    $typeName = ((($TypeName -split ',', 2)[0] -replace '\s', '')).ToLowerInvariant()
+    return $typeName -in @(
+        'powershell',
+        'system.management.automation.powershell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'system.management.automation.runspaces.runspace',
+        'system.management.automation.runspaces.runspacefactory',
+        'system.management.automation.runspaces.initialsessionstate',
+        'microsoft.csharp.csharpcodeprovider',
+        'system.codedom.compiler.codedomprovider',
+        'system.codedom.compiler.compilerparameters',
+        'microsoft.codeanalysis.compilation',
+        'microsoft.codeanalysis.csharp.csharpcompilation',
+        'assembly',
+        'reflection.assembly',
+        'system.reflection.assembly',
+        'system.reflection.emit.assemblybuilder',
+        'system.reflection.emit.modulebuilder',
+        'system.reflection.emit.typebuilder',
+        'system.reflection.emit.methodbuilder',
+        'system.reflection.emit.dynamicmethod'
+    )
+}
+
+function Test-StrictReleaseForbiddenParameterName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $ParameterName)
+
+    if ($ParameterName.Length -eq 0) { return $false }
+    if ($ParameterName -in @('ov', 'pv', 'ev', 'wv', 'iv')) {
+        return $true
+    }
+    foreach ($canonicalName in @(
+        'OutVariable',
+        'PipelineVariable',
+        'ErrorVariable',
+        'WarningVariable',
+        'InformationVariable',
+        'MemberName'
+    )) {
+        if ($canonicalName.StartsWith(
+            $ParameterName,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Test-ExecutionContextRoot {
     param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
 
@@ -693,9 +2022,28 @@ function Test-ExecutionContextMemberChain {
     return Test-ExecutionContextMemberChain -Node $Node.Expression -Members @($Members[0..($Members.Count - 2)])
 }
 
-function Test-CommandResolutionMutationNode {
-    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+function Test-ForbiddenScriptMutationNode {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [switch] $StrictReleaseContract
+    )
 
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.CommandParameterAst] -and
+        (Test-StrictReleaseForbiddenParameterName `
+            -ParameterName $Node.ParameterName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.TypeName.FullName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.Value)) {
+        return $true
+    }
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
         (($Node.Type.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Child -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
@@ -707,6 +2055,13 @@ function Test-CommandResolutionMutationNode {
         (($Node.Right.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Left -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
             (Test-DynamicScriptTypeName -TypeName $Node.Left.Value)
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        (($Node.VariablePath.UserPath -split ':')[-1]) -in @(
+            'ExecutionContext', 'PSCmdlet', 'Host', 'MyInvocation'
+        )) {
+        return $true
     }
     if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
         (Test-DynamicScriptTypeName -TypeName $Node.Value)) {
@@ -742,6 +2097,41 @@ function Test-CommandResolutionMutationNode {
         }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ($StrictReleaseContract -and
+            $memberName -in @(
+                'DefaultRunspace', 'SessionStateProxy',
+                'SetVariable', 'GetVariable', 'RemoveVariable',
+                'SessionState', 'PSVariable',
+                'PSObject', 'PSBase', 'PSAdapted',
+                'Members', 'Methods', 'Properties',
+                'CompileAssemblyFromSource',
+                'CompileAssemblyFromFile',
+                'CompileAssemblyFromDom',
+                'CreateCompiler', 'CreateProvider',
+                'DefineDynamicAssembly', 'DefineDynamicModule',
+                'DefineType', 'DefineMethod',
+                'CreateType', 'CreateTypeInfo',
+                'BakeByteArray', 'Emit',
+                'Load', 'LoadFile', 'LoadFrom', 'UnsafeLoadFrom', 'LoadModule'
+            )) {
+            return $true
+        }
+        if ($StrictReleaseContract -and
+            $Node -is
+                [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $memberName -in @(
+                'GetType',
+                'GetMethod', 'GetMethods',
+                'GetConstructor', 'GetConstructors',
+                'GetField', 'GetFields',
+                'GetProperty', 'GetProperties',
+                'GetMember', 'GetMembers',
+                'Invoke', 'InvokeMember', 'DynamicInvoke',
+                'CreateDelegate', 'CreateInstance',
+                'MakeGenericMethod', 'MakeGenericType'
+            )) {
+            return $true
+        }
         if ($Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
             $memberName -eq 'GetType' -and $Node.Arguments.Count -ne 0) {
             return $true
@@ -769,8 +2159,43 @@ function Test-CommandResolutionMutationNode {
     }
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
+        if ($StrictReleaseContract -and
+            $Node.InvocationOperator -in @(
+                [System.Management.Automation.Language.TokenKind]::Ampersand,
+                [System.Management.Automation.Language.TokenKind]::Dot
+            )) {
+            return $true
+        }
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex') -or
+            ($StrictReleaseContract -and
+                $leafName -in @(
+                    'Get-Command', 'gcm',
+                    'Add-Type',
+                    'Tee-Object', 'tee',
+                    'Get-Member', 'gm',
+                    'Get-Variable', 'gv',
+                    'Set-Variable', 'sv', 'set',
+                    'New-Variable', 'nv',
+                    'Remove-Variable', 'rv',
+                    'Clear-Variable', 'clv',
+                    'Set-Item', 'si', 'Clear-Item', 'cli',
+                    'Remove-Item', 'del', 'erase', 'rd', 'ri', 'rm', 'rmdir',
+                    'Copy-Item', 'copy', 'cp', 'cpi',
+                    'Move-Item', 'mi', 'move', 'mv',
+                    'Rename-Item', 'ren', 'rni', 'Get-Item', 'gi',
+                    'Set-ItemProperty', 'sp',
+                    'New-ItemProperty',
+                    'Clear-ItemProperty', 'clp',
+                    'Remove-ItemProperty', 'rp',
+                    'Copy-ItemProperty', 'cpp',
+                    'Move-ItemProperty', 'mp',
+                    'Rename-ItemProperty', 'rnp',
+                    'Get-ItemProperty', 'gp',
+                    'Get-ItemPropertyValue', 'gpv',
+                    'Set-Content', 'sc', 'Add-Content', 'ac',
+                    'Clear-Content', 'clc'
+                )) -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -788,7 +2213,7 @@ function Assert-CommandResolutionContract {
         [string[]] $ExpectedAmpersandCommands = @()
     )
 
-    $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
+    $mutators = @($Ast.FindAll({ param($node) Test-ForbiddenScriptMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
     if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
         throw "Command-loading #requires directive is forbidden: $Context"
@@ -859,7 +2284,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
-    [pscustomobject]@{ Reject = $true; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $false; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$(Get-Item variable:ExecutionContext).Value.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ss = $ExecutionContext.SessionState; $ss.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$member = "Create"; [ScriptBlock]::$member("1+1")' }
@@ -918,6 +2343,120 @@ foreach ($probe in $commandResolutionProbes) {
     }
 }
 
+$strictOnlyCommandProbes = @(
+    'Get-Variable value',
+    'gv value',
+    'Set-Variable value 1',
+    'sv value 1',
+    'set value 1',
+    'New-Variable value 1',
+    'nv value 1',
+    'Remove-Variable value',
+    'rv value',
+    'Clear-Variable value',
+    'clv value',
+    '. ./scripts/replace-release-evidence.ps1',
+    '& Write-Output harmless'
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'GetType',
+        'GetMethod', 'GetMethods',
+        'GetConstructor', 'GetConstructors',
+        'GetField', 'GetFields',
+        'GetProperty', 'GetProperties',
+        'GetMember', 'GetMembers',
+        'Invoke', 'InvokeMember', 'DynamicInvoke',
+        'CreateDelegate', 'CreateInstance',
+        'MakeGenericMethod', 'MakeGenericType'
+    ) | ForEach-Object { '$value.' + $_ + '()' }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'powershell',
+        'System.Management.Automation.PowerShell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'System.Management.Automation.Runspaces.Runspace',
+        'System.Management.Automation.Runspaces.RunspaceFactory',
+        'System.Management.Automation.Runspaces.InitialSessionState',
+        'Microsoft.CSharp.CSharpCodeProvider',
+        'Reflection.Assembly',
+        'System.Reflection.Emit.AssemblyBuilder'
+    ) | ForEach-Object {
+        "'$_'"
+        "[$_]::Name"
+    }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'DefaultRunspace',
+        'SessionStateProxy',
+        'SetVariable',
+        'GetVariable',
+        'RemoveVariable'
+    ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    'Tee-Object -Variable value',
+    'tee -Variable value',
+    'Write-Output x -OutVariable value',
+    'Write-Output x -ov value',
+    'Write-Output x -OutV value',
+    'Write-Output x -PipelineV value',
+    'Write-Output x -ev value',
+    'Write-Output x -wv value',
+    'Write-Output x -iv value',
+    'Write-Output x | ForEach-Object -MemberName ToString',
+    'Write-Output x | % -M ToString',
+    'gm -InputObject value',
+    'Add-Type -TypeDefinition ''public class StrictProbe {}''',
+    'Microsoft.PowerShell.Utility\Add-Type -TypeDefinition ''public class StrictProbe {}'''
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'PSObject',
+        'Properties',
+        'CompileAssemblyFromSource',
+        'DefineDynamicAssembly',
+        'Load'
+    ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    '$PSCmdlet',
+    '$Host',
+    '$MyInvocation',
+    '$value.SessionState',
+    '$value.PSVariable'
+)
+foreach ($probeText in $strictOnlyCommandProbes) {
+    $probeTokens = $null
+    $probeErrors = $null
+    $probeAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        $probeText,
+        [ref]$probeTokens,
+        [ref]$probeErrors
+    )
+    if ($probeErrors.Count -ne 0) {
+        throw "Strict command probe does not parse: $probeText"
+    }
+    $generalRejections = @($probeAst.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode -Node $node
+    }, $true))
+    $strictRejections = @($probeAst.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true))
+    if ($generalRejections.Count -ne 0 -or
+        $strictRejections.Count -ne 1) {
+        throw "Strict command mode contract failed: $probeText"
+    }
+}
+
 $directStatementTokens = $null
 $directStatementErrors = $null
 $directStatementAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -945,11 +2484,31 @@ $stepBoundaryProbe = @'
       - name: Other
         run: outside-step
 '@
-if ((Get-YamlStepText -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a step boundary.'
 }
+$duplicateStepProbe = @'
+      - name: Target
+        run: first
+      - name: Target
+        run: second
+'@
+$duplicateStepRejected = $false
+try {
+    Get-YamlStepBlock `
+        -Content $duplicateStepProbe `
+        -Name 'Target' `
+        -Source 'duplicate step probe' |
+        Out-Null
+}
+catch {
+    $duplicateStepRejected = $true
+}
+if (-not $duplicateStepRejected) {
+    throw 'Workflow step extraction accepted an ambiguous duplicate name.'
+}
 $stepTailProbe = "      - name: Target`n        run: inside-step`n    env: # job-level tail`n      VALUE: outside-step"
-if ((Get-YamlStepText -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a job-level key boundary.'
 }
 $jobBoundaryProbe = "  target:`n    value: inside-job`n  `"other.job`": # annotated`n    value: outside-job"
@@ -5086,27 +6645,1175 @@ for ($i = 1; $i -lt $sessionBurstStatementIndices.Count; $i++) {
         throw 'Session restore burst deadline, posts, proof barriers, and close must remain adjacent statements.'
     }
 }
+$releasePreflightStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Release preflight' `
+    -Source $releaseWorkflow
+$readinessPreflightStep = Get-YamlStepBlock `
+    -Content $readinessWorkflowText `
+    -Name 'Validate release configuration' `
+    -Source $readinessWorkflow
+$releaseInteractiveEvidenceStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Require successful Test workflow for release SHA' `
+    -Source $releaseWorkflow
+$releasePreflightExpected = @{
+    Version = '$env:RELEASE_VERSION'
+    RequireSigning = '$true'
+    RequirePackageManagers = '$true'
+}
+$releasePreflightScriptSha256 =
+    '11cef0f8ad78ad165cb61aa6a06a74cca36e523a84a2d2162a6d9b940c426065'
+$readinessPreflightScriptSha256 =
+    '9e08d1fca871d8eb340ee88057e66b4472cef074eb0cab4ff728537ed439c7dc'
+$releaseInteractiveEvidenceScriptSha256 =
+    '2bc265c1052c000e5f8ea599d2f5e2002dec3d3dc893bff0b8ecd72da739bb92'
+$releaseInteractiveEvidenceStepSha256 =
+    '88a9d8d525eca9bb31327fdad515af39488a63b418222036b82edf94db945b6f'
+$releasePreflightStepSha256 =
+    '0535add72682e9ee85894835766355e537d5a5a03174ed656e6365954d7f16eb'
+$readinessPreflightStepSha256 =
+    '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
+$releaseWorkflowSha256 =
+    '4cb17b2e84359fdbd199c5e0b65a7035a1409fe28ddb8cf199c1c9157d48dd76'
+$readinessWorkflowSha256 =
+    '2659a58baeffaa9861c33bd4cdcd7adc8838dd6f9e91d51dcffc338af906f303'
+# Full-file pins deliberately make every workflow edit a semantic-review event,
+# including triggers, permissions, inherited job metadata, and unprotected steps.
+$commonWorkflowBoundaryMutations = @(
+    @{
+        Label = 'WinGet package redirect'
+        Target = '      WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}'
+        Replacement = '      WINGET_PACKAGE_IDENTIFIER: attacker.forged.package'
+    },
+    @{
+        Label = 'Scoop repository redirect'
+        Target = '      SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}'
+        Replacement = '      SCOOP_BUCKET_REPO: attacker/forged-bucket'
+    },
+    @{
+        Label = 'Scoop branch redirect'
+        Target = '      SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}'
+        Replacement = '      SCOOP_BUCKET_BRANCH: forged-release'
+    },
+    @{
+        Label = 'runner redirect'
+        Target = '    runs-on: windows-latest'
+        Replacement = '    runs-on: [self-hosted, forged-release]'
+    },
+    @{
+        Label = 'environment redirect'
+        Target = '    environment: release'
+        Replacement = '    environment: forged-release'
+    }
+)
+$protectedWorkflowSpecs = @(
+    [pscustomobject]@{
+        Context = $releaseWorkflow
+        Content = $releaseWorkflowText
+        ExpectedSha256 = $releaseWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Require successful Test workflow for release SHA'
+                StepSha256 = $releaseInteractiveEvidenceStepSha256
+                BodySha256 = $releaseInteractiveEvidenceScriptSha256
+            },
+            @{
+                Name = 'Release preflight'
+                StepSha256 = $releasePreflightStepSha256
+                BodySha256 = $releasePreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'release permission reduction'
+                Target = '  contents: write'
+                Replacement = '  contents: read'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Context = $readinessWorkflow
+        Content = $readinessWorkflowText
+        ExpectedSha256 = $readinessWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Validate release configuration'
+                StepSha256 = $readinessPreflightStepSha256
+                BodySha256 = $readinessPreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'readiness permission escalation'
+                Target = '  contents: read'
+                Replacement = '  contents: write'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedWorkflowSpecs) {
+    if ((Get-CanonicalTextSha256 -Text $spec.Content) -cne
+        $spec.ExpectedSha256) {
+        throw "Protected workflow changed: $($spec.Context)"
+    }
+    $canonicalWorkflow = ConvertTo-CanonicalText -Text $spec.Content
+    foreach ($mutation in $spec.Mutations) {
+        if (@([regex]::Matches(
+            $canonicalWorkflow,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected workflow mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantWorkflow = $canonicalWorkflow.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        if ((Get-CanonicalTextSha256 -Text $mutantWorkflow) -ceq
+            $spec.ExpectedSha256) {
+            throw "Protected workflow accepted full-file mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+        foreach ($protectedStep in $spec.ProtectedSteps) {
+            $mutantStep = Get-YamlStepBlock `
+                -Content $mutantWorkflow `
+                -Name $protectedStep.Name `
+                -Source "$($spec.Context) :: $($mutation.Label)"
+            $mutantBody = Get-YamlLiteralRunScript `
+                -Content $mutantStep `
+                -Source "$($spec.Context) :: $($mutation.Label) :: $($protectedStep.Name)"
+            if ((Get-CanonicalTextSha256 -Text $mutantStep) -cne
+                    $protectedStep.StepSha256 -or
+                (Get-CanonicalTextSha256 -Text $mutantBody) -cne
+                    $protectedStep.BodySha256) {
+                throw "Full-file mutation unexpectedly changed a protected step: $($spec.Context) :: $($mutation.Label)"
+            }
+        }
+    }
+}
+$protectedStepEnvelopeSpecs = @(
+    [pscustomobject]@{
+        Name = 'Require successful Test workflow for release SHA'
+        Context = "$releaseWorkflow :: Require successful Test workflow for release SHA"
+        StepText = $releaseInteractiveEvidenceStep
+        ExpectedSha256 = $releaseInteractiveEvidenceStepSha256
+        Mutations = @(
+            @{
+                Label = 'GH_REPOSITORY redirect'
+                Target = '          GH_REPOSITORY: ${{ github.repository }}'
+                Replacement = '          GH_REPOSITORY: attacker/forged-evidence'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Release preflight'
+        Context = "$releaseWorkflow :: Release preflight"
+        StepText = $releasePreflightStep
+        ExpectedSha256 = $releasePreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'release prerelease override'
+                Target = '          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}'
+                Replacement = '          RELEASE_PRERELEASE: true'
+            },
+            @{
+                Label = 'release version override'
+                Target = '          RELEASE_VERSION: ${{ steps.meta.outputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Validate release configuration'
+        Context = "$readinessWorkflow :: Validate release configuration"
+        StepText = $readinessPreflightStep
+        ExpectedSha256 = $readinessPreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'readiness version override'
+                Target = '          RELEASE_VERSION: ${{ inputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            },
+            @{
+                Label = 'readiness package-manager override'
+                Target = '          REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}'
+                Replacement = '          REQUIRE_PACKAGE_MANAGERS: false'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedStepEnvelopeSpecs) {
+    if (-not (Test-YamlStepEnvelopeDigest `
+        -StepText $spec.StepText `
+        -ExpectedSha256 $spec.ExpectedSha256)) {
+        throw "Protected workflow step envelope changed: $($spec.Context)"
+    }
+    $canonicalStep = ConvertTo-CanonicalText -Text $spec.StepText
+    $canonicalBody = Get-YamlLiteralRunScript `
+        -Content $canonicalStep `
+        -Source $spec.Context
+    $nameLine = "      - name: $($spec.Name)"
+    $mutations = @(
+        @{
+            Label = 'continue-on-error'
+            Target = $nameLine
+            Replacement = "$nameLine`n        continue-on-error: true"
+        },
+        @{
+            Label = 'if false'
+            Target = $nameLine
+            Replacement = "$nameLine`n        if: `${{ false }}"
+        },
+        @{
+            Label = 'GH_TOKEN redirect'
+            Target = '          GH_TOKEN: ${{ github.token }}'
+            Replacement = '          GH_TOKEN: ${{ secrets.FORGED_GH_TOKEN }}'
+        }
+    ) + @($spec.Mutations)
+    foreach ($mutation in $mutations) {
+        if (@([regex]::Matches(
+            $canonicalStep,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected step envelope mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantStep = $canonicalStep.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        $mutantBody = Get-YamlLiteralRunScript `
+            -Content $mutantStep `
+            -Source "$($spec.Context) :: $($mutation.Label)"
+        if ($mutantBody -cne $canonicalBody -or
+            (Test-YamlStepEnvelopeDigest `
+                -StepText $mutantStep `
+                -ExpectedSha256 $spec.ExpectedSha256)) {
+            throw "Protected workflow step envelope accepted metadata mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+    }
+}
+Assert-NamedReleasePreflightSplat `
+    -StepText $releasePreflightStep `
+    -ExpectedExpressions $releasePreflightExpected `
+    -ExpectedScriptSha256 $releasePreflightScriptSha256 `
+    -Context "$releaseWorkflow :: Release preflight"
+Assert-NamedReleasePreflightSplat `
+    -StepText $readinessPreflightStep `
+    -ExpectedExpressions @{
+        Version = '$env:RELEASE_VERSION'
+        RequireSigning = '$true'
+        RequirePackageManagers =
+            '$env:REQUIRE_PACKAGE_MANAGERS -eq ''true'''
+    } `
+    -ExpectedScriptSha256 $readinessPreflightScriptSha256 `
+    -Context "$readinessWorkflow :: Validate release configuration"
+
+$releasePreflightScript = Get-YamlLiteralRunScript `
+    -Content $releasePreflightStep `
+    -Source "$releaseWorkflow :: Release preflight"
+# Intentional protected-step edits require semantic review plus body/envelope
+# digest updates; formatting changes are contract changes too.
+$releasePreflightWhitespaceMutant = $releasePreflightScript.Replace(
+    '$preflightArgs = @{',
+    '$preflightArgs  = @{'
+)
+if ($releasePreflightWhitespaceMutant -ceq $releasePreflightScript -or
+    (Test-NamedReleasePreflightSplat `
+        -ScriptText $releasePreflightWhitespaceMutant `
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
+    throw 'Release-preflight script digest accepted a whitespace mutation.'
+}
+$releasePreflightInvocationTarget =
+    './scripts/release-preflight.ps1 @preflightArgs'
+if (-not $releasePreflightScript.Contains($releasePreflightInvocationTarget)) {
+    throw 'Release-preflight mutation insertion target is missing.'
+}
+$invalidSplatMutants = @{
+    'later signing mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$preflightArgs.RequireSigning = $false
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'flat argument array' = @'
+$preflightArgs = @('-Version', $env:RELEASE_VERSION, '-RequireSigning', '-RequirePackageManagers')
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra invocation argument' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs -RequireSigning
+'@
+    'missing key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+    RequireAccessibilityEvidence = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Set-Variable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Set-Variable -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'stored provider path Set-Item mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+Set-Item -Path $providerPath -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Set-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+si -Path variable:preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Copy-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+cpi -Path variable:preflightArgs -Destination variable:shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Move-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+mv -Path variable:preflightArgs -Destination variable:shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Rename-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+rni -Path variable:preflightArgs -NewName shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'New-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+ni -Path variable:preflightArgs -Value @{} -Force
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'module-qualified New-Item stored provider path' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+Microsoft.PowerShell.Management\New-Item -Path $providerPath -Value @{} -Force
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-ChildItem alias stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = gci -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-Content stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = Get-Content -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'wrapped ExecutionContext mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ec = @($ExecutionContext)[0]
+$ec.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'SessionState PSVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ExecutionContext.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Invoke-Expression mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+iex '$preflightArgs = @{}'
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'dynamic call mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$mutator = 'Set-Variable'
+& $mutator -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'static dot-source mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+. ./scripts/replace-release-evidence.ps1
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'static call-operator mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+& Write-Output harmless
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'stored reflection mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$scriptBlockType = {}.GetType()
+$createMethod = $scriptBlockType.GetMethod('Create', [type[]]@([string]))
+$payload = $createMethod.Invoke($null, @('Set-Variable -Scope 1 -Name preflightArgs -Value @{}'))
+$payload.Invoke()
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'DefaultRunspace state proxy mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Tee-Object variable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} | Tee-Object -Variable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'ErrorVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Error forged -ErrorVariable preflightArgs -ErrorAction SilentlyContinue`n$releasePreflightInvocationTarget"
+    )
+    'PSObject member dispatch mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name preflightArgs -Value @{} } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$releasePreflightInvocationTarget"
+    )
+    'Add-Type static method mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Add-Type -TypeDefinition 'public static class PreflightMutator { public static void Set() {} }'`n[PreflightMutator]::Set()`n$releasePreflightInvocationTarget"
+    )
+    'Assembly Load mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$releasePreflightInvocationTarget"
+    )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releasePreflightScript.Replace(
+            $releasePreflightInvocationTarget,
+            "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'`n$releasePreflightInvocationTarget"
+        )
+    'PSCmdlet session-state mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "function Invoke-PreflightMutation { [CmdletBinding()] param(); `$PSCmdlet.SessionState.PSVariable.Set('script:preflightArgs', @{}) }; Invoke-PreflightMutation`n$releasePreflightInvocationTarget"
+    )
+    'splatted PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$writeParams = @{ PipelineVariable = 'preflightArgs' }; Write-Output @{} @writeParams`n$releasePreflightInvocationTarget"
+    )
+}
+foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
+    if (Test-NamedReleasePreflightSplat `
+        -ScriptText $mutant.Value `
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256) {
+        throw "Named release-preflight splat contract accepted mutant: $($mutant.Key)"
+    }
+}
+
+$releaseInteractiveEvidenceScript = Get-YamlLiteralRunScript `
+    -Content $releaseInteractiveEvidenceStep `
+    -Source "$releaseWorkflow :: Require successful Test workflow for release SHA"
+if (-not (Test-ReleaseInteractiveResultSelectionContract `
+    -ScriptText $releaseInteractiveEvidenceScript)) {
+    throw 'Release interactive evidence must select one composite result without arbitrary first-match fallback.'
+}
+$countGateText = 'if ($resultFiles.Count -ne 1) { continue }'
+$countGateIndex = $releaseInteractiveEvidenceScript.IndexOf(
+    $countGateText,
+    [StringComparison]::Ordinal
+)
+if ($countGateIndex -lt 0) {
+    throw 'Release result-selection count gate mutation target is missing.'
+}
+$countBeforeFilterScript = $releaseInteractiveEvidenceScript.Remove(
+    $countGateIndex,
+    $countGateText.Length
+)
+$resultFilterIndex = $countBeforeFilterScript.IndexOf(
+    '$resultFiles = @(',
+    [StringComparison]::Ordinal
+)
+if ($resultFilterIndex -lt 0) {
+    throw 'Release result-selection filter mutation target is missing.'
+}
+$countBeforeFilterScript = $countBeforeFilterScript.Insert(
+    $resultFilterIndex,
+    "$countGateText`n"
+)
+$filterAfterCountScript = @'
+$resultFiles = @(
+    Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse
+)
+if ($resultFiles.Count -ne 1) { continue }
+$resultFiles = @(
+    $resultFiles | Where-Object {
+        try {
+            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
+        }
+        catch { $false }
+    }
+)
+$resultPath = $resultFiles[0].FullName
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+'@
+$noCatchScript = [regex]::Replace(
+    $releaseInteractiveEvidenceScript,
+    '(?ms)try\s*\{\s*(?<predicate>\(Get-Content -LiteralPath \$_\.FullName -Raw \| ConvertFrom-Json\)\.scenario_id -eq ''windows\.interactive-win11\.composite'')\s*\}\s*catch\s*\{\s*\$false\s*\}',
+    '${predicate}'
+)
+$invalidResultSelectionMutants = @{
+    'zero-only count' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultFiles.Count -ne 1',
+        '$resultFiles.Count -eq 0'
+    )
+    'wrong scenario' = $releaseInteractiveEvidenceScript.Replace(
+        'windows.interactive-win11.composite',
+        'windows.interactive-win11.other'
+    )
+    'arbitrary first match' =
+        $releaseInteractiveEvidenceScript + "`nSelect-Object -First 1"
+    'count before filter' = $countBeforeFilterScript
+    'filter after count' = $filterAfterCountScript
+    'missing catch' = $noCatchScript
+    'fail-open catch' = $releaseInteractiveEvidenceScript.Replace(
+        'catch { $false }',
+        'catch { $true }'
+    )
+    'nested count gate' = $releaseInteractiveEvidenceScript.Replace(
+        'if ($resultFiles.Count -ne 1) { continue }',
+        'if ($false) { if ($resultFiles.Count -ne 1) { continue } }'
+    )
+    'nested result path' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultPath = $resultFiles[0].FullName',
+        'if ($false) { $resultPath = $resultFiles[0].FullName }'
+    )
+    'nested result parse' = $releaseInteractiveEvidenceScript.Replace(
+        '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json',
+        'if ($false) { $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }'
+    )
+}
+foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
+        throw "Release result-selection contract accepted mutant: $($mutant.Key)"
+    }
+}
+if (-not (Test-ReleaseInteractiveSuccessPredicates `
+    -ScriptText $releaseInteractiveEvidenceScript `
+    -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256)) {
+    throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
+}
+$runsSourceTarget = '$runs = @($runsJson | ConvertFrom-Json)'
+$otherJsonSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $runsSourceTarget,
+    '$runs = @($otherJson | ConvertFrom-Json)'
+)
+$matchingSourceTarget = '$matching = @($runs | Where-Object {'
+$otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $matchingSourceTarget,
+    '$matching = @($otherRuns | Where-Object {'
+)
+$matchingCountTarget = 'if ($matching.Count -eq 0) {'
+$shaAssignmentTarget = '$sha = (git rev-parse HEAD).Trim()'
+$resultAssignmentTarget =
+    '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+$artifactFloorTarget =
+    'if (@($result.artifacts).Count -eq 0) { continue }'
+$hashAcceptanceTarget = 'if ($result.status -eq ''pass'' -and'
+$evidenceGuardTarget = 'if (-not $evidenceRun) {'
+$resultDirAssignmentTarget =
+    '$resultDir = Split-Path -Parent $resultPath'
+$resultDirJoinTarget =
+    'Join-Path $resultDir ([string]$artifact.path)'
+$evidenceWriteTarget =
+    'Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."'
+$missingMetadataGuardTarget =
+    'if (-not $artifact.sha256 -or -not $artifact.path) {'
+$containmentGuardTarget =
+    'if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or' +
+        "`n" +
+        '        -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {'
+$hashMismatchGuardTarget =
+    'if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {'
+if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($shaAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($artifactFloorTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($hashAcceptanceTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($evidenceGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultDirAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultDirJoinTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($evidenceWriteTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($missingMetadataGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($containmentGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($hashMismatchGuardTarget)) {
+    throw 'Release success-predicate source-binding mutation target is missing.'
+}
+$addTypeEvidenceMutation =
+    "Add-Type -TypeDefinition 'public static class EvidenceMutator { public static void Set() {} }'`n[EvidenceMutator]::Set()"
+$memberDispatchEvidenceMutation =
+    "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'"
+$invalidSuccessSourceMutants = @{
+    'runs JSON source substitution' = $otherJsonSourceScript
+    'runs JSON source comment decoy' =
+        $otherJsonSourceScript + "`n# $runsSourceTarget"
+    'runs JSON source dead-code decoy' =
+        $otherJsonSourceScript +
+            "`n" +
+            'if ($false) { $runs = @($runsJson | ConvertFrom-Json) }'
+    'matching source substitution' = $otherRunsSourceScript
+    'matching source comment decoy' =
+        $otherRunsSourceScript + "`n# $matchingSourceTarget"
+    'matching source dead-code decoy' =
+        $otherRunsSourceScript +
+            "`n" +
+            'if ($false) { $matching = @($runs | Where-Object { $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" }) }'
+    'live nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$true) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'dead nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$false) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'live nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$true) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'dead nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$false) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'live nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$true) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'dead nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$false) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'indexed runs JSON mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$runsJson[0] = 'x'`n$runsSourceTarget"
+        )
+    'indexed runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs[0] = `$otherRun"
+        )
+    'indexed matching mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$matching[0] = `$otherRun`n$matchingCountTarget"
+        )
+    'runs method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs.Clear()"
+        )
+    'matching member decoy' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$null = `$matching.Count`n$matchingCountTarget"
+        )
+    'runs JSON unexpected read' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$null = `$runsJson`n$runsSourceTarget"
+        )
+    'Set-Variable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nSet-Variable -Name runs -Value @(`$otherRun)"
+        )
+    'SessionState PSVariable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$ExecutionContext.SessionState.PSVariable.Set('runs', @(`$otherRun))"
+        )
+    'qualified Set-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nMicrosoft.PowerShell.Utility\Set-Variable -Name runs -Value @(`$otherRun)"
+    'Set-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nsv -Name runs -Value @(`$otherRun)"
+    'Set-Variable set alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nset -Name runs -Value @(`$otherRun)"
+    'New-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nNew-Variable -Name runs -Value @(`$otherRun)"
+    'New-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nnv -Name runs -Value @(`$otherRun)"
+    'Remove-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nRemove-Variable -Name runs"
+    'Remove-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nrv -Name runs"
+    'Clear-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nClear-Variable -Name runs"
+    'Clear-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nclv -Name runs"
+    'Invoke-Expression mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`niex '`$runs = @(`$otherRun)'"
+    'ScriptBlock Create mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`n[ScriptBlock]::Create('`$runs = @(`$otherRun)').Invoke()"
+    'dynamic Set-Variable call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Command call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& (Get-Command Set-Variable) -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'module-qualified stored command mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Microsoft.PowerShell.Utility\Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'static dot-source mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            ". ./scripts/replace-release-evidence.ps1`n$matchingCountTarget"
+        )
+    'static call-operator mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& Write-Output harmless`n$matchingCountTarget"
+        )
+    'stored reflection mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$scriptBlockType = {}.GetType()`n`$createMethod = `$scriptBlockType.GetMethod('Create', [type[]]@([string]))`n`$payload = `$createMethod.Invoke(`$null, @('Set-Variable -Scope 1 -Name matching -Value @()'))`n`$payload.Invoke()`n$matchingCountTarget"
+        )
+    'DefaultRunspace state proxy mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('matching', @(`$otherRun))`n$matchingCountTarget"
+        )
+    'Tee-Object variable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) | Tee-Object -Variable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutV matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineV matching | Out-Null`n$matchingCountTarget"
+        )
+    'ErrorVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Error forged -ErrorVariable matching -ErrorAction SilentlyContinue`n$matchingCountTarget"
+        )
+    'PSObject member dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name matching -Value @() } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$matchingCountTarget"
+        )
+    'Add-Type static method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $addTypeEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'Assembly Load mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$matchingCountTarget"
+        )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $memberDispatchEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'PSCmdlet session-state mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "function Invoke-EvidenceMutation {`n    [CmdletBinding()]`n    param()`n    `$PSCmdlet.SessionState.PSVariable.Set('script:matching', @())`n}`nInvoke-EvidenceMutation`n$matchingCountTarget"
+        )
+    'splatted OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$writeParams = @{ OutVariable = 'matching' }`nWrite-Output ([pscustomobject]@{ databaseId = 4242 }) @writeParams`n$matchingCountTarget"
+        )
+    'stored provider path Set-Item mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`nSet-Item -Path `$providerPath -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'stored provider path Get-Item access' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Item -Path `$providerPath`n$matchingCountTarget"
+        )
+    'Clear-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "cli -Path variable:matching`n$matchingCountTarget"
+        )
+    'Remove-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "ri -Path variable:matching`n$matchingCountTarget"
+        )
+    'Copy-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "cpi -Path variable:matching -Destination variable:other`n$matchingCountTarget"
+        )
+    'Move-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "mv -Path variable:matching -Destination variable:other`n$matchingCountTarget"
+        )
+    'Rename-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "rni -Path variable:matching -NewName other`n$matchingCountTarget"
+        )
+    'ItemProperty alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "sp -Path variable:matching -Name Value -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Content alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "sc -Path variable:matching -Value 'forged'`n$matchingCountTarget"
+        )
+    'extra New-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "ni -Path variable:matching -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'module-qualified New-Item stored provider path' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`nMicrosoft.PowerShell.Management\New-Item -Path `$providerPath -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'Get-ChildItem alias stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = gci -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Content stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Content -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'wrapped ExecutionContext mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$ec = @(`$ExecutionContext)[0]`n`$ec.SessionState.PSVariable.Set('matching', @(`$otherRun))`n$matchingCountTarget"
+        )
+    'count-preserving evidenceRun ref substitution' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $evidenceWriteTarget,
+            "`$evidenceRunRef = [ref]`$evidenceRun`nWrite-Host `"Release SHA `$sha is covered by an interactive Test run.`""
+        )
+    'count-preserving resultDir ref substitution' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultDirAssignmentTarget,
+            "$resultDirAssignmentTarget`n`$resultDirRef = [ref]`$resultDir"
+        ).Replace(
+            $resultDirJoinTarget,
+            'Join-Path $artifactRoot ([string]$artifact.path)'
+        )
+    'missing metadata guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $missingMetadataGuardTarget,
+            'if ($false) {'
+        )
+    'containment guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $containmentGuardTarget,
+            'if ($false) {'
+        )
+    'hash mismatch guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $hashMismatchGuardTarget,
+            'if ($false) {'
+        )
+    'forged result assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`nif (`$true) { `$result = [pscustomobject]@{ status = 'pass'; implementation_commit = `$sha; workflow_run_id = `$run.databaseId; artifacts = @() } }"
+        )
+    'forged SHA assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $shaAssignmentTarget,
+            "$shaAssignmentTarget`nif (`$true) { `$sha = 'forged' }"
+        )
+    'forged hashes-bound assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $hashAcceptanceTarget,
+            "if (`$true) { `$hashesBound = `$true }`n$hashAcceptanceTarget"
+        )
+    'forged evidence-run assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $evidenceGuardTarget,
+            "if (`$true) { `$evidenceRun = [pscustomobject]@{ databaseId = 1 } }`n$evidenceGuardTarget"
+        )
+    'result member mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`n`$result.status = 'pass'"
+        )
+    'vacuous artifact floor' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $artifactFloorTarget,
+            'if (@($result.artifacts).Count -lt 0) { continue }'
+        )
+}
+foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveSuccessPredicates `
+        -ScriptText $mutant.Value `
+        -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
+        throw "Release success-predicate contract accepted source mutant: $($mutant.Key)"
+    }
+}
+$successPredicateMutationSpecs = @(
+    [pscustomobject]@{
+        Label = 'GitHub success filter'
+        Active = '--status success'
+        Removed = '--status queued'
+        Inverted = '--status failure'
+        Dead = 'if ($false) { ''--status success'' }'
+    },
+    [pscustomobject]@{
+        Label = 'exact candidate head'
+        Active = '$_.headSha -eq $sha'
+        Removed = '$true'
+        Inverted = '$_.headSha -ne $sha'
+        Dead = 'if ($false) { $_.headSha -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'completed candidate'
+        Active = '$_.status -eq "completed"'
+        Removed = '$true'
+        Inverted = '$_.status -ne "completed"'
+        Dead = 'if ($false) { $_.status -eq "completed" }'
+    },
+    [pscustomobject]@{
+        Label = 'successful candidate'
+        Active = '$_.conclusion -eq "success"'
+        Removed = '$true'
+        Inverted = '$_.conclusion -ne "success"'
+        Dead = 'if ($false) { $_.conclusion -eq "success" }'
+    },
+    [pscustomobject]@{
+        Label = 'passing result'
+        Active = '$result.status -eq ''pass'''
+        Removed = '$true'
+        Inverted = '$result.status -ne ''pass'''
+        Dead = 'if ($false) { $result.status -eq ''pass'' }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence implementation SHA'
+        Active = '$result.implementation_commit -eq $sha'
+        Removed = '$true'
+        Inverted = '$result.implementation_commit -ne $sha'
+        Dead = 'if ($false) { $result.implementation_commit -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence workflow run'
+        Active =
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId'
+        Removed = '$true'
+        Inverted =
+            '[string]$result.workflow_run_id -ne [string]$run.databaseId'
+        Dead =
+            'if ($false) { [string]$result.workflow_run_id -eq [string]$run.databaseId }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence artifact hashes'
+        Active = '$hashesBound'
+        Removed = '$true'
+        Inverted = '-not $hashesBound'
+        Dead = 'if ($false) { $hashesBound }'
+    }
+)
+foreach ($spec in $successPredicateMutationSpecs) {
+    $targetIndex = $releaseInteractiveEvidenceScript.LastIndexOf(
+        $spec.Active,
+        [StringComparison]::Ordinal
+    )
+    if ($targetIndex -lt 0) {
+        throw "Release success-predicate mutation target is missing: $($spec.Label)"
+    }
+    $prefix = $releaseInteractiveEvidenceScript.Substring(0, $targetIndex)
+    $suffix = $releaseInteractiveEvidenceScript.Substring(
+        $targetIndex + $spec.Active.Length
+    )
+    $removedScript = $prefix + $spec.Removed + $suffix
+    $invertedScript = $prefix + $spec.Inverted + $suffix
+    $mutants = @(
+        [pscustomobject]@{
+            Label = "$($spec.Label) inversion"
+            Script = $invertedScript
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) comment decoy"
+            Script = $removedScript + "`n# $($spec.Active)"
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) dead-code decoy"
+            Script = $removedScript + "`n$($spec.Dead)"
+        }
+    )
+    foreach ($mutant in $mutants) {
+        if (Test-ReleaseInteractiveSuccessPredicates `
+            -ScriptText $mutant.Script `
+            -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
+            throw "Release success-predicate contract accepted mutant: $($mutant.Label)"
+        }
+    }
+}
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Release preflight' -Source $releaseWorkflow) `
+    -Content $releaseInteractiveEvidenceStep `
+    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
+    -Description 'release remains gated on successful exact-SHA hash-bound interactive evidence' `
+    -Context "$releaseWorkflow :: Require successful Test workflow for release SHA"
+Assert-TextContract `
+    -Content $releasePreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release preflight propagates release-copy failures' `
     -Context "$releaseWorkflow :: Release preflight"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $readinessWorkflowText -Name 'Validate release configuration' -Source $readinessWorkflow) `
+    -Content $readinessPreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
-$signedArtifactStep = Get-YamlStepText `
+$signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
     -Source $releaseWorkflow
@@ -5285,12 +7992,12 @@ foreach ($contract in @(
         -Context $publishedReleaseVerifier
 }
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
     -Description 'scheduled remote verification authenticates gh' `
     -Context "$testWorkflow :: Remote release copy checks"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows") `
@@ -5298,7 +8005,7 @@ Assert-TextContract `
     -Description 'hosted Windows tests cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-portable-smoke' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-portable-smoke") `
@@ -5306,7 +8013,7 @@ Assert-TextContract `
     -Description 'portable smoke cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-portable-smoke :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow) `
         -Name 'Setup Zig' `
         -Source "$releaseWorkflow :: windows-release") `
@@ -5314,7 +8021,7 @@ Assert-TextContract `
     -Description 'release builds cannot restore failed Zig build caches' `
     -Context "$releaseWorkflow :: windows-release :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-interactive") `
@@ -5326,7 +8033,7 @@ Assert-TextContract `
     -Pattern '(?m)^\s*timeout-minutes:\s+60\s*$' `
     -Description 'full interactive validation has enough job budget for the accessibility soak' `
     -Context "$testWorkflow :: windows-interactive"
-$interactiveRunStep = Get-YamlStepText `
+$interactiveRunStep = Get-YamlStepBlock `
     -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
     -Name 'Run interactive Win11 composite' `
     -Source "$testWorkflow :: windows-interactive"
@@ -5368,7 +8075,7 @@ Assert-WorkflowContract `
     -Pattern '(?s)IsNullOrWhiteSpace\(\$env:ZIG_GLOBAL_CACHE_DIR\).*?IsNullOrWhiteSpace\(\$env:ZIG_LOCAL_CACHE_DIR\)' `
     -Description 'PowerShell Windows bootstrap preserves caller-provided Zig cache isolation'
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
     -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
     -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
     -Context "$testWorkflow :: Upload interactive evidence"

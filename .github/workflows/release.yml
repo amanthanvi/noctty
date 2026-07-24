@@ -107,10 +107,19 @@ jobs:
             New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
             gh run download $run.databaseId --repo $env:GH_REPOSITORY --name $artifactName --dir $artifactRoot
             if ($LASTEXITCODE -ne 0) { continue }
-            $resultPath = Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -Recurse |
-              Select-Object -First 1 -ExpandProperty FullName
-            if (-not $resultPath) { continue }
+            $resultFiles = @(
+              Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse |
+                Where-Object {
+                  try {
+                    (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
+                  }
+                  catch { $false }
+                }
+            )
+            if ($resultFiles.Count -ne 1) { continue }
+            $resultPath = $resultFiles[0].FullName
             $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+            if (@($result.artifacts).Count -eq 0) { continue }
             $artifactRootFull = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
             $resultDir = Split-Path -Parent $resultPath
             $hashesBound = $true
@@ -209,16 +218,14 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
         run: |
-          $preflightArgs = @(
-            '-Version'
-            $env:RELEASE_VERSION
-            '-RequireSigning'
-            '-RequirePackageManagers'
-          )
+          $preflightArgs = @{
+            Version = $env:RELEASE_VERSION
+            RequireSigning = $true
+            RequirePackageManagers = $true
+          }
           if ($env:RELEASE_PRERELEASE -ne 'true') {
             ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $preflightArgs += '-RequireAccessibilityEvidence'
           }
           ./scripts/release-preflight.ps1 @preflightArgs
 
