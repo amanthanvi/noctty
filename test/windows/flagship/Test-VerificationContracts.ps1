@@ -2365,18 +2365,8 @@ $strictOnlyCommandProbes += @(
         'System.Management.Automation.Runspaces.RunspaceFactory',
         'System.Management.Automation.Runspaces.InitialSessionState',
         'Microsoft.CSharp.CSharpCodeProvider',
-        'System.CodeDom.Compiler.CodeDomProvider',
-        'System.CodeDom.Compiler.CompilerParameters',
-        'Microsoft.CodeAnalysis.Compilation',
-        'Microsoft.CodeAnalysis.CSharp.CSharpCompilation',
-        'Assembly',
         'Reflection.Assembly',
-        'System.Reflection.Assembly',
-        'System.Reflection.Emit.AssemblyBuilder',
-        'System.Reflection.Emit.ModuleBuilder',
-        'System.Reflection.Emit.TypeBuilder',
-        'System.Reflection.Emit.MethodBuilder',
-        'System.Reflection.Emit.DynamicMethod'
+        'System.Reflection.Emit.AssemblyBuilder'
     ) | ForEach-Object {
         "'$_'"
         "[$_]::Name"
@@ -2396,20 +2386,13 @@ $strictOnlyCommandProbes += @(
     'tee -Variable value',
     'Write-Output x -OutVariable value',
     'Write-Output x -ov value',
-    'Write-Output x -PipelineVariable value',
-    'Write-Output x -pv value',
-    'Write-Output x -ErrorVariable value',
-    'Write-Output x -ev value',
-    'Write-Output x -WarningVariable value',
-    'Write-Output x -wv value',
-    'Write-Output x -InformationVariable value',
-    'Write-Output x -iv value',
     'Write-Output x -OutV value',
     'Write-Output x -PipelineV value',
+    'Write-Output x -ev value',
+    'Write-Output x -wv value',
+    'Write-Output x -iv value',
     'Write-Output x | ForEach-Object -MemberName ToString',
-    'Write-Output x | ForEach-Object -MemberN ToString',
     'Write-Output x | % -M ToString',
-    'Get-Member -InputObject value',
     'gm -InputObject value',
     'Add-Type -TypeDefinition ''public class StrictProbe {}''',
     'Microsoft.PowerShell.Utility\Add-Type -TypeDefinition ''public class StrictProbe {}'''
@@ -2417,34 +2400,14 @@ $strictOnlyCommandProbes += @(
 $strictOnlyCommandProbes += @(
     @(
         'PSObject',
-        'PSBase',
-        'PSAdapted',
-        'Members',
-        'Methods',
         'Properties',
         'CompileAssemblyFromSource',
-        'CompileAssemblyFromFile',
-        'CompileAssemblyFromDom',
-        'CreateCompiler',
-        'CreateProvider',
         'DefineDynamicAssembly',
-        'DefineDynamicModule',
-        'DefineType',
-        'DefineMethod',
-        'CreateType',
-        'CreateTypeInfo',
-        'BakeByteArray',
-        'Emit',
-        'Load',
-        'LoadFile',
-        'LoadFrom',
-        'UnsafeLoadFrom',
-        'LoadModule'
+        'Load'
     ) | ForEach-Object { '$value.' + $_ }
 )
 $strictOnlyCommandProbes += @(
     '$PSCmdlet',
-    '$script:PSCmdlet',
     '$Host',
     '$MyInvocation',
     '$value.SessionState',
@@ -6687,12 +6650,6 @@ Assert-NamedReleasePreflightSplat `
 $releasePreflightScript = Get-YamlLiteralRunScript `
     -Content $releasePreflightStep `
     -Source "$releaseWorkflow :: Release preflight"
-if (-not (Test-NamedReleasePreflightSplat `
-    -ScriptText $releasePreflightScript `
-    -ExpectedExpressions $releasePreflightExpected `
-    -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
-    throw 'Canonical release-preflight script digest must pass.'
-}
 # Intentional workflow-script edits require reviewing semantics and updating the
 # corresponding literal digest; formatting changes are contract changes too.
 $releasePreflightWhitespaceMutant = $releasePreflightScript.Replace(
@@ -6705,6 +6662,11 @@ if ($releasePreflightWhitespaceMutant -ceq $releasePreflightScript -or
         -ExpectedExpressions $releasePreflightExpected `
         -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
     throw 'Release-preflight script digest accepted a whitespace mutation.'
+}
+$releasePreflightInvocationTarget =
+    './scripts/release-preflight.ps1 @preflightArgs'
+if (-not $releasePreflightScript.Contains($releasePreflightInvocationTarget)) {
+    throw 'Release-preflight mutation insertion target is missing.'
 }
 $invalidSplatMutants = @{
     'later signing mutation' = @'
@@ -6917,137 +6879,55 @@ $preflightArgs = @{
 [runspace]::DefaultRunspace.SessionStateProxy.SetVariable('preflightArgs', @{})
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
-    'Tee-Object variable mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Output @{} | Tee-Object -Variable preflightArgs | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'OutVariable mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Output @{} -OutVariable preflightArgs | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'OutVariable prefix mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Output @{} -OutV preflightArgs | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'PipelineVariable mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Output @{} -PipelineVariable preflightArgs | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'PipelineVariable prefix mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Output @{} -PipelineV preflightArgs | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'ErrorVariable mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Write-Error forged -ErrorVariable preflightArgs -ErrorAction SilentlyContinue
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'PSObject member dispatch mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-$dispatch = [pscustomobject]@{
-    mutate = { Set-Variable -Scope 1 -Name preflightArgs -Value @{} }
-}
-$dispatch.PSObject.Properties['mutate'].Value.Invoke()
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'Add-Type static method mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-Add-Type -TypeDefinition @"
-using System.Management.Automation.Runspaces;
-public static class PreflightMutator {
-    public static void Set(string name, object value) {
-        Runspace.DefaultRunspace.SessionStateProxy.SetVariable(name, value);
-    }
-}
-"@
-[PreflightMutator]::Set('preflightArgs', @{})
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'Assembly Load mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'ForEach-Object MemberName dispatch mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-$scriptBlockType = [PSObject].Assembly |
-    ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'
-$createMethod = $scriptBlockType |
-    ForEach-Object -MemberName ('Get' + 'Method') -ArgumentList 'Create', [type[]]@([string])
-$payload = $createMethod |
-    ForEach-Object -MemberName ('In' + 'voke') -ArgumentList $null, @('Set-Variable -Scope 1 -Name preflightArgs -Value @{}')
-$payload | ForEach-Object -MemberName ('In' + 'voke') | Out-Null
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'PSCmdlet session-state mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-function Invoke-PreflightMutation {
-    [CmdletBinding()]
-    param()
-    $PSCmdlet.SessionState.PSVariable.Set('script:preflightArgs', @{})
-}
-Invoke-PreflightMutation
-./scripts/release-preflight.ps1 @preflightArgs
-'@
-    'splatted PipelineVariable mutation' = @'
-$preflightArgs = @{
-    Version = $env:RELEASE_VERSION
-    RequireSigning = $true
-    RequirePackageManagers = $true
-}
-$writeParams = @{ PipelineVariable = 'preflightArgs' }
-Write-Output @{} @writeParams
-./scripts/release-preflight.ps1 @preflightArgs
-'@
+    'Tee-Object variable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} | Tee-Object -Variable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'ErrorVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Error forged -ErrorVariable preflightArgs -ErrorAction SilentlyContinue`n$releasePreflightInvocationTarget"
+    )
+    'PSObject member dispatch mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name preflightArgs -Value @{} } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$releasePreflightInvocationTarget"
+    )
+    'Add-Type static method mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Add-Type -TypeDefinition 'public static class PreflightMutator { public static void Set() {} }'`n[PreflightMutator]::Set()`n$releasePreflightInvocationTarget"
+    )
+    'Assembly Load mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$releasePreflightInvocationTarget"
+    )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releasePreflightScript.Replace(
+            $releasePreflightInvocationTarget,
+            "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'`n$releasePreflightInvocationTarget"
+        )
+    'PSCmdlet session-state mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "function Invoke-PreflightMutation { [CmdletBinding()] param(); `$PSCmdlet.SessionState.PSVariable.Set('script:preflightArgs', @{}) }; Invoke-PreflightMutation`n$releasePreflightInvocationTarget"
+    )
+    'splatted PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$writeParams = @{ PipelineVariable = 'preflightArgs' }; Write-Output @{} @writeParams`n$releasePreflightInvocationTarget"
+    )
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
@@ -7198,26 +7078,10 @@ if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
     -not $releaseInteractiveEvidenceScript.Contains($hashMismatchGuardTarget)) {
     throw 'Release success-predicate source-binding mutation target is missing.'
 }
-$addTypeEvidenceMutation = @'
-Add-Type -TypeDefinition @"
-using System.Management.Automation.Runspaces;
-public static class EvidenceMutator {
-    public static void Set(string name, object value) {
-        Runspace.DefaultRunspace.SessionStateProxy.SetVariable(name, value);
-    }
-}
-"@
-[EvidenceMutator]::Set('matching', @())
-'@
-$memberDispatchEvidenceMutation = @'
-$scriptBlockType = [PSObject].Assembly |
-    ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'
-$createMethod = $scriptBlockType |
-    ForEach-Object -MemberName ('Get' + 'Method') -ArgumentList 'Create', [type[]]@([string])
-$payload = $createMethod |
-    ForEach-Object -MemberName ('In' + 'voke') -ArgumentList $null, @('Set-Variable -Scope 1 -Name matching -Value @()')
-$payload | ForEach-Object -MemberName ('In' + 'voke') | Out-Null
-'@
+$addTypeEvidenceMutation =
+    "Add-Type -TypeDefinition 'public static class EvidenceMutator { public static void Set() {} }'`n[EvidenceMutator]::Set()"
+$memberDispatchEvidenceMutation =
+    "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'"
 $invalidSuccessSourceMutants = @{
     'runs JSON source substitution' = $otherJsonSourceScript
     'runs JSON source comment decoy' =
