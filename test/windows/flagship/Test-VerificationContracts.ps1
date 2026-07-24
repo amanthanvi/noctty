@@ -287,7 +287,7 @@ function Test-NamedReleasePreflightSplat {
         param($node)
         Test-CommandResolutionMutationNode `
             -Node $node `
-            -RejectUnresolvedCommands
+            -StrictReleaseContract
     }, $true)).Count -ne 0) {
         return $false
     }
@@ -646,7 +646,7 @@ function Test-ReleaseInteractiveSuccessPredicates {
         param($node)
         Test-CommandResolutionMutationNode `
             -Node $node `
-            -RejectUnresolvedCommands
+            -StrictReleaseContract
     }, $true)).Count -ne 0) {
         return $false
     }
@@ -1915,7 +1915,7 @@ function Test-ExecutionContextMemberChain {
 function Test-CommandResolutionMutationNode {
     param(
         [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
-        [switch] $RejectUnresolvedCommands
+        [switch] $StrictReleaseContract
     )
 
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
@@ -1930,7 +1930,7 @@ function Test-CommandResolutionMutationNode {
         return $Node.Left -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
             (Test-DynamicScriptTypeName -TypeName $Node.Left.Value)
     }
-    if ($RejectUnresolvedCommands -and
+    if ($StrictReleaseContract -and
         $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
         (($Node.VariablePath.UserPath -split ':')[-1]) -eq
             'ExecutionContext') {
@@ -1970,6 +1970,22 @@ function Test-CommandResolutionMutationNode {
         }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ($StrictReleaseContract -and
+            $Node -is
+                [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $memberName -in @(
+                'GetType',
+                'GetMethod', 'GetMethods',
+                'GetConstructor', 'GetConstructors',
+                'GetField', 'GetFields',
+                'GetProperty', 'GetProperties',
+                'GetMember', 'GetMembers',
+                'Invoke', 'InvokeMember', 'DynamicInvoke',
+                'CreateDelegate', 'CreateInstance',
+                'MakeGenericMethod', 'MakeGenericType'
+            )) {
+            return $true
+        }
         if ($Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
             $memberName -eq 'GetType' -and $Node.Arguments.Count -ne 0) {
             return $true
@@ -1997,7 +2013,7 @@ function Test-CommandResolutionMutationNode {
     }
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
-        if ($RejectUnresolvedCommands -and
+        if ($StrictReleaseContract -and
             $Node.InvocationOperator -in @(
                 [System.Management.Automation.Language.TokenKind]::Ampersand,
                 [System.Management.Automation.Language.TokenKind]::Dot
@@ -2006,7 +2022,7 @@ function Test-CommandResolutionMutationNode {
         }
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
         return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex') -or
-            ($RejectUnresolvedCommands -and
+            ($StrictReleaseContract -and
                 $leafName -in @(
                     'Get-Command', 'gcm',
                     'Get-Variable', 'gv',
@@ -2193,6 +2209,19 @@ $strictOnlyCommandProbes = @(
     '. ./scripts/replace-release-evidence.ps1',
     '& Write-Output harmless'
 )
+$strictOnlyCommandProbes += @(
+    @(
+        'GetType',
+        'GetMethod', 'GetMethods',
+        'GetConstructor', 'GetConstructors',
+        'GetField', 'GetFields',
+        'GetProperty', 'GetProperties',
+        'GetMember', 'GetMembers',
+        'Invoke', 'InvokeMember', 'DynamicInvoke',
+        'CreateDelegate', 'CreateInstance',
+        'MakeGenericMethod', 'MakeGenericType'
+    ) | ForEach-Object { '$value.' + $_ + '()' }
+)
 foreach ($probeText in $strictOnlyCommandProbes) {
     $probeTokens = $null
     $probeErrors = $null
@@ -2212,7 +2241,7 @@ foreach ($probeText in $strictOnlyCommandProbes) {
         param($node)
         Test-CommandResolutionMutationNode `
             -Node $node `
-            -RejectUnresolvedCommands
+            -StrictReleaseContract
     }, $true))
     if ($generalRejections.Count -ne 0 -or
         $strictRejections.Count -ne 1) {
@@ -6622,6 +6651,18 @@ $preflightArgs = @{
 & Write-Output harmless
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'stored reflection mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$scriptBlockType = {}.GetType()
+$createMethod = $scriptBlockType.GetMethod('Create', [type[]]@([string]))
+$payload = $createMethod.Invoke($null, @('Set-Variable -Scope 1 -Name preflightArgs -Value @{}'))
+$payload.Invoke()
+./scripts/release-preflight.ps1 @preflightArgs
+'@
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
@@ -6912,6 +6953,11 @@ $invalidSuccessSourceMutants = @{
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
             "& Write-Output harmless`n$matchingCountTarget"
+        )
+    'stored reflection mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$scriptBlockType = {}.GetType()`n`$createMethod = `$scriptBlockType.GetMethod('Create', [type[]]@([string]))`n`$payload = `$createMethod.Invoke(`$null, @('Set-Variable -Scope 1 -Name matching -Value @()'))`n`$payload.Invoke()`n$matchingCountTarget"
         )
     'stored provider path Set-Item mutation' =
         $releaseInteractiveEvidenceScript.Replace(
