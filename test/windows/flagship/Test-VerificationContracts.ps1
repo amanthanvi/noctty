@@ -220,6 +220,21 @@ function Get-YamlLiteralRunScript {
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
 }
 
+function Get-NamedVariableAssignments {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+    }, $true))
+}
+
 function Test-NamedReleasePreflightSplat {
     param(
         [Parameter(Mandatory)] [string] $ScriptText,
@@ -234,6 +249,14 @@ function Test-NamedReleasePreflightSplat {
         [ref]$errors
     )
     if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-CommandResolutionMutationNode `
+            -Node $node `
+            -RejectUnresolvedCommands
+    }, $true)).Count -ne 0) {
+        return $false
+    }
 
     $commands = @($ast.FindAll({
         param($node)
@@ -572,10 +595,23 @@ function Test-ReleaseInteractiveSuccessPredicates {
     if ($errors.Count -ne 0) { return $false }
     if (@($ast.FindAll({
         param($node)
-        Test-CommandResolutionMutationNode -Node $node
+        Test-CommandResolutionMutationNode `
+            -Node $node `
+            -RejectUnresolvedCommands
     }, $true)).Count -ne 0) {
         return $false
     }
+
+    $shaAssignments = @(Get-NamedVariableAssignments -Ast $ast -Name 'sha')
+    if ($shaAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $shaAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        (($shaAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(git rev-parse HEAD).Trim()') {
+        return $false
+    }
+    $shaAssignment = $shaAssignments[0]
 
     $runListCommands = @($ast.FindAll({
         param($node)
@@ -845,6 +881,7 @@ function Test-ReleaseInteractiveSuccessPredicates {
             }
     )
     if ($matchingLoops.Count -ne 1) { return $false }
+    $runBody = $matchingLoops[0].Body
     $matchingLoopSource = Get-SinglePipelineExpression `
         -Node $matchingLoops[0].Condition
 
@@ -892,33 +929,246 @@ function Test-ReleaseInteractiveSuccessPredicates {
         }
     }
 
-    $evidenceIfs = @($ast.FindAll({
-        param($node)
-        if ($node -isnot [System.Management.Automation.Language.IfStatementAst] -or
-            $node.Clauses.Count -ne 1) {
-            return $false
-        }
-        $body = $node.Clauses[0].Item2
-        return @($body.FindAll({
-            param($child)
-            $child -is
-                [System.Management.Automation.Language.AssignmentStatementAst] -and
-                $child.Left.Extent.Text -ceq '$evidenceRun' -and
-                $child.Right.Extent.Text -ceq '$run'
-        }, $true) | Where-Object {
-            Test-DirectStatementBlockChild -Node $_ -StatementBlock $body
-        }).Count -eq 1
-    }, $true))
+    $evidenceIfs = @(
+        $runBody.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $body = $node.Clauses[0].Item2
+            return @($body.FindAll({
+                param($child)
+                $child -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $child.Left.Extent.Text -ceq '$evidenceRun' -and
+                    $child.Right.Extent.Text -ceq '$run'
+            }, $true) | Where-Object {
+                Test-DirectStatementBlockChild -Node $_ -StatementBlock $body
+            }).Count -eq 1
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
     if ($evidenceIfs.Count -ne 1) { return $false }
-    return Test-ExactExpressionSet `
-        -Root (Get-SinglePipelineExpression `
-            -Node $evidenceIfs[0].Clauses[0].Item1) `
+    $evidenceIf = $evidenceIfs[0]
+    if (-not (Test-ExactExpressionSet `
+        -Root (Get-SinglePipelineExpression -Node $evidenceIf.Clauses[0].Item1) `
         -Expected @(
             '$result.status -eq ''pass''',
             '$result.implementation_commit -eq $sha',
             '[string]$result.workflow_run_id -eq [string]$run.databaseId',
             '$hashesBound'
-        )
+        ))) {
+        return $false
+    }
+    $evidenceBodyStatements = @($evidenceIf.Clauses[0].Item2.Statements)
+    if ($evidenceBodyStatements.Count -ne 2 -or
+        $evidenceBodyStatements[0] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        $evidenceBodyStatements[0].Left.Extent.Text -cne '$evidenceRun' -or
+        $evidenceBodyStatements[0].Right.Extent.Text -cne '$run' -or
+        $evidenceBodyStatements[1] -isnot
+            [System.Management.Automation.Language.BreakStatementAst]) {
+        return $false
+    }
+    $evidenceSuccessAssignment = $evidenceBodyStatements[0]
+
+    $resultFilesAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultFiles'
+    )
+    $resultPathAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultPath'
+    )
+    $resultAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'result'
+    )
+    $resultDirAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultDir'
+    )
+    if ($resultFilesAssignments.Count -ne 1 -or
+        $resultPathAssignments.Count -ne 1 -or
+        $resultAssignments.Count -ne 1 -or
+        $resultDirAssignments.Count -ne 1 -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultFilesAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultPathAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultDirAssignments[0] `
+            -StatementBlock $runBody) -or
+        $resultPathAssignments[0].Right.Extent.Text.Trim() -cne
+            '$resultFiles[0].FullName' -or
+        (($resultAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json' -or
+        (($resultDirAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Split-Path -Parent $resultPath') {
+        return $false
+    }
+    $resultFilesAssignment = $resultFilesAssignments[0]
+    $resultPathAssignment = $resultPathAssignments[0]
+    $resultAssignment = $resultAssignments[0]
+    $resultDirAssignment = $resultDirAssignments[0]
+
+    $resultFilesCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if (@($result.artifacts).Count -eq 0) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactLoops = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$artifact' -and
+                (($node.Condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '@($result.artifacts)'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($resultFilesCountGates.Count -ne 1 -or
+        $artifactCountGates.Count -ne 1 -or
+        $artifactLoops.Count -ne 1 -or
+        $resultFilesAssignment.Extent.EndOffset -ge
+            $resultFilesCountGates[0].Extent.StartOffset -or
+        $resultFilesCountGates[0].Extent.EndOffset -ge
+            $resultPathAssignment.Extent.StartOffset -or
+        $resultPathAssignment.Extent.EndOffset -ge
+            $resultAssignment.Extent.StartOffset -or
+        $resultAssignment.Extent.EndOffset -ge
+            $artifactCountGates[0].Extent.StartOffset -or
+        $artifactCountGates[0].Extent.EndOffset -ge
+            $artifactLoops[0].Extent.StartOffset) {
+        return $false
+    }
+    $hashesBoundAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'hashesBound'
+    )
+    $hashesBoundInitializers = @(
+        $hashesBoundAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$true' -and
+                (Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody)
+            }
+    )
+    $hashesBoundFailures = @(
+        $hashesBoundAssignments |
+            Where-Object { $_.Right.Extent.Text -ceq '$false' }
+    )
+    if ($hashesBoundAssignments.Count -ne 4 -or
+        $hashesBoundInitializers.Count -ne 1 -or
+        $hashesBoundFailures.Count -ne 3) {
+        return $false
+    }
+
+    $evidenceRunAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'evidenceRun'
+    )
+    $evidenceInitializers = @(
+        $evidenceRunAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$null' -and
+                (Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock)
+            }
+    )
+    $evidenceSuccessAssignments = @(
+        $evidenceRunAssignments |
+            Where-Object { $_.Right.Extent.Text -ceq '$run' }
+    )
+    if ($evidenceRunAssignments.Count -ne 2 -or
+        $evidenceInitializers.Count -ne 1 -or
+        $evidenceSuccessAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $evidenceSuccessAssignments[0],
+            $evidenceSuccessAssignment
+        )) {
+        return $false
+    }
+    $evidenceGuards = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '-not $evidenceRun' -and
+                $node.Clauses[0].Item2.Statements.Count -eq 1 -and
+                $node.Clauses[0].Item2.Statements[0] -is
+                    [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($evidenceGuards.Count -ne 1 -or
+        $evidenceInitializers[0].Extent.EndOffset -ge
+            $matchingLoops[0].Extent.StartOffset -or
+        $matchingLoops[0].Extent.EndOffset -ge
+            $evidenceGuards[0].Extent.StartOffset) {
+        return $false
+    }
+
+    $criticalUseCounts = [ordered]@{
+        sha = 8
+        resultFiles = 3
+        resultPath = 3
+        result = 6
+        hashesBound = 5
+        evidenceRun = 4
+    }
+    foreach ($entry in $criticalUseCounts.GetEnumerator()) {
+        $uses = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.VariablePath.UserPath -split ':')[-1]) -ceq $entry.Key
+        }, $true))
+        if ($uses.Count -ne $entry.Value) { return $false }
+    }
+    return $true
 }
 
 function Get-PowerShellBlockText {
@@ -1395,7 +1645,10 @@ function Test-ExecutionContextMemberChain {
 }
 
 function Test-CommandResolutionMutationNode {
-    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [switch] $RejectUnresolvedCommands
+    )
 
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
         (($Node.Type.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
@@ -1470,8 +1723,17 @@ function Test-CommandResolutionMutationNode {
     }
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
+        if ($RejectUnresolvedCommands -and $null -eq $name -and
+            $Node.InvocationOperator -in @(
+                [System.Management.Automation.Language.TokenKind]::Ampersand,
+                [System.Management.Automation.Language.TokenKind]::Dot
+            )) {
+            return $true
+        }
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
         return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv', 'Set-Variable', 'sv', 'set', 'New-Variable', 'nv', 'Remove-Variable', 'rv', 'Clear-Variable', 'clv') -or
+            ($RejectUnresolvedCommands -and
+                $leafName -in @('Get-Command', 'gcm')) -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -5869,6 +6131,43 @@ $preflightArgs = @{
 }
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'Set-Variable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Set-Variable -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'SessionState PSVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ExecutionContext.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Invoke-Expression mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+iex '$preflightArgs = @{}'
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'dynamic call mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$mutator = 'Set-Variable'
+& $mutator -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
@@ -5980,9 +6279,21 @@ $otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
     '$matching = @($otherRuns | Where-Object {'
 )
 $matchingCountTarget = 'if ($matching.Count -eq 0) {'
+$shaAssignmentTarget = '$sha = (git rev-parse HEAD).Trim()'
+$resultAssignmentTarget =
+    '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+$artifactFloorTarget =
+    'if (@($result.artifacts).Count -eq 0) { continue }'
+$hashAcceptanceTarget = 'if ($result.status -eq ''pass'' -and'
+$evidenceGuardTarget = 'if (-not $evidenceRun) {'
 if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
     $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript -or
-    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget)) {
+    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($shaAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($artifactFloorTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($hashAcceptanceTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($evidenceGuardTarget)) {
     throw 'Release success-predicate source-binding mutation target is missing.'
 }
 $invalidSuccessSourceMutants = @{
@@ -6103,6 +6414,51 @@ $invalidSuccessSourceMutants = @{
     'ScriptBlock Create mutation' =
         $releaseInteractiveEvidenceScript +
             "`n[ScriptBlock]::Create('`$runs = @(`$otherRun)').Invoke()"
+    'dynamic Set-Variable call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Command call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& (Get-Command Set-Variable) -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'module-qualified stored command mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Microsoft.PowerShell.Utility\Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'forged result assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`nif (`$true) { `$result = [pscustomobject]@{ status = 'pass'; implementation_commit = `$sha; workflow_run_id = `$run.databaseId; artifacts = @() } }"
+        )
+    'forged SHA assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $shaAssignmentTarget,
+            "$shaAssignmentTarget`nif (`$true) { `$sha = 'forged' }"
+        )
+    'forged hashes-bound assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $hashAcceptanceTarget,
+            "if (`$true) { `$hashesBound = `$true }`n$hashAcceptanceTarget"
+        )
+    'forged evidence-run assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $evidenceGuardTarget,
+            "if (`$true) { `$evidenceRun = [pscustomobject]@{ databaseId = 1 } }`n$evidenceGuardTarget"
+        )
+    'result member mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`n`$result.status = 'pass'"
+        )
+    'vacuous artifact floor' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $artifactFloorTarget,
+            'if (@($result.artifacts).Count -lt 0) { continue }'
+        )
 }
 foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
     if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
