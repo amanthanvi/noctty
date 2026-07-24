@@ -21,13 +21,6 @@
       "path": "test/windows/package-portable-cli.ps1",
       "sha256": "269f010e479c78720b3649ded80199039d89a779e109a720675f640d42d4a518",
       "scenario_id": "windows.portable-cli.x64"
-    },
-    {
-      "id": "interactive-win11-harness",
-      "kind": "contract",
-      "path": "test/windows/interactive-win11-validate.ps1",
-      "sha256": "3ae33710432f4ab97cad69297b26f77e0a53581c7de5c2c3759e0f22ef0d0068",
-      "scenario_id": "windows.interactive-win11.composite"
     }
   ]
 }

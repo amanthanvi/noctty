@@ -75,6 +75,10 @@ colors: Colors,
 /// char CSI (ESC [ <n> b).
 previous_char: ?u21 = null,
 
+/// Display scalar committed by the most recent print call. Null means the
+/// print succeeded without committing a glyph.
+last_printed_codepoint: ?u21 = null,
+
 /// The modes that this terminal currently has active.
 modes: modespkg.ModeState = .{},
 
@@ -291,6 +295,7 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
 
 pub fn print(self: *Terminal, c: u21) !void {
     // log.debug("print={x} y={} x={}", .{ c, self.screens.active.cursor.y, self.screens.active.cursor.x });
+    self.last_printed_codepoint = null;
 
     // If we're not on the main display, do nothing for now
     if (self.status_display != .main) {
@@ -527,6 +532,7 @@ pub fn print(self: *Terminal, c: u21) !void {
             });
             self.screens.active.cursorMarkDirty();
             try self.screens.active.appendGrapheme(prev.cell, c);
+            self.last_printed_codepoint = c;
             return;
         }
     }
@@ -581,6 +587,7 @@ pub fn print(self: *Terminal, c: u21) !void {
         }
 
         try self.screens.active.appendGrapheme(prev, c);
+        self.last_printed_codepoint = c;
         return;
     }
 
@@ -663,6 +670,10 @@ pub fn print(self: *Terminal, c: u21) !void {
     self.screens.active.cursorRight(1);
 }
 
+pub inline fn committedPrintCodepoint(self: *const Terminal) ?u21 {
+    return self.last_printed_codepoint;
+}
+
 fn printCell(
     self: *Terminal,
     unmapped_c: u21,
@@ -697,6 +708,7 @@ fn printCell(
         const table = charsets.table(set);
         break :c @intCast(table[@intCast(unmapped_c)]);
     };
+    if (unmapped_c != 0) self.last_printed_codepoint = c;
 
     const cell = self.screens.active.cursor.page_cell;
 

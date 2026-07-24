@@ -11,7 +11,7 @@
 //!     ControlType=List with a live name that names the currently
 //!     selected match so Narrator announces it on arrow-key nav.
 //!   * `TerminalProvider` — the terminal child HWND. Reports
-//!     ControlType=Document and exposes terminal content through TextPattern.
+//!     ControlType=Text and exposes terminal content through TextPattern.
 //!
 //! The owner-drawn palette list is a fragment root. Its rows are ephemeral
 //! fragment/SelectionItem providers backed by live widget state; native HWND
@@ -2171,7 +2171,7 @@ pub const TerminalProvider = struct {
         switch (prop_id) {
             constants.UIA_ControlTypePropertyId => {
                 out.* = com.VARIANT.fromI4(switch (self.state.role) {
-                    .terminal => constants.UIA_DocumentControlTypeId,
+                    .terminal => constants.UIA_TextControlTypeId,
                     .edit => constants.UIA_EditControlTypeId,
                 });
             },
@@ -2211,6 +2211,9 @@ pub const TerminalProvider = struct {
             },
             constants.UIA_ValueIsReadOnlyPropertyId => if (self.state.role == .edit) {
                 out.* = com.VARIANT.fromBool(self.state.set_value == null);
+            },
+            constants.UIA_LiveSettingPropertyId => if (self.state.role == .terminal) {
+                out.* = com.VARIANT.fromI4(constants.LiveSetting_Polite);
             },
             constants.UIA_IsControlElementPropertyId,
             constants.UIA_IsContentElementPropertyId,
@@ -2296,19 +2299,23 @@ pub const TerminalProvider = struct {
         out.* = null;
         const self = fromText(self_text);
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.state.role == .terminal) {
-            out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0) orelse
-                return com.E_OUTOFMEMORY;
-            return com.S_OK;
-        }
-
         var snapshot = self.terminalSnapshot() catch |err| return switch (err) {
             error.ElementNotAvailable => com.UIA_E_ELEMENTNOTAVAILABLE,
             else => com.E_OUTOFMEMORY,
         };
         defer self.alloc.free(snapshot.visible_text);
+        // TextPattern2.GetCaretRange is the canonical terminal caret API.
+        // Preserve a degenerate legacy GetSelection range for older clients
+        // even though terminals truthfully advertise no mutable selection.
+        const selection_range = if (self.state.role == .terminal)
+            terminal_text.OffsetRange{
+                .start = snapshot.caret_offset,
+                .end = snapshot.caret_offset,
+            }
+        else
+            snapshot.selection_range;
         var range: ?*com.ITextRangeProvider = null;
-        const range_hr = self.createRangeFromSnapshot(&snapshot, snapshot.selection_range, &range);
+        const range_hr = self.createRangeFromSnapshot(&snapshot, selection_range, &range);
         if (range_hr != com.S_OK) return range_hr;
         defer _ = TerminalTextRangeProvider.Release(range.?);
 
@@ -2365,10 +2372,9 @@ pub const TerminalProvider = struct {
         const self = fromText(self_text);
         out.* = com.SupportedTextSelection_None;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        out.* = if (self.state.role == .edit)
-            com.SupportedTextSelection_Single
-        else
-            com.SupportedTextSelection_None;
+        if (self.state.role == .edit) {
+            out.* = com.SupportedTextSelection_Single;
+        }
         return com.S_OK;
     }
 
@@ -3106,7 +3112,10 @@ const TerminalTextRangeProvider = struct {
     fn Select(self_base: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         if (self.parent.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (self.parent.state.role != .edit) return com.E_NOTIMPL;
+        // A terminal owns its PTY caret and cannot persist an arbitrary UIA
+        // selection. Keep GetSelection useful for caret review, but report
+        // mutation as unsupported rather than acknowledging a no-op.
+        if (self.parent.state.role == .terminal) return com.UIA_E_INVALIDOPERATION;
         const select_range = self.parent.state.select_range orelse return com.E_NOTIMPL;
         select_range(self.parent.state.ctx, self.text, self.range) catch |err| {
             return if (err == error.OutOfMemory) com.E_OUTOFMEMORY else com.UIA_E_INVALIDOPERATION;
@@ -3117,13 +3126,13 @@ const TerminalTextRangeProvider = struct {
     fn AddToSelection(self_base: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         if (self.parent.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        return if (self.parent.state.role == .edit) com.UIA_E_INVALIDOPERATION else com.E_NOTIMPL;
+        return com.UIA_E_INVALIDOPERATION;
     }
 
     fn RemoveFromSelection(self_base: *com.ITextRangeProvider) callconv(.winapi) com.HRESULT {
         const self = fromBase(self_base);
         if (self.parent.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        return if (self.parent.state.role == .edit) com.UIA_E_INVALIDOPERATION else com.E_NOTIMPL;
+        return com.UIA_E_INVALIDOPERATION;
     }
 
     fn ScrollIntoView(
@@ -4182,7 +4191,7 @@ test "TerminalProvider refcount and state retain balance across text provider re
     try std.testing.expectEqual(@as(u32, 1), state_data.releases);
 }
 
-test "TerminalProvider reports no legacy selection for a PTY-owned caret" {
+test "TerminalProvider legacy caret compatibility reports no mutable selection" {
     var state_data = TestTerminalStateData{ .caret_offset = 6 };
     const state = testTerminalState(&state_data);
 
@@ -4203,7 +4212,32 @@ test "TerminalProvider reports no legacy selection for a PTY-owned caret" {
     try std.testing.expectEqual(com.S_OK, com.SafeArrayGetLBound(ranges.?, 1, &lower));
     try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
     try std.testing.expectEqual(@as(i32, 0), lower);
-    try std.testing.expectEqual(@as(i32, -1), upper);
+    try std.testing.expectEqual(@as(i32, 0), upper);
+
+    var index: i32 = 0;
+    var selected: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        com.SafeArrayGetElement(ranges.?, &index, @ptrCast(&selected)),
+    );
+    defer _ = TerminalTextRangeProvider.Release(selected.?);
+
+    var active: com.BOOL = 0;
+    var caret: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetCaretRange(&p.text2_iface, &active, &caret),
+    );
+    defer _ = TerminalTextRangeProvider.Release(caret.?);
+    try std.testing.expectEqual(
+        TerminalTextRangeProvider.fromBase(caret.?).range,
+        TerminalTextRangeProvider.fromBase(selected.?).range,
+    );
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 6, .end = 6 },
+        TerminalTextRangeProvider.fromBase(selected.?).range,
+    );
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.Select(selected.?));
 }
 
 test "TerminalProvider visible ranges returns a SAFEARRAY" {
@@ -4223,7 +4257,7 @@ test "TerminalProvider visible ranges returns a SAFEARRAY" {
     try std.testing.expectEqual(@as(u32, 1), state_data.snapshot_calls);
 }
 
-test "TerminalProvider reports document control type" {
+test "TerminalProvider reports text control type and polite live setting" {
     var state_data = TestTerminalStateData{};
     const state = testTerminalState(&state_data);
 
@@ -4233,7 +4267,14 @@ test "TerminalProvider reports document control type" {
     var value = com.VARIANT.empty();
     const hr = TerminalProvider.GetPropertyValue(&p.base, constants.UIA_ControlTypePropertyId, &value);
     try std.testing.expectEqual(com.S_OK, hr);
-    try std.testing.expectEqual(constants.UIA_DocumentControlTypeId, value.value.i4);
+    try std.testing.expectEqual(constants.UIA_TextControlTypeId, value.value.i4);
+
+    value = com.VARIANT.empty();
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetPropertyValue(&p.base, constants.UIA_LiveSettingPropertyId, &value),
+    );
+    try std.testing.expectEqual(constants.LiveSetting_Polite, value.value.i4);
 }
 
 test "TerminalProvider DocumentRange returns terminal text" {
@@ -5524,9 +5565,9 @@ test "TerminalTextRangeProvider reports unsupported mutation and scrolling hones
     );
     defer _ = TerminalTextRangeProvider.Release(&range.base);
 
-    try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.Select(&range.base));
-    try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.AddToSelection(&range.base));
-    try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.RemoveFromSelection(&range.base));
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.Select(&range.base));
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.AddToSelection(&range.base));
+    try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.RemoveFromSelection(&range.base));
     try std.testing.expectEqual(com.E_NOTIMPL, TerminalTextRangeProvider.ScrollIntoView(&range.base, 1));
 }
 

@@ -43,3 +43,6 @@ renderer_mailbox: *RendererThread.Mailbox,
 
 /// The mailbox for sending the surface messages.
 surface_mailbox: apprt.surface.Mailbox,
+
+/// Nonblocking semantic terminal-output transport owned by the Surface.
+terminal_output_transport: *apprt.surface.TerminalOutputTransport,

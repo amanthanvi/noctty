@@ -214,6 +214,9 @@ renderer_mailbox: *renderer.Thread.Mailbox,
 /// The mailbox for communicating with the surface.
 surface_mailbox: apprt.surface.Mailbox,
 
+/// Nonblocking semantic terminal-output transport owned by the Surface.
+terminal_output_transport: *apprt.surface.TerminalOutputTransport,
+
 /// The cached size info
 size: renderer.Size,
 
@@ -476,6 +479,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .renderer_wakeup = opts.renderer_wakeup,
         .renderer_mailbox = opts.renderer_mailbox,
         .surface_mailbox = opts.surface_mailbox,
+        .terminal_output_transport = opts.terminal_output_transport,
         .size = opts.size,
         .backend = backend,
         .mailbox = opts.mailbox,
@@ -846,6 +850,7 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 /// call with pty data but it is also called by the read thread when using
 /// an exec subprocess.
 pub fn processOutput(self: *Termio, buf: []const u8) void {
+    const semantic_output_epoch = self.terminal_output_transport.captureEpoch();
     const decision = render: {
         // We are modifying terminal state from here on out and we need
         // the lock to grab our read data.
@@ -853,7 +858,9 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
         defer self.renderer_state.mutex.unlock();
         const had_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const was_synchronized_output = self.terminal.modes.get(.synchronized_output);
+        self.terminal_stream.handler.semantic_output.begin(semantic_output_epoch != null);
         const processing = self.processOutputLocked(buf);
+        const semantic_output = self.terminal_stream.handler.semantic_output.finish();
         const has_render_work = terminal_render_dirty.needsRendererWake(&self.terminal);
         const synchronized_output_active = self.terminal.modes.get(.synchronized_output);
         const ended_synchronized_output =
@@ -876,8 +883,25 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
             .ended_synchronized_output = ended_synchronized_output,
             .completed_synchronized_output_batch = completed_synchronized_output_batch,
             .has_render_work = has_render_work,
+            .semantic_output = semantic_output,
+            .semantic_output_epoch = semantic_output_epoch,
         };
     };
+
+    if (decision.semantic_output_epoch) |epoch| {
+        if (decision.semantic_output.len != 0 or
+            decision.semantic_output.omitted_after or
+            decision.semantic_output.reset_before)
+        {
+            const semantic_bytes = decision.semantic_output.slice();
+            _ = self.terminal_output_transport.pushSemanticBatchForEpoch(
+                epoch,
+                semantic_bytes,
+                decision.semantic_output.omitted_after,
+                decision.semantic_output.reset_before,
+            );
+        }
+    }
 
     self.output_trace.noteProcessOutput(
         buf.len,

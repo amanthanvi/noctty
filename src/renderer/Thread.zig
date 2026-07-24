@@ -764,29 +764,33 @@ fn cursorTimerCallback(
         return .disarm;
     };
 
-    // An unfocused surface needs no recurring cursor timer. Focus regain will
-    // arm a new one once this callback has been popped and the completion is
-    // therefore safe to reuse.
-    if (!t.flags.focused) {
-        t.flags.cursor_blink_visible = true;
-        t.cursor_blink_reset_at = null;
-        return .disarm;
-    }
-
     // Input or focus regain may have requested a fresh interval while this
     // completion was already queued. Honor the remaining logical delay here,
     // from the timer's own callback, rather than resetting the queued object.
-    if (t.cursor_blink_reset_at) |reset_at| {
-        const elapsed_ms = elapsed: {
+    const reset_elapsed_ns: ?u64 = if (t.flags.focused)
+        if (t.cursor_blink_reset_at) |reset_at| elapsed: {
             const now = std.time.Instant.now() catch break :elapsed 0;
-            break :elapsed now.since(reset_at) / std.time.ns_per_ms;
-        };
-        const remaining_ms = cursorBlinkRemainingMs(cursorBlinkInterval(), elapsed_ms);
-        if (remaining_ms > 0) {
-            t.armCursorTimerIfDead(remaining_ms);
+            break :elapsed now.since(reset_at);
+        } else null
+    else
+        null;
+    switch (cursorBlinkTimerDecision(
+        t.flags.focused,
+        cursorBlinkInterval(),
+        reset_elapsed_ns,
+    )) {
+        .disarm => {
+            // An unfocused surface needs no recurring cursor timer. Focus
+            // regain will arm a new one once this callback has been popped.
+            t.flags.cursor_blink_visible = true;
+            t.cursor_blink_reset_at = null;
             return .disarm;
-        }
-        t.cursor_blink_reset_at = null;
+        },
+        .rearm_after => |delay_ms| {
+            t.armCursorTimerIfDead(delay_ms);
+            return .disarm;
+        },
+        .toggle => t.cursor_blink_reset_at = null,
     }
 
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
@@ -829,17 +833,70 @@ fn cursorBlinkInterval() u64 {
     return CURSOR_BLINK_INTERVAL;
 }
 
-fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ms: u64) u64 {
-    return interval_ms -| elapsed_ms;
+fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ns: u64) u64 {
+    const interval_ns = interval_ms *| std.time.ns_per_ms;
+    const remaining_ns = interval_ns -| elapsed_ns;
+    return remaining_ns / std.time.ns_per_ms +
+        @intFromBool(remaining_ns % std.time.ns_per_ms != 0);
 }
 
-test "cursor blink reset deadline saturates safely" {
+const CursorBlinkTimerDecision = union(enum) {
+    disarm,
+    rearm_after: u64,
+    toggle,
+};
+
+fn cursorBlinkTimerDecision(
+    focused: bool,
+    interval_ms: u64,
+    reset_elapsed_ns: ?u64,
+) CursorBlinkTimerDecision {
+    if (!focused) return .disarm;
+    if (reset_elapsed_ns) |elapsed_ns| {
+        const remaining_ms = cursorBlinkRemainingMs(interval_ms, elapsed_ns);
+        if (remaining_ms > 0) return .{ .rearm_after = remaining_ms };
+    }
+    return .toggle;
+}
+
+test "cursor blink reset deadline rounds up and clamps" {
     const testing = std.testing;
 
     try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 0));
-    try testing.expectEqual(@as(u64, 1), cursorBlinkRemainingMs(500, 499));
-    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 500));
-    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 750));
+    try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 1));
+    try testing.expectEqual(
+        @as(u64, 1),
+        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms - 1),
+    );
+    try testing.expectEqual(
+        @as(u64, 0),
+        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms),
+    );
+    try testing.expectEqual(
+        @as(u64, 0),
+        cursorBlinkRemainingMs(500, 750 * std.time.ns_per_ms),
+    );
+}
+
+test "cursor blink timer decision preserves focus and reset state" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.disarm,
+        cursorBlinkTimerDecision(false, 500, 1),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.toggle,
+        cursorBlinkTimerDecision(true, 500, null),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision{ .rearm_after = 500 },
+        cursorBlinkTimerDecision(true, 500, 1),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.toggle,
+        cursorBlinkTimerDecision(true, 500, 500 * std.time.ns_per_ms),
+    );
 }
 
 test "renderer follow-up check tracks visible terminal dirtiness" {

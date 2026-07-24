@@ -365,6 +365,7 @@ pub const StructureChangeType_ChildrenReordered: i32 = 5;
 pub const NotificationKind_ActionCompleted: i32 = 2;
 pub const NotificationKind_ActionAborted: i32 = 3;
 pub const NotificationKind_Other: i32 = 4;
+pub const NotificationProcessing_All: i32 = 2;
 pub const NotificationProcessing_MostRecent: i32 = 3;
 
 // ── UIA externs ─────────────────────────────────────────────────────────

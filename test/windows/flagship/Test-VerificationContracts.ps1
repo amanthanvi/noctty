@@ -78,6 +78,41 @@ function Assert-TextContract {
     if ($Content -notmatch $Pattern) { throw "Contract missing: $Description ($Context)" }
 }
 
+function Assert-ZigTestsDiscoveredAndRun {
+    param(
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [Parameter(Mandatory)] [hashtable] $Sources,
+        [Parameter(Mandatory)] [string[]] $ExpectedNames,
+        [Parameter(Mandatory)] [string] $Filter
+    )
+
+    $declarations = [Collections.Generic.List[object]]::new()
+    foreach ($entry in $Sources.GetEnumerator()) {
+        foreach ($match in [regex]::Matches(
+            $entry.Value,
+            '(?m)^test "(?<name>[^"\r\n]+)" \{$'
+        )) {
+            [void]$declarations.Add([pscustomobject]@{
+                Path = $entry.Key
+                Name = $match.Groups['name'].Value
+            })
+        }
+    }
+    foreach ($expectedName in $ExpectedNames) {
+        $matches = @($declarations | Where-Object { $_.Name -ceq $expectedName })
+        if ($matches.Count -ne 1) {
+            throw "Expected exactly one Zig test declaration '$expectedName'; found $($matches.Count)."
+        }
+    }
+
+    $filterArgument = "-Dtest-filter=$Filter"
+    & (Join-Path $RepoRoot 'scripts\dev-windows.cmd') `
+        zig build test $filterArgument
+    if ($LASTEXITCODE -ne 0) {
+        throw "Zig semantic fixture '$Filter' failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Get-YamlJobText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -187,10 +222,352 @@ function Get-DirectStatementBlockChild {
     return $statement
 }
 
+function Test-DirectNamedBlockChild {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.NamedBlockAst] $NamedBlock
+    )
+
+    $ancestor = $Node.Parent
+    while ($null -ne $ancestor -and
+        $ancestor -isnot [System.Management.Automation.Language.NamedBlockAst]) {
+        if ($ancestor -isnot [System.Management.Automation.Language.PipelineAst] -and
+            $ancestor -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $ancestor -isnot
+                [System.Management.Automation.Language.CommandExpressionAst]) {
+            return $false
+        }
+        $ancestor = $ancestor.Parent
+    }
+    [object]::ReferenceEquals($ancestor, $NamedBlock)
+}
+
 function Get-MemberExpressionName {
     param([Parameter(Mandatory)] [System.Management.Automation.Language.MemberExpressionAst] $Node)
 
     return ([string] $Node.Member.Value).Trim()
+}
+
+function Get-NamedFunctionDefinitions {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $Name
+    }, $true))
+}
+
+function Get-NamedCommands {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq $Name
+    }, $true))
+}
+
+function Get-NamedMemberExpressions {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name,
+        [switch] $InvocationOnly
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+            (-not $InvocationOnly -or
+                $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) -and
+            (Get-MemberExpressionName -Node $node) -eq $Name
+    }, $true))
+}
+
+function Get-ExpressionRootVariableName {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    while ($Node -is [System.Management.Automation.Language.MemberExpressionAst] -or
+        $Node -is [System.Management.Automation.Language.ParenExpressionAst]) {
+        if ($Node -is [System.Management.Automation.Language.MemberExpressionAst]) {
+            $Node = $Node.Expression
+        } else {
+            $pipelineElements = @($Node.Pipeline.PipelineElements)
+            if ($pipelineElements.Count -ne 1 -or
+                $pipelineElements[0] -isnot
+                    [System.Management.Automation.Language.CommandExpressionAst]) {
+                return ''
+            }
+            $Node = $pipelineElements[0].Expression
+        }
+    }
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+        return ''
+    }
+    return ($Node.VariablePath.UserPath -split ':')[-1]
+}
+
+function Test-CommandHasStringArgument {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.CommandAst] $Command,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    return @($Command.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $node.Value -eq $Value
+    }, $true)).Count -gt 0
+}
+
+function Get-CommandParameterArgument {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.CommandAst] $Command,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    $elements = @($Command.CommandElements)
+    for ($index = 0; $index -lt $elements.Count; $index++) {
+        $element = $elements[$index]
+        if ($element -isnot [System.Management.Automation.Language.CommandParameterAst] -or
+            $element.ParameterName -ne $Name) {
+            continue
+        }
+        if ($null -ne $element.Argument) { return $element.Argument }
+        if (($index + 1) -lt $elements.Count -and
+            $elements[$index + 1] -isnot
+                [System.Management.Automation.Language.CommandParameterAst]) {
+            return $elements[$index + 1]
+        }
+        return $null
+    }
+    return $null
+}
+
+function Get-ContainingStatementBlock {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    while ($null -ne $Node -and
+        $Node -isnot [System.Management.Automation.Language.StatementBlockAst]) {
+        $Node = $Node.Parent
+    }
+    return $Node
+}
+
+function Get-VariableExpressionName {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+        return ''
+    }
+    return ($Node.VariablePath.UserPath -split ':')[-1]
+}
+
+function Test-StaticMemberReference {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [string] $TypeName,
+        [Parameter(Mandatory)] [string] $MemberName
+    )
+
+    return $Node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $Node.Static -and
+        (Get-MemberExpressionName -Node $Node) -eq $MemberName -and
+        $Node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $Node.Expression.TypeName.FullName -eq $TypeName
+}
+
+function Test-DirectJoinPathNameExpression {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [string] $ParentVariable,
+        [AllowEmptyString()] [string] $ParentMember = '',
+        [Parameter(Mandatory)] [string] $ChildVariable,
+        [Parameter(Mandatory)] [string] $ChildSuffix,
+        [Parameter(Mandatory)] [ValidateSet('Expandable', 'Format')] [string] $Style
+    )
+
+    if ($Node -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $Node.PipelineElements.Count -ne 1 -or
+        $Node.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandAst]) {
+        return $false
+    }
+    $command = $Node.PipelineElements[0]
+    $elements = @($command.CommandElements)
+    if ($command.GetCommandName() -ne 'Join-Path' -or $elements.Count -ne 3) {
+        return $false
+    }
+    $parent = $elements[1]
+    if ([string]::IsNullOrEmpty($ParentMember)) {
+        if ((Get-VariableExpressionName -Node $parent) -ne $ParentVariable) {
+            return $false
+        }
+    } elseif ($parent -isnot
+            [System.Management.Automation.Language.MemberExpressionAst] -or
+        (Get-ExpressionRootVariableName -Node $parent) -ne $ParentVariable -or
+        (Get-MemberExpressionName -Node $parent) -ne $ParentMember) {
+        return $false
+    }
+
+    $child = $elements[2]
+    if ($Style -eq 'Expandable') {
+        return $child -is
+                [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+            $child.Value -ceq ('$' + $ChildVariable + $ChildSuffix) -and
+            $child.NestedExpressions.Count -eq 1 -and
+            (Get-VariableExpressionName -Node $child.NestedExpressions[0]) -eq
+                $ChildVariable
+    }
+    if ($child -isnot [System.Management.Automation.Language.ParenExpressionAst] -or
+        $child.Pipeline.PipelineElements.Count -ne 1 -or
+        $child.Pipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $false
+    }
+    $format = $child.Pipeline.PipelineElements[0].Expression
+    return $format -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $format.Operator -eq [System.Management.Automation.Language.TokenKind]::Format -and
+        $format.Left -is
+            [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $format.Left.Value -ceq ('{0}' + $ChildSuffix) -and
+        (Get-VariableExpressionName -Node $format.Right) -eq $ChildVariable
+}
+
+function Test-InjectiveHarnessRunNameExpression {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.IfStatementAst] -or
+        $Node.Clauses.Count -ne 1 -or $null -eq $Node.ElseClause) {
+        return $false
+    }
+    $conditionElements = @($Node.Clauses[0].Item1.PipelineElements)
+    $thenStatements = @($Node.Clauses[0].Item2.Statements)
+    $elseStatements = @($Node.ElseClause.Statements)
+    if ($conditionElements.Count -ne 1 -or
+        $conditionElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $thenStatements.Count -ne 1 -or $elseStatements.Count -ne 1) {
+        return $false
+    }
+    $condition = $conditionElements[0].Expression
+    if ($condition -isnot
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not $condition.Static -or
+        $condition.Expression -isnot
+            [System.Management.Automation.Language.TypeExpressionAst] -or
+        $condition.Expression.TypeName.FullName -ne 'string' -or
+        (Get-MemberExpressionName -Node $condition) -ne 'IsNullOrWhiteSpace' -or
+        $condition.Arguments.Count -ne 1 -or
+        (Get-VariableExpressionName -Node $condition.Arguments[0]) -ne
+            'ScenarioSlug') {
+        return $false
+    }
+    $thenElements = @($thenStatements[0].PipelineElements)
+    $elseElements = @($elseStatements[0].PipelineElements)
+    if ($thenElements.Count -ne 1 -or $elseElements.Count -ne 1 -or
+        $thenElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $elseElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        (Get-VariableExpressionName -Node $thenElements[0].Expression) -ne
+            'ScriptName') {
+        return $false
+    }
+    $format = $elseElements[0].Expression
+    if ($format -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+        $format.Operator -ne [System.Management.Automation.Language.TokenKind]::Format -or
+        $format.Left -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $format.Left.Value -cne '{0}-{1}' -or
+        $format.Right -isnot [System.Management.Automation.Language.ArrayLiteralAst] -or
+        $format.Right.Elements.Count -ne 2) {
+        return $false
+    }
+    $scriptName = $format.Right.Elements[0]
+    return $scriptName -is
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $scriptName.Static -and
+        $scriptName.Expression -is
+            [System.Management.Automation.Language.TypeExpressionAst] -and
+        $scriptName.Expression.TypeName.FullName -eq 'System.IO.Path' -and
+        (Get-MemberExpressionName -Node $scriptName) -eq
+            'GetFileNameWithoutExtension' -and
+        $scriptName.Arguments.Count -eq 1 -and
+        (Get-VariableExpressionName -Node $scriptName.Arguments[0]) -eq
+            'ScriptName' -and
+        (Get-VariableExpressionName -Node $format.Right.Elements[1]) -eq
+            'ScenarioSlug'
+}
+
+function Test-TextChangedHandlerOperation {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [ValidateSet('Add', 'Remove')] [string] $Operation
+    )
+
+    if ($Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not $Node.Static -or
+        $Node.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst] -or
+        $Node.Expression.TypeName.FullName -ne
+            'System.Windows.Automation.Automation' -or
+        (Get-MemberExpressionName -Node $Node) -ne
+            "${Operation}AutomationEventHandler") {
+        return $false
+    }
+    $arguments = @($Node.Arguments)
+    $expectedCount = if ($Operation -eq 'Add') { 4 } else { 3 }
+    if ($arguments.Count -ne $expectedCount -or
+        -not (Test-StaticMemberReference `
+            -Node $arguments[0] `
+            -TypeName 'System.Windows.Automation.TextPattern' `
+            -MemberName 'TextChangedEvent') -or
+        (Get-VariableExpressionName -Node $arguments[1]) -eq '' -or
+        (Get-VariableExpressionName -Node $arguments[-1]) -eq '') {
+        return $false
+    }
+    if ($Operation -eq 'Add' -and
+        -not (Test-StaticMemberReference `
+            -Node $arguments[2] `
+            -TypeName 'System.Windows.Automation.TreeScope' `
+            -MemberName 'Element')) {
+        return $false
+    }
+    return $true
+}
+
+function Assert-NoUnreachableStatements {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $terminatorTypes = @(
+        [System.Management.Automation.Language.ReturnStatementAst],
+        [System.Management.Automation.Language.ThrowStatementAst],
+        [System.Management.Automation.Language.ExitStatementAst],
+        [System.Management.Automation.Language.BreakStatementAst],
+        [System.Management.Automation.Language.ContinueStatementAst]
+    )
+    foreach ($block in @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StatementBlockAst]
+    }, $true))) {
+        $statements = @($block.Statements)
+        for ($index = 0; $index -lt ($statements.Count - 1); $index++) {
+            $statementType = $statements[$index].GetType()
+            if ($terminatorTypes -contains $statementType) {
+                throw "Unreachable statement after $($statementType.Name): $Context"
+            }
+        }
+    }
 }
 
 function Test-DynamicScriptTypeName {
@@ -579,9 +956,18 @@ $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palet
 $newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1'
 $undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
 $resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
+$keyInputHarness = Join-Path $repoRoot 'test\windows\interactive-win11-key-input.ps1'
+$interactiveValidator = Join-Path $repoRoot 'test\windows\interactive-win11-validate.ps1'
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
+$win32Theme = Join-Path $repoRoot 'src\apprt\win32_theme.zig'
 $win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
+$terminalOutputCapture = Join-Path $repoRoot 'src\termio\semantic_output_capture.zig'
+$terminalStreamHandler = Join-Path $repoRoot 'src\termio\stream_handler.zig'
+$terminalSemanticOutput = Join-Path $repoRoot 'src\terminal\semantic_output.zig'
+$termioRuntime = Join-Path $repoRoot 'src\termio\Termio.zig'
+$surfaceRuntime = Join-Path $repoRoot 'src\apprt\surface.zig'
+$terminalAccessibility = Join-Path $repoRoot 'src\apprt\win32_terminal_accessibility.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
@@ -602,9 +988,18 @@ $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
 $win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
+$win32ThemeText = Get-Content -LiteralPath $win32Theme -Raw
 $win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
+$terminalOutputCaptureText = Get-Content -LiteralPath $terminalOutputCapture -Raw
+$terminalStreamHandlerText = Get-Content -LiteralPath $terminalStreamHandler -Raw
+$terminalSemanticOutputText = Get-Content -LiteralPath $terminalSemanticOutput -Raw
+$termioRuntimeText = Get-Content -LiteralPath $termioRuntime -Raw
+$surfaceRuntimeText = Get-Content -LiteralPath $surfaceRuntime -Raw
+$terminalAccessibilityText = Get-Content -LiteralPath $terminalAccessibility -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
+$keyInputHarnessText = Get-Content -LiteralPath $keyInputHarness -Raw
+$interactiveValidatorText = Get-Content -LiteralPath $interactiveValidator -Raw
 $accessibilityHarnessTokens = $null
 $accessibilityHarnessErrors = $null
 $accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -615,6 +1010,557 @@ $accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::Parse
 if ($accessibilityHarnessErrors.Count -ne 0) {
     throw "Accessibility harness does not parse: $($accessibilityHarnessErrors[0].Message)"
 }
+foreach ($source in @(
+    [pscustomobject]@{ Name = 'key-input harness'; Text = $keyInputHarnessText },
+    [pscustomobject]@{ Name = 'interactive validator'; Text = $interactiveValidatorText }
+)) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $source.Text,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "$($source.Name) does not parse: $($errors[0].Message)"
+    }
+    if ($source.Name -eq 'key-input harness') { $keyInputHarnessAst = $ast }
+    else { $interactiveValidatorAst = $ast }
+}
+
+$injectiveMutationTokens = $null
+$injectiveMutationErrors = $null
+$injectiveMutationAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    @'
+$stdoutPath = Join-Path $layout.Logs "constant.log"
+$runName = if ([string]::IsNullOrWhiteSpace($ScenarioSlug)) {
+    $ScriptName
+} else {
+    $ScriptName
+}
+'@,
+    [ref] $injectiveMutationTokens,
+    [ref] $injectiveMutationErrors
+)
+$injectiveMutationAssignments = @($injectiveMutationAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+}, $true))
+if ($injectiveMutationErrors.Count -ne 0 -or
+    $injectiveMutationAssignments.Count -ne 2 -or
+    (Test-DirectJoinPathNameExpression `
+        -Node $injectiveMutationAssignments[0].Right `
+        -ParentVariable 'layout' `
+        -ParentMember 'Logs' `
+        -ChildVariable 'artifactPrefix' `
+        -ChildSuffix '-stdout.log' `
+        -Style Expandable) -or
+    (Test-InjectiveHarnessRunNameExpression `
+        -Node $injectiveMutationAssignments[1].Right)) {
+    throw 'Injective artifact-name contracts must reject constant-path mutations.'
+}
+
+$keyInputParameterNames = @($keyInputHarnessAst.ParamBlock.Parameters | ForEach-Object {
+    $_.Name.VariablePath.UserPath
+})
+if ($keyInputParameterNames -contains 'Route') {
+    throw 'Key-input harness must always target the surface directly; Route is not a valid public option.'
+}
+$keyInputKeyParameters = @($keyInputHarnessAst.ParamBlock.Parameters | Where-Object {
+    $_.Name.VariablePath.UserPath -eq 'Key'
+})
+$keyInputKeyValidateSets = if ($keyInputKeyParameters.Count -eq 1) {
+    @($keyInputKeyParameters[0].Attributes | Where-Object {
+        $_ -is [System.Management.Automation.Language.AttributeAst] -and
+            $_.TypeName.FullName -eq 'ValidateSet'
+    })
+} else {
+    @()
+}
+$keyInputKeyValues = if ($keyInputKeyValidateSets.Count -eq 1) {
+    @($keyInputKeyValidateSets[0].PositionalArguments | ForEach-Object {
+        if ($_ -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            throw 'Key-input Key ValidateSet values must be static strings.'
+        }
+        $_.Value
+    })
+} else {
+    @()
+}
+$requiredKeyInputValues = @(
+    'a',
+    'space',
+    'unicode-bmp',
+    'unicode-supplementary',
+    'unicode-burst',
+    'unicode-cr',
+    'unicode-lf',
+    'unicode-tab',
+    'unicode-backspace',
+    'unicode-escape'
+)
+if ($keyInputKeyValues.Count -ne $requiredKeyInputValues.Count -or
+    @(Compare-Object `
+        -ReferenceObject $requiredKeyInputValues `
+        -DifferenceObject $keyInputKeyValues `
+        -SyncWindow 0 `
+        -CaseSensitive).Count -ne 0 -or
+    @($keyInputKeyValues | Sort-Object -Unique).Count -ne
+        $keyInputKeyValues.Count) {
+    throw 'Key-input harness must expose the exact ten-key input ValidateSet.'
+}
+if (@($keyInputKeyValues | Where-Object {
+    $_ -match '(?i)alt|numpad'
+}).Count -ne 0) {
+    throw 'Key-input harness cannot expose Alt+numpad input synthesis.'
+}
+$slugFunctions = @(Get-NamedFunctionDefinitions -Ast $keyInputHarnessAst -Name 'Get-KeyInputScenarioSlug')
+if ($slugFunctions.Count -ne 1) {
+    throw 'Key-input harness must own exactly one scenario-slug function.'
+}
+try {
+    . ([scriptblock]::Create($slugFunctions[0].Extent.Text))
+    $slugFixtures = @(
+        foreach ($keyValue in $keyInputKeyValues) {
+            Get-KeyInputScenarioSlug -Key $keyValue
+            Get-KeyInputScenarioSlug -Key $keyValue -PostBoo
+        }
+    )
+    if (@($slugFixtures | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+        $slugFixtures.Count -ne 20 -or
+        @($slugFixtures | Sort-Object -Unique).Count -ne
+            $slugFixtures.Count) {
+        throw 'The ten-key by PostBoo cross-product must produce exactly twenty unique artifact slugs.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-KeyInputScenarioSlug -ErrorAction SilentlyContinue
+}
+$sandboxCalls = @(Get-NamedCommands -Ast $keyInputHarnessAst -Name 'Initialize-InteractiveWin11Sandbox')
+$scenarioSlugAssignments = @($keyInputHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        (Get-VariableExpressionName -Node $node.Left) -eq 'scenarioSlug'
+}, $true))
+$artifactAssignments = @($keyInputHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        (Get-VariableExpressionName -Node $node.Left) -in @(
+            'artifactPrefix', 'stdoutPath', 'stderrPath', 'resultPath'
+        )
+}, $true))
+$sandboxName = if ($sandboxCalls.Count -eq 1) {
+    Get-CommandParameterArgument -Command $sandboxCalls[0] -Name 'SandboxName'
+}
+$scenarioSlugCalls = if ($scenarioSlugAssignments.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $scenarioSlugAssignments[0].Right `
+        -Name 'Get-KeyInputScenarioSlug')
+} else {
+    @()
+}
+$scenarioSlugKey = if ($scenarioSlugCalls.Count -eq 1) {
+    Get-CommandParameterArgument -Command $scenarioSlugCalls[0] -Name 'Key'
+}
+$scenarioSlugPostBoo = if ($scenarioSlugCalls.Count -eq 1) {
+    Get-CommandParameterArgument -Command $scenarioSlugCalls[0] -Name 'PostBoo'
+}
+$artifactVariableNames = @(
+    'artifactPrefix', 'stdoutPath', 'stderrPath', 'resultPath'
+)
+$artifactAssignmentContract = @(
+    foreach ($artifactVariableName in $artifactVariableNames) {
+        $assignments = @($artifactAssignments | Where-Object {
+            (Get-VariableExpressionName -Node $_.Left) -eq
+                $artifactVariableName
+        })
+        if ($assignments.Count -ne 1) { $false; continue }
+        if ($artifactVariableName -eq 'artifactPrefix') {
+            $expression = $assignments[0].Right
+            $expression -is
+                    [System.Management.Automation.Language.CommandExpressionAst] -and
+                $expression.Expression -is
+                    [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+                $expression.Expression.Value -ceq
+                    'interactive-win11-key-input-$scenarioSlug' -and
+                $expression.Expression.NestedExpressions.Count -eq 1 -and
+                (Get-VariableExpressionName `
+                    -Node $expression.Expression.NestedExpressions[0]) -eq
+                        'scenarioSlug'
+            continue
+        }
+        $spec = switch ($artifactVariableName) {
+            'stdoutPath' { @('layout', 'Logs', 'artifactPrefix', '-stdout.log') }
+            'stderrPath' { @('layout', 'Logs', 'artifactPrefix', '-stderr.log') }
+            'resultPath' { @('layout', 'Temp', 'artifactPrefix', '-result.json') }
+        }
+        Test-DirectJoinPathNameExpression `
+            -Node $assignments[0].Right `
+            -ParentVariable $spec[0] `
+            -ParentMember $spec[1] `
+            -ChildVariable $spec[2] `
+            -ChildSuffix $spec[3] `
+            -Style Expandable
+    }
+)
+if ($sandboxCalls.Count -ne 1 -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $sandboxCalls[0] `
+        -NamedBlock $keyInputHarnessAst.EndBlock) -or
+    $sandboxName -isnot
+        [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+    $sandboxName.Value -cne 'key-input-$scenarioSlug' -or
+    $sandboxName.NestedExpressions.Count -ne 1 -or
+    (Get-VariableExpressionName -Node $sandboxName.NestedExpressions[0]) -ne
+        'scenarioSlug' -or
+    $scenarioSlugAssignments.Count -ne 1 -or
+    -not [object]::ReferenceEquals(
+        $scenarioSlugAssignments[0].Parent,
+        $keyInputHarnessAst.EndBlock
+    ) -or
+    $scenarioSlugAssignments[0].Right -isnot
+        [System.Management.Automation.Language.PipelineAst] -or
+    $scenarioSlugAssignments[0].Right.PipelineElements.Count -ne 1 -or
+    -not [object]::ReferenceEquals(
+        $scenarioSlugAssignments[0].Right.PipelineElements[0],
+        $scenarioSlugCalls[0]
+    ) -or
+    $scenarioSlugCalls.Count -ne 1 -or
+    (Get-VariableExpressionName -Node $scenarioSlugKey) -ne 'Key' -or
+    (Get-VariableExpressionName -Node $scenarioSlugPostBoo) -ne
+        'RunBooFirst' -or
+    @($artifactAssignments | Where-Object {
+        -not [object]::ReferenceEquals($_.Parent, $keyInputHarnessAst.EndBlock)
+    }).Count -ne 0 -or
+    $artifactAssignmentContract.Count -ne $artifactVariableNames.Count -or
+    @($artifactAssignmentContract | Where-Object { -not $_ }).Count -ne 0) {
+    throw 'Key-input scenario slug must flow into its sandbox, result, and log artifact names.'
+}
+
+$keyInputCompositeCalls = @(Get-NamedCommands -Ast $interactiveValidatorAst -Name 'Invoke-HarnessWithPassSentinel' |
+    Where-Object {
+        $scriptName = Get-CommandParameterArgument -Command $_ -Name 'ScriptName'
+        $scriptName -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $scriptName.Value -eq 'interactive-win11-key-input.ps1'
+    })
+$coveredKeyScenarios = [Collections.Generic.List[string]]::new()
+$compositeSlugs = [Collections.Generic.List[string]]::new()
+foreach ($command in $keyInputCompositeCalls) {
+    $slug = Get-CommandParameterArgument -Command $command -Name 'ScenarioSlug'
+    if ($slug -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        [string]::IsNullOrWhiteSpace($slug.Value)) {
+        throw 'Every composite key-input run must provide a nonempty static scenario slug.'
+    }
+    [void]$compositeSlugs.Add($slug.Value)
+    $additional = Get-CommandParameterArgument -Command $command -Name 'AdditionalArguments'
+    if ($null -eq $additional) {
+        [void]$coveredKeyScenarios.Add('a')
+        continue
+    }
+    $keyValues = @($additional.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $node.Value -in @(
+                'unicode-bmp',
+                'unicode-supplementary',
+                'unicode-burst',
+                'unicode-cr',
+                'unicode-lf',
+                'unicode-tab',
+                'unicode-backspace',
+                'unicode-escape'
+            )
+    }, $true))
+    if ($keyValues.Count -ne 1) { throw 'Composite key-input run has an ambiguous Unicode scenario.' }
+    [void]$coveredKeyScenarios.Add($keyValues[0].Value)
+}
+$expectedKeyScenarios = @(
+    'a',
+    'unicode-bmp',
+    'unicode-supplementary',
+    'unicode-burst',
+    'unicode-cr',
+    'unicode-lf',
+    'unicode-tab',
+    'unicode-backspace',
+    'unicode-escape'
+)
+if ($keyInputCompositeCalls.Count -ne 9 -or
+    @($compositeSlugs | Sort-Object -Unique).Count -ne 9 -or
+    (Compare-Object $expectedKeyScenarios @($coveredKeyScenarios) -SyncWindow 0)) {
+    throw 'Composite validator must isolate every key-input scenario except space.'
+}
+$invokeHarnessFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $interactiveValidatorAst `
+        -Name 'Invoke-HarnessWithPassSentinel'
+)
+$startHarnessFunctions = @(Get-NamedFunctionDefinitions -Ast $interactiveValidatorAst -Name 'Start-Harness')
+$getHarnessArgumentsFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $interactiveValidatorAst `
+        -Name 'Get-HarnessArguments'
+)
+$invokeStartHarnessCalls = if ($invokeHarnessFunctions.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $invokeHarnessFunctions[0].Body `
+        -Name 'Start-Harness')
+} else {
+    @()
+}
+$startGetHarnessArgumentsCalls = if ($startHarnessFunctions.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $startHarnessFunctions[0].Body `
+        -Name 'Get-HarnessArguments')
+} else {
+    @()
+}
+$invokeAdditionalArguments =
+    if ($invokeStartHarnessCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $invokeStartHarnessCalls[0] `
+            -Name 'AdditionalArguments'
+    }
+$invokeScenarioSlug =
+    if ($invokeStartHarnessCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $invokeStartHarnessCalls[0] `
+            -Name 'ScenarioSlug'
+    }
+$startAdditionalArguments =
+    if ($startGetHarnessArgumentsCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $startGetHarnessArgumentsCalls[0] `
+            -Name 'AdditionalArguments'
+    }
+$startHarnessAssignments = if ($startHarnessFunctions.Count -eq 1) {
+    @($startHarnessFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            (Get-VariableExpressionName -Node $node.Left) -in @('runName', 'stdoutPath', 'stderrPath')
+    }, $true))
+} else {
+    @()
+}
+$startHarnessVariableNames = @('runName', 'stdoutPath', 'stderrPath')
+$startHarnessAssignmentContract = @(
+    foreach ($startHarnessVariableName in $startHarnessVariableNames) {
+        $assignments = @($startHarnessAssignments | Where-Object {
+            (Get-VariableExpressionName -Node $_.Left) -eq
+                $startHarnessVariableName
+        })
+        if ($assignments.Count -ne 1) { $false; continue }
+        if ($startHarnessVariableName -eq 'runName') {
+            Test-InjectiveHarnessRunNameExpression -Node $assignments[0].Right
+            continue
+        }
+        $suffix = if ($startHarnessVariableName -eq 'stdoutPath') {
+            '.stdout.log'
+        } else {
+            '.stderr.log'
+        }
+        Test-DirectJoinPathNameExpression `
+            -Node $assignments[0].Right `
+            -ParentVariable 'suiteLogDir' `
+            -ChildVariable 'runName' `
+            -ChildSuffix $suffix `
+            -Style Format
+    }
+)
+if ($invokeHarnessFunctions.Count -ne 1 -or
+    $startHarnessFunctions.Count -ne 1 -or
+    $getHarnessArgumentsFunctions.Count -ne 1 -or
+    $invokeStartHarnessCalls.Count -ne 1 -or
+    $startGetHarnessArgumentsCalls.Count -ne 1 -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $invokeStartHarnessCalls[0] `
+        -NamedBlock $invokeHarnessFunctions[0].Body.EndBlock) -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $startGetHarnessArgumentsCalls[0] `
+        -NamedBlock $startHarnessFunctions[0].Body.EndBlock) -or
+    (Get-VariableExpressionName -Node $invokeAdditionalArguments) -ne
+        'AdditionalArguments' -or
+    (Get-VariableExpressionName -Node $invokeScenarioSlug) -ne
+        'ScenarioSlug' -or
+    (Get-VariableExpressionName -Node $startAdditionalArguments) -ne
+        'AdditionalArguments' -or
+    @($startHarnessAssignments | Where-Object {
+        -not [object]::ReferenceEquals(
+            $_.Parent,
+            $startHarnessFunctions[0].Body.EndBlock
+        )
+    }).Count -ne 0 -or
+    $startHarnessAssignmentContract.Count -ne
+        $startHarnessVariableNames.Count -or
+    @($startHarnessAssignmentContract | Where-Object { -not $_ }).Count -ne
+        0) {
+    throw 'Composite log paths must derive from each run scenario slug.'
+}
+
+$nativeKeyFilters = @('VK_PACKET', 'deferred char')
+foreach ($nativeKeyFilter in $nativeKeyFilters) {
+    # Zig accepts a zero-match test filter. A narrow declaration check is
+    # appropriate here only to prove that the semantic runner below is nonempty.
+    $nativeKeyDeclarations = [regex]::Matches(
+        $win32RuntimeText,
+        '(?m)^test "win32 ' + [regex]::Escape($nativeKeyFilter) +
+            '[^"\r\n]*" \{$'
+    )
+    if ($nativeKeyDeclarations.Count -lt 1) {
+        throw "$nativeKeyFilter semantic fixture has no matching Zig test declaration."
+    }
+    $nativeKeyFilterArgument = "-Dtest-filter=$nativeKeyFilter"
+    & (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
+        zig build test $nativeKeyFilterArgument
+    if ($LASTEXITCODE -ne 0) {
+        throw "$nativeKeyFilter semantic fixture failed with exit code $LASTEXITCODE."
+    }
+}
+
+if ($termioRuntimeText.Contains('self.surface_mailbox.pushTerminalOutput(buf)') -or
+    -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.begin(') -or
+    -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.finish()') -or
+    -not $termioRuntimeText.Contains('self.terminal_output_transport.captureEpoch()') -or
+    -not $termioRuntimeText.Contains('self.terminal_output_transport.pushSemanticBatchForEpoch(') -or
+    -not $termioRuntimeText.Contains('decision.semantic_output.slice()')) {
+    throw 'Termio must publish parser-derived semantic batches instead of forwarding raw PTY bytes.'
+}
+if ($terminalAccessibilityText.Contains('OutputSanitizer') -or
+    $terminalAccessibilityText.Contains('sanitizeAnnouncementByte') -or
+    $surfaceRuntimeText.Contains('terminal output transport drains inactive split controls without speech')) {
+    throw 'Win32 accessibility cannot retain a second terminal parser or its fake transport parser fixture.'
+}
+$semanticOutputInterestPolicyMatches = [regex]::Matches(
+    $terminalAccessibilityText,
+    '(?ms)^fn semanticOutputInterestPolicy\(\r?\n\s+attached: bool,\r?\n\s+provider_ready: bool,\r?\n\s+focused: bool,\r?\n\) bool \{\r?\n(?<body>.*?)^\}'
+)
+if ($semanticOutputInterestPolicyMatches.Count -ne 1 -or
+    -not $semanticOutputInterestPolicyMatches[0].Groups['body'].Value.Contains(
+        'return attached and provider_ready and focused;'
+    ) -or
+    -not $terminalAccessibilityText.Contains('.emit_events = clients_listening,') -or
+    -not $terminalAccessibilityText.Contains('win32_uia.events.clientsAreListening(),')) {
+    throw 'Semantic output interest must require attachment, provider readiness, and focus while event emission remains listener-gated.'
+}
+
+$semanticPolicyTestMatch = [regex]::Match(
+    $terminalAccessibilityText,
+    '(?ms)^test "terminal accessibility refresh and query policies" \{\r?\n(?<body>.*?)^\}'
+)
+$semanticPolicyAssertions = @(
+    'try std.testing.expect(semanticOutputInterestPolicy(true, true, true));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(true, true, false));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(true, false, true));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(false, true, true));',
+    'try std.testing.expect(!query_only.emit_events);',
+    'try std.testing.expect(subscribed.emit_events);'
+)
+if (-not $semanticPolicyTestMatch.Success) {
+    throw 'Semantic output interest policy has no exact Zig test declaration.'
+}
+foreach ($assertion in $semanticPolicyAssertions) {
+    if (-not $semanticPolicyTestMatch.Groups['body'].Value.Contains($assertion)) {
+        throw "Semantic output interest policy test is missing assertion: $assertion"
+    }
+}
+if (-not $terminalSemanticOutputText.Contains('pub const transport_chunk_bytes = 1_000;') -or
+    -not $terminalSemanticOutputText.Contains('pub const transport_max_chunks = 8;') -or
+    -not $terminalSemanticOutputText.Contains('pub const capacity = transport_chunk_bytes * transport_max_chunks;') -or
+    -not $terminalOutputCaptureText.Contains('pub const capacity = semantic_output.capacity;') -or
+    -not $surfaceRuntimeText.Contains('pub const capacity = semantic_output.capacity;') -or
+    $terminalOutputCaptureText.Contains('recordRepeat') -or
+    $terminalStreamHandlerText.Contains('recordRepeat')) {
+    throw 'Semantic capture and transport must share one 8000-byte capacity and no duplicate REP interface.'
+}
+
+$realParserSemanticFragments = @(
+    'stream.nextSlice("\x1b[3b");',
+    '\x1b[31mright',
+    '\x1b]8;;https://secret.example',
+    '\x1bPqDCS-SECRET',
+    '\x1b[1$}\r\n\thidden\x1b[0$}visible',
+    '\x1b(0`\x1b(B',
+    'before\x1bcafter',
+    'stream.nextSlice("\xcc\x81");'
+)
+foreach ($fragment in $realParserSemanticFragments) {
+    if (-not $terminalStreamHandlerText.Contains($fragment)) {
+        throw "Real-parser semantic fixture is missing executable coverage fragment: $fragment"
+    }
+}
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{
+        $terminalOutputCapture = $terminalOutputCaptureText
+        $terminalStreamHandler = $terminalStreamHandlerText
+    } `
+    -ExpectedNames @(
+        'semantic output capture uninterested fast path',
+        'semantic output capture preserves utf8 and control order',
+        'semantic output finished batch owns bytes across capture reuse',
+        'semantic output full reset discards prior bytes and omission',
+        'semantic output capture retains codepoint-aligned prefix before omission',
+        'semantic output capture explicit partial error omission retains prefix',
+        'semantic output capture follows real stream handler parser'
+    ) `
+    -Filter 'semantic output capture'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $surfaceRuntime = $surfaceRuntimeText } `
+    -ExpectedNames @(
+        'terminal output transport saturation is nonblocking and ordered',
+        'terminal output transport keeps utf8 chunks before batch omission marker',
+        'terminal output transport reentrant callbacks preserve epochs and contention marker',
+        'terminal output transport rejects stale interest epoch without poisoning new epoch',
+        'terminal output transport orders silent reset before post reset data'
+    ) `
+    -Filter 'terminal output transport'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $terminalAccessibility = $terminalAccessibilityText } `
+    -ExpectedNames @(
+        'terminal accessibility refresh and query policies'
+    ) `
+    -Filter 'terminal accessibility refresh and query policies'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $terminalAccessibility = $terminalAccessibilityText } `
+    -ExpectedNames @(
+        'terminal output announcement normalization allocation failure becomes ordered omission'
+    ) `
+    -Filter 'normalization allocation failure becomes ordered omission'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
+    -ExpectedNames @(
+        'TerminalProvider legacy caret compatibility reports no mutable selection'
+    ) `
+    -Filter 'legacy caret compatibility reports no mutable selection'
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
+    -ExpectedNames @(
+        'TerminalTextRangeProvider reports unsupported mutation and scrolling honestly'
+    ) `
+    -Filter 'unsupported mutation and scrolling honestly'
+
+if (-not $win32ThemeText.Contains('const DWMSBT_NONE: u32 = 1;')) {
+    throw 'Win32 theme policy must use the documented DWMSBT_NONE value 1.'
+}
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32Theme = $win32ThemeText } `
+    -ExpectedNames @(
+        'settings window policy explicitly disables system backdrop',
+        'DWM system backdrop constants match Win32 ABI'
+    ) `
+    -Filter 'system backdrop'
+
 $publishedReleaseVerifierTokens = $null
 $publishedReleaseVerifierErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput(
@@ -1034,11 +1980,7 @@ foreach ($file in $cleanupScriptFiles) {
             $text -match '(?i)(?:^|\s)-RequireLiveRoot(?:\s|$)'
             $text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)'
         ).Where({ $_ }).Count
-        # The composite validator is a byte-for-byte frozen baseline artifact.
-        # Mode omission uses Stop-InteractiveWin11Process's fail-closed live-root
-        # default; every mutable caller must state exactly one lifecycle mode.
-        $frozenValidatorDefault = $file.Name -eq 'interactive-win11-validate.ps1' -and $modeCount -eq 0
-        if ((-not $frozenValidatorDefault -and $modeCount -ne 1) -or
+        if ($modeCount -ne 1 -or
             ($text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)' -and $file.Name -ne 'vt-probe-win32-conformance.ps1')) {
             [void]$cleanupContractViolations.Add("$($file.Name):$($command.Extent.StartLineNumber): $text")
         }
@@ -1318,12 +2260,27 @@ $accessibilityUIntPtrConversions = @($accessibilityAst.FindAll({
 if ($accessibilityErrors.Count -ne 0 -or $accessibilityUIntPtrConversions.Count -ne 0) {
     throw 'Accessibility harness must parse and construct nonzero WPARAM values through UIntPtr::new([uint64] ...).'
 }
-$textRangeEndpointReferences = [regex]::Matches(
-    $accessibilityHarnessText,
-    '\[System\.Windows\.Automation\.Text\.TextPatternRangeEndpoint\]::(?:Start|End)'
-)
-if ($textRangeEndpointReferences.Count -ne 4 -or
-    $accessibilityHarnessText -match '\[System\.Windows\.Automation\.TextPatternRangeEndpoint\]') {
+$textRangeEndpointReferences = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $node.Static -and
+        (Get-MemberExpressionName -Node $node) -in @('Start', 'End') -and
+        $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $node.Expression.TypeName.FullName -eq
+            'System.Windows.Automation.Text.TextPatternRangeEndpoint'
+}, $true))
+$wrongTextRangeEndpointReferences = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $node.Static -and
+        (Get-MemberExpressionName -Node $node) -in @('Start', 'End') -and
+        $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $node.Expression.TypeName.Name -eq 'TextPatternRangeEndpoint' -and
+        $node.Expression.TypeName.FullName -ne
+            'System.Windows.Automation.Text.TextPatternRangeEndpoint'
+}, $true))
+if ($textRangeEndpointReferences.Count -ne 6 -or
+    $wrongTextRangeEndpointReferences.Count -ne 0) {
     throw 'Accessibility caret assertions must use the installed UIAutomation Text.TextPatternRangeEndpoint type.'
 }
 if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
@@ -1331,56 +2288,1143 @@ if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
     ([regex]::Matches($accessibilityHarnessText, 'inputs\.Add\(Key\(0, value, KEYEVENTF_UNICODE(?: \| KEYEVENTF_KEYUP)?\)\);')).Count -ne 2) {
     throw 'Accessibility text injection must use layout-independent KEYEVENTF_UNICODE key down/up pairs.'
 }
-$queryOnlyTextPatternContract = [regex]::Match(
-    $accessibilityHarnessText,
-    '(?s)\$queryOnlyPreviousRange = \$textPattern\.DocumentRange.*?RemoveAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent.*?Send-AccessibilityOutputMarker .*?-TextPattern \$textPattern .*?-Marker \$queryOnlyMarker.*?\$script:queryOnlyTextProbe = \$textPattern\.DocumentRange\.GetText\(-1\).*?\$queryOnlyPreviousRange\.GetText\(-1\)\.Contains\(\$queryOnlyMarker\).*?AddAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent'
+$highContrastFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityHighContrastProof'
 )
-if (-not $queryOnlyTextPatternContract.Success) {
-    throw 'Accessibility query-only contract must remove this client handler, request fresh ranges through the retained TextPattern, preserve the prior immutable range, and restore the handler.'
-}
-if ($accessibilityHarnessText -notmatch '\$queryOnlyMarker = "whq\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"' -or
-    $accessibilityHarnessText -notmatch '\$coldQueryMarker = "whc\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"') {
-    throw 'Accessibility query-only markers must remain short enough to avoid viewport soft-wrap false negatives.'
-}
-$outputMarkerInputDrainContract = [regex]::Match(
-    $accessibilityHarnessText,
-    '(?s)function Send-AccessibilityOutputMarker\(.*?SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?\$preEnterText = \$TextPattern\.DocumentRange\.GetText\(-1\).*?Send-AccessibilityChord .*?Enter'
+$highContrastCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityHighContrastProof'
 )
-if (-not $outputMarkerInputDrainContract.Success) {
-    throw 'Accessibility output markers must drain queued Unicode input and reassert focus before the pre-Enter UIA check and Enter.'
+if ($highContrastFunctions.Count -ne 1 -or $highContrastCalls.Count -ne 2) {
+    throw 'Targeted and full accessibility evidence must share one High Contrast proof helper.'
 }
-if ($win32RuntimeText -notmatch 'WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP \+ 6' -or
-    $win32RuntimeText -notmatch 'SendMessageTimeoutW\(\s*hwnd\.\?,\s*WM_WINHOSTTY_UIA_QUERY_REFRESH,\s*1,' -or
-    $win32RuntimeText -notmatch 'refreshTerminalUiaTextWithMode\(wParam != 0\)' -or
-    $win32RuntimeText -notmatch 'if \(!force and !terminalUiaRefreshDue' -or
-    $win32RuntimeText -notmatch 'query_refresh_post_pending\.cmpxchgStrong\(false, true' -or
-    $win32RuntimeText -notmatch 'PostMessageW\(hwnd\.\?, WM_WINHOSTTY_UIA_QUERY_REFRESH' -or
-    $win32RuntimeText -notmatch 'refresh_snapshot = clients_listening_for_events or query_recently_active') {
-    throw 'Terminal UIA polling must use a coalesced query-driven UI-thread refresh and stop snapshots when clients are idle.'
-}
-if ($accessibilityHarnessText -notmatch 'Send-AccessibilityBlindOutputMarker' -or
-    $accessibilityHarnessText -notmatch 'Start-Sleep -Milliseconds 1200' -or
-    $accessibilityHarnessText -notmatch '\$coldQueryFirstText = \$textPattern\.DocumentRange\.GetText\(-1\)' -or
-    $accessibilityHarnessText -notmatch 'cold_query_first_document_range_fresh') {
-    throw 'Accessibility evidence must prove the first TextPattern range after a cold query is fresh without pre-querying.'
-}
-$blindMarkerFunctions = @($accessibilityHarnessAst.FindAll({
+Assert-NoUnreachableStatements `
+    -Ast $highContrastFunctions[0].Body `
+    -Context 'Invoke-AccessibilityHighContrastProof'
+$highContrastRecoveryTries = @($highContrastFunctions[0].Body.FindAll({
     param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq 'Send-AccessibilityBlindOutputMarker'
+    if ($node -isnot [System.Management.Automation.Language.TryStatementAst] -or
+        $null -eq $node.Finally) {
+        return $false
+    }
+    $commands = @($node.Finally.FindAll({
+        param($child)
+        $child -is [System.Management.Automation.Language.CommandAst]
+    }, $true) | ForEach-Object { $_.GetCommandName() })
+    return $commands -contains 'Set-HighContrastState' -and
+        $commands -contains 'Get-HighContrastState' -and
+        $commands -contains 'Write-HighContrastRestoreDiagnostic' -and
+        $commands -contains 'Wait-AccessibilityCondition'
 }, $true))
-if ($blindMarkerFunctions.Count -ne 1) {
-    throw 'Accessibility harness must define exactly one blind output-marker helper.'
+if ($highContrastRecoveryTries.Count -ne 1) {
+    throw 'High Contrast proof must have one fail-closed finally block that restores exact SPI state, verifies recovery boundedly, and writes diagnostics.'
 }
-$blindMarkerBody = $blindMarkerFunctions[0].Body.Extent.Text
-$blindTextPatternReads = @($blindMarkerFunctions[0].Body.FindAll({
+$dwmHighContrastDiagnosticFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $highContrastFunctions[0].Body `
+        -Name 'Get-DwmHighContrastResetDiagnostic'
+)
+if ($dwmHighContrastDiagnosticFunctions.Count -ne 1) {
+    throw 'High Contrast proof must define one pure DWM reset diagnostic.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $dwmHighContrastDiagnosticFunctions[0].Body `
+    -Context 'Get-DwmHighContrastResetDiagnostic'
+. ([scriptblock]::Create($dwmHighContrastDiagnosticFunctions[0].Extent.Text))
+$dwmNames = @(
+    'immersive_dark_20',
+    'immersive_dark_19',
+    'caption_color',
+    'text_color',
+    'backdrop_type'
+)
+$dwmBeforeFixture = [ordered]@{}
+$dwmDuringSuccessFixture = [ordered]@{}
+$dwmDuringFailureFixture = [ordered]@{}
+for ($dwmIndex = 0; $dwmIndex -lt $dwmNames.Count; $dwmIndex++) {
+    $dwmName = $dwmNames[$dwmIndex]
+    $dwmExpected = [uint32]($dwmIndex + 10)
+    $dwmBeforeFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = [uint32]0
+        expected_high_contrast = $dwmExpected
+    }
+    $dwmDuringSuccessFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = $dwmExpected
+        expected_high_contrast = $dwmExpected
+    }
+    $dwmDuringFailureFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = if ($dwmName -eq 'caption_color') {
+            [uint32]($dwmExpected + 1)
+        } else {
+            $dwmExpected
+        }
+        expected_high_contrast = $dwmExpected
+    }
+}
+$dwmSuccessOutputs = @(
+    Get-DwmHighContrastResetDiagnostic `
+        -Before $dwmBeforeFixture `
+        -During $dwmDuringSuccessFixture
+)
+$dwmFailureOutputs = @(
+    Get-DwmHighContrastResetDiagnostic `
+        -Before $dwmBeforeFixture `
+        -During $dwmDuringFailureFixture
+)
+if ($dwmSuccessOutputs.Count -ne 1 -or
+    $dwmSuccessOutputs[0].exact -ne $true -or
+    @($dwmSuccessOutputs[0].failures).Count -ne 0 -or
+    $dwmFailureOutputs.Count -ne 1 -or
+    $dwmFailureOutputs[0].exact -ne $false -or
+    @($dwmFailureOutputs[0].failures).Count -ne 1 -or
+    [string]::IsNullOrWhiteSpace([string]$dwmFailureOutputs[0].failures[0])) {
+    throw 'High Contrast DWM diagnostic must emit one exact success or one shaped failure without stray output.'
+}
+$openSettingsLoops = @($accessibilityHarnessAst.FindAll({
     param($node)
-    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        $node.VariablePath.UserPath -eq 'TextPattern'
+    if ($node -isnot [System.Management.Automation.Language.DoWhileStatementAst]) {
+        return $false
+    }
+    $settingsClassReferences = @($node.Body.FindAll({
+        param($child)
+        $child -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $child.Value -eq 'winghostty.win32.settings'
+    }, $true))
+    return $settingsClassReferences.Count -gt 0 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'TopLevelWindowsForProcess' `
+            -InvocationOnly).Count -ge 2 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'VisibleTerminalChildren' `
+            -InvocationOnly).Count -ge 1 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'SendChord' `
+            -InvocationOnly).Count -ge 1
 }, $true))
-if ($blindTextPatternReads.Count -ne 0 -or
-    $blindMarkerBody -notmatch '(?s)SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?Send-AccessibilityChord .*?Enter') {
-    throw 'Blind output validation must drain queued Unicode before Enter without warming TextPattern.'
+if ($openSettingsLoops.Count -ne 1) {
+    throw 'Settings open recovery must have one owned bounded discovery/recovery loop.'
+}
+$openSettingsLoop = $openSettingsLoops[0]
+$openSettingsFunction = $openSettingsLoop
+while ($null -ne $openSettingsFunction -and
+    $openSettingsFunction -isnot
+        [System.Management.Automation.Language.FunctionDefinitionAst]) {
+    $openSettingsFunction = $openSettingsFunction.Parent
+}
+if ($null -eq $openSettingsFunction) {
+    throw 'Settings open recovery loop must be owned by a function.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $openSettingsFunction.Body `
+    -Context 'Settings open recovery'
+$openSettingsTopLevelQueries = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'TopLevelWindowsForProcess' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$openSettingsIsWindowCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'IsWindow' `
+        -InvocationOnly
+)
+$openSettingsSendChordCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'SendChord' `
+        -InvocationOnly
+)
+$openSettingsSetFocusCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'SetFocus' `
+        -InvocationOnly
+)
+$openSettingsReturns = @($openSettingsLoop.Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ReturnStatementAst]
+}, $true))
+$openSettingsRecoveryBranches = @($openSettingsLoop.Body.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) {
+        return $false
+    }
+    return (Get-NamedMemberExpressions `
+        -Ast $node `
+        -Name 'VisibleTerminalChildren' `
+        -InvocationOnly).Count -ge 1 -and
+        (Get-NamedMemberExpressions `
+        -Ast $node `
+        -Name 'SendChord' `
+        -InvocationOnly).Count -ge 1
+}, $true))
+if ($openSettingsTopLevelQueries.Count -lt 2 -or
+    $openSettingsIsWindowCalls.Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $openSettingsLoop.Body -Name 'FindAll' -InvocationOnly).Count -lt 1 -or
+    (Get-NamedMemberExpressions -Ast $openSettingsLoop.Body -Name 'FocusedWindowFor' -InvocationOnly).Count -lt 2 -or
+    $openSettingsSetFocusCalls.Count -lt 1 -or
+    $openSettingsSendChordCalls.Count -lt 1 -or
+    $openSettingsReturns.Count -lt 1 -or
+    $openSettingsRecoveryBranches.Count -lt 1 -or
+    (Get-NamedCommands -Ast $openSettingsLoop.Body -Name 'Start-Sleep').Count -lt 1 -or
+    $openSettingsSetFocusCalls[0].Extent.StartOffset -gt
+        $openSettingsSendChordCalls[0].Extent.StartOffset) {
+    throw 'Settings open recovery must use one deadline, one chord per zero-window state, terminal focus restoration, and an atomic stable HWND/UIA/section return.'
+}
+$forbiddenThemeApiPattern = '\b(?:DwmSetWindowAttribute|SetWindowTheme)\s*\('
+$themeApiLeaks = @(
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src\apprt') -Filter '*.zig' -File -Recurse |
+        Where-Object { $_.FullName -ne $win32Theme } |
+        ForEach-Object {
+            if ((Get-Content -LiteralPath $_.FullName -Raw) -match $forbiddenThemeApiPattern) {
+                $_.FullName
+            }
+        }
+)
+if ($themeApiLeaks.Count -ne 0) {
+    throw "DWM and native-control theme APIs must remain private to win32_theme.zig: $($themeApiLeaks -join ', ')"
+}
+if ($win32RuntimeText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applyHost\s*\(' -or
+    $win32SettingsText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applySettings\s*\(' -or
+    $win32SettingsText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applyNativeControl\s*\(') {
+    throw 'Win32 host and Settings callers must use the shared WindowThemeAdapter interface.'
+}
+$queryOnlyMarkerCommands = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Send-AccessibilityOutputMarker' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'query-only TextPattern marker'
+        }
+)
+if ($queryOnlyMarkerCommands.Count -ne 1) {
+    throw 'Accessibility query-only contract must have one marker command.'
+}
+$queryOnlyMarkerCommand = $queryOnlyMarkerCommands[0]
+$queryOnlyOwner = Get-ContainingStatementBlock -Node $queryOnlyMarkerCommand
+$queryOnlyTextPatternName = Get-VariableExpressionName -Node (
+    Get-CommandParameterArgument `
+        -Command $queryOnlyMarkerCommand `
+        -Name 'TextPattern'
+)
+$queryOnlyRemoveHandlers = @($queryOnlyOwner.FindAll({
+    param($node)
+    Test-TextChangedHandlerOperation -Node $node -Operation 'Remove'
+}, $true) |
+        Where-Object {
+            $_.Extent.StartOffset -lt $queryOnlyMarkerCommand.Extent.StartOffset -and
+                [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $_),
+                    $queryOnlyOwner
+                )
+        } |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$queryOnlyColdCalls = @(
+    Get-NamedCommands `
+        -Ast $queryOnlyOwner `
+        -Name 'Invoke-AccessibilityColdFirstReadProof' |
+        Where-Object {
+            $_.Extent.StartOffset -gt $queryOnlyMarkerCommand.Extent.StartOffset -and
+                [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $_),
+                    $queryOnlyOwner
+                ) -and
+                (Test-CommandHasStringArgument `
+                    -Command $_ `
+                    -Value 'cold first-read TextPattern marker')
+        } |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$queryOnlyInactiveCalls = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedCommands `
+            -Ast $queryOnlyOwner `
+            -Name 'Invoke-AccessibilityInactiveTabFirstReadProof' |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $queryOnlyOwner
+                    )
+            } |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+} else {
+    @()
+}
+$queryOnlyAddHandlers = if ($queryOnlyInactiveCalls.Count -eq 1) {
+    @($queryOnlyOwner.FindAll({
+        param($node)
+        Test-TextChangedHandlerOperation -Node $node -Operation 'Add'
+    }, $true) |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyInactiveCalls[0].Extent.StartOffset -and
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $queryOnlyOwner
+                    )
+            } |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+} else {
+    @()
+}
+$queryOnlyHandlerPairs = @(
+    foreach ($removeHandler in $queryOnlyRemoveHandlers) {
+        foreach ($addHandler in $queryOnlyAddHandlers) {
+            $removeArguments = @($removeHandler.Arguments)
+            $addArguments = @($addHandler.Arguments)
+            if ((Get-VariableExpressionName -Node $removeArguments[1]) -eq
+                    (Get-VariableExpressionName -Node $addArguments[1]) -and
+                (Get-VariableExpressionName -Node $removeArguments[-1]) -eq
+                    (Get-VariableExpressionName -Node $addArguments[-1])) {
+                [pscustomobject]@{
+                    Remove = $removeHandler
+                    Add = $addHandler
+                }
+            }
+        }
+    }
+)
+$queryOnlyPreviousRangeAssignments = if ($queryOnlyHandlerPairs.Count -eq 1) {
+    @(
+        $queryOnlyOwner.FindAll({
+            param($node)
+            if ($node -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -or
+                $node.Extent.StartOffset -ge
+                    $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -or
+                -not [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $node),
+                    $queryOnlyOwner
+                )) {
+                return $false
+            }
+            return (Get-VariableExpressionName -Node $node.Left) -ne '' -and
+                @(
+                    Get-NamedMemberExpressions `
+                        -Ast $node.Right `
+                        -Name 'DocumentRange' |
+                        Where-Object {
+                            (Get-ExpressionRootVariableName -Node $_) -eq
+                                $queryOnlyTextPatternName
+                        }
+                ).Count -eq 1
+        }, $true) |
+            Sort-Object { $_.Extent.StartOffset } |
+            Select-Object -Last 1
+    )
+} else {
+    @()
+}
+$queryOnlyPreviousRangeName =
+    if ($queryOnlyPreviousRangeAssignments.Count -eq 1) {
+        Get-VariableExpressionName `
+            -Node $queryOnlyPreviousRangeAssignments[0].Left
+    } else {
+        ''
+    }
+$queryOnlyCurrentReads = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $queryOnlyOwner `
+            -Name 'GetText' `
+            -InvocationOnly |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyMarkerCommand.Extent.StartOffset -and
+                $_.Extent.StartOffset -lt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                (Get-ExpressionRootVariableName -Node $_.Expression) -eq
+                    $queryOnlyTextPatternName -and
+                (Get-NamedMemberExpressions `
+                    -Ast $_.Expression `
+                    -Name 'DocumentRange').Count -eq 1
+            }
+    )
+} else {
+    @()
+}
+$queryOnlyPreviousReads = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $queryOnlyOwner `
+            -Name 'GetText' `
+            -InvocationOnly |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyMarkerCommand.Extent.StartOffset -and
+                $_.Extent.StartOffset -lt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                (Get-ExpressionRootVariableName -Node $_.Expression) -eq
+                    $queryOnlyPreviousRangeName
+            }
+    )
+} else {
+    @()
+}
+if ($null -ne $queryOnlyOwner) {
+    Assert-NoUnreachableStatements `
+        -Ast $queryOnlyOwner `
+        -Context 'query-only TextChanged handler ownership'
+}
+if ($null -eq $queryOnlyOwner -or
+    [string]::IsNullOrWhiteSpace($queryOnlyTextPatternName) -or
+    $queryOnlyColdCalls.Count -ne 1 -or
+    $queryOnlyInactiveCalls.Count -ne 1 -or
+    $queryOnlyHandlerPairs.Count -ne 1 -or
+    $queryOnlyPreviousRangeAssignments.Count -ne 1 -or
+    $queryOnlyCurrentReads.Count -ne 1 -or
+    $queryOnlyPreviousReads.Count -ne 1 -or
+    -not (
+        $queryOnlyPreviousRangeAssignments[0].Extent.StartOffset -lt
+            $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -and
+        $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -lt
+            $queryOnlyMarkerCommand.Extent.StartOffset -and
+        $queryOnlyMarkerCommand.Extent.StartOffset -lt
+            $queryOnlyCurrentReads[0].Extent.StartOffset -and
+        $queryOnlyCurrentReads[0].Extent.StartOffset -lt
+            $queryOnlyPreviousReads[0].Extent.StartOffset -and
+        $queryOnlyPreviousReads[0].Extent.StartOffset -lt
+            $queryOnlyColdCalls[0].Extent.StartOffset -and
+        $queryOnlyColdCalls[0].Extent.StartOffset -lt
+            $queryOnlyInactiveCalls[0].Extent.StartOffset -and
+        $queryOnlyInactiveCalls[0].Extent.StartOffset -lt
+            $queryOnlyHandlerPairs[0].Add.Extent.StartOffset
+    )) {
+    throw 'Accessibility query-only contract must own one ordered proof, remove and restore the identical TextChanged event/document/handler triple, refresh the retained TextPattern, and preserve the prior immutable range.'
+}
+$outputMarkerFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Send-AccessibilityOutputMarker'
+)
+if ($outputMarkerFunctions.Count -ne 1) {
+    throw 'Accessibility evidence must define exactly one output-marker input helper.'
+}
+$outputMarkerFunction = $outputMarkerFunctions[0]
+Assert-NoUnreachableStatements `
+    -Ast $outputMarkerFunction.Body `
+    -Context 'Send-AccessibilityOutputMarker'
+$outputMarkerLaunchers = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+$outputMarkerOwnerAssertions = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Assert-AccessibilityInputOwner' |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$outputMarkerUnicodeSends = @(
+    Get-NamedMemberExpressions `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'SendUnicodeText' `
+        -InvocationOnly
+)
+$outputMarkerEchoWaits = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Wait-AccessibilityTerminalCommandEcho'
+)
+$outputMarkerTextReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'GetText' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$outputMarkerEnterSends = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Send-AccessibilityChord'
+)
+$outputMarkerOutputWaits = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Wait-AccessibilityCondition'
+)
+$outputMarkerCleanupTries = @($outputMarkerFunction.Body.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.TryStatementAst] -or
+        $null -eq $node.Finally) {
+        return $false
+    }
+    return (Get-NamedMemberExpressions `
+        -Ast $node.Finally `
+        -Name 'Delete' `
+        -InvocationOnly).Count -eq 1
+}, $true))
+if ($outputMarkerLaunchers.Count -ne 1 -or
+    $outputMarkerOwnerAssertions.Count -ne 2 -or
+    $outputMarkerUnicodeSends.Count -ne 1 -or
+    $outputMarkerEchoWaits.Count -ne 1 -or
+    $outputMarkerTextReads.Count -ne 2 -or
+    $outputMarkerEnterSends.Count -ne 1 -or
+    $outputMarkerOutputWaits.Count -ne 1 -or
+    $outputMarkerCleanupTries.Count -ne 1 -or
+    -not (
+        $outputMarkerLaunchers[0].Extent.StartOffset -lt
+            $outputMarkerOwnerAssertions[0].Extent.StartOffset -and
+        $outputMarkerOwnerAssertions[0].Extent.StartOffset -lt
+            $outputMarkerUnicodeSends[0].Extent.StartOffset -and
+        $outputMarkerUnicodeSends[0].Extent.StartOffset -lt
+            $outputMarkerEchoWaits[0].Extent.StartOffset -and
+        $outputMarkerEchoWaits[0].Extent.StartOffset -lt
+            $outputMarkerTextReads[0].Extent.StartOffset -and
+        $outputMarkerTextReads[0].Extent.StartOffset -lt
+            $outputMarkerOwnerAssertions[1].Extent.StartOffset -and
+        $outputMarkerOwnerAssertions[1].Extent.StartOffset -lt
+            $outputMarkerEnterSends[0].Extent.StartOffset -and
+        $outputMarkerEnterSends[0].Extent.StartOffset -lt
+            $outputMarkerOutputWaits[0].Extent.StartOffset -and
+        $outputMarkerOutputWaits[0].Extent.StartOffset -lt
+            $outputMarkerTextReads[1].Extent.StartOffset
+    )) {
+    throw 'Accessibility output markers must observe the full command, record/recover exact owner immediately before one Enter, and retain diagnostics.'
+}
+$notificationDiagnosticFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityOutputNotificationDiagnostic'
+)
+if ($notificationDiagnosticFunctions.Count -ne 1) {
+    throw 'Accessibility output notification evidence must define one pure diagnostic.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $notificationDiagnosticFunctions[0].Body `
+    -Context 'Get-AccessibilityOutputNotificationDiagnostic'
+. ([scriptblock]::Create($notificationDiagnosticFunctions[0].Extent.Text))
+$notificationRawSuccessFixture = @()
+$notificationRawSuccessFixture += ,([object[]]@(
+    'Other',
+    'ignored',
+    0,
+    'OtherActivity'
+))
+$notificationRawSuccessFixture += ,([object[]]@(
+    'ActionCompleted',
+    'prefix-',
+    2,
+    'TerminalTextOutput'
+))
+$notificationRawSuccessFixture += ,([object[]]@(
+    'ActionCompleted',
+    'MARKER',
+    2,
+    'TerminalTextOutput'
+))
+$notificationSuccessOutputs = @(
+    Get-AccessibilityOutputNotificationDiagnostic `
+        -RawNotificationHistory $notificationRawSuccessFixture `
+        -Marker 'MARKER' `
+        -FocusMismatchPolls 2 `
+        -FocusRecoveryCount 1 `
+        -StolenForegroundHwnds @(41, 42) `
+        -LastForegroundHwnd 43 `
+        -LastFocusedHwnd 44
+)
+$notificationRawFailureFixture = @()
+$notificationRawFailureFixture += ,([object[]]@(
+    'ActionCompleted',
+    'different',
+    2,
+    'TerminalTextOutput'
+))
+$notificationRawFailureFixture += ,([object[]]@(
+    'Other',
+    'MARKER',
+    0,
+    'OtherActivity'
+))
+$notificationFailureOutputs = @(
+    Get-AccessibilityOutputNotificationDiagnostic `
+        -RawNotificationHistory $notificationRawFailureFixture `
+        -Marker 'MARKER'
+)
+$notificationRequiredProperties = @(
+    'raw_notification_history',
+    'notification_history',
+    'notification_text',
+    'matched',
+    'history',
+    'text',
+    'count',
+    'focus_mismatch_polls',
+    'focus_recovery_count',
+    'stolen_foreground_hwnds',
+    'last_foreground_hwnd',
+    'last_focused_hwnd'
+)
+if ($notificationSuccessOutputs.Count -ne 1 -or
+    @($notificationRequiredProperties | Where-Object {
+        $notificationSuccessOutputs[0].PSObject.Properties.Name -notcontains $_
+    }).Count -ne 0 -or
+    @($notificationSuccessOutputs[0].raw_notification_history).Count -ne 3 -or
+    @($notificationSuccessOutputs[0].notification_history).Count -ne 2 -or
+    $notificationSuccessOutputs[0].notification_text -cne 'prefix-MARKER' -or
+    $notificationSuccessOutputs[0].matched -ne $true -or
+    @($notificationSuccessOutputs[0].history).Count -ne 2 -or
+    $notificationSuccessOutputs[0].text -cne 'prefix-MARKER' -or
+    $notificationSuccessOutputs[0].count -ne 2 -or
+    $notificationSuccessOutputs[0].focus_mismatch_polls -ne 2 -or
+    $notificationSuccessOutputs[0].focus_recovery_count -ne 1 -or
+    @($notificationSuccessOutputs[0].stolen_foreground_hwnds).Count -ne 2 -or
+    $notificationSuccessOutputs[0].last_foreground_hwnd -ne 43 -or
+    $notificationSuccessOutputs[0].last_focused_hwnd -ne 44 -or
+    $notificationFailureOutputs.Count -ne 1 -or
+    @($notificationFailureOutputs[0].raw_notification_history).Count -ne 2 -or
+    @($notificationFailureOutputs[0].notification_history).Count -ne 1 -or
+    $notificationFailureOutputs[0].notification_text -cne 'different' -or
+    $notificationFailureOutputs[0].matched -ne $false) {
+    throw 'Accessibility output notification diagnostic must atomically shape raw, matching, text, focus, success, and failure evidence without stray output.'
+}
+$ownedWarmNotificationFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityOwnedOutputNotification'
+)
+$ownedWarmNotificationCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityOwnedOutputNotification'
+)
+$coldFirstReadFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadProof'
+)
+$coldFirstReadCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadProof'
+)
+$coldOwnedNotificationCalls = if ($coldFirstReadFunctions.Count -eq 1) {
+    @($coldFirstReadFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Wait-AccessibilityOwnedOutputNotification'
+    }, $true))
+} else {
+    @()
+}
+$coldCleanupTries = if ($coldFirstReadFunctions.Count -eq 1) {
+    @($coldFirstReadFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally
+    }, $true))
+} else {
+    @()
+}
+if ($ownedWarmNotificationFunctions.Count -ne 1 -or
+    $ownedWarmNotificationCalls.Count -ne 3 -or
+    $coldFirstReadFunctions.Count -ne 1 -or
+    $coldFirstReadCalls.Count -ne 2 -or
+    $coldOwnedNotificationCalls.Count -ne 1 -or
+    $coldCleanupTries.Count -lt 1) {
+    throw 'Warm and cold accessibility evidence must share one owner-aware notification wait, one cold proof, and fail-closed cleanup.'
+}
+. ([scriptblock]::Create($ownedWarmNotificationFunctions[0].Extent.Text))
+function Wait-AccessibilityCondition {
+    param(
+        $Deadline,
+        [string] $Description,
+        [scriptblock] $Condition
+    )
+}
+try {
+    $notificationWaitFixtureProcess =
+        [System.Diagnostics.Process]::GetCurrentProcess()
+    $notificationWaitWithoutDiagnostic = @(
+        Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'optional diagnostic omitted fixture'
+    )
+    $notificationWaitDiagnosticValue = $null
+    $notificationWaitWithDiagnostic = @(
+        Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'optional diagnostic reference fixture' `
+            -Diagnostic ([ref] $notificationWaitDiagnosticValue)
+    )
+    $notificationWaitRejectedScalar = $false
+    try {
+        $null = Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'invalid diagnostic scalar fixture' `
+            -Diagnostic 'not-a-reference'
+    }
+    catch {
+        if ($_.Exception.Message -cne
+            'Diagnostic must be a [ref] value when supplied.') {
+            throw
+        }
+        $notificationWaitRejectedScalar = $true
+    }
+    if ($notificationWaitWithoutDiagnostic.Count -ne 1 -or
+        $notificationWaitWithoutDiagnostic[0].matched -ne $false -or
+        $notificationWaitWithDiagnostic.Count -ne 1 -or
+        $notificationWaitWithDiagnostic[0].matched -ne $false -or
+        $null -eq $notificationWaitDiagnosticValue -or
+        $notificationWaitDiagnosticValue.matched -ne $false -or
+        -not $notificationWaitRejectedScalar) {
+        throw 'Owner-aware notification wait must support omitted and [ref] diagnostics while rejecting scalar diagnostics.'
+    }
+}
+finally {
+    Remove-Item `
+        -LiteralPath Function:\Wait-AccessibilityOwnedOutputNotification `
+        -ErrorAction SilentlyContinue
+    Remove-Item `
+        -LiteralPath Function:\Wait-AccessibilityCondition `
+        -ErrorAction SilentlyContinue
+}
+Assert-NoUnreachableStatements `
+    -Ast $ownedWarmNotificationFunctions[0].Body `
+    -Context 'Wait-AccessibilityOwnedOutputNotification'
+Assert-NoUnreachableStatements `
+    -Ast $coldFirstReadFunctions[0].Body `
+    -Context 'Invoke-AccessibilityColdFirstReadProof'
+$coldReadyWaits = @(
+    Get-NamedCommands `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'Wait-AccessibilityCondition'
+)
+$coldInactivitySleeps = @(
+    Get-NamedCommands `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'Start-Sleep'
+)
+$coldStartCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'StartNotificationCapture' `
+        -InvocationOnly
+)
+$coldStopCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'StopNotificationCapture' `
+        -InvocationOnly
+)
+$coldFinalReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'GetText' `
+        -InvocationOnly
+)
+$coldTriggerWrites = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'WriteAllText' `
+        -InvocationOnly |
+        Where-Object {
+            $_.Arguments.Count -gt 0 -and
+            $_.Arguments[0] -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            ($_.Arguments[0].VariablePath.UserPath -split ':')[-1] -eq
+                'triggerPath' -and
+            $_.Extent.StartOffset -lt
+                $coldOwnedNotificationCalls[0].Extent.StartOffset
+        }
+)
+$coldFailClosedCleanupTries = @(
+    $coldCleanupTries |
+        Where-Object {
+            (Get-NamedMemberExpressions `
+                -Ast $_.Finally `
+                -Name 'StopNotificationCapture' `
+                -InvocationOnly).Count -eq 1 -and
+            (Get-NamedMemberExpressions `
+                -Ast $_.Finally `
+                -Name 'Delete' `
+                -InvocationOnly).Count -eq 1
+        }
+)
+if ($coldReadyWaits.Count -ne 1 -or
+    $coldInactivitySleeps.Count -ne 1 -or
+    $coldStartCaptures.Count -ne 1 -or
+    $coldStopCaptures.Count -ne 1 -or
+    $coldFinalReads.Count -ne 1 -or
+    (Get-ExpressionRootVariableName -Node $coldFinalReads[0].Expression) -ne
+        'TextPattern' -or
+    (Get-NamedMemberExpressions -Ast $coldFinalReads[0].Expression -Name 'DocumentRange').Count -ne 1 -or
+    $coldTriggerWrites.Count -ne 1 -or
+    $coldFailClosedCleanupTries.Count -ne 1 -or
+    -not (
+        $coldStartCaptures[0].Extent.StartOffset -lt
+            $coldReadyWaits[0].Extent.StartOffset -and
+        $coldReadyWaits[0].Extent.StartOffset -lt
+            $coldInactivitySleeps[0].Extent.StartOffset -and
+        $coldInactivitySleeps[0].Extent.StartOffset -lt
+            $coldTriggerWrites[0].Extent.StartOffset -and
+        $coldTriggerWrites[0].Extent.StartOffset -lt
+            $coldOwnedNotificationCalls[0].Extent.StartOffset -and
+        $coldOwnedNotificationCalls[0].Extent.StartOffset -lt
+            $coldFinalReads[0].Extent.StartOffset
+    )) {
+    throw 'Cold first-read proof must establish readiness and query inactivity, trigger output, observe owned notification evidence, then perform its sole TextPattern read with fail-closed capture cleanup.'
+}
+$ownedDiagnosticCalls = @(
+    Get-NamedCommands `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'Get-AccessibilityOutputNotificationDiagnostic'
+)
+$ownedRawHistorySnapshots = @(
+    Get-NamedMemberExpressions `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'NotificationHistorySnapshot'
+)
+$ownedDiagnosticValueAssignments = @(
+    Get-NamedMemberExpressions `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'Value' |
+        Where-Object {
+            (Get-ExpressionRootVariableName -Node $_) -eq 'diagnosticState' -and
+            $_.Parent -is
+                [System.Management.Automation.Language.AssignmentStatementAst] -and
+            [object]::ReferenceEquals($_.Parent.Left, $_)
+        }
+)
+if ($ownedDiagnosticCalls.Count -ne 3 -or
+    $ownedRawHistorySnapshots.Count -ne 2 -or
+    $ownedDiagnosticValueAssignments.Count -ne 2 -or
+    (Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Wait-AccessibilityCondition').Count -ne 1 -or
+    (Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Where-Object').Count -ne 0) {
+    throw 'Owner-aware output notification wait must recompute one atomic diagnostic from raw capture history on every poll and failure.'
+}
+$inactiveTabFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityInactiveTabFirstReadProof'
+)
+$inactiveTabCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityInactiveTabFirstReadProof'
+)
+$inactiveCleanupTries = if ($inactiveTabFunctions.Count -eq 1) {
+    @($inactiveTabFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally
+    }, $true))
+} else {
+    @()
+}
+if ($inactiveTabFunctions.Count -ne 1 -or
+    $inactiveTabCalls.Count -ne 2 -or
+    $inactiveCleanupTries.Count -lt 1) {
+    throw 'Targeted and full evidence must share one inactive-tab proof with fail-closed cleanup.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $inactiveTabFunctions[0].Body `
+    -Context 'Invoke-AccessibilityInactiveTabFirstReadProof'
+$inactiveAckWaits = @(
+    Get-NamedCommands `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'Wait-AccessibilityCondition' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'inactive-output external ack'
+        }
+)
+$inactiveQuietLoops = @($inactiveTabFunctions[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.DoWhileStatementAst] -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'IsWindowResponsive' `
+            -InvocationOnly).Count -eq 1 -and
+        (Get-NamedCommands `
+            -Ast $node.Body `
+            -Name 'Get-AccessibilityOutputNotificationDiagnostic').Count -eq 1
+}, $true))
+$inactiveStartCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'StartNotificationCapture' `
+        -InvocationOnly
+)
+$inactiveStopCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'StopNotificationCapture' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$inactiveFirstReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'GetText' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+if ($inactiveAckWaits.Count -ne 1 -or
+    $inactiveQuietLoops.Count -ne 1 -or
+    $inactiveStartCaptures.Count -ne 1 -or
+    $inactiveStopCaptures.Count -ne 2 -or
+    $inactiveFirstReads.Count -ne 1) {
+    throw 'Inactive-tab proof must define one ACK, quiet loop, capture lifetime, and first refocused TextPattern read.'
+}
+$inactiveNormalStop = @(
+    $inactiveStopCaptures |
+        Where-Object {
+            $_.Extent.StartOffset -gt $inactiveQuietLoops[0].Extent.EndOffset -and
+            $_.Extent.StartOffset -lt $inactiveFirstReads[0].Extent.StartOffset
+        }
+)
+$inactiveQuietBody = $inactiveQuietLoops[0].Body
+$inactiveFinalDiagnosticAssignments = if ($inactiveNormalStop.Count -eq 1) {
+    @($inactiveTabFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Extent.StartOffset -gt $inactiveQuietLoops[0].Extent.EndOffset -and
+            $node.Extent.StartOffset -lt $inactiveNormalStop[0].Extent.StartOffset -and
+            (Get-NamedCommands `
+                -Ast $node.Right `
+                -Name 'Get-AccessibilityOutputNotificationDiagnostic').Count -eq 1 -and
+            (Get-NamedMemberExpressions `
+                -Ast $node.Right `
+                -Name 'NotificationHistorySnapshot').Count -eq 1
+    }, $true))
+} else {
+    @()
+}
+$inactiveFinalDiagnosticName =
+    if ($inactiveFinalDiagnosticAssignments.Count -eq 1) {
+        Get-VariableExpressionName `
+            -Node $inactiveFinalDiagnosticAssignments[0].Left
+    } else {
+        ''
+    }
+$inactiveFinalMatchedGuards = if ($inactiveNormalStop.Count -eq 1 -and
+    -not [string]::IsNullOrWhiteSpace($inactiveFinalDiagnosticName)) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $inactiveTabFunctions[0].Body `
+            -Name 'matched' |
+            Where-Object {
+                if ((Get-ExpressionRootVariableName -Node $_) -ne
+                    $inactiveFinalDiagnosticName -or
+                    $_.Extent.StartOffset -le
+                        $inactiveFinalDiagnosticAssignments[0].Extent.EndOffset -or
+                    $_.Extent.StartOffset -ge
+                        $inactiveNormalStop[0].Extent.StartOffset) {
+                    return $false
+                }
+                $guard = $_
+                while ($null -ne $guard -and
+                    $guard -isnot
+                        [System.Management.Automation.Language.IfStatementAst]) {
+                    $guard = $guard.Parent
+                }
+                return $null -ne $guard -and
+                    @($guard.FindAll({
+                        param($node)
+                        $node -is
+                            [System.Management.Automation.Language.ThrowStatementAst]
+                    }, $true)).Count -ge 1
+            }
+    )
+} else {
+    @()
+}
+$inactiveBoundaryConsecutive = $false
+if ($inactiveFinalDiagnosticAssignments.Count -eq 1 -and
+    $inactiveFinalMatchedGuards.Count -eq 1 -and
+    $inactiveNormalStop.Count -eq 1) {
+    $inactiveBoundaryOwner =
+        Get-ContainingStatementBlock `
+            -Node $inactiveFinalDiagnosticAssignments[0]
+    $inactiveBoundaryAssignmentStatement =
+        Get-DirectStatementBlockChild `
+            -Node $inactiveFinalDiagnosticAssignments[0] `
+            -StatementBlock $inactiveBoundaryOwner
+    $inactiveBoundaryGuardStatement =
+        $inactiveFinalMatchedGuards[0]
+    while ($null -ne $inactiveBoundaryGuardStatement -and
+        $inactiveBoundaryGuardStatement -isnot
+            [System.Management.Automation.Language.IfStatementAst]) {
+        $inactiveBoundaryGuardStatement =
+            $inactiveBoundaryGuardStatement.Parent
+    }
+    $inactiveBoundaryStopStatement =
+        Get-DirectStatementBlockChild `
+            -Node $inactiveNormalStop[0] `
+            -StatementBlock $inactiveBoundaryOwner
+    $inactiveBoundaryStatements = @($inactiveBoundaryOwner.Statements)
+    $inactiveBoundaryAssignmentIndex = -1
+    $inactiveBoundaryGuardIndex = -1
+    $inactiveBoundaryStopIndex = -1
+    for ($index = 0; $index -lt $inactiveBoundaryStatements.Count; $index++) {
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryAssignmentStatement
+        )) {
+            $inactiveBoundaryAssignmentIndex = $index
+        }
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryGuardStatement
+        )) {
+            $inactiveBoundaryGuardIndex = $index
+        }
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryStopStatement
+        )) {
+            $inactiveBoundaryStopIndex = $index
+        }
+    }
+    $inactiveBoundaryConsecutive =
+        $inactiveBoundaryAssignmentIndex -ge 0 -and
+        $inactiveBoundaryGuardIndex -eq
+            ($inactiveBoundaryAssignmentIndex + 1) -and
+        $inactiveBoundaryStopIndex -eq
+            ($inactiveBoundaryGuardIndex + 1)
+}
+if ($inactiveNormalStop.Count -ne 1 -or
+    $inactiveFinalDiagnosticAssignments.Count -ne 1 -or
+    $inactiveFinalMatchedGuards.Count -ne 1 -or
+    -not $inactiveBoundaryConsecutive -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'Refresh' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'IsWindowResponsive' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'NotificationHistorySnapshot').Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'FocusedWindowFor' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'matched').Count -ne 1 -or
+    (Get-NamedCommands -Ast $inactiveQuietBody -Name 'Start-Sleep').Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'GetText' -InvocationOnly).Count -ne 0 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'DocumentRange').Count -ne 0 -or
+    -not (
+        $inactiveStartCaptures[0].Extent.StartOffset -lt
+            $inactiveAckWaits[0].Extent.StartOffset -and
+        $inactiveAckWaits[0].Extent.StartOffset -lt
+            $inactiveQuietLoops[0].Extent.StartOffset -and
+        $inactiveQuietLoops[0].Extent.EndOffset -lt
+            $inactiveFinalDiagnosticAssignments[0].Extent.StartOffset -and
+        $inactiveFinalDiagnosticAssignments[0].Extent.StartOffset -lt
+            $inactiveFinalMatchedGuards[0].Extent.StartOffset -and
+        $inactiveFinalMatchedGuards[0].Extent.StartOffset -lt
+            $inactiveNormalStop[0].Extent.StartOffset -and
+        $inactiveNormalStop[0].Extent.StartOffset -lt
+            $inactiveFirstReads[0].Extent.StartOffset
+    )) {
+    throw 'Inactive-tab proof must keep capture active through a bounded marker-free responsive quiet interval, reject one final fresh snapshot immediately before capture stop, and perform zero TextPattern reads before the first refocused read.'
+}
+$tempLauncherFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+$tempLauncherCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+if ($tempLauncherFunctions.Count -ne 1 -or $tempLauncherCalls.Count -ne 3) {
+    throw 'Warm, cold, and inactive evidence must share one temporary CMD launcher factory.'
+}
+$commandEchoFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityTerminalCommandEcho'
+)
+if ($commandEchoFunctions.Count -ne 1) {
+    throw 'Terminal command echo gating must define one helper.'
+}
+$commandEchoFunction = $commandEchoFunctions[0]
+Assert-NoUnreachableStatements `
+    -Ast $commandEchoFunction.Body `
+    -Context 'Wait-AccessibilityTerminalCommandEcho'
+$commandEchoLoops = @($commandEchoFunction.Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.DoWhileStatementAst]
+}, $true))
+$commandEchoGetTextCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $commandEchoFunction.Body `
+        -Name 'GetText' `
+        -InvocationOnly
+)
+$commandEchoFullCommandContains = @(
+    Get-NamedMemberExpressions `
+        -Ast $commandEchoFunction.Body `
+        -Name 'Contains' `
+        -InvocationOnly |
+        Where-Object {
+            @($_.Arguments | Where-Object {
+                $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    ($_.VariablePath.UserPath -split ':')[-1] -eq 'Command'
+            }).Count -eq 1
+        }
+)
+$commandEchoForbiddenInputCalls = @(
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $commandEchoFunction.Body `
+            -Name 'SendUnicodeText' `
+            -InvocationOnly
+    ) + @(
+        Get-NamedMemberExpressions `
+            -Ast $commandEchoFunction.Body `
+            -Name 'SendChord' `
+            -InvocationOnly
+    ) + @(
+        Get-NamedCommands `
+            -Ast $commandEchoFunction.Body `
+            -Name 'Send-AccessibilityChord'
+    )
+)
+if ($commandEchoLoops.Count -ne 1 -or
+    $commandEchoGetTextCalls.Count -ne 1 -or
+    $commandEchoGetTextCalls[0].Extent.StartOffset -lt
+        $commandEchoLoops[0].Extent.StartOffset -or
+    $commandEchoGetTextCalls[0].Extent.EndOffset -gt
+        $commandEchoLoops[0].Extent.EndOffset -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'GetForegroundWindow' -InvocationOnly).Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'FocusedWindowFor' -InvocationOnly).Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'ForceForeground' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'FromHandle' -InvocationOnly).Count -ne 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'SetFocus' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'TryGetCurrentPattern' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'Replace' -InvocationOnly).Count -lt 4 -or
+    $commandEchoFullCommandContains.Count -ne 1 -or
+    (Get-NamedCommands -Ast $commandEchoFunction.Body -Name 'Get-AccessibilityExceptionHResults').Count -ne 1 -or
+    (Get-NamedCommands -Ast $commandEchoFunction.Body -Name 'Test-AccessibilityTransientHResult').Count -ne 1 -or
+    $commandEchoForbiddenInputCalls.Count -ne 0) {
+    throw 'Terminal command echo gating must require the full normalized command, recover exact host/terminal focus without resending input, poll TextPattern, and reacquire transient providers.'
 }
 $stressBoundaryContract = [regex]::Match(
     $accessibilityHarnessText,
@@ -1417,11 +3461,147 @@ if ($accessibilityHarnessText -notmatch 'docked search query UIA focus''[\s\S]*?
     $accessibilityHarnessText -match 'docked search query UIA focus''[\s\S]{0,1200}?\$searchQueryEdit\.SetFocus\(\)') {
     throw 'Accessibility docked-search recovery must prove native query focus before restoring only foreground ownership.'
 }
-if ($accessibilityHarnessText -notmatch 'settings section focus and selection ownership''[\s\S]*?\$sectionNativeFocusBeforeRecovery -ne \$focusSectionHwnd[\s\S]*?ForceForeground\(\$settingsHwnd\)' -or
-    $accessibilityHarnessText -match 'settings section focus and selection ownership''[\s\S]{0,1200}?\$focusSection\.SetFocus\(\)' -or
+$settingsFocusWaits = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityCondition' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings section focus and selection ownership'
+        }
+)
+$settingsFocusContract = $false
+if ($settingsFocusWaits.Count -eq 1) {
+    $settingsFocusCondition =
+        Get-CommandParameterArgument `
+            -Command $settingsFocusWaits[0] `
+            -Name 'Condition'
+    if ($settingsFocusCondition -is
+        [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        $settingsFocusBody = $settingsFocusCondition.ScriptBlock.EndBlock
+        $settingsFocusWaitOwner =
+            Get-ContainingStatementBlock -Node $settingsFocusWaits[0]
+        $settingsFocusForegroundBranches = @($settingsFocusBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (Get-NamedMemberExpressions `
+                    -Ast $node.Clauses[0].Item1 `
+                    -Name 'GetForegroundWindow' `
+                    -InvocationOnly).Count -ge 1 -and
+                (Get-NamedMemberExpressions `
+                    -Ast $node.Clauses[0].Item2 `
+                    -Name 'ForceForeground' `
+                    -InvocationOnly).Count -ge 1
+        }, $true))
+        $settingsFocusSetFocusCalls = @(
+            Get-NamedMemberExpressions `
+                -Ast $settingsFocusBody `
+                -Name 'SetFocus' `
+                -InvocationOnly |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $settingsFocusWaitOwner
+                    )
+                }
+        )
+        $settingsFocusSelectCalls = @(
+            Get-NamedMemberExpressions `
+                -Ast $settingsFocusBody `
+                -Name 'Select' `
+                -InvocationOnly |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $settingsFocusWaitOwner
+                    )
+                }
+        )
+        if ($settingsFocusForegroundBranches.Count -eq 1 -and
+            $settingsFocusSetFocusCalls.Count -eq 1 -and
+            $settingsFocusSelectCalls.Count -eq 1) {
+            $settingsFocusForegroundBranch =
+                $settingsFocusForegroundBranches[0]
+            $settingsFocusForceCalls = @(
+                Get-NamedMemberExpressions `
+                    -Ast $settingsFocusForegroundBranch.Clauses[0].Item2 `
+                    -Name 'ForceForeground' `
+                    -InvocationOnly
+            )
+            $settingsFocusFalseReturns =
+                @($settingsFocusForegroundBranch.Clauses[0].Item2.FindAll({
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.ReturnStatementAst] -and
+                        @($node.FindAll({
+                            param($child)
+                            $child -is
+                                [System.Management.Automation.Language.VariableExpressionAst] -and
+                                (Get-VariableExpressionName -Node $child) -eq
+                                    'false'
+                        }, $true)).Count -eq 1
+                }, $true))
+            $settingsFocusPostconditions = @(
+                Get-NamedMemberExpressions `
+                    -Ast $settingsFocusBody `
+                    -Name 'FocusedWindowFor' `
+                    -InvocationOnly |
+                    Where-Object {
+                        $_.Extent.StartOffset -gt
+                            $settingsFocusSelectCalls[0].Extent.StartOffset -and
+                            [object]::ReferenceEquals(
+                                (Get-ContainingStatementBlock -Node $_),
+                                $settingsFocusWaitOwner
+                            )
+                    }
+            )
+            $settingsFocusHwndName =
+                if ($settingsFocusForceCalls.Count -eq 1 -and
+                    $settingsFocusForceCalls[0].Arguments.Count -eq 1) {
+                    Get-VariableExpressionName `
+                        -Node $settingsFocusForceCalls[0].Arguments[0]
+                } else {
+                    ''
+                }
+            $settingsFocusConditionVariableNames = @(
+                $settingsFocusForegroundBranch.Clauses[0].Item1.FindAll({
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.VariableExpressionAst]
+                }, $true) |
+                    ForEach-Object { Get-VariableExpressionName -Node $_ }
+            )
+            $settingsFocusPostconditionHwndName =
+                if ($settingsFocusPostconditions.Count -eq 1 -and
+                    $settingsFocusPostconditions[0].Arguments.Count -eq 1) {
+                    Get-VariableExpressionName `
+                        -Node $settingsFocusPostconditions[0].Arguments[0]
+                } else {
+                    ''
+                }
+            $settingsFocusContract =
+                $settingsFocusFalseReturns.Count -eq 1 -and
+                -not [string]::IsNullOrWhiteSpace($settingsFocusHwndName) -and
+                $settingsFocusConditionVariableNames -contains
+                    $settingsFocusHwndName -and
+                $settingsFocusPostconditionHwndName -eq
+                    $settingsFocusHwndName -and
+                $settingsFocusForceCalls[0].Extent.StartOffset -lt
+                    $settingsFocusFalseReturns[0].Extent.StartOffset -and
+                $settingsFocusForegroundBranch.Extent.EndOffset -lt
+                    $settingsFocusSetFocusCalls[0].Extent.StartOffset -and
+                $settingsFocusSetFocusCalls[0].Extent.StartOffset -lt
+                    $settingsFocusSelectCalls[0].Extent.StartOffset -and
+                $settingsFocusSelectCalls[0].Extent.StartOffset -lt
+                    $settingsFocusPostconditions[0].Extent.StartOffset
+        }
+    }
+}
+if (-not $settingsFocusContract -or
     $accessibilityHarnessText -notmatch 'ForceForeground\(\$ownerSettingsHwnd\)[\s\S]*?PostMessageW\(\s*\$ownerSettingsHwnd[\s\S]*?settings conservative dirty-close focus' -or
     $accessibilityHarnessText -match 'settings conservative dirty-close focus''[\s\S]{0,900}?(ForceForeground|SetFocus)\(') {
-    throw 'Accessibility settings evidence must validate focus without repairing the exact target under test.'
+    throw 'Accessibility settings focus evidence must restore only foreground ownership before retrying UIA target focus and selection.'
 }
 if ($accessibilityHarnessText -notmatch 'settings destruction and terminal focus restoration after idle soak''[\s\S]*?\$script:idleRestoreForegroundHwnd -eq \$idleTerminalHostHwnd[\s\S]*?\$script:idleRestoreFocusedHwnd -eq \$leftPane\.Hwnd' -or
     $accessibilityHarnessText -match 'settings destruction and terminal focus restoration after idle soak''[\s\S]{0,1000}?ForceForeground\(') {
@@ -1452,6 +3632,21 @@ Assert-TextContract `
     -Pattern '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(.*?SMTO_BLOCK \| SMTO_ABORTIFHUNG.*?settings_selection_timeout_ms.*?UIA_E_ELEMENTNOTAVAILABLE.*?fn Select\(p: \*com\.ISelectionItemProvider\).*?const result = sendButtonClicked\(self\.hwnd\).*?if \(!self\.available\(\)\).*?self\.isSelected\(\)' `
     -Description 'settings section selection is synchronous, bounded, and postcondition checked' `
     -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32UiaWidgetsText `
+    -Pattern '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(.*?WM_COMMAND.*?@bitCast\(@intFromPtr\(hwnd\)\).*?fn Select\(p: \*com\.ISelectionItemProvider\).*?sendButtonClicked\(self\.hwnd\)' `
+    -Description 'settings SelectionItem Select routes the real child source HWND synchronously to the UI thread' `
+    -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn validatedSectionClickFocusTarget\(source: \?HWND, expected: \?HWND\).*?source_hwnd == expected_hwnd.*?if \(clickedSection\(id, notify\)\) \|section\|.*?validatedSectionClickFocusTarget\(.*?o\.sectionButton\(section\).*?_ = SetFocus\(button\);.*?o\.setActiveSection\(section\);' `
+    -Description 'validated section clicks focus the real child on the UI thread before activation' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn settingsSectionButtonProc.*?if \(msg == WM_SETFOCUS\).*?provider\.raiseFocusChanged\(\)' `
+    -Description 'real section child WM_SETFOCUS publishes the matching UIA focus event' `
+    -Context $win32Settings
 Assert-TextContract `
     -Content $win32UiaWidgetsText `
     -Pattern '(?s)fn hwndHasKeyboardFocus\(hwnd: com\.HWND\).*?GetWindowThreadProcessId\(hwnd, null\).*?GetGUIThreadInfo\(thread_id, &info\).*?IsChild\(hwnd, focused\).*?pub fn raiseFocusChanged\(self: \*SettingsControlProvider\).*?events\.raiseFocusChanged\(&self\.base\).*?UIA_HasKeyboardFocusPropertyId.*?hwndHasKeyboardFocus\(self\.hwnd\).*?pub fn raiseFocusChanged\(self: \*SettingsSectionProvider\)' `
@@ -1532,6 +3727,103 @@ Assert-TextContract `
     -Pattern '(?s)Invoke-AccessibilitySettingsCloseAction.*?-ActionName ''Save and close''.*?settings save-and-close completion.*?settings persisted config bytes.*?settings persistence verifier.*?Save and close did not survive a same-sandbox process relaunch.*?settings persistence baseline restoration.*?save_and_close_invoked.*?persisted_after_process_relaunch.*?original_value_restored' `
     -Description 'accessibility evidence invokes Save and close, proves same-sandbox process persistence, and restores the baseline' `
     -Context $accessibilityHarness
+$themePersistenceFunctionNames = @(
+    'Get-AccessibilityThemeProbe',
+    'Set-AccessibilityThemeIndex',
+    'Get-AccessibilityDwmUInt'
+)
+foreach ($functionName in $themePersistenceFunctionNames) {
+    if (@(Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name $functionName).Count -ne 1) {
+        throw "Theme persistence evidence must define exactly one $functionName helper."
+    }
+}
+$themePersistenceVerifierCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityThemeProbe' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings persistence verifier'
+        }
+)
+$themePersistenceSelectionCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Set-AccessibilityThemeIndex' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings save probe Dark selection'
+        }
+)
+$themePersistenceDwmCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityDwmUInt' |
+        Where-Object {
+            $description = Get-CommandParameterArgument `
+                -Command $_ `
+                -Name 'Description'
+            $description -is
+                    [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $description.Value -in @('fresh Dark host', 'fresh Dark Settings')
+        }
+)
+$themePersistenceDwmAttributes = @(
+    $themePersistenceDwmCalls |
+        ForEach-Object {
+            $argument = Get-CommandParameterArgument -Command $_ -Name 'Attribute'
+            if ($argument -isnot
+                [System.Management.Automation.Language.ConstantExpressionAst]) {
+                throw 'Fresh Dark DWM persistence attributes must be static integers.'
+            }
+            [int]$argument.Value
+        } |
+        Sort-Object
+)
+$themePersistenceStringValues = @(
+    $accessibilityHarnessAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst]
+    }, $true) |
+        ForEach-Object { $_.Value }
+)
+$themePersistenceEvidenceKeys = @(
+    'persistence_theme_config_dark',
+    'persistence_theme_fresh_process_index',
+    'persistence_theme_dark_settings_pixel',
+    'persistence_theme_dark_host_pixel',
+    'persistence_theme_host_dwm_dark',
+    'persistence_theme_settings_dwm_dark',
+    'persistence_theme_host_backdrop',
+    'persistence_theme_settings_backdrop',
+    'persistence_theme_restored'
+)
+$themeSelectionIndex = if ($themePersistenceSelectionCalls.Count -eq 1) {
+    Get-CommandParameterArgument `
+        -Command $themePersistenceSelectionCalls[0] `
+        -Name 'Index'
+}
+if ($themePersistenceVerifierCalls.Count -ne 1 -or
+    $themePersistenceSelectionCalls.Count -ne 1 -or
+    $themeSelectionIndex -isnot
+        [System.Management.Automation.Language.ConstantExpressionAst] -or
+    [int]$themeSelectionIndex.Value -ne 3 -or
+    $themePersistenceDwmCalls.Count -ne 4 -or
+    (Compare-Object `
+        -ReferenceObject @(20, 20, 38, 38) `
+        -DifferenceObject $themePersistenceDwmAttributes `
+        -SyncWindow 0).Count -ne 0 -or
+    $themePersistenceStringValues -notcontains
+        '(?m)^window-theme\s*=\s*dark\s*$' -or
+    @($themePersistenceEvidenceKeys | Where-Object {
+        $themePersistenceStringValues -notcontains $_
+    }).Count -ne 0) {
+    throw 'Theme persistence evidence must save Dark, relaunch, verify exact visual/DWM state, and restore its baseline.'
+}
 Assert-TextContract `
     -Content $accessibilityHarnessText `
     -Pattern '(?s)function Start-AccessibilityProcessWithEnvironment.*?\$baseline = \[ordered\]@\{\}.*?SetEnvironmentVariable\(.*?try \{.*?Start-Process.*?finally \{.*?\$baseline\.GetEnumerator\(\).*?SetEnvironmentVariable\(.*?settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout.*?settingsProbeEnvironment = Get-InteractiveWin11Environment.*?sandboxConfigPath = Join-Path \$settingsPersistenceLayout\.LocalAppData.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveProbeArguments.*?-EnvironmentVariables \$settingsProbeEnvironment.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveVerifyArguments.*?-EnvironmentVariables \$settingsProbeEnvironment' `
