@@ -1873,6 +1873,22 @@ function Test-DynamicScriptTypeExpression {
         (Test-DynamicScriptTypeName -TypeName $Node.TypeName.FullName)
 }
 
+function Test-StrictReleaseStateTypeName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
+
+    $typeName = ((($TypeName -split ',', 2)[0] -replace '\s', '')).ToLowerInvariant()
+    return $typeName -in @(
+        'powershell',
+        'system.management.automation.powershell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'system.management.automation.runspaces.runspace',
+        'system.management.automation.runspaces.runspacefactory',
+        'system.management.automation.runspaces.initialsessionstate'
+    )
+}
+
 function Test-ExecutionContextRoot {
     param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
 
@@ -1918,6 +1934,16 @@ function Test-CommandResolutionMutationNode {
         [switch] $StrictReleaseContract
     )
 
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (Test-StrictReleaseStateTypeName -TypeName $Node.TypeName.FullName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        (Test-StrictReleaseStateTypeName -TypeName $Node.Value)) {
+        return $true
+    }
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
         (($Node.Type.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Child -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
@@ -1970,6 +1996,13 @@ function Test-CommandResolutionMutationNode {
         }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ($StrictReleaseContract -and
+            $memberName -in @(
+                'DefaultRunspace', 'SessionStateProxy',
+                'SetVariable', 'GetVariable', 'RemoveVariable'
+            )) {
+            return $true
+        }
         if ($StrictReleaseContract -and
             $Node -is
                 [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
@@ -2221,6 +2254,30 @@ $strictOnlyCommandProbes += @(
         'CreateDelegate', 'CreateInstance',
         'MakeGenericMethod', 'MakeGenericType'
     ) | ForEach-Object { '$value.' + $_ + '()' }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'powershell',
+        'System.Management.Automation.PowerShell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'System.Management.Automation.Runspaces.Runspace',
+        'System.Management.Automation.Runspaces.RunspaceFactory',
+        'System.Management.Automation.Runspaces.InitialSessionState'
+    ) | ForEach-Object {
+        "'$_'"
+        "[$_]::Name"
+    }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'DefaultRunspace',
+        'SessionStateProxy',
+        'SetVariable',
+        'GetVariable',
+        'RemoveVariable'
+    ) | ForEach-Object { '$value.' + $_ }
 )
 foreach ($probeText in $strictOnlyCommandProbes) {
     $probeTokens = $null
@@ -6663,6 +6720,15 @@ $payload = $createMethod.Invoke($null, @('Set-Variable -Scope 1 -Name preflightA
 $payload.Invoke()
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'DefaultRunspace state proxy mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
 }
 foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
     if (Test-NamedReleasePreflightSplat `
@@ -6958,6 +7024,11 @@ $invalidSuccessSourceMutants = @{
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
             "`$scriptBlockType = {}.GetType()`n`$createMethod = `$scriptBlockType.GetMethod('Create', [type[]]@([string]))`n`$payload = `$createMethod.Invoke(`$null, @('Set-Variable -Scope 1 -Name matching -Value @()'))`n`$payload.Invoke()`n$matchingCountTarget"
+        )
+    'DefaultRunspace state proxy mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('matching', @(`$otherRun))`n$matchingCountTarget"
         )
     'stored provider path Set-Item mutation' =
         $releaseInteractiveEvidenceScript.Replace(
