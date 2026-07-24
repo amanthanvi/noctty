@@ -607,12 +607,7 @@ function Test-ReleaseInteractiveSuccessPredicates {
                     [System.Management.Automation.Language.VariableExpressionAst] -and
                 (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
                     'runsJson'
-        }, $true) |
-            Where-Object {
-                Test-DirectNamedBlockChild `
-                    -Node $_ `
-                    -NamedBlock $ast.EndBlock
-            }
+        }, $true)
     )
     if ($runsJsonAssignments.Count -ne 1 -or
         -not [object]::ReferenceEquals(
@@ -645,14 +640,12 @@ function Test-ReleaseInteractiveSuccessPredicates {
                 $node.Left -is
                     [System.Management.Automation.Language.VariableExpressionAst] -and
                 (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'runs'
-        }, $true) |
-            Where-Object {
-                Test-DirectNamedBlockChild `
-                    -Node $_ `
-                    -NamedBlock $ast.EndBlock
-            }
+        }, $true)
     )
     if ($runsAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runsAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
         $runsAssignments[0].Right -isnot
             [System.Management.Automation.Language.CommandExpressionAst] -or
         $runsAssignments[0].Right.Expression -isnot
@@ -684,16 +677,20 @@ function Test-ReleaseInteractiveSuccessPredicates {
         return $false
     }
 
-    $matchingAssignments = @($ast.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left -is
-                [System.Management.Automation.Language.VariableExpressionAst] -and
-            (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'matching'
-    }, $true) | Where-Object {
-        Test-DirectNamedBlockChild -Node $_ -NamedBlock $ast.EndBlock
-    })
+    $matchingAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
     if ($matchingAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $matchingAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
         $matchingAssignments[0].Right -isnot
             [System.Management.Automation.Language.CommandExpressionAst] -or
         $matchingAssignments[0].Right.Expression -isnot
@@ -5842,8 +5839,10 @@ $otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
     $matchingSourceTarget,
     '$matching = @($otherRuns | Where-Object {'
 )
+$matchingCountTarget = 'if ($matching.Count -eq 0) {'
 if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
-    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript) {
+    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget)) {
     throw 'Release success-predicate source-binding mutation target is missing.'
 }
 $invalidSuccessSourceMutants = @{
@@ -5861,6 +5860,36 @@ $invalidSuccessSourceMutants = @{
         $otherRunsSourceScript +
             "`n" +
             'if ($false) { $matching = @($runs | Where-Object { $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" }) }'
+    'live nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$true) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'dead nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$false) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'live nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$true) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'dead nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$false) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'live nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$true) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'dead nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$false) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
 }
 foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
     if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
