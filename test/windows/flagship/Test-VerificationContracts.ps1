@@ -323,8 +323,139 @@ function Assert-NamedReleasePreflightSplat {
 function Test-ReleaseInteractiveResultSelectionContract {
     param([Parameter(Mandatory)] [string] $ScriptText)
 
-    return $ScriptText -notmatch '(?m)Select-Object\s+-First' -and
-        $ScriptText -match '(?ms)\$resultFiles\s*=\s*@\(\s*Get-ChildItem -LiteralPath \$artifactRoot -Filter result\.json -File -Recurse\s*\)\s*if \(\$resultFiles\.Count -ne 1\) \{ continue \}\s*\$resultPath = \$resultFiles\[0\]\.FullName\s*\$result = Get-Content -LiteralPath \$resultPath -Raw \| ConvertFrom-Json\s*if \(\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''\) \{ continue \}'
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+
+    $resultFileAssignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$resultFiles'
+    }, $true))
+    if ($resultFileAssignments.Count -ne 1 -or
+        $resultFileAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $resultFileAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $resultFileAssignment = $resultFileAssignments[0]
+    $getChildCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-ChildItem'
+    }, $true))
+    $whereCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($getChildCommands.Count -ne 1 -or $whereCommands.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent,
+            $whereCommands[0].Parent
+        ) -or
+        $getChildCommands[0].Parent -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+        $getChildCommands[0].Parent.PipelineElements.Count -ne 2 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[0],
+            $getChildCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[1],
+            $whereCommands[0]
+        )) {
+        return $false
+    }
+    $getChildElements = @(
+        $getChildCommands[0].CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    if (-not (Test-CommandArgumentPair `
+        -Elements $getChildElements `
+        -Name '-LiteralPath' `
+        -Value '$artifactRoot') -or
+        -not (Test-CommandArgumentPair `
+            -Elements $getChildElements `
+            -Name '-Filter' `
+            -Value 'result.json') -or
+        @($getChildElements | Where-Object { $_ -ceq '-File' }).Count -ne 1 -or
+        @($getChildElements | Where-Object { $_ -ceq '-Recurse' }).Count -ne 1 -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        $filterStatements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $filterTry = $filterStatements[0]
+    if ($filterTry.Body.Statements.Count -ne 1 -or
+        $filterTry.CatchClauses.Count -ne 1 -or
+        $null -ne $filterTry.Finally -or
+        $filterTry.CatchClauses[0].Body.Statements.Count -ne 1) {
+        return $false
+    }
+    $filterExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.Body.Statements[0]
+    $catchExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.CatchClauses[0].Body.Statements[0]
+    if ($null -eq $filterExpression -or
+        (($filterExpression.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq ''windows.interactive-win11.composite''' -or
+        $null -eq $catchExpression -or
+        $catchExpression.Extent.Text.Trim() -cne '$false') {
+        return $false
+    }
+
+    $countGates = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.IfStatementAst] -and
+            (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'if ($resultFiles.Count -ne 1) { continue }'
+    }, $true))
+    $resultPathAssignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$resultPath' -and
+            $node.Right.Extent.Text.Trim() -ceq '$resultFiles[0].FullName'
+    }, $true))
+    $resultAssignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$result' -and
+            (($node.Right.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+    }, $true))
+    $arbitraryFirst = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Select-Object' -and
+            @($node.CommandElements | Where-Object {
+                $_.Extent.Text -ceq '-First'
+            }).Count -gt 0
+    }, $true))
+    return $countGates.Count -eq 1 -and
+        $resultPathAssignments.Count -eq 1 -and
+        $resultAssignments.Count -eq 1 -and
+        $arbitraryFirst.Count -eq 0 -and
+        $resultFileAssignment.Extent.EndOffset -lt
+            $countGates[0].Extent.StartOffset -and
+        $countGates[0].Extent.EndOffset -lt
+            $resultPathAssignments[0].Extent.StartOffset -and
+        $resultPathAssignments[0].Extent.EndOffset -lt
+            $resultAssignments[0].Extent.StartOffset
 }
 
 function Get-LogicalAndLeaves {
@@ -5468,6 +5599,50 @@ if (-not (Test-ReleaseInteractiveResultSelectionContract `
     -ScriptText $releaseInteractiveEvidenceScript)) {
     throw 'Release interactive evidence must select one composite result without arbitrary first-match fallback.'
 }
+$countGateText = 'if ($resultFiles.Count -ne 1) { continue }'
+$countGateIndex = $releaseInteractiveEvidenceScript.IndexOf(
+    $countGateText,
+    [StringComparison]::Ordinal
+)
+if ($countGateIndex -lt 0) {
+    throw 'Release result-selection count gate mutation target is missing.'
+}
+$countBeforeFilterScript = $releaseInteractiveEvidenceScript.Remove(
+    $countGateIndex,
+    $countGateText.Length
+)
+$resultFilterIndex = $countBeforeFilterScript.IndexOf(
+    '$resultFiles = @(',
+    [StringComparison]::Ordinal
+)
+if ($resultFilterIndex -lt 0) {
+    throw 'Release result-selection filter mutation target is missing.'
+}
+$countBeforeFilterScript = $countBeforeFilterScript.Insert(
+    $resultFilterIndex,
+    "$countGateText`n"
+)
+$filterAfterCountScript = @'
+$resultFiles = @(
+    Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse
+)
+if ($resultFiles.Count -ne 1) { continue }
+$resultFiles = @(
+    $resultFiles | Where-Object {
+        try {
+            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
+        }
+        catch { $false }
+    }
+)
+$resultPath = $resultFiles[0].FullName
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+'@
+$noCatchScript = [regex]::Replace(
+    $releaseInteractiveEvidenceScript,
+    '(?ms)try\s*\{\s*(?<predicate>\(Get-Content -LiteralPath \$_\.FullName -Raw \| ConvertFrom-Json\)\.scenario_id -eq ''windows\.interactive-win11\.composite'')\s*\}\s*catch\s*\{\s*\$false\s*\}',
+    '${predicate}'
+)
 $invalidResultSelectionMutants = @{
     'zero-only count' = $releaseInteractiveEvidenceScript.Replace(
         '$resultFiles.Count -ne 1',
@@ -5479,6 +5654,13 @@ $invalidResultSelectionMutants = @{
     )
     'arbitrary first match' =
         $releaseInteractiveEvidenceScript + "`nSelect-Object -First 1"
+    'count before filter' = $countBeforeFilterScript
+    'filter after count' = $filterAfterCountScript
+    'missing catch' = $noCatchScript
+    'fail-open catch' = $releaseInteractiveEvidenceScript.Replace(
+        'catch { $false }',
+        'catch { $true }'
+    )
 }
 foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
     if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
@@ -5586,7 +5768,7 @@ foreach ($spec in $successPredicateMutationSpecs) {
 }
 Assert-TextContract `
     -Content $releaseInteractiveEvidenceStep `
-    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$resultFiles\.Count -ne 1.*?\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
+    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
     -Description 'release remains gated on successful exact-SHA hash-bound interactive evidence' `
     -Context "$releaseWorkflow :: Require successful Test workflow for release SHA"
 Assert-TextContract `
