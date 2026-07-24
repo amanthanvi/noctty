@@ -105,12 +105,9 @@ function Assert-ZigTestsDiscoveredAndRun {
         }
     }
 
-    $filterArgument = "-Dtest-filter=$Filter"
-    & (Join-Path $RepoRoot 'scripts\dev-windows.cmd') `
-        zig build test $filterArgument
-    if ($LASTEXITCODE -ne 0) {
-        throw "Zig semantic fixture '$Filter' failed with exit code $LASTEXITCODE."
-    }
+    Invoke-ZigFixture `
+        -RepoRoot $RepoRoot `
+        -Filter $Filter
 }
 
 function Get-YamlJobText {
@@ -137,6 +134,70 @@ function Get-YamlStepText {
     $match = [regex]::Match($Content, $pattern)
     if (-not $match.Success) { throw "Workflow step not found: $Name ($Source)" }
     $match.Value
+}
+
+function Assert-DeferredZigFixtureExecution {
+    param(
+        [Parameter(Mandatory)] [string] $WorkflowText,
+        [Parameter(Mandatory)] [string] $Source
+    )
+
+    $windowsJob = Get-YamlJobText `
+        -Content $WorkflowText `
+        -Name 'windows' `
+        -Source $Source
+    $flagshipStep = Get-YamlStepText `
+        -Content $windowsJob `
+        -Name 'Flagship verification contract checks' `
+        -Source "$Source :: windows"
+    $setupStep = Get-YamlStepText `
+        -Content $windowsJob `
+        -Name 'Setup Zig' `
+        -Source "$Source :: windows"
+    $fullSuiteStep = Get-YamlStepText `
+        -Content $windowsJob `
+        -Name 'Full Zig test suite' `
+        -Source "$Source :: windows"
+    $conditionalStepPattern = '(?m)^        (?:if|continue-on-error):'
+    $flagshipIndex = $windowsJob.IndexOf($flagshipStep, [StringComparison]::Ordinal)
+    $setupIndex = $windowsJob.IndexOf($setupStep, [StringComparison]::Ordinal)
+    $fullSuiteIndex = $windowsJob.IndexOf($fullSuiteStep, [StringComparison]::Ordinal)
+
+    if ($flagshipStep -notmatch
+            '(?m)^        run: \./test/windows/flagship/Test-VerificationContracts\.ps1\s*$' -or
+        $setupStep -notmatch
+            '(?m)^        uses: mlugg/setup-zig@[^\s]+(?:\s+#.*)?\s*$' -or
+        $setupStep -match $conditionalStepPattern -or
+        $fullSuiteStep -notmatch
+            '(?m)^        run: zig build test -Demit-test-exe=true\s*$' -or
+        $fullSuiteStep -match $conditionalStepPattern -or
+        $flagshipIndex -lt 0 -or
+        $setupIndex -le $flagshipIndex -or
+        $fullSuiteIndex -le $setupIndex) {
+        throw 'The early flagship contract must defer unavailable fixture execution to the same Windows job''s mandatory Setup Zig and full Zig test suite.'
+    }
+}
+
+function Test-FlagshipZigFixtureExecutionEnabled {
+    return $env:GITHUB_ACTIONS -ne 'true'
+}
+
+function Invoke-ZigFixture {
+    param(
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [Parameter(Mandatory)] [string] $Filter
+    )
+
+    if (-not (Test-FlagshipZigFixtureExecutionEnabled)) {
+        Write-Host "ZIG-FIXTURE-EXECUTION-SKIPPED [$Filter]: deferred to mandatory full Zig suite in the same Windows job."
+        return
+    }
+    $filterArgument = "-Dtest-filter=$Filter"
+    & (Join-Path $RepoRoot 'scripts\dev-windows.cmd') `
+        zig build test $filterArgument
+    if ($LASTEXITCODE -ne 0) {
+        throw "Zig semantic fixture '$Filter' failed with exit code $LASTEXITCODE."
+    }
 }
 
 function Get-YamlLiteralRunScript {
@@ -1397,6 +1458,10 @@ if ($invokeHarnessFunctions.Count -ne 1 -or
     throw 'Composite log paths must derive from each run scenario slug.'
 }
 
+Assert-DeferredZigFixtureExecution `
+    -WorkflowText $testWorkflowText `
+    -Source $testWorkflow
+
 $nativeKeyFilters = @('VK_PACKET', 'deferred char')
 foreach ($nativeKeyFilter in $nativeKeyFilters) {
     # Zig accepts a zero-match test filter. A narrow declaration check is
@@ -1409,12 +1474,9 @@ foreach ($nativeKeyFilter in $nativeKeyFilters) {
     if ($nativeKeyDeclarations.Count -lt 1) {
         throw "$nativeKeyFilter semantic fixture has no matching Zig test declaration."
     }
-    $nativeKeyFilterArgument = "-Dtest-filter=$nativeKeyFilter"
-    & (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
-        zig build test $nativeKeyFilterArgument
-    if ($LASTEXITCODE -ne 0) {
-        throw "$nativeKeyFilter semantic fixture failed with exit code $LASTEXITCODE."
-    }
+    Invoke-ZigFixture `
+        -RepoRoot $repoRoot `
+        -Filter $nativeKeyFilter
 }
 
 if ($termioRuntimeText.Contains('self.surface_mailbox.pushTerminalOutput(buf)') -or
