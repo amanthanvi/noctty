@@ -570,6 +570,12 @@ function Test-ReleaseInteractiveSuccessPredicates {
         [ref]$errors
     )
     if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-CommandResolutionMutationNode -Node $node
+    }, $true)).Count -ne 0) {
+        return $false
+    }
 
     $runListCommands = @($ast.FindAll({
         param($node)
@@ -737,6 +743,41 @@ function Test-ReleaseInteractiveSuccessPredicates {
             $runsAssignment.Extent.StartOffset -or
         $runsAssignment.Extent.EndOffset -ge
             $matchingAssignment.Extent.StartOffset) {
+        return $false
+    }
+    $runListToRunsStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge
+                    $runListAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $runsAssignment.Extent.StartOffset
+            }
+    )
+    $runsToMatchingStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge $runsAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $matchingAssignment.Extent.StartOffset
+            }
+    )
+    if ($runListToRunsStatements.Count -ne 1 -or
+        $runListToRunsStatements[0] -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        $runListToRunsStatements[0].Clauses.Count -ne 1 -or
+        $null -ne $runListToRunsStatements[0].ElseClause -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements[0] -isnot
+            [System.Management.Automation.Language.ThrowStatementAst] -or
+        $runsToMatchingStatements.Count -ne 0) {
+        return $false
+    }
+    $runListFailureCondition = Get-SinglePipelineExpression `
+        -Node $runListToRunsStatements[0].Clauses[0].Item1
+    if ($null -eq $runListFailureCondition -or
+        (($runListFailureCondition.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '$LASTEXITCODE -ne 0') {
         return $false
     }
     $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
@@ -1430,7 +1471,7 @@ function Test-CommandResolutionMutationNode {
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv', 'Set-Variable', 'sv', 'set', 'New-Variable', 'nv', 'Remove-Variable', 'rv', 'Clear-Variable', 'clv') -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -6019,6 +6060,49 @@ $invalidSuccessSourceMutants = @{
             $runsSourceTarget,
             "`$null = `$runsJson`n$runsSourceTarget"
         )
+    'Set-Variable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nSet-Variable -Name runs -Value @(`$otherRun)"
+        )
+    'SessionState PSVariable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$ExecutionContext.SessionState.PSVariable.Set('runs', @(`$otherRun))"
+        )
+    'qualified Set-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nMicrosoft.PowerShell.Utility\Set-Variable -Name runs -Value @(`$otherRun)"
+    'Set-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nsv -Name runs -Value @(`$otherRun)"
+    'Set-Variable set alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nset -Name runs -Value @(`$otherRun)"
+    'New-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nNew-Variable -Name runs -Value @(`$otherRun)"
+    'New-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nnv -Name runs -Value @(`$otherRun)"
+    'Remove-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nRemove-Variable -Name runs"
+    'Remove-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nrv -Name runs"
+    'Clear-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nClear-Variable -Name runs"
+    'Clear-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nclv -Name runs"
+    'Invoke-Expression mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`niex '`$runs = @(`$otherRun)'"
+    'ScriptBlock Create mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`n[ScriptBlock]::Create('`$runs = @(`$otherRun)').Invoke()"
 }
 foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
     if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
