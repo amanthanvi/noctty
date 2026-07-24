@@ -327,6 +327,21 @@ function Test-ReleaseInteractiveResultSelectionContract {
         $ScriptText -match '(?ms)\$resultFiles\s*=\s*@\(\s*Get-ChildItem -LiteralPath \$artifactRoot -Filter result\.json -File -Recurse\s*\)\s*if \(\$resultFiles\.Count -ne 1\) \{ continue \}\s*\$resultPath = \$resultFiles\[0\]\.FullName\s*\$result = Get-Content -LiteralPath \$resultPath -Raw \| ConvertFrom-Json\s*if \(\$result\.scenario_id -ne ''windows\.interactive-win11\.composite''\) \{ continue \}'
 }
 
+function Test-ReleaseInteractiveSuccessPredicates {
+    param([Parameter(Mandatory)] [string] $ScriptText)
+
+    $requiredPredicates = @(
+        '--status success',
+        '$_.headSha -eq $sha',
+        '$_.status -eq "completed"',
+        '$_.conclusion -eq "success"',
+        '$result.status -eq ''pass'''
+    )
+    return @($requiredPredicates | Where-Object {
+        -not $ScriptText.Contains($_)
+    }).Count -eq 0
+}
+
 function Get-PowerShellBlockText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -5306,6 +5321,37 @@ $invalidResultSelectionMutants = @{
 foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
     if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
         throw "Release result-selection contract accepted mutant: $($mutant.Key)"
+    }
+}
+if (-not (Test-ReleaseInteractiveSuccessPredicates `
+    -ScriptText $releaseInteractiveEvidenceScript)) {
+    throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
+}
+$invalidSuccessPredicateMutants = @{
+    'GitHub success filter' = $releaseInteractiveEvidenceScript.Replace(
+        '--status success',
+        '--status failure'
+    )
+    'exact candidate head' = $releaseInteractiveEvidenceScript.Replace(
+        '$_.headSha -eq $sha',
+        '$_.headSha -ne $sha'
+    )
+    'completed candidate' = $releaseInteractiveEvidenceScript.Replace(
+        '$_.status -eq "completed"',
+        '$_.status -ne "completed"'
+    )
+    'successful candidate' = $releaseInteractiveEvidenceScript.Replace(
+        '$_.conclusion -eq "success"',
+        '$_.conclusion -ne "success"'
+    )
+    'passing result' = $releaseInteractiveEvidenceScript.Replace(
+        '$result.status -eq ''pass''',
+        '$result.status -ne ''pass'''
+    )
+}
+foreach ($mutant in $invalidSuccessPredicateMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
+        throw "Release success-predicate contract accepted mutant: $($mutant.Key)"
     }
 }
 Assert-TextContract `
