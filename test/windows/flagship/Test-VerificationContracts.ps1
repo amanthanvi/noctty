@@ -599,6 +599,28 @@ function Test-ReleaseInteractiveSuccessPredicates {
             -NamedBlock $ast.EndBlock)) {
         return $false
     }
+    $runsJsonAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'runsJson'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($runsJsonAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $runsJsonAssignments[0],
+            $runListAssignment
+        )) {
+        return $false
+    }
     $runListElements = @(
         $runList.CommandElements |
             ForEach-Object { $_.Extent.Text.Trim() }
@@ -616,6 +638,52 @@ function Test-ReleaseInteractiveSuccessPredicates {
         }
     }
 
+    $runsAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'runs'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($runsAssignments.Count -ne 1 -or
+        $runsAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $runsAssignment = $runsAssignments[0]
+    $runsStatements = @(
+        $runsAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($runsStatements.Count -ne 1 -or
+        $runsStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $runsPipeline = $runsStatements[0]
+    if ($runsPipeline.PipelineElements.Count -ne 2 -or
+        $runsPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runsJson' -or
+        $runsPipeline.PipelineElements[1] -isnot
+            [System.Management.Automation.Language.CommandAst] -or
+        $runsPipeline.PipelineElements[1].GetCommandName() -ne
+            'ConvertFrom-Json' -or
+        $runsPipeline.PipelineElements[1].CommandElements.Count -ne 1) {
+        return $false
+    }
+
     $matchingAssignments = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -625,16 +693,53 @@ function Test-ReleaseInteractiveSuccessPredicates {
     }, $true) | Where-Object {
         Test-DirectNamedBlockChild -Node $_ -NamedBlock $ast.EndBlock
     })
-    if ($matchingAssignments.Count -ne 1) { return $false }
-    $whereCommands = @($matchingAssignments[0].FindAll({
+    if ($matchingAssignments.Count -ne 1 -or
+        $matchingAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $matchingAssignment = $matchingAssignments[0]
+    $matchingStatements = @(
+        $matchingAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($matchingStatements.Count -ne 1 -or
+        $matchingStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $matchingPipeline = $matchingStatements[0]
+    $whereCommands = @($matchingAssignment.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -eq 'Where-Object'
     }, $true))
     if ($whereCommands.Count -ne 1 -or
+        $matchingPipeline.PipelineElements.Count -ne 2 -or
+        $matchingPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runs' -or
+        -not [object]::ReferenceEquals(
+            $matchingPipeline.PipelineElements[1],
+            $whereCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $whereCommands[0].Parent,
+            $matchingPipeline
+        ) -or
         $whereCommands[0].CommandElements.Count -ne 2 -or
         $whereCommands[0].CommandElements[1] -isnot
             [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+    if ($runListAssignment.Extent.EndOffset -ge
+            $runsAssignment.Extent.StartOffset -or
+        $runsAssignment.Extent.EndOffset -ge
+            $matchingAssignment.Extent.StartOffset) {
         return $false
     }
     $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
@@ -5726,6 +5831,41 @@ foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
 if (-not (Test-ReleaseInteractiveSuccessPredicates `
     -ScriptText $releaseInteractiveEvidenceScript)) {
     throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
+}
+$runsSourceTarget = '$runs = @($runsJson | ConvertFrom-Json)'
+$otherJsonSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $runsSourceTarget,
+    '$runs = @($otherJson | ConvertFrom-Json)'
+)
+$matchingSourceTarget = '$matching = @($runs | Where-Object {'
+$otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $matchingSourceTarget,
+    '$matching = @($otherRuns | Where-Object {'
+)
+if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript) {
+    throw 'Release success-predicate source-binding mutation target is missing.'
+}
+$invalidSuccessSourceMutants = @{
+    'runs JSON source substitution' = $otherJsonSourceScript
+    'runs JSON source comment decoy' =
+        $otherJsonSourceScript + "`n# $runsSourceTarget"
+    'runs JSON source dead-code decoy' =
+        $otherJsonSourceScript +
+            "`n" +
+            'if ($false) { $runs = @($runsJson | ConvertFrom-Json) }'
+    'matching source substitution' = $otherRunsSourceScript
+    'matching source comment decoy' =
+        $otherRunsSourceScript + "`n# $matchingSourceTarget"
+    'matching source dead-code decoy' =
+        $otherRunsSourceScript +
+            "`n" +
+            'if ($false) { $matching = @($runs | Where-Object { $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" }) }'
+}
+foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveSuccessPredicates -ScriptText $mutant.Value) {
+        throw "Release success-predicate contract accepted source mutant: $($mutant.Key)"
+    }
 }
 $successPredicateMutationSpecs = @(
     [pscustomobject]@{
