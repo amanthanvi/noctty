@@ -752,6 +752,105 @@ function Test-ReleaseInteractiveSuccessPredicates {
         return $false
     }
 
+    $matchingCountIfs = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '$matching.Count -eq 0'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingCountIfs.Count -ne 1) { return $false }
+    $matchingCountUses = @(
+        $matchingCountIfs[0].Clauses[0].Item1.FindAll({
+            param($node)
+            $node -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
+    if ($matchingCountUses.Count -ne 1) { return $false }
+
+    $matchingLoops = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.ForEachStatementAst] -or
+                $node.Variable.Extent.Text -cne '$run') {
+                return $false
+            }
+            $source = Get-SinglePipelineExpression -Node $node.Condition
+            return $source -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                $source.Extent.Text -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingLoops.Count -ne 1) { return $false }
+    $matchingLoopSource = Get-SinglePipelineExpression `
+        -Node $matchingLoops[0].Condition
+
+    $chainVariableContracts = @(
+        [pscustomobject]@{
+            Name = 'runsJson'
+            Expected = @(
+                $runListAssignment.Left,
+                $runsPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'runs'
+            Expected = @(
+                $runsAssignment.Left,
+                $matchingPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'matching'
+            Expected = @(
+                $matchingAssignment.Left,
+                $matchingCountUses[0],
+                $matchingLoopSource
+            )
+        }
+    )
+    foreach ($contract in $chainVariableContracts) {
+        $uses = @(
+            $ast.FindAll({
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                    (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                        $contract.Name
+            }, $true)
+        )
+        if ($uses.Count -ne $contract.Expected.Count) { return $false }
+        foreach ($expected in $contract.Expected) {
+            if (@($uses | Where-Object {
+                [object]::ReferenceEquals($_, $expected)
+            }).Count -ne 1) {
+                return $false
+            }
+        }
+    }
+
     $evidenceIfs = @($ast.FindAll({
         param($node)
         if ($node -isnot [System.Management.Automation.Language.IfStatementAst] -or
@@ -5889,6 +5988,36 @@ $invalidSuccessSourceMutants = @{
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
             "if (`$false) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'indexed runs JSON mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$runsJson[0] = 'x'`n$runsSourceTarget"
+        )
+    'indexed runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs[0] = `$otherRun"
+        )
+    'indexed matching mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$matching[0] = `$otherRun`n$matchingCountTarget"
+        )
+    'runs method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs.Clear()"
+        )
+    'matching member decoy' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$null = `$matching.Count`n$matchingCountTarget"
+        )
+    'runs JSON unexpected read' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$null = `$runsJson`n$runsSourceTarget"
         )
 }
 foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
