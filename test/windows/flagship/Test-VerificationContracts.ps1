@@ -293,8 +293,16 @@ function Test-NamedReleasePreflightSplat {
     }
     if (@($ast.FindAll({
         param($node)
-        $node -is [System.Management.Automation.Language.CommandAst] -and
-            $node.GetCommandName() -in @('New-Item', 'ni')
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'New-Item', 'ni',
+                'Get-ChildItem', 'dir', 'gci', 'ls',
+                'Get-Content', 'cat', 'gc', 'type'
+            )
     }, $true)).Count -ne 0) {
         return $false
     }
@@ -927,8 +935,12 @@ function Test-ReleaseInteractiveSuccessPredicates {
         -Node $matchingLoops[0].Condition
     $newItemCommands = @($ast.FindAll({
         param($node)
-        $node -is [System.Management.Automation.Language.CommandAst] -and
-            $node.GetCommandName() -in @('New-Item', 'ni')
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @('New-Item', 'ni')
     }, $true))
     if ($newItemCommands.Count -ne 1 -or
         $newItemCommands[0].GetCommandName() -cne 'New-Item' -or
@@ -1073,6 +1085,69 @@ function Test-ReleaseInteractiveSuccessPredicates {
     $resultPathAssignment = $resultPathAssignments[0]
     $resultAssignment = $resultAssignments[0]
     $resultDirAssignment = $resultDirAssignments[0]
+    $getChildItemCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-ChildItem', 'dir', 'gci', 'ls'
+            )
+    }, $true))
+    if ($getChildItemCommands.Count -ne 1 -or
+        $getChildItemCommands[0].GetCommandName() -cne 'Get-ChildItem' -or
+        (($getChildItemCommands[0].Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse' -or
+        $getChildItemCommands[0].Extent.StartOffset -le
+            $resultFilesAssignment.Extent.StartOffset -or
+        $getChildItemCommands[0].Extent.EndOffset -ge
+            $resultFilesAssignment.Extent.EndOffset) {
+        return $false
+    }
+    $getContentCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-Content', 'cat', 'gc', 'type'
+            )
+    }, $true))
+    $resultFileContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $_.FullName -Raw' -and
+            $_.Extent.StartOffset -gt
+                $resultFilesAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt
+                $resultFilesAssignment.Extent.EndOffset
+    })
+    $resultContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $resultPath -Raw' -and
+            $_.Extent.StartOffset -gt $resultAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt $resultAssignment.Extent.EndOffset
+    })
+    if ($getContentCommands.Count -ne 2 -or
+        $resultFileContentCommands.Count -ne 1 -or
+        $resultContentCommands.Count -ne 1) {
+        return $false
+    }
+    foreach ($command in @(
+        $resultFileContentCommands[0],
+        $resultContentCommands[0]
+    )) {
+        if (@($getContentCommands | Where-Object {
+            [object]::ReferenceEquals($_, $command)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
 
     $resultFilesCountGates = @(
         $runBody.FindAll({
@@ -1854,6 +1929,12 @@ function Test-CommandResolutionMutationNode {
         (($Node.Right.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Left -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
             (Test-DynamicScriptTypeName -TypeName $Node.Left.Value)
+    }
+    if ($RejectUnresolvedCommands -and
+        $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        (($Node.VariablePath.UserPath -split ':')[-1]) -eq
+            'ExecutionContext') {
+        return $true
     }
     if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
         (Test-DynamicScriptTypeName -TypeName $Node.Value)) {
@@ -6451,6 +6532,48 @@ $preflightArgs = @{
 ni -Path variable:preflightArgs -Value @{} -Force
 ./scripts/release-preflight.ps1 @preflightArgs
 '@
+    'module-qualified New-Item stored provider path' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+Microsoft.PowerShell.Management\New-Item -Path $providerPath -Value @{} -Force
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-ChildItem alias stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = gci -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-Content stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = Get-Content -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'wrapped ExecutionContext mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ec = @($ExecutionContext)[0]
+$ec.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
     'SessionState PSVariable mutation' = @'
 $preflightArgs = @{
     Version = $env:RELEASE_VERSION
@@ -6809,6 +6932,26 @@ $invalidSuccessSourceMutants = @{
         $releaseInteractiveEvidenceScript.Replace(
             $matchingCountTarget,
             "ni -Path variable:matching -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'module-qualified New-Item stored provider path' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`nMicrosoft.PowerShell.Management\New-Item -Path `$providerPath -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'Get-ChildItem alias stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = gci -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Content stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Content -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'wrapped ExecutionContext mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$ec = @(`$ExecutionContext)[0]`n`$ec.SessionState.PSVariable.Set('matching', @(`$otherRun))`n$matchingCountTarget"
         )
     'count-preserving evidenceRun ref substitution' =
         $releaseInteractiveEvidenceScript.Replace(
