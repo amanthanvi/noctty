@@ -72,28 +72,29 @@ export function App() {
           <HeroColorPop />
         </div>
 
-        <div
+        <section
           className="wg-container wg-section wg-section--follow"
           data-accent="blue"
+          aria-labelledby="features-title"
           style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 640px' }}
         >
-          <SectionLabel num="01" title="What you get" />
+          <SectionLabel id="features-title" title="What you get" />
           <FeatureGrid />
-        </div>
+        </section>
 
-        <div
+        <section
           className="wg-container wg-section wg-section--why"
           data-accent="yellow"
+          aria-labelledby="why-title"
           style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 540px' }}
         >
-          <SectionLabel num="02" title="Why a fork?" />
+          <SectionLabel id="why-title" title="Why a fork?" />
           <WhyFork />
-        </div>
-
-        <div className="wg-container" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }}>
-          <Footer theme={theme} />
-        </div>
+        </section>
       </main>
+      <div className="wg-container" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }}>
+        <Footer theme={theme} />
+      </div>
     </>
   );
 }

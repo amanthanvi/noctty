@@ -1,0 +1,25 @@
+/*
+  Cache-Control: public, max-age=0, must-revalidate
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'sha256-pISZ4uq8FeQ38HOwS22gAtqH+pfUgqkItu+zFe6qagg=' 'sha256-HgYMqcl1IJyO4BIHc3TA/IswS2cmPQtqqPBk9kLqGao='; script-src-attr 'unsafe-hashes' 'sha256-MhtPZXr7+LpJUY5qtMutB+qWfQtMaPccfe7QXtCcEYc='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.github.com; img-src 'self' data:; frame-src 'none'; worker-src 'none'; manifest-src 'self'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+
+/assets/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/icons/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/vendor/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/app.js
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/bundle.js
+  Cache-Control: public, max-age=3600, must-revalidate
+
+/styles.css
+  Cache-Control: public, max-age=3600, must-revalidate

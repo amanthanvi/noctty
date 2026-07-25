@@ -11,7 +11,7 @@ runtime shape:
 - `components/` - archive JSX references kept for design/source parity
 - `assets/` - SVG brand assets carried over from the archive
 - `404.html`, `styles.css`, `app.js` - standalone static extras already present in this repo
-- `_redirects` - canonical host redirect for `www` to apex
+- `_headers` - Cloudflare Pages cache and browser security policy
 
 ## Source of truth
 
@@ -46,14 +46,63 @@ edits, run `node scripts/build-site-bundle.mjs` from the repo root.
 
 ## Cloudflare Pages
 
-Project settings for v1:
+The existing `winghostty` project remains a Direct Upload Pages project. There
+is no `wrangler.toml`, `wrangler.json`, or Git-integrated Pages build.
 
-- Production branch: `main`
-- Build command: `exit 0`
-- Build output directory: `site`
-- Custom domains: `winghostty.com` and `www.winghostty.com`
+Production is owned by `.github/workflows/deploy-site.yml`. It runs only for
+relevant pushes to `main`, published releases, or an explicit manual dispatch;
+pull requests do not deploy. The protected GitHub environment is
+`cloudflare-pages-production` and must provide:
 
-Recommended follow-up in Pages:
+- `CLOUDFLARE_API_TOKEN` - a least-privilege token with Account / Cloudflare
+  Pages / Edit for this account
+- `CLOUDFLARE_ACCOUNT_ID` - the account identifier, stored as a secret so it is
+  not copied into logs or provenance
 
-- Keep preview deployments enabled for PRs.
-- Set build watch paths to `site/*` so app-only changes do not redeploy the marketing site.
+The workflow checks out the immutable event SHA, requires that SHA to still be
+the exact clean `origin/main` head before both deployment phases, and installs
+Wrangler `4.114.0` in an isolated runner-temp directory. It builds an exact
+static-file allowlist twice and requires identical, ordinally sorted SHA-256
+manifests. That same payload is uploaded first to a non-production canary
+branch and then to `main`; Cloudflare API metadata, commit provenance, and
+every served byte are checked after each upload. The zone-owned `www` redirect
+is preflighted before production, so missing zone configuration cannot publish
+and then fail. Production verification also checks `winghostty.com`. If
+Cloudflare explicitly marks an automated custom-domain HTML response with
+`cf-mitigated: challenge`, immutable Pages HTML remains authoritative while
+every custom-domain static asset is still byte-verified, and provenance records
+the challenged host separately instead of calling its HTML verified.
+
+The workflow does not automatically roll back a failed production verification:
+the Pages API has no compare-and-swap rollback primitive, so an automated
+rollback could overwrite a newer dashboard/API deployment. The failed run
+retains redacted evidence for an operator to inspect before selecting a known
+production deployment in Cloudflare's rollback UI.
+
+`site/_redirects` is intentionally absent. Cloudflare Pages does not support a
+domain-level `www` redirect in that file. Configure the permanent
+`https://www.winghostty.com/*` to `https://winghostty.com/:splat` redirect at
+the Cloudflare zone level (Bulk Redirect or Redirect Rule), with path and query
+preservation. The deployment workflow verifies the zone-level 301.
+
+The Pages custom domain is:
+
+- `winghostty.com`
+
+`site/_headers` keeps HTML and fallback responses revalidated and gives
+non-content-addressed assets bounded cache lifetimes without claiming they are
+immutable. Its CSP allowlists the two current inline theme bootstraps and the
+font stylesheet `onload` handler by exact SHA-256 hashes. `style-src` and
+`style-src-attr` retain `unsafe-inline` because the current React UI emits
+inline styles; removing that residual allowance requires a coordinated UI
+refactor. Any inline-script or handler edit must update both the CSP hashes and
+the flagship contract test.
+
+To build the deploy payload locally:
+
+```powershell
+$root = Join-Path $env:TEMP winghostty-site-payload
+pwsh -File scripts/build-site-payload.ps1 `
+  -OutputDirectory (Join-Path $root payload) `
+  -ManifestPath (Join-Path $root payload.sha256)
+```

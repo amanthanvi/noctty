@@ -1,8 +1,5 @@
-export function SectionLabel({ num, title }) {
+export function SectionLabel({ id, title }) {
   return (
-    <div className="wg-section-label">
-      <span>{num}</span>
-      <span>{title}</span>
-    </div>
+    <h2 className="wg-section-label" id={id}>{title}</h2>
   );
 }

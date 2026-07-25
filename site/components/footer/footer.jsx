@@ -5,12 +5,14 @@ export function Footer({ theme }) {
     <footer className="wg-footer">
       <div className="wg-footer__top">
         <WinghosttyWordmark size={20} theme={theme} />
-        <div className="wg-footer__links">
+        <nav className="wg-footer__links" aria-label="Project links">
           <a href="https://github.com/amanthanvi/winghostty" target="_blank" rel="noopener noreferrer">GitHub</a>
           <a href="https://github.com/amanthanvi/winghostty/releases" target="_blank" rel="noopener noreferrer">Releases</a>
-          <a href="https://github.com/amanthanvi/winghostty/issues" target="_blank" rel="noopener noreferrer">Issues</a>
-          <a href="https://ghostty.org" target="_blank" rel="noopener noreferrer">Upstream ↗</a>
-        </div>
+          <a href="https://github.com/amanthanvi/winghostty/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>
+          <a href="https://github.com/amanthanvi/winghostty/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer">Report bug</a>
+          <a href="https://github.com/amanthanvi/winghostty/blob/main/docs/status.md" target="_blank" rel="noopener noreferrer">Status</a>
+          <a href="https://github.com/amanthanvi/winghostty/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer">Getting started</a>
+        </nav>
       </div>
       <div className="wg-footer__bottom">
         <span>

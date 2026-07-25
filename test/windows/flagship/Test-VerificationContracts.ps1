@@ -2565,6 +2565,15 @@ Assert-JsonDocument `
 $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
+$siteDeployWorkflow = Join-Path $repoRoot '.github\workflows\deploy-site.yml'
+$siteBundleBuilder = Join-Path $repoRoot 'scripts\build-site-bundle.mjs'
+$sitePayloadBuilder = Join-Path $repoRoot 'scripts\build-site-payload.ps1'
+$cloudflarePagesVerifier = Join-Path $repoRoot 'scripts\verify-cloudflare-pages.ps1'
+$siteHeaders = Join-Path $repoRoot 'site\_headers'
+$siteReadme = Join-Path $repoRoot 'site\README.md'
+$site404 = Join-Path $repoRoot 'site\404.html'
+$siteIndex = Join-Path $repoRoot 'site\index.html'
+$siteGitattributes = Join-Path $repoRoot '.gitattributes'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
@@ -2598,6 +2607,15 @@ $signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
+$siteDeployWorkflowText = Get-Content -LiteralPath $siteDeployWorkflow -Raw
+$siteBundleBuilderText = Get-Content -LiteralPath $siteBundleBuilder -Raw
+$sitePayloadBuilderText = Get-Content -LiteralPath $sitePayloadBuilder -Raw
+$cloudflarePagesVerifierText = Get-Content -LiteralPath $cloudflarePagesVerifier -Raw
+$siteHeadersText = Get-Content -LiteralPath $siteHeaders -Raw
+$siteReadmeText = Get-Content -LiteralPath $siteReadme -Raw
+$site404Text = Get-Content -LiteralPath $site404 -Raw
+$siteIndexText = Get-Content -LiteralPath $siteIndex -Raw
+$siteGitattributesText = Get-Content -LiteralPath $siteGitattributes -Raw
 $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
@@ -8255,6 +8273,308 @@ Assert-TextContract `
     -Pattern '(?ms)Assert-WingetArchitectureCoverage\s+`\r?\n\s+-ManifestPath' `
     -Description 'package-manager preflight invokes the WinGet architecture gate' `
     -Context "$releasePreflight :: RequirePackageManagers"
+
+foreach ($siteScript in @($sitePayloadBuilder, $cloudflarePagesVerifier)) {
+    $siteScriptTokens = $null
+    $siteScriptErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        $siteScript,
+        [ref]$siteScriptTokens,
+        [ref]$siteScriptErrors
+    )
+    if ($siteScriptErrors.Count -ne 0) {
+        throw "Site deployment script does not parse: $siteScript ($($siteScriptErrors[0].Message))"
+    }
+}
+
+Assert-TextContract `
+    -Content $siteDeployWorkflowText `
+    -Pattern '(?ms)^on:\s+push:\s+branches:\s+- main\s+paths:.*?release:\s+types:\s+- published\s+workflow_dispatch:\s*$' `
+    -Description 'site deployment has only filtered main pushes, published releases, and manual dispatch triggers' `
+    -Context $siteDeployWorkflow
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s*(?:pull_request|pull_request_target):' `
+    -Description 'site deployment never runs for pull requests'
+Assert-TextContract `
+    -Content $siteDeployWorkflowText `
+    -Pattern '(?ms)^permissions:\s+contents: read\s+deployments: write\s+.*?^concurrency:\s+group: cloudflare-pages-production\s+cancel-in-progress: false\s*$' `
+    -Description 'site deployment uses minimum repository permissions and serialized non-canceling production concurrency' `
+    -Context $siteDeployWorkflow
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $siteDeployWorkflowText -Name 'deploy' -Source $siteDeployWorkflow) `
+    -Pattern '(?m)^\s+environment: cloudflare-pages-production\s*$' `
+    -Description 'site deployment is protected by the production environment' `
+    -Context "$siteDeployWorkflow :: deploy"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout exact event commit' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ github\.sha \}\}.*?persist-credentials: false' `
+    -Description 'site checkout is an immutable action pinned to the exact event SHA without persisted credentials' `
+    -Context "$siteDeployWorkflow :: checkout"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)RELEASE_TAG:.*?github\.event\.release\.tag_name.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1 -ExpectedVersion \$Matches\.version.*?else \{.*?check-release-copy\.ps1.*?LASTEXITCODE' `
+    -Description 'release-triggered site deployments bind baked-in copy to the published semver tag' `
+    -Context "$siteDeployWorkflow :: site validation"
+$siteActionUses = [regex]::Matches(
+    $siteDeployWorkflowText,
+    '(?m)^\s*uses:\s+(?<action>[^\s@]+)@(?<ref>[^\s#]+)'
+)
+if ($siteActionUses.Count -ne 4 -or
+    @($siteActionUses | Where-Object {
+        $_.Groups['ref'].Value -cnotmatch '^[0-9a-f]{40}$'
+    }).Count -ne 0) {
+    throw 'Every site deployment action must use a full immutable commit SHA.'
+}
+$wranglerUses = @($siteActionUses | Where-Object {
+    $_.Groups['action'].Value -ceq 'cloudflare/wrangler-action'
+})
+if ($wranglerUses.Count -ne 2 -or
+    @($wranglerUses | Where-Object {
+        $_.Groups['ref'].Value -cne 'ebbaa1584979971c8614a24965b4405ff95890e0'
+    }).Count -ne 0) {
+    throw 'Canary and production must use the pinned official Wrangler action v4 commit.'
+}
+foreach ($deployStepName in @(
+    'Deploy exact payload to canary',
+    'Deploy identical payload to production'
+)) {
+    $deployStep = Get-YamlStepBlock `
+        -Content $siteDeployWorkflowText `
+        -Name $deployStepName `
+        -Source $siteDeployWorkflow
+    Assert-TextContract `
+        -Content $deployStep `
+        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?quiet: true.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ github\.sha \}\}".*?--commit-dirty=false' `
+        -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version' `
+        -Context "$siteDeployWorkflow :: $deployStepName"
+}
+if ([regex]::Matches(
+        $siteDeployWorkflowText,
+        '(?m)^      - name: Require exact origin main before (?:canary|production)$'
+    ).Count -ne 2 -or
+    [regex]::Matches(
+        $siteDeployWorkflowText,
+        "git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'"
+    ).Count -ne 2 -or
+    [regex]::Matches(
+        $siteDeployWorkflowText,
+        '\$head -cne \$env:GITHUB_SHA -or \$head -cne \$originMain'
+    ).Count -ne 2) {
+    throw 'Site deployment must reassert the exact clean origin/main head before both uploads.'
+}
+$sitePayloadStep = Get-YamlStepBlock `
+    -Content $siteDeployWorkflowText `
+    -Name 'Build deterministic deploy payload twice' `
+    -Source $siteDeployWorkflow
+Assert-TextContract `
+    -Content $sitePayloadStep `
+    -Pattern '(?ms)build-site-payload\.ps1.*?build-site-payload\.ps1.*?SequenceEqual\[byte\].*?different sorted SHA-256 manifests' `
+    -Description 'site payload is built twice and compared by its sorted SHA-256 manifest' `
+    -Context "$siteDeployWorkflow :: payload"
+Assert-TextContract `
+    -Content $sitePayloadStep `
+    -Pattern '(?ms)winghostty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory=' `
+    -Description 'Wrangler installs in a runner-temporary directory outside the checkout' `
+    -Context "$siteDeployWorkflow :: payload"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify canary provenance and bytes' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit \$env:GITHUB_SHA.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
+    -Description 'canary verification binds API provenance and payload bytes to the exact commit' `
+    -Context "$siteDeployWorkflow :: canary verification"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Require the zone-owned www redirect before production' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit \$env:GITHUB_SHA' `
+    -Description 'the zone-owned www redirect is verified before the production write' `
+    -Context "$siteDeployWorkflow :: redirect preflight"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow) `
+    -Pattern "(?ms)-ExpectedEnvironment production.*?-ExpectedBranch main.*?-CanonicalBaseUrl 'https://winghostty\.com/'.*?-RequireCanonical.*?-VerifyWwwRedirect" `
+    -Description 'production verification binds the canonical domain and zone redirect' `
+    -Context "$siteDeployWorkflow :: production verification"
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?i)rollback|previous\.outputs\.deployment_id' `
+    -Description 'production verification cannot race an automatic Pages rollback'
+Assert-WorkflowContractAbsent `
+    -Path $cloudflarePagesVerifier `
+    -Pattern '(?i)/rollback|Mode Rollback|RollbackDeploymentId' `
+    -Description 'the verifier exposes no non-atomic automatic rollback path'
+Assert-TextContract `
+    -Content $site404Text `
+    -Pattern '(?ms)href="/assets/favicon\.svg".*?href="/styles\.css\?v=[0-9a-f]{64}".*?src="/app\.js\?v=[0-9a-f]{64}"' `
+    -Description 'the nested 404 fallback resolves all local assets from the site root' `
+    -Context $site404
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '"/__winghostty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"' `
+    -Description 'deployment verification exercises the 404 fallback below a multi-segment path' `
+    -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content $siteIndexText `
+    -Pattern '(?ms)property="og:image" content="https://winghostty\.com/assets/winghostty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://winghostty\.com/assets/winghostty-social\.png"' `
+    -Description 'social previews use a current raster large-image card with explicit dimensions' `
+    -Context $siteIndex
+Assert-TextContract `
+    -Content $sitePayloadBuilderText `
+    -Pattern "'assets/winghostty-social\.png'" `
+    -Description 'the deterministic Cloudflare payload includes the social preview image' `
+    -Context $sitePayloadBuilder
+Assert-TextContract `
+    -Content $siteGitattributesText `
+    -Pattern '(?ms)^site/\*\.html text eol=lf$.*?^site/\*\.css text eol=lf$.*?^site/\*\.js text eol=lf$.*?^site/_headers text eol=lf$.*?^site/assets/\*\.svg text eol=lf$.*?^site/components/\*\*/\*\.jsx text eol=lf$.*?^site/vendor/\*\.js text eol=lf$.*?^scripts/build-site-bundle\.mjs text eol=lf$' `
+    -Description 'every text file in the site payload and its source graph has a deterministic LF checkout rule' `
+    -Context $siteGitattributes
+Assert-TextContract `
+    -Content $siteBundleBuilderText `
+    -Pattern '(?ms)const normalizeLf = .*?styles\.css.*?normalizeLf\(fs\.readFileSync.*?app\.js.*?normalizeLf\(fs\.readFileSync' `
+    -Description 'cache keys hash the canonical LF representation used by clean CI checkouts' `
+    -Context $siteBundleBuilder
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?Assert-PublicHeaderContract' `
+    -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
+    -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern "(?ms)Test-IsCloudflareManagedChallenge.*?TryGetValues\('cf-mitigated'.*?-contains 'challenge'.*?AllowMitigatedHtml.*?\$isHtml.*?Test-IsCloudflareManagedChallenge.*?mitigated-challenge.*?\$challengedHosts.*?canonical_html_status" `
+    -Description 'custom-domain HTML records only explicit managed challenges separately from verified hosts' `
+    -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '(?ms)\$json\.Contains\(\$ApiToken.*?\$json\.Contains\(\$AccountId.*?Refusing to write provenance containing Cloudflare credentials' `
+    -Description 'deployment provenance fails closed if credentials or account identifiers enter the artifact' `
+    -Context $cloudflarePagesVerifier
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?i)wrangler\.(?:toml|json|jsonc)' `
+    -Description 'Direct Upload does not introduce Wrangler configuration'
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'site\_redirects')) {
+    throw 'Unsupported domain-level Pages _redirects file must remain absent.'
+}
+Assert-TextContract `
+    -Content $siteReadmeText `
+    -Pattern '(?ms)Direct Upload.*?pull requests do not deploy.*?zone-owned `www` redirect\s+is preflighted.*?does not automatically roll back.*?zone level.*?workflow verifies the zone-level 301' `
+    -Description 'site operations document Direct Upload scope and the zone-owned www redirect' `
+    -Context $siteReadme
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern '(?ms)Cache-Control: public, max-age=0, must-revalidate.*?Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:' `
+    -Description 'Pages responses use revalidation and baseline browser security headers' `
+    -Context $siteHeaders
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern "(?ms)script-src 'self' 'sha256-[^']+' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
+    -Description 'inline scripts and the font load handler use narrow CSP hashes' `
+    -Context $siteHeaders
+if ($siteHeadersText -match "script-src 'self'[^;]*'unsafe-inline'") {
+    throw 'Pages CSP cannot broadly allow inline scripts.'
+}
+
+function Get-CspSha256Source {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+    return 'sha256-' + [Convert]::ToBase64String(
+        [Security.Cryptography.SHA256]::HashData($bytes)
+    )
+}
+
+$expectedCspHashes = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
+foreach ($htmlName in @('index.html', '404.html')) {
+    $html = [IO.File]::ReadAllText(
+        (Join-Path $repoRoot "site\$htmlName"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $inlineScripts = @(
+        [regex]::Matches($html, '(?is)<script(?<attrs>[^>]*)>(?<body>.*?)</script>') |
+            Where-Object { $_.Groups['attrs'].Value -notmatch '\bsrc\s*=' }
+    )
+    if ($inlineScripts.Count -ne 1) {
+        throw "Expected exactly one CSP-hashed inline theme script in site/$htmlName."
+    }
+    [void]$expectedCspHashes.Add(
+        (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
+    )
+}
+[void]$expectedCspHashes.Add(
+    (Get-CspSha256Source -Value "this.media='all'")
+)
+$declaredCspHashes = @(
+    [regex]::Matches($siteHeadersText, "'(?<hash>sha256-[A-Za-z0-9+/]+=*)'") |
+        ForEach-Object { $_.Groups['hash'].Value }
+)
+if ($declaredCspHashes.Count -ne $expectedCspHashes.Count -or
+    @($declaredCspHashes | Where-Object {
+        -not $expectedCspHashes.Contains($_)
+    }).Count -ne 0) {
+    throw 'Pages CSP hashes do not exactly match the inline HTML scripts and handlers.'
+}
+
+$sitePayloadFixtureRoot = Join-Path (
+    [IO.Path]::GetTempPath()
+) "winghostty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+$sitePayloadFixtureRoot = [IO.Path]::GetFullPath($sitePayloadFixtureRoot)
+$tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') +
+    [IO.Path]::DirectorySeparatorChar
+if (-not $sitePayloadFixtureRoot.StartsWith(
+        $tempPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Site payload contract fixture escaped the system temp directory.'
+}
+try {
+    $firstPayload = Join-Path $sitePayloadFixtureRoot 'first'
+    $secondPayload = Join-Path $sitePayloadFixtureRoot 'second'
+    $firstManifest = Join-Path $sitePayloadFixtureRoot 'first.sha256'
+    $secondManifest = Join-Path $sitePayloadFixtureRoot 'second.sha256'
+    & $sitePayloadBuilder `
+        -OutputDirectory $firstPayload `
+        -ManifestPath $firstManifest
+    & $sitePayloadBuilder `
+        -OutputDirectory $secondPayload `
+        -ManifestPath $secondManifest
+    $firstManifestBytes = [IO.File]::ReadAllBytes($firstManifest)
+    $secondManifestBytes = [IO.File]::ReadAllBytes($secondManifest)
+    if (-not [Linq.Enumerable]::SequenceEqual[byte](
+            $firstManifestBytes,
+            $secondManifestBytes
+        )) {
+        throw 'Site payload builder is not byte-for-byte deterministic.'
+    }
+    $manifestPaths = @(
+        [IO.File]::ReadAllLines($firstManifest) |
+            ForEach-Object {
+                $match = [regex]::Match(
+                    $_,
+                    '^[0-9a-f]{64}  (?<path>_headers|[A-Za-z0-9][A-Za-z0-9._/-]*)$'
+                )
+                if (-not $match.Success) {
+                    throw 'Site payload manifest line does not use the strict SHA-256 format.'
+                }
+                $match.Groups['path'].Value
+            }
+    )
+    $sortedManifestPaths = [string[]]$manifestPaths.Clone()
+    [Array]::Sort($sortedManifestPaths, [StringComparer]::Ordinal)
+    if (-not [Linq.Enumerable]::SequenceEqual[string](
+            [string[]]$manifestPaths,
+            $sortedManifestPaths
+        ) -or
+        $manifestPaths -notcontains '_headers' -or
+        $manifestPaths -contains '_redirects' -or
+        $manifestPaths -contains 'main.jsx' -or
+        @($manifestPaths | Where-Object { $_ -like 'components/*' }).Count -ne 0) {
+        throw 'Site deploy manifest escaped the clean sorted static allowlist.'
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $sitePayloadFixtureRoot) {
+        Remove-Item -LiteralPath $sitePayloadFixtureRoot -Recurse -Force
+    }
+}
 
 & (Join-Path $root 'Test-WindowsX64Baseline.ps1')
 
