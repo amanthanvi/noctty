@@ -14,6 +14,7 @@
 *.blp text eol=lf
 
 # Config/build files - always LF
+.gitattributes text eol=lf
 *.zon text eol=lf
 *.nix text eol=lf
 *.md text eol=lf
@@ -27,6 +28,16 @@ Makefile text eol=lf
 
 # Text data files - always LF (embedded in Zig, parsed with \n split)
 *.txt text eol=lf
+
+# Static site sources and generated browser output - always LF
+site/*.html text eol=lf
+site/*.css text eol=lf
+site/*.js text eol=lf
+site/_headers text eol=lf
+site/assets/*.svg text eol=lf
+site/components/**/*.jsx text eol=lf
+site/vendor/*.js text eol=lf
+scripts/build-site-bundle.mjs text eol=lf
 
 # Windows resource files - preserve as-is (native Windows tooling)
 *.rc -text

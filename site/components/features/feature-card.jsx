@@ -6,7 +6,7 @@ export function FeatureCard({ feature }) {
   return (
     <article className="wg-feature-card" data-feature={feature.k}>
       <div className="wg-feature-card__glyph">{glyph}</div>
-      <h2>{feature.title}</h2>
+      <h3>{feature.title}</h3>
       <p>{feature.body}</p>
     </article>
   );

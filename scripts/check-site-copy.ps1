@@ -26,7 +26,10 @@ $forbiddenRules = @(
     @{ Pattern = "silent auto-update"; Reason = "Updater apply must stay user-initiated." },
     @{ Pattern = "releases are unsigned"; Reason = "Release copy should reflect the signed-release track." },
     @{ Pattern = "currently unsigned"; Reason = "Release copy should reflect the signed-release track." },
+    @{ Pattern = "allowDowngrade"; Reason = "The latest-release fetch must never downgrade the compiled site version." },
     @{ Pattern = "full parity"; Reason = "Avoid overclaiming protocol or platform parity." },
+    @{ Pattern = "The Ghostty you know and love"; Reason = "Avoid broad compatibility claims that exceed the documented shared core." },
+    @{ Pattern = "Close where it matters"; Reason = "Avoid vague compatibility claims; name the shared and fork-specific layers." },
     @{ Pattern = "shared Ghostty terminal core · auto-detected: PowerShell, cmd, Git Bash'"; Reason = "Current profile-picker messaging should include opt-in WSL." },
     @{ Pattern = "src/terminal, src/font, src/renderer, src/input, src/config, and libghostty-vt are shared"; Reason = "The shared upstream surface is broader today and includes termio/crash/shell-integration/inspector." },
     @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." }
@@ -38,7 +41,15 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/winghostty"; Reason = "Landing page should keep a repo link." },
     @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "winget install AmanThanvi.winghostty"; Reason = "Hero copy should surface the official WinGet install command." },
     @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "scoop install winghostty/winghostty"; Reason = "Copied install text should include the official Scoop install command." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/scoop-winghostty"; Reason = "Copied Scoop install text should include the official bucket source." }
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/scoop-winghostty"; Reason = "Copied Scoop install text should include the official bucket source." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Native settings"; Reason = "Landing page should describe the current native settings window." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Universal palette"; Reason = "Landing page should describe the current universal palette." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "partial, not complete"; Reason = "Landing page must keep Windows accessibility status explicitly partial." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = '<link rel="canonical" href="https://winghostty.com/"'; Reason = "Landing page should publish its canonical URL." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "<noscript>"; Reason = "Landing page should retain a useful no-JavaScript fallback." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/winghostty/discussions"; Reason = "Footer should link to project Discussions." },
+    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
 )
 
 $failures = New-Object System.Collections.Generic.List[string]

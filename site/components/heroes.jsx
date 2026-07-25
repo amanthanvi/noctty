@@ -14,13 +14,12 @@ export function HeroColorPop() {
           <h1 className="wg-hero__title" id="hero-title">
             Ghostty<span className="wg-accent-red">,</span>
             <br className="wg-hero__mobile-break" /> finally
-            <br />
+            <br />{' '}
             on Windows<span className="wg-accent-blue">.</span>
           </h1>
           <p className="wg-hero__caption">
-            The Ghostty you know and love, now on Windows. Winghostty is a Windows-native fork that
-            brings Ghostty&apos;s terminal core into a real Windows app, with tabs, splits, profiles,
-            and plain-text configuration.
+            Winghostty pairs Ghostty&apos;s terminal core with a native Win32 app for tabs, splits,
+            profiles, session restoration, native settings, and a keyboard-driven universal palette.
           </p>
         </div>
 
