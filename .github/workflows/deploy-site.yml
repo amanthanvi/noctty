@@ -1,0 +1,284 @@
+name: Deploy Site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/deploy-site.yml"
+      - "README.md"
+      - "docs/getting-started.md"
+      - "docs/status.md"
+      - "scripts/build-site-bundle.mjs"
+      - "scripts/build-site-payload.ps1"
+      - "scripts/check-release-copy.ps1"
+      - "scripts/check-site-bundle.ps1"
+      - "scripts/check-site-copy.ps1"
+      - "scripts/verify-cloudflare-pages.ps1"
+      - "site/**"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: cloudflare-pages-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Canary, verify, and publish
+    if: github.event_name != 'release' || github.event.release.prerelease == false
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: cloudflare-pages-production
+    env:
+      CLOUDFLARE_PAGES_PROJECT: winghostty
+      CLOUDFLARE_PAGES_PRODUCTION_BRANCH: main
+
+    steps:
+      - name: Checkout exact event commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve exact deployment commit
+        id: source
+        shell: pwsh
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Deployment source did not resolve to a full Git SHA.'
+          }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Validate committed site bundle and copy
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          npm ci --prefix site --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { throw 'Site dependency installation failed.' }
+          ./scripts/check-site-bundle.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/check-site-copy.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            if ($env:RELEASE_TAG -cnotmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+              throw 'Published release tag must be plain v<major>.<minor>.<patch> semver.'
+            }
+            ./scripts/check-release-copy.ps1 `
+              -ExpectedVersion $Matches.version `
+              -CheckRemoteLatest
+          } else {
+            ./scripts/check-release-copy.ps1 -CheckRemoteLatest
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build deterministic deploy payload twice
+        id: payload
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "winghostty-site-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $first = Join-Path $root 'payload'
+          $second = Join-Path $root 'payload-repeat'
+          $firstManifest = Join-Path $root 'payload.sha256'
+          $secondManifest = Join-Path $root 'payload-repeat.sha256'
+          $evidence = Join-Path $env:RUNNER_TEMP "winghostty-site-evidence-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $wrangler = Join-Path $env:RUNNER_TEMP "winghostty-wrangler-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+
+          ./scripts/build-site-payload.ps1 -OutputDirectory $first -ManifestPath $firstManifest
+          ./scripts/build-site-payload.ps1 -OutputDirectory $second -ManifestPath $secondManifest
+
+          $firstBytes = [IO.File]::ReadAllBytes($firstManifest)
+          $secondBytes = [IO.File]::ReadAllBytes($secondManifest)
+          if (-not [Linq.Enumerable]::SequenceEqual[byte]($firstBytes, $secondBytes)) {
+            throw 'Repeated site builds produced different sorted SHA-256 manifests.'
+          }
+
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          New-Item -ItemType Directory -Path $wrangler -Force | Out-Null
+          Copy-Item -LiteralPath $firstManifest -Destination (Join-Path $evidence 'payload.sha256')
+          "directory=$($first.Replace('\', '/'))" >> $env:GITHUB_OUTPUT
+          "manifest=$($firstManifest.Replace('\', '/'))" >> $env:GITHUB_OUTPUT
+          "evidence_directory=$($evidence.Replace('\', '/'))" >> $env:GITHUB_OUTPUT
+          "wrangler_directory=$($wrangler.Replace('\', '/'))" >> $env:GITHUB_OUTPUT
+
+      - name: Require exact origin main before canary
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/winghostty' -or
+              $env:DEFAULT_BRANCH -cne 'main') {
+            throw 'Site deployment is restricted to amanthanvi/winghostty main.'
+          }
+          $origin = (git remote get-url origin).Trim()
+          if ($origin -cnotin @(
+              'https://github.com/amanthanvi/winghostty',
+              'https://github.com/amanthanvi/winghostty.git'
+          )) {
+            throw 'Unexpected origin remote for production site deployment.'
+          }
+          git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch exact origin/main.' }
+          $head = (git rev-parse HEAD).Trim()
+          $originMain = (git rev-parse refs/remotes/origin/main).Trim()
+          if ($head -cne $env:DEPLOY_SHA -or $head -cne $originMain) {
+            throw 'Resolved deployment SHA is not the exact current origin/main commit.'
+          }
+          if (git status --porcelain=v1 --untracked-files=all) {
+            throw 'Repository became dirty before the canary deployment.'
+          }
+
+      - name: Resolve canary branch
+        id: canary_meta
+        shell: pwsh
+        run: |
+          $sha = '${{ steps.source.outputs.sha }}'
+          $branch = "canary-$($sha.Substring(0, 12))-$env:GITHUB_RUN_ATTEMPT"
+          "branch=$branch" >> $env:GITHUB_OUTPUT
+
+      - name: Deploy exact payload to canary
+        id: canary
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          wranglerVersion: 4.114.0
+          packageManager: npm
+          workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
+          quiet: true
+          command: >-
+            pages deploy "${{ steps.payload.outputs.directory }}"
+            --project-name=winghostty
+            --branch="${{ steps.canary_meta.outputs.branch }}"
+            --commit-hash="${{ steps.source.outputs.sha }}"
+            --commit-dirty=false
+
+      - name: Verify canary provenance and bytes
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOYMENT_ID: ${{ steps.canary.outputs.pages-deployment-id }}
+          DEPLOYMENT_URL: ${{ steps.canary.outputs.deployment-url }}
+          CANARY_BRANCH: ${{ steps.canary_meta.outputs.branch }}
+          PAYLOAD_DIRECTORY: ${{ steps.payload.outputs.directory }}
+          PAYLOAD_MANIFEST: ${{ steps.payload.outputs.manifest }}
+          PROVENANCE_DIRECTORY: ${{ steps.payload.outputs.evidence_directory }}
+        run: |
+          $provenancePath = Join-Path $env:PROVENANCE_DIRECTORY 'canary-provenance.json'
+          ./scripts/verify-cloudflare-pages.ps1 `
+            -Mode Deployment `
+            -DeploymentId $env:DEPLOYMENT_ID `
+            -ExpectedEnvironment preview `
+            -ExpectedBranch $env:CANARY_BRANCH `
+            -ExpectedCommit '${{ steps.source.outputs.sha }}' `
+            -BaseUrl $env:DEPLOYMENT_URL `
+            -PayloadDirectory $env:PAYLOAD_DIRECTORY `
+            -ManifestPath $env:PAYLOAD_MANIFEST `
+            -ProvenancePath $provenancePath
+
+      - name: Require the zone-owned www redirect before production
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOYMENT_ID: ${{ steps.canary.outputs.pages-deployment-id }}
+        run: |
+          ./scripts/verify-cloudflare-pages.ps1 `
+            -Mode Redirect `
+            -DeploymentId $env:DEPLOYMENT_ID `
+            -ExpectedCommit '${{ steps.source.outputs.sha }}'
+
+      - name: Require exact origin main before production
+        shell: pwsh
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/winghostty' -or
+              $env:DEFAULT_BRANCH -cne 'main') {
+            throw 'Site deployment is restricted to amanthanvi/winghostty main.'
+          }
+          $origin = (git remote get-url origin).Trim()
+          if ($origin -cnotin @(
+              'https://github.com/amanthanvi/winghostty',
+              'https://github.com/amanthanvi/winghostty.git'
+          )) {
+            throw 'Unexpected origin remote for production site deployment.'
+          }
+          git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch exact origin/main.' }
+          $head = (git rev-parse HEAD).Trim()
+          $originMain = (git rev-parse refs/remotes/origin/main).Trim()
+          if ($head -cne $env:DEPLOY_SHA -or $head -cne $originMain) {
+            throw 'Resolved deployment SHA is not the exact current origin/main commit.'
+          }
+          if (git status --porcelain=v1 --untracked-files=all) {
+            throw 'Repository became dirty before the production deployment.'
+          }
+
+      - name: Deploy identical payload to production
+        id: production
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          wranglerVersion: 4.114.0
+          packageManager: npm
+          workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
+          quiet: true
+          command: >-
+            pages deploy "${{ steps.payload.outputs.directory }}"
+            --project-name=winghostty
+            --branch=main
+            --commit-hash="${{ steps.source.outputs.sha }}"
+            --commit-dirty=false
+
+      - name: Verify production provenance, domain, and bytes
+        shell: pwsh
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOYMENT_ID: ${{ steps.production.outputs.pages-deployment-id }}
+          DEPLOYMENT_URL: ${{ steps.production.outputs.deployment-url }}
+          PAYLOAD_DIRECTORY: ${{ steps.payload.outputs.directory }}
+          PAYLOAD_MANIFEST: ${{ steps.payload.outputs.manifest }}
+          PROVENANCE_DIRECTORY: ${{ steps.payload.outputs.evidence_directory }}
+        run: |
+          $provenancePath = Join-Path $env:PROVENANCE_DIRECTORY 'production-provenance.json'
+          ./scripts/verify-cloudflare-pages.ps1 `
+            -Mode Deployment `
+            -DeploymentId $env:DEPLOYMENT_ID `
+            -ExpectedEnvironment production `
+            -ExpectedBranch main `
+            -ExpectedCommit '${{ steps.source.outputs.sha }}' `
+            -BaseUrl $env:DEPLOYMENT_URL `
+            -CanonicalBaseUrl 'https://winghostty.com/' `
+            -PayloadDirectory $env:PAYLOAD_DIRECTORY `
+            -ManifestPath $env:PAYLOAD_MANIFEST `
+            -ProvenancePath $provenancePath `
+            -RequireCanonical `
+            -VerifyWwwRedirect
+
+      - name: Upload redacted deployment provenance
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: site-deployment-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/winghostty-site-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 30
