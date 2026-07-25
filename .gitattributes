@@ -14,6 +14,7 @@
 *.blp text eol=lf
 
 # Config/build files - always LF
+.gitattributes text eol=lf
 *.zon text eol=lf
 *.nix text eol=lf
 *.md text eol=lf

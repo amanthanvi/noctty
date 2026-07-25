@@ -8422,7 +8422,7 @@ Assert-TextContract `
     -Context $sitePayloadBuilder
 Assert-TextContract `
     -Content $siteGitattributesText `
-    -Pattern '(?ms)^site/\*\.html text eol=lf$.*?^site/\*\.css text eol=lf$.*?^site/\*\.js text eol=lf$.*?^site/_headers text eol=lf$.*?^site/assets/\*\.svg text eol=lf$.*?^site/components/\*\*/\*\.jsx text eol=lf$.*?^site/vendor/\*\.js text eol=lf$.*?^scripts/build-site-bundle\.mjs text eol=lf$' `
+    -Pattern '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/components/\*\*/\*\.jsx text eol=lf\r?$.*?^site/vendor/\*\.js text eol=lf\r?$.*?^scripts/build-site-bundle\.mjs text eol=lf\r?$' `
     -Description 'every text file in the site payload and its source graph has a deterministic LF checkout rule' `
     -Context $siteGitattributes
 Assert-TextContract `
