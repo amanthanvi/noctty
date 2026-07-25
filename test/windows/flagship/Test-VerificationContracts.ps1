@@ -8450,6 +8450,11 @@ Assert-TextContract `
     -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?get-site-header-contract\.ps1.*?Assert-PublicHeaderContract' `
     -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
     -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Wait-CanonicalDeployment(?=\s|\{)') `
+    -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?try \{\s*\$project = Get-Project.*?catch \{.*?\$attempt -eq 10.*?failed after bounded retries.*?Start-Sleep -Seconds 2.*?continue.*?Assert-ProjectContract.*?Get-CanonicalDeploymentId' `
+    -Description 'canonical promotion tolerates bounded transient project API failures but still validates project identity' `
+    -Context "$cloudflarePagesVerifier :: Wait-CanonicalDeployment"
 Assert-WorkflowContractAbsent `
     -Path $cloudflarePagesVerifier `
     -Pattern '(?i)cf-mitigated|AllowMitigatedHtml|mitigated-challenge|challenged_hosts|canonical_html_status' `

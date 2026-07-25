@@ -188,7 +188,16 @@ function Wait-CanonicalDeployment {
     param([Parameter(Mandatory)] [string] $ExpectedId)
 
     for ($attempt = 1; $attempt -le 10; $attempt++) {
-        $project = Get-Project
+        try {
+            $project = Get-Project
+        }
+        catch {
+            if ($attempt -eq 10) {
+                throw 'Cloudflare canonical deployment polling failed after bounded retries.'
+            }
+            Start-Sleep -Seconds 2
+            continue
+        }
         Assert-ProjectContract -Project $project
         if ((Get-CanonicalDeploymentId -Project $project) -ceq $ExpectedId) {
             return $project
@@ -549,13 +558,14 @@ try {
                 -Branch $ExpectedBranch `
                 -Commit $ExpectedCommit
 
-            $project = Get-Project
-            Assert-ProjectContract -Project $project
             if ($RequireCanonical) {
                 if ($ExpectedEnvironment -cne 'production') {
                     throw 'Only a production deployment can be canonical.'
                 }
                 $project = Wait-CanonicalDeployment -ExpectedId $DeploymentId
+            } else {
+                $project = Get-Project
+                Assert-ProjectContract -Project $project
             }
 
             $pagesOrigin = ConvertTo-PublicBaseUri -Value $BaseUrl -Kind pages
