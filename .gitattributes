@@ -35,7 +35,9 @@ site/*.css text eol=lf
 site/*.js text eol=lf
 site/_headers text eol=lf
 site/assets/*.svg text eol=lf
+site/components/**/*.js text eol=lf
 site/components/**/*.jsx text eol=lf
+site/tests/*.mjs text eol=lf
 site/vendor/*.js text eol=lf
 scripts/build-site-bundle.mjs text eol=lf
 

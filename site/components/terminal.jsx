@@ -1,12 +1,15 @@
 // Mock terminal window with an optional, user-controlled typewriter animation.
 
 import { TerminalLine } from './terminal/terminal-line.jsx';
+import {
+  useDemoActivity,
+  usePrefersReducedMotion,
+} from './terminal/activity-hooks.jsx';
 
 const { useEffect, useLayoutEffect, useReducer, useRef, useState } = React;
 
 let WG_VERSION = window.WG_VERSION || '1.3.119';
 const WG_REPO = 'amanthanvi/winghostty';
-const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 function buildScript(v) {
   const scenes = [
@@ -100,49 +103,6 @@ function terminalReducer(state, action) {
     default:
       return state;
   }
-}
-
-function usePrefersReducedMotion() {
-  const [reducedMotion, setReducedMotion] = useState(
-    () => window.matchMedia?.(REDUCED_MOTION_QUERY).matches ?? false,
-  );
-
-  useEffect(() => {
-    if (!window.matchMedia) return undefined;
-    const mediaQuery = window.matchMedia(REDUCED_MOTION_QUERY);
-    const onChange = (event) => setReducedMotion(event.matches);
-    mediaQuery.addEventListener?.('change', onChange);
-    mediaQuery.addListener?.(onChange);
-    return () => {
-      mediaQuery.removeEventListener?.('change', onChange);
-      mediaQuery.removeListener?.(onChange);
-    };
-  }, []);
-
-  return reducedMotion;
-}
-
-function useDemoActivity(terminalRef) {
-  const [documentActive, setDocumentActive] = useState(() => !document.hidden);
-  const [inViewport, setInViewport] = useState(true);
-
-  useEffect(() => {
-    const onVisibilityChange = () => setDocumentActive(!document.hidden);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, []);
-
-  useEffect(() => {
-    if (!window.IntersectionObserver || !terminalRef.current) return undefined;
-    const observer = new IntersectionObserver(
-      ([entry]) => setInViewport(entry.isIntersecting),
-      { threshold: 0.05 },
-    );
-    observer.observe(terminalRef.current);
-    return () => observer.disconnect();
-  }, [terminalRef]);
-
-  return documentActive && inViewport;
 }
 
 export function WinghosttyTerminal({

@@ -1195,7 +1195,7 @@ code {
   line-height: 1.65;
 }
 
-.wg-noscript p:has(.wg-button) {
+.wg-noscript__actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
