@@ -8307,6 +8307,11 @@ Assert-TextContract `
     -Description 'site deployment is protected by the production environment' `
     -Context "$siteDeployWorkflow :: deploy"
 Assert-TextContract `
+    -Content (Get-YamlJobText -Content $siteDeployWorkflowText -Name 'deploy' -Source $siteDeployWorkflow) `
+    -Pattern "(?m)^\s+if: github\.event_name != 'release' \|\| github\.event\.release\.prerelease == false\s*$" `
+    -Description 'stable site publication ignores prerelease events' `
+    -Context "$siteDeployWorkflow :: deploy"
+Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout exact event commit' -Source $siteDeployWorkflow) `
     -Pattern '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ github\.event_name == ''release'' && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false' `
     -Description 'site checkout uses exact event commits for pushes and current main for release publication' `

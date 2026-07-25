@@ -59,9 +59,10 @@ pull requests do not deploy. The protected GitHub environment is
 - `CLOUDFLARE_ACCOUNT_ID` - the account identifier, stored as a secret so it is
   not copied into logs or provenance
 
-For a push, the workflow checks out the immutable event SHA. For a published
-release, it checks out the current `main` head and requires its baked-in release
-copy to match the published tag and GitHub's public latest release. In both
+For a push, the workflow checks out the immutable event SHA. Published
+prereleases are ignored. For a published stable release, it checks out the
+current `main` head and requires its baked-in release copy to match the
+published tag and GitHub's public latest release. In both
 cases, the resolved SHA must remain the exact clean `origin/main` head before
 both deployment phases. Wrangler `4.114.0` installs in an isolated runner-temp
 directory. The workflow builds an exact static-file allowlist twice and
