@@ -410,28 +410,18 @@ function Get-ResponseHeaderText {
 function Assert-PublicHeaderContract {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
-        [Parameter(Mandatory)] [string] $Id
+        [Parameter(Mandatory)] [string] $Id,
+        [Parameter(Mandatory)] [object] $Contract
     )
 
-    $requiredCspTokens = [string[]] @(
-        "default-src 'self'"
-        "base-uri 'none'"
-        "object-src 'none'"
-        "frame-ancestors 'none'"
-        "script-src 'self' 'sha256-pISZ4uq8FeQ38HOwS22gAtqH+pfUgqkItu+zFe6qagg=' 'sha256-HgYMqcl1IJyO4BIHc3TA/IswS2cmPQtqqPBk9kLqGao='"
-        "script-src-attr 'unsafe-hashes' 'sha256-MhtPZXr7+LpJUY5qtMutB+qWfQtMaPccfe7QXtCcEYc='"
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com"
-        "font-src 'self' https://fonts.gstatic.com"
-        "connect-src 'self' https://api.github.com"
-    )
     $probes = @(
         [pscustomobject]@{
             Path = '/'
-            CachePattern = '(?:^|,\s*)public,\s*max-age=0,\s*must-revalidate(?:,|$)'
+            ExpectedCache = [string]$Contract.root.cache_control
         }
         [pscustomobject]@{
             Path = '/bundle.js'
-            CachePattern = '(?:^|,\s*)public,\s*max-age=3600,\s*must-revalidate(?:,|$)'
+            ExpectedCache = [string]$Contract.bundle.cache_control
         }
     )
     foreach ($probe in $probes) {
@@ -449,40 +439,20 @@ function Assert-PublicHeaderContract {
             $cacheControl = Get-ResponseHeaderText `
                 -Response $response `
                 -Name 'Cache-Control'
-            if ($cacheControl -notmatch $probe.CachePattern) {
+            if ($cacheControl -cne $probe.ExpectedCache) {
                 throw "Published cache policy mismatch at $($Origin.DnsSafeHost)."
             }
             if ((Get-ResponseHeaderText -Response $response -Name 'X-Content-Type-Options') -cne
-                    'nosniff' -or
+                    [string]$Contract.root.x_content_type_options -or
                 (Get-ResponseHeaderText -Response $response -Name 'X-Frame-Options') -cne
-                    'DENY' -or
+                    [string]$Contract.root.x_frame_options -or
                 (Get-ResponseHeaderText -Response $response -Name 'Referrer-Policy') -cne
-                    'strict-origin-when-cross-origin') {
+                    [string]$Contract.root.referrer_policy -or
+                (Get-ResponseHeaderText -Response $response -Name 'Permissions-Policy') -cne
+                    [string]$Contract.root.permissions_policy -or
+                (Get-ResponseHeaderText -Response $response -Name 'Content-Security-Policy') -cne
+                    [string]$Contract.root.content_security_policy) {
                 throw "Published browser security headers are incomplete at $($Origin.DnsSafeHost)."
-            }
-            $permissions =
-                Get-ResponseHeaderText -Response $response -Name 'Permissions-Policy'
-            foreach ($permission in @(
-                'camera=()',
-                'geolocation=()',
-                'microphone=()',
-                'payment=()',
-                'usb=()'
-            )) {
-                if (-not $permissions.Contains($permission, [StringComparison]::Ordinal)) {
-                    throw "Published permissions policy is incomplete at $($Origin.DnsSafeHost)."
-                }
-            }
-            $csp = Get-ResponseHeaderText `
-                -Response $response `
-                -Name 'Content-Security-Policy'
-            if ($csp.Contains("script-src 'self' 'unsafe-inline'", [StringComparison]::Ordinal)) {
-                throw "Published CSP allows broad inline scripts at $($Origin.DnsSafeHost)."
-            }
-            foreach ($token in $requiredCspTokens) {
-                if (-not $csp.Contains($token, [StringComparison]::Ordinal)) {
-                    throw "Published CSP is incomplete at $($Origin.DnsSafeHost)."
-                }
             }
         }
         finally {
@@ -597,12 +567,19 @@ try {
             $entries = @(Get-ManifestEntries `
                 -Path $ManifestPath `
                 -PayloadRoot $PayloadDirectory)
+            $headerContract = (
+                & (Join-Path $PSScriptRoot 'get-site-header-contract.ps1') `
+                    -SiteDirectory $PayloadDirectory
+            ) | ConvertFrom-Json -Depth 6
             [void](Assert-PublicPayload `
                 -Origin $pagesOrigin `
                 -Entries $entries `
                 -Id $DeploymentId `
                 -Commit $ExpectedCommit)
-            [void](Assert-PublicHeaderContract -Origin $pagesOrigin -Id $DeploymentId)
+            [void](Assert-PublicHeaderContract `
+                -Origin $pagesOrigin `
+                -Id $DeploymentId `
+                -Contract $headerContract)
 
             $verifiedHosts = [Collections.Generic.List[string]]::new()
             [void]$verifiedHosts.Add($pagesOrigin.DnsSafeHost)
@@ -622,7 +599,8 @@ try {
                     -Commit $ExpectedCommit)
                 [void](Assert-PublicHeaderContract `
                     -Origin $canonicalOrigin `
-                    -Id $DeploymentId)
+                    -Id $DeploymentId `
+                    -Contract $headerContract)
                 [void]$verifiedHosts.Add($canonicalOrigin.DnsSafeHost)
             }
             if ($VerifyWwwRedirect) {

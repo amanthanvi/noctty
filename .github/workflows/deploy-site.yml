@@ -14,6 +14,8 @@ on:
       - "scripts/check-release-copy.ps1"
       - "scripts/check-site-bundle.ps1"
       - "scripts/check-site-copy.ps1"
+      - "scripts/get-site-header-contract.ps1"
+      - "scripts/require-site-deployment-head.ps1"
       - "scripts/verify-cloudflare-pages.ps1"
       - "site/**"
   release:
@@ -70,6 +72,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/check-site-copy.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/get-site-header-contract.ps1 | Out-Null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($env:GITHUB_EVENT_NAME -eq 'release') {
             if ($env:RELEASE_TAG -cnotmatch '^v(?<version>\d+\.\d+\.\d+)$') {
               throw 'Published release tag must be plain v<major>.<minor>.<patch> semver.'
@@ -117,27 +121,10 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DEPLOY_SHA: ${{ steps.source.outputs.sha }}
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/winghostty' -or
-              $env:DEFAULT_BRANCH -cne 'main') {
-            throw 'Site deployment is restricted to amanthanvi/winghostty main.'
-          }
-          $origin = (git remote get-url origin).Trim()
-          if ($origin -cnotin @(
-              'https://github.com/amanthanvi/winghostty',
-              'https://github.com/amanthanvi/winghostty.git'
-          )) {
-            throw 'Unexpected origin remote for production site deployment.'
-          }
-          git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch exact origin/main.' }
-          $head = (git rev-parse HEAD).Trim()
-          $originMain = (git rev-parse refs/remotes/origin/main).Trim()
-          if ($head -cne $env:DEPLOY_SHA -or $head -cne $originMain) {
-            throw 'Resolved deployment SHA is not the exact current origin/main commit.'
-          }
-          if (git status --porcelain=v1 --untracked-files=all) {
-            throw 'Repository became dirty before the canary deployment.'
-          }
+          ./scripts/require-site-deployment-head.ps1 `
+            -ExpectedSha $env:DEPLOY_SHA `
+            -DefaultBranch $env:DEFAULT_BRANCH `
+            -Phase canary
 
       - name: Resolve canary branch
         id: canary_meta
@@ -207,27 +194,10 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           DEPLOY_SHA: ${{ steps.source.outputs.sha }}
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/winghostty' -or
-              $env:DEFAULT_BRANCH -cne 'main') {
-            throw 'Site deployment is restricted to amanthanvi/winghostty main.'
-          }
-          $origin = (git remote get-url origin).Trim()
-          if ($origin -cnotin @(
-              'https://github.com/amanthanvi/winghostty',
-              'https://github.com/amanthanvi/winghostty.git'
-          )) {
-            throw 'Unexpected origin remote for production site deployment.'
-          }
-          git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to fetch exact origin/main.' }
-          $head = (git rev-parse HEAD).Trim()
-          $originMain = (git rev-parse refs/remotes/origin/main).Trim()
-          if ($head -cne $env:DEPLOY_SHA -or $head -cne $originMain) {
-            throw 'Resolved deployment SHA is not the exact current origin/main commit.'
-          }
-          if (git status --porcelain=v1 --untracked-files=all) {
-            throw 'Repository became dirty before the production deployment.'
-          }
+          ./scripts/require-site-deployment-head.ps1 `
+            -ExpectedSha $env:DEPLOY_SHA `
+            -DefaultBranch $env:DEFAULT_BRANCH `
+            -Phase production
 
       - name: Deploy identical payload to production
         id: production

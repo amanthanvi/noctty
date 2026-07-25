@@ -2568,6 +2568,8 @@ $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $siteDeployWorkflow = Join-Path $repoRoot '.github\workflows\deploy-site.yml'
 $siteBundleBuilder = Join-Path $repoRoot 'scripts\build-site-bundle.mjs'
 $sitePayloadBuilder = Join-Path $repoRoot 'scripts\build-site-payload.ps1'
+$siteHeaderContract = Join-Path $repoRoot 'scripts\get-site-header-contract.ps1'
+$siteDeploymentHeadGate = Join-Path $repoRoot 'scripts\require-site-deployment-head.ps1'
 $cloudflarePagesVerifier = Join-Path $repoRoot 'scripts\verify-cloudflare-pages.ps1'
 $siteHeaders = Join-Path $repoRoot 'site\_headers'
 $siteReadme = Join-Path $repoRoot 'site\README.md'
@@ -8274,7 +8276,12 @@ Assert-TextContract `
     -Description 'package-manager preflight invokes the WinGet architecture gate' `
     -Context "$releasePreflight :: RequirePackageManagers"
 
-foreach ($siteScript in @($sitePayloadBuilder, $cloudflarePagesVerifier)) {
+foreach ($siteScript in @(
+    $sitePayloadBuilder,
+    $siteHeaderContract,
+    $siteDeploymentHeadGate,
+    $cloudflarePagesVerifier
+)) {
     $siteScriptTokens = $null
     $siteScriptErrors = $null
     [void][Management.Automation.Language.Parser]::ParseFile(
@@ -8323,7 +8330,7 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: source"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
+    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
     -Description 'release-triggered site deployments bind baked-in copy to the published semver tag' `
     -Context "$siteDeployWorkflow :: site validation"
 $siteActionUses = [regex]::Matches(
@@ -8359,20 +8366,18 @@ foreach ($deployStepName in @(
         -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version' `
         -Context "$siteDeployWorkflow :: $deployStepName"
 }
-if ([regex]::Matches(
-        $siteDeployWorkflowText,
-        '(?m)^      - name: Require exact origin main before (?:canary|production)$'
-    ).Count -ne 2 -or
-    [regex]::Matches(
-        $siteDeployWorkflowText,
-        "git fetch --force --no-tags origin 'refs/heads/main:refs/remotes/origin/main'"
-    ).Count -ne 2 -or
-    [regex]::Matches(
-        $siteDeployWorkflowText,
-        '\$head -cne \$env:DEPLOY_SHA -or \$head -cne \$originMain'
-    ).Count -ne 2) {
-    throw 'Site deployment must reassert the exact clean origin/main head before both uploads.'
+foreach ($phase in @('canary', 'production')) {
+    Assert-TextContract `
+        -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name "Require exact origin main before $phase" -Source $siteDeployWorkflow) `
+        -Pattern "(?ms)require-site-deployment-head\.ps1.*?-ExpectedSha \`$env:DEPLOY_SHA.*?-DefaultBranch \`$env:DEFAULT_BRANCH.*?-Phase $phase" `
+        -Description "site deployment invokes the shared exact-main gate before $phase" `
+        -Context "$siteDeployWorkflow :: $phase head gate"
 }
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw) `
+    -Pattern '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/winghostty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all' `
+    -Description 'the shared site gate binds both phases to a clean exact fork-local main head' `
+    -Context $siteDeploymentHeadGate
 $sitePayloadStep = Get-YamlStepBlock `
     -Content $siteDeployWorkflowText `
     -Name 'Build deterministic deploy payload twice' `
@@ -8442,7 +8447,7 @@ Assert-TextContract `
     -Context $siteBundleBuilder
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
-    -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?Assert-PublicHeaderContract' `
+    -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?get-site-header-contract\.ps1.*?Assert-PublicHeaderContract' `
     -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
     -Context $cloudflarePagesVerifier
 Assert-WorkflowContractAbsent `
@@ -8481,51 +8486,23 @@ Assert-TextContract `
     -Pattern "(?ms)script-src 'self' 'sha256-[^']+' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
     -Description 'inline scripts and the font load handler use narrow CSP hashes' `
     -Context $siteHeaders
-if ($siteHeadersText -match "script-src 'self'[^;]*'unsafe-inline'") {
-    throw 'Pages CSP cannot broadly allow inline scripts.'
+$siteHeaderContractJson = & $siteHeaderContract `
+    -SiteDirectory (Join-Path $repoRoot 'site')
+$siteHeaderContractObject = $siteHeaderContractJson | ConvertFrom-Json -Depth 6
+if ([string]$siteHeaderContractObject.root.content_security_policy -cne
+        [string](
+            [regex]::Match(
+                $siteHeadersText,
+                '(?m)^\s+Content-Security-Policy:\s*(?<value>.+)$'
+            ).Groups['value'].Value
+        )) {
+    throw 'Central site header contract did not return the tracked CSP.'
 }
-
-function Get-CspSha256Source {
-    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
-
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
-    return 'sha256-' + [Convert]::ToBase64String(
-        [Security.Cryptography.SHA256]::HashData($bytes)
-    )
-}
-
-$expectedCspHashes = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-foreach ($htmlName in @('index.html', '404.html')) {
-    $html = [IO.File]::ReadAllText(
-        (Join-Path $repoRoot "site\$htmlName"),
-        [Text.UTF8Encoding]::new($false)
-    )
-    $inlineScripts = @(
-        [regex]::Matches($html, '(?is)<script(?<attrs>[^>]*)>(?<body>.*?)</script>') |
-            Where-Object { $_.Groups['attrs'].Value -notmatch '\bsrc\s*=' }
-    )
-    if ($inlineScripts.Count -ne 1) {
-        throw "Expected exactly one CSP-hashed inline theme script in site/$htmlName."
-    }
-    [void]$expectedCspHashes.Add(
-        (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
-    )
-}
-[void]$expectedCspHashes.Add(
-    (Get-CspSha256Source -Value "this.media='all'")
-)
-$declaredCspHashes = @(
-    [regex]::Matches($siteHeadersText, "'(?<hash>sha256-[A-Za-z0-9+/]+=*)'") |
-        ForEach-Object { $_.Groups['hash'].Value }
-)
-if ($declaredCspHashes.Count -ne $expectedCspHashes.Count -or
-    @($declaredCspHashes | Where-Object {
-        -not $expectedCspHashes.Contains($_)
-    }).Count -ne 0) {
-    throw 'Pages CSP hashes do not exactly match the inline HTML scripts and handlers.'
-}
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern '(?ms)index\.html.*?404\.html.*?Get-CspSha256Source.*?declaredHashes.*?expectedHashes.*?ConvertTo-Json' `
+    -Description 'one reusable contract derives CSP hashes from both HTML fallbacks and emits live expectations' `
+    -Context $siteHeaderContract
 
 $sitePayloadFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()

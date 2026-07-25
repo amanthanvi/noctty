@@ -29,6 +29,8 @@ $outputPrefix = "$outputRoot$separator"
 if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
     throw "Site source directory does not exist: $sourceRoot"
 }
+[void](& (Join-Path $PSScriptRoot 'get-site-header-contract.ps1') `
+    -SiteDirectory $sourceRoot)
 if ($outputRoot.Equals($sourceRoot, $pathComparison) -or
     $outputRoot.StartsWith($sourcePrefix, $pathComparison) -or
     $sourceRoot.StartsWith($outputPrefix, $pathComparison)) {
