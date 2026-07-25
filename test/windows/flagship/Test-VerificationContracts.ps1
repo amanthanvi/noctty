@@ -8308,12 +8308,17 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: deploy"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout exact event commit' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ github\.sha \}\}.*?persist-credentials: false' `
-    -Description 'site checkout is an immutable action pinned to the exact event SHA without persisted credentials' `
+    -Pattern '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ github\.event_name == ''release'' && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false' `
+    -Description 'site checkout uses exact event commits for pushes and current main for release publication' `
     -Context "$siteDeployWorkflow :: checkout"
 Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Resolve exact deployment commit' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)id: source.*?git rev-parse HEAD.*?\^\[0-9a-f\]\{40\}\$.*?"sha=\$sha" >> \$env:GITHUB_OUTPUT' `
+    -Description 'site deployment records the full resolved source SHA once after checkout' `
+    -Context "$siteDeployWorkflow :: source"
+Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)RELEASE_TAG:.*?github\.event\.release\.tag_name.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1 -ExpectedVersion \$Matches\.version.*?else \{.*?check-release-copy\.ps1.*?LASTEXITCODE' `
+    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
     -Description 'release-triggered site deployments bind baked-in copy to the published semver tag' `
     -Context "$siteDeployWorkflow :: site validation"
 $siteActionUses = [regex]::Matches(
@@ -8345,7 +8350,7 @@ foreach ($deployStepName in @(
         -Source $siteDeployWorkflow
     Assert-TextContract `
         -Content $deployStep `
-        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?quiet: true.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ github\.sha \}\}".*?--commit-dirty=false' `
+        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?quiet: true.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
         -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version' `
         -Context "$siteDeployWorkflow :: $deployStepName"
 }
@@ -8359,7 +8364,7 @@ if ([regex]::Matches(
     ).Count -ne 2 -or
     [regex]::Matches(
         $siteDeployWorkflowText,
-        '\$head -cne \$env:GITHUB_SHA -or \$head -cne \$originMain'
+        '\$head -cne \$env:DEPLOY_SHA -or \$head -cne \$originMain'
     ).Count -ne 2) {
     throw 'Site deployment must reassert the exact clean origin/main head before both uploads.'
 }
@@ -8379,12 +8384,12 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: payload"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify canary provenance and bytes' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit \$env:GITHUB_SHA.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
+    -Pattern '(?ms)-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit ''\$\{\{ steps\.source\.outputs\.sha \}\}''.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
     -Description 'canary verification binds API provenance and payload bytes to the exact commit' `
     -Context "$siteDeployWorkflow :: canary verification"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Require the zone-owned www redirect before production' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit \$env:GITHUB_SHA' `
+    -Pattern '(?ms)-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit ''\$\{\{ steps\.source\.outputs\.sha \}\}''' `
     -Description 'the zone-owned www redirect is verified before the production write' `
     -Context "$siteDeployWorkflow :: redirect preflight"
 Assert-TextContract `
@@ -8435,10 +8440,14 @@ Assert-TextContract `
     -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?Assert-PublicHeaderContract' `
     -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
     -Context $cloudflarePagesVerifier
+Assert-WorkflowContractAbsent `
+    -Path $cloudflarePagesVerifier `
+    -Pattern '(?i)cf-mitigated|AllowMitigatedHtml|mitigated-challenge|challenged_hosts|canonical_html_status' `
+    -Description 'custom-domain verification cannot accept substituted challenge HTML'
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
-    -Pattern "(?ms)Test-IsCloudflareManagedChallenge.*?TryGetValues\('cf-mitigated'.*?-contains 'challenge'.*?AllowMitigatedHtml.*?\$isHtml.*?Test-IsCloudflareManagedChallenge.*?mitigated-challenge.*?\$challengedHosts.*?canonical_html_status" `
-    -Description 'custom-domain HTML records only explicit managed challenges separately from verified hosts' `
+    -Pattern '(?ms)\$canonicalOrigin.*?Assert-PublicPayload.*?-Origin \$canonicalOrigin.*?Assert-PublicHeaderContract.*?-Origin \$canonicalOrigin.*?\$verifiedHosts\.Add\(\$canonicalOrigin\.DnsSafeHost\).*?canonical_html_verified' `
+    -Description 'canonical production HTML, fallback bytes, and response controls must verify before provenance succeeds' `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `

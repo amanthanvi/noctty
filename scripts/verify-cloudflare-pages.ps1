@@ -331,26 +331,14 @@ $publicClient.DefaultRequestHeaders.CacheControl =
 $publicClient.DefaultRequestHeaders.CacheControl.NoCache = $true
 $publicClient.DefaultRequestHeaders.Pragma.ParseAdd('no-cache')
 
-function Test-IsCloudflareManagedChallenge {
-    param([Parameter(Mandatory)] [Net.Http.HttpResponseMessage] $Response)
-
-    $values = $null
-    if (-not $Response.Headers.TryGetValues('cf-mitigated', [ref]$values)) {
-        return $false
-    }
-    return @($values) -contains 'challenge'
-}
-
 function Test-PublicPayloadOnce {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [object[]] $Entries,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [string] $Commit,
-        [switch] $AllowMitigatedHtml
+        [Parameter(Mandatory)] [string] $Commit
     )
 
-    $mitigatedHtml = $false
     foreach ($entry in $Entries) {
         if ($entry.Path -ceq '_headers') {
             # Pages consumes this control file; it is not a public static asset.
@@ -366,13 +354,6 @@ function Test-PublicPayloadOnce {
         try {
             $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
             $expectedStatus = if ($entry.Path -ceq '404.html') { 404 } else { 200 }
-            $isHtml = $entry.Path -cin @('index.html', '404.html')
-            if ($AllowMitigatedHtml -and
-                $isHtml -and
-                (Test-IsCloudflareManagedChallenge -Response $response)) {
-                $mitigatedHtml = $true
-                continue
-            }
             if ([int]$response.StatusCode -ne $expectedStatus) {
                 return 'failed'
             }
@@ -387,7 +368,7 @@ function Test-PublicPayloadOnce {
             $request.Dispose()
         }
     }
-    return $(if ($mitigatedHtml) { 'mitigated-challenge' } else { 'verified' })
+    return 'verified'
 }
 
 function Assert-PublicPayload {
@@ -395,8 +376,7 @@ function Assert-PublicPayload {
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [object[]] $Entries,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [string] $Commit,
-        [switch] $AllowMitigatedHtml
+        [Parameter(Mandatory)] [string] $Commit
     )
 
     for ($attempt = 1; $attempt -le 6; $attempt++) {
@@ -404,8 +384,7 @@ function Assert-PublicPayload {
                 -Origin $Origin `
                 -Entries $Entries `
                 -Id $Id `
-                -Commit $Commit `
-                -AllowMitigatedHtml:$AllowMitigatedHtml
+                -Commit $Commit
         if ($status -cne 'failed') {
             return $status
         }
@@ -431,11 +410,9 @@ function Get-ResponseHeaderText {
 function Assert-PublicHeaderContract {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
-        [Parameter(Mandatory)] [string] $Id,
-        [switch] $AllowMitigatedHtml
+        [Parameter(Mandatory)] [string] $Id
     )
 
-    $mitigatedHtml = $false
     $requiredCspTokens = [string[]] @(
         "default-src 'self'"
         "base-uri 'none'"
@@ -450,12 +427,10 @@ function Assert-PublicHeaderContract {
     $probes = @(
         [pscustomobject]@{
             Path = '/'
-            IsHtml = $true
             CachePattern = '(?:^|,\s*)public,\s*max-age=0,\s*must-revalidate(?:,|$)'
         }
         [pscustomobject]@{
             Path = '/bundle.js'
-            IsHtml = $false
             CachePattern = '(?:^|,\s*)public,\s*max-age=3600,\s*must-revalidate(?:,|$)'
         }
     )
@@ -468,12 +443,6 @@ function Assert-PublicHeaderContract {
         $response = $null
         try {
             $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
-            if ($AllowMitigatedHtml -and
-                $probe.IsHtml -and
-                (Test-IsCloudflareManagedChallenge -Response $response)) {
-                $mitigatedHtml = $true
-                continue
-            }
             if ([int]$response.StatusCode -ne 200) {
                 throw "Published header probe failed at $($Origin.DnsSafeHost)."
             }
@@ -521,7 +490,6 @@ function Assert-PublicHeaderContract {
             $request.Dispose()
         }
     }
-    return $mitigatedHtml
 }
 
 function Assert-WwwRedirectContract {
@@ -637,8 +605,6 @@ try {
             [void](Assert-PublicHeaderContract -Origin $pagesOrigin -Id $DeploymentId)
 
             $verifiedHosts = [Collections.Generic.List[string]]::new()
-            $challengedHosts = [Collections.Generic.List[string]]::new()
-            $canonicalHtmlStatus = 'not-requested'
             [void]$verifiedHosts.Add($pagesOrigin.DnsSafeHost)
             if (-not [string]::IsNullOrWhiteSpace($CanonicalBaseUrl)) {
                 if (-not $RequireCanonical -or $ExpectedEnvironment -cne 'production') {
@@ -649,24 +615,15 @@ try {
                 if (@($project.domains) -cnotcontains $canonicalOrigin.DnsSafeHost) {
                     throw 'The apex custom domain is not attached to the Pages project.'
                 }
-                $canonicalPayloadStatus = Assert-PublicPayload `
+                [void](Assert-PublicPayload `
                     -Origin $canonicalOrigin `
                     -Entries $entries `
                     -Id $DeploymentId `
-                    -Commit $ExpectedCommit `
-                    -AllowMitigatedHtml
-                $canonicalHeadersMitigated = [bool](Assert-PublicHeaderContract `
+                    -Commit $ExpectedCommit)
+                [void](Assert-PublicHeaderContract `
                     -Origin $canonicalOrigin `
-                    -Id $DeploymentId `
-                    -AllowMitigatedHtml)
-                if ($canonicalPayloadStatus -ceq 'mitigated-challenge' -or
-                    $canonicalHeadersMitigated) {
-                    $canonicalHtmlStatus = 'mitigated-challenge'
-                    [void]$challengedHosts.Add($canonicalOrigin.DnsSafeHost)
-                } else {
-                    $canonicalHtmlStatus = 'verified'
-                    [void]$verifiedHosts.Add($canonicalOrigin.DnsSafeHost)
-                }
+                    -Id $DeploymentId)
+                [void]$verifiedHosts.Add($canonicalOrigin.DnsSafeHost)
             }
             if ($VerifyWwwRedirect) {
                 if ([string]::IsNullOrWhiteSpace($CanonicalBaseUrl)) {
@@ -694,8 +651,8 @@ try {
                 manifest_sha256 = $manifestHash
                 file_count = $entries.Count
                 verified_hosts = [string[]]$verifiedHosts
-                challenged_hosts = [string[]]$challengedHosts
-                canonical_html_status = $canonicalHtmlStatus
+                canonical_html_verified =
+                    -not [string]::IsNullOrWhiteSpace($CanonicalBaseUrl)
                 github_repository = $env:GITHUB_REPOSITORY
                 github_run_id = $env:GITHUB_RUN_ID
                 github_run_attempt = $env:GITHUB_RUN_ATTEMPT

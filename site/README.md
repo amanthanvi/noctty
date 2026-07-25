@@ -59,19 +59,20 @@ pull requests do not deploy. The protected GitHub environment is
 - `CLOUDFLARE_ACCOUNT_ID` - the account identifier, stored as a secret so it is
   not copied into logs or provenance
 
-The workflow checks out the immutable event SHA, requires that SHA to still be
-the exact clean `origin/main` head before both deployment phases, and installs
-Wrangler `4.114.0` in an isolated runner-temp directory. It builds an exact
-static-file allowlist twice and requires identical, ordinally sorted SHA-256
-manifests. That same payload is uploaded first to a non-production canary
-branch and then to `main`; Cloudflare API metadata, commit provenance, and
-every served byte are checked after each upload. The zone-owned `www` redirect
-is preflighted before production, so missing zone configuration cannot publish
-and then fail. Production verification also checks `winghostty.com`. If
-Cloudflare explicitly marks an automated custom-domain HTML response with
-`cf-mitigated: challenge`, immutable Pages HTML remains authoritative while
-every custom-domain static asset is still byte-verified, and provenance records
-the challenged host separately instead of calling its HTML verified.
+For a push, the workflow checks out the immutable event SHA. For a published
+release, it checks out the current `main` head and requires its baked-in release
+copy to match the published tag and GitHub's public latest release. In both
+cases, the resolved SHA must remain the exact clean `origin/main` head before
+both deployment phases. Wrangler `4.114.0` installs in an isolated runner-temp
+directory. The workflow builds an exact static-file allowlist twice and
+requires identical, ordinally sorted SHA-256 manifests. That same payload is
+uploaded first to a non-production canary branch and then to `main`; Cloudflare
+API metadata, commit provenance, and every served byte are checked after each
+upload. The zone-owned `www` redirect is preflighted before production, so
+missing zone configuration cannot publish and then fail. Production
+verification also requires the exact HTML, fallback, static assets, cache
+policy, and security headers at `winghostty.com`; a Cloudflare challenge or any
+other substituted response fails verification.
 
 The workflow does not automatically roll back a failed production verification:
 the Pages API has no compare-and-swap rollback primitive, so an automated
