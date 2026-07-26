@@ -8487,9 +8487,13 @@ Assert-TextContract `
     -Context $siteReadme
 Assert-TextContract `
     -Content $siteHeadersText `
-    -Pattern '(?ms)^/\*\s+Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:.*?^/\s+Cache-Control: public, max-age=0, must-revalidate.*?^/bundle\.js\s+Cache-Control: public, max-age=3600, must-revalidate' `
-    -Description 'Pages uses catch-all browser security headers and non-overlapping root and bundle cache rules' `
+    -Pattern '(?ms)^/\*\s+Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:.*?Cache-Control: public, max-age=0, must-revalidate\s*$' `
+    -Description 'Pages uses one catch-all browser security and revalidation policy' `
     -Context $siteHeaders
+Assert-WorkflowContractAbsent `
+    -Path $siteHeaders `
+    -Pattern '(?m)^/(?!\*)' `
+    -Description 'path-specific cache rules cannot overlap the catch-all response policy'
 Assert-TextContract `
     -Content $siteHeadersText `
     -Pattern "(?ms)script-src 'self' 'sha256-[^']+' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
@@ -8509,9 +8513,14 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)index\.html.*?404\.html.*?Get-CspSha256Source.*?declaredHashes.*?expectedHashes.*?ConvertTo-Json' `
-    -Description 'one reusable contract derives CSP hashes from both HTML fallbacks and emits live expectations' `
+    -Pattern '(?ms)one catch-all response policy.*?index\.html.*?404\.html.*?Get-CspSha256Source.*?declaredHashes.*?expectedHashes.*?ConvertTo-Json' `
+    -Description 'one catch-all contract derives CSP hashes from both HTML fallbacks and emits live expectations' `
     -Context $siteHeaderContract
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Assert-PublicHeaderContract(?=\s|\{)') `
+    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
+    -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
+    -Context "$cloudflarePagesVerifier :: Assert-PublicHeaderContract"
 
 $sitePayloadFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()

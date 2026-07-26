@@ -51,15 +51,12 @@ foreach ($line in [IO.File]::ReadAllLines($headersPath)) {
     }
 }
 
-foreach ($requiredPath in @('/*', '/', '/bundle.js')) {
-    if (-not $blocks.ContainsKey($requiredPath)) {
-        throw "Site header contract is missing $requiredPath."
-    }
+if ($blocks.Count -ne 1 -or -not $blocks.ContainsKey('/*')) {
+    throw 'Site header contract must use one catch-all response policy.'
 }
 $security = $blocks['/*']
-$root = $blocks['/']
-$bundle = $blocks['/bundle.js']
 foreach ($requiredHeader in @(
+    'Cache-Control',
     'Content-Security-Policy',
     'X-Content-Type-Options',
     'X-Frame-Options',
@@ -70,15 +67,7 @@ foreach ($requiredHeader in @(
         throw "Catch-all site security contract is missing $requiredHeader."
     }
 }
-if (-not $root.ContainsKey('Cache-Control') -or
-    -not $bundle.ContainsKey('Cache-Control')) {
-    throw 'Root or bundle site header contract is missing Cache-Control.'
-}
-if ($security.ContainsKey('Cache-Control')) {
-    throw 'Catch-all security headers cannot overlap path-specific cache policy.'
-}
-if ($root['Cache-Control'] -cne 'public, max-age=0, must-revalidate' -or
-    $bundle['Cache-Control'] -cne 'public, max-age=3600, must-revalidate' -or
+if ($security['Cache-Control'] -cne 'public, max-age=0, must-revalidate' -or
     $security['X-Content-Type-Options'] -cne 'nosniff' -or
     $security['X-Frame-Options'] -cne 'DENY' -or
     $security['Referrer-Policy'] -cne 'strict-origin-when-cross-origin') {
@@ -164,7 +153,7 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
 
 [ordered]@{
     root = [ordered]@{
-        cache_control = $root['Cache-Control']
+        cache_control = $security['Cache-Control']
         content_security_policy = $csp
         x_content_type_options = $security['X-Content-Type-Options']
         x_frame_options = $security['X-Frame-Options']
@@ -172,6 +161,6 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
         permissions_policy = $permissions
     }
     bundle = [ordered]@{
-        cache_control = $bundle['Cache-Control']
+        cache_control = $security['Cache-Control']
     }
 } | ConvertTo-Json -Depth 4 -Compress

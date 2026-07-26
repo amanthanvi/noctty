@@ -426,11 +426,19 @@ function Assert-PublicHeaderContract {
     $probes = @(
         [pscustomobject]@{
             Path = '/'
+            ExpectedStatus = 200
             ExpectedCache = [string]$Contract.root.cache_control
         }
         [pscustomobject]@{
             Path = '/bundle.js'
+            ExpectedStatus = 200
             ExpectedCache = [string]$Contract.bundle.cache_control
+        }
+        [pscustomobject]@{
+            Path = '/__winghostty_header_contract_' +
+                [Uri]::EscapeDataString($Id) + '/nested/page'
+            ExpectedStatus = 404
+            ExpectedCache = [string]$Contract.root.cache_control
         }
     )
     foreach ($probe in $probes) {
@@ -442,14 +450,16 @@ function Assert-PublicHeaderContract {
         $response = $null
         try {
             $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
-            if ([int]$response.StatusCode -ne 200) {
-                throw "Published header probe failed at $($Origin.DnsSafeHost)."
+            if ([int]$response.StatusCode -ne $probe.ExpectedStatus) {
+                throw "Published header probe failed for $($probe.Path) at " +
+                    "$($Origin.DnsSafeHost)."
             }
             $cacheControl = Get-ResponseHeaderText `
                 -Response $response `
                 -Name 'Cache-Control'
             if ($cacheControl -cne $probe.ExpectedCache) {
-                throw "Published cache policy mismatch at $($Origin.DnsSafeHost)."
+                throw "Published cache policy mismatch for $($probe.Path) at " +
+                    "$($Origin.DnsSafeHost)."
             }
             if ((Get-ResponseHeaderText -Response $response -Name 'X-Content-Type-Options') -cne
                     [string]$Contract.root.x_content_type_options -or

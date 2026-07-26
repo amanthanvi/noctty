@@ -91,9 +91,10 @@ The Pages custom domain is:
 
 - `winghostty.com`
 
-`site/_headers` keeps HTML and fallback responses revalidated and gives
-non-content-addressed assets bounded cache lifetimes without claiming they are
-immutable. Its CSP allowlists the two current inline theme bootstraps and the
+`site/_headers` keeps every response revalidated, including nested 404
+fallbacks. Cloudflare Pages still serves ETags and handles its edge cache,
+while browsers cannot retain stale routes or non-content-addressed assets
+without validation. Its CSP allowlists the two current inline theme bootstraps and the
 font stylesheet `onload` handler by exact SHA-256 hashes. `style-src` and
 `style-src-attr` retain `unsafe-inline` because the current React UI emits
 inline styles; removing that residual allowance requires a coordinated UI
