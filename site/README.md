@@ -71,9 +71,13 @@ uploaded first to a non-production canary branch and then to `main`; Cloudflare
 API metadata, commit provenance, and every served byte are checked after each
 upload. The zone-owned `www` redirect is preflighted before production, so
 missing zone configuration cannot publish and then fail. Production
-verification also requires the exact HTML, fallback, static assets, cache
-policy, and security headers at `winghostty.com`; a Cloudflare challenge or any
-other substituted response fails verification.
+verification requires the exact HTML, fallback, static assets, cache policy,
+and security headers at the immutable Pages deployment URL. At
+`winghostty.com`, it separately verifies Pages API domain attachment, every
+non-HTML static asset byte, and the static response cache and security headers.
+Cloudflare can replace custom-domain HTML with a managed challenge, so the
+provenance records canonical HTML as unverified. Challenge HTML is never
+accepted as published site content.
 
 The workflow does not automatically roll back a failed production verification:
 the Pages API has no compare-and-swap rollback primitive, so an automated

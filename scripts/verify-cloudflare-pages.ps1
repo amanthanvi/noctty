@@ -290,13 +290,27 @@ function ConvertTo-PublicBaseUri {
         throw 'Deployment verification URL must be an HTTPS origin.'
     }
     if ($Kind -eq 'pages' -and
-        $uri.DnsSafeHost -cnotmatch '^(?:[a-z0-9-]+\.)?winghostty\.pages\.dev$') {
-        throw 'Deployment URL is not a winghostty Pages origin.'
+        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.winghostty\.pages\.dev$') {
+        throw 'Deployment URL is not an immutable winghostty Pages origin.'
     }
     if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'winghostty.com') {
         throw 'Canonical URL must be https://winghostty.com/.'
     }
     return $uri
+}
+
+function Assert-ImmutablePagesDeploymentOrigin {
+    param(
+        [Parameter(Mandatory)] [Uri] $Origin,
+        [Parameter(Mandatory)] [string] $DeploymentId
+    )
+
+    $idMatch = [regex]::Match($DeploymentId, '^(?<label>[0-9a-f]{8})-')
+    if (-not $idMatch.Success -or
+        $Origin.DnsSafeHost -cne
+            "$($idMatch.Groups['label'].Value).winghostty.pages.dev") {
+        throw 'Immutable Pages origin does not match the deployment ID.'
+    }
 }
 
 function New-PublicAssetUri {
@@ -345,12 +359,18 @@ function Test-PublicPayloadOnce {
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [object[]] $Entries,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [string] $Commit
+        [Parameter(Mandatory)] [string] $Commit,
+        [switch] $StaticOnly
     )
 
     foreach ($entry in $Entries) {
         if ($entry.Path -ceq '_headers') {
             # Pages consumes this control file; it is not a public static asset.
+            continue
+        }
+        if ($StaticOnly -and $entry.Path -cin @('index.html', '404.html')) {
+            # A custom-domain challenge can replace HTML. The immutable Pages
+            # deployment remains the authoritative full-payload verification.
             continue
         }
         $uri = New-PublicAssetUri `
@@ -385,7 +405,8 @@ function Assert-PublicPayload {
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [object[]] $Entries,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [string] $Commit
+        [Parameter(Mandatory)] [string] $Commit,
+        [switch] $StaticOnly
     )
 
     for ($attempt = 1; $attempt -le 6; $attempt++) {
@@ -393,7 +414,8 @@ function Assert-PublicPayload {
                 -Origin $Origin `
                 -Entries $Entries `
                 -Id $Id `
-                -Commit $Commit
+                -Commit $Commit `
+                -StaticOnly:$StaticOnly
         if ($status -cne 'failed') {
             return $status
         }
@@ -444,27 +466,31 @@ function Test-PublicHeaderContractOnce {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [object] $Contract
+        [Parameter(Mandatory)] [object] $Contract,
+        [switch] $StaticOnly
     )
 
-    $probes = @(
-        [pscustomobject]@{
+    $probes = @()
+    if (-not $StaticOnly) {
+        $probes += [pscustomobject]@{
             Path = '/'
             ExpectedStatus = 200
             ExpectedCache = [string]$Contract.root.cache_control
         }
-        [pscustomobject]@{
-            Path = '/bundle.js'
-            ExpectedStatus = 200
-            ExpectedCache = [string]$Contract.bundle.cache_control
-        }
-        [pscustomobject]@{
+    }
+    $probes += [pscustomobject]@{
+        Path = '/bundle.js'
+        ExpectedStatus = 200
+        ExpectedCache = [string]$Contract.bundle.cache_control
+    }
+    if (-not $StaticOnly) {
+        $probes += [pscustomobject]@{
             Path = '/__winghostty_header_contract_' +
                 [Uri]::EscapeDataString($Id) + '/nested/page'
             ExpectedStatus = 404
             ExpectedCache = [string]$Contract.not_found.cache_control
         }
-    )
+    }
     foreach ($probe in $probes) {
         $builder = [UriBuilder]::new($Origin)
         $builder.Path = $probe.Path
@@ -513,14 +539,16 @@ function Assert-PublicHeaderContract {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [string] $Id,
-        [Parameter(Mandatory)] [object] $Contract
+        [Parameter(Mandatory)] [object] $Contract,
+        [switch] $StaticOnly
     )
 
     for ($attempt = 1; $attempt -le 6; $attempt++) {
         if (Test-PublicHeaderContractOnce `
                 -Origin $Origin `
                 -Id $Id `
-                -Contract $Contract) {
+                -Contract $Contract `
+                -StaticOnly:$StaticOnly) {
             return
         }
         if ($attempt -lt 6) { Start-Sleep -Seconds 2 }
@@ -631,6 +659,9 @@ try {
                 $apiOrigin.AbsoluteUri.TrimEnd('/')) {
                 throw 'Wrangler deployment URL does not match Cloudflare API provenance.'
             }
+            Assert-ImmutablePagesDeploymentOrigin `
+                -Origin $pagesOrigin `
+                -DeploymentId $DeploymentId
             $entries = @(Get-ManifestEntries `
                 -Path $ManifestPath `
                 -PayloadRoot $PayloadDirectory)
@@ -663,11 +694,13 @@ try {
                     -Origin $canonicalOrigin `
                     -Entries $entries `
                     -Id $DeploymentId `
-                    -Commit $ExpectedCommit)
+                    -Commit $ExpectedCommit `
+                    -StaticOnly)
                 [void](Assert-PublicHeaderContract `
                     -Origin $canonicalOrigin `
                     -Id $DeploymentId `
-                    -Contract $headerContract)
+                    -Contract $headerContract `
+                    -StaticOnly)
                 [void]$verifiedHosts.Add($canonicalOrigin.DnsSafeHost)
             }
             if ($VerifyWwwRedirect) {
@@ -682,7 +715,7 @@ try {
                     -LiteralPath ([IO.Path]::GetFullPath($ManifestPath)) `
                     -Algorithm SHA256).Hash.ToLowerInvariant()
             Write-RedactedJson -Path $ProvenancePath -Value ([ordered]@{
-                schema_version = 'winghostty.cloudflare-pages-provenance.v1'
+                schema_version = 'winghostty.cloudflare-pages-provenance.v2'
                 verified_at = [DateTimeOffset]::UtcNow.ToString('o')
                 project_name = $ProjectName
                 deployment_id = $DeploymentId
@@ -696,8 +729,10 @@ try {
                 manifest_sha256 = $manifestHash
                 file_count = $entries.Count
                 verified_hosts = [string[]]$verifiedHosts
-                canonical_html_verified =
+                immutable_html_verified = $true
+                canonical_static_assets_verified =
                     -not [string]::IsNullOrWhiteSpace($CanonicalBaseUrl)
+                canonical_html_verified = $false
                 github_repository = $env:GITHUB_REPOSITORY
                 github_run_id = $env:GITHUB_RUN_ID
                 github_run_attempt = $env:GITHUB_RUN_ATTEMPT

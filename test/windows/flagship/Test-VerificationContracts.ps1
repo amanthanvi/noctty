@@ -8554,10 +8554,218 @@ Assert-WorkflowContractAbsent `
     -Path $cloudflarePagesVerifier `
     -Pattern '(?i)cf-mitigated|AllowMitigatedHtml|mitigated-challenge|challenged_hosts|canonical_html_status' `
     -Description 'custom-domain verification cannot accept substituted challenge HTML'
+$publicBaseUriFunctionText = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+ConvertTo-PublicBaseUri(?=\s|\{)'
+. ([scriptblock]::Create($publicBaseUriFunctionText))
+$immutablePagesOrigin = ConvertTo-PublicBaseUri `
+    -Value 'https://69cd5628.winghostty.pages.dev/' `
+    -Kind pages
+if ($immutablePagesOrigin.DnsSafeHost -cne
+    '69cd5628.winghostty.pages.dev') {
+    throw 'Immutable Pages deployment origin was not preserved.'
+}
+foreach ($mutablePagesUrl in @(
+    'https://winghostty.pages.dev/',
+    'https://main.winghostty.pages.dev/'
+)) {
+    $mutablePagesOriginRejected = $false
+    try {
+        [void](ConvertTo-PublicBaseUri `
+            -Value $mutablePagesUrl `
+            -Kind pages)
+    } catch {
+        $mutablePagesOriginRejected = $true
+    }
+    if (-not $mutablePagesOriginRejected) {
+        throw "Mutable Pages origin passed immutable validation: $mutablePagesUrl"
+    }
+}
+$immutableOriginBindingFunctionText = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+Assert-ImmutablePagesDeploymentOrigin(?=\s|\{)'
+. ([scriptblock]::Create($immutableOriginBindingFunctionText))
+Assert-ImmutablePagesDeploymentOrigin `
+    -Origin $immutablePagesOrigin `
+    -DeploymentId '69cd5628-1d01-4095-9774-6f8cfe7d7d1e'
+$mismatchedDeploymentIdRejected = $false
+try {
+    Assert-ImmutablePagesDeploymentOrigin `
+        -Origin $immutablePagesOrigin `
+        -DeploymentId 'deadbeef-1d01-4095-9774-6f8cfe7d7d1e'
+} catch {
+    $mismatchedDeploymentIdRejected = $true
+}
+if (-not $mismatchedDeploymentIdRejected) {
+    throw 'Immutable Pages origin was not bound to its deployment ID.'
+}
+$cloudflareVerifierTokens = $null
+$cloudflareVerifierErrors = $null
+$cloudflareVerifierAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $cloudflarePagesVerifierText,
+    [ref]$cloudflareVerifierTokens,
+    [ref]$cloudflareVerifierErrors
+)
+if ($cloudflareVerifierErrors.Count -ne 0) {
+    throw 'Cloudflare verifier must parse for public-verification call checks.'
+}
+$immutableOriginBindingCalls = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Assert-ImmutablePagesDeploymentOrigin'
+}, $true))
+$urlIdentityChecks = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains(
+            'Wrangler deployment URL does not match Cloudflare API provenance.'
+        )
+}, $true))
+if ($immutableOriginBindingCalls.Count -ne 1 -or
+    $urlIdentityChecks.Count -ne 1) {
+    throw 'Deployment flow must contain one URL identity check and origin binding.'
+}
+$originBindingElements = @(
+    $immutableOriginBindingCalls[0].CommandElements
+)
+if ($originBindingElements.Count -ne 5 -or
+    $originBindingElements[1] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[1].ParameterName -cne 'Origin' -or
+    $originBindingElements[2] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[2].VariablePath.UserPath -cne 'pagesOrigin' -or
+    $originBindingElements[3] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[3].ParameterName -cne 'DeploymentId' -or
+    $originBindingElements[4] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[4].VariablePath.UserPath -cne 'DeploymentId' -or
+    $immutableOriginBindingCalls[0].Extent.StartOffset -le
+        $urlIdentityChecks[0].Extent.EndOffset) {
+    throw 'Deployment flow must bind pagesOrigin to DeploymentId after URL identity.'
+}
+$publicVerificationCalls = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -cin @(
+            'Assert-PublicPayload',
+            'Assert-PublicHeaderContract'
+        )
+}, $true))
+$expectedPublicVerificationCalls = @(
+    [pscustomobject]@{
+        Command = 'Assert-PublicPayload'
+        Origin = 'pagesOrigin'
+        StaticOnly = $false
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicHeaderContract'
+        Origin = 'pagesOrigin'
+        StaticOnly = $false
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicPayload'
+        Origin = 'canonicalOrigin'
+        StaticOnly = $true
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicHeaderContract'
+        Origin = 'canonicalOrigin'
+        StaticOnly = $true
+    }
+)
+foreach ($expectedCall in $expectedPublicVerificationCalls) {
+    $matchingCalls = @($publicVerificationCalls | Where-Object {
+        $elements = @($_.CommandElements)
+        $originIndex = [Array]::FindIndex(
+            [object[]]$elements,
+            [Predicate[object]] { param($element) $element.Extent.Text -ceq '-Origin' }
+        )
+        $originIndex -ge 0 -and
+            $originIndex + 1 -lt $elements.Count -and
+            $elements[$originIndex + 1] -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            $elements[$originIndex + 1].VariablePath.UserPath -ceq
+                $expectedCall.Origin -and
+            $_.GetCommandName() -ceq $expectedCall.Command -and
+            (@($elements | Where-Object {
+                $_.Extent.Text -ceq '-StaticOnly'
+            }).Count -eq 1) -eq $expectedCall.StaticOnly
+    })
+    if ($matchingCalls.Count -ne 1) {
+        throw "Expected exactly one $($expectedCall.Command) call for " +
+            "$($expectedCall.Origin) with StaticOnly=$($expectedCall.StaticOnly)."
+    }
+}
+if ($publicVerificationCalls.Count -ne $expectedPublicVerificationCalls.Count) {
+    throw 'Unexpected public-verification call bypasses the immutable/canonical policy.'
+}
+$expectedPublicVerificationWrappers = @(
+    [pscustomobject]@{
+        Wrapper = 'Assert-PublicPayload'
+        Inner = 'Test-PublicPayloadOnce'
+    }
+    [pscustomobject]@{
+        Wrapper = 'Assert-PublicHeaderContract'
+        Inner = 'Test-PublicHeaderContractOnce'
+    }
+)
+foreach ($expectedWrapper in $expectedPublicVerificationWrappers) {
+    $wrapperDefinitions = @(
+        Get-NamedFunctionDefinitions `
+            -Ast $cloudflareVerifierAst `
+            -Name $expectedWrapper.Wrapper
+    )
+    if ($wrapperDefinitions.Count -ne 1) {
+        throw "Expected exactly one $($expectedWrapper.Wrapper) function."
+    }
+    $staticOnlyParameters = @(
+        $wrapperDefinitions[0].Body.ParamBlock.Parameters |
+            Where-Object {
+                $_.Name.VariablePath.UserPath -ceq 'StaticOnly'
+            }
+    )
+    $innerCalls = @($wrapperDefinitions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq $expectedWrapper.Inner
+    }, $true))
+    $forwardedSwitches = @(
+        if ($innerCalls.Count -eq 1) {
+            $innerCalls[0].CommandElements |
+                Where-Object {
+                    $_ -is
+                        [System.Management.Automation.Language.CommandParameterAst] -and
+                    $_.ParameterName -ceq 'StaticOnly' -and
+                    $_.Argument -is
+                        [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $_.Argument.VariablePath.UserPath -ceq 'StaticOnly'
+                }
+        }
+    )
+    if ($staticOnlyParameters.Count -ne 1 -or
+        $staticOnlyParameters[0].StaticType -ne [switch] -or
+        $innerCalls.Count -ne 1 -or
+        $forwardedSwitches.Count -ne 1) {
+        throw "$($expectedWrapper.Wrapper) must forward exactly " +
+            "-StaticOnly:`$StaticOnly to $($expectedWrapper.Inner)."
+    }
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicPayloadOnce(?=\s|\{)') `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and \$entry\.Path -cin @\(''index\.html'', ''404\.html''\).*?continue.*?New-PublicAssetUri' `
+    -Description 'static-only payload verification excludes only Pages control and HTML documents before hashing remaining assets' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicPayloadOnce"
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/bundle\.js''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__winghostty_header_contract_''' `
+    -Description 'static-only response verification always checks bundle controls and excludes HTML route probes' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
-    -Pattern '(?ms)\$canonicalOrigin.*?Assert-PublicPayload.*?-Origin \$canonicalOrigin.*?Assert-PublicHeaderContract.*?-Origin \$canonicalOrigin.*?\$verifiedHosts\.Add\(\$canonicalOrigin\.DnsSafeHost\).*?canonical_html_verified' `
-    -Description 'canonical production HTML, fallback bytes, and response controls must verify before provenance succeeds' `
+    -Pattern '(?ms)schema_version\s*=\s*''winghostty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false' `
+    -Description 'deployment provenance distinguishes immutable HTML, canonical static assets, and unverified canonical HTML' `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
