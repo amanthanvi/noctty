@@ -109,6 +109,19 @@ Run with:
 powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-progress.ps1 -ResetState -TimeoutSeconds 20
 ```
 
+## interactive-win11-shaders.ps1
+
+Interactive Win11 validation for custom post-processing shaders. It builds
+with `-Dcustom-shaders=true`, loads a deterministic solid-magenta ShaderToy
+fixture, captures the terminal surface child window, and fails unless the
+dominant sampled surface color is magenta.
+
+Run with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-shaders.ps1 -Rebuild -ResetState
+```
+
 ## interactive-win11-resize.ps1
 
 Interactive Win11 validation for resize repaint coverage. It launches

@@ -2827,9 +2827,9 @@ keybind: Keybinds = .{},
 /// Custom shaders to run after the default shaders. This is a file path
 /// to a GLSL-syntax shader for all platforms.
 ///
-/// In this Windows-only fork, custom shader compilation support is disabled
-/// in default builds. This setting is retained for compatibility and only has
-/// an effect if Ghostty is built with `-Dcustom-shaders=true`.
+/// Official winghostty packages include custom shader support. Source builds
+/// disable shader compilation by default to keep ordinary developer builds
+/// lighter; pass `-Dcustom-shaders=true` to enable it.
 ///
 /// Warning: Invalid shaders can cause Ghostty to become unusable such as by
 /// causing the window to be completely black. If this happens, you can

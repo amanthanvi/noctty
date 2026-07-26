@@ -579,6 +579,7 @@ $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palet
 $newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1'
 $undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
 $resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
+$shaderHarness = Join-Path $repoRoot 'test\windows\interactive-win11-shaders.ps1'
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
 $win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
@@ -2993,6 +2994,8 @@ if ($quick) {
 } else {
   ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-palette-theme.ps1 -ResetState -ExerciseHighContrast
@@ -3005,6 +3008,14 @@ $expectedInteractiveRunScript = ($expectedInteractiveRunScript -replace '\r\n?',
 if ($interactiveRunScript -cne $expectedInteractiveRunScript) {
     throw 'Interactive workflow run script drifted from its exact fail-closed source snapshot.'
 }
+Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern 'zig build -Demit-exe=true -Dcustom-shaders=true' `
+    -Description 'shader harness rebuilds the executable with custom shader support'
+Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern "(?s)custom shaders: enabled.*?R -ge 220.*?G -le 40.*?B -ge 220" `
+    -Description 'shader harness verifies both the compiled capability and visible magenta output'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
     -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
@@ -3180,6 +3191,10 @@ Assert-WorkflowContract `
     -Path $windowsPackager `
     -Pattern '(?ms)foreach \(\$runtimeFile in \$runtimeFiles\).*?Assert-PeMachine.*?if \(\$Architecture -eq "x64"\).*?check-windows-x64-baseline\.ps1.*?-Path \$runtimePath' `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)\$hostArchitecture -eq \$Architecture.*?winghostty\.com.*?\+version.*?custom shaders: enabled.*?defer custom shader capability check to native \$Architecture smoke' `
+    -Description 'Windows packaging verifies shader capability natively and defers cross-target execution explicitly'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
     -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$objdumpKillTimeoutMs = 5000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitForExit\(\$objdumpKillTimeoutMs\).*?llvm-objdump did not exit after termination.*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `

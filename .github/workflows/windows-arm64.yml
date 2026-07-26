@@ -78,8 +78,8 @@ jobs:
         run: |
           $versionText = & .\zig-out\bin\winghostty.com +version | Out-String
           Write-Host $versionText
-          if ($versionText -notmatch "Build Config") {
-            throw "winghostty.com +version did not print the expected version output."
+          if ($versionText -notmatch "custom shaders: enabled") {
+            throw "winghostty.com +version did not report custom shader support."
           }
 
       - name: Run packaged ARM64 CLI smoke
@@ -93,8 +93,8 @@ jobs:
 
           $versionText = & $portableCommand +version | Out-String
           Write-Host $versionText
-          if ($versionText -notmatch "Build Config") {
-            throw "Packaged winghostty.com +version did not print the expected version output."
+          if ($versionText -notmatch "custom shaders: enabled") {
+            throw "Packaged winghostty.com +version did not report custom shader support."
           }
 
           $themesText = & $portableCommand +list-themes | Out-String

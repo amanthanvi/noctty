@@ -397,7 +397,7 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline "-Dversion-string=$Version"
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
             if ($LASTEXITCODE -ne 0) {
                 throw "Zig build failed with exit code $LASTEXITCODE."
             }
@@ -450,6 +450,22 @@ try {
 
     if (Test-Path -LiteralPath $zigOutShare) {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
+    }
+
+    $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($hostArchitecture -eq $Architecture) {
+        Write-Host "Packaging phase: verify custom shader capability"
+        $portableCommand = Join-Path $portableRoot "winghostty.com"
+        $versionText = & $portableCommand +version | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Packaged winghostty.com +version failed with exit code $LASTEXITCODE."
+        }
+        if ($versionText -notmatch "custom shaders: enabled") {
+            throw "Packaged winghostty.com does not report custom shader support."
+        }
+    }
+    else {
+        Write-Host "Packaging phase: defer custom shader capability check to native $Architecture smoke"
     }
 
     Write-Host "Packaging phase: create portable zip"

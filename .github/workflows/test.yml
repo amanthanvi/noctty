@@ -81,6 +81,9 @@ jobs:
       - name: Full Zig test suite
         run: zig build test -Demit-test-exe=true
 
+      - name: Custom shader compiler tests
+        run: zig build test -Dtest-filter=shadertoy -Dcustom-shaders=true
+
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
@@ -170,6 +173,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

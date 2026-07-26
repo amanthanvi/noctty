@@ -27,6 +27,7 @@ try {
         "-Demit-lib-vt=true",
         "-Dtarget=$($archInfo.ZigTarget)",
         "-Dcpu=baseline",
+        "-Dcustom-shaders=true",
         "-Dversion-string=$Version"
     )
     if (-not [string]::IsNullOrWhiteSpace($Optimize)) {
