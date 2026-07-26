@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
+. (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -46,6 +47,7 @@ $releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
 $exePath = Join-Path $zigOutBin "winghostty.exe"
+$buildCapabilitiesPath = Join-Path $zigOutBin "winghostty-build-capabilities.json"
 $runtimeFiles = @(
     "winghostty.com",
     "winghostty.exe",
@@ -397,15 +399,29 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
-            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline "-Dversion-string=$Version"
+            Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
+            & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
             if ($LASTEXITCODE -ne 0) {
                 throw "Zig build failed with exit code $LASTEXITCODE."
             }
+            Write-WindowsBuildCapabilitiesManifest `
+                -Path $buildCapabilitiesPath `
+                -BinPath $zigOutBin `
+                -Version $Version `
+                -Architecture $Architecture `
+                -RuntimeFiles $runtimeFiles
         }
         finally {
             Pop-Location
         }
     }
+
+    Assert-WindowsBuildCapabilitiesManifest `
+        -Path $buildCapabilitiesPath `
+        -BinPath $zigOutBin `
+        -Version $Version `
+        -Architecture $Architecture `
+        -RuntimeFiles $runtimeFiles
 
     if (-not (Test-Path -LiteralPath $exePath)) {
         throw "Expected build output was not found: $exePath"
@@ -450,6 +466,22 @@ try {
 
     if (Test-Path -LiteralPath $zigOutShare) {
         Copy-Tree -Source $zigOutShare -Destination $portableRoot
+    }
+
+    $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+    if ($hostArchitecture -eq $Architecture) {
+        Write-Host "Packaging phase: verify custom shader capability"
+        $portableCommand = Join-Path $portableRoot "winghostty.com"
+        $versionText = & $portableCommand +version | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Packaged winghostty.com +version failed with exit code $LASTEXITCODE."
+        }
+        if ($versionText -notmatch "custom shaders: enabled") {
+            throw "Packaged winghostty.com does not report custom shader support."
+        }
+    }
+    else {
+        Write-Host "Packaging phase: custom shader capability verified by hash-bound $Architecture build manifest"
     }
 
     Write-Host "Packaging phase: create portable zip"

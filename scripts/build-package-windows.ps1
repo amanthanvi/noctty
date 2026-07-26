@@ -15,9 +15,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
+. (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$zigOutBin = Join-Path $repoRoot "zig-out/bin"
+$buildCapabilitiesPath = Join-Path $zigOutBin "winghostty-build-capabilities.json"
+$runtimeFiles = @(
+    "winghostty.com",
+    "winghostty.exe",
+    "ghostty-vt.dll"
+)
 
 Push-Location $repoRoot
 try {
@@ -27,6 +35,7 @@ try {
         "-Demit-lib-vt=true",
         "-Dtarget=$($archInfo.ZigTarget)",
         "-Dcpu=baseline",
+        "-Dcustom-shaders=true",
         "-Dversion-string=$Version"
     )
     if (-not [string]::IsNullOrWhiteSpace($Optimize)) {
@@ -34,10 +43,17 @@ try {
     }
 
     Write-Host "Build phase: $($archInfo.Name) ($($archInfo.ZigTarget))"
+    Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
     & zig @buildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "zig build failed for $($archInfo.Name) with exit code $LASTEXITCODE."
     }
+    Write-WindowsBuildCapabilitiesManifest `
+        -Path $buildCapabilitiesPath `
+        -BinPath $zigOutBin `
+        -Version $Version `
+        -Architecture $archInfo.Name `
+        -RuntimeFiles $runtimeFiles
 
     $packageArgs = @{
         Version = $Version

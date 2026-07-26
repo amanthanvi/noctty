@@ -60,6 +60,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-signing-trust.ps1
 
+      - name: Windows build capability manifest tests
+        shell: pwsh
+        run: ./scripts/test-windows-build-capabilities.ps1
+
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -81,6 +85,9 @@ jobs:
       - name: Full Zig test suite
         run: zig build test -Demit-test-exe=true
 
+      - name: Custom shader compiler tests
+        run: zig build test -Dtest-filter=shadertoy -Dcustom-shaders=true
+
       - name: Native Win32 compositor tests
         run: zig test src/apprt/win32_compositor_native.zig -lc -luser32 -lkernel32
 
@@ -88,6 +95,19 @@ jobs:
         # This traverses the default build graph too; a preceding plain
         # `zig build` duplicated the same Windows compile/link work.
         run: zig build -Demit-exe=true
+
+      - name: Verify default source-build shader mode
+        shell: pwsh
+        run: |
+          $versionText = & .\zig-out\bin\winghostty.com +version | Out-String
+          Write-Host $versionText
+          if ($LASTEXITCODE -ne 0) {
+            throw "winghostty.com +version failed with exit code $LASTEXITCODE."
+          }
+          if ($versionText -notmatch "Build Config" -or
+              $versionText -notmatch "custom shaders: disabled") {
+            throw "Default source build did not report disabled custom shaders."
+          }
 
       - name: Build ARM64 executable
         env:
@@ -168,8 +188,12 @@ jobs:
           if ($quick) {
             ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
