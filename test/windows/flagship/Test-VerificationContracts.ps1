@@ -8532,13 +8532,13 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?function Assert-ExactCspDirectiveHashes.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
-    -Description 'one catch-all contract binds unique CSP hashes to their exact script directives and emits live expectations' `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Description 'one catch-all contract binds exact complete source sets to both script directives and emits live expectations' `
     -Context $siteHeaderContract
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern "(?ms)Assert-ExactCspDirectiveHashes.*?-DirectiveName 'script-src'.*?Assert-ExactCspDirectiveHashes.*?-DirectiveName 'script-src-attr'.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
-    -Description 'script and event-handler hashes remain directive-specific before the global CSP allowlist check' `
+    -Pattern "(?ms)expectedScriptSources.*?'self'.*?expectedScriptAttributeSources.*?'unsafe-hashes'.*?expectedCspDirectives.*?default-src.*?script-src.*?script-src-attr.*?upgrade-insecure-requests.*?declaredDirectiveNames.*?exact expected directive set.*?Assert-ExactCspDirectiveSources.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
+    -Description 'every CSP directive and source is exact before the global hash allowlist check' `
     -Context $siteHeaderContract
 
 $siteCspFixtureRoot = Join-Path (
@@ -8596,7 +8596,7 @@ try {
     }
     catch {
         if ($_.Exception.Message -notmatch
-            'script-src hashes do not exactly match') {
+            'script-src sources do not exactly match') {
             throw
         }
         $directiveSwapRejected = $true
@@ -8620,13 +8620,60 @@ try {
     }
     catch {
         if ($_.Exception.Message -notmatch
-            'cannot declare hashes in unvalidated directive script-src-elem') {
+            'exact expected directive set') {
             throw
         }
         $unvalidatedDirectiveRejected = $true
     }
     if (-not $unvalidatedDirectiveRejected) {
         throw 'Site CSP contract accepted a reused hash in script-src-elem.'
+    }
+
+    $unsafeOverrideHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem 'unsafe-inline'; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $unsafeOverrideHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $unsafeOverrideRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'exact expected directive set') {
+            throw
+        }
+        $unsafeOverrideRejected = $true
+    }
+    if (-not $unsafeOverrideRejected) {
+        throw 'Site CSP contract accepted an unsafe script-src-elem override.'
+    }
+
+    $sha384OverrideHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem 'sha384-YWJjZA=='; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $sha384OverrideHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $sha384OverrideRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'exact expected directive set') {
+            throw
+        }
+        $sha384OverrideRejected = $true
+    }
+    if (-not $sha384OverrideRejected) {
+        throw 'Site CSP contract accepted a SHA-384 script-src-elem override.'
     }
 }
 finally {

@@ -127,24 +127,6 @@ $expectedScriptAttributeHashes = [Collections.Generic.HashSet[string]]::new(
 )
 
 $csp = $security['Content-Security-Policy']
-if ($csp.Contains("script-src 'self' 'unsafe-inline'", [StringComparison]::Ordinal)) {
-    throw 'Site CSP cannot broadly allow inline scripts.'
-}
-foreach ($token in @(
-    "default-src 'self'",
-    "base-uri 'none'",
-    "object-src 'none'",
-    "frame-ancestors 'none'",
-    "script-src 'self'",
-    "script-src-attr 'unsafe-hashes'",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
-    "connect-src 'self' https://api.github.com"
-)) {
-    if (-not $csp.Contains($token, [StringComparison]::Ordinal)) {
-        throw "Site CSP is missing: $token"
-    }
-}
 function Get-CspDirectiveSources {
     param(
         [Parameter(Mandatory)] [string] $Policy,
@@ -164,44 +146,85 @@ function Get-CspDirectiveSources {
     return @([regex]::Split($matches[0], '\s+') | Select-Object -Skip 1)
 }
 
-function Assert-ExactCspDirectiveHashes {
+function Assert-ExactCspDirectiveSources {
     param(
         [Parameter(Mandatory)] [string] $DirectiveName,
-        [Parameter(Mandatory)]
-        [Collections.Generic.HashSet[string]] $Expected
+        [Parameter(Mandatory)] [AllowEmptyCollection()]
+        [string[]] $Expected
     )
 
     $declaredTokens = @(
-        Get-CspDirectiveSources -Policy $csp -DirectiveName $DirectiveName |
-            Where-Object { $_ -match "^'sha256-[A-Za-z0-9+/]+=*'$" }
+        Get-CspDirectiveSources -Policy $csp -DirectiveName $DirectiveName
     )
     $declared = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal
     )
+    $expectedSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
     foreach ($token in $declaredTokens) {
-        [void]$declared.Add($token.Trim("'"))
+        [void]$declared.Add($token)
+    }
+    foreach ($token in $Expected) {
+        [void]$expectedSet.Add($token)
     }
     if ($declaredTokens.Count -ne $declared.Count -or
-        $declared.Count -ne $Expected.Count -or
-        @($Expected | Where-Object { -not $declared.Contains($_) }).Count -ne 0) {
-        throw "Site CSP $DirectiveName hashes do not exactly match their HTML sources."
+        $Expected.Count -ne $expectedSet.Count -or
+        $declared.Count -ne $expectedSet.Count -or
+        @($expectedSet | Where-Object { -not $declared.Contains($_) }).Count -ne 0) {
+        throw "Site CSP $DirectiveName sources do not exactly match the site contract."
     }
 }
-Assert-ExactCspDirectiveHashes `
-    -DirectiveName 'script-src' `
-    -Expected $expectedScriptHashes
-Assert-ExactCspDirectiveHashes `
-    -DirectiveName 'script-src-attr' `
-    -Expected $expectedScriptAttributeHashes
 
+$expectedScriptSources = @("'self'") + @(
+    $expectedScriptHashes | ForEach-Object { "'$_'" }
+)
+$expectedScriptAttributeSources = @("'unsafe-hashes'") + @(
+    $expectedScriptAttributeHashes | ForEach-Object { "'$_'" }
+)
+$expectedCspDirectives = [ordered]@{
+    'default-src' = @("'self'")
+    'base-uri' = @("'none'")
+    'object-src' = @("'none'")
+    'frame-ancestors' = @("'none'")
+    'form-action' = @("'self'")
+    'script-src' = $expectedScriptSources
+    'script-src-attr' = $expectedScriptAttributeSources
+    'style-src' = @(
+        "'self'",
+        "'unsafe-inline'",
+        'https://fonts.googleapis.com'
+    )
+    'style-src-attr' = @("'unsafe-inline'")
+    'font-src' = @("'self'", 'https://fonts.gstatic.com')
+    'connect-src' = @("'self'", 'https://api.github.com')
+    'img-src' = @("'self'", 'data:')
+    'frame-src' = @("'none'")
+    'worker-src' = @("'none'")
+    'manifest-src' = @("'self'")
+    'upgrade-insecure-requests' = @()
+}
+$declaredDirectiveNames = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
 foreach ($directive in $csp.Split(';')) {
     $directive = $directive.Trim()
     if (-not $directive) { continue }
     $directiveName = [regex]::Split($directive, '\s+')[0]
-    if ($directiveName -notin @('script-src', 'script-src-attr') -and
-        $directive -match "'sha256-[A-Za-z0-9+/]+=*'") {
-        throw "Site CSP cannot declare hashes in unvalidated directive $directiveName."
+    if (-not $declaredDirectiveNames.Add($directiveName)) {
+        throw "Site CSP declares duplicate directive $directiveName."
     }
+}
+if ($declaredDirectiveNames.Count -ne $expectedCspDirectives.Count -or
+    @($declaredDirectiveNames | Where-Object {
+        -not $expectedCspDirectives.Contains($_)
+    }).Count -ne 0) {
+    throw 'Site CSP does not declare the exact expected directive set.'
+}
+foreach ($directiveName in $expectedCspDirectives.Keys) {
+    Assert-ExactCspDirectiveSources `
+        -DirectiveName $directiveName `
+        -Expected $expectedCspDirectives[$directiveName]
 }
 
 $expectedHashes = [Collections.Generic.HashSet[string]]::new(
