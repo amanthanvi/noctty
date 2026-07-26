@@ -140,13 +140,18 @@ foreach ($token in @(
         throw "Site CSP is missing: $token"
     }
 }
-$declaredHashes = @(
-    [regex]::Matches($csp, "'(?<hash>sha256-[A-Za-z0-9+/]+=*)'") |
-        ForEach-Object { $_.Groups['hash'].Value }
+$declaredHashes = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
 )
+foreach ($match in [regex]::Matches(
+    $csp,
+    "'(?<hash>sha256-[A-Za-z0-9+/]+=*)'"
+)) {
+    [void]$declaredHashes.Add($match.Groups['hash'].Value)
+}
 if ($declaredHashes.Count -ne $expectedHashes.Count -or
-    @($declaredHashes | Where-Object {
-        -not $expectedHashes.Contains($_)
+    @($expectedHashes | Where-Object {
+        -not $declaredHashes.Contains($_)
     }).Count -ne 0) {
     throw 'Site CSP hashes do not exactly match the inline HTML scripts and handlers.'
 }

@@ -21,8 +21,12 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_REPOSITORY -cne 'amanthanvi/winghostty') {
     throw 'Site deployment is restricted to amanthanvi/winghostty.'
 }
-$origin = (git remote get-url origin).Trim()
-if ($LASTEXITCODE -ne 0 -or $origin -cnotin @(
+$originOutput = git remote get-url origin
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to read the origin remote for production site deployment.'
+}
+$origin = ([string]($originOutput -join "`n")).Trim()
+if ($origin -cnotin @(
     'https://github.com/amanthanvi/winghostty',
     'https://github.com/amanthanvi/winghostty.git'
 )) {
@@ -32,14 +36,25 @@ git fetch --force --no-tags origin "refs/heads/${DefaultBranch}:refs/remotes/ori
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to fetch exact origin/$DefaultBranch."
 }
-$head = (git rev-parse HEAD).Trim()
-$originHead = (git rev-parse "refs/remotes/origin/$DefaultBranch").Trim()
-if ($LASTEXITCODE -ne 0 -or
-    $head -cne $ExpectedSha -or
+$headOutput = git rev-parse HEAD
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to resolve the checked-out deployment commit.'
+}
+$head = ([string]($headOutput -join "`n")).Trim()
+$originHeadOutput = git rev-parse "refs/remotes/origin/$DefaultBranch"
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to resolve exact origin/$DefaultBranch."
+}
+$originHead = ([string]($originHeadOutput -join "`n")).Trim()
+if ($head -cne $ExpectedSha -or
     $head -cne $originHead) {
     throw "Resolved deployment SHA is not the exact current origin/$DefaultBranch commit."
 }
-if (git status --porcelain=v1 --untracked-files=all) {
+$status = @(git status --porcelain=v1 --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to inspect the working tree before the $Phase deployment."
+}
+if ($status.Count -ne 0) {
     throw "Repository became dirty before the $Phase deployment."
 }
 

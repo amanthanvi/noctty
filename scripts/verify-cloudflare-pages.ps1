@@ -416,7 +416,7 @@ function Get-ResponseHeaderText {
     return ''
 }
 
-function Assert-PublicHeaderContract {
+function Test-PublicHeaderContractOnce {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
         [Parameter(Mandatory)] [string] $Id,
@@ -451,15 +451,13 @@ function Assert-PublicHeaderContract {
         try {
             $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
             if ([int]$response.StatusCode -ne $probe.ExpectedStatus) {
-                throw "Published header probe failed for $($probe.Path) at " +
-                    "$($Origin.DnsSafeHost)."
+                return $false
             }
             $cacheControl = Get-ResponseHeaderText `
                 -Response $response `
                 -Name 'Cache-Control'
             if ($cacheControl -cne $probe.ExpectedCache) {
-                throw "Published cache policy mismatch for $($probe.Path) at " +
-                    "$($Origin.DnsSafeHost)."
+                return $false
             }
             if ((Get-ResponseHeaderText -Response $response -Name 'X-Content-Type-Options') -cne
                     [string]$Contract.root.x_content_type_options -or
@@ -471,14 +469,37 @@ function Assert-PublicHeaderContract {
                     [string]$Contract.root.permissions_policy -or
                 (Get-ResponseHeaderText -Response $response -Name 'Content-Security-Policy') -cne
                     [string]$Contract.root.content_security_policy) {
-                throw "Published browser security headers are incomplete at $($Origin.DnsSafeHost)."
+                return $false
             }
+        }
+        catch {
+            return $false
         }
         finally {
             if ($response) { $response.Dispose() }
             $request.Dispose()
         }
     }
+    return $true
+}
+
+function Assert-PublicHeaderContract {
+    param(
+        [Parameter(Mandatory)] [Uri] $Origin,
+        [Parameter(Mandatory)] [string] $Id,
+        [Parameter(Mandatory)] [object] $Contract
+    )
+
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        if (Test-PublicHeaderContractOnce `
+                -Origin $Origin `
+                -Id $Id `
+                -Contract $Contract) {
+            return
+        }
+        if ($attempt -lt 6) { Start-Sleep -Seconds 2 }
+    }
+    throw "Published response headers did not converge at $($Origin.DnsSafeHost)."
 }
 
 function Assert-WwwRedirectContract {

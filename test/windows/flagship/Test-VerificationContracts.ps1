@@ -8292,6 +8292,11 @@ foreach ($siteScript in @(
     if ($siteScriptErrors.Count -ne 0) {
         throw "Site deployment script does not parse: $siteScript ($($siteScriptErrors[0].Message))"
     }
+    Assert-TextContract `
+        -Content (Get-Content -LiteralPath $siteScript -Raw) `
+        -Pattern '(?m)^#requires -Version 7\.3\s*$' `
+        -Description 'workflow-owned site deployment scripts declare their PowerShell 7.3 floor' `
+        -Context $siteScript
 }
 
 Assert-TextContract `
@@ -8329,13 +8334,13 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: checkout"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Resolve exact deployment commit' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)id: source.*?git rev-parse HEAD.*?\^\[0-9a-f\]\{40\}\$.*?"sha=\$sha" >> \$env:GITHUB_OUTPUT' `
-    -Description 'site deployment records the full resolved source SHA once after checkout' `
+    -Pattern '(?ms)id: source.*?\$sha = git rev-parse HEAD.*?\$LASTEXITCODE -ne 0.*?\$sha = \(\[string\]\(\$sha -join "`n"\)\)\.Trim\(\).*?\^\[0-9a-f\]\{40\}\$.*?"sha=\$sha" >> \$env:GITHUB_OUTPUT' `
+    -Description 'site deployment fails closed before recording the full resolved source SHA' `
     -Context "$siteDeployWorkflow :: source"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
-    -Description 'release-triggered site deployments bind baked-in copy to the published semver tag' `
+    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?npm ci --prefix site --ignore-scripts.*?check-site-bundle\.ps1.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
+    -Description 'site copy is checked before dependencies and release copy binds to the published semver tag' `
     -Context "$siteDeployWorkflow :: site validation"
 $siteActionUses = [regex]::Matches(
     $siteDeployWorkflowText,
@@ -8382,6 +8387,11 @@ Assert-TextContract `
     -Pattern '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/winghostty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all' `
     -Description 'the shared site gate binds both phases to a clean exact fork-local main head' `
     -Context $siteDeploymentHeadGate
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw) `
+    -Pattern '(?ms)\$originOutput = git remote get-url origin.*?\$LASTEXITCODE -ne 0.*?\$headOutput = git rev-parse HEAD.*?\$LASTEXITCODE -ne 0.*?\$originHeadOutput = git rev-parse.*?\$LASTEXITCODE -ne 0.*?\$status = @\(git status.*?\$LASTEXITCODE -ne 0.*?\$status\.Count -ne 0' `
+    -Description 'every deployment gate git query checks its own exit status before consuming output' `
+    -Context $siteDeploymentHeadGate
 $sitePayloadStep = Get-YamlStepBlock `
     -Content $siteDeployWorkflowText `
     -Name 'Build deterministic deploy payload twice' `
@@ -8398,19 +8408,28 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: payload"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify canary provenance and bytes' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit ''\$\{\{ steps\.source\.outputs\.sha \}\}''.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
     -Description 'canary verification binds API provenance and payload bytes to the exact commit' `
     -Context "$siteDeployWorkflow :: canary verification"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Require the zone-owned www redirect before production' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit ''\$\{\{ steps\.source\.outputs\.sha \}\}''' `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit \$env:DEPLOY_SHA' `
     -Description 'the zone-owned www redirect is verified before the production write' `
     -Context "$siteDeployWorkflow :: redirect preflight"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow) `
-    -Pattern "(?ms)-ExpectedEnvironment production.*?-ExpectedBranch main.*?-CanonicalBaseUrl 'https://winghostty\.com/'.*?-RequireCanonical.*?-VerifyWwwRedirect" `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://winghostty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect' `
     -Description 'production verification binds the canonical domain and zone redirect' `
     -Context "$siteDeployWorkflow :: production verification"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Resolve canary branch' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?\$sha = \$env:DEPLOY_SHA' `
+    -Description 'canary metadata receives the validated SHA through the environment' `
+    -Context "$siteDeployWorkflow :: canary metadata"
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s+(?:\$sha\s*=\s*''\$\{\{ steps\.source\.outputs\.sha \}\}''|-ExpectedCommit\s+''\$\{\{ steps\.source\.outputs\.sha \}\}'')' `
+    -Description 'validated action outputs are never interpolated directly into PowerShell source'
 Assert-WorkflowContractAbsent `
     -Path $siteDeployWorkflow `
     -Pattern '(?i)rollback|previous\.outputs\.deployment_id' `
@@ -8482,8 +8501,8 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot 'site\_redirects')) {
 }
 Assert-TextContract `
     -Content $siteReadmeText `
-    -Pattern '(?ms)Direct Upload.*?pull requests do not deploy.*?zone-owned `www` redirect\s+is preflighted.*?does not automatically roll back.*?zone level.*?workflow verifies the zone-level 301' `
-    -Description 'site operations document Direct Upload scope and the zone-owned www redirect' `
+    -Pattern '(?ms)Direct Upload.*?every\s+push to `main`.*?pull requests do not deploy.*?zone-owned `www` redirect\s+is preflighted.*?does not automatically roll back.*?zone level.*?workflow verifies the zone-level 301.*?deployment-only scripts require PowerShell 7\.3 or newer.*?outside the Windows PowerShell 5\.1 harness compatibility scope' `
+    -Description 'site operations document deployment triggers, Direct Upload scope, runtime floor, and the zone-owned redirect' `
     -Context $siteReadme
 Assert-TextContract `
     -Content $siteHeadersText `
@@ -8507,19 +8526,24 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
             [regex]::Match(
                 $siteHeadersText,
                 '(?m)^\s+Content-Security-Policy:\s*(?<value>.+)$'
-            ).Groups['value'].Value
+            ).Groups['value'].Value.Trim()
         )) {
     throw 'Central site header contract did not return the tracked CSP.'
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)one catch-all response policy.*?index\.html.*?404\.html.*?Get-CspSha256Source.*?declaredHashes.*?expectedHashes.*?ConvertTo-Json' `
-    -Description 'one catch-all contract derives CSP hashes from both HTML fallbacks and emits live expectations' `
+    -Pattern '(?ms)one catch-all response policy.*?index\.html.*?404\.html.*?Get-CspSha256Source.*?HashSet\[string\].*?declaredHashes\.Add.*?expectedHashes.*?ConvertTo-Json' `
+    -Description 'one catch-all contract compares unique CSP hash sets from both HTML fallbacks and emits live expectations' `
     -Context $siteHeaderContract
 Assert-TextContract `
-    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Assert-PublicHeaderContract(?=\s|\{)') `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
     -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
     -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Assert-PublicHeaderContract(?=\s|\{)') `
+    -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 6; \$attempt\+\+\).*?Test-PublicHeaderContractOnce.*?Start-Sleep -Seconds 2.*?did not converge' `
+    -Description 'public header verification tolerates bounded edge propagation before failing closed' `
     -Context "$cloudflarePagesVerifier :: Assert-PublicHeaderContract"
 
 $sitePayloadFixtureRoot = Join-Path (

@@ -40,7 +40,11 @@ jobs:
         id: source
         shell: pwsh
         run: |
-          $sha = (git rev-parse HEAD).Trim()
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not resolve the deployment source SHA.'
+          }
+          $sha = ([string]($sha -join "`n")).Trim()
           if ($sha -cnotmatch '^[0-9a-f]{40}$') {
             throw 'Deployment source did not resolve to a full Git SHA.'
           }
@@ -52,11 +56,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
+          ./scripts/check-site-copy.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm ci --prefix site --ignore-scripts
           if ($LASTEXITCODE -ne 0) { throw 'Site dependency installation failed.' }
           ./scripts/check-site-bundle.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/check-site-copy.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/get-site-header-contract.ps1 | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -115,8 +119,10 @@ jobs:
       - name: Resolve canary branch
         id: canary_meta
         shell: pwsh
+        env:
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
         run: |
-          $sha = '${{ steps.source.outputs.sha }}'
+          $sha = $env:DEPLOY_SHA
           $branch = "canary-$($sha.Substring(0, 12))-$env:GITHUB_RUN_ATTEMPT"
           "branch=$branch" >> $env:GITHUB_OUTPUT
 
@@ -145,6 +151,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOYMENT_ID: ${{ steps.canary.outputs.pages-deployment-id }}
           DEPLOYMENT_URL: ${{ steps.canary.outputs.deployment-url }}
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
           CANARY_BRANCH: ${{ steps.canary_meta.outputs.branch }}
           PAYLOAD_DIRECTORY: ${{ steps.payload.outputs.directory }}
           PAYLOAD_MANIFEST: ${{ steps.payload.outputs.manifest }}
@@ -156,7 +163,7 @@ jobs:
             -DeploymentId $env:DEPLOYMENT_ID `
             -ExpectedEnvironment preview `
             -ExpectedBranch $env:CANARY_BRANCH `
-            -ExpectedCommit '${{ steps.source.outputs.sha }}' `
+            -ExpectedCommit $env:DEPLOY_SHA `
             -BaseUrl $env:DEPLOYMENT_URL `
             -PayloadDirectory $env:PAYLOAD_DIRECTORY `
             -ManifestPath $env:PAYLOAD_MANIFEST `
@@ -168,11 +175,12 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOYMENT_ID: ${{ steps.canary.outputs.pages-deployment-id }}
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
         run: |
           ./scripts/verify-cloudflare-pages.ps1 `
             -Mode Redirect `
             -DeploymentId $env:DEPLOYMENT_ID `
-            -ExpectedCommit '${{ steps.source.outputs.sha }}'
+            -ExpectedCommit $env:DEPLOY_SHA
 
       - name: Require exact origin main before production
         shell: pwsh
@@ -210,6 +218,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOYMENT_ID: ${{ steps.production.outputs.pages-deployment-id }}
           DEPLOYMENT_URL: ${{ steps.production.outputs.deployment-url }}
+          DEPLOY_SHA: ${{ steps.source.outputs.sha }}
           PAYLOAD_DIRECTORY: ${{ steps.payload.outputs.directory }}
           PAYLOAD_MANIFEST: ${{ steps.payload.outputs.manifest }}
           PROVENANCE_DIRECTORY: ${{ steps.payload.outputs.evidence_directory }}
@@ -220,7 +229,7 @@ jobs:
             -DeploymentId $env:DEPLOYMENT_ID `
             -ExpectedEnvironment production `
             -ExpectedBranch main `
-            -ExpectedCommit '${{ steps.source.outputs.sha }}' `
+            -ExpectedCommit $env:DEPLOY_SHA `
             -BaseUrl $env:DEPLOYMENT_URL `
             -CanonicalBaseUrl 'https://winghostty.com/' `
             -PayloadDirectory $env:PAYLOAD_DIRECTORY `

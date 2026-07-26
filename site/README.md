@@ -49,8 +49,8 @@ edits, run `node scripts/build-site-bundle.mjs` from the repo root.
 The existing `winghostty` project remains a Direct Upload Pages project. There
 is no `wrangler.toml`, `wrangler.json`, or Git-integrated Pages build.
 
-Production is owned by `.github/workflows/deploy-site.yml`. It runs only for
-relevant pushes to `main`, published releases, or an explicit manual dispatch;
+Production is owned by `.github/workflows/deploy-site.yml`. It runs for every
+push to `main`, published stable releases, or an explicit manual dispatch;
 pull requests do not deploy. The protected GitHub environment is
 `cloudflare-pages-production` and must provide:
 
@@ -109,3 +109,7 @@ pwsh -File scripts/build-site-payload.ps1 `
   -OutputDirectory (Join-Path $root payload) `
   -ManifestPath (Join-Path $root payload.sha256)
 ```
+
+The four deployment-only scripts require PowerShell 7.3 or newer and are
+intentionally outside the Windows PowerShell 5.1 harness compatibility scope.
+The workflow and this runbook invoke them with `pwsh`.
