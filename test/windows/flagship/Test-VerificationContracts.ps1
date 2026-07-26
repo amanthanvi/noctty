@@ -8602,6 +8602,9 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
         )) {
     throw 'Central site header contract did not return the tracked CSP.'
 }
+if ([string]$siteHeaderContractObject.not_found.cache_control -cne 'no-store') {
+    throw 'Central site header contract must require generated 404 responses not to be cached.'
+}
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
     -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?eventHandlers.*?WebUtility\]::HtmlDecode.*?Get-CspSha256Source -Value \$decodedEventHandler.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
@@ -8832,6 +8835,33 @@ Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
     -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
     -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
+$cacheControlContract = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+Test-EquivalentCacheControl(?=\s|\{)'
+. ([scriptblock]::Create($cacheControlContract))
+if (-not (Test-EquivalentCacheControl `
+        -Actual 'PUBLIC, must-revalidate, max-age=0' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    -not (Test-EquivalentCacheControl -Actual 'no-store' -Expected 'no-store') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, max-age=0' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, max-age=0, must-revalidate, immutable' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, public, max-age=0, must-revalidate' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual '' `
+        -Expected 'public, max-age=0, must-revalidate')) {
+    throw 'Published cache-control verification must ignore order and case but reject missing, extra, or duplicate directives.'
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
+    -Pattern '(?ms)ExpectedStatus = 404.*?ExpectedCache = \[string\]\$Contract\.not_found\.cache_control.*?Test-EquivalentCacheControl.*?-Actual \$cacheControl.*?-Expected \$probe\.ExpectedCache' `
+    -Description 'published headers compare exact cache directive sets and require no-store for generated 404 responses' `
     -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Assert-PublicHeaderContract(?=\s|\{)') `

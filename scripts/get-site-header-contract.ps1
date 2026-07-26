@@ -298,4 +298,7 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
     bundle = [ordered]@{
         cache_control = $security['Cache-Control']
     }
+    not_found = [ordered]@{
+        cache_control = 'no-store'
+    }
 } | ConvertTo-Json -Depth 4 -Compress
