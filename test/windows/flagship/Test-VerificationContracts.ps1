@@ -8565,16 +8565,39 @@ if ($immutablePagesOrigin.DnsSafeHost -cne
     '69cd5628.winghostty.pages.dev') {
     throw 'Immutable Pages deployment origin was not preserved.'
 }
-$mutablePagesOriginRejected = $false
-try {
-    [void](ConvertTo-PublicBaseUri `
-        -Value 'https://winghostty.pages.dev/' `
-        -Kind pages)
-} catch {
-    $mutablePagesOriginRejected = $true
+foreach ($mutablePagesUrl in @(
+    'https://winghostty.pages.dev/',
+    'https://main.winghostty.pages.dev/'
+)) {
+    $mutablePagesOriginRejected = $false
+    try {
+        [void](ConvertTo-PublicBaseUri `
+            -Value $mutablePagesUrl `
+            -Kind pages)
+    } catch {
+        $mutablePagesOriginRejected = $true
+    }
+    if (-not $mutablePagesOriginRejected) {
+        throw "Mutable Pages origin passed immutable validation: $mutablePagesUrl"
+    }
 }
-if (-not $mutablePagesOriginRejected) {
-    throw 'Mutable Pages project origin passed immutable deployment validation.'
+$immutableOriginBindingFunctionText = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+Assert-ImmutablePagesDeploymentOrigin(?=\s|\{)'
+. ([scriptblock]::Create($immutableOriginBindingFunctionText))
+Assert-ImmutablePagesDeploymentOrigin `
+    -Origin $immutablePagesOrigin `
+    -DeploymentId '69cd5628-1d01-4095-9774-6f8cfe7d7d1e'
+$mismatchedDeploymentIdRejected = $false
+try {
+    Assert-ImmutablePagesDeploymentOrigin `
+        -Origin $immutablePagesOrigin `
+        -DeploymentId 'deadbeef-1d01-4095-9774-6f8cfe7d7d1e'
+} catch {
+    $mismatchedDeploymentIdRejected = $true
+}
+if (-not $mismatchedDeploymentIdRejected) {
+    throw 'Immutable Pages origin was not bound to its deployment ID.'
 }
 $cloudflareVerifierTokens = $null
 $cloudflareVerifierErrors = $null

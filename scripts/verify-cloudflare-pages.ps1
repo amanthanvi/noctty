@@ -290,13 +290,27 @@ function ConvertTo-PublicBaseUri {
         throw 'Deployment verification URL must be an HTTPS origin.'
     }
     if ($Kind -eq 'pages' -and
-        $uri.DnsSafeHost -cnotmatch '^[a-z0-9-]+\.winghostty\.pages\.dev$') {
+        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.winghostty\.pages\.dev$') {
         throw 'Deployment URL is not an immutable winghostty Pages origin.'
     }
     if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'winghostty.com') {
         throw 'Canonical URL must be https://winghostty.com/.'
     }
     return $uri
+}
+
+function Assert-ImmutablePagesDeploymentOrigin {
+    param(
+        [Parameter(Mandatory)] [Uri] $Origin,
+        [Parameter(Mandatory)] [string] $DeploymentId
+    )
+
+    $idMatch = [regex]::Match($DeploymentId, '^(?<label>[0-9a-f]{8})-')
+    if (-not $idMatch.Success -or
+        $Origin.DnsSafeHost -cne
+            "$($idMatch.Groups['label'].Value).winghostty.pages.dev") {
+        throw 'Immutable Pages origin does not match the deployment ID.'
+    }
 }
 
 function New-PublicAssetUri {
@@ -645,6 +659,9 @@ try {
                 $apiOrigin.AbsoluteUri.TrimEnd('/')) {
                 throw 'Wrangler deployment URL does not match Cloudflare API provenance.'
             }
+            Assert-ImmutablePagesDeploymentOrigin `
+                -Origin $pagesOrigin `
+                -DeploymentId $DeploymentId
             $entries = @(Get-ManifestEntries `
                 -Path $ManifestPath `
                 -PayloadRoot $PayloadDirectory)
