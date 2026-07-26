@@ -8477,6 +8477,11 @@ Assert-TextContract `
     -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Invoke-CloudflareApi(?=\s|\{)') `
+    -Pattern '(?ms)\[Parameter\(Mandatory\)\]\s*\[AllowEmptyString\(\)\]\s*\[string\]\s*\$RelativePath.*?\$apiRoot\$RelativePath' `
+    -Description 'the Pages project-root API request permits its intentional empty relative path' `
+    -Context "$cloudflarePagesVerifier :: Invoke-CloudflareApi"
+Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Wait-CanonicalDeployment(?=\s|\{)') `
     -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?try \{\s*\$project = Get-Project.*?catch \{.*?\$attempt -eq 10.*?failed after bounded retries.*?Start-Sleep -Seconds 2.*?continue.*?Assert-ProjectContract.*?Get-CanonicalDeploymentId' `
     -Description 'canonical promotion tolerates bounded transient project API failures but still validates project identity' `
