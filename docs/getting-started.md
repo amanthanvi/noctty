@@ -24,7 +24,7 @@ You can also go to
 - **Portable ZIP:** `winghostty-<version>-windows-<arch>-portable.zip`
 - **Checksums:** `SHA256SUMS-windows-<arch>.txt`
 
-Use `x64` or `arm64` for `<arch>`. The current stable release is `1.3.119`;
+Use `x64` or `arm64` for `<arch>`. The current stable release is `1.3.120`;
 both architectures have installer and portable ZIP assets. The legacy
 `SHA256SUMS.txt` file remains an x64 compatibility alias.
 

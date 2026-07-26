@@ -2589,6 +2589,7 @@ $undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
 $resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
 $keyInputHarness = Join-Path $repoRoot 'test\windows\interactive-win11-key-input.ps1'
 $interactiveValidator = Join-Path $repoRoot 'test\windows\interactive-win11-validate.ps1'
+$shaderHarness = Join-Path $repoRoot 'test\windows\interactive-win11-shaders.ps1'
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
 $win32Theme = Join-Path $repoRoot 'src\apprt\win32_theme.zig'
@@ -2604,6 +2605,7 @@ $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$windowsBuildCapabilities = Join-Path $repoRoot 'scripts\windows-build-capabilities.ps1'
 $signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
 $signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
@@ -8071,8 +8073,12 @@ $quick = '${{ github.event_name }}' -eq 'pull_request'
 if ($quick) {
   ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
   ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   ./test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 120 -IdleSoakSeconds 600
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -8086,6 +8092,23 @@ $expectedInteractiveRunScript = ($expectedInteractiveRunScript -replace '\r\n?',
 if ($interactiveRunScript -cne $expectedInteractiveRunScript) {
     throw 'Interactive workflow run script drifted from its exact fail-closed source snapshot.'
 }
+Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern 'zig build -Demit-exe=true -Dcustom-shaders=true' `
+    -Description 'shader harness rebuilds the executable with custom shader support'
+Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern "(?s)custom shaders: enabled.*?R -ge 220.*?G -le 40.*?B -ge 220" `
+    -Description 'shader harness verifies both the compiled capability and visible magenta output'
+Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern '(?ms)Show-StatefulHost \$hostHwnd\r?\n\s+\$graphics\.CopyFromScreen.*?Show-StatefulHost \$hostHwnd\r?\n\s+\$argb = Get-StatefulPixel' `
+    -Description 'shader harness refocuses the host immediately before both screen-pixel captures'
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Verify default source-build shader mode' -Source $testWorkflow) `
+    -Pattern '(?ms)winghostty\.com \+version.*?Build Config.*?custom shaders: disabled' `
+    -Description 'default source build executes the CLI and reports custom shaders disabled' `
+    -Context "$testWorkflow :: Verify default source-build shader mode"
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
     -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
@@ -8232,6 +8255,10 @@ Assert-WorkflowContract `
     -Pattern "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}" `
     -Description 'ARM64 workflow checkout uses the immutable PR head SHA for pull requests'
 Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot '.github\workflows\windows-arm64.yml') `
+    -Pattern '(?ms)Run ARM64 CLI smoke.*?Build Config.*?custom shaders: enabled.*?Run packaged ARM64 CLI smoke.*?Build Config.*?custom shaders: enabled' `
+    -Description 'native and packaged ARM64 CLI smokes retain version output and shader capability coverage'
+Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
     -Pattern '\$runnerVersion -lt \$minimumRunnerVersion' `
     -Description 'interactive evidence rejects outdated runners'
@@ -8261,6 +8288,14 @@ Assert-WorkflowContract `
     -Path $windowsPackager `
     -Pattern '(?ms)foreach \(\$runtimeFile in \$runtimeFiles\).*?Assert-PeMachine.*?if \(\$Architecture -eq "x64"\).*?check-windows-x64-baseline\.ps1.*?-Path \$runtimePath' `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?winghostty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest' `
+    -Description 'Windows packaging verifies hash-bound shader capability for every target and executes native packages'
+Assert-WorkflowContract `
+    -Path $windowsBuildCapabilities `
+    -Pattern '(?ms)Get-FileHash.*?custom_shaders = \$true.*?custom_shaders -ne \$true.*?Get-FileHash.*?\$actualHash -cne \[string\] \$hashProperty\.Value' `
+    -Description 'build capability manifests bind shader support to every runtime artifact hash'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
     -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$objdumpKillTimeoutMs = 5000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitForExit\(\$objdumpKillTimeoutMs\).*?llvm-objdump did not exit after termination.*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `

@@ -8,7 +8,7 @@ import {
 
 const { useEffect, useLayoutEffect, useReducer, useRef, useState } = React;
 
-let WG_VERSION = window.WG_VERSION || '1.3.119';
+let WG_VERSION = window.WG_VERSION || '1.3.120';
 const WG_REPO = 'amanthanvi/winghostty';
 
 function buildScript(v) {
