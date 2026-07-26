@@ -96,7 +96,7 @@ function Get-CspSha256Source {
     )
 }
 
-$expectedHashes = [Collections.Generic.HashSet[string]]::new(
+$expectedScriptHashes = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
 foreach ($htmlName in @('index.html', '404.html')) {
@@ -115,11 +115,16 @@ foreach ($htmlName in @('index.html', '404.html')) {
     if ($inlineScripts.Count -ne 1) {
         throw "Expected exactly one CSP-hashed inline script in $htmlName."
     }
-    [void]$expectedHashes.Add(
+    [void]$expectedScriptHashes.Add(
         (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
     )
 }
-[void]$expectedHashes.Add((Get-CspSha256Source -Value "this.media='all'"))
+$expectedScriptAttributeHashes = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
+[void]$expectedScriptAttributeHashes.Add(
+    (Get-CspSha256Source -Value "this.media='all'")
+)
 
 $csp = $security['Content-Security-Policy']
 if ($csp.Contains("script-src 'self' 'unsafe-inline'", [StringComparison]::Ordinal)) {
@@ -140,6 +145,60 @@ foreach ($token in @(
         throw "Site CSP is missing: $token"
     }
 }
+function Get-CspDirectiveSources {
+    param(
+        [Parameter(Mandatory)] [string] $Policy,
+        [Parameter(Mandatory)] [string] $DirectiveName
+    )
+
+    $matches = @(
+        $Policy.Split(';') |
+            ForEach-Object { $_.Trim() } |
+            Where-Object {
+                $_ -match ('^' + [regex]::Escape($DirectiveName) + '(?:\s|$)')
+            }
+    )
+    if ($matches.Count -ne 1) {
+        throw "Site CSP must declare $DirectiveName exactly once."
+    }
+    return @([regex]::Split($matches[0], '\s+') | Select-Object -Skip 1)
+}
+
+function Assert-ExactCspDirectiveHashes {
+    param(
+        [Parameter(Mandatory)] [string] $DirectiveName,
+        [Parameter(Mandatory)]
+        [Collections.Generic.HashSet[string]] $Expected
+    )
+
+    $declaredTokens = @(
+        Get-CspDirectiveSources -Policy $csp -DirectiveName $DirectiveName |
+            Where-Object { $_ -match "^'sha256-[A-Za-z0-9+/]+=*'$" }
+    )
+    $declared = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($token in $declaredTokens) {
+        [void]$declared.Add($token.Trim("'"))
+    }
+    if ($declaredTokens.Count -ne $declared.Count -or
+        $declared.Count -ne $Expected.Count -or
+        @($Expected | Where-Object { -not $declared.Contains($_) }).Count -ne 0) {
+        throw "Site CSP $DirectiveName hashes do not exactly match their HTML sources."
+    }
+}
+Assert-ExactCspDirectiveHashes `
+    -DirectiveName 'script-src' `
+    -Expected $expectedScriptHashes
+Assert-ExactCspDirectiveHashes `
+    -DirectiveName 'script-src-attr' `
+    -Expected $expectedScriptAttributeHashes
+
+$expectedHashes = [Collections.Generic.HashSet[string]]::new(
+    $expectedScriptHashes,
+    [StringComparer]::Ordinal
+)
+$expectedHashes.UnionWith($expectedScriptAttributeHashes)
 $declaredHashes = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
@@ -153,7 +212,7 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
     @($expectedHashes | Where-Object {
         -not $declaredHashes.Contains($_)
     }).Count -ne 0) {
-    throw 'Site CSP hashes do not exactly match the inline HTML scripts and handlers.'
+    throw 'Site CSP declares hashes outside the exact HTML source contract.'
 }
 
 [ordered]@{

@@ -8532,9 +8532,84 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)one catch-all response policy.*?index\.html.*?404\.html.*?Get-CspSha256Source.*?HashSet\[string\].*?declaredHashes\.Add.*?expectedHashes.*?ConvertTo-Json' `
-    -Description 'one catch-all contract compares unique CSP hash sets from both HTML fallbacks and emits live expectations' `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?function Assert-ExactCspDirectiveHashes.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Description 'one catch-all contract binds unique CSP hashes to their exact script directives and emits live expectations' `
     -Context $siteHeaderContract
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern "(?ms)Assert-ExactCspDirectiveHashes.*?-DirectiveName 'script-src'.*?Assert-ExactCspDirectiveHashes.*?-DirectiveName 'script-src-attr'.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
+    -Description 'script and event-handler hashes remain directive-specific before the global CSP allowlist check' `
+    -Context $siteHeaderContract
+
+$siteCspFixtureRoot = Join-Path (
+    [IO.Path]::GetTempPath()
+) "winghostty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+$siteCspFixtureRoot = [IO.Path]::GetFullPath($siteCspFixtureRoot)
+$siteCspTempPrefix = [IO.Path]::GetFullPath(
+    [IO.Path]::GetTempPath()
+).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+if (-not $siteCspFixtureRoot.StartsWith(
+        $siteCspTempPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Refusing unsafe CSP fixture path: $siteCspFixtureRoot"
+}
+[IO.Directory]::CreateDirectory($siteCspFixtureRoot) | Out-Null
+try {
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'site') |
+        Copy-Item `
+            -Destination $siteCspFixtureRoot `
+            -Recurse `
+            -Force
+    $fixtureHeadersPath = Join-Path $siteCspFixtureRoot '_headers'
+    $fixtureHeadersText = [IO.File]::ReadAllText($fixtureHeadersPath)
+    $scriptHash = [regex]::Match(
+        $fixtureHeadersText,
+        "script-src 'self' '(?<hash>sha256-[^']+)'"
+    ).Groups['hash'].Value
+    $attributeHash = [regex]::Match(
+        $fixtureHeadersText,
+        "script-src-attr 'unsafe-hashes' '(?<hash>sha256-[^']+)'"
+    ).Groups['hash'].Value
+    if ([string]::IsNullOrWhiteSpace($scriptHash) -or
+        [string]::IsNullOrWhiteSpace($attributeHash)) {
+        throw 'Could not identify CSP hashes for the directive-swap regression.'
+    }
+    $swappedHeaders = $fixtureHeadersText.Replace(
+        "'$scriptHash'",
+        "'__WINGHOSTTY_SCRIPT_HASH__'"
+    ).Replace(
+        "'$attributeHash'",
+        "'$scriptHash'"
+    ).Replace(
+        "'__WINGHOSTTY_SCRIPT_HASH__'",
+        "'$attributeHash'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $swappedHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $directiveSwapRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'script-src hashes do not exactly match') {
+            throw
+        }
+        $directiveSwapRejected = $true
+    }
+    if (-not $directiveSwapRejected) {
+        throw 'Site CSP contract accepted hashes swapped between script directives.'
+    }
+}
+finally {
+    if ([IO.Directory]::Exists($siteCspFixtureRoot)) {
+        [IO.Directory]::Delete($siteCspFixtureRoot, $true)
+    }
+}
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
     -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
