@@ -84,7 +84,7 @@ $apiRoot = 'https://api.cloudflare.com/client/v4/accounts/' +
 function Invoke-CloudflareApi {
     param(
         [Parameter(Mandatory)] [Net.Http.HttpMethod] $Method,
-        [Parameter(Mandatory)] [string] $RelativePath
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $RelativePath
     )
 
     $request = [Net.Http.HttpRequestMessage]::new(
