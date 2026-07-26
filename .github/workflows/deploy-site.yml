@@ -136,7 +136,6 @@ jobs:
           wranglerVersion: 4.114.0
           packageManager: npm
           workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
-          quiet: true
           command: >-
             pages deploy "${{ steps.payload.outputs.directory }}"
             --project-name=winghostty
@@ -203,7 +202,6 @@ jobs:
           wranglerVersion: 4.114.0
           packageManager: npm
           workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
-          quiet: true
           command: >-
             pages deploy "${{ steps.payload.outputs.directory }}"
             --project-name=winghostty
