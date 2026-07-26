@@ -8371,9 +8371,12 @@ foreach ($deployStepName in @(
         -Source $siteDeployWorkflow
     Assert-TextContract `
         -Content $deployStep `
-        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?quiet: true.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
-        -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version' `
+        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
+        -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version and visible diagnostics' `
         -Context "$siteDeployWorkflow :: $deployStepName"
+    if ($deployStep -match '(?m)^\s*quiet:') {
+        throw "Cloudflare deployment diagnostics must remain visible ($siteDeployWorkflow :: $deployStepName)"
+    }
 }
 foreach ($phase in @('canary', 'production')) {
     Assert-TextContract `
