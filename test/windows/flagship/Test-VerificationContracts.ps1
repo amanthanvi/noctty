@@ -8296,9 +8296,13 @@ foreach ($siteScript in @(
 
 Assert-TextContract `
     -Content $siteDeployWorkflowText `
-    -Pattern '(?ms)^on:\s+push:\s+branches:\s+- main\s+paths:.*?release:\s+types:\s+- published\s+workflow_dispatch:\s*$' `
-    -Description 'site deployment has only filtered main pushes, published releases, and manual dispatch triggers' `
+    -Pattern '(?ms)^on:\s+push:\s+branches:\s+- main\s+release:\s+types:\s+- published\s+workflow_dispatch:\s*$' `
+    -Description 'site deployment catches every main advance plus published releases and manual dispatch' `
     -Context $siteDeployWorkflow
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s+paths(?:-ignore)?:' `
+    -Description 'site deployment cannot strand a site change behind a later path-filtered main advance'
 Assert-WorkflowContractAbsent `
     -Path $siteDeployWorkflow `
     -Pattern '(?m)^\s*(?:pull_request|pull_request_target):' `

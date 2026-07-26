@@ -4,20 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".github/workflows/deploy-site.yml"
-      - "README.md"
-      - "docs/getting-started.md"
-      - "docs/status.md"
-      - "scripts/build-site-bundle.mjs"
-      - "scripts/build-site-payload.ps1"
-      - "scripts/check-release-copy.ps1"
-      - "scripts/check-site-bundle.ps1"
-      - "scripts/check-site-copy.ps1"
-      - "scripts/get-site-header-contract.ps1"
-      - "scripts/require-site-deployment-head.ps1"
-      - "scripts/verify-cloudflare-pages.ps1"
-      - "site/**"
   release:
     types:
       - published
