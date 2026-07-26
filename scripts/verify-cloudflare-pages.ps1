@@ -416,6 +416,30 @@ function Get-ResponseHeaderText {
     return ''
 }
 
+function Test-EquivalentCacheControl {
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Actual,
+        [Parameter(Mandatory)] [string] $Expected
+    )
+
+    $actualTokens = @($Actual.Split(',') | ForEach-Object { $_.Trim() })
+    $expectedTokens = @($Expected.Split(',') | ForEach-Object { $_.Trim() })
+    $actualSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $expectedSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($token in $actualTokens) {
+        if (-not $token -or -not $actualSet.Add($token)) { return $false }
+    }
+    foreach ($token in $expectedTokens) {
+        if (-not $token -or -not $expectedSet.Add($token)) { return $false }
+    }
+    return $actualSet.Count -eq $expectedSet.Count -and
+        @($expectedSet | Where-Object { -not $actualSet.Contains($_) }).Count -eq 0
+}
+
 function Test-PublicHeaderContractOnce {
     param(
         [Parameter(Mandatory)] [Uri] $Origin,
@@ -438,7 +462,7 @@ function Test-PublicHeaderContractOnce {
             Path = '/__winghostty_header_contract_' +
                 [Uri]::EscapeDataString($Id) + '/nested/page'
             ExpectedStatus = 404
-            ExpectedCache = [string]$Contract.root.cache_control
+            ExpectedCache = [string]$Contract.not_found.cache_control
         }
     )
     foreach ($probe in $probes) {
@@ -456,7 +480,9 @@ function Test-PublicHeaderContractOnce {
             $cacheControl = Get-ResponseHeaderText `
                 -Response $response `
                 -Name 'Cache-Control'
-            if ($cacheControl -cne $probe.ExpectedCache) {
+            if (-not (Test-EquivalentCacheControl `
+                    -Actual $cacheControl `
+                    -Expected $probe.ExpectedCache)) {
                 return $false
             }
             if ((Get-ResponseHeaderText -Response $response -Name 'X-Content-Type-Options') -cne
