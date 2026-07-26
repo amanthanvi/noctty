@@ -8609,6 +8609,42 @@ $cloudflareVerifierAst = [System.Management.Automation.Language.Parser]::ParseIn
 if ($cloudflareVerifierErrors.Count -ne 0) {
     throw 'Cloudflare verifier must parse for public-verification call checks.'
 }
+$immutableOriginBindingCalls = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Assert-ImmutablePagesDeploymentOrigin'
+}, $true))
+$urlIdentityChecks = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains(
+            'Wrangler deployment URL does not match Cloudflare API provenance.'
+        )
+}, $true))
+if ($immutableOriginBindingCalls.Count -ne 1 -or
+    $urlIdentityChecks.Count -ne 1) {
+    throw 'Deployment flow must contain one URL identity check and origin binding.'
+}
+$originBindingElements = @(
+    $immutableOriginBindingCalls[0].CommandElements
+)
+if ($originBindingElements.Count -ne 5 -or
+    $originBindingElements[1] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[1].ParameterName -cne 'Origin' -or
+    $originBindingElements[2] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[2].VariablePath.UserPath -cne 'pagesOrigin' -or
+    $originBindingElements[3] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[3].ParameterName -cne 'DeploymentId' -or
+    $originBindingElements[4] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[4].VariablePath.UserPath -cne 'DeploymentId' -or
+    $immutableOriginBindingCalls[0].Extent.StartOffset -le
+        $urlIdentityChecks[0].Extent.EndOffset) {
+    throw 'Deployment flow must bind pagesOrigin to DeploymentId after URL identity.'
+}
 $publicVerificationCalls = @($cloudflareVerifierAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
