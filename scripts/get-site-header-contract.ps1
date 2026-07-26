@@ -75,16 +75,40 @@ if ($security['Cache-Control'] -cne 'public, max-age=0, must-revalidate' -or
 }
 
 $permissions = $security['Permissions-Policy']
+$expectedPermissions = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
 foreach ($permission in @(
+    'accelerometer=()',
+    'autoplay=()',
     'camera=()',
     'geolocation=()',
+    'gyroscope=()',
+    'magnetometer=()',
     'microphone=()',
     'payment=()',
     'usb=()'
 )) {
-    if (-not $permissions.Contains($permission, [StringComparison]::Ordinal)) {
-        throw "Site permissions policy is missing $permission."
+    [void]$expectedPermissions.Add($permission)
+}
+$declaredPermissionTokens = @(
+    $permissions.Split(',') | ForEach-Object { $_.Trim() }
+)
+$declaredPermissions = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
+foreach ($permission in $declaredPermissionTokens) {
+    if (-not $permission) {
+        throw 'Site permissions policy contains an empty directive.'
     }
+    [void]$declaredPermissions.Add($permission)
+}
+if ($declaredPermissionTokens.Count -ne $declaredPermissions.Count -or
+    $declaredPermissions.Count -ne $expectedPermissions.Count -or
+    @($expectedPermissions | Where-Object {
+        -not $declaredPermissions.Contains($_)
+    }).Count -ne 0) {
+    throw 'Site permissions policy does not exactly match the denylist contract.'
 }
 
 function Get-CspSha256Source {
@@ -97,6 +121,9 @@ function Get-CspSha256Source {
 }
 
 $expectedScriptHashes = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
+$expectedScriptAttributeHashes = [Collections.Generic.HashSet[string]]::new(
     [StringComparer]::Ordinal
 )
 foreach ($htmlName in @('index.html', '404.html')) {
@@ -118,13 +145,21 @@ foreach ($htmlName in @('index.html', '404.html')) {
     [void]$expectedScriptHashes.Add(
         (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
     )
+    $eventAttributeCount = [regex]::Matches(
+        $html,
+        '(?is)\s+on[a-z][a-z0-9_-]*\s*='
+    ).Count
+    $eventHandlers = @([regex]::Matches(
+        $html,
+        '(?is)\s+on[a-z][a-z0-9_-]*\s*=\s*(?<quote>["''])(?<body>.*?)\k<quote>'
+    ))
+    if ($eventAttributeCount -ne 1 -or $eventHandlers.Count -ne 1) {
+        throw "Expected exactly one quoted CSP-hashed event handler in $htmlName."
+    }
+    [void]$expectedScriptAttributeHashes.Add(
+        (Get-CspSha256Source -Value $eventHandlers[0].Groups['body'].Value)
+    )
 }
-$expectedScriptAttributeHashes = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-[void]$expectedScriptAttributeHashes.Add(
-    (Get-CspSha256Source -Value "this.media='all'")
-)
 
 $csp = $security['Content-Security-Policy']
 function Get-CspDirectiveSources {

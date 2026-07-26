@@ -8532,8 +8532,13 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?eventHandlers.*?Get-CspSha256Source -Value \$eventHandlers.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
     -Description 'one catch-all contract binds exact complete source sets to both script directives and emits live expectations' `
+    -Context $siteHeaderContract
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern '(?ms)expectedPermissions.*?accelerometer=\(\).*?autoplay=\(\).*?gyroscope=\(\).*?magnetometer=\(\).*?declaredPermissionTokens.*?declaredPermissions.*?expectedPermissions\.Count.*?denylist contract' `
+    -Description 'permissions policy uses an exact duplicate-free directive denylist' `
     -Context $siteHeaderContract
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
@@ -8674,6 +8679,61 @@ try {
     }
     if (-not $sha384OverrideRejected) {
         throw 'Site CSP contract accepted a SHA-384 script-src-elem override.'
+    }
+
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $fixtureHeadersText,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $fixtureIndexPath = Join-Path $siteCspFixtureRoot 'index.html'
+    $fixtureIndexText = [IO.File]::ReadAllText($fixtureIndexPath)
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText.Replace(
+            "onload=`"this.media='all'`"",
+            "onload=`"this.media='screen'`""
+        ),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $editedHandlerRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'script-src-attr sources do not exactly match') {
+            throw
+        }
+        $editedHandlerRejected = $true
+    }
+    if (-not $editedHandlerRejected) {
+        throw 'Site CSP contract accepted an untracked event-handler edit.'
+    }
+
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $fixtureHeadersText.Replace('accelerometer=()', 'accelerometer=(self)'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $weakenedPermissionRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'permissions policy does not exactly match') {
+            throw
+        }
+        $weakenedPermissionRejected = $true
+    }
+    if (-not $weakenedPermissionRejected) {
+        throw 'Site header contract accepted a weakened permissions policy.'
     }
 }
 finally {
