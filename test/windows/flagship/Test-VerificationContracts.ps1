@@ -8604,6 +8604,30 @@ try {
     if (-not $directiveSwapRejected) {
         throw 'Site CSP contract accepted hashes swapped between script directives.'
     }
+
+    $reusedHashHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem '$attributeHash'; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $reusedHashHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $unvalidatedDirectiveRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'cannot declare hashes in unvalidated directive script-src-elem') {
+            throw
+        }
+        $unvalidatedDirectiveRejected = $true
+    }
+    if (-not $unvalidatedDirectiveRejected) {
+        throw 'Site CSP contract accepted a reused hash in script-src-elem.'
+    }
 }
 finally {
     if ([IO.Directory]::Exists($siteCspFixtureRoot)) {

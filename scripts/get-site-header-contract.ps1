@@ -194,6 +194,16 @@ Assert-ExactCspDirectiveHashes `
     -DirectiveName 'script-src-attr' `
     -Expected $expectedScriptAttributeHashes
 
+foreach ($directive in $csp.Split(';')) {
+    $directive = $directive.Trim()
+    if (-not $directive) { continue }
+    $directiveName = [regex]::Split($directive, '\s+')[0]
+    if ($directiveName -notin @('script-src', 'script-src-attr') -and
+        $directive -match "'sha256-[A-Za-z0-9+/]+=*'") {
+        throw "Site CSP cannot declare hashes in unvalidated directive $directiveName."
+    }
+}
+
 $expectedHashes = [Collections.Generic.HashSet[string]]::new(
     $expectedScriptHashes,
     [StringComparer]::Ordinal
