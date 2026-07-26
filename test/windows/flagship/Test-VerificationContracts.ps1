@@ -8483,8 +8483,8 @@ Assert-TextContract `
     -Context $siteReadme
 Assert-TextContract `
     -Content $siteHeadersText `
-    -Pattern '(?ms)Cache-Control: public, max-age=0, must-revalidate.*?Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:' `
-    -Description 'Pages responses use revalidation and baseline browser security headers' `
+    -Pattern '(?ms)^/\*\s+Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:.*?^/\s+Cache-Control: public, max-age=0, must-revalidate.*?^/bundle\.js\s+Cache-Control: public, max-age=3600, must-revalidate' `
+    -Description 'Pages uses catch-all browser security headers and non-overlapping root and bundle cache rules' `
     -Context $siteHeaders
 Assert-TextContract `
     -Content $siteHeadersText `

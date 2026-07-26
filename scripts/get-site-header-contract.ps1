@@ -51,37 +51,41 @@ foreach ($line in [IO.File]::ReadAllLines($headersPath)) {
     }
 }
 
-foreach ($requiredPath in @('/*', '/bundle.js')) {
+foreach ($requiredPath in @('/*', '/', '/bundle.js')) {
     if (-not $blocks.ContainsKey($requiredPath)) {
         throw "Site header contract is missing $requiredPath."
     }
 }
-$root = $blocks['/*']
+$security = $blocks['/*']
+$root = $blocks['/']
 $bundle = $blocks['/bundle.js']
 foreach ($requiredHeader in @(
-    'Cache-Control',
     'Content-Security-Policy',
     'X-Content-Type-Options',
     'X-Frame-Options',
     'Referrer-Policy',
     'Permissions-Policy'
 )) {
-    if (-not $root.ContainsKey($requiredHeader)) {
-        throw "Root site header contract is missing $requiredHeader."
+    if (-not $security.ContainsKey($requiredHeader)) {
+        throw "Catch-all site security contract is missing $requiredHeader."
     }
 }
-if (-not $bundle.ContainsKey('Cache-Control')) {
-    throw 'Bundle site header contract is missing Cache-Control.'
+if (-not $root.ContainsKey('Cache-Control') -or
+    -not $bundle.ContainsKey('Cache-Control')) {
+    throw 'Root or bundle site header contract is missing Cache-Control.'
+}
+if ($security.ContainsKey('Cache-Control')) {
+    throw 'Catch-all security headers cannot overlap path-specific cache policy.'
 }
 if ($root['Cache-Control'] -cne 'public, max-age=0, must-revalidate' -or
     $bundle['Cache-Control'] -cne 'public, max-age=3600, must-revalidate' -or
-    $root['X-Content-Type-Options'] -cne 'nosniff' -or
-    $root['X-Frame-Options'] -cne 'DENY' -or
-    $root['Referrer-Policy'] -cne 'strict-origin-when-cross-origin') {
+    $security['X-Content-Type-Options'] -cne 'nosniff' -or
+    $security['X-Frame-Options'] -cne 'DENY' -or
+    $security['Referrer-Policy'] -cne 'strict-origin-when-cross-origin') {
     throw 'Site cache or browser security header contract changed unexpectedly.'
 }
 
-$permissions = $root['Permissions-Policy']
+$permissions = $security['Permissions-Policy']
 foreach ($permission in @(
     'camera=()',
     'geolocation=()',
@@ -128,7 +132,7 @@ foreach ($htmlName in @('index.html', '404.html')) {
 }
 [void]$expectedHashes.Add((Get-CspSha256Source -Value "this.media='all'"))
 
-$csp = $root['Content-Security-Policy']
+$csp = $security['Content-Security-Policy']
 if ($csp.Contains("script-src 'self' 'unsafe-inline'", [StringComparison]::Ordinal)) {
     throw 'Site CSP cannot broadly allow inline scripts.'
 }
@@ -162,9 +166,9 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
     root = [ordered]@{
         cache_control = $root['Cache-Control']
         content_security_policy = $csp
-        x_content_type_options = $root['X-Content-Type-Options']
-        x_frame_options = $root['X-Frame-Options']
-        referrer_policy = $root['Referrer-Policy']
+        x_content_type_options = $security['X-Content-Type-Options']
+        x_frame_options = $security['X-Frame-Options']
+        referrer_policy = $security['Referrer-Policy']
         permissions_policy = $permissions
     }
     bundle = [ordered]@{
