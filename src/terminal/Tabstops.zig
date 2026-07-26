@@ -140,7 +140,7 @@ pub fn resize(
 
     // What we need in the dynamic size
     const size = cols - prealloc_columns;
-    if (size < self.dynamic_stops.len) {
+    if (size <= self.dynamic_stops.len) {
         self.cols = cols;
         return;
     }
@@ -227,6 +227,15 @@ test "Tabstops: dynamic allocations" {
 
     // Prealloc still works
     try testing.expect(!t.get(5));
+}
+
+test "Tabstops: resize to existing capacity does not allocate" {
+    var backing: [prealloc_columns]Unit = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    var t: Tabstops = .{};
+
+    try t.resize(fixed.allocator(), prealloc_columns * 2);
+    try t.resize(fixed.allocator(), prealloc_columns * 2);
 }
 
 test "Tabstops: interval" {
