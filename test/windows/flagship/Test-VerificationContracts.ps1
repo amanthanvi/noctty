@@ -8715,23 +8715,15 @@ try {
         $fixtureIndexPath,
         $fixtureIndexText.Replace(
             "onload=`"this.media='all'`"",
-            'onload="this.media=&quot;all&quot;"'
+            'onload="this.media=&#39;all&#39;"'
         ),
         [Text.UTF8Encoding]::new($false)
     )
-    $entityHandlerRejected = $false
     try {
         & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
     }
     catch {
-        if ($_.Exception.Message -notmatch
-            'script-src-attr sources do not exactly match') {
-            throw
-        }
-        $entityHandlerRejected = $true
-    }
-    if (-not $entityHandlerRejected) {
-        throw 'Site CSP contract hashed serialized rather than decoded handler text.'
+        throw 'Site CSP contract did not hash the browser-decoded handler text.'
     }
 
     [IO.File]::WriteAllText(
