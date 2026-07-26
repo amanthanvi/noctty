@@ -156,8 +156,11 @@ foreach ($htmlName in @('index.html', '404.html')) {
     if ($eventAttributeCount -ne 1 -or $eventHandlers.Count -ne 1) {
         throw "Expected exactly one quoted CSP-hashed event handler in $htmlName."
     }
+    $decodedEventHandler = [Net.WebUtility]::HtmlDecode(
+        $eventHandlers[0].Groups['body'].Value
+    )
     [void]$expectedScriptAttributeHashes.Add(
-        (Get-CspSha256Source -Value $eventHandlers[0].Groups['body'].Value)
+        (Get-CspSha256Source -Value $decodedEventHandler)
     )
 }
 

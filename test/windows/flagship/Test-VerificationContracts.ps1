@@ -8532,7 +8532,7 @@ if ([string]$siteHeaderContractObject.root.content_security_policy -cne
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?eventHandlers.*?Get-CspSha256Source -Value \$eventHandlers.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?eventHandlers.*?WebUtility\]::HtmlDecode.*?Get-CspSha256Source -Value \$decodedEventHandler.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
     -Description 'one catch-all contract binds exact complete source sets to both script directives and emits live expectations' `
     -Context $siteHeaderContract
 Assert-TextContract `
@@ -8709,6 +8709,29 @@ try {
     }
     if (-not $editedHandlerRejected) {
         throw 'Site CSP contract accepted an untracked event-handler edit.'
+    }
+
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText.Replace(
+            "onload=`"this.media='all'`"",
+            'onload="this.media=&quot;all&quot;"'
+        ),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $entityHandlerRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'script-src-attr sources do not exactly match') {
+            throw
+        }
+        $entityHandlerRejected = $true
+    }
+    if (-not $entityHandlerRejected) {
+        throw 'Site CSP contract hashed serialized rather than decoded handler text.'
     }
 
     [IO.File]::WriteAllText(
