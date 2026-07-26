@@ -8476,11 +8476,75 @@ Assert-TextContract `
     -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?get-site-header-contract\.ps1.*?Assert-PublicHeaderContract' `
     -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
     -Context $cloudflarePagesVerifier
-Assert-TextContract `
-    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Invoke-CloudflareApi(?=\s|\{)') `
-    -Pattern '(?ms)\[Parameter\(Mandatory\)\]\s*\[AllowEmptyString\(\)\]\s*\[string\]\s*\$RelativePath.*?\$apiRoot\$RelativePath' `
-    -Description 'the Pages project-root API request permits its intentional empty relative path' `
-    -Context "$cloudflarePagesVerifier :: Invoke-CloudflareApi"
+$cloudflareApiTokens = $null
+$cloudflareApiErrors = $null
+$cloudflareApiAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    (Get-PowerShellBlockText `
+        -Content $cloudflarePagesVerifierText `
+        -HeaderPattern '^function\s+Invoke-CloudflareApi(?=\s|\{)'),
+    [ref] $cloudflareApiTokens,
+    [ref] $cloudflareApiErrors
+)
+if ($cloudflareApiErrors.Count -ne 0) {
+    throw 'Cloudflare API verifier function must parse for semantic contract checks.'
+}
+$cloudflareApiFunctions = @(
+    Get-NamedFunctionDefinitions -Ast $cloudflareApiAst -Name 'Invoke-CloudflareApi'
+)
+if ($cloudflareApiFunctions.Count -ne 1) {
+    throw 'Pages verifier must define exactly one Invoke-CloudflareApi function.'
+}
+$cloudflareApiFunction = $cloudflareApiFunctions[0]
+$relativePathParameters = @(
+    $cloudflareApiFunction.Body.ParamBlock.Parameters |
+        Where-Object { $_.Name.VariablePath.UserPath -ceq 'RelativePath' }
+)
+$relativePathAttributes = @(
+    $relativePathParameters.Attributes |
+        Where-Object { $_ -is [System.Management.Automation.Language.AttributeAst] }
+)
+if ($relativePathParameters.Count -ne 1 -or
+    $relativePathAttributes.Count -ne 2 -or
+    @($relativePathAttributes | Where-Object {
+            $_.TypeName.FullName -cin @('Parameter', 'AllowEmptyString')
+        }).Count -ne 2) {
+    throw 'Pages project-root relative path must be mandatory, allow empty input, and have no conflicting validation.'
+}
+$requestConstructors = @(
+    $cloudflareApiFunction.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $node.Expression.TypeName.FullName -ceq 'Net.Http.HttpRequestMessage' -and
+            $node.Member.Value -ceq 'new'
+    }, $true)
+)
+$sendRequests = @(
+    Get-NamedMemberExpressions `
+        -Ast $cloudflareApiFunction `
+        -Name 'SendAsync' `
+        -InvocationOnly
+)
+if ($requestConstructors.Count -ne 1 -or
+    $requestConstructors[0].Arguments.Count -ne 2 -or
+    $requestConstructors[0].Arguments[0] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $requestConstructors[0].Arguments[0].VariablePath.UserPath -cne 'Method' -or
+    $requestConstructors[0].Arguments[1] -isnot
+        [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+    $requestConstructors[0].Arguments[1].Value -cne '$apiRoot$RelativePath' -or
+    @($requestConstructors[0].Arguments[1].NestedExpressions).Count -ne 2 -or
+    $requestConstructors[0].Arguments[1].NestedExpressions[0].VariablePath.UserPath -cne 'apiRoot' -or
+    $requestConstructors[0].Arguments[1].NestedExpressions[1].VariablePath.UserPath -cne 'RelativePath' -or
+    $requestConstructors[0].Parent.Parent -isnot
+        [System.Management.Automation.Language.AssignmentStatementAst] -or
+    $requestConstructors[0].Parent.Parent.Left.VariablePath.UserPath -cne 'request' -or
+    $sendRequests.Count -ne 1 -or
+    $sendRequests[0].Expression.VariablePath.UserPath -cne 'apiClient' -or
+    $sendRequests[0].Arguments.Count -ne 1 -or
+    $sendRequests[0].Arguments[0].VariablePath.UserPath -cne 'request') {
+    throw 'Pages project-root URI must be the exact API root plus relative path used by the sent HTTP request.'
+}
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Wait-CanonicalDeployment(?=\s|\{)') `
     -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?try \{\s*\$project = Get-Project.*?catch \{.*?\$attempt -eq 10.*?failed after bounded retries.*?Start-Sleep -Seconds 2.*?continue.*?Assert-ProjectContract.*?Get-CanonicalDeploymentId' `
