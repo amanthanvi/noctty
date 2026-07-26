@@ -5,11 +5,11 @@ const WHY_ITEMS = [
   },
   {
     q: 'How close is it to Ghostty?',
-    a: 'Close where it matters: the terminal core is shared, while the app layer around it is purpose-built for Windows.',
+    a: 'The terminal core is shared with Ghostty. The application runtime, windowing, settings, updater, and Windows integration are built for this fork.',
   },
   {
     q: 'Is it ready to use?',
-    a: 'Winghostty is young, with first public releases on April 16, 2026, but it is already usable if you are comfortable running a fast-moving project.',
+    a: 'Public releases are available now. The project moves quickly, so review the current status and release notes before updating.',
   },
   {
     q: 'What platforms is this for?',
@@ -23,19 +23,20 @@ const WHY_ITEMS = [
     q: 'Does it phone home?',
     a: 'No telemetry or analytics. Update checks query GitHub Releases; download mode stages a verified signed installer and waits for your confirmation.',
   },
+  {
+    q: 'What is the accessibility status?',
+    a: 'Windows UI Automation support is partial, not complete. Terminal text, focus, selection, the command palette, and native settings controls have coverage; broader per-widget and screen-reader validation is still in progress.',
+  },
 ];
 
 export function WhyFork() {
   return (
     <div className="wg-why-grid">
-      {WHY_ITEMS.map((item, idx) => (
-        <div key={item.q} className="wg-why-item">
-          <span className="wg-why-item__index">{String(idx + 1).padStart(2, '0')}</span>
-          <div>
-            <h2>{item.q}</h2>
-            <p>{item.a}</p>
-          </div>
-        </div>
+      {WHY_ITEMS.map((item) => (
+        <article key={item.q} className="wg-why-item">
+          <h3>{item.q}</h3>
+          <p>{item.a}</p>
+        </article>
       ))}
     </div>
   );

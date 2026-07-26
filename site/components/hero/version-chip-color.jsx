@@ -13,7 +13,7 @@ function readCachedVersion() {
     if (!cached) return null;
     const parsed = JSON.parse(cached);
     if (!parsed?.tag || Date.now() - parsed.ts > CACHE_TTL_MS) return null;
-    return parsed.tag;
+    return normalizeStableSemver(parsed.tag);
   } catch (e) {
     return null;
   }
@@ -25,11 +25,18 @@ function cacheVersion(tag) {
   } catch (e) {}
 }
 
+function normalizeStableSemver(value) {
+  const match = String(value || '').match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  if (!match) return null;
+  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}`;
+}
+
 function compareSemver(a, b) {
-  const parse = (v) => String(v || '').split('.').map((part) => Number.parseInt(part, 10));
-  const left = parse(a);
-  const right = parse(b);
-  if (left.length < 3 || right.length < 3 || left.some(Number.isNaN) || right.some(Number.isNaN)) return null;
+  const leftVersion = normalizeStableSemver(a);
+  const rightVersion = normalizeStableSemver(b);
+  if (!leftVersion || !rightVersion) return null;
+  const left = leftVersion.split('.').map(Number);
+  const right = rightVersion.split('.').map(Number);
 
   for (let i = 0; i < 3; i += 1) {
     if (left[i] !== right[i]) return left[i] - right[i];
@@ -37,17 +44,20 @@ function compareSemver(a, b) {
   return 0;
 }
 
-function shouldPublishVersion(tag, { allowDowngrade = false } = {}) {
-  const current = window.WG_VERSION || DEFAULT_WG_VERSION;
-  const comparedToCurrent = compareSemver(tag, current);
-  if (comparedToCurrent === null) return false;
-  return allowDowngrade ? comparedToCurrent !== 0 : comparedToCurrent > 0;
+function shouldPublishVersion(tag) {
+  const normalizedTag = normalizeStableSemver(tag);
+  const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
+  const currentBaseline = compareSemver(current, DEFAULT_WG_VERSION) >= 0
+    ? current
+    : DEFAULT_WG_VERSION;
+  return normalizedTag !== null && compareSemver(normalizedTag, currentBaseline) > 0;
 }
 
-function publishVersion(tag, options) {
-  if (!tag || !shouldPublishVersion(tag, options)) return false;
-  window.WG_VERSION = tag;
-  window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: tag } }));
+function publishVersion(tag) {
+  const normalizedTag = normalizeStableSemver(tag);
+  if (!normalizedTag || !shouldPublishVersion(normalizedTag)) return false;
+  window.WG_VERSION = normalizedTag;
+  window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: normalizedTag } }));
   return true;
 }
 
@@ -62,9 +72,10 @@ async function fetchLatestVersion() {
     if (res.status === 429 || res.status === 403) return;
     if (!res.ok) return;
     const data = await res.json();
-    const tag = String(data.tag_name || '').replace(/^v/, '');
+    const tag = normalizeStableSemver(data.tag_name);
+    if (!tag) return;
     cacheVersion(tag);
-    publishVersion(tag, { allowDowngrade: true });
+    publishVersion(tag);
   } catch (e) {
   } finally {
     clearTimeout(timeoutId);
@@ -74,7 +85,8 @@ async function fetchLatestVersion() {
 function scheduleLatestVersionFetch() {
   const cached = readCachedVersion();
   if (cached) {
-    const cachedMatchesCurrent = compareSemver(cached, window.WG_VERSION || DEFAULT_WG_VERSION) === 0;
+    const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
+    const cachedMatchesCurrent = compareSemver(cached, current) === 0;
     if (publishVersion(cached) || cachedMatchesCurrent) return;
   }
 

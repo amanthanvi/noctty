@@ -1,8 +1,12 @@
-// Mock terminal window with typewriter animation.
+// Mock terminal window with an optional, user-controlled typewriter animation.
 
 import { TerminalLine } from './terminal/terminal-line.jsx';
+import {
+  useDemoActivity,
+  usePrefersReducedMotion,
+} from './terminal/activity-hooks.jsx';
 
-const { useEffect, useReducer } = React;
+const { useEffect, useLayoutEffect, useReducer, useRef, useState } = React;
 
 let WG_VERSION = window.WG_VERSION || '1.3.119';
 const WG_REPO = 'amanthanvi/winghostty';
@@ -73,7 +77,6 @@ function setTerminalVersion(tag) {
 }
 
 const PROMPT = 'PS C:\\Users\\dev>';
-const scheduleDelay = (...args) => window.setTimeout(...args);
 
 const initialTerminalState = {
   sceneIdx: 0,
@@ -89,6 +92,8 @@ function terminalReducer(state, action) {
       return { ...state, lineIdx: state.lineIdx + 1, typed: '' };
     case 'next-output':
       return { ...state, lineIdx: state.lineIdx + 1 };
+    case 'complete-scene':
+      return { ...state, lineIdx: action.lineCount, typed: '' };
     case 'next-scene':
       return {
         sceneIdx: (state.sceneIdx + 1) % action.scriptLength,
@@ -106,7 +111,14 @@ export function WinghosttyTerminal({
   height = 440,
   script: initialScript,
 }) {
+  const terminalRef = useRef(null);
+  const bodyRef = useRef(null);
+  const timerRef = useRef(null);
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const demoActive = useDemoActivity(terminalRef);
+  const [motionMode, setMotionMode] = useState('auto');
   const [, forceVersion] = useReducer((n) => n + 1, 0);
+
   useEffect(() => {
     setTerminalVersion(window.WG_VERSION || WG_VERSION);
     forceVersion();
@@ -123,41 +135,62 @@ export function WinghosttyTerminal({
   const [{ sceneIdx, lineIdx, typed }, dispatch] = useReducer(terminalReducer, initialTerminalState);
   const scene = script[sceneIdx];
   const line = scene?.lines[lineIdx];
+  const shouldAnimate = autoplay
+    && demoActive
+    && (motionMode === 'playing' || (motionMode === 'auto' && !prefersReducedMotion));
+  const showCompletedScene = !autoplay || (motionMode === 'auto' && prefersReducedMotion);
 
   useEffect(() => {
-    if (!autoplay || !scene) return;
+    if (!showCompletedScene || !scene) return;
+    dispatch({ type: 'complete-scene', lineCount: scene.lines.length });
+  }, [showCompletedScene, scene]);
+
+  useEffect(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (!shouldAnimate || !scene) return undefined;
+
+    const schedule = (callback, delay) => {
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        callback();
+      }, delay);
+    };
 
     if (lineIdx >= scene.lines.length) {
-      const t = scheduleDelay(() => {
+      schedule(() => {
         dispatch({ type: 'next-scene', scriptLength: script.length });
       }, 1800);
-      return () => clearTimeout(t);
-    }
-
-    if (!line) return;
-
-    if (line.kind === 'cmd') {
+    } else if (line?.kind === 'cmd') {
       if (typed.length < line.text.length) {
-        const t = scheduleDelay(() => {
+        schedule(() => {
           dispatch({ type: 'type', text: line.text.slice(0, typed.length + 1) });
         }, 32 + Math.random() * 48);
-        return () => clearTimeout(t);
+      } else {
+        schedule(() => {
+          dispatch({ type: 'next-line' });
+        }, 360);
       }
-      const t = scheduleDelay(() => {
-        dispatch({ type: 'next-line' });
-      }, 360);
-      return () => clearTimeout(t);
+    } else if (line) {
+      schedule(() => {
+        dispatch({ type: 'next-output' });
+      }, 220);
     }
 
-    const t = scheduleDelay(() => {
-      dispatch({ type: 'next-output' });
-    }, 220);
-    return () => clearTimeout(t);
-  }, [autoplay, scene, line, lineIdx, sceneIdx, typed, script]);
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [shouldAnimate, scene, line, lineIdx, typed, script]);
 
   const visible = [];
   if (scene) {
-    if (!autoplay) {
+    if (showCompletedScene) {
       scene.lines.forEach((entry) => visible.push({ key: entry.id, line: entry }));
       visible.push({ key: `${scene.title}:cursor`, line: { kind: 'cmd', text: '', cursor: true } });
     } else {
@@ -172,21 +205,61 @@ export function WinghosttyTerminal({
     }
   }
 
+  useLayoutEffect(() => {
+    if (!bodyRef.current) return;
+    if (showCompletedScene) {
+      bodyRef.current.scrollTop = 0;
+    } else {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [sceneIdx, lineIdx, typed, showCompletedScene]);
+
   const bodyStyle = height == null ? undefined : { minHeight: height };
+  const motionLabel = shouldAnimate ? 'Pause terminal demo' : 'Play terminal demo';
+  const toggleMotion = () => {
+    if (shouldAnimate && timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setMotionMode(shouldAnimate ? 'paused' : 'playing');
+  };
 
   return (
-    <div className="wg-terminal" data-theme={theme}>
+    <section
+      className="wg-terminal"
+      data-theme={theme}
+      data-motion={shouldAnimate ? 'playing' : 'paused'}
+      ref={terminalRef}
+      aria-label="Winghostty terminal demo"
+    >
       <div className="wg-terminal__chrome">
         <div className="wg-terminal__title">
           winghostty · PowerShell · {scene?.title || 'idle'}
         </div>
+        {autoplay && (
+          <button
+            type="button"
+            className="wg-terminal__motion"
+            onClick={toggleMotion}
+            aria-label={motionLabel}
+            title={motionLabel}
+          >
+            {shouldAnimate ? 'Pause' : 'Play'}
+          </button>
+        )}
         <div className="wg-terminal__caption" aria-hidden="true">
           <span className="wg-terminal__caption-btn" />
           <span className="wg-terminal__caption-btn" />
           <span className="wg-terminal__caption-btn wg-terminal__caption-btn--close" />
         </div>
       </div>
-      <div className="wg-terminal__body" style={bodyStyle}>
+      <div
+        className="wg-terminal__body"
+        style={bodyStyle}
+        ref={bodyRef}
+        tabIndex={shouldAnimate ? undefined : 0}
+        aria-label={shouldAnimate ? undefined : 'Paused terminal demo output'}
+      >
         {visible.map(({ key, line: l }) => {
           if (l.kind === 'cmd') {
             return (
@@ -206,6 +279,6 @@ export function WinghosttyTerminal({
           );
         })}
       </div>
-    </div>
+    </section>
   );
 }
