@@ -3634,6 +3634,48 @@ const ScrollAmount = struct {
     }
 };
 
+const AccumulatedScroll = struct {
+    delta: isize = 0,
+    pending: f64 = 0,
+};
+
+fn accumulateScroll(pending: f64, offset: f64, cell_size: f64) AccumulatedScroll {
+    const total = pending + offset;
+    if (@abs(total) < cell_size) return .{ .pending = total };
+
+    const amount = total / cell_size;
+    const delta: isize = @intFromFloat(@trunc(amount));
+    assert(@abs(delta) >= 1);
+
+    return .{
+        .delta = delta,
+        .pending = total -
+            (@as(f64, @floatFromInt(delta)) * cell_size),
+    };
+}
+
+test "surface accumulated scroll retains fractional cell remainder" {
+    const first = accumulateScroll(0, 10, 16);
+    try std.testing.expectEqual(@as(isize, 0), first.delta);
+    try std.testing.expectApproxEqAbs(10.0, first.pending, 0.0001);
+
+    const second = accumulateScroll(first.pending, 10, 16);
+    try std.testing.expectEqual(@as(isize, 1), second.delta);
+    try std.testing.expectApproxEqAbs(4.0, second.pending, 0.0001);
+
+    const negative = accumulateScroll(-10, -10, 16);
+    try std.testing.expectEqual(@as(isize, -1), negative.delta);
+    try std.testing.expectApproxEqAbs(-4.0, negative.pending, 0.0001);
+
+    const reversed = accumulateScroll(10, -20, 16);
+    try std.testing.expectEqual(@as(isize, 0), reversed.delta);
+    try std.testing.expectApproxEqAbs(-10.0, reversed.pending, 0.0001);
+
+    const multi_row = accumulateScroll(0, 37, 16);
+    try std.testing.expectEqual(@as(isize, 2), multi_row.delta);
+    try std.testing.expectApproxEqAbs(5.0, multi_row.pending, 0.0001);
+}
+
 /// Mouse scroll event. Negative is down, left. Positive is up, right.
 ///
 /// Platform runtimes must normalize wheel polarity before calling into the
@@ -3683,30 +3725,13 @@ pub fn scrollCallback(
             break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
         };
 
-        // Add our previously saved pending amount to the offset to get the
-        // new offset value. The signs of the pending and yoff should match
-        // so that we move further away from zero, but we don't assert
-        // this because in theory a user could scroll in the opposite
-        // direction and undo a pending scroll.
-        const poff: f64 = self.mouse.pending_scroll_y + yoff_adjusted;
-
-        // If the new offset is less than a single unit of scroll, we save
-        // the new pending value and do not scroll yet.
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_y = poff;
-            break :y .{};
-        }
-
-        // We scroll by the number of rows in the offset and save the remainder
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
-
-        // Round towards zero.
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-
-        break :y .{ .delta = delta };
+        const accumulated = accumulateScroll(
+            self.mouse.pending_scroll_y,
+            yoff_adjusted,
+            cell_size,
+        );
+        self.mouse.pending_scroll_y = accumulated.pending;
+        break :y .{ .delta = accumulated.delta };
     };
 
     // For detailed comments see the y calculation above.
@@ -3724,18 +3749,13 @@ pub fn scrollCallback(
                 discrete_multiplier_scale)
         else
             xoff;
-        const poff: f64 = self.mouse.pending_scroll_x + xoff_adjusted;
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_x = poff;
-            break :x .{};
-        }
-
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_x = poff - (amount * cell_size);
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-        break :x .{ .delta = delta };
+        const accumulated = accumulateScroll(
+            self.mouse.pending_scroll_x,
+            xoff_adjusted,
+            cell_size,
+        );
+        self.mouse.pending_scroll_x = accumulated.pending;
+        break :x .{ .delta = accumulated.delta };
     };
 
     // High-resolution wheel devices can emit many sub-cell deltas while
