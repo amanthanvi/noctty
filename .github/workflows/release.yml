@@ -340,6 +340,62 @@ jobs:
             }
           }
 
+      - name: Scan setup artifacts with Microsoft Defender
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
+          $status = Get-MpComputerStatus -ErrorAction Stop
+          if (-not $status.AMServiceEnabled -or -not $status.AntivirusEnabled) {
+            throw "Microsoft Defender Antivirus must be active before release publication."
+          }
+
+          $scannerCandidates = @(
+            (Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe")
+          )
+          $platformRoot = Join-Path $env:ProgramData "Microsoft/Windows Defender/Platform"
+          if (Test-Path -LiteralPath $platformRoot) {
+            $scannerCandidates = @(
+              Get-ChildItem -LiteralPath $platformRoot -Directory |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName "MpCmdRun.exe" }
+            ) + $scannerCandidates
+          }
+          $scanner = $scannerCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+          if (-not $scanner) {
+            throw "MpCmdRun.exe was not found."
+          }
+
+          & $scanner -SignatureUpdate
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
+          }
+
+          $version = "${{ steps.meta.outputs.version }}"
+          $setupPaths = @(
+            foreach ($arch in (Get-WindowsPackageArchitectures)) {
+              $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
+              $setupName = New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup
+              $setupPath = Join-Path $artifactDir $setupName
+              if (-not (Test-Path -LiteralPath $setupPath)) {
+                throw "Missing Defender scan input: $setupPath"
+              }
+              $setupPath
+            }
+          )
+          if ($setupPaths.Count -ne 2) {
+            throw "Expected exactly two setup artifacts for Defender scanning; found $($setupPaths.Count)."
+          }
+
+          foreach ($setupPath in $setupPaths) {
+            & $scanner -Scan -ScanType 3 -File $setupPath -DisableRemediation -ReturnHR
+            if ($LASTEXITCODE -ne 0) {
+              throw "Microsoft Defender rejected $setupPath with exit code $LASTEXITCODE."
+            }
+          }
+
       - name: Generate package manager metadata
         shell: pwsh
         run: >

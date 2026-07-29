@@ -7835,6 +7835,23 @@ Assert-TextContract `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
+$defenderScanStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Scan setup artifacts with Microsoft Defender' `
+    -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $defenderScanStep `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsPackageArchitectures.*?-Kind setup.*?setupPaths\.Count -ne 2.*?-Scan -ScanType 3 -File \$setupPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'release scans both setup artifacts with active current Microsoft Defender and fails closed' `
+    -Context "$releaseWorkflow :: Scan setup artifacts with Microsoft Defender"
+$signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
+$defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan setup artifacts with Microsoft Defender')
+$publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
+if ($signedArtifactStepIndex -lt 0 -or
+    $defenderScanStepIndex -le $signedArtifactStepIndex -or
+    $publishReleaseStepIndex -le $defenderScanStepIndex) {
+    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+}
 $signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
