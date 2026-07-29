@@ -346,8 +346,10 @@ jobs:
         run: |
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
           $status = Get-MpComputerStatus -ErrorAction Stop
-          if (-not $status.AMServiceEnabled -or -not $status.AntivirusEnabled) {
-            throw "Microsoft Defender Antivirus must be active before release publication."
+          if (-not $status.AMServiceEnabled -or
+              -not $status.AntivirusEnabled -or
+              $status.AMRunningMode -ne "Normal") {
+            throw "Microsoft Defender Antivirus must be active in Normal mode before release publication."
           }
 
           $scannerCandidates = @(
@@ -357,8 +359,17 @@ jobs:
           if (Test-Path -LiteralPath $platformRoot) {
             $scannerCandidates = @(
               Get-ChildItem -LiteralPath $platformRoot -Directory |
-                Sort-Object Name -Descending |
-                ForEach-Object { Join-Path $_.FullName "MpCmdRun.exe" }
+                ForEach-Object {
+                  $platformVersion = ($_.Name -replace '-\d+$', '') -as [version]
+                  if ($null -ne $platformVersion) {
+                    [pscustomobject]@{
+                      Version = $platformVersion
+                      Path = Join-Path $_.FullName "MpCmdRun.exe"
+                    }
+                  }
+                } |
+                Sort-Object Version -Descending |
+                ForEach-Object { $_.Path }
             ) + $scannerCandidates
           }
           $scanner = $scannerCandidates |

@@ -46,10 +46,10 @@ Authenticode-signed.
 
 Before publication, the Release workflow updates Microsoft Defender
 signatures and scans both setup artifacts with remediation disabled. A missing
-or inactive scanner, update failure, or detection fails the release. This is a
-current-engine regression gate for the published installer bytes; it does not
-replace a publicly trusted signing identity or reproduce every enterprise
-security policy.
+or inactive scanner, update or scan error, or detection fails the release.
+This is a current-engine regression gate for the published installer bytes; it
+does not replace a publicly trusted signing identity or reproduce every
+enterprise security policy.
 
 ## Local Packaging
 

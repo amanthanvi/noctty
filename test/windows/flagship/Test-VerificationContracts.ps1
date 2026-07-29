@@ -6697,7 +6697,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '86f805975d1883fca7e65b279c08e5d6cc5f65ee876d3af20e450a0d49660662'
+    'e2ebc484f30d233ecade23ca6226f710af2705f2e8ef934bc8d111a41782f352'
 $readinessWorkflowSha256 =
     '2659a58baeffaa9861c33bd4cdcd7adc8838dd6f9e91d51dcffc338af906f303'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7841,7 +7841,7 @@ $defenderScanStep = Get-YamlStepBlock `
     -Source $releaseWorkflow
 Assert-TextContract `
     -Content $defenderScanStep `
-    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsPackageArchitectures.*?-Kind setup.*?setupPaths\.Count -ne 2.*?-Scan -ScanType 3 -File \$setupPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsPackageArchitectures.*?-Kind setup.*?setupPaths\.Count -ne 2.*?-Scan -ScanType 3 -File \$setupPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'release scans both setup artifacts with active current Microsoft Defender and fails closed' `
     -Context "$releaseWorkflow :: Scan setup artifacts with Microsoft Defender"
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
