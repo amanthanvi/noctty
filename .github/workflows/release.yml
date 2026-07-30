@@ -340,6 +340,87 @@ jobs:
             }
           }
 
+      - name: Scan Windows release artifacts with Microsoft Defender
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
+          $status = Get-MpComputerStatus -ErrorAction Stop
+          if (-not $status.AMServiceEnabled -or
+              -not $status.AntivirusEnabled -or
+              $status.AMRunningMode -ne "Normal") {
+            throw "Microsoft Defender Antivirus must be active in Normal mode before release publication."
+          }
+
+          $scannerCandidates = @(
+            (Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe")
+          )
+          $platformRoot = Join-Path $env:ProgramData "Microsoft/Windows Defender/Platform"
+          if (Test-Path -LiteralPath $platformRoot) {
+            $scannerCandidates = @(
+              Get-ChildItem -LiteralPath $platformRoot -Directory |
+                ForEach-Object {
+                  $platformVersion = ($_.Name -replace '-\d+$', '') -as [version]
+                  if ($null -ne $platformVersion) {
+                    [pscustomobject]@{
+                      Version = $platformVersion
+                      Path = Join-Path $_.FullName "MpCmdRun.exe"
+                    }
+                  }
+                } |
+                Sort-Object Version -Descending |
+                ForEach-Object { $_.Path }
+            ) + $scannerCandidates
+          }
+          $scanner = $scannerCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+          if (-not $scanner) {
+            throw "MpCmdRun.exe was not found."
+          }
+
+          & $scanner -SignatureUpdate
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
+          }
+
+          $version = "${{ steps.meta.outputs.version }}"
+          $portablePayloads = @(
+            "winghostty/winghostty.com",
+            "winghostty/winghostty.exe",
+            "winghostty/ghostty-vt.dll"
+          )
+          $scanPaths = @(
+            foreach ($arch in (Get-WindowsPackageArchitectures)) {
+              $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
+              $setupName = New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup
+              $setupPath = Join-Path $artifactDir $setupName
+              if (-not (Test-Path -LiteralPath $setupPath)) {
+                throw "Missing Defender scan input: $setupPath"
+              }
+              $setupPath
+
+              $extractDir = Join-Path $env:RUNNER_TEMP "winghostty-release-verify-$arch"
+              foreach ($relative in $portablePayloads) {
+                $payloadPath = Join-Path $extractDir $relative
+                if (-not (Test-Path -LiteralPath $payloadPath)) {
+                  throw "Missing Defender scan input: $payloadPath"
+                }
+                $payloadPath
+              }
+            }
+          )
+          if ($scanPaths.Count -ne 8) {
+            throw "Expected exactly eight release artifacts for Defender scanning; found $($scanPaths.Count)."
+          }
+
+          foreach ($scanPath in $scanPaths) {
+            & $scanner -Scan -ScanType 3 -File $scanPath -DisableRemediation -ReturnHR
+            if ($LASTEXITCODE -ne 0) {
+              throw "Microsoft Defender rejected $scanPath with exit code $LASTEXITCODE."
+            }
+          }
+
       - name: Generate package manager metadata
         shell: pwsh
         run: >

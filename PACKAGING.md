@@ -44,6 +44,14 @@ The release installer and Windows PE files inside the portable ZIP are
 Authenticode-signed; the ZIP container itself is checksummed, not
 Authenticode-signed.
 
+Before publication, the Release workflow updates Microsoft Defender
+signatures and scans both setup artifacts plus the six PE files extracted from
+the portable ZIPs, with remediation disabled. A missing or inactive scanner,
+update or scan error, or detection fails the release. This is a current-engine
+regression gate for the published Windows executable bytes; it does not replace
+a publicly trusted signing identity or reproduce every enterprise security
+policy.
+
 ## Local Packaging
 
 Build the app first:

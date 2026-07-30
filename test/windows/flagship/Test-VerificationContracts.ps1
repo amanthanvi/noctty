@@ -6697,7 +6697,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '4cb17b2e84359fdbd199c5e0b65a7035a1409fe28ddb8cf199c1c9157d48dd76'
+    '2aba54c3128eae8ab191751f2c746785347ae8a7dd166e12f69db2bd5ed36b4f'
 $readinessWorkflowSha256 =
     '2659a58baeffaa9861c33bd4cdcd7adc8838dd6f9e91d51dcffc338af906f303'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7835,6 +7835,23 @@ Assert-TextContract `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
+$defenderScanStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Scan Windows release artifacts with Microsoft Defender' `
+    -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $defenderScanStep `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?winghostty/winghostty\.com.*?winghostty/winghostty\.exe.*?winghostty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?winghostty-release-verify-\$arch.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed' `
+    -Context "$releaseWorkflow :: Scan Windows release artifacts with Microsoft Defender"
+$signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
+$defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan Windows release artifacts with Microsoft Defender')
+$publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
+if ($signedArtifactStepIndex -lt 0 -or
+    $defenderScanStepIndex -le $signedArtifactStepIndex -or
+    $publishReleaseStepIndex -le $defenderScanStepIndex) {
+    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+}
 $signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
