@@ -24246,9 +24246,11 @@ pub const Surface = struct {
         if (GetFocus() == hwnd) {
             self.window_focused = true;
         }
-        if (self.window_focused) {
-            self.focusChanged(true);
-        }
+
+        // Both the core and renderer default to focused, so always send the
+        // actual state. Otherwise the first focus event may be ignored as
+        // unchanged for a surface that started unfocused.
+        self.focusChanged(self.window_focused);
         if (activate_during_init) {
             try host.refreshChrome();
             try host.layout();

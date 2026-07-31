@@ -60,6 +60,8 @@ const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
 const RENDER_FOLLOWUP_BURST_MS = 128;
 
+const UNFOCUSED_HEARTBEAT_MS = 250;
+
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
 /// If this is `true` then we send a `redraw_surface` message to the apprt
@@ -117,6 +119,12 @@ cursor_c: xev.Completion = .{},
 /// completed timer remains `.active` until its callback is popped, so reusing
 /// it from another callback can corrupt libxev's intrusive completion queue.
 cursor_blink_reset_at: ?std.time.Instant = null,
+
+/// Focused surfaces already render for cursor blinking. On Win32, repeated
+/// renderer wakeups may be combined, so this timer keeps unfocused surfaces
+/// updating and their renderer mailboxes draining.
+heartbeat_h: xev.Timer,
+heartbeat_c: xev.Completion = .{},
 
 /// The surface we're rendering to.
 surface: *apprt.Surface,
@@ -209,6 +217,9 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
+    var heartbeat_h = try xev.Timer.init();
+    errdefer heartbeat_h.deinit();
+
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
@@ -223,6 +234,7 @@ pub fn init(
         .draw_h = draw_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
+        .heartbeat_h = heartbeat_h,
         .surface = surface,
         .search_generation = search_generation,
         .renderer = renderer_impl,
@@ -241,6 +253,7 @@ pub fn deinit(self: *Thread) void {
     self.draw_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
+    self.heartbeat_h.deinit();
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
@@ -307,6 +320,8 @@ fn threadMain_(self: *Thread) !void {
 
     // Start the draw timer
     self.syncDrawTimer();
+
+    self.syncUnfocusedHeartbeat();
 
     // Run
     log.debug("starting renderer thread", .{});
@@ -425,6 +440,8 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // Visibility changes can suppress or restart animation draws.
                 self.syncDrawTimer();
+
+                self.syncUnfocusedHeartbeat();
             },
 
             .focus => |v| focus: {
@@ -442,6 +459,9 @@ fn drainMailbox(self: *Thread) !bool {
 
                 // We always resync our draw timer (may disable it)
                 self.syncDrawTimer();
+
+                // Replace periodic cursor renders while unfocused.
+                self.syncUnfocusedHeartbeat();
 
                 if (!v) {
                     // Let an already-queued one-shot timer expire and disarm
@@ -587,6 +607,100 @@ fn scheduleRenderFollowup(self: *Thread) void {
         self,
         renderCallback,
     );
+}
+
+fn shouldRunUnfocusedHeartbeat(visible: bool, focused: bool) bool {
+    return visible and !focused;
+}
+
+const HeartbeatArmDecision = enum { arm, skip };
+
+/// Only reuse a dead completion. On IOCP, an active completion may have fired
+/// but still be queued, so submitting it again would corrupt libxev state.
+fn heartbeatArmDecision(
+    eligible: bool,
+    completion_dead: bool,
+) HeartbeatArmDecision {
+    if (!eligible) return .skip;
+    return if (completion_dead) .arm else .skip;
+}
+
+const HeartbeatTickDecision = enum { retire, render_and_rearm };
+
+fn heartbeatTickDecision(eligible: bool) HeartbeatTickDecision {
+    return if (eligible) .render_and_rearm else .retire;
+}
+
+fn syncUnfocusedHeartbeat(self: *Thread) void {
+    switch (heartbeatArmDecision(
+        shouldRunUnfocusedHeartbeat(self.flags.visible, self.flags.focused),
+        self.heartbeat_c.state() == .dead,
+    )) {
+        .skip => return,
+        .arm => self.heartbeat_h.run(
+            &self.loop,
+            &self.heartbeat_c,
+            UNFOCUSED_HEARTBEAT_MS,
+            Thread,
+            self,
+            heartbeatCallback,
+        ),
+    }
+}
+
+fn heartbeatCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        // Sent when the timer is canceled, which is fine.
+        error.Canceled => return .disarm,
+        else => {
+            log.warn("error in unfocused heartbeat callback err={}", .{err});
+            return .disarm;
+        },
+    };
+
+    const t: *Thread = self_ orelse {
+        log.warn("heartbeat callback fired without data set", .{});
+        return .disarm;
+    };
+
+    switch (heartbeatTickDecision(shouldRunUnfocusedHeartbeat(
+        t.flags.visible,
+        t.flags.focused,
+    ))) {
+        .retire => return .disarm,
+        .render_and_rearm => {},
+    }
+
+    // renderOnce updates terminal state and drains the renderer mailbox;
+    // drawFrame would only present the current frame.
+    _ = t.renderOnce(false);
+
+    // renderOnce may process a focus or visibility change. Check again before
+    // scheduling the next tick.
+    switch (heartbeatTickDecision(shouldRunUnfocusedHeartbeat(
+        t.flags.visible,
+        t.flags.focused,
+    ))) {
+        .retire => return .disarm,
+        .render_and_rearm => {},
+    }
+
+    // libxev has removed the completion from its queue, so it is safe to reuse.
+    t.heartbeat_h.run(
+        &t.loop,
+        &t.heartbeat_c,
+        UNFOCUSED_HEARTBEAT_MS,
+        Thread,
+        t,
+        heartbeatCallback,
+    );
+
+    return .disarm;
 }
 
 /// Arm the cursor's one-shot timer only when libxev no longer owns the
@@ -920,4 +1034,55 @@ test "renderer follow-up check tracks visible terminal dirtiness" {
 
     try term.printString("x");
     try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+}
+
+test "unfocused heartbeat runs only while visible and unfocused" {
+    const testing = std.testing;
+
+    try testing.expect(!shouldRunUnfocusedHeartbeat(true, true));
+    try testing.expect(shouldRunUnfocusedHeartbeat(true, false));
+    try testing.expect(!shouldRunUnfocusedHeartbeat(false, false));
+    try testing.expect(!shouldRunUnfocusedHeartbeat(false, true));
+}
+
+test "unfocused heartbeat arms only an eligible, dead completion" {
+    const testing = std.testing;
+
+    try testing.expectEqual(HeartbeatArmDecision.arm, heartbeatArmDecision(true, true));
+    try testing.expectEqual(HeartbeatArmDecision.skip, heartbeatArmDecision(true, false));
+    try testing.expectEqual(HeartbeatArmDecision.skip, heartbeatArmDecision(false, true));
+    try testing.expectEqual(HeartbeatArmDecision.skip, heartbeatArmDecision(false, false));
+}
+
+test "unfocused heartbeat tick renders while eligible and retires otherwise" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        HeartbeatTickDecision.render_and_rearm,
+        heartbeatTickDecision(true),
+    );
+    try testing.expectEqual(
+        HeartbeatTickDecision.retire,
+        heartbeatTickDecision(false),
+    );
+}
+
+test "unfocused heartbeat submits the timer when eligible" {
+    const testing = std.testing;
+
+    // syncUnfocusedHeartbeat only reads the fields initialized below.
+    var thr: Thread = undefined;
+    thr.loop = try xev.Loop.init(.{});
+    defer thr.loop.deinit();
+    thr.heartbeat_h = try xev.Timer.init();
+    defer thr.heartbeat_h.deinit();
+    thr.heartbeat_c = .{};
+    thr.flags = .{};
+
+    thr.syncUnfocusedHeartbeat();
+    try testing.expect(thr.heartbeat_c.state() == .dead);
+
+    thr.flags.focused = false;
+    thr.syncUnfocusedHeartbeat();
+    try testing.expect(thr.heartbeat_c.state() != .dead);
 }
