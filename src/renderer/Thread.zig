@@ -389,6 +389,26 @@ fn syncDrawTimer(self: *Thread) void {
     );
 }
 
+/// Enqueue a message and wake the renderer to process it.
+///
+/// The first notification lets the renderer make room if the mailbox is
+/// full. The second covers the case where that notification is processed
+/// before the message is enqueued.
+pub fn send(self: *Thread, msg: rendererpkg.Message) void {
+    self.notify();
+
+    // Renderer messages may transfer ownership or required state.
+    _ = self.mailbox.push(msg, .{ .forever = {} });
+
+    self.notify();
+}
+
+fn notify(self: *Thread) void {
+    self.wakeup.notify() catch |err| {
+        log.warn("error notifying renderer thread err={}", .{err});
+    };
+}
+
 /// Drain the mailbox.
 fn drainMailbox(self: *Thread) !bool {
     // There's probably a more elegant way to do this...
@@ -920,4 +940,115 @@ test "renderer follow-up check tracks visible terminal dirtiness" {
 
     try term.printString("x");
     try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+}
+
+test "send wakes the renderer before waiting on a full mailbox" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // This is the deadlock from the original bug, in miniature: a full
+    // mailbox whose consumer is asleep and only drains once woken. If
+    // `send` pushes before notifying, nothing ever wakes the consumer and
+    // the push waits forever.
+    var mailbox = try Mailbox.create(alloc);
+    defer mailbox.destroy(alloc);
+
+    var filled: usize = 0;
+    while (mailbox.push(.{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
+        filled += 1;
+    }
+    try testing.expect(filled > 0);
+
+    // Confirm the mailbox really is full before we test the blocking path.
+    try testing.expectEqual(
+        @as(Mailbox.Size, 0),
+        mailbox.push(.{ .focus = true }, .{ .instant = {} }),
+    );
+
+    const Consumer = struct {
+        loop: xev.Loop,
+        wakeup: *xev.Async,
+        wakeup_c: xev.Completion = .{},
+        guard: xev.Timer,
+        guard_c: xev.Completion = .{},
+        mailbox: *Mailbox,
+        to_drain: usize,
+        woken: bool = false,
+        ready: std.atomic.Value(bool) = .init(false),
+
+        const Consumer = @This();
+
+        /// Pop exactly the messages we pre-filled, leaving whatever the
+        /// sender adds. Draining until empty would race the sender's push.
+        fn drain(self: *Consumer) void {
+            for (0..self.to_drain) |_| _ = self.mailbox.pop();
+            self.loop.stop();
+        }
+
+        fn onWake(
+            self_: ?*Consumer,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            const self = self_.?;
+            self.woken = true;
+            self.drain();
+            return .disarm;
+        }
+
+        fn onGuard(
+            self_: ?*Consumer,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            // Safety valve. On a regression the wakeup never arrives, so we
+            // drain anyway and let the `woken` assertion fail rather than
+            // hanging the test suite forever.
+            self_.?.drain();
+            return .disarm;
+        }
+
+        fn run(self: *Consumer) void {
+            self.wakeup.wait(&self.loop, &self.wakeup_c, Consumer, self, onWake);
+            self.guard.run(&self.loop, &self.guard_c, 5000, Consumer, self, onGuard);
+            self.ready.store(true, .release);
+            self.loop.run(.until_done) catch {};
+        }
+    };
+
+    // `send` only touches `wakeup` and `mailbox`, so the rest of the thread
+    // state is never read here.
+    var thr: Thread = undefined;
+    thr.wakeup = try xev.Async.init();
+    defer thr.wakeup.deinit();
+    thr.mailbox = mailbox;
+
+    var consumer: Consumer = .{
+        .loop = try xev.Loop.init(.{}),
+        .wakeup = &thr.wakeup,
+        .guard = try xev.Timer.init(),
+        .mailbox = mailbox,
+        .to_drain = filled,
+    };
+    defer consumer.loop.deinit();
+    defer consumer.guard.deinit();
+
+    const consumer_thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
+    while (!consumer.ready.load(.acquire)) std.Thread.yield() catch {};
+
+    thr.send(.{ .focus = true });
+    consumer_thread.join();
+
+    // The consumer was woken by `send`, not by the safety valve.
+    try testing.expect(consumer.woken);
+
+    // And the message was delivered rather than dropped.
+    const delivered = mailbox.pop();
+    try testing.expect(delivered != null);
+    try testing.expect(std.meta.activeTag(delivered.?) == .focus);
+    try testing.expect(mailbox.pop() == null);
 }
