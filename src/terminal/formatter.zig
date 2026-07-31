@@ -1406,6 +1406,9 @@ pub const PageFormatter = struct {
                     closing.len,
                 );
             }
+            // Closing the div creates a newline in the output
+            // so make sure to create one less newline
+            if (blank_rows >= 1) blank_rows -= 1;
         }
 
         return .{ .rows = blank_rows, .cells = blank_cells };
