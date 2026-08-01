@@ -5605,6 +5605,42 @@ test "Page html with unicode as numeric entities" {
     );
 }
 
+test "Page html trailing blank lines" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var t = try Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    s.nextSlice("hello\r\nworld\r\n\r\n");
+
+    const pages = &t.screens.active.pages;
+    try testing.expect(pages.pages.first != null);
+    try testing.expect(pages.pages.first == pages.pages.last);
+
+    const page = &pages.pages.last.?.data;
+    var formatter: PageFormatter = .init(page, .{ .emit = .html });
+
+    const state = try formatter.formatWithState(&builder.writer);
+    const output = builder.writer.buffered();
+
+    // The closing div behaves as a newline
+    try testing.expectEqual(@as(usize, page.size.rows - 2), state.rows);
+    try testing.expectEqualStrings(
+        "<div style=\"font-family: monospace; white-space: pre;\">hello\nworld</div>",
+        output,
+    );
+}
+
 test "Page html ascii characters unchanged" {
     const testing = std.testing;
     const alloc = testing.allocator;
