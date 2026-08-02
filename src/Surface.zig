@@ -847,6 +847,13 @@ pub fn deinit(self: *Surface) void {
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
+    // Stop the IO producer while the renderer can still drain its mailbox.
+    {
+        self.io_thread.stop.notify() catch |err|
+            log.err("error notifying io thread to stop, may stall err={}", .{err});
+        self.io_thr.join();
+    }
+
     // Stop rendering thread
     {
         self.renderer_thread.stop.notify() catch |err|
@@ -855,13 +862,6 @@ pub fn deinit(self: *Surface) void {
 
         // We need to become the active rendering thread again
         self.renderer.threadEnter(self.rt_surface) catch unreachable;
-    }
-
-    // Stop our IO thread
-    {
-        self.io_thread.stop.notify() catch |err|
-            log.err("error notifying io thread to stop, may stall err={}", .{err});
-        self.io_thr.join();
     }
 
     // We need to deinit AFTER everything is stopped, since there are
