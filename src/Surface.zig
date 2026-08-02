@@ -744,7 +744,7 @@ pub fn init(
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
-            .renderer_wakeup = render_thread.wakeup,
+            .renderer_wakeup = &self.renderer_thread.wakeup,
             .renderer_mailbox = render_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
             .terminal_output_transport = &self.terminal_output_transport,
@@ -847,6 +847,13 @@ pub fn deinit(self: *Surface) void {
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
+    // Stop the IO producer while the renderer can still drain its mailbox.
+    {
+        self.io_thread.stop.notify() catch |err|
+            log.err("error notifying io thread to stop, may stall err={}", .{err});
+        self.io_thr.join();
+    }
+
     // Stop rendering thread
     {
         self.renderer_thread.stop.notify() catch |err|
@@ -855,13 +862,6 @@ pub fn deinit(self: *Surface) void {
 
         // We need to become the active rendering thread again
         self.renderer.threadEnter(self.rt_surface) catch unreachable;
-    }
-
-    // Stop our IO thread
-    {
-        self.io_thread.stop.notify() catch |err|
-            log.err("error notifying io thread to stop, may stall err={}", .{err});
-        self.io_thr.join();
     }
 
     // We need to deinit AFTER everything is stopped, since there are
@@ -974,7 +974,7 @@ pub fn activateInspector(self: *Surface) !void {
     }
 
     // Notify our components we have an inspector active
-    _ = self.renderer_thread.mailbox.push(.{ .inspector = true }, .{ .forever = {} });
+    self.renderer_thread.send(.{ .inspector = true });
     self.queueIo(.{ .inspector = true }, .unlocked);
 }
 
@@ -991,7 +991,7 @@ pub fn deactivateInspector(self: *Surface) void {
     }
 
     // Notify our components we have deactivated inspector
-    _ = self.renderer_thread.mailbox.push(.{ .inspector = false }, .{ .forever = {} });
+    self.renderer_thread.send(.{ .inspector = false });
     self.queueIo(.{ .inspector = false }, .unlocked);
 
     // Deinit the inspector
@@ -1225,11 +1225,9 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 return;
             }
 
-            _ = self.renderer_thread.mailbox.push(
+            self.renderer_thread.send(
                 .{ .search_viewport_matches = payload },
-                .forever,
             );
-            try self.renderer_thread.wakeup.notify();
         },
 
         .search_selected_match => |v| {
@@ -1239,11 +1237,9 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 return;
             }
 
-            _ = self.renderer_thread.mailbox.push(
+            self.renderer_thread.send(
                 .{ .search_selected_match = payload },
-                .forever,
             );
-            try self.renderer_thread.wakeup.notify();
         },
 
         .search_total => |v| {
@@ -1940,22 +1936,24 @@ pub fn updateConfig(
         break :font_size size;
     });
 
-    // We need to store our configs in a heap-allocated pointer so that
-    // our messages aren't huge.
-    var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
-    errdefer renderer_message.deinit();
-    var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
-    errdefer self.alloc.destroy(termio_config_ptr);
-    termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
-    errdefer termio_config_ptr.deinit();
+    {
+        // We need to store our configs in a heap-allocated pointer so that
+        // our messages aren't huge.
+        var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
+        errdefer renderer_message.deinit();
+        var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
+        errdefer self.alloc.destroy(termio_config_ptr);
+        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
+        errdefer termio_config_ptr.deinit();
 
-    _ = self.renderer_thread.mailbox.push(renderer_message, .{ .forever = {} });
-    self.queueIo(.{
-        .change_config = .{
-            .alloc = self.alloc,
-            .ptr = termio_config_ptr,
-        },
-    }, .unlocked);
+        self.renderer_thread.send(renderer_message);
+        self.queueIo(.{
+            .change_config = .{
+                .alloc = self.alloc,
+                .ptr = termio_config_ptr,
+            },
+        }, .unlocked);
+    }
 
     // With mailbox messages sent, we have to wake them up so they process it.
     self.queueRender() catch |err| {
@@ -2638,14 +2636,14 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 
     // Notify our render thread of the new font stack. The renderer
     // MUST accept the new font grid and deref the old.
-    _ = self.renderer_thread.mailbox.push(.{
+    self.renderer_thread.send(.{
         .font_grid = .{
             .grid = font_grid,
             .set = &self.app.font_grid_set,
             .old_key = self.font_grid_key,
             .new_key = font_grid_key,
         },
-    }, .{ .forever = {} });
+    });
 
     // Once we've sent the key we can replace our key
     self.font_grid_key = font_grid_key;
@@ -3496,13 +3494,12 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     if (self.visible == visible) return;
     self.visible = visible;
 
-    _ = self.renderer_thread.mailbox.push(.{
+    self.renderer_thread.send(.{
         .visible = visible,
-    }, .{ .forever = {} });
+    });
 
     if (self.search) |*s| {
-        _ = s.state.mailbox.push(.{ .visible = visible }, .forever);
-        s.state.wakeup.notify() catch {};
+        s.state.send(.{ .visible = visible });
     }
 
     try self.queueRender();
@@ -3522,13 +3519,12 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
     self.focused = focused;
 
     // Notify our render thread of the new state
-    _ = self.renderer_thread.mailbox.push(.{
+    self.renderer_thread.send(.{
         .focus = focused,
-    }, .{ .forever = {} });
+    });
 
     if (self.search) |*s| {
-        _ = s.state.mailbox.push(.{ .focus = focused }, .forever);
-        s.state.wakeup.notify() catch {};
+        s.state.send(.{ .focus = focused });
     }
 
     if (!focused) unfocused: {
@@ -5399,14 +5395,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .navigate_search => |nav| {
             const s: *Search = if (self.search) |*s| s else return false;
-            _ = s.state.mailbox.push(
+            s.state.send(
                 .{ .select = switch (nav) {
                     .next => .next,
                     .previous => .prev,
                 } },
-                .forever,
             );
-            s.state.wakeup.notify() catch {};
         },
 
         .copy_to_clipboard => |format| {
@@ -5987,7 +5981,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .main => @panic("crash binding action, crashing intentionally"),
 
             .render => {
-                _ = self.renderer_thread.mailbox.push(.{ .crash = {} }, .{ .forever = {} });
+                self.renderer_thread.send(.{ .crash = {} });
                 self.queueRender() catch |err| {
                     // Not a big deal if this fails.
                     log.warn("failed to notify renderer of crash message err={}", .{err});
@@ -6080,21 +6074,18 @@ pub fn invalidateSearchResults(self: *Surface) !bool {
 
     var req = try terminal.search.Thread.Message.WriteReq.init(self.alloc, "");
     errdefer req.deinit();
-    _ = s.state.mailbox.push(
+    s.state.send(
         .{ .change_query = .{
             .generation = generation,
             .options = self.search_query_options,
             .req = req,
         } },
-        .forever,
     );
-    s.state.wakeup.notify() catch {};
     return true;
 }
 
 fn syncClearSearchState(self: *Surface, generation: u64) !void {
-    _ = self.renderer_thread.mailbox.push(.{ .search_clear = generation }, .forever);
-    try self.renderer_thread.wakeup.notify();
+    self.renderer_thread.send(.{ .search_clear = generation });
 
     _ = try self.rt_app.performAction(
         .{ .surface = self },
@@ -6176,15 +6167,13 @@ pub fn setSearchQuery(
     errdefer req.deinit();
     const generation = self.nextSearchGeneration();
 
-    _ = s.state.mailbox.push(
+    s.state.send(
         .{ .change_query = .{
             .generation = generation,
             .options = query_options,
             .req = req,
         } },
-        .forever,
     );
-    s.state.wakeup.notify() catch {};
     return true;
 }
 

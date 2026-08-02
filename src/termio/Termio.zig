@@ -206,7 +206,7 @@ renderer_state: *renderer.State,
 
 /// A handle to wake up the renderer. This hints to the renderer that
 /// a repaint should happen.
-renderer_wakeup: xev.Async,
+renderer_wakeup: *xev.Async,
 
 /// The mailbox for notifying the renderer of things.
 renderer_mailbox: *renderer.Thread.Mailbox,
@@ -684,8 +684,11 @@ pub fn resize(
     }
 
     // Mail the renderer so that it can update the GPU and re-render
-    _ = self.renderer_mailbox.push(.{ .resize = size }, .{ .forever = {} });
-    self.renderer_wakeup.notify() catch {};
+    renderer.Thread.sendMessage(
+        self.renderer_wakeup,
+        self.renderer_mailbox,
+        .{ .resize = size },
+    );
 }
 
 /// Resize terminal/backend state before the IO thread starts.
@@ -717,7 +720,11 @@ pub fn resizeBeforeThreadStart(
         self.terminal.modes.set(.synchronized_output, false);
     }
 
-    _ = self.renderer_mailbox.push(.{ .resize = size }, .{ .forever = {} });
+    renderer.Thread.sendMessage(
+        self.renderer_wakeup,
+        self.renderer_mailbox,
+        .{ .resize = size },
+    );
 }
 
 /// Make a size report.

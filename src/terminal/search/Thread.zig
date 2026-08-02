@@ -269,6 +269,26 @@ fn threadMain_(self: *Thread) !void {
     }
 }
 
+/// Enqueue a message and wake the search thread to process it.
+///
+/// The first notification lets the search thread make room if the mailbox
+/// is full. The second covers the case where that notification is processed
+/// before the message is enqueued.
+pub fn send(self: *Thread, msg: Message) void {
+    self.notify();
+
+    // Search messages may transfer ownership or required state.
+    _ = self.mailbox.push(msg, .{ .forever = {} });
+
+    self.notify();
+}
+
+fn notify(self: *Thread) void {
+    self.wakeup.notify() catch |err| {
+        log.warn("error notifying search thread err={}", .{err});
+    };
+}
+
 /// Drain the mailbox.
 fn drainMailbox(self: *Thread) !void {
     while (self.mailbox.pop()) |message| {
