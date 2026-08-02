@@ -1936,22 +1936,24 @@ pub fn updateConfig(
         break :font_size size;
     });
 
-    // We need to store our configs in a heap-allocated pointer so that
-    // our messages aren't huge.
-    var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
-    errdefer renderer_message.deinit();
-    var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
-    errdefer self.alloc.destroy(termio_config_ptr);
-    termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
-    errdefer termio_config_ptr.deinit();
+    {
+        // We need to store our configs in a heap-allocated pointer so that
+        // our messages aren't huge.
+        var renderer_message = try rendererpkg.Message.initChangeConfig(self.alloc, config);
+        errdefer renderer_message.deinit();
+        var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
+        errdefer self.alloc.destroy(termio_config_ptr);
+        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
+        errdefer termio_config_ptr.deinit();
 
-    self.renderer_thread.send(renderer_message);
-    self.queueIo(.{
-        .change_config = .{
-            .alloc = self.alloc,
-            .ptr = termio_config_ptr,
-        },
-    }, .unlocked);
+        self.renderer_thread.send(renderer_message);
+        self.queueIo(.{
+            .change_config = .{
+                .alloc = self.alloc,
+                .ptr = termio_config_ptr,
+            },
+        }, .unlocked);
+    }
 
     // With mailbox messages sent, we have to wake them up so they process it.
     self.queueRender() catch |err| {
