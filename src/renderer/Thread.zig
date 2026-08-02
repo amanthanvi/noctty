@@ -395,16 +395,25 @@ fn syncDrawTimer(self: *Thread) void {
 /// full. The second covers the case where that notification is processed
 /// before the message is enqueued.
 pub fn send(self: *Thread, msg: rendererpkg.Message) void {
-    self.notify();
-
-    // Renderer messages may transfer ownership or required state.
-    _ = self.mailbox.push(msg, .{ .forever = {} });
-
-    self.notify();
+    sendMessage(&self.wakeup, self.mailbox, msg);
 }
 
-fn notify(self: *Thread) void {
-    self.wakeup.notify() catch |err| {
+/// Enqueue a message through a shared renderer wake handle.
+pub fn sendMessage(
+    wakeup: *xev.Async,
+    mailbox: *Mailbox,
+    msg: rendererpkg.Message,
+) void {
+    notify(wakeup);
+
+    // Renderer messages may transfer ownership or required state.
+    _ = mailbox.push(msg, .{ .forever = {} });
+
+    notify(wakeup);
+}
+
+fn notify(wakeup: *xev.Async) void {
+    wakeup.notify() catch |err| {
         log.warn("error notifying renderer thread err={}", .{err});
     };
 }
@@ -1020,16 +1029,12 @@ test "send wakes the renderer before waiting on a full mailbox" {
         }
     };
 
-    // `send` only touches `wakeup` and `mailbox`, so the rest of the thread
-    // state is never read here.
-    var thr: Thread = undefined;
-    thr.wakeup = try xev.Async.init();
-    defer thr.wakeup.deinit();
-    thr.mailbox = mailbox;
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
 
     var consumer: Consumer = .{
         .loop = try xev.Loop.init(.{}),
-        .wakeup = &thr.wakeup,
+        .wakeup = &wakeup,
         .guard = try xev.Timer.init(),
         .mailbox = mailbox,
         .to_drain = filled,
@@ -1040,7 +1045,7 @@ test "send wakes the renderer before waiting on a full mailbox" {
     const consumer_thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
     while (!consumer.ready.load(.acquire)) std.Thread.yield() catch {};
 
-    thr.send(.{ .focus = true });
+    sendMessage(&wakeup, mailbox, .{ .focus = true });
     consumer_thread.join();
 
     // The consumer was woken by `send`, not by the safety valve.

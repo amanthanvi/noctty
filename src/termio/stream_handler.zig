@@ -39,7 +39,7 @@ pub const StreamHandler = struct {
 
     /// A handle to wake up the renderer. This hints to the renderer that
     /// a repaint should happen.
-    renderer_wakeup: xev.Async,
+    renderer_wakeup: *xev.Async,
 
     /// The default cursor state. This is used with CSI q. This is
     /// set to true when we're currently in the default cursor state.
@@ -169,16 +169,11 @@ pub const StreamHandler = struct {
         self.renderer_state.mutex.unlock();
         defer self.renderer_state.mutex.lock();
         self.renderer_state.noteRenderWakeupNotify();
-        self.renderer_wakeup.notify() catch |err| {
-            // This is an EXTREMELY unlikely case. We still don't return
-            // and attempt to send the message because its most likely
-            // that everything is fine, but log in case a freeze happens.
-            log.warn(
-                "failed to notify renderer, may deadlock err={}",
-                .{err},
-            );
-        };
-        _ = self.renderer_mailbox.push(msg, .{ .forever = {} });
+        renderer.Thread.sendMessage(
+            self.renderer_wakeup,
+            self.renderer_mailbox,
+            msg,
+        );
     }
 
     pub fn vt(
