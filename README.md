@@ -68,7 +68,7 @@ Issues are reserved for reproducible bugs.
 
 Latest stable release:
 **[winghostty 1.3.122](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.122)**,
-published 2026-08-02.
+published 2026-08-03.
 
 Download directly from **[Releases](https://github.com/amanthanvi/winghostty/releases)**:
 
