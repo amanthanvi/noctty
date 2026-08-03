@@ -105,6 +105,18 @@ public static class Win11ShellCommandLiveNative {
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
     public static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -115,6 +127,27 @@ public static class Win11ShellCommandLiveNative {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern short VkKeyScanW(char ch);
+
+    public static bool ForceForeground(IntPtr hWnd) {
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
+        uint ignored;
+        uint targetThread = GetWindowThreadProcessId(hWnd, out ignored);
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+        uint currentThread = GetCurrentThreadId();
+        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
+        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
+        try {
+            BringWindowToTop(hWnd);
+            SetForegroundWindow(hWnd);
+            return GetForegroundWindow() == hWnd;
+        }
+        finally {
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+    }
 }
 '@
 }
@@ -507,7 +540,7 @@ function Promote-WindowForCapture {
         0,
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
-    [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
+    [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
 
     $captureDeadline = (Get-Date).AddMilliseconds($CAPTURE_PROMOTION_DELAY_MS * 4)
     while ((Get-Date) -lt $captureDeadline) {
@@ -517,7 +550,7 @@ function Promote-WindowForCapture {
         }
 
         Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
-        [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
+        [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
     }
 
     throw "Failed to foreground capture target hwnd=$Hwnd before screenshot sampling"
