@@ -170,10 +170,38 @@ public static class Win11KeyInputNative {
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint cInputs, INPUT[] pInputs, int cbSize);
+
+    public static bool ForceForeground(IntPtr hWnd) {
+        uint ignored;
+        uint targetThread = GetWindowThreadProcessId(hWnd, out ignored);
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+        uint currentThread = GetCurrentThreadId();
+        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
+        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
+        try {
+            BringWindowToTop(hWnd);
+            SetForegroundWindow(hWnd);
+            return GetForegroundWindow() == hWnd;
+        }
+        finally {
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+    }
 
     public static uint SendUnicodeInput(ushort[] codeUnits) {
         const uint INPUT_KEYBOARD = 1;
@@ -369,8 +397,17 @@ function Send-VirtualKeyMessage {
 
 function Send-UnicodeInput {
     param(
-        [Parameter(Mandatory)] [AllowEmptyCollection()] [UInt16[]] $CodeUnits
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [UInt16[]] $CodeUnits,
+        [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
+
+    Start-Sleep -Milliseconds 100
+    if (
+        [Win11KeyInputNative]::GetForegroundWindow() -ne $Hwnd -and
+        -not [Win11KeyInputNative]::ForceForeground($Hwnd)
+    ) {
+        throw "Failed to foreground terminal before Unicode input"
+    }
 
     [uint16[]] $terminated = @($CodeUnits + $UNICODE_SENTINEL)
     $inserted = [Win11KeyInputNative]::SendUnicodeInput($terminated)
@@ -562,7 +599,7 @@ try {
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
     [void] [Win11KeyInputNative]::ShowWindow($hostHwnd, $SW_RESTORE)
-    [void] [Win11KeyInputNative]::SetForegroundWindow($hostHwnd)
+    [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
@@ -617,17 +654,22 @@ try {
     $inputSentAtUtc = [DateTime]::UtcNow
     $inputStopwatch = [Diagnostics.Stopwatch]::StartNew()
     if ($useSequentialRead) {
-        [void] [Win11KeyInputNative]::SetForegroundWindow($hostHwnd)
+        [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
         Wait-InteractiveWin11Until -Deadline $deadline -Description 'focused terminal surface' -Process $process -Condition {
             if ([Win11KeyInputNative]::GetForegroundWindow() -ne $hostHwnd) {
+                [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
                 return $false
             }
             $info = Get-GuiThreadInfo -Hwnd $hostHwnd
-            return $null -ne $info -and
+            $focused = $null -ne $info -and
                 $info.FocusHwnd -ne [IntPtr]::Zero -and
                 (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'winghostty.win32'
+            if (-not $focused) {
+                [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
+            }
+            return $focused
         }
-        Send-UnicodeInput -CodeUnits $unicodeInputUnits
+        Send-UnicodeInput -CodeUnits $unicodeInputUnits -Hwnd $hostHwnd
     }
     else {
         Send-VirtualKeyMessage -Hwnd $surfaceHwnd -VirtualKey $virtualKey -CharCode ([uint16] $charCode) -Deadline $deadline -Process $process
