@@ -9229,8 +9229,8 @@ fn completeClipboardReadOSC52(
     // This must hold the base64 encoded data PLUS the OSC code surrounding it.
     const enc = std.base64.standard.Encoder;
     const size = enc.calcSize(data.len);
-    var buf = try self.alloc.alloc(u8, size + 9); // const for OSC
-    defer self.alloc.free(buf);
+    const buf = try self.alloc.alloc(u8, size + 9); // const for OSC
+    errdefer self.alloc.free(buf);
 
     const kind: u8 = switch (clipboard_type) {
         .standard => 'c',
@@ -9248,10 +9248,10 @@ fn completeClipboardReadOSC52(
     const encoded = enc.encode(buf[prefix.len..], data);
     assert(encoded.len == size);
 
-    self.queueIo(try termio.Message.writeReq(
-        self.alloc,
-        buf,
-    ), .unlocked);
+    self.queueIo(.{ .write_alloc = .{
+        .alloc = self.alloc,
+        .data = buf,
+    } }, .unlocked);
 }
 
 fn showDesktopNotification(self: *Surface, title: [:0]const u8, body: [:0]const u8) !void {
