@@ -3687,6 +3687,29 @@ test "Terminal: zero-width character attaches to last column without wraparound"
     try testing.expectEqualStrings("xå̲", str);
 }
 
+test "Terminal: caps zero-width codepoints attached to one cell" {
+    var t = try init(testing.allocator, .{ .cols = 2, .rows = 2 });
+    defer t.deinit(testing.allocator);
+
+    t.modes.set(.grapheme_cluster, false);
+    try t.print('A');
+
+    const initial_capacity = t.screens.active.cursor.page_pin.node.data.capacity.grapheme_bytes;
+    for (0..pagepkg.grapheme_max_len * 4) |_| try t.print(0x0301);
+
+    const list_cell = t.screens.active.pages.getCell(.{
+        .screen = .{ .x = 0, .y = 0 },
+    }).?;
+    try testing.expectEqual(
+        @as(usize, pagepkg.grapheme_max_len),
+        list_cell.node.data.lookupGrapheme(list_cell.cell).?.len,
+    );
+    try testing.expectEqual(
+        initial_capacity,
+        list_cell.node.data.capacity.grapheme_bytes,
+    );
+}
+
 // https://github.com/mitchellh/ghostty/issues/1400
 test "Terminal: print single very long line" {
     var t = try init(testing.allocator, .{ .rows = 5, .cols = 5 });
