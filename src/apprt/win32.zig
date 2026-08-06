@@ -23203,6 +23203,10 @@ fn shouldDeferTextToCharMessage(
     return !isControlCodepoint(translated.unshifted_codepoint);
 }
 
+fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
+    return effect == .ignored;
+}
+
 const DeferredCharState = struct {
     pending_units: usize = 0,
     high_surrogate: ?u16 = null,
@@ -26981,9 +26985,8 @@ pub const Surface = struct {
 
         const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
         const event = message.event;
-        self.deferred_char.authorize(message.deferred_utf16_units);
 
-        _ = self.core_surface.keyCallback(event) catch |err| {
+        const effect = self.core_surface.keyCallback(event) catch |err| {
             log.err("win32 key callback failed err={} vk={} action={} key={} mods={}", .{
                 err,
                 @as(UINT, @intCast(wParam & 0xFFFF)),
@@ -26993,6 +26996,10 @@ pub const Surface = struct {
             });
             return;
         };
+        if (effect == .closed) return;
+        if (shouldAuthorizeDeferredCharMessage(effect)) {
+            self.deferred_char.authorize(message.deferred_utf16_units);
+        }
         if (event.utf8.len != 0) {
             if (self.terminal_accessibility) |session| session.noteInput(event.utf8);
         }
@@ -31548,6 +31555,12 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .{},
         .{ .unshifted_codepoint = 0x0D },
     ));
+}
+
+test "win32 deferred char authorization respects key handling effect" {
+    try std.testing.expect(shouldAuthorizeDeferredCharMessage(.ignored));
+    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.consumed));
+    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.closed));
 }
 
 test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
