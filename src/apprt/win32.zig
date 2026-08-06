@@ -23187,7 +23187,8 @@ fn shouldDeferTextToCharMessage(
     if (action == .release) return false;
     // Windows reports AltGr as synthetic left Ctrl plus right Alt. The
     // resulting WM_CHAR is layout text, not a Ctrl+Alt terminal chord.
-    const alt_gr = mods.ctrl and mods.alt and mods.sides.alt == .right;
+    const alt_gr = mods.ctrl and mods.alt and
+        mods.sides.ctrl == .left and mods.sides.alt == .right;
     if (mods.super or ((mods.ctrl or mods.alt) and !alt_gr)) return false;
     if (key.modifier()) return false;
 
@@ -31529,6 +31530,16 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .press,
         .equal,
         .{ .alt = true, .sides = .{ .alt = .right } },
+        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .equal,
+        .{
+            .ctrl = true,
+            .alt = true,
+            .sides = .{ .ctrl = .right, .alt = .right },
+        },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
