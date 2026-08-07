@@ -232,7 +232,12 @@ if ($CheckRemoteLatest) {
             if ($release) {
                 $publishedDate = $null
                 try {
-                    $publishedDate = [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime.ToString(
+                    $publishedAtUtc = if ($release.publishedAt -is [DateTime]) {
+                        $release.publishedAt.ToUniversalTime()
+                    } else {
+                        [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime
+                    }
+                    $publishedDate = $publishedAtUtc.ToString(
                         "yyyy-MM-dd",
                         [System.Globalization.CultureInfo]::InvariantCulture
                     )
