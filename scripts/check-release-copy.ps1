@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
+. (Join-Path $PSScriptRoot "release-copy-date.ps1")
 
 $copyPaths = @(
     "README.md",
@@ -232,10 +233,7 @@ if ($CheckRemoteLatest) {
             if ($release) {
                 $publishedDate = $null
                 try {
-                    $publishedDate = [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime.ToString(
-                        "yyyy-MM-dd",
-                        [System.Globalization.CultureInfo]::InvariantCulture
-                    )
+                    $publishedDate = ConvertTo-UtcReleaseDate -PublishedAt $release.publishedAt
                 } catch {
                     Add-Failure "Could not parse GitHub latest-release publishedAt date: $($release.publishedAt)"
                 }

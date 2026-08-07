@@ -41,6 +41,14 @@ jobs:
         shell: pwsh
         run: ./scripts/check-release-copy.ps1
 
+      - name: Release copy UTC date tests (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/test-release-copy-date.ps1
+
+      - name: Release copy UTC date tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./scripts/test-release-copy-date.ps1
+
       - name: Remote release copy checks
         if: github.event_name == 'schedule'
         shell: pwsh
