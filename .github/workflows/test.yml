@@ -41,6 +41,10 @@ jobs:
         shell: pwsh
         run: ./scripts/check-release-copy.ps1
 
+      - name: Release copy UTC date tests
+        shell: pwsh
+        run: ./scripts/test-release-copy-date.ps1
+
       - name: Remote release copy checks
         if: github.event_name == 'schedule'
         shell: pwsh
