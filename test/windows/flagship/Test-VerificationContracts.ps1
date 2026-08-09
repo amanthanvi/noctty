@@ -6085,11 +6085,14 @@ if ($highContrastStabilityWaits.Count -ne 2 -or
         $_.Extent.Text -match [regex]::Escape('$hcPresentation.Stable.Restart()')
     }).Count -ne 1 -or
     @($highContrastStabilityWaits | Where-Object {
-        $_.Extent.Text -match [regex]::Escape("throw 'Theme preview changed terminal colors while High Contrast was active.'") -and
-            $_.Extent.Text -match [regex]::Escape('$suppressedPreviewStable.Reset()') -and
-            $_.Extent.Text -match [regex]::Escape('$previewPixel -band 0xFFFFFF) -eq $draculaRgb')
-    }).Count -ne 1) {
-    throw 'High Contrast theme preview must reject Dracula immediately and prove the original framebuffer stable for two seconds.'
+        $_.Extent.Text -match [regex]::Escape('$previewRgb -eq $draculaRgb') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.Stable.Restart()') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.TransitionCount++')
+    }).Count -ne 1 -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('($activeHc.dwFlags -band 1) -eq 0') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('High Contrast preview framebuffer stable: baseline={0:x6}, settled={1:x6}, transitions={2}')) {
+    throw 'High Contrast theme preview must reject Dracula, prove a stable settled framebuffer, verify active High Contrast, and report transitions.'
 }
 $highContrastCloseCalls = @($paletteThemeAst.FindAll({
     param($node)
