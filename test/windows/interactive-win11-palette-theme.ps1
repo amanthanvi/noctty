@@ -34,6 +34,11 @@ function Open-ThemeQuery([IntPtr]$HostHwnd, [string]$Query, [DateTime]$Deadline,
     return $edit.Hwnd
 }
 
+function Write-SuppressedPreviewDiagnostic([int]$BaselinePixel, $Preview) {
+    Write-Host ('High Contrast preview framebuffer: baseline={0:x6}, settled-or-last={1:x6}, transitions={2}' -f `
+        ($BaselinePixel -band 0xFFFFFF), ($Preview.Pixel -band 0xFFFFFF), $Preview.TransitionCount)
+}
+
 function Test-ThemePaletteDismissed([IntPtr]$HostHwnd) {
     return @(Get-StatefulChildren $HostHwnd | Where-Object {
         $_.Id -ge 2001 -and $_.Id -le 2006
@@ -202,31 +207,39 @@ try {
             Stable = [Diagnostics.Stopwatch]::new()
             TransitionCount = 0
         }
-        Wait-InteractiveWin11Until -Deadline $deadline -Description 'suppressed High Contrast theme preview' -Process $hcRun.Process -Condition {
-            $previewPixel = Get-StatefulPixel $hcSurface.Hwnd
-            $previewRgb = $previewPixel -band 0xFFFFFF
-            if ($previewRgb -eq $draculaRgb) {
-                throw ('Theme preview changed terminal colors while High Contrast was active: rgb={0:x6}.' -f $previewRgb)
+        try {
+            Wait-InteractiveWin11Until -Deadline $deadline -Description 'suppressed High Contrast theme preview' -Process $hcRun.Process -Condition {
+                $previewPixel = Get-StatefulPixel $hcSurface.Hwnd
+                $previewTransitioned = $previewPixel -ne $suppressedPreview.Pixel
+                if ($previewTransitioned) {
+                    $suppressedPreview.Pixel = $previewPixel
+                    $suppressedPreview.TransitionCount++
+                    $suppressedPreview.Stable.Restart()
+                }
+                $previewRgb = $previewPixel -band 0xFFFFFF
+                if ($previewRgb -eq $draculaRgb) {
+                    throw ('Theme preview changed terminal colors while High Contrast was active: rgb={0:x6}.' -f $previewRgb)
+                }
+                if ($previewTransitioned) { return $false }
+                if (-not $suppressedPreview.Stable.IsRunning) { $suppressedPreview.Stable.Start() }
+                return $suppressedPreview.Stable.Elapsed -ge [TimeSpan]::FromSeconds(2)
             }
-            if ($previewPixel -ne $suppressedPreview.Pixel) {
-                $suppressedPreview.Pixel = $previewPixel
-                $suppressedPreview.TransitionCount++
-                $suppressedPreview.Stable.Restart()
-                return $false
-            }
-            if (-not $suppressedPreview.Stable.IsRunning) { $suppressedPreview.Stable.Start() }
-            return $suppressedPreview.Stable.Elapsed -ge [TimeSpan]::FromSeconds(2)
+        }
+        catch {
+            Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
+            throw
         }
         $activeHc = [WinghosttyStatefulNative+HIGHCONTRAST]::new()
         $activeHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($activeHc)
         if (-not [WinghosttyStatefulNative]::SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)) {
+            Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
             throw 'SPI_GETHIGHCONTRAST verification failed after suppressed theme preview.'
         }
         if (($activeHc.dwFlags -band 1) -eq 0) {
+            Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
             throw 'High Contrast became inactive during the suppressed theme preview.'
         }
-        Write-Host ('High Contrast preview framebuffer stable: baseline={0:x6}, settled={1:x6}, transitions={2}' -f `
-            ($hcPixel -band 0xFFFFFF), ($suppressedPreview.Pixel -band 0xFFFFFF), $suppressedPreview.TransitionCount)
+        Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
         if ((Get-Content $configPath -Raw) -notmatch 'theme\s*=\s*0x96f') { throw 'High Contrast preview mutated persisted theme.' }
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         Invoke-StatefulButton $hcHost 2004 $deadline $hcRun.Process
