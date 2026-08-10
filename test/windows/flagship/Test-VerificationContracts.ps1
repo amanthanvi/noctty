@@ -3944,6 +3944,12 @@ $highContrastCalls = @(
 if ($highContrastFunctions.Count -ne 1 -or $highContrastCalls.Count -ne 2) {
     throw 'Targeted and full accessibility evidence must share one High Contrast proof helper.'
 }
+$highContrastFunctionText = $highContrastFunctions[0].Extent.Text
+if ($highContrastFunctionText -notmatch [regex]::Escape('$compoundRestoreBudgetSeconds = 20') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('[DateTime]::UtcNow.AddSeconds($compoundRestoreBudgetSeconds)') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('budget_seconds = $compoundRestoreBudgetSeconds')) {
+    throw 'Compound High Contrast restoration must reserve a diagnostic-consistent 20-second convergence budget.'
+}
 Assert-NoUnreachableStatements `
     -Ast $highContrastFunctions[0].Body `
     -Context 'Invoke-AccessibilityHighContrastProof'
@@ -5744,9 +5750,11 @@ $paletteThemeFunctions = @($paletteThemeAst.FindAll({
 $openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
 $themePaletteDismissedFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Test-ThemePaletteDismissed')
 $postHighContrastFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Invoke-PostHighContrastPresentationCanary')
-if ($paletteThemeFunctions.Count -ne 3 -or $openThemeQueryFunctions.Count -ne 1 -or
-    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
-    throw 'Palette theme harness must define only its exact query, dismissal, and post-High-Contrast presentation functions.'
+$suppressedPreviewDiagnosticFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Write-SuppressedPreviewDiagnostic')
+if ($paletteThemeFunctions.Count -ne 4 -or $openThemeQueryFunctions.Count -ne 1 -or
+    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1 -or
+    $suppressedPreviewDiagnosticFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only its exact query, dismissal, diagnostic, and post-High-Contrast presentation functions.'
 }
 $openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
 if ($openThemeQueryParameters.Count -ne 4 -or
@@ -6085,11 +6093,16 @@ if ($highContrastStabilityWaits.Count -ne 2 -or
         $_.Extent.Text -match [regex]::Escape('$hcPresentation.Stable.Restart()')
     }).Count -ne 1 -or
     @($highContrastStabilityWaits | Where-Object {
-        $_.Extent.Text -match [regex]::Escape("throw 'Theme preview changed terminal colors while High Contrast was active.'") -and
-            $_.Extent.Text -match [regex]::Escape('$suppressedPreviewStable.Reset()') -and
-            $_.Extent.Text -match [regex]::Escape('$previewPixel -band 0xFFFFFF) -eq $draculaRgb')
-    }).Count -ne 1) {
-    throw 'High Contrast theme preview must reject Dracula immediately and prove the original framebuffer stable for two seconds.'
+        $_.Extent.Text -match [regex]::Escape('$previewRgb -eq $draculaRgb') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.Stable.Restart()') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.TransitionCount++')
+    }).Count -ne 1 -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('($activeHc.dwFlags -band 1) -eq 0') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('High Contrast preview framebuffer: baseline={0:x6}, settled-or-last={1:x6}, transitions={2}') -or
+    ([regex]::Matches($paletteThemeHarnessText, '(?m)^\s*Write-SuppressedPreviewDiagnostic \$hcPixel \$suppressedPreview\s*$')).Count -ne 4 -or
+    $paletteThemeHarnessText -notmatch '(?s)catch\s*\{\s*Write-SuppressedPreviewDiagnostic \$hcPixel \$suppressedPreview\s+throw\s*\}') {
+    throw 'High Contrast theme preview must reject Dracula, prove a stable settled framebuffer, verify active High Contrast, and report transitions before success or failure.'
 }
 $highContrastCloseCalls = @($paletteThemeAst.FindAll({
     param($node)
