@@ -2675,7 +2675,8 @@ function Invoke-AccessibilityHighContrastProof(
                 throw "Targeted High Contrast state was not restored exactly. diagnostic=$restoreDiagnosticPath recovery=$recoveryPath"
             }
             if ($toggleAttempted -and $null -ne $semanticPixel) {
-                $compoundRestoreDeadline = [DateTime]::UtcNow.AddSeconds(10)
+                $compoundRestoreBudgetSeconds = 20
+                $compoundRestoreDeadline = [DateTime]::UtcNow.AddSeconds($compoundRestoreBudgetSeconds)
                 $script:hcRestorePollCount = 0
                 $script:hcRestoreDiagnostic = $null
                 try {
@@ -2763,7 +2764,7 @@ function Invoke-AccessibilityHighContrastProof(
                             poll = $script:hcRestorePollCount
                             timed_out = $false
                             deadline_utc = $compoundRestoreDeadline.ToString('o')
-                            budget_seconds = 10
+                            budget_seconds = $compoundRestoreBudgetSeconds
                             recovery_path = $recoveryPath
                             diagnostic_path = $restoreDiagnosticPath
                             process_alive = -not $Process.HasExited

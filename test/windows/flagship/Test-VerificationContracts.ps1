@@ -3944,6 +3944,12 @@ $highContrastCalls = @(
 if ($highContrastFunctions.Count -ne 1 -or $highContrastCalls.Count -ne 2) {
     throw 'Targeted and full accessibility evidence must share one High Contrast proof helper.'
 }
+$highContrastFunctionText = $highContrastFunctions[0].Extent.Text
+if ($highContrastFunctionText -notmatch [regex]::Escape('$compoundRestoreBudgetSeconds = 20') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('[DateTime]::UtcNow.AddSeconds($compoundRestoreBudgetSeconds)') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('budget_seconds = $compoundRestoreBudgetSeconds')) {
+    throw 'Compound High Contrast restoration must reserve a diagnostic-consistent 20-second convergence budget.'
+}
 Assert-NoUnreachableStatements `
     -Ast $highContrastFunctions[0].Body `
     -Context 'Invoke-AccessibilityHighContrastProof'
