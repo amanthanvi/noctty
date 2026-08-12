@@ -36,17 +36,22 @@ both architectures ship every asset:
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
 
 Verify the download before you run it. Grab
-`SHA256SUMS-windows-<arch>.txt` from the same release, then hash
-whichever file you downloaded:
+`SHA256SUMS-windows-<arch>.txt` from the same release, then hash the file
+you actually downloaded. For the installer:
 
 ```powershell
 Get-FileHash .\winghostty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
-Get-FileHash .\winghostty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
-# Compare each hash against SHA256SUMS-windows-<arch>.txt
 ```
 
-If a hash doesn't match, stop. Don't install or extract that file; delete
-it and download it again.
+For the portable ZIP:
+
+```powershell
+Get-FileHash .\winghostty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
+```
+
+Compare the result against the matching line in
+`SHA256SUMS-windows-<arch>.txt`. If it doesn't match, stop. Don't install
+or extract that file; delete it and download it again.
 
 ### Installer
 

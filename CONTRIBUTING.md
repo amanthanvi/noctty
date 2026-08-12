@@ -35,9 +35,12 @@ bugs don't get buried.
 - Read any applicable `AGENTS.md` files before editing.
 - If you use AI assistance, you are responsible for understanding and
   reviewing the final change. See [AI_POLICY.md](AI_POLICY.md).
-- If the change touches input, rendering, window chrome, process
-  startup, packaging, or update behavior, do the manual Windows checks
-  in [HACKING.md](HACKING.md#manual-validation) as well.
+- If the change touches input, rendering, window chrome, or process
+  startup, do the manual Windows checks in
+  [HACKING.md](HACKING.md#manual-validation) as well.
+- If it touches packaging or update behavior, follow the release runbook
+  in [PACKAGING.md](PACKAGING.md#release-runbook) instead; the manual
+  checks above don't cover that path.
 
 ## Scope guard
 

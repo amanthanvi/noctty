@@ -72,8 +72,8 @@ terminal under the same sandboxed environment:
 powershell -ExecutionPolicy Bypass -File test/windows/interactive-win11-smoke.ps1
 ```
 
-If your change touches input, rendering, or chrome behavior, manually
-verify:
+If your change touches input, rendering, chrome, or startup behavior,
+manually verify:
 
 1. Wheel mouse scrolling in a long buffer.
 2. Precision touchpad scrolling, if available.
