@@ -36,15 +36,17 @@ both architectures ship every asset:
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
 
 Verify the download before you run it. Grab
-`SHA256SUMS-windows-<arch>.txt` from the same release, then:
+`SHA256SUMS-windows-<arch>.txt` from the same release, then hash
+whichever file you downloaded:
 
 ```powershell
 Get-FileHash .\winghostty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
-# Compare the output against SHA256SUMS-windows-<arch>.txt
+Get-FileHash .\winghostty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
+# Compare each hash against SHA256SUMS-windows-<arch>.txt
 ```
 
-If the hash doesn't match, stop. Delete the file and download it again
-rather than running it.
+If a hash doesn't match, stop. Don't install or extract that file; delete
+it and download it again.
 
 ### Installer
 
@@ -76,12 +78,18 @@ The ZIP container itself is checksummed, not signed.
 
 A self-signed certificate carries no third-party publisher identity, so
 it earns no SmartScreen reputation. The warning won't fade with time;
-expect it until releases move to a CA-issued certificate. That makes the
-published checksum the integrity check that matters, so compare the hash
-against `SHA256SUMS-windows-<arch>.txt` as shown above before you click
-through. The in-app updater doesn't depend on that warning either way:
-it pins the publisher key and refuses an installer signed by anything
-else.
+expect it until releases move to a CA-issued certificate.
+
+Be precise about what the checksum buys you before you click through. It
+confirms the file arrived intact and matches what the release publishes,
+which is worth checking every time. It is not proof of authorship: the
+checksum file sits next to the installer, so whatever could replace one
+could replace the other. The value that doesn't come from the release
+page is the publisher key pinned in the updater and recorded in
+[ADR 0005](adr/0005-pin-updater-publisher-public-keys.md). In-app
+updates are checked against that pin and refuse an installer signed by
+anything else, and `scripts/verify-published-release.ps1` checks a
+published release the same way.
 
 ## 3. First launch
 
