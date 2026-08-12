@@ -174,8 +174,14 @@ config:
 command = pwsh.exe
 ```
 
-Any executable name on PATH or full path works, for example
-`C:\Program Files\Git\bin\bash.exe`.
+Any executable name on PATH works the same way. A full path does too,
+but if it contains spaces, use the `direct:` form and quote it. A plain
+value is handed to `cmd.exe /C`, which would stop reading at the first
+space and look for `C:\Program`:
+
+```ini
+command = direct:"C:\Program Files\Git\bin\bash.exe"
+```
 
 WSL appears in the profile picker, but making it the default requires
 an explicit opt-in:
