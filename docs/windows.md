@@ -140,8 +140,11 @@ explicit titles. It doesn't restore terminal contents or child process
 state.
 
 If the session-state file is unreadable, winghostty moves it aside to a
-timestamped quarantine sibling, logs the failure, and starts with a fresh
-window. If that move fails, the original file is left untouched.
+sibling named after the original with a `.corrupt` suffix, logs the
+failure, and starts with a fresh window. A numeric suffix is added
+(`.corrupt.1`, `.corrupt.2`, and so on) when an earlier quarantine file
+is already there, so nothing is overwritten. If the move fails, the
+original file is left untouched.
 
 Three consecutive pre-ready startup failures automatically select an
 ephemeral safe mode: built-in config, no session restore. You can also
