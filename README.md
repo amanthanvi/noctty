@@ -88,9 +88,10 @@ The older
 is still published as an x64 auto-update compatibility alias.
 
 The installers and the binaries inside the portable ZIP are
-Authenticode-signed; the ZIP container itself is checksummed, not
-signed. SmartScreen may still warn on first run while the publisher
-certificate builds reputation.
+Authenticode-signed with a self-signed certificate; the ZIP container
+itself is checksummed, not signed. SmartScreen warns on first run
+because that certificate carries no publisher reputation, so check the
+download against its checksum file before you run it.
 [docs/getting-started.md](docs/getting-started.md) explains the warning
 and walks through install, portable use, and uninstall.
 

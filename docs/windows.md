@@ -26,7 +26,8 @@ Each release publishes signed Windows artifacts for x64 and ARM64:
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
 
 The installer and the binaries inside the portable ZIP are
-Authenticode-signed; the ZIP container itself is checksummed, not signed.
+Authenticode-signed with a self-signed certificate; the ZIP container
+itself is checksummed, not signed.
 The legacy `SHA256SUMS.txt` file remains an x64 auto-update compatibility
 alias.
 
@@ -258,9 +259,10 @@ pass the explicit `--include-crash-dumps` flag.
 
 ### SmartScreen
 
-SmartScreen can warn on a signed release while the publisher certificate
-is still building reputation. What the warning means, and how to verify a
-download against its checksum file first, is covered in
+SmartScreen warns on release downloads because the current signing
+certificate is self-signed and so carries no publisher reputation. What
+the warning means, and how to verify a download against its checksum
+file first, is covered in
 [getting-started.md](getting-started.md#about-the-smartscreen-warning).
 
 ### Focus Assist and toasts

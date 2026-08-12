@@ -92,7 +92,8 @@ Configurable actions, live tabs, panes, Windows profiles, installed themes,
 native settings, reviewed help destinations, and keyboard tab-to-pane moves
 share one typed, fuzzy-ranked list with:
 
-- category prefixes (`>`, `@`, `/`, `~`, `:`) and keyboard navigation
+- category prefixes (`>`, `@`, `/`, `~`, `:`, `%`, `!`, `?`) and keyboard
+  navigation
 - stable dispatch IDs and destructive/disabled semantics
 - UI Automation selection announcements
 - reversible live theme preview before commit (High Contrast suppresses

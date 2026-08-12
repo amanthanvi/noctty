@@ -35,17 +35,21 @@ both architectures ship every asset:
 
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
 
-To verify a download (optional), grab `SHA256SUMS-windows-<arch>.txt`
-from the same release, then:
+Verify the download before you run it. Grab
+`SHA256SUMS-windows-<arch>.txt` from the same release, then:
 
 ```powershell
 Get-FileHash .\winghostty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
 # Compare the output against SHA256SUMS-windows-<arch>.txt
 ```
 
+If the hash doesn't match, stop. Delete the file and download it again
+rather than running it.
+
 ### Installer
 
-1. Double-click `winghostty-<version>-windows-<arch>-setup.exe`.
+1. Check the hash first, then double-click
+   `winghostty-<version>-windows-<arch>-setup.exe`.
 2. If SmartScreen says _"Windows protected your PC"_, click **More info**,
    then **Run anyway**. See the note below on why this warning appears.
 3. Accept the MIT license and install.
@@ -67,12 +71,17 @@ that folder.
 ### About the SmartScreen warning
 
 Release installers and the Windows binaries inside the portable ZIP are
-Authenticode-signed. The ZIP container itself is checksummed, not signed.
-SmartScreen trust is based on publisher reputation, which builds over
-time and lags behind the signature for a new publisher, so you may see
-the warning even though the signature is present and valid. If you want
-an extra check, verify the download against
-`SHA256SUMS-windows-<arch>.txt` as shown above before running it.
+Authenticode-signed, but the current signing certificate is self-signed.
+The ZIP container itself is checksummed, not signed.
+
+A self-signed certificate carries no third-party publisher identity, so
+it earns no SmartScreen reputation. The warning won't fade with time;
+expect it until releases move to a CA-issued certificate. That makes the
+published checksum the integrity check that matters, so compare the hash
+against `SHA256SUMS-windows-<arch>.txt` as shown above before you click
+through. The in-app updater doesn't depend on that warning either way:
+it pins the publisher key and refuses an installer signed by anything
+else.
 
 ## 3. First launch
 
