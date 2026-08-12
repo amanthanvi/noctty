@@ -1,9 +1,10 @@
 # Status
 
-What currently works in winghostty, what is experimental, and what is out of
-scope. When this page disagrees with a commit message, trust this page.
+What currently works in winghostty, what is experimental, and what is out
+of scope. When this page disagrees with a commit message, trust this
+page.
 
-Last updated: 2026-07-11, against current fork HEAD.
+Last updated: 2026-08-12, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -13,11 +14,12 @@ paths, shells, updates, automation, and troubleshooting, see
 
 ## Supported platform
 
-- **Windows 10** and **Windows 11** — x64 and ARM64.
+- Windows 10 and Windows 11, on x64 and ARM64.
 - No macOS, Linux, or cross-platform app runtime ships from this repo;
   `libghostty-vt` stays buildable for non-Windows targets as a library.
-- WSL works as a launched shell when you opt in (`command = wsl.exe`); it is
-  never picked implicitly (see [windows.md](windows.md#shells) for why).
+- WSL sessions work from the profile picker; becoming the default shell
+  requires an explicit `command = wsl.exe` (see
+  [windows.md](windows.md#shells) for why).
 
 ## What works today
 
@@ -25,12 +27,13 @@ paths, shells, updates, automation, and troubleshooting, see
 
 - VT parsing, screen / scrollback / alt-screen, DEC and xterm behaviors.
 - 256-color and true-color.
-- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52 (all
-  OSC 52 selectors target the single native Windows clipboard).
+- Bracketed paste, mouse tracking, OSC 8 hyperlinks, OSC 10 / 11 / 52
+  (all OSC 52 selectors target the single native Windows clipboard).
 - Bidi, combining marks, grapheme cluster rendering.
 - Kitty graphics protocol and inline image display.
-- Shell integration for bash, zsh, fish, PowerShell; `cmd.exe` is a plain
-  fallback without prompt/cwd/command-finish integration.
+- Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
+  (PowerShell through `shell-integration = detect`); `cmd.exe` is a
+  plain fallback without prompt/cwd/command-finish integration.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained for Zig and C consumers.
 
@@ -40,29 +43,34 @@ Win32-validated VT protocol coverage is tracked in
 ### Windows application runtime (new in this fork)
 
 - Native Win32 windows, tab bar with overflow, and drag: same-window tab
-  reorder and exact-pane drag-to-split, with full undo/redo.
+  reorder and exact-pane drag-to-split.
 - Horizontal and vertical splits.
-- Close-tab undo/redo that restores the exact tab, panes, and layout.
+- Structural undo/redo for new splits, single-tab close (restoring the
+  exact tab, panes, and layout), and drag-to-split subtree transfers.
+  Tab reorder and multi-tab close modes are not undoable.
 - Native right-click context menus.
-- In-app profile picker for detected shells: PowerShell, `cmd`, Git Bash,
-  and opt-in WSL.
+- In-app profile picker for detected shells: PowerShell 7, Windows
+  PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
 - Per-monitor DPI scaling.
 - DWM dark title bar that follows the app theme.
 - High-contrast mode detection and palette switching.
 - IME for CJK and other composed input.
-- A local sensitive-input indicator for no-echo input (`toggle_secure_input`
-  is a visual affordance only; it does not block system-wide keyboard hooks
-  the way macOS Secure Keyboard Entry does).
+- A local sensitive-input indicator for no-echo input
+  (`toggle_secure_input` is a visual affordance only; it does not block
+  system-wide keyboard hooks the way macOS Secure Keyboard Entry does).
 - Drag-and-drop of files into the terminal.
-- Session restore via `window-save-state`: windows, tabs, splits, profiles,
-  working directories, and explicit titles come back — terminal contents and
-  child processes do not.
-- Windows-convention default keybindings.
+- Session restore via `window-save-state`: windows, tabs, splits,
+  profiles, working directories, and explicit titles come back; terminal
+  contents and child processes do not.
+- Ctrl-based default keybindings, mostly shared with Ghostty's
+  non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
+  pane focus and `Alt+F4` to close the window.
 - Native settings window (Appearance, Terminal, Shell, Privacy, Updates,
   Keybindings, Advanced) that stages edits until Save and patches your
   config without rewriting unrelated text.
-- Universal palette: actions, tabs, panes, profiles, themes, and native
-  settings in one fuzzy-searched, keyboard-driven list.
+- Universal palette: actions, tabs, panes, profiles, themes, native
+  settings, help, and recent commands in one fuzzy-searched,
+  keyboard-driven list.
 
 ### Renderer
 
@@ -74,9 +82,10 @@ Win32-validated VT protocol coverage is tracked in
 
 - Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`, at
   most once every 24 hours, and never replaces binaries silently.
-- `auto-update = download` stages only releases that pass checksum metadata
-  plus Authenticode verification; applying a staged update is always
-  user-initiated. Details in [windows.md](windows.md#updates).
+- `auto-update = download` stages only releases that pass their
+  checksum metadata plus Authenticode verification; applying a staged
+  update is always user-initiated. Details in
+  [windows.md](windows.md#updates).
 
 ### Windows package managers
 
@@ -85,47 +94,52 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Crash reports
 
-- Crash dumps stay local under `%LOCALAPPDATA%\winghostty\crash` — **no
-  automatic upload**, and no code path to upload exists in this repo.
+- Crash dumps stay local under `%LOCALAPPDATA%\winghostty\crash`. There
+  is no automatic upload, and no code path to upload exists in this repo.
 - `winghostty +crash-report` reads whatever is there. Details in
   [windows.md](windows.md#crash-reports-and-diagnostics).
+- Unreadable session state is quarantined, never deleted, and repeated
+  startup failures fall back to safe mode; details in
+  [windows.md](windows.md#session-restore-and-recovery).
+- `+diagnostic-bundle` exports are explicit and redact terminal content,
+  environment, and config values by default.
 
 ## Experimental / partial
 
 ### Windows UI Automation (accessibility)
 
-UI Automation is **partial, not complete**. Terminal text is exposed read-only
-through TextPattern/TextPattern2 with bounded ranges, visible geometry, and an
-active caret anchor. The host and command palette expose focus and selection
-semantics, while standard settings controls use native HWND providers. Broader
-per-widget coverage and the full Narrator/NVDA release matrix remain required.
+UI Automation coverage is partial. Terminal text is exposed read-only
+through TextPattern/TextPattern2 with bounded ranges, visible geometry,
+and an active caret anchor. The host and command palette expose focus
+and selection semantics, while standard settings controls use native
+HWND providers. Still to do: broader per-widget coverage and a full
+Narrator/NVDA release matrix.
 
 ### Win32 runtime extraction
 
 The Win32 runtime is still centered on a single large file
-(`src/apprt/win32.zig`). Extraction into focused modules is in progress and
-lands incrementally.
+(`src/apprt/win32.zig`). Extraction into focused modules is in progress
+and lands incrementally.
 
 ## Known caveats
 
-- **SmartScreen reputation.** Installers and the Windows binaries inside the
-  portable ZIP are Authenticode-signed; the ZIP container itself is
-  checksummed, not Authenticode-signed. SmartScreen can still warn for a new
-  or low-reputation publisher certificate.
-- **Issues are for reproducible bugs.** For questions, feature discussion,
-  and feedback, use
+- Installers and the Windows binaries inside the portable ZIP are
+  Authenticode-signed; the ZIP container itself is checksummed, not
+  signed. SmartScreen can still warn for a new or low-reputation
+  publisher certificate; see
+  [getting-started.md](getting-started.md#about-the-smartscreen-warning).
+- GitHub Issues are for reproducible bugs. For questions, feature
+  discussion, and feedback, use
   [Discussions](https://github.com/amanthanvi/winghostty/discussions).
-- **No Nix / Flatpak / Snap packaging.** Upstream's Linux packaging surfaces
-  are removed.
-- **Generated help links.** A few generated help strings still link to
-  `github.com/ghostty-org/ghostty` rather than this fork.
-- **Crash capture is local-only.** Some hard-abort paths may still terminate
-  before Windows can produce a dump.
-- **Startup recovery is non-destructive.** Unreadable session state is
-  quarantined, never deleted; repeated startup failures fall back to safe
-  mode. Details in [windows.md](windows.md#session-restore-and-recovery).
-- **Diagnostic export is explicit.** `+diagnostic-bundle` redacts sensitive
-  data by default.
+- No supported Linux packaging. Upstream's Flatpak and Snap surfaces
+  are removed; the Nix files left over from upstream are untested and
+  unsupported here.
+- A few generated artifacts still reference upstream: the
+  `libghostty-vt` pkg-config `URL` field, the vim syntax-file headers,
+  and a link in the generated bash completions point at
+  `ghostty-org/ghostty`.
+- Crash capture is local-only, and some hard-abort paths may still
+  terminate before Windows can produce a dump.
 
 ## Out of scope
 
@@ -134,9 +148,9 @@ lands incrementally.
 - Flatpak, Snap, or other Linux desktop packaging.
 - Replicating upstream's community process or governance.
 
-## Informal roadmap signal
+## What's next
 
-No formal roadmap. Indicative next areas:
+No formal roadmap. Likely next areas:
 
 - Broader UI Automation / screen reader coverage.
 - Continuing the `src/apprt/win32.zig` extraction.

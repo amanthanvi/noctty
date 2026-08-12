@@ -1,4 +1,4 @@
-# winghostty Design System
+# winghostty design system
 
 This is the target visual and interaction contract for winghostty's native
 Windows shell. Existing implementation tokens remain authoritative until a
@@ -7,11 +7,11 @@ regressing platform behavior or accessibility.
 
 ## Direction
 
-Compact, adaptive, and terminal-first. The design target is a developer who
+Compact, adaptive, terminal-first. The design target is a developer who
 moves between a bright office, a dim home workspace, and mixed-DPI monitors
-while a long-running PowerShell or WSL session stays visible — so light,
-dark, system, and High Contrast modes are equal product states, not variants
-of one preferred theme.
+while a long-running PowerShell or WSL session stays visible. That means
+light, dark, system, and High Contrast modes are equal product states, not
+variants of one preferred theme.
 
 Color stays restrained. Neutral chrome carries the interface; Windows accent
 and semantic colors communicate selection, focus, warning, and failure. No
@@ -127,8 +127,8 @@ The shipped section list and save semantics are tracked in the
 - Ease out with a quart/quint curve. No bounce or elastic motion.
 - Animate compositor-friendly properties; do not animate terminal geometry
   when it delays viewport correctness.
-- Motion communicates selection, focus transfer, reveal, dismissal, drag, or
-  completion — never decoration.
+- Motion communicates a state change: selection, focus transfer, reveal,
+  dismissal, drag, or completion. It is never decoration.
 - Reduced Motion makes transitions instant or uses a minimal crossfade.
 - Settled UI has no animation or rendering heartbeat.
 
