@@ -173,8 +173,13 @@ opens the release page when a newer stable version exists.
 installer releases that ship architecture-specific SHA256 metadata, then
 verifies the installer's SHA-256 against that manifest and requires a
 valid Windows Authenticode signature before staging the installer under
-the local winghostty state directory. Unsigned installers fail that
-verification and are not staged.
+the local winghostty state directory. The signature check is not generic:
+the signer's public key must match a SHA-256 SPKI pin compiled into the
+app, so an installer signed by any other key is rejected even when its
+signature is otherwise valid. Unsigned installers fail that verification
+too, and neither is staged. See
+[ADR 0005](adr/0005-pin-updater-publisher-public-keys.md) for the pinning
+and key-rotation rules.
 
 For installer-managed installs, the update notice can launch the verified
 staged installer. Applying an update is always user-initiated: it
