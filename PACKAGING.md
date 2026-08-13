@@ -194,16 +194,21 @@ Recommended order:
 2. Configure or rotate the `release` environment signing secrets.
 3. Run the **Release Readiness** workflow with the target plain semver
    version, for example `1.3.107`.
-4. After readiness passes, either:
+4. Produce interactive evidence for the release SHA: register the
+   self-hosted interactive runner ephemerally, then dispatch the **Test**
+   workflow with `run_interactive_win11=true`. The interactive job runs
+   only on this opted-in dispatch, and the **Release** workflow refuses
+   to publish without its hash-bound evidence at the exact release SHA.
+5. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>`.
-5. Confirm the workflow published artifacts for both x64 and ARM64:
+6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
-6. Confirm follow-on publishes:
+7. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
 
