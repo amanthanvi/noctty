@@ -5,7 +5,7 @@ Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-07-11.
+Last reviewed: 2026-08-12.
 
 ## Status legend
 
@@ -21,7 +21,7 @@ Last reviewed: 2026-07-11.
 | Ghostty docs surface                                                                                               | winghostty note                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\winghostty\config.ghostty`; live reload via `Ctrl+Shift+,`.                             |
-| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; default bindings are Windows-native.                                                         |
+| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; defaults are the shared non-macOS set with Windows-specific exceptions.                      |
 | [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                 |
 | [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Transparent terminal backgrounds work on Windows and can be toggled live.                                                                                       |
 | [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface. Win32-validated coverage: [windows-vt-conformance.md](windows-vt-conformance.md). |
@@ -92,7 +92,8 @@ Configurable actions, live tabs, panes, Windows profiles, installed themes,
 native settings, reviewed help destinations, and keyboard tab-to-pane moves
 share one typed, fuzzy-ranked list with:
 
-- category prefixes (`>`, `@`, `/`, `~`, `:`) and keyboard navigation
+- category prefixes (`>`, `@`, `/`, `~`, `:`, `%`, `!`, `?`) and keyboard
+  navigation
 - stable dispatch IDs and destructive/disabled semantics
 - UI Automation selection announcements
 - reversible live theme preview before commit (High Contrast suppresses

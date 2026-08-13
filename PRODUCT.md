@@ -7,24 +7,25 @@ principles lives in [DESIGN.md](DESIGN.md).
 ## Users
 
 winghostty is for keyboard-first Windows developers who move between
-PowerShell and WSL, keep several tabs and panes open, run long-lived shells
-and TUIs, and expect their session layout to survive restarts. The canonical
-benchmark user values native Windows behavior, immediate feedback, and deep
-terminal capability more than cross-platform uniformity.
+PowerShell and WSL, keep several tabs and panes open, run long-lived
+shells and TUIs, and expect their session layout to survive restarts. The
+canonical benchmark user values native Windows behavior, immediate
+feedback, and deep terminal capability more than cross-platform
+uniformity.
 
-## Product Purpose
+## Product purpose
 
 winghostty exists to provide the fastest, most fluid native terminal
-workflow for Windows developers. Success looks like this: PowerShell, WSL,
-tabs, splits, search, session restoration, and keyboard navigation feel
-instantaneous and dependable — while Ghostty's terminal core and
-compatibility stay intact.
+workflow for Windows developers. Success means PowerShell, WSL, tabs,
+splits, search, session restoration, and keyboard navigation all feel
+instantaneous and dependable, while keeping Ghostty's terminal core and
+compatibility intact.
 
-## Brand Personality
+## Brand personality
 
-Native, credible, precise. The interface should feel calm under sustained
-work, clear under failure, and confident without calling attention away from
-terminal content.
+Native, credible, precise. The interface should stay calm during
+sustained work and clear when something fails, without pulling attention
+away from terminal content.
 
 References:
 
@@ -43,21 +44,21 @@ References:
 - Hidden state, novelty controls, and pointer-only workflows.
 - Feature-count competition that weakens performance or reliability.
 
-## Design Principles
+## Design principles
 
-1. **Terminal content dominates.** Chrome earns every pixel and every
-   repaint.
-2. **Flow over ceremony.** Frequent actions stay direct, keyboard-first, and
-   discoverable without onboarding gates.
-3. **Native where behavior matters.** Follow Windows conventions for focus,
-   input, accessibility, windowing, menus, and recovery.
-4. **Quiet but unmistakable state.** Focus, selection, progress, and failure
-   are always clear without visual noise.
-5. **Reliability is a product feature.** Preserve user state, fail visibly,
-   and provide a safe path back to a working terminal.
+1. Terminal content comes first. Chrome has to justify every pixel and
+   every repaint.
+2. Frequent actions stay direct, keyboard-first, and discoverable
+   without onboarding gates.
+3. Be native where behavior matters: follow Windows conventions for
+   focus, input, accessibility, windowing, menus, and recovery.
+4. Keep focus, selection, progress, and failure visible without visual
+   noise.
+5. Treat reliability as a feature: preserve user state, fail visibly,
+   and always leave a path back to a working terminal.
 
-## Accessibility & Inclusion
+## Accessibility & inclusion
 
-Application chrome targets WCAG 2.2 AA-equivalent contrast and full keyboard
-operation; the complete accessibility targets are defined in
+Application chrome targets WCAG 2.2 AA-equivalent contrast and full
+keyboard operation; the complete accessibility targets are defined in
 [DESIGN.md](DESIGN.md#accessibility-targets).

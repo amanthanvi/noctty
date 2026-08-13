@@ -1,4 +1,4 @@
-# Packaging winghostty for Distribution
+# Packaging winghostty for distribution
 
 This repository publishes Windows user artifacts directly from GitHub
 Releases. The public packaging targets are:
@@ -17,7 +17,7 @@ Primary distribution URL:
 https://github.com/amanthanvi/winghostty/releases
 ```
 
-## Release Inputs
+## Release inputs
 
 winghostty releases use plain semver tags such as `v1.3.100`:
 
@@ -52,7 +52,7 @@ regression gate for the published Windows executable bytes; it does not replace
 a publicly trusted signing identity or reproduce every enterprise security
 policy.
 
-## Local Packaging
+## Local packaging
 
 Build the app first:
 
@@ -117,7 +117,7 @@ This emits:
 - `dist/artifacts/winghostty-<version>-windows-x64/package-managers/scoop/`
 - `dist/artifacts/winghostty-<version>-windows-x64/package-managers/metadata.json`
 
-## Release Automation
+## Release automation
 
 The release workflow publishes to the official Windows package-manager
 tracks after the GitHub Release is live. The preflight fails closed unless
@@ -132,7 +132,7 @@ Automated releases should use a dedicated GitHub Actions environment named
 the repo default secret scope and runs `scripts/release-preflight.ps1`
 before build/test/package work starts.
 
-### Authenticode Signing
+### Authenticode signing
 
 Required for the GitHub `Release` workflow:
 
@@ -173,19 +173,19 @@ to DigiCert when the variable is absent.
 
 > **Security note:** set `WINDOWS_CODESIGN_TRUST_SELF_SIGNED` in the
 > `release` environment only while the release identity is intentionally
-> self-signed, and remove it as soon as a publicly trusted certificate is in
-> use — with the variable unset, signature validation fails closed on
+> self-signed, and remove it as soon as a publicly trusted certificate is
+> in use. With the variable unset, signature validation fails closed on
 > untrusted roots instead of accepting them.
 
 When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps
-internal/self-signed release probes green on the current runner — but it
+internal/self-signed release probes green on the current runner, but it
 does not create public publisher trust on other machines. Until winghostty
 moves from internal/self-signed signing to a publicly trusted certificate,
 treat SmartScreen and publisher trust as incomplete.
 
-### Release Runbook
+### Release runbook
 
 Recommended order:
 
@@ -246,13 +246,13 @@ scoop install winghostty/winghostty
 Release preflight verifies that the configured manifest exists, defaulting
 to `bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
-## Zig Version
+## Zig version
 
 This repo is pinned to Zig `0.15.2` in CI, and packaging should use the same
 Zig version unless the repo is intentionally updated to a newer one. The
 full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
-## Library Consumers
+## Library consumers
 
 `libghostty-vt` remains intentionally retained and keeps its existing public
 name. The app binary and Windows packaging are rebranded to `winghostty`,
