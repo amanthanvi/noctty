@@ -2,7 +2,7 @@
 
 - Label: wayfinder:research
 - Status: open
-- Assignee:
+- Assignee: research subagent (fired at charting, 2026-08-17)
 - Blocked-by: (none)
 
 ## Question
