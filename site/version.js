@@ -1,29 +1,12 @@
-import { ColorDots } from './color-dots.jsx';
+// Release version chip: shows the compiled default immediately, then
+// refreshes from GitHub Releases when the browser is idle. Never downgrades
+// below the compiled version.
 
-const { useEffect, useState } = React;
 const DEFAULT_WG_VERSION = '1.3.123';
 const WG_REPO = 'amanthanvi/winghostty';
 const CACHE_KEY = 'wg-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const RELEASE_FETCH_TIMEOUT_MS = 4000;
-
-function readCachedVersion() {
-  try {
-    const cached = sessionStorage.getItem(CACHE_KEY);
-    if (!cached) return null;
-    const parsed = JSON.parse(cached);
-    if (!parsed?.tag || Date.now() - parsed.ts > CACHE_TTL_MS) return null;
-    return normalizeStableSemver(parsed.tag);
-  } catch (e) {
-    return null;
-  }
-}
-
-function cacheVersion(tag) {
-  try {
-    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ tag, ts: Date.now() }));
-  } catch (e) {}
-}
 
 function normalizeStableSemver(value) {
   const match = String(value || '').match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
@@ -44,6 +27,33 @@ function compareSemver(a, b) {
   return 0;
 }
 
+function readCachedVersion() {
+  try {
+    const cached = sessionStorage.getItem(CACHE_KEY);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached);
+    if (!parsed?.tag || Date.now() - parsed.ts > CACHE_TTL_MS) return null;
+    return normalizeStableSemver(parsed.tag);
+  } catch (e) {
+    return null;
+  }
+}
+
+function cacheVersion(tag) {
+  try {
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ tag, ts: Date.now() }));
+  } catch (e) {}
+}
+
+function renderVersion(version) {
+  const chip = document.getElementById('wg-version');
+  if (chip) chip.textContent = `v${version}`;
+  const summary = document.getElementById('wg-version-summary');
+  if (summary) {
+    summary.textContent = `Version ${version}, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.`;
+  }
+}
+
 function shouldPublishVersion(tag) {
   const normalizedTag = normalizeStableSemver(tag);
   const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
@@ -57,6 +67,7 @@ function publishVersion(tag) {
   const normalizedTag = normalizeStableSemver(tag);
   if (!normalizedTag || !shouldPublishVersion(normalizedTag)) return false;
   window.WG_VERSION = normalizedTag;
+  renderVersion(normalizedTag);
   window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: normalizedTag } }));
   return true;
 }
@@ -94,37 +105,5 @@ function scheduleLatestVersionFetch() {
   idle(fetchLatestVersion, { timeout: RELEASE_FETCH_TIMEOUT_MS });
 }
 
-if (typeof window !== 'undefined') {
-  window.WG_VERSION = window.WG_VERSION || DEFAULT_WG_VERSION;
-  scheduleLatestVersionFetch();
-}
-
-function useLiveVersion() {
-  const [v, setV] = useState(() => (typeof window !== 'undefined' && window.WG_VERSION) || DEFAULT_WG_VERSION);
-
-  useEffect(() => {
-    const onUpdate = (e) => {
-      const newV = e?.detail?.version || window.WG_VERSION || DEFAULT_WG_VERSION;
-      setV(newV);
-    };
-    window.addEventListener('wg-version-updated', onUpdate);
-    return () => window.removeEventListener('wg-version-updated', onUpdate);
-  }, []);
-
-  return v;
-}
-
-export function VersionChipColor() {
-  const v = useLiveVersion();
-  return (
-    <span className="wg-hero__badge">
-      <ColorDots />
-      <span className="wg-hero__badge-version">{`v${v}`}</span>
-      <span className="wg-hero__badge-latest">latest</span>
-      <span className="wg-hero__badge-sep" aria-hidden="true" />
-      <span className="wg-hero__badge-meta">Win 10/11 · x64 + ARM64</span>
-      <span className="wg-hero__badge-sep" aria-hidden="true" />
-      <span className="wg-hero__badge-stack">MIT · OpenGL 4.3</span>
-    </span>
-  );
-}
+window.WG_VERSION = window.WG_VERSION || DEFAULT_WG_VERSION;
+scheduleLatestVersionFetch();

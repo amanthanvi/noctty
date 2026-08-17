@@ -230,10 +230,8 @@ $expectedCspDirectives = [ordered]@{
     'script-src-attr' = $expectedScriptAttributeSources
     'style-src' = @(
         "'self'",
-        "'unsafe-inline'",
         'https://fonts.googleapis.com'
     )
-    'style-src-attr' = @("'unsafe-inline'")
     'font-src' = @("'self'", 'https://fonts.gstatic.com')
     'connect-src' = @("'self'", 'https://api.github.com')
     'img-src' = @("'self'", 'data:')

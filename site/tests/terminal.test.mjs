@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildScenes,
   observeElementVisibility,
   subscribeToMediaQuery,
-} from '../components/terminal/activity.js';
+} from '../terminal.js';
 
 test('media query subscription uses only the modern API when available', () => {
   const calls = [];
@@ -69,4 +70,19 @@ test('viewport observation forwards visibility and disconnects', () => {
   assert.equal(observed, element);
   assert.deepEqual(visibility, [true]);
   assert.equal(disconnected, true);
+});
+
+test('demo scenes keep the release-copy guardrail needles', () => {
+  const scenes = buildScenes('9.9.9');
+  const text = scenes
+    .flatMap((scene) => scene.lines.map((line) => line.text))
+    .join('\n');
+
+  assert.match(text, /PROCESSOR_ARCHITEW6432/);
+  assert.match(text, /windows-\$arch-setup\.exe/);
+  assert.match(text, /windows-\$arch-portable\.zip/);
+  assert.match(text, /x64 and ARM64/);
+  assert.match(text, /SmartScreen may still warn while reputation builds\./);
+  assert.match(text, /%LOCALAPPDATA%\\winghostty\\config\.ghostty/);
+  assert.match(text, /winghostty-9\.9\.9-windows-\$arch-setup\.exe/);
 });

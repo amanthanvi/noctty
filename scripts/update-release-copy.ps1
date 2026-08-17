@@ -23,8 +23,9 @@ $previous = $Matches.version
 foreach ($relative in @(
     'README.md',
     'docs/getting-started.md',
-    'site/components/hero/version-chip-color.jsx',
-    'site/components/terminal.jsx'
+    'site/index.html',
+    'site/version.js',
+    'site/terminal.js'
 )) {
     $path = Join-Path $repoRoot $relative
     $text = [System.IO.File]::ReadAllText($path).Replace($previous, $Version)
@@ -35,8 +36,8 @@ foreach ($relative in @(
 }
 
 if (-not $SkipSiteBuild) {
-    & node (Join-Path $repoRoot 'scripts/build-site-bundle.mjs')
-    if ($LASTEXITCODE -ne 0) { throw "Site bundle build failed with exit code $LASTEXITCODE." }
+    & node (Join-Path $repoRoot 'scripts/build-site-assets.mjs')
+    if ($LASTEXITCODE -ne 0) { throw "Site asset refresh failed with exit code $LASTEXITCODE." }
 }
 
 & (Join-Path $PSScriptRoot 'check-release-copy.ps1')

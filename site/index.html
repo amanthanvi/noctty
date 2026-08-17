@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="wg-no-js">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -27,46 +27,260 @@
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link rel="preload" as="script" href="vendor/react.production.min.js" />
-  <link rel="preload" as="script" href="vendor/react-dom.production.min.js" />
-  <link rel="preload" as="script" href="bundle.js?v=0dcc9e32f45e5c51b1728807de38d79390e2460b46fbeb024ee8489aaf3aa4b3" />
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'" />
-  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" /></noscript>
-  <link rel="stylesheet" href="styles.css?v=3bce8a639e306659d3edc3c73ebdb0ccdf8e23342d09833bf72856243c04c986" />
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" media="print" onload="this.media='all'" />
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" /></noscript>
+  <link rel="stylesheet" href="styles.css?v=3c0a83ca7a1a34272ea6aedc4ccbdf9d30a2caed9002de2858b70fab0b08c9b7" />
   <script>
     (function () {
+      var root = document.documentElement;
+      root.className = root.className.replace(/\bwg-no-js\b/, "wg-js");
       try {
-        var t = localStorage.getItem('wg-theme') || 'dark';
-        document.documentElement.setAttribute('data-theme', t);
+        root.setAttribute("data-theme", localStorage.getItem("wg-theme") || "dark");
       } catch (e) {}
     })();
   </script>
 </head>
 <body>
-  <div id="root"></div>
-  <noscript>
-    <main class="wg-noscript">
-      <div class="wg-container">
-        <h1>Winghostty for Windows</h1>
-        <p class="wg-noscript__actions">
-          Winghostty pairs Ghostty's terminal core with a native Windows app for Windows 10 and 11
-          on x64 and ARM64. The current stable release is available from GitHub Releases.
+  <a class="wg-skip-link" href="#main-content">Skip to content</a>
+
+  <header class="wg-topbar">
+    <div class="wg-container wg-topbar__inner">
+      <a href="/" class="wg-wordmark-link" aria-label="Winghostty home">
+        <span class="wg-wordmark">
+          <svg width="24" height="28" viewBox="0 0 27 32" fill="none" aria-hidden="true">
+            <defs>
+              <clipPath id="wg-mk-a-tl"><rect x="0" y="0" width="13.36" height="16" /></clipPath>
+              <clipPath id="wg-mk-a-tr"><rect x="13.36" y="0" width="13.64" height="16" /></clipPath>
+              <clipPath id="wg-mk-a-bl"><rect x="0" y="16" width="13.36" height="16" /></clipPath>
+              <clipPath id="wg-mk-a-br"><rect x="13.36" y="16" width="13.64" height="16" /></clipPath>
+            </defs>
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#F25022" clip-path="url(#wg-mk-a-tl)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#7FBA00" clip-path="url(#wg-mk-a-tr)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#00A4EF" clip-path="url(#wg-mk-a-bl)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#FFB900" clip-path="url(#wg-mk-a-br)" />
+            <path class="wg-mark__outline" d="M20.4 30.59C19.28 30.59 18.18 30.21 17.32 29.51C17.16 29.39 17 29.36 16.9 29.36C16.72 29.36 16.55 29.43 16.41 29.54C15.55 30.22 14.46 30.6 13.36 30.6C12.26 30.6 11.18 30.22 10.32 29.54C10.18 29.43 10.01 29.37 9.85 29.37C9.68 29.37 9.51 29.43 9.37 29.54C8.51 30.22 7.47 30.59 6.36 30.6H6.33C5.02 30.6 3.78 30.07 2.84 29.11C1.92 28.17 1.41 26.93 1.41 25.62V13.37C1.41 6.77 6.77 1.41 13.36 1.41C19.95 1.41 25.32 6.77 25.32 13.36V25.62C25.32 28.26 23.28 30.44 20.67 30.59C20.58 30.59 20.49 30.59 20.4 30.59Z" />
+            <path class="wg-mark__ghost" d="M23.91 13.36V25.62C23.91 27.49 22.47 29.08 20.59 29.18C19.68 29.23 18.84 28.94 18.19 28.41C17.42 27.79 16.32 27.82 15.54 28.43C14.94 28.91 14.18 29.19 13.36 29.19C12.54 29.19 11.78 28.91 11.19 28.43C10.39 27.81 9.3 27.81 8.5 28.43C7.91 28.9 7.16 29.18 6.35 29.19C4.4 29.2 2.81 27.56 2.81 25.61V13.36C2.81 7.54 7.54 2.81 13.36 2.81C19.19 2.81 23.91 7.54 23.91 13.36Z" />
+            <path class="wg-mark__glyph" d="M11.28 12.44L7.35 10.17C6.84 9.87 6.18 10.05 5.89 10.56C5.59 11.07 5.77 11.73 6.28 12.02L8.6 13.37L6.28 14.71C5.77 15 5.59 15.66 5.89 16.17C6.18 16.68 6.84 16.86 7.35 16.56L11.28 14.29C11.99 13.88 11.99 12.85 11.28 12.44V12.44Z" />
+            <path class="wg-mark__glyph" d="M20.18 12.29H15.02C14.43 12.29 13.95 12.77 13.95 13.36C13.95 13.96 14.42 14.43 15.02 14.43H20.18C20.77 14.43 21.25 13.96 21.25 13.36C21.25 12.77 20.78 12.29 20.18 12.29Z" />
+          </svg>
+          <span class="wg-wordmark__text">Winghostty</span>
+        </span>
+      </a>
+      <button type="button" class="wg-theme-toggle" id="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
+        <svg width="22" height="26" viewBox="0 0 27 32" fill="none" aria-hidden="true">
+          <path class="wg-theme-toggle__ghost" d="M20.4 30.59C19.28 30.59 18.18 30.21 17.32 29.51C17.16 29.39 17 29.36 16.9 29.36C16.72 29.36 16.55 29.43 16.41 29.54C15.55 30.22 14.46 30.6 13.36 30.6C12.26 30.6 11.18 30.22 10.32 29.54C10.18 29.43 10.01 29.37 9.85 29.37C9.68 29.37 9.51 29.43 9.37 29.54C8.51 30.22 7.47 30.59 6.36 30.6H6.33C5.02 30.6 3.78 30.07 2.84 29.11C1.92 28.17 1.41 26.93 1.41 25.62V13.37C1.41 6.77 6.77 1.41 13.36 1.41C19.95 1.41 25.32 6.77 25.32 13.36V25.62C25.32 28.26 23.28 30.44 20.67 30.59C20.58 30.59 20.49 30.59 20.4 30.59Z" fill="currentColor" />
+          <g class="wg-theme-toggle__glyphs">
+            <path class="wg-theme-toggle__glyph" d="M11.28 12.44L7.35 10.17C6.84 9.87 6.18 10.05 5.89 10.56C5.59 11.07 5.77 11.73 6.28 12.02L8.6 13.37L6.28 14.71C5.77 15 5.59 15.66 5.89 16.17C6.18 16.68 6.84 16.86 7.35 16.56L11.28 14.29C11.99 13.88 11.99 12.85 11.28 12.44V12.44Z" />
+            <path class="wg-theme-toggle__glyph" d="M20.18 12.29H15.02C14.43 12.29 13.95 12.77 13.95 13.36C13.95 13.96 14.42 14.43 15.02 14.43H20.18C20.77 14.43 21.25 13.96 21.25 13.36C21.25 12.77 20.78 12.29 20.18 12.29Z" />
+          </g>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <div class="wg-container wg-section wg-section--lead">
+      <section class="wg-hero" id="download" aria-labelledby="hero-title">
+        <div class="wg-hero-copy">
+          <p class="wg-hero__badge">
+            <span class="wg-sr-only" id="wg-version-summary">Version 1.3.123, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
+            <span class="wg-hero__badge-visual" aria-hidden="true">
+              <span class="wg-color-dots">
+                <span class="wg-color-dot wg-color-dot--red"><span class="wg-color-dot__chip"></span></span>
+                <span class="wg-color-dot wg-color-dot--green"><span class="wg-color-dot__chip"></span></span>
+                <span class="wg-color-dot wg-color-dot--blue"><span class="wg-color-dot__chip"></span></span>
+                <span class="wg-color-dot wg-color-dot--yellow"><span class="wg-color-dot__chip"></span></span>
+              </span>
+              <span class="wg-hero__badge-version" id="wg-version">v1.3.123</span>
+              <span class="wg-hero__badge-latest">latest</span>
+              <span class="wg-hero__badge-sep"></span>
+              <span class="wg-hero__badge-meta">Win 10/11 · x64 + ARM64</span>
+              <span class="wg-hero__badge-sep"></span>
+              <span class="wg-hero__badge-stack">MIT · OpenGL 4.3</span>
+            </span>
+          </p>
+
+          <div class="wg-hero__intro">
+            <h1 class="wg-hero__title" id="hero-title">
+              Ghostty<span class="wg-accent-red">,</span><br class="wg-hero__mobile-break" /> finally<br />
+              on Windows<span class="wg-accent-blue">.</span>
+            </h1>
+            <p class="wg-hero__caption">
+              Winghostty puts Ghostty&rsquo;s terminal core inside a native Win32 app.
+              You get tabs and splits, session restoration, a real settings window,
+              and a keyboard-driven palette for everything else.
+            </p>
+          </div>
+
+          <div class="wg-hero__actions">
+            <a class="wg-button wg-button--primary" href="https://github.com/amanthanvi/winghostty/releases/latest" target="_blank" rel="noreferrer">
+              Download latest<span aria-hidden="true"> ↗</span>
+            </a>
+            <div class="wg-install">
+              <div class="wg-install__row">
+                <span class="wg-install__sigil" aria-hidden="true">$</span>
+                <code class="wg-install__command" id="wg-install-command" title="winget install AmanThanvi.winghostty">winget install AmanThanvi.winghostty</code>
+                <button type="button" class="wg-install__copy" id="wg-install-copy" aria-label="Copy install command">
+                  <svg class="wg-install__copy-icon wg-install__copy-icon--copy" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <rect x="5.5" y="5.5" width="8" height="9" rx="1" stroke="currentColor" stroke-width="1.25" />
+                    <path d="M5 10.5H4a1.5 1.5 0 0 1-1.5-1.5V3.5A1.5 1.5 0 0 1 4 2h6a1.5 1.5 0 0 1 1.5 1.5V5" stroke="currentColor" stroke-width="1.25" />
+                  </svg>
+                  <svg class="wg-install__copy-icon wg-install__copy-icon--copied" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <span class="wg-sr-only" aria-live="polite" id="wg-install-status"></span>
+              </div>
+              <fieldset class="wg-install__methods">
+                <legend class="wg-sr-only">Install method</legend>
+                <label class="wg-install__method">
+                  <input type="radio" name="install-method" value="winget" checked />
+                  <span>WinGet</span>
+                </label>
+                <label class="wg-install__method">
+                  <input type="radio" name="install-method" value="scoop" />
+                  <span>Scoop</span>
+                </label>
+              </fieldset>
+              <noscript>
+                <p class="wg-install__alt">
+                  Scoop: <code>scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty</code>
+                  then <code>scoop install winghostty/winghostty</code>
+                </p>
+              </noscript>
+            </div>
+          </div>
+
+          <div class="wg-hero__terminal">
+            <section class="wg-terminal" data-wg-terminal data-motion="paused" aria-label="Winghostty terminal demo">
+              <div class="wg-terminal__chrome">
+                <div class="wg-terminal__title">winghostty — PowerShell</div>
+                <button type="button" class="wg-terminal__motion" aria-label="Play terminal demo" title="Play terminal demo">Play</button>
+                <div class="wg-terminal__caption" aria-hidden="true">
+                  <span class="wg-terminal__caption-btn"></span>
+                  <span class="wg-terminal__caption-btn"></span>
+                  <span class="wg-terminal__caption-btn wg-terminal__caption-btn--close"></span>
+                </div>
+              </div>
+              <div class="wg-terminal__body" role="log" aria-live="off" tabindex="0" aria-label="Terminal demo output">
+                <p><span class="wg-terminal__prompt">PS C:\Users\dev&gt;</span><span class="wg-terminal__live">$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }</span></p>
+                <p><span class="wg-terminal__prompt">PS C:\Users\dev&gt;</span><span class="wg-terminal__live">$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }</span></p>
+                <p><span class="wg-terminal__prompt">PS C:\Users\dev&gt;</span><span class="wg-terminal__live">iwr https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/winghostty-1.3.123-windows-$arch-setup.exe -OutFile winghostty-setup.exe</span></p>
+                <p><span class="wg-terminal__prompt">PS C:\Users\dev&gt;</span><span class="wg-terminal__live">.\winghostty-setup.exe</span></p>
+                <div class="wg-terminal__line wg-terminal__line--dim">→ installer build: Start menu entry and standard uninstall path</div>
+                <div class="wg-terminal__line wg-terminal__line--dim">→ x64 and ARM64 installers are Authenticode-signed.</div>
+                <div class="wg-terminal__line wg-terminal__line--dim">→ SmartScreen may still warn while reputation builds.</div>
+                <p><span class="wg-terminal__prompt">PS C:\Users\dev&gt;</span><span class="wg-terminal__live"><span class="wg-caret" aria-hidden="true">▋</span></span></p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="wg-container wg-section wg-section--follow" aria-labelledby="features-title">
+      <h2 class="wg-section-label" id="features-title">What you get</h2>
+      <ul class="wg-features" role="list">
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--red" aria-hidden="true"></span>GPU rendering</h3>
+          <p>Ghostty&rsquo;s terminal core draws every frame through OpenGL 4.3+ via WGL. Native window chrome renders on its own pipeline.</p>
+        </li>
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--green" aria-hidden="true"></span>Tabs and splits</h3>
+          <p>A real Win32 workspace with tabs, horizontal and vertical splits, and per-profile shells. IME input and drag-and-drop follow Windows conventions on x64 and ARM64.</p>
+        </li>
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--blue" aria-hidden="true"></span>Session restoration</h3>
+          <p>Close Winghostty and reopen it to the same windows, tabs, and split layouts. Working directories, profiles, and explicit titles come back too.</p>
+        </li>
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--yellow" aria-hidden="true"></span>Native settings</h3>
+          <p>A settings window covers appearance, shells, keybindings, privacy, and updates. Changes are staged, then saved without rewriting unrelated lines of your config.</p>
+        </li>
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--red" aria-hidden="true"></span>Universal palette</h3>
+          <p>Press one shortcut and type a few characters to reach any action, tab, pane, or setting. Fuzzy search covers profiles and themes too.</p>
+        </li>
+        <li class="wg-feature">
+          <h3 class="wg-feature__name"><span class="wg-feature__dot wg-feature__dot--blue" aria-hidden="true"></span>Signed updates</h3>
+          <p>Nothing installs behind your back. Download mode stages an installer only after SHA-256 and Authenticode checks pass, and you choose when to run it.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section class="wg-container wg-section wg-section--why" aria-labelledby="why-title">
+      <h2 class="wg-section-label" id="why-title">Why a fork?</h2>
+      <div class="wg-why">
+        <p>
+          Ghostty does not ship a Windows app today, so Winghostty builds one around
+          Ghostty&rsquo;s terminal core. The core is shared with upstream; the application
+          runtime, windowing, settings, and updater are this fork&rsquo;s own work.
         </p>
         <p>
-          <a class="wg-button wg-button--primary" href="https://github.com/amanthanvi/winghostty/releases/latest">Current release</a>
-          <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/winghostty/blob/main/docs/getting-started.md">Getting started</a>
+          Public releases are out now for Windows 10 and 11 on x64 and ARM64. Installers
+          and Windows binaries are Authenticode-signed, but SmartScreen may still warn
+          while reputation builds. Click More info, then Run anyway. The project moves
+          quickly, so read the release notes before updating.
         </p>
-        <h2>Install with WinGet</h2>
-        <pre><code>winget install AmanThanvi.winghostty</code></pre>
-        <h2>Install with Scoop</h2>
-        <pre><code>scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
-scoop install winghostty/winghostty</code></pre>
+        <p>
+          There is no telemetry and there are no analytics. The only network traffic is
+          the update check against GitHub Releases, and download mode stages a verified
+          signed installer that waits for your confirmation.
+        </p>
+        <p>
+          Windows UI Automation support is partial, not complete. Terminal text, focus,
+          selection, the command palette, and native settings controls have coverage
+          today; broader per-widget and screen-reader validation is still in progress.
+        </p>
       </div>
-    </main>
-  </noscript>
-  <script defer src="vendor/react.production.min.js"></script>
-  <script defer src="vendor/react-dom.production.min.js"></script>
-  <script defer src="bundle.js?v=0dcc9e32f45e5c51b1728807de38d79390e2460b46fbeb024ee8489aaf3aa4b3"></script>
+    </section>
+  </main>
+
+  <div class="wg-container">
+    <footer class="wg-footer">
+      <div class="wg-footer__top">
+        <span class="wg-wordmark wg-wordmark--footer">
+          <svg width="20" height="24" viewBox="0 0 27 32" fill="none" aria-hidden="true">
+            <defs>
+              <clipPath id="wg-mk-b-tl"><rect x="0" y="0" width="13.36" height="16" /></clipPath>
+              <clipPath id="wg-mk-b-tr"><rect x="13.36" y="0" width="13.64" height="16" /></clipPath>
+              <clipPath id="wg-mk-b-bl"><rect x="0" y="16" width="13.36" height="16" /></clipPath>
+              <clipPath id="wg-mk-b-br"><rect x="13.36" y="16" width="13.64" height="16" /></clipPath>
+            </defs>
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#F25022" clip-path="url(#wg-mk-b-tl)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#7FBA00" clip-path="url(#wg-mk-b-tr)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#00A4EF" clip-path="url(#wg-mk-b-bl)" />
+            <path d="M20.4 32C19.14 32 17.92 31.62 16.88 30.93C15.84 31.62 14.61 32 13.36 32C12.11 32 10.88 31.62 9.85 30.93C8.82 31.62 7.63 31.99 6.37 32H6.33C4.63 32 3.04 31.32 1.83 30.09C0.65 28.88 -0 27.29 -0 25.61V13.36C-9.71e-05 5.99 5.99 0 13.36 0C20.73 0 26.73 5.99 26.73 13.36V25.62C26.73 29.01 24.1 31.81 20.75 31.99C20.63 32 20.51 32 20.4 32Z" fill="#FFB900" clip-path="url(#wg-mk-b-br)" />
+            <path class="wg-mark__outline" d="M20.4 30.59C19.28 30.59 18.18 30.21 17.32 29.51C17.16 29.39 17 29.36 16.9 29.36C16.72 29.36 16.55 29.43 16.41 29.54C15.55 30.22 14.46 30.6 13.36 30.6C12.26 30.6 11.18 30.22 10.32 29.54C10.18 29.43 10.01 29.37 9.85 29.37C9.68 29.37 9.51 29.43 9.37 29.54C8.51 30.22 7.47 30.59 6.36 30.6H6.33C5.02 30.6 3.78 30.07 2.84 29.11C1.92 28.17 1.41 26.93 1.41 25.62V13.37C1.41 6.77 6.77 1.41 13.36 1.41C19.95 1.41 25.32 6.77 25.32 13.36V25.62C25.32 28.26 23.28 30.44 20.67 30.59C20.58 30.59 20.49 30.59 20.4 30.59Z" />
+            <path class="wg-mark__ghost" d="M23.91 13.36V25.62C23.91 27.49 22.47 29.08 20.59 29.18C19.68 29.23 18.84 28.94 18.19 28.41C17.42 27.79 16.32 27.82 15.54 28.43C14.94 28.91 14.18 29.19 13.36 29.19C12.54 29.19 11.78 28.91 11.19 28.43C10.39 27.81 9.3 27.81 8.5 28.43C7.91 28.9 7.16 29.18 6.35 29.19C4.4 29.2 2.81 27.56 2.81 25.61V13.36C2.81 7.54 7.54 2.81 13.36 2.81C19.19 2.81 23.91 7.54 23.91 13.36Z" />
+            <path class="wg-mark__glyph" d="M11.28 12.44L7.35 10.17C6.84 9.87 6.18 10.05 5.89 10.56C5.59 11.07 5.77 11.73 6.28 12.02L8.6 13.37L6.28 14.71C5.77 15 5.59 15.66 5.89 16.17C6.18 16.68 6.84 16.86 7.35 16.56L11.28 14.29C11.99 13.88 11.99 12.85 11.28 12.44V12.44Z" />
+            <path class="wg-mark__glyph" d="M20.18 12.29H15.02C14.43 12.29 13.95 12.77 13.95 13.36C13.95 13.96 14.42 14.43 15.02 14.43H20.18C20.77 14.43 21.25 13.96 21.25 13.36C21.25 12.77 20.78 12.29 20.18 12.29Z" />
+          </svg>
+          <span class="wg-wordmark__text">Winghostty</span>
+        </span>
+        <nav class="wg-footer__links" aria-label="Project links">
+          <a href="https://github.com/amanthanvi/winghostty" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/amanthanvi/winghostty/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/amanthanvi/winghostty/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>
+          <a href="https://github.com/amanthanvi/winghostty/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer">Report bug</a>
+          <a href="https://github.com/amanthanvi/winghostty/blob/main/docs/status.md" target="_blank" rel="noopener noreferrer">Status</a>
+          <a href="https://github.com/amanthanvi/winghostty/blob/main/docs/getting-started.md" target="_blank" rel="noopener noreferrer">Getting started</a>
+        </nav>
+      </div>
+      <div class="wg-footer__bottom">
+        <span>
+          Built on Ghostty&rsquo;s terminal core by Mitchell Hashimoto &amp; contributors.
+          Win32 runtime by <a href="https://github.com/amanthanvi" target="_blank" rel="noopener noreferrer">@amanthanvi</a>.
+        </span>
+        <span>MIT licensed. Not affiliated with upstream Ghostty.</span>
+      </div>
+    </footer>
+  </div>
+
+  <script defer src="app.js?v=113e9150fa49b29393d89fc58a691314977b03da0cf7853199627c62f4d98eae"></script>
+  <script type="module" src="version.js?v=f487b0d5ebce75250b274d5c6acceb3b8cf188c27b472f9de77f562599a3424f"></script>
+  <script type="module" src="install.js?v=86d2b7623e6566a040927c5b8ee5692e88ac369b910663f81cb2d64bd718076f"></script>
+  <script type="module" src="terminal.js?v=84a12a93856c5e007c53af4fdb0b19c9f91f567e2d4645fb5069fad164e72419"></script>
 </body>
 </html>
