@@ -96,6 +96,14 @@ deliverable.
   libghostty). Live finding: upstream maintainer says unaffiliated
   projects must not use "Ghostty" in branding, naming winghostty
   specifically — rename risk is a decision item.
+- [Synthesis: ranked gap list](tickets/S01-synthesis.md) — 37 candidates
+  (26 provisional adopts, 11 defers), 9 PRODUCT.md frame challenges, 11
+  staged rejects, ranked in
+  [research/synthesis.md](research/synthesis.md). Code check: status.md
+  undersells shipped features (quick terminal, toasts, taskbar
+  progress, docked search all exist) — six claimed gaps deduped into
+  one docs-accuracy item. Decision-first: naming/trademark (F1),
+  upstream-relations posture (F2).
 
 ## Not yet specified
 
