@@ -1,6 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = @import("../quirks.zig").inlineAssert;
 const freetype = @import("freetype");
 const Collection = @import("main.zig").Collection;
 const DeferredFace = @import("main.zig").DeferredFace;
@@ -11,10 +11,38 @@ const log = std.log.scoped(.discovery);
 
 pub const Discover = Windows;
 
+/// Font discovery for Windows. Fonts are enumerated from three sources:
+///
+///   1. The system font directory (%WINDIR%\Fonts)
+///   2. The per-user font directory (%LOCALAPPDATA%\Microsoft\Windows\Fonts),
+///      which is where Windows 10 1809+ installs fonts by default
+///   3. The per-user font registry key
+///      (HKCU\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts), which
+///      catches fonts registered at arbitrary paths (e.g. by font managers)
+///
+/// Each font file is inspected with FreeType for its family/style names.
+/// Codepoint coverage (charset) is computed lazily per face the first time
+/// a query needs it, never during the scan itself.
+///
+/// The record set can be refreshed at runtime (see `refresh`) so fonts
+/// installed while the app is running are picked up on config reload
+/// without a restart.
 pub const Windows = struct {
     alloc: Allocator,
-    fonts_dir: [:0]const u8,
+    system_dir: ?[:0]const u8,
+    user_dir: ?[:0]const u8,
     records: []Record,
+
+    /// Guards `records` (including the lazily-computed charsets inside
+    /// them). Discovery can be called concurrently from multiple renderer
+    /// threads via codepoint-fallback resolution while a refresh swaps
+    /// the record set.
+    mutex: std.Thread.Mutex,
+
+    /// Snapshot of the font sources at the time of the last successful
+    /// scan; used by `refresh` to skip rescanning when nothing changed.
+    /// Null means we have never scanned.
+    state: ?ScanState,
 
     const Record = struct {
         path: [:0]const u8,
@@ -22,16 +50,24 @@ pub const Windows = struct {
         family_name: [:0]const u8,
         style_name: [:0]const u8,
         full_name: [:0]const u8,
+        /// Typographic family (OpenType name ID 16), when present and
+        /// distinct information from the legacy family. This is the name
+        /// the Windows Fonts UI shows for weight-split families, so users
+        /// copy it into their config.
+        typographic_family: ?[:0]const u8,
         monospace: bool,
         bold: bool,
         italic: bool,
         color: bool,
         variable: bool,
         has_codepoint: bool,
-        charset: []const u32,
+        /// Sorted codepoint coverage. Computed lazily on first use under
+        /// the discovery mutex; null means not yet computed.
+        charset: ?[]const u32,
 
         fn deinit(self: *Record, alloc: Allocator) void {
-            alloc.free(self.charset);
+            if (self.charset) |charset| alloc.free(charset);
+            if (self.typographic_family) |name| alloc.free(name);
             alloc.free(self.path);
             alloc.free(self.family_name);
             alloc.free(self.style_name);
@@ -42,43 +78,72 @@ pub const Windows = struct {
 
     pub fn init() Windows {
         const alloc = std.heap.page_allocator;
-        const fonts_dir = windowsFontsDir(alloc) catch |err| {
-            log.warn("windows font discovery disabled: {}", .{err});
-            return empty(alloc);
+        return .{
+            .alloc = alloc,
+            .system_dir = systemFontsDir(alloc) catch |err| dir: {
+                log.warn("windows system fonts dir unavailable err={}", .{err});
+                break :dir null;
+            },
+            .user_dir = userFontsDir(alloc) catch null,
+            .records = alloc.alloc(Record, 0) catch unreachable,
+            .mutex = .{},
+            .state = null,
         };
-
-        const records = scanFonts(alloc, fonts_dir) catch |err| {
-            log.warn("windows font discovery scan failed dir={s} err={}", .{ fonts_dir, err });
-            alloc.free(fonts_dir);
-            return empty(alloc);
-        };
-
-        return .{ .alloc = alloc, .fonts_dir = fonts_dir, .records = records };
     }
 
     pub fn deinit(self: *Windows) void {
         const alloc = self.alloc;
         for (self.records) |*record| record.deinit(alloc);
         alloc.free(self.records);
-        alloc.free(self.fonts_dir);
+        if (self.system_dir) |dir| alloc.free(dir);
+        if (self.user_dir) |dir| alloc.free(dir);
         self.* = undefined;
     }
 
-    fn empty(alloc: Allocator) Windows {
-        return .{
-            .alloc = alloc,
-            .fonts_dir = alloc.dupeZ(u8, "") catch unreachable,
-            .records = alloc.alloc(Record, 0) catch unreachable,
+    /// Rescan the font sources if they changed since the last scan (or if
+    /// we never scanned). Cheap when nothing changed: two directory stats
+    /// and one registry query. Serialized by the caller (SharedGridSet
+    /// holds its own lock across collection creation); concurrent
+    /// `discover` calls are safe because the record swap happens under
+    /// our mutex and iterators hold deep copies.
+    pub fn refresh(self: *Windows) void {
+        const state = self.scanState();
+        if (self.state) |prev| if (prev.eql(state)) return;
+
+        const records = self.scanAll() catch |err| {
+            log.warn("windows font discovery scan failed err={}", .{err});
+            return;
         };
+        if (records.len == 0) {
+            log.warn("windows font discovery found no fonts", .{});
+        } else {
+            log.info("windows font discovery found {d} font faces", .{records.len});
+        }
+
+        self.mutex.lock();
+        const old = self.records;
+        self.records = records;
+        self.state = state;
+        self.mutex.unlock();
+
+        for (old) |*record| record.deinit(self.alloc);
+        self.alloc.free(old);
     }
 
     pub fn discover(
-        self: *const Windows,
+        self: *Windows,
         alloc: Allocator,
         desc: Descriptor,
     ) !DiscoverIterator {
-        const filtered = try filterRecords(alloc, self.records, desc);
-        errdefer alloc.free(filtered);
+        const filtered = blk: {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            break :blk try self.filterRecordsLocked(alloc, desc);
+        };
+        errdefer {
+            for (filtered) |*record| record.deinit(alloc);
+            alloc.free(filtered);
+        }
 
         std.mem.sortUnstable(Record, filtered, desc, struct {
             fn lessThan(desc_inner: Descriptor, lhs: Record, rhs: Record) bool {
@@ -95,7 +160,7 @@ pub const Windows = struct {
     }
 
     pub fn discoverFallback(
-        self: *const Windows,
+        self: *Windows,
         alloc: Allocator,
         collection: *Collection,
         desc: Descriptor,
@@ -106,11 +171,15 @@ pub const Windows = struct {
 
     pub const DiscoverIterator = struct {
         alloc: Allocator,
+        /// Deep copies of the matching records (owned by `alloc`), so the
+        /// iterator stays valid even if a concurrent refresh replaces the
+        /// discovery's record set.
         records: []Record,
         variations: []const Variation,
         i: usize,
 
         pub fn deinit(self: *DiscoverIterator) void {
+            for (self.records) |*record| record.deinit(self.alloc);
             self.alloc.free(self.records);
             self.* = undefined;
         }
@@ -130,13 +199,16 @@ pub const Windows = struct {
                     .full_name = try self.alloc.dupeZ(u8, record.full_name),
                     .variations = try self.alloc.dupe(Variation, self.variations),
                     .color = record.color,
-                    .charset = try self.alloc.dupe(u32, record.charset),
+                    .charset = try self.alloc.dupe(u32, record.charset orelse &.{}),
                 },
             };
         }
     };
 
-    fn windowsFontsDir(alloc: Allocator) ![:0]const u8 {
+    //-------------------------------------------------------------------
+    // Font source enumeration
+
+    fn systemFontsDir(alloc: Allocator) ![:0]const u8 {
         const base = envBase: {
             const windir = envDir(alloc, "WINDIR") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => envDir(alloc, "SystemRoot") catch |inner| switch (inner) {
@@ -153,15 +225,44 @@ pub const Windows = struct {
         return try alloc.dupeZ(u8, path);
     }
 
+    fn userFontsDir(alloc: Allocator) ![:0]const u8 {
+        const base = try envDir(alloc, "LOCALAPPDATA");
+        defer alloc.free(base);
+        const path = try std.fmt.allocPrint(alloc, "{s}\\Microsoft\\Windows\\Fonts", .{base});
+        defer alloc.free(path);
+        return try alloc.dupeZ(u8, path);
+    }
+
     fn envDir(alloc: Allocator, key: []const u8) ![]u8 {
         return try std.process.getEnvVarOwned(alloc, key);
     }
 
-    fn scanFonts(alloc: Allocator, fonts_dir: [:0]const u8) ![]Record {
-        var dir = try std.fs.openDirAbsolute(fonts_dir, .{ .iterate = true });
-        defer dir.close();
+    /// Scan all font sources and return the records. Individual files and
+    /// faces that fail to load are skipped; only allocation failure aborts
+    /// the scan.
+    fn scanAll(self: *Windows) ![]Record {
+        const alloc = self.alloc;
 
-        var lib = try freetype.Library.init();
+        var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+        defer {
+            for (paths.items) |path| alloc.free(path);
+            paths.deinit(alloc);
+        }
+        var seen: std.StringHashMapUnmanaged(void) = .{};
+        defer {
+            var it = seen.keyIterator();
+            while (it.next()) |key| alloc.free(key.*);
+            seen.deinit(alloc);
+        }
+
+        if (self.system_dir) |dir| try collectDirFontPaths(alloc, dir, &paths, &seen);
+        if (self.user_dir) |dir| try collectDirFontPaths(alloc, dir, &paths, &seen);
+        try collectRegistryFontPaths(alloc, self.system_dir, &paths, &seen);
+
+        var lib = freetype.Library.init() catch |err| {
+            log.warn("windows font discovery freetype init failed err={}", .{err});
+            return try alloc.alloc(Record, 0);
+        };
         defer lib.deinit();
 
         var records: std.ArrayListUnmanaged(Record) = .{};
@@ -170,36 +271,401 @@ pub const Windows = struct {
             records.deinit(alloc);
         }
 
+        for (paths.items) |path| try scanPath(alloc, lib, path, &records);
+
+        return try records.toOwnedSlice(alloc);
+    }
+
+    /// Collect supported font file paths from a directory. Filesystem
+    /// errors are logged and skipped; only allocation failure propagates.
+    fn collectDirFontPaths(
+        alloc: Allocator,
+        dir_path: [:0]const u8,
+        paths: *std.ArrayListUnmanaged([:0]const u8),
+        seen: *std.StringHashMapUnmanaged(void),
+    ) error{OutOfMemory}!void {
+        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+            log.warn("windows font discovery cannot open dir={s} err={}", .{ dir_path, err });
+            return;
+        };
+        defer dir.close();
+
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (true) {
+            const entry = iter.next() catch |err| {
+                log.warn("windows font discovery dir iteration failed dir={s} err={}", .{ dir_path, err });
+                break;
+            } orelse break;
             if (entry.kind != .file) continue;
             if (!supportedFontFile(entry.name)) continue;
 
-            const path = try std.fs.path.joinZ(alloc, &.{ fonts_dir, entry.name });
-            errdefer alloc.free(path);
+            const joined = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ dir_path, entry.name });
+            defer alloc.free(joined);
+            try addUniquePath(alloc, paths, seen, joined);
+        }
+    }
 
-            var face0 = lib.initFace(path, 0) catch |err| {
-                log.debug("windows font discovery skipped path={s} err={}", .{ path, err });
+    /// Collect font file paths registered under the per-user font registry
+    /// key. This catches fonts registered outside the standard directories
+    /// (e.g. activated by font managers). Registry errors are non-fatal.
+    fn collectRegistryFontPaths(
+        alloc: Allocator,
+        system_dir: ?[:0]const u8,
+        paths: *std.ArrayListUnmanaged([:0]const u8),
+        seen: *std.StringHashMapUnmanaged(void),
+    ) error{OutOfMemory}!void {
+        var hkey: winreg.HKEY = 0;
+        if (winreg.RegOpenKeyExW(
+            winreg.HKEY_CURRENT_USER,
+            fonts_subkey,
+            0,
+            winreg.KEY_READ,
+            &hkey,
+        ) != winreg.ERROR_SUCCESS) return;
+        defer _ = winreg.RegCloseKey(hkey);
+
+        var index: u32 = 0;
+        while (true) : (index += 1) {
+            var name_buf: [260]u16 = undefined;
+            var name_len: u32 = name_buf.len;
+            var value_type: u32 = 0;
+            var data_buf: [1040]u16 = undefined;
+            var data_len: u32 = @sizeOf(@TypeOf(data_buf));
+
+            const rc = winreg.RegEnumValueW(
+                hkey,
+                index,
+                &name_buf,
+                &name_len,
+                null,
+                &value_type,
+                @ptrCast(&data_buf),
+                &data_len,
+            );
+            if (rc == winreg.ERROR_NO_MORE_ITEMS) break;
+            // Oversized name/data: not a font path we care about, skip it.
+            if (rc == winreg.ERROR_MORE_DATA) continue;
+            if (rc != winreg.ERROR_SUCCESS) break;
+            if (value_type != winreg.REG_SZ and value_type != winreg.REG_EXPAND_SZ) continue;
+
+            const raw: []const u16 = data_buf[0 .. data_len / 2];
+            const value_utf16 = std.mem.sliceTo(raw, 0);
+            if (value_utf16.len == 0) continue;
+
+            var expanded_buf: [1040]u16 = undefined;
+            const final_utf16: []const u16 = if (value_type == winreg.REG_EXPAND_SZ) expand: {
+                var src_buf: [1041]u16 = undefined;
+                if (value_utf16.len >= src_buf.len) continue;
+                @memcpy(src_buf[0..value_utf16.len], value_utf16);
+                src_buf[value_utf16.len] = 0;
+                const n = winreg.ExpandEnvironmentStringsW(
+                    @ptrCast(&src_buf),
+                    &expanded_buf,
+                    expanded_buf.len,
+                );
+                // n includes the terminating NUL on success.
+                if (n == 0 or n > expanded_buf.len) continue;
+                break :expand expanded_buf[0 .. n - 1];
+            } else value_utf16;
+
+            const value_utf8 = std.unicode.utf16LeToUtf8Alloc(alloc, final_utf16) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue,
+            };
+            defer alloc.free(value_utf8);
+
+            const resolved = (try resolveRegistryFontPath(alloc, value_utf8, system_dir)) orelse continue;
+            defer alloc.free(resolved);
+            try addUniquePath(alloc, paths, seen, resolved);
+        }
+    }
+
+    /// Resolve a font registry value to an absolute path, or null if it
+    /// isn't a usable font file. Registry font values are either absolute
+    /// paths (per-user installs, font managers) or bare file names that
+    /// are relative to the system fonts directory.
+    fn resolveRegistryFontPath(
+        alloc: Allocator,
+        value: []const u8,
+        system_dir: ?[]const u8,
+    ) error{OutOfMemory}!?[]u8 {
+        const trimmed = std.mem.trim(u8, value, " \t");
+        if (trimmed.len == 0) return null;
+        if (!supportedFontFile(trimmed)) return null;
+        if (std.fs.path.isAbsoluteWindows(trimmed)) return try alloc.dupe(u8, trimmed);
+        const dir = system_dir orelse return null;
+        return try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ dir, trimmed });
+    }
+
+    /// Append the path if it hasn't been seen yet (case-insensitive).
+    fn addUniquePath(
+        alloc: Allocator,
+        paths: *std.ArrayListUnmanaged([:0]const u8),
+        seen: *std.StringHashMapUnmanaged(void),
+        path: []const u8,
+    ) error{OutOfMemory}!void {
+        const key = try std.ascii.allocLowerString(alloc, path);
+        const gop = try seen.getOrPut(alloc, key);
+        if (gop.found_existing) {
+            alloc.free(key);
+            return;
+        }
+        // The key is now owned by the map; the caller's defer frees it.
+        const owned = try alloc.dupeZ(u8, path);
+        errdefer alloc.free(owned);
+        try paths.append(alloc, owned);
+    }
+
+    /// Inspect every face of a font file. Per-file and per-face failures
+    /// are logged and skipped; only allocation failure propagates.
+    fn scanPath(
+        alloc: Allocator,
+        lib: freetype.Library,
+        path: [:0]const u8,
+        records: *std.ArrayListUnmanaged(Record),
+    ) error{OutOfMemory}!void {
+        var face0 = lib.initFace(path, 0) catch |err| {
+            log.debug("windows font discovery skipped path={s} err={}", .{ path, err });
+            return;
+        };
+        defer face0.deinit();
+
+        const num_faces: usize = @intCast(@max(face0.handle.*.num_faces, 1));
+        for (0..num_faces) |i| {
+            const face_index: i32 = @intCast(i);
+            const face = if (i == 0) face0 else lib.initFace(path, face_index) catch |err| {
+                log.debug("windows font discovery face skipped path={s} index={} err={}", .{ path, face_index, err });
                 continue;
             };
-            defer face0.deinit();
+            defer if (i != 0) face.deinit();
 
-            const num_faces: usize = @intCast(@max(face0.handle.*.num_faces, 1));
-            for (0..num_faces) |i| {
-                const face_index: i32 = @intCast(i);
-                const face = if (i == 0) face0 else lib.initFace(path, face_index) catch |err| {
-                    log.debug("windows font discovery face skipped path={s} index={} err={}", .{ path, face_index, err });
-                    continue;
-                };
-                defer if (i != 0) face.deinit();
+            var record = try inspectFace(alloc, path, face, face_index);
+            errdefer record.deinit(alloc);
+            try records.append(alloc, record);
+        }
+    }
 
-                var record = try inspectFace(alloc, path, face, face_index);
-                errdefer record.deinit(alloc);
-                try records.append(alloc, record);
-            }
+    fn inspectFace(
+        alloc: Allocator,
+        path: [:0]const u8,
+        face: freetype.Face,
+        face_index: i32,
+    ) error{OutOfMemory}!Record {
+        const family_name = try dupFaceString(alloc, face.handle.*.family_name, "Unknown");
+        errdefer alloc.free(family_name);
+
+        const style_name = try dupFaceString(alloc, face.handle.*.style_name, "Regular");
+        errdefer alloc.free(style_name);
+
+        const full_name = try buildFullName(alloc, family_name, style_name);
+        errdefer alloc.free(full_name);
+
+        const typographic_family = try typographicFamilyName(alloc, face);
+        errdefer if (typographic_family) |name| alloc.free(name);
+
+        const style_flags = face.handle.*.style_flags;
+        const face_flags = face.handle.*.face_flags;
+
+        return .{
+            .path = try alloc.dupeZ(u8, path),
+            .face_index = face_index,
+            .family_name = family_name,
+            .style_name = style_name,
+            .full_name = full_name,
+            .typographic_family = typographic_family,
+            .monospace = face_flags & freetype.c.FT_FACE_FLAG_FIXED_WIDTH != 0,
+            .bold = style_flags & freetype.c.FT_STYLE_FLAG_BOLD != 0,
+            .italic = style_flags & freetype.c.FT_STYLE_FLAG_ITALIC != 0 or
+                containsIgnoreCase(style_name, "oblique"),
+            .color = face.hasColor() or face.hasSBIX(),
+            .variable = face.hasMultipleMasters(),
+            .has_codepoint = false,
+            .charset = null,
+        };
+    }
+
+    //-------------------------------------------------------------------
+    // Typographic family (OpenType name ID 16)
+
+    /// A name-table entry, decoupled from FreeType so the selection logic
+    /// is testable with injected data.
+    const SfntNameEntry = struct {
+        platform_id: u16,
+        encoding_id: u16,
+        language_id: u16,
+        string: []const u8,
+    };
+
+    // OpenType name-table constants.
+    const name_id_typographic_family = 16;
+    const platform_unicode = 0;
+    const platform_macintosh = 1;
+    const platform_microsoft = 3;
+    const ms_encoding_unicode_bmp = 1;
+    const ms_encoding_unicode_full = 10;
+    const mac_encoding_roman = 0;
+    const ms_lang_en_us = 0x0409;
+
+    /// Read the typographic family from the face's name table, if present.
+    fn typographicFamilyName(
+        alloc: Allocator,
+        face: freetype.Face,
+    ) error{OutOfMemory}!?[:0]const u8 {
+        const count = face.getSfntNameCount();
+        if (count == 0) return null;
+
+        var entries_buf: [16]SfntNameEntry = undefined;
+        var entries_len: usize = 0;
+        for (0..count) |i| {
+            if (entries_len >= entries_buf.len) break;
+            const name = face.getSfntName(i) catch continue;
+            if (name.name_id != name_id_typographic_family) continue;
+            if (name.string == null) continue;
+            entries_buf[entries_len] = .{
+                .platform_id = @intCast(name.platform_id),
+                .encoding_id = @intCast(name.encoding_id),
+                .language_id = @intCast(name.language_id),
+                .string = name.string[0..name.string_len],
+            };
+            entries_len += 1;
         }
 
-        return try records.toOwnedSlice(alloc);
+        return try pickTypographicFamily(alloc, entries_buf[0..entries_len]);
+    }
+
+    /// Pick and decode the best typographic family candidate. Preference:
+    /// Microsoft/Unicode en-US, then any-English, then any language, then
+    /// Unicode platform, then Mac Roman (ASCII only).
+    fn pickTypographicFamily(
+        alloc: Allocator,
+        entries: []const SfntNameEntry,
+    ) error{OutOfMemory}!?[:0]const u8 {
+        var best: ?SfntNameEntry = null;
+        var best_rank: u8 = 0;
+        for (entries) |entry| {
+            const rank = sfntNameRank(entry) orelse continue;
+            if (rank > best_rank) {
+                best_rank = rank;
+                best = entry;
+            }
+        }
+        const entry = best orelse return null;
+
+        if (entry.platform_id == platform_macintosh) {
+            // Treated as ASCII; sfntNameRank already rejected high bytes.
+            return try alloc.dupeZ(u8, entry.string);
+        }
+        return utf16BeToUtf8Alloc(alloc, entry.string) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf16 => return null,
+        };
+    }
+
+    /// Rank a name-table entry for family-name selection; null means the
+    /// entry is not usable.
+    fn sfntNameRank(entry: SfntNameEntry) ?u8 {
+        switch (entry.platform_id) {
+            platform_microsoft => {
+                if (entry.encoding_id != ms_encoding_unicode_bmp and
+                    entry.encoding_id != ms_encoding_unicode_full) return null;
+                if (entry.language_id == ms_lang_en_us) return 5;
+                // Primary language ID 0x09 is English (any region).
+                if (entry.language_id & 0x3FF == 0x09) return 4;
+                return 3;
+            },
+            platform_unicode => return 2,
+            platform_macintosh => {
+                if (entry.encoding_id != mac_encoding_roman) return null;
+                for (entry.string) |byte| if (byte >= 0x80) return null;
+                return 1;
+            },
+            else => return null,
+        }
+    }
+
+    /// Decode a UTF-16 big-endian byte string (the encoding of Microsoft
+    /// and Unicode platform name-table entries) to UTF-8.
+    fn utf16BeToUtf8Alloc(
+        alloc: Allocator,
+        bytes: []const u8,
+    ) error{ OutOfMemory, InvalidUtf16 }![:0]const u8 {
+        if (bytes.len % 2 != 0) return error.InvalidUtf16;
+        const n = bytes.len / 2;
+        const units = try alloc.alloc(u16, n);
+        defer alloc.free(units);
+        for (0..n) |i| {
+            units[i] = (@as(u16, bytes[2 * i]) << 8) | bytes[2 * i + 1];
+        }
+        const utf8 = std.unicode.utf16LeToUtf8Alloc(alloc, units) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidUtf16,
+        };
+        defer alloc.free(utf8);
+        return try alloc.dupeZ(u8, utf8);
+    }
+
+    //-------------------------------------------------------------------
+    // Matching
+
+    /// Filter records against the descriptor and return deep copies for
+    /// the iterator. Must be called with the mutex held. Charsets are
+    /// materialized (and cached on the master records) for every record
+    /// that survives the name/style filters, because both codepoint
+    /// filtering here and DeferredFace.hasCodepoint downstream need them.
+    fn filterRecordsLocked(
+        self: *Windows,
+        alloc: Allocator,
+        desc: Descriptor,
+    ) ![]Record {
+        var result: std.ArrayListUnmanaged(Record) = .{};
+        errdefer {
+            for (result.items) |*record| record.deinit(alloc);
+            result.deinit(alloc);
+        }
+
+        for (self.records) |*record| {
+            if (!matchesDescriptor(record.*, desc)) continue;
+
+            const charset = self.ensureCharsetLocked(record);
+            const has_codepoint = desc.codepoint > 0 and
+                charsetHasCodepoint(charset, desc.codepoint);
+            if (desc.codepoint > 0 and !has_codepoint) continue;
+
+            var copy = try copyRecord(alloc, record.*);
+            copy.has_codepoint = has_codepoint;
+            errdefer copy.deinit(alloc);
+            try result.append(alloc, copy);
+        }
+
+        return try result.toOwnedSlice(alloc);
+    }
+
+    /// Return the record's charset, computing and caching it on first
+    /// use. Must be called with the mutex held. Extraction failures are
+    /// cached as an empty charset so a broken font isn't re-parsed on
+    /// every query.
+    fn ensureCharsetLocked(self: *Windows, record: *Record) []const u32 {
+        if (record.charset) |charset| return charset;
+        const charset = computeCharset(self.alloc, record.path, record.face_index) catch |err| blk: {
+            log.debug("windows font discovery charset failed path={s} index={} err={}", .{
+                record.path, record.face_index, err,
+            });
+            break :blk @as([]const u32, &.{});
+        };
+        record.charset = charset;
+        return charset;
+    }
+
+    fn computeCharset(
+        alloc: Allocator,
+        path: [:0]const u8,
+        face_index: i32,
+    ) ![]const u32 {
+        var lib = try freetype.Library.init();
+        defer lib.deinit();
+        const face = try lib.initFace(path, face_index);
+        defer face.deinit();
+        return try extractCharset(alloc, face);
     }
 
     fn extractCharset(alloc: Allocator, face: freetype.Face) ![]const u32 {
@@ -221,66 +687,30 @@ pub const Windows = struct {
         return try codepoints.toOwnedSlice(alloc);
     }
 
-    fn inspectFace(
-        alloc: Allocator,
-        path: [:0]const u8,
-        face: freetype.Face,
-        face_index: i32,
-    ) !Record {
-        const family_name = try dupFaceString(alloc, face.handle.*.family_name, "Unknown");
+    fn copyRecord(alloc: Allocator, record: Record) error{OutOfMemory}!Record {
+        const path = try alloc.dupeZ(u8, record.path);
+        errdefer alloc.free(path);
+        const family_name = try alloc.dupeZ(u8, record.family_name);
         errdefer alloc.free(family_name);
-
-        const style_name = try dupFaceString(alloc, face.handle.*.style_name, "Regular");
+        const style_name = try alloc.dupeZ(u8, record.style_name);
         errdefer alloc.free(style_name);
-
-        const full_name = try buildFullName(alloc, family_name, style_name);
+        const full_name = try alloc.dupeZ(u8, record.full_name);
         errdefer alloc.free(full_name);
+        const typographic_family: ?[:0]const u8 = if (record.typographic_family) |name|
+            try alloc.dupeZ(u8, name)
+        else
+            null;
+        errdefer if (typographic_family) |name| alloc.free(name);
+        const charset = try alloc.dupe(u32, record.charset orelse &.{});
 
-        const style_flags = face.handle.*.style_flags;
-        const face_flags = face.handle.*.face_flags;
-
-        // Extract charset: enumerate all codepoints via FT_Get_First_Char/FT_Get_Next_Char
-        const charset = try extractCharset(alloc, face);
-        errdefer alloc.free(charset);
-
-        return .{
-            .path = try alloc.dupeZ(u8, path),
-            .face_index = face_index,
-            .family_name = family_name,
-            .style_name = style_name,
-            .full_name = full_name,
-            .monospace = face_flags & freetype.c.FT_FACE_FLAG_FIXED_WIDTH != 0,
-            .bold = style_flags & freetype.c.FT_STYLE_FLAG_BOLD != 0,
-            .italic = style_flags & freetype.c.FT_STYLE_FLAG_ITALIC != 0 or
-                containsIgnoreCase(style_name, "oblique"),
-            .color = face.hasColor() or face.hasSBIX(),
-            .variable = face.hasMultipleMasters(),
-            .has_codepoint = false,
-            .charset = charset,
-        };
-    }
-
-    fn filterRecords(
-        alloc: Allocator,
-        records: []const Record,
-        desc: Descriptor,
-    ) ![]Record {
-        var result: std.ArrayListUnmanaged(Record) = .{};
-        errdefer result.deinit(alloc);
-
-        for (records) |record| {
-            if (!matchesDescriptor(record, desc)) continue;
-
-            var copy = record;
-            if (desc.codepoint > 0) {
-                copy.has_codepoint = recordHasCodepoint(record, desc.codepoint);
-                if (!copy.has_codepoint) continue;
-            }
-
-            try result.append(alloc, copy);
-        }
-
-        return try result.toOwnedSlice(alloc);
+        var copy = record;
+        copy.path = path;
+        copy.family_name = family_name;
+        copy.style_name = style_name;
+        copy.full_name = full_name;
+        copy.typographic_family = typographic_family;
+        copy.charset = charset;
+        return copy;
     }
 
     fn matchesDescriptor(record: Record, desc: Descriptor) bool {
@@ -288,7 +718,9 @@ pub const Windows = struct {
             if (std.ascii.eqlIgnoreCase(family, "monospace")) {
                 if (!record.monospace) return false;
             } else if (!containsIgnoreCase(record.family_name, family) and
-                !containsIgnoreCase(record.full_name, family))
+                !containsIgnoreCase(record.full_name, family) and
+                !(record.typographic_family != null and
+                    containsIgnoreCase(record.typographic_family.?, family)))
             {
                 return false;
             }
@@ -316,6 +748,10 @@ pub const Windows = struct {
 
         if (desc.family) |family| {
             if (std.ascii.eqlIgnoreCase(record.family_name, family)) result |= 1 << 19;
+            if (record.typographic_family) |typographic| {
+                if (std.ascii.eqlIgnoreCase(typographic, family)) result |= 1 << 19;
+                if (containsIgnoreCase(typographic, family)) result |= 1 << 17;
+            }
             if (std.ascii.eqlIgnoreCase(record.full_name, family)) result |= 1 << 18;
             if (containsIgnoreCase(record.family_name, family)) result |= 1 << 17;
         }
@@ -334,8 +770,8 @@ pub const Windows = struct {
         return result;
     }
 
-    fn recordHasCodepoint(record: Record, codepoint: u32) bool {
-        const result = std.sort.binarySearch(u32, record.charset, codepoint, struct {
+    fn charsetHasCodepoint(charset: []const u32, codepoint: u32) bool {
+        const result = std.sort.binarySearch(u32, charset, codepoint, struct {
             fn order(target: u32, item: u32) std.math.Order {
                 return std.math.order(target, item);
             }
@@ -391,38 +827,348 @@ pub const Windows = struct {
 
         return false;
     }
+
+    //-------------------------------------------------------------------
+    // Staleness tracking for refresh()
+
+    const ScanState = struct {
+        system_mtime: ?i128,
+        user_mtime: ?i128,
+        registry_write: ?u64,
+
+        fn eql(a: ScanState, b: ScanState) bool {
+            return std.meta.eql(a, b);
+        }
+    };
+
+    fn scanState(self: *const Windows) ScanState {
+        return .{
+            .system_mtime = if (self.system_dir) |dir| dirMtime(dir) else null,
+            .user_mtime = if (self.user_dir) |dir| dirMtime(dir) else null,
+            .registry_write = registryLastWrite(),
+        };
+    }
+
+    fn dirMtime(path: [:0]const u8) ?i128 {
+        var dir = std.fs.openDirAbsolute(path, .{}) catch return null;
+        defer dir.close();
+        const stat = dir.stat() catch return null;
+        return stat.mtime;
+    }
+
+    fn registryLastWrite() ?u64 {
+        var hkey: winreg.HKEY = 0;
+        if (winreg.RegOpenKeyExW(
+            winreg.HKEY_CURRENT_USER,
+            fonts_subkey,
+            0,
+            winreg.KEY_READ,
+            &hkey,
+        ) != winreg.ERROR_SUCCESS) return null;
+        defer _ = winreg.RegCloseKey(hkey);
+
+        var ft: winreg.FILETIME = .{ .low = 0, .high = 0 };
+        if (winreg.RegQueryInfoKeyW(
+            hkey,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            &ft,
+        ) != winreg.ERROR_SUCCESS) return null;
+        return (@as(u64, ft.high) << 32) | ft.low;
+    }
+
+    //-------------------------------------------------------------------
+    // Registry bindings (mirrors the pattern in src/apprt/win32.zig)
+
+    const fonts_subkey = std.unicode.utf8ToUtf16LeStringLiteral(
+        "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+    );
+
+    const winreg = struct {
+        const HKEY = usize;
+        const HKEY_CURRENT_USER: HKEY = 0x80000001;
+        const KEY_READ: u32 = 0x20019;
+        const ERROR_SUCCESS: i32 = 0;
+        const ERROR_MORE_DATA: i32 = 234;
+        const ERROR_NO_MORE_ITEMS: i32 = 259;
+        const REG_SZ: u32 = 1;
+        const REG_EXPAND_SZ: u32 = 2;
+        const FILETIME = extern struct { low: u32, high: u32 };
+
+        extern "advapi32" fn RegOpenKeyExW(hKey: HKEY, lpSubKey: [*:0]const u16, ulOptions: u32, samDesired: u32, phkResult: *HKEY) callconv(.winapi) i32;
+        extern "advapi32" fn RegCloseKey(hKey: HKEY) callconv(.winapi) i32;
+        extern "advapi32" fn RegQueryInfoKeyW(hKey: HKEY, lpClass: ?[*]u16, lpcchClass: ?*u32, lpReserved: ?*u32, lpcSubKeys: ?*u32, lpcbMaxSubKeyLen: ?*u32, lpcbMaxClassLen: ?*u32, lpcValues: ?*u32, lpcbMaxValueNameLen: ?*u32, lpcbMaxValueLen: ?*u32, lpcbSecurityDescriptor: ?*u32, lpftLastWriteTime: ?*FILETIME) callconv(.winapi) i32;
+        extern "advapi32" fn RegEnumValueW(hKey: HKEY, dwIndex: u32, lpValueName: [*]u16, lpcchValueName: *u32, lpReserved: ?*u32, lpType: ?*u32, lpData: ?[*]u8, lpcbData: ?*u32) callconv(.winapi) i32;
+        extern "kernel32" fn ExpandEnvironmentStringsW(lpSrc: [*:0]const u16, lpDst: ?[*]u16, nSize: u32) callconv(.winapi) u32;
+    };
 };
 
+//-----------------------------------------------------------------------
+// Tests. The helpers below are pure and run on every host; tests that
+// touch the real filesystem, registry, or FreeType faces skip themselves
+// off-Windows.
+
+const testing = std.testing;
+
 test "windowsSupportedFontFileHelper" {
-    try std.testing.expect(Windows.supportedFontFile("foo.ttf"));
-    try std.testing.expect(Windows.supportedFontFile("foo.OTF"));
-    try std.testing.expect(Windows.supportedFontFile("foo.ttc"));
-    try std.testing.expect(!Windows.supportedFontFile("foo.txt"));
+    try testing.expect(Windows.supportedFontFile("foo.ttf"));
+    try testing.expect(Windows.supportedFontFile("foo.OTF"));
+    try testing.expect(Windows.supportedFontFile("foo.ttc"));
+    try testing.expect(!Windows.supportedFontFile("foo.txt"));
+    try testing.expect(!Windows.supportedFontFile("foo.fon"));
+    try testing.expect(!Windows.supportedFontFile("foo"));
 }
 
-test "windowsDescriptorMatchingHelper" {
-    const record: Windows.Record = .{
+fn testRecord() Windows.Record {
+    return .{
         .path = undefined,
         .face_index = 0,
         .family_name = "Cascadia Mono",
         .style_name = "Bold Italic",
         .full_name = "Cascadia Mono Bold Italic",
+        .typographic_family = null,
         .monospace = true,
         .bold = true,
         .italic = true,
         .color = false,
         .variable = true,
         .has_codepoint = true,
-        .charset = &.{},
+        .charset = null,
     };
+}
 
-    try std.testing.expect(Windows.matchesDescriptor(record, .{
+test "windowsDescriptorMatchingHelper" {
+    const record = testRecord();
+
+    try testing.expect(Windows.matchesDescriptor(record, .{
         .family = "cascadia mono",
         .bold = true,
         .italic = true,
         .monospace = true,
     }));
-    try std.testing.expect(!Windows.matchesDescriptor(record, .{
+    try testing.expect(!Windows.matchesDescriptor(record, .{
         .family = "Segoe UI",
     }));
+}
+
+test "windowsTypographicFamilyMatching" {
+    // A weight-split family: the legacy family (name ID 1) that FreeType
+    // reports differs from the typographic family (name ID 16) shown by
+    // the Windows Fonts UI.
+    var record = testRecord();
+    record.family_name = "Cascadia Mono SemiLight";
+    record.full_name = "Cascadia Mono SemiLight Bold Italic";
+    record.typographic_family = "Cascadia Mono";
+
+    try testing.expect(Windows.matchesDescriptor(record, .{
+        .family = "Cascadia Mono",
+    }));
+
+    // Exact typographic match scores at the same tier as exact legacy
+    // family match.
+    const typographic_score = Windows.score(.{ .family = "cascadia mono" }, record);
+    record.typographic_family = null;
+    record.family_name = "Cascadia Mono";
+    record.full_name = "Cascadia Mono Bold Italic";
+    const legacy_score = Windows.score(.{ .family = "cascadia mono" }, record);
+    try testing.expect(typographic_score & (1 << 19) != 0);
+    try testing.expect(legacy_score & (1 << 19) != 0);
+}
+
+test "windowsRegistryFontPathResolve" {
+    const alloc = testing.allocator;
+    const system_dir: []const u8 = "C:\\Windows\\Fonts";
+
+    // Absolute paths pass through untouched.
+    {
+        const got = (try Windows.resolveRegistryFontPath(
+            alloc,
+            "C:\\Users\\me\\AppData\\Local\\Microsoft\\Windows\\Fonts\\Custom.ttf",
+            system_dir,
+        )).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings(
+            "C:\\Users\\me\\AppData\\Local\\Microsoft\\Windows\\Fonts\\Custom.ttf",
+            got,
+        );
+    }
+
+    // UNC paths are absolute too.
+    {
+        const got = (try Windows.resolveRegistryFontPath(
+            alloc,
+            "\\\\server\\share\\font.otf",
+            system_dir,
+        )).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings("\\\\server\\share\\font.otf", got);
+    }
+
+    // Bare file names resolve against the system fonts directory.
+    {
+        const got = (try Windows.resolveRegistryFontPath(alloc, "arial.ttf", system_dir)).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings("C:\\Windows\\Fonts\\arial.ttf", got);
+    }
+
+    // Unsupported extensions and empty values resolve to nothing.
+    try testing.expect(try Windows.resolveRegistryFontPath(alloc, "vgaoem.fon", system_dir) == null);
+    try testing.expect(try Windows.resolveRegistryFontPath(alloc, "", system_dir) == null);
+    try testing.expect(try Windows.resolveRegistryFontPath(alloc, "  ", system_dir) == null);
+
+    // A bare name with no system dir available resolves to nothing.
+    try testing.expect(try Windows.resolveRegistryFontPath(alloc, "arial.ttf", null) == null);
+}
+
+test "windowsFontPathDedupe" {
+    const alloc = testing.allocator;
+
+    var paths: std.ArrayListUnmanaged([:0]const u8) = .{};
+    defer {
+        for (paths.items) |path| alloc.free(path);
+        paths.deinit(alloc);
+    }
+    var seen: std.StringHashMapUnmanaged(void) = .{};
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |key| alloc.free(key.*);
+        seen.deinit(alloc);
+    }
+
+    try Windows.addUniquePath(alloc, &paths, &seen, "C:\\Windows\\Fonts\\Arial.TTF");
+    try Windows.addUniquePath(alloc, &paths, &seen, "c:\\windows\\fonts\\arial.ttf");
+    try Windows.addUniquePath(alloc, &paths, &seen, "C:\\Windows\\Fonts\\Consola.ttf");
+
+    try testing.expectEqual(@as(usize, 2), paths.items.len);
+    try testing.expectEqualStrings("C:\\Windows\\Fonts\\Arial.TTF", paths.items[0]);
+    try testing.expectEqualStrings("C:\\Windows\\Fonts\\Consola.ttf", paths.items[1]);
+}
+
+test "windowsUtf16BeDecode" {
+    const alloc = testing.allocator;
+
+    // ASCII.
+    {
+        const got = try Windows.utf16BeToUtf8Alloc(alloc, "\x00A\x00r\x00i\x00a\x00l");
+        defer alloc.free(got);
+        try testing.expectEqualStrings("Arial", got);
+    }
+
+    // Non-ASCII BMP character (é = U+00E9).
+    {
+        const got = try Windows.utf16BeToUtf8Alloc(alloc, "\x00\xe9");
+        defer alloc.free(got);
+        try testing.expectEqualStrings("é", got);
+    }
+
+    // Surrogate pair (𝄞 = U+1D11E = D834 DD1E).
+    {
+        const got = try Windows.utf16BeToUtf8Alloc(alloc, "\xd8\x34\xdd\x1e");
+        defer alloc.free(got);
+        try testing.expectEqualStrings("𝄞", got);
+    }
+
+    // Odd byte counts are invalid.
+    try testing.expectError(error.InvalidUtf16, Windows.utf16BeToUtf8Alloc(alloc, "\x00"));
+}
+
+test "windowsSfntNamePick" {
+    const alloc = testing.allocator;
+    const be = struct {
+        // "Best" in UTF-16BE.
+        const best = "\x00B\x00e\x00s\x00t";
+        // "Other" in UTF-16BE.
+        const other = "\x00O\x00t\x00h\x00e\x00r";
+    };
+
+    // Microsoft en-US beats Mac Roman.
+    {
+        const got = (try Windows.pickTypographicFamily(alloc, &.{
+            .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "MacName" },
+            .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0409, .string = be.best },
+        })).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings("Best", got);
+    }
+
+    // Any-English beats non-English.
+    {
+        const got = (try Windows.pickTypographicFamily(alloc, &.{
+            .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0407, .string = be.other },
+            .{ .platform_id = 3, .encoding_id = 1, .language_id = 0x0809, .string = be.best },
+        })).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings("Best", got);
+    }
+
+    // Mac Roman ASCII works as a last resort.
+    {
+        const got = (try Windows.pickTypographicFamily(alloc, &.{
+            .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "MacName" },
+        })).?;
+        defer alloc.free(got);
+        try testing.expectEqualStrings("MacName", got);
+    }
+
+    // Mac Roman with high bytes is not decodable; nothing usable → null.
+    try testing.expect((try Windows.pickTypographicFamily(alloc, &.{
+        .{ .platform_id = 1, .encoding_id = 0, .language_id = 0, .string = "Caf\xe9" },
+    })) == null);
+    try testing.expect((try Windows.pickTypographicFamily(alloc, &.{})) == null);
+}
+
+test "windowsCharsetHasCodepoint" {
+    const charset = [_]u32{ 'A', 'B', 'Z', 0x1F600 };
+    try testing.expect(Windows.charsetHasCodepoint(&charset, 'A'));
+    try testing.expect(Windows.charsetHasCodepoint(&charset, 0x1F600));
+    try testing.expect(!Windows.charsetHasCodepoint(&charset, 'C'));
+    try testing.expect(!Windows.charsetHasCodepoint(&.{}, 'A'));
+}
+
+test "windowsScanStateEql" {
+    const a: Windows.ScanState = .{ .system_mtime = 1, .user_mtime = null, .registry_write = 42 };
+    try testing.expect(a.eql(.{ .system_mtime = 1, .user_mtime = null, .registry_write = 42 }));
+    try testing.expect(!a.eql(.{ .system_mtime = 2, .user_mtime = null, .registry_write = 42 }));
+    try testing.expect(!a.eql(.{ .system_mtime = 1, .user_mtime = 0, .registry_write = 42 }));
+    try testing.expect(!a.eql(.{ .system_mtime = 1, .user_mtime = null, .registry_write = null }));
+}
+
+test "windows discovery end to end" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+
+    var disco = Windows.init();
+    defer disco.deinit();
+
+    // First refresh scans; an immediate second refresh must be a cheap
+    // no-op (unchanged state) and must not invalidate anything.
+    disco.refresh();
+    disco.refresh();
+
+    // Arial ships with every Windows install.
+    {
+        var it = try disco.discover(alloc, .{ .family = "Arial", .size = 12 });
+        defer it.deinit();
+        var face = (try it.next()) orelse return error.TestUnexpectedResult;
+        defer face.deinit();
+        try testing.expect(face.hasCodepoint('A', null));
+    }
+
+    // Codepoint fallback across all fonts.
+    {
+        var it = try disco.discover(alloc, .{ .codepoint = 'A', .size = 12 });
+        defer it.deinit();
+        var face = (try it.next()) orelse return error.TestUnexpectedResult;
+        defer face.deinit();
+        try testing.expect(face.hasCodepoint('A', null));
+    }
 }
