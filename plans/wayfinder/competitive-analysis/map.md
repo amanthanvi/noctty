@@ -47,6 +47,44 @@ deliverable.
   sweep, everything-deep; research-only evidence; rubric drafted at
   charting; PRODUCT.md default-but-amendable; product + adoption scope;
   synthesize-then-batch-grill decision flow.
+- [Deep dive: wintty](tickets/R01-wintty.md) — direct rival ships broad
+  native surface fast (WinUI3/DX12 soft fork) but has zero releases,
+  no CI, sponsor-gated signing, bus factor 1; adopt its ConPTY
+  workarounds + measurement culture, exploit installability/ARM64 lead.
+- [Deep dive: Windows Terminal](tickets/R02-windows-terminal.md) —
+  incumbent slowing; fixed folklore problems but stuck on cold start,
+  ~2x input latency, settings sprawl, text-only restore, zero
+  extensibility — the exploitable space is exactly PRODUCT.md's thesis.
+- [Deep dive: WezTerm](tickets/R03-wezterm.md) — strongest power-user
+  rival via Lua scripting + multiplexing domains, but Windows is a port
+  (startup stalls, no ARM64) and no stable release since 2024-02.
+- [Deep dive: Warp on Windows](tickets/R04-warp.md) — $73M
+  agentic-terminal category-definer; steal workflow objects (quake,
+  named layouts, restored scrollback), loudly reject cloud coupling,
+  telemetry, forced updates.
+- [Deep dive: Alacritty](tickets/R05-alacritty.md) — minimal-fast
+  benchmark whose speed is no longer unique; tier-2 on Windows
+  (unsigned, no ARM64, "use tmux" fails natively) — leaves winghostty's
+  benchmark user unserved.
+- [Deep dive: Tabby](tickets/R06-tabby.md) — proves Windows devs pay a
+  huge Electron tax for SSH/serial connection management, secrets
+  vault, GUI settings; winghostty can deliver that value natively.
+- [Deep dive: ConEmu / Cmder](tickets/R07-conemu.md) — invented
+  affordances no successor matched (elevated tabs, task system, OSC
+  9;4); architecture became its ceiling; Cmder proves
+  defaults/packaging multiply distribution.
+- [Deep dive: Rio](tickets/R08-rio.md) — fastest-moving adjacent
+  competitor (all three image protocols, real Windows distribution) but
+  no session restore/profiles/WSL story; monitor, not threat.
+- [Deep dive: upstream Ghostty parity](tickets/R09-upstream-ghostty.md)
+  — core synced to 1.3.2-dev; real delta is ~5 months of main + the 1.4
+  wave and libghostty shift; Windows GUI "still not planned" → 12–24
+  month window as the definitive Ghostty-on-Windows.
+- [Field sweep: long-tail](tickets/R10-long-tail.md) — no head-on rival,
+  but: community ghostty-windows ports contest the exact niche,
+  category drifts toward infrastructure workspaces, and Contour/
+  Extraterm/mintty donate ideas. Promoted Wave Terminal and the
+  ghostty-windows fork family to full dives.
 
 ## Not yet specified
 
@@ -57,8 +95,6 @@ deliverable.
   from [Decision session: adopt/reject/defer](tickets/D01-decision-session.md).
 - Possible PRODUCT.md amendment decisions, if the dives expose flaws in
   the positioning frame itself.
-- Possible promotion of a long-tail product to a full deep dive, if the
-  sweep flags one as a real rival.
 - Shape and location of the final roadmap document (likely
   `plans/2026-competitive-roadmap.md`; confirm at assembly time).
 
