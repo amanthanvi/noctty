@@ -85,6 +85,17 @@ deliverable.
   category drifts toward infrastructure workspaces, and Contour/
   Extraterm/mintty donate ideas. Promoted Wave Terminal and the
   ghostty-windows fork family to full dives.
+- [Deep dive: Wave Terminal](tickets/R11-wave-terminal.md) — the
+  workspace-drift flagship validates winghostty's terminal-first frame:
+  users beg it to be more terminal; development stalled (founder silent
+  since 2026-05-10). Adopt durable sessions, scriptability, quake mode;
+  exploit Electron/VT/keybinding weaknesses.
+- [Deep dive: ghostty-windows community fork family](tickets/R12-ghostty-windows-forks.md)
+  — the fork swarm is decaying and none out-tracks winghostty; the real
+  contest is upstream itself (Windows CI, Apr 2026 tier plan,
+  libghostty). Live finding: upstream maintainer says unaffiliated
+  projects must not use "Ghostty" in branding, naming winghostty
+  specifically — rename risk is a decision item.
 
 ## Not yet specified
 
