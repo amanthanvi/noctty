@@ -108,7 +108,11 @@ pub const Windows = struct {
     /// our mutex and iterators hold deep copies.
     pub fn refresh(self: *Windows) void {
         const state = self.scanState();
-        if (self.state) |prev| if (prev.eql(state)) return;
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.state) |prev| if (prev.eql(state)) return;
+        }
 
         const records = self.scanAll() catch |err| {
             log.warn("windows font discovery scan failed err={}", .{err});
@@ -135,6 +139,12 @@ pub const Windows = struct {
         alloc: Allocator,
         desc: Descriptor,
     ) !DiscoverIterator {
+        // Some consumers (e.g. the +list-fonts CLI action) use
+        // init()+discover() directly and never call refresh(); make the
+        // first scan self-healing so they still see fonts. Concurrent
+        // first calls can at worst scan twice; the extra result is freed.
+        if (!self.hasScanned()) self.refresh();
+
         const filtered = blk: {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -159,6 +169,12 @@ pub const Windows = struct {
         };
     }
 
+    fn hasScanned(self: *Windows) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.state != null;
+    }
+
     pub fn discoverFallback(
         self: *Windows,
         alloc: Allocator,
@@ -179,29 +195,44 @@ pub const Windows = struct {
         i: usize,
 
         pub fn deinit(self: *DiscoverIterator) void {
-            for (self.records) |*record| record.deinit(self.alloc);
+            // Records before `i` were consumed by next(), which transferred
+            // their allocations into the returned faces.
+            for (self.records[self.i..]) |*record| record.deinit(self.alloc);
             self.alloc.free(self.records);
             self.* = undefined;
         }
 
         pub fn next(self: *DiscoverIterator) !?DeferredFace {
             if (self.i >= self.records.len) return null;
-            defer self.i += 1;
+            const record = &self.records[self.i];
 
-            const record = self.records[self.i];
-            return DeferredFace{
+            // The only fallible step happens before any ownership moves,
+            // so a failure here leaks nothing and leaves the record
+            // available for a retry.
+            const variations = try self.alloc.dupe(Variation, self.variations);
+
+            // Transfer the record's allocations into the face (same
+            // allocator, no second copy). The typographic family has no
+            // destination field, so it is released here.
+            if (record.typographic_family) |name| self.alloc.free(name);
+            const face: DeferredFace = .{
                 .win = .{
                     .alloc = self.alloc,
-                    .path = try self.alloc.dupeZ(u8, record.path),
+                    .path = record.path,
                     .face_index = record.face_index,
-                    .family_name = try self.alloc.dupeZ(u8, record.family_name),
-                    .style_name = try self.alloc.dupeZ(u8, record.style_name),
-                    .full_name = try self.alloc.dupeZ(u8, record.full_name),
-                    .variations = try self.alloc.dupe(Variation, self.variations),
+                    .family_name = record.family_name,
+                    .style_name = record.style_name,
+                    .full_name = record.full_name,
+                    .variations = variations,
                     .color = record.color,
-                    .charset = try self.alloc.dupe(u32, record.charset orelse &.{}),
+                    // Filtered records always carry a materialized charset
+                    // (see filterRecordsLocked).
+                    .charset = record.charset.?,
                 },
             };
+            record.* = undefined;
+            self.i += 1;
+            return face;
         }
     };
 
@@ -623,16 +654,33 @@ pub const Windows = struct {
             result.deinit(alloc);
         }
 
+        // One FreeType library shared by every face this query has to
+        // open, created only if some face actually needs inspection.
+        var lib: ?freetype.Library = null;
+        defer if (lib) |*l| l.deinit();
+
         for (self.records) |*record| {
             if (!matchesDescriptor(record.*, desc)) continue;
 
-            const charset = self.ensureCharsetLocked(record);
-            const has_codepoint = desc.codepoint > 0 and
-                charsetHasCodepoint(charset, desc.codepoint);
-            if (desc.codepoint > 0 and !has_codepoint) continue;
+            // Codepoint filter. A cached charset answers with a binary
+            // search; otherwise probe the face with a single char-index
+            // lookup instead of enumerating its entire charset — a
+            // codepoint-only fallback query visits nearly every record.
+            if (desc.codepoint > 0) {
+                const contains = if (record.charset) |charset|
+                    charsetHasCodepoint(charset, desc.codepoint)
+                else
+                    faceHasCodepoint(&lib, record.path, record.face_index, desc.codepoint);
+                if (!contains) continue;
+            }
+
+            // Records handed to the iterator must carry a materialized
+            // charset for DeferredFace.hasCodepoint, so compute and cache
+            // it — but only for these survivors.
+            _ = self.ensureCharsetLocked(&lib, record);
 
             var copy = try copyRecord(alloc, record.*);
-            copy.has_codepoint = has_codepoint;
+            copy.has_codepoint = desc.codepoint > 0;
             errdefer copy.deinit(alloc);
             try result.append(alloc, copy);
         }
@@ -640,17 +688,42 @@ pub const Windows = struct {
         return try result.toOwnedSlice(alloc);
     }
 
+    /// Cheap membership probe: open the face and look up one char index
+    /// instead of enumerating the full charset. Any failure counts as
+    /// "does not contain".
+    fn faceHasCodepoint(
+        lib: *?freetype.Library,
+        path: [:0]const u8,
+        face_index: i32,
+        codepoint: u32,
+    ) bool {
+        const l = sharedLibrary(lib) orelse return false;
+        const face = l.initFace(path, face_index) catch return false;
+        defer face.deinit();
+        face.selectCharmap(.unicode) catch return false;
+        return face.getCharIndex(codepoint) != null;
+    }
+
     /// Return the record's charset, computing and caching it on first
     /// use. Must be called with the mutex held. Extraction failures are
-    /// cached as an empty charset so a broken font isn't re-parsed on
-    /// every query.
-    fn ensureCharsetLocked(self: *Windows, record: *Record) []const u32 {
+    /// cached as an empty heap-owned slice so a broken font isn't
+    /// re-parsed on every query; out-of-memory skips the cache entirely
+    /// so a later query can retry.
+    fn ensureCharsetLocked(
+        self: *Windows,
+        lib: *?freetype.Library,
+        record: *Record,
+    ) []const u32 {
         if (record.charset) |charset| return charset;
-        const charset = computeCharset(self.alloc, record.path, record.face_index) catch |err| blk: {
-            log.debug("windows font discovery charset failed path={s} index={} err={}", .{
-                record.path, record.face_index, err,
-            });
-            break :blk @as([]const u32, &.{});
+
+        const charset = computeCharset(self.alloc, lib, record.path, record.face_index) catch |err| switch (err) {
+            error.OutOfMemory => return &.{},
+            else => blk: {
+                log.debug("windows font discovery charset failed path={s} index={} err={}", .{
+                    record.path, record.face_index, err,
+                });
+                break :blk self.alloc.alloc(u32, 0) catch return &.{};
+            },
         };
         record.charset = charset;
         return charset;
@@ -658,14 +731,25 @@ pub const Windows = struct {
 
     fn computeCharset(
         alloc: Allocator,
+        lib: *?freetype.Library,
         path: [:0]const u8,
         face_index: i32,
     ) ![]const u32 {
-        var lib = try freetype.Library.init();
-        defer lib.deinit();
-        const face = try lib.initFace(path, face_index);
+        const l = sharedLibrary(lib) orelse return error.LibraryInitFailed;
+        const face = try l.initFace(path, face_index);
         defer face.deinit();
         return try extractCharset(alloc, face);
+    }
+
+    /// Return the query-shared FreeType library, creating it on first use.
+    fn sharedLibrary(lib: *?freetype.Library) ?freetype.Library {
+        if (lib.*) |l| return l;
+        const created = freetype.Library.init() catch |err| {
+            log.warn("windows font discovery freetype init failed err={}", .{err});
+            return null;
+        };
+        lib.* = created;
+        return created;
     }
 
     fn extractCharset(alloc: Allocator, face: freetype.Face) ![]const u32 {
@@ -831,6 +915,14 @@ pub const Windows = struct {
     //-------------------------------------------------------------------
     // Staleness tracking for refresh()
 
+    /// Change signal for the font sources. Installing or removing a font
+    /// updates the containing directory's mtime (NTFS bumps it when
+    /// direct children are added/removed) and/or the HKCU font key's
+    /// last-write time, so those events are detected. Overwriting an
+    /// existing font file in place changes neither and is deliberately
+    /// not detected — the next install/uninstall or app restart picks it
+    /// up, and tracking per-file mtimes would make every staleness check
+    /// a full directory walk.
     const ScanState = struct {
         system_mtime: ?i128,
         user_mtime: ?i128,
@@ -1142,33 +1234,36 @@ test "windowsScanStateEql" {
 }
 
 test "windows discovery end to end" {
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+    // The comptime branch keeps the Windows-only body (init/refresh and
+    // the advapi32/kernel32 externs behind them) out of semantic analysis
+    // on other hosts entirely.
+    if (comptime builtin.os.tag == .windows) {
+        const alloc = testing.allocator;
 
-    const alloc = testing.allocator;
+        var disco = Windows.init();
+        defer disco.deinit();
 
-    var disco = Windows.init();
-    defer disco.deinit();
+        // First refresh scans; an immediate second refresh must be a cheap
+        // no-op (unchanged state) and must not invalidate anything.
+        disco.refresh();
+        disco.refresh();
 
-    // First refresh scans; an immediate second refresh must be a cheap
-    // no-op (unchanged state) and must not invalidate anything.
-    disco.refresh();
-    disco.refresh();
+        // Arial ships with every Windows install.
+        {
+            var it = try disco.discover(alloc, .{ .family = "Arial", .size = 12 });
+            defer it.deinit();
+            var face = (try it.next()) orelse return error.TestUnexpectedResult;
+            defer face.deinit();
+            try testing.expect(face.hasCodepoint('A', null));
+        }
 
-    // Arial ships with every Windows install.
-    {
-        var it = try disco.discover(alloc, .{ .family = "Arial", .size = 12 });
-        defer it.deinit();
-        var face = (try it.next()) orelse return error.TestUnexpectedResult;
-        defer face.deinit();
-        try testing.expect(face.hasCodepoint('A', null));
-    }
-
-    // Codepoint fallback across all fonts.
-    {
-        var it = try disco.discover(alloc, .{ .codepoint = 'A', .size = 12 });
-        defer it.deinit();
-        var face = (try it.next()) orelse return error.TestUnexpectedResult;
-        defer face.deinit();
-        try testing.expect(face.hasCodepoint('A', null));
-    }
+        // Codepoint fallback across all fonts.
+        {
+            var it = try disco.discover(alloc, .{ .codepoint = 'A', .size = 12 });
+            defer it.deinit();
+            var face = (try it.next()) orelse return error.TestUnexpectedResult;
+            defer face.deinit();
+            try testing.expect(face.hasCodepoint('A', null));
+        }
+    } else return error.SkipZigTest;
 }
