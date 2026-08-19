@@ -104,18 +104,25 @@ deliverable.
   progress, docked search all exist) — six claimed gaps deduped into
   one docs-accuracy item. Decision-first: naming/trademark (F1),
   upstream-relations posture (F2).
+- [Decision session: adopt/reject/defer](tickets/D01-decision-session.md)
+  — every item ruled with the user (2026-08-19): all 26 adopts
+  confirmed, all 11 defers ratified, all 11 rejects ratified
+  individually. Frame: F1 naming = wait-and-see; F2 = hard fork, no
+  upstreaming, deliberate downstream merges; F3 AI stance = silent; F4
+  perf budgets, F5 launch topology, F6 session tiers + durability
+  aspiration, F8 narrow SSH extension = adopted; F7 sustainability =
+  skipped; C27 trust page = full send under the current name. Roadmap:
+  three waves (credibility → moats → depth) in
+  `plans/2026-competitive-roadmap.md`. C16 spike spawned as
+  [Spike: durable-session feasibility](tickets/R13-durable-session-spike.md).
 
 ## Not yet specified
 
 <!-- in-scope fog; graduates into tickets as the frontier advances -->
 
-- Individual grilling tickets for roadmap items too big or contentious
-  to settle in the batch decision session — which items, if any, emerge
-  from [Decision session: adopt/reject/defer](tickets/D01-decision-session.md).
-- Possible PRODUCT.md amendment decisions, if the dives expose flaws in
-  the positioning frame itself.
-- Shape and location of the final roadmap document (likely
-  `plans/2026-competitive-roadmap.md`; confirm at assembly time).
+- Whether the durable-session aspiration (F6) graduates into build
+  tickets — depends on the verdict of
+  [Spike: durable-session feasibility](tickets/R13-durable-session-spike.md).
 
 ## Out of scope
 
