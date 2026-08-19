@@ -115,14 +115,22 @@ deliverable.
   three waves (credibility → moats → depth) in
   `plans/2026-competitive-roadmap.md`. C16 spike spawned as
   [Spike: durable-session feasibility](tickets/R13-durable-session-spike.md).
+- [Spike: durable-session feasibility](tickets/R13-durable-session-spike.md)
+  — verdict: **feasible-with-broker** (HPCON dies with its owner; a
+  session-host process + named-pipe attach is proven art — VS Code pty
+  host, WT #20077). XL confirmed for the full feature but known
+  engineering, not research risk; smallest testable increment is an
+  M-sized standalone `conpty-host` exe. Funding that increment is a
+  roadmap decision for the assembly ticket.
 
 ## Not yet specified
 
 <!-- in-scope fog; graduates into tickets as the frontier advances -->
 
-- Whether the durable-session aspiration (F6) graduates into build
-  tickets — depends on the verdict of
-  [Spike: durable-session feasibility](tickets/R13-durable-session-spike.md).
+- Whether/when the M-sized `conpty-host` increment (the spike's
+  smallest testable step toward F6's durability aspiration) gets
+  funded — decided in the roadmap at
+  [Assemble the competitive roadmap](tickets/T01-assemble-roadmap.md).
 
 ## Out of scope
 
