@@ -10,11 +10,16 @@ field, closed by setting `Status: closed` and appending a
 
 ## Destination
 
-A decided, prioritized competitive-response roadmap committed to this
-repo: for each competitor strength, weakness, or blind spot the analysis
-surfaces, an explicit adopt / reject / defer decision with rationale,
-ready to hand to `/implement`. The analysis report is an input, not the
-deliverable.
+**Reached 2026-08-19.** The roadmap is committed at
+[`plans/2026-competitive-roadmap.md`](../../2026-competitive-roadmap.md)
+and the adopted PRODUCT.md amendments are applied. All 16 tickets are
+closed; this map is complete and now serves as the effort's record.
+
+Original destination: a decided, prioritized competitive-response
+roadmap committed to this repo — for each competitor strength,
+weakness, or blind spot the analysis surfaces, an explicit
+adopt / reject / defer decision with rationale, ready to hand to
+`/implement`. The analysis report is an input, not the deliverable.
 
 ## Notes
 
@@ -122,15 +127,21 @@ deliverable.
   engineering, not research risk; smallest testable increment is an
   M-sized standalone `conpty-host` exe. Funding that increment is a
   roadmap decision for the assembly ticket.
+- [Assemble the competitive roadmap](tickets/T01-assemble-roadmap.md)
+  — the destination: `plans/2026-competitive-roadmap.md` committed
+  (three waves, 26 adopts + conpty-host increment, 11 non-goals,
+  deferred ledger) and the four PRODUCT.md amendments applied.
+  Assembly-time rulings: conpty-host scheduled in Wave 2 after
+  scrollback restore; F4 budgets carry provisional targets until the
+  benchmark suite's first baseline.
 
 ## Not yet specified
 
 <!-- in-scope fog; graduates into tickets as the frontier advances -->
 
-- Whether/when the M-sized `conpty-host` increment (the spike's
-  smallest testable step toward F6's durability aspiration) gets
-  funded — decided in the roadmap at
-  [Assemble the competitive roadmap](tickets/T01-assemble-roadmap.md).
+None — the frontier reached the destination. Follow-on work lives in
+[`plans/2026-competitive-roadmap.md`](../../2026-competitive-roadmap.md),
+not on this map.
 
 ## Out of scope
 
@@ -139,7 +150,7 @@ deliverable.
 - Hands-on evaluation of competitors on a real Windows machine —
   consciously ruled out at charting; all claims stay research-sourced.
 - Implementing any roadmap item — this map ends when decisions are made.
-- Marketing/community *execution* (writing posts, running outreach);
+- Marketing/community _execution_ (writing posts, running outreach);
   the roadmap may decide adoption priorities, but doing them is a
   separate effort.
 - Upstreaming work to ghostty-org/ghostty (AGENTS.md forbids it).
