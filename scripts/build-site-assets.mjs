@@ -16,6 +16,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const checkOnly = process.argv.includes("--check");
 
 const sha256Hex = (text) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
 const sha256Base64 = (text) => crypto.createHash("sha256").update(text, "utf8").digest("base64");
@@ -72,7 +73,6 @@ function withAssetCacheKeys(html, htmlPath, assets) {
 }
 
 function main() {
-  const checkOnly = process.argv.includes("--check");
   const failures = [];
 
   function updateOrCheck(relativePath, expected, current) {
