@@ -58,8 +58,7 @@ OpenConsole so the Kitty-graphics claim survives the user's OS (C05);
 (4) **take the OS entry points nobody else has** — default-terminal
 registration, jump lists, Explorer menu (C11–C13); (5) **deepen the session
 promise** — scrollback-content restore now, durable-process feasibility spike
-next (C15/C16). The naming/upstream questions (F1/F2) gate all marketing
-spend and should be ruled first.
+next (C15/C16). The naming/upstream questions (F1/F2) gate all marketing spend and should be ruled first. (Ruled in D01: F1 wait-and-see, F2 hard fork; C27 proceeds under the current name.)
 
 ---
 
@@ -76,8 +75,7 @@ leverage. Cost: S ≲ days, M ≲ weeks, L ≈ month+, XL ≈ quarter+.
 - _What:_ Adopt a vtebench-style harness plus Windows-specific metrics
   (cold-start-to-first-frame, camera/photodiode key-to-pixel latency, ConPTY
   round-trip, scroll throughput, frame-time p95, idle/peak memory), publish
-  numbers vs Windows Terminal / Alacritty / Tabby / Wave on the same machine,
-  and gate regressions in CI.
+  numbers vs Windows Terminal / Alacritty / Tabby / Wave on the same machine, and gate regressions in CI. (CI gates run the software-reproducible metrics; camera/photodiode key-to-pixel latency is a scheduled lab measurement with a documented CI proxy, not a per-PR gate.)
 - _Evidence:_ `[ala]` §10.1 (vtebench, perf-as-artifact culture); `[wintty]`
   §2/§10.9 (rival's full metric plan exists but is unexecuted — publishing
   first converts it into winghostty marketing); `[wt]` §2/§10 (no published
@@ -155,8 +153,7 @@ leverage. Cost: S ≲ days, M ≲ weeks, L ≈ month+, XL ≈ quarter+.
 **C05. Own the ConPTY layer: bundle newer OpenConsole + degraded-mode
 logging + a public mangling catalog.**
 
-- _What:_ Ship a newer OpenConsole as `conpty.dll` beside the exe, prefer it
-  over the in-box conhost, log a loud degraded-mode warning on fallback
+- _What:_ Ship the redistributable ConPTY pair — `conpty.dll` plus a matching-architecture/version `OpenConsole.exe` — beside the exe and load it explicitly, resolving `CreatePseudoConsole` from the bundled DLL (the current `kernel32` import ignores a side-by-side DLL, so bundling alone changes nothing); fall back to the in-box `kernel32`/conhost path with a loud degraded-mode warning
   ("Kitty graphics and Sixel will not work"), and publish a
   ConPTY-mangling/mitigation catalog + measured esctest baseline in the
   spirit of docs/windows-vt-conformance.md.
@@ -331,10 +328,7 @@ logging + a public mangling catalog.**
 - _Why:_ The strongest possible fulfillment of PRODUCT.md's restart promise;
   no Windows-native terminal has it.
 - _Cost:_ XL (process lifetime, ConPTY ownership, reattach protocol).
-- _Recommendation:_ **Defer, with a funded feasibility spike.** Impact is
-  top-3 but cost and technical risk (ConPTY handle lifetime) are unproven;
-  C15 buys most of the felt value now. Candidate for its own grilling
-  ticket.
+- _Recommendation:_ **Defer, with a funded feasibility spike.** Impact is top-3 but cost and technical risk (ConPTY handle lifetime) were unproven at synthesis time; C15 buys most of the felt value now. (Update: the R13 spike since ruled **feasible-with-broker** — an HPCON dies with its owner, so durability needs a session-host process — with the M-sized `conpty-host` exe as the smallest testable increment; see durable-session-spike.md. Implementation stays deferred.)
 
 **C17. Named layouts ("tasks"): profile + split layout + hotkey in one
 object.**
@@ -488,14 +482,12 @@ object.**
 
 **C28. SmartScreen/signing reputation hardening.**
 
-- _What:_ Pursue SignPath Foundation or EV-grade reputation so first-run
-  SmartScreen warnings disappear; sign or attest the portable ZIP container.
+- _What:_ Sign every release consistently (SignPath Foundation or equivalent) and build SmartScreen file-hash reputation over time — EV certificates no longer grant instant SmartScreen reputation (Microsoft removed that privilege in 2024; reputation now accrues per file hash) — and sign or attest the portable ZIP container.
 - _Evidence:_ `[ala]` §3/§10.5 (unsigned since 2021; SignPath proposal
   [#8725](https://github.com/alacritty/alacritty/issues/8725)); `[rio]` §3
   ("click Run anyway" docs); `[conemu]` §9 (AV reputation death spiral);
   status.md's own caveat (SmartScreen can still warn).
-- _Why:_ The last trust gap in an otherwise best-in-field distribution
-  story; SmartScreen warnings kill first installs.
+- _Why:_ The last trust gap in an otherwise best-in-field distribution story; SmartScreen warnings kill first installs, and only consistent signing plus accumulated hash reputation makes them fade.
 - _Cost:_ S/M.
 - _Recommendation:_ **Adopt.**
 
@@ -765,5 +757,4 @@ Things the evidence says NOT to do — listed for fast ratification.
 Candidates: 37 total — **adopt 26** (C01–C08, C11–C15, C17–C20, C25,
 C27–C34), **defer 11** (C09, C10, C16, C21–C24, C26, C35–C37), reject 0
 (rejections are ratified via §4's eleven items). Frame challenges: 9
-(F1–F9), of which F1 and F2 should be ruled before adoption-marketing
-candidates (C27) are executed.
+(F1–F9), of which F1 and F2 were flagged to be ruled before adoption-marketing candidates (C27) execute. (Since ruled in D01: F1 wait-and-see, F2 hard fork with no upstreaming, and C27 approved full-send under the current name.)

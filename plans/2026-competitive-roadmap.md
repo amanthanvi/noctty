@@ -124,9 +124,7 @@ plus Windows-specific metrics — cold-start-to-first-frame, key-to-pixel
 latency (camera/photodiode methodology documented), ConPTY round-trip,
 scroll MB/s, frame-time p95, steady-state memory per pane, idle
 GPU/CPU — run same-machine against Windows Terminal, Alacritty, Tabby,
-Wave; publish results in docs; wire regression gates into CI against
-the PRODUCT.md budgets (provisional until this suite's first baseline
-fixes them). Evidence: synthesis C01; alacritty §10.1, wintty §2/§10.9,
+Wave; publish results in docs; wire regression gates into CI against the PRODUCT.md budgets (provisional until this suite's first baseline fixes them; CI gates the software-reproducible metrics, while camera/photodiode key-to-pixel latency is a scheduled lab measurement with a documented CI proxy). Evidence: synthesis C01; alacritty §10.1, wintty §2/§10.9,
 wt §2/§10, rio §10.6, tabby §10.1, wave §10.2.
 
 ### C03 · GPU floor documentation + graceful degraded-mode — S · [#122](https://github.com/amanthanvi/winghostty/issues/122)
@@ -215,9 +213,7 @@ graphics, deep VT) currently depends on whatever conhost version the
 user's OS carries — the in-box `CreatePseudoConsole`
 (`src/pty.zig:430`) silently strips Kitty APC/Sixel on older builds
 (wintty measured it; Warp forked ConPTY over it). The single biggest
-silent-failure risk in the product's core promise. **Shape:** ship a
-newer OpenConsole as `conpty.dll` beside the exe; prefer it, fall back
-to in-box with a loud logged warning naming what degrades; publish a
+silent-failure risk in the product's core promise. **Shape:** ship the redistributable ConPTY pair (`conpty.dll` + matching-architecture `OpenConsole.exe`) beside the exe and load `CreatePseudoConsole` explicitly from the bundled DLL — the current `kernel32` import would ignore a side-by-side DLL — falling back to the in-box `kernel32`/conhost path with a loud logged warning naming what degrades; publish a
 ConPTY-mangling/mitigation catalog + measured esctest baseline
 extending [docs/windows-vt-conformance.md](../docs/windows-vt-conformance.md).
 Evidence: synthesis C05; wintty §3/§10.1/§10.5, rio §3/§10.1, warp §3,
@@ -312,9 +308,7 @@ conemu §3/§10.1, wt §3/§10.8, wave §3.
 **Ruling:** adopt. **Why:** the last trust gap in a
 best-in-field distribution story; first-run SmartScreen warnings kill
 installs; Alacritty is unsigned since 2021, ConEmu shows the AV
-reputation death spiral. **Shape:** pursue SignPath Foundation or
-EV-grade reputation; sign or attest the portable ZIP container;
-document verification steps (feeds the trust page). Evidence:
+reputation death spiral. **Shape:** sign every release consistently (SignPath Foundation or equivalent) and build SmartScreen file-hash reputation over time — EV no longer grants instant reputation (Microsoft removed that privilege in 2024); sign or attest the portable ZIP container; document verification steps (feeds the trust page). Evidence:
 synthesis C28; alacritty §3/§10.5, rio §3, conemu §9.
 
 ### C29 · Portable mode + portable-ZIP updater apply — M · [#138](https://github.com/amanthanvi/winghostty/issues/138)
