@@ -25,18 +25,31 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Browsers execute the HTML-decoded attribute value, and the header contract
 // (scripts/get-site-header-contract.ps1) HtmlDecodes before hashing — so an
 // encoded handler like onload="this.media=&#39;all&#39;" must hash the same
-// as its literal form.
+// as its literal form. This is deliberately not a full HTML decoder: any
+// reference outside the small supported set fails the build instead of
+// risking a hash the browser would disagree with (named references beyond
+// these five, out-of-range or surrogate code points, and the 0x80-0x9F range
+// browsers remap via windows-1252 all decode differently across parsers).
 const NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 
 export function decodeHtmlEntities(text) {
-  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);/g, (match, body) => {
+  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g, (match, body) => {
     if (body[0] === "#") {
       const codePoint = body[1] === "x" || body[1] === "X"
         ? Number.parseInt(body.slice(2), 16)
         : Number.parseInt(body.slice(1), 10);
-      return Number.isNaN(codePoint) ? match : String.fromCodePoint(codePoint);
+      if (Number.isNaN(codePoint) ||
+          codePoint > 0x10ffff ||
+          (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
+          (codePoint >= 0x80 && codePoint <= 0x9f)) {
+        throw new Error(`Unsupported HTML character reference "${match}"; use a literal character or one of the plain numeric forms.`);
+      }
+      return String.fromCodePoint(codePoint);
     }
-    return Object.hasOwn(NAMED_ENTITIES, body) ? NAMED_ENTITIES[body] : match;
+    if (!Object.hasOwn(NAMED_ENTITIES, body)) {
+      throw new Error(`Unsupported HTML named reference "${match}"; only ${Object.keys(NAMED_ENTITIES).map((name) => `&${name};`).join(" ")} are recognized.`);
+    }
+    return NAMED_ENTITIES[body];
   });
 }
 

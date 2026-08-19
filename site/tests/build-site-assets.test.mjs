@@ -19,6 +19,13 @@ test('text without character references passes through untouched', () => {
   assert.equal(decodeHtmlEntities(literal), literal);
 });
 
-test('unknown or malformed references are left as-is', () => {
-  assert.equal(decodeHtmlEntities('&unknown; &#zz; & plain'), '&unknown; &#zz; & plain');
+test('bare ampersands and non-reference text are left as-is', () => {
+  assert.equal(decodeHtmlEntities('a & b &#zz; &; &'), 'a & b &#zz; &; &');
+});
+
+test('references beyond the supported set fail the build instead of hashing wrong', () => {
+  assert.throws(() => decodeHtmlEntities('this.media=&nbsp;'), /Unsupported HTML named reference "&nbsp;"/);
+  assert.throws(() => decodeHtmlEntities('&#x110000;'), /Unsupported HTML character reference/);
+  assert.throws(() => decodeHtmlEntities('&#55296;'), /Unsupported HTML character reference/); // lone surrogate
+  assert.throws(() => decodeHtmlEntities('&#150;'), /Unsupported HTML character reference/); // windows-1252 remap range
 });
