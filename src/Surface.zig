@@ -3976,13 +3976,14 @@ fn copySelectionToClipboards(
 
     const ScreenFormatter = terminal.formatter.ScreenFormatter;
     var aw: std.Io.Writer.Allocating = .init(alloc);
-    var contents: std.ArrayList(apprt.ClipboardContent) = .empty;
+    var contents_buf: [2]apprt.ClipboardContent = undefined;
+    var contents: std.ArrayList(apprt.ClipboardContent) = .initBuffer(&contents_buf);
     switch (format) {
         .plain => {
             var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts);
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
-            try contents.append(alloc, .{
+            contents.appendAssumeCapacity(.{
                 .mime = "text/plain",
                 .data = try aw.toOwnedSliceSentinel(0),
             });
@@ -3999,7 +4000,7 @@ fn copySelectionToClipboards(
 
             // Codepoint mappings affect terminal cell text; formatter-generated
             // VT escape sequences are preserved as-is.
-            try contents.append(alloc, .{
+            contents.appendAssumeCapacity(.{
                 .mime = "text/plain",
                 .data = try aw.toOwnedSliceSentinel(0),
             });
@@ -4015,7 +4016,7 @@ fn copySelectionToClipboards(
             try formatter.format(&aw.writer);
 
             // Codepoint mappings are applied before HTML encoding.
-            try contents.append(alloc, .{
+            contents.appendAssumeCapacity(.{
                 .mime = "text/html",
                 .data = try aw.toOwnedSliceSentinel(0),
             });
@@ -4026,7 +4027,7 @@ fn copySelectionToClipboards(
             var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, opts);
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
-            try contents.append(alloc, .{
+            contents.appendAssumeCapacity(.{
                 .mime = "text/plain",
                 .data = try aw.toOwnedSliceSentinel(0),
             });
@@ -4048,7 +4049,7 @@ fn copySelectionToClipboards(
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
 
-            try contents.append(alloc, .{
+            contents.appendAssumeCapacity(.{
                 .mime = "text/html",
                 .data = try aw.toOwnedSliceSentinel(0),
             });
