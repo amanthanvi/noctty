@@ -230,10 +230,8 @@ $expectedCspDirectives = [ordered]@{
     'script-src-attr' = $expectedScriptAttributeSources
     'style-src' = @(
         "'self'",
-        "'unsafe-inline'",
         'https://fonts.googleapis.com'
     )
-    'style-src-attr' = @("'unsafe-inline'")
     'font-src' = @("'self'", 'https://fonts.gstatic.com')
     'connect-src' = @("'self'", 'https://api.github.com')
     'img-src' = @("'self'", 'data:')
@@ -294,9 +292,6 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
         x_frame_options = $security['X-Frame-Options']
         referrer_policy = $security['Referrer-Policy']
         permissions_policy = $permissions
-    }
-    bundle = [ordered]@{
-        cache_control = $security['Cache-Control']
     }
     not_found = [ordered]@{
         cache_control = 'no-store'

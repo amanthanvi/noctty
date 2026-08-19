@@ -479,9 +479,9 @@ function Test-PublicHeaderContractOnce {
         }
     }
     $probes += [pscustomobject]@{
-        Path = '/bundle.js'
+        Path = '/styles.css'
         ExpectedStatus = 200
-        ExpectedCache = [string]$Contract.bundle.cache_control
+        ExpectedCache = [string]$Contract.root.cache_control
     }
     if (-not $StaticOnly) {
         $probes += [pscustomobject]@{

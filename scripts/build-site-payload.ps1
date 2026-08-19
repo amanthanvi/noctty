@@ -46,25 +46,19 @@ if ($manifestFullPath.StartsWith($outputPrefix, $pathComparison) -or
     throw 'The SHA-256 manifest must be outside the deploy payload.'
 }
 
-# Deliberately exact: source JSX, package metadata, build notes, and local tooling
-# cannot silently become production files.
+# Deliberately exact: build notes and local tooling cannot silently become
+# production files.
 $allowlist = [string[]] @(
     '404.html'
     '_headers'
     'app.js'
     'assets/favicon.svg'
-    'assets/winghostty-app-icon.svg'
-    'assets/winghostty-flag-light.svg'
-    'assets/winghostty-flag.svg'
-    'assets/winghostty-icon.svg'
     'assets/winghostty-social.png'
-    'assets/winghostty-wordmark.svg'
-    'bundle.js'
-    'icons/ghostty-official.png'
     'index.html'
+    'install.js'
     'styles.css'
-    'vendor/react-dom.production.min.js'
-    'vendor/react.production.min.js'
+    'terminal.js'
+    'version.js'
 )
 [Array]::Sort($allowlist, [StringComparer]::Ordinal)
 

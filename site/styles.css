@@ -11,7 +11,7 @@ body {
 
 :root {
   --mono: "JetBrains Mono", consolas, ui-monospace, "SFMono-Regular", "Liberation Mono", monospace;
-  --display: "Bricolage Grotesque", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --display: var(--mono);
   --sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   --wg-red: #f25022;
@@ -61,11 +61,6 @@ body {
   --primary-hover: #005ca8;
   --primary-active: #004f91;
   --shadow: 0 4px 8px oklch(0.05 0.02 265 / 0.32);
-  --wg-install-clip: polygon(0 0,
-      calc(100% - 1px) 0,
-      100% 1px,
-      100% 100%,
-      0 100%);
 }
 
 :root[data-theme="light"] {
@@ -157,7 +152,8 @@ a:hover {
 }
 
 a:focus-visible,
-button:focus-visible {
+button:focus-visible,
+input:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--wg-blue) 70%, currentcolor);
   outline-offset: 2px;
   border-radius: 8px;
@@ -188,8 +184,8 @@ code {
 .wg-container {
   max-width: 1180px;
   margin: 0 auto;
-  padding-left: 32px;
-  padding-right: 32px;
+  padding-left: var(--space-xl);
+  padding-right: var(--space-xl);
 }
 
 .wg-sr-only {
@@ -204,6 +200,14 @@ code {
   border: 0;
 }
 
+/* Off-screen staging textarea for the execCommand clipboard fallback. */
+.wg-clipboard-stage {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  opacity: 0;
+}
+
 .wg-wordmark-link {
   display: inline-flex;
   align-items: center;
@@ -216,29 +220,36 @@ code {
 .wg-wordmark {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-sm);
   text-decoration: none;
 }
 
-.wg-wordmark>svg {
+.wg-wordmark > svg {
   display: block;
   flex-shrink: 0;
 }
 
-.wg-wordmark img {
-  display: block;
+.wg-wordmark__text {
+  color: var(--fg);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-family: var(--sans);
+  font-size: 18px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.wg-wordmark__light {
-  display: none;
+.wg-wordmark--footer .wg-wordmark__text {
+  font-size: 15px;
 }
 
-:root[data-theme="light"] .wg-wordmark__dark {
-  display: none;
+.wg-mark__outline,
+.wg-mark__glyph {
+  fill: var(--toggle-glyph);
 }
 
-:root[data-theme="light"] .wg-wordmark__light {
-  display: block;
+.wg-mark__ghost {
+  fill: var(--toggle-ghost);
 }
 
 .wg-topbar {
@@ -261,52 +272,34 @@ code {
   min-height: 60px;
 }
 
-.wg-chip-link,
 .wg-theme-toggle,
 .wg-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-xs);
   border-radius: 10px;
   text-decoration: none;
   font-family: var(--mono);
   transition: opacity 0.15s, background 0.18s, border-color 0.18s;
 }
 
-.wg-chip-link,
-.wg-theme-toggle {
-  height: 36px;
-  padding: 0 14px;
-  border: 1px solid var(--chip-border);
-  background: var(--surface);
-  color: var(--fg);
-  font-size: 12px;
-  cursor: pointer;
-}
-
 .wg-theme-toggle {
   width: 44px;
   height: 44px;
   padding: 0;
-}
-
-.wg-theme-toggle__mark {
-  display: none;
+  border: 1px solid var(--chip-border);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
 }
 
 .wg-theme-toggle__ghost {
   display: block;
 }
 
-.wg-theme-toggle__body {
-  fill: var(--toggle-ghost);
-  transition: fill 0.32s ease;
-}
-
 .wg-theme-toggle__glyph {
   fill: var(--toggle-glyph);
-  transition: fill 0.32s ease;
 }
 
 .wg-theme-toggle__glyphs {
@@ -328,15 +321,15 @@ code {
 }
 
 .wg-section.wg-section--lead {
-  padding-top: 28px;
-  padding-bottom: 24px;
+  padding-top: var(--space-lg);
+  padding-bottom: var(--space-lg);
 }
 
 .wg-hero-copy {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
+  gap: var(--space-lg);
   width: 100%;
   max-width: 100%;
 }
@@ -347,9 +340,9 @@ code {
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-xs);
   margin: 0;
-  padding: 4px 12px 4px 8px;
+  padding: var(--space-2xs) var(--space-sm) var(--space-2xs) var(--space-xs);
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--wg-blue) 16%, var(--chip-border));
   background: color-mix(in srgb, var(--accent-blue-soft) 14%, var(--surface));
@@ -358,7 +351,10 @@ code {
   font-size: 11px;
   letter-spacing: 0.03em;
   max-width: 100%;
-  box-sizing: border-box;
+}
+
+.wg-hero__badge-visual {
+  display: contents;
 }
 
 .wg-hero__badge-version {
@@ -429,7 +425,7 @@ code {
   flex-direction: column;
   align-items: center;
   align-self: center;
-  gap: 18px;
+  gap: var(--space-md);
   width: 100%;
   max-width: 62ch;
   text-align: center;
@@ -437,12 +433,12 @@ code {
 
 .wg-hero__title {
   margin: 0;
-  max-width: 13ch;
+  max-width: 15ch;
   font-family: var(--display);
-  font-size: clamp(2.75rem, 5.2vw + 1rem, 4.75rem);
-  font-weight: 600;
-  line-height: 0.98;
-  letter-spacing: 0;
+  font-size: clamp(2.2rem, 4.2vw + 0.8rem, 3.6rem);
+  font-weight: 500;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
   color: var(--fg);
 }
 
@@ -452,14 +448,6 @@ code {
 
 .wg-hero__caption {
   margin: 0;
-  max-width: 62ch;
-  color: var(--dim);
-  font-size: 1.0625rem;
-  line-height: 1.6;
-  text-wrap: pretty;
-}
-
-.wg-hero__lede {
   max-width: 62ch;
   color: var(--dim);
   font-size: 1.0625rem;
@@ -481,141 +469,26 @@ code {
   align-items: start;
   justify-content: center;
   align-self: center;
-  gap: 14px;
+  gap: var(--space-sm);
   width: min(100%, 860px);
   max-width: 100%;
 }
 
 .wg-hero__terminal {
   width: min(100%, 860px);
-  margin-top: 6px;
+  margin-top: var(--space-2xs);
 }
 
 .wg-hero__terminal .wg-terminal {
   width: 100%;
 }
 
-.wg-hero__terminal .wg-terminal__body {
-  min-height: 220px;
-}
-
-.wg-install-lane {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-}
-
-.wg-install-panel {
-  display: flex;
-  justify-content: center;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-}
-
-.wg-install-frame {
-  position: relative;
-  isolation: isolate;
-  display: block;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-  padding-bottom: 32px;
-}
-
-.wg-install-fluid {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-}
-
-.wg-install-fluid__pill,
-.wg-install-fluid__tab {
-  position: absolute;
-  background: color-mix(in srgb, var(--accent-green-soft) 18%, var(--surface-soft));
-  border: 1px solid color-mix(in srgb, var(--wg-green) 18%, var(--line));
-  border-radius: 12px;
-}
-
-.wg-install-fluid__pill {
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 44px;
-  border-radius: 12px 12px 12px 0;
-}
-
-.wg-install-fluid__tab {
-  bottom: 1px;
-  left: 0;
-  width: 110px;
-  height: 32px;
-  border-top: 0;
-  border-radius: 0 0 10px 10px;
-  clip-path: var(--wg-install-clip);
-}
-
-.wg-install-tabs {
-  position: absolute;
-  left: 0;
-  bottom: 1px;
-  z-index: 2;
-  width: 110px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  margin: 0;
-  padding: 0 4px;
-  border: 0;
-  border-radius: 0 0 10px 10px;
-  clip-path: var(--wg-install-clip);
-  background: transparent;
-  min-inline-size: 0;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  box-sizing: border-box;
-}
-
-.wg-install-tabs button {
-  min-height: 32px;
-  margin: 0;
-  padding: 0 9px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--label);
-  font: inherit;
-  line-height: 1.25;
-  cursor: pointer;
-  transition: background 0.15s ease-out, color 0.15s ease-out;
-}
-
-.wg-install-tabs button.is-active {
-  background: color-mix(in srgb, var(--wg-blue) 10%, var(--surface-strong));
-  color: var(--fg);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wg-blue) 22%, transparent);
-}
-
-.wg-install-tabs button:focus-visible {
-  outline: 0;
-  box-shadow: 0 0 0 2px currentcolor;
-}
-
 .wg-button {
   min-height: 44px;
-  padding: 0 18px;
+  padding: 0 var(--space-md);
   border: 1px solid var(--line);
   color: var(--fg);
   font-size: 14px;
-  box-sizing: border-box;
 }
 
 .wg-button--primary {
@@ -648,48 +521,38 @@ code {
 }
 
 .wg-install {
-  position: relative;
-  z-index: 1;
-  display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: 44px;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
   width: 100%;
   max-width: 100%;
+}
+
+.wg-install__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
   min-height: 44px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--wg-green) 18%, var(--line));
+  border-radius: 10px 10px 10px 0;
+  background: color-mix(in srgb, var(--accent-green-soft) 18%, var(--surface-soft));
   font-family: var(--mono);
   font-size: 13px;
-  overflow: visible;
-}
-
-.wg-install__sigil,
-.wg-install__command,
-.wg-install__copy {
-  grid-row: 1;
-}
-
-.wg-install__sigil,
-.wg-install__command,
-.wg-install__copy {
-  display: flex;
-  align-items: center;
-  position: relative;
-  z-index: 2;
 }
 
 .wg-install__sigil {
-  grid-column: 1;
-  padding: 0 2px 0 14px;
+  display: flex;
+  align-items: center;
+  padding: 0 2px 0 var(--space-sm);
   color: var(--accent-green-muted);
   user-select: none;
 }
 
 .wg-install__command {
-  grid-column: 2;
-  grid-row: 1;
+  display: flex;
+  align-items: center;
   margin: 0;
   padding: 0 2px 0 6px;
   color: var(--fg);
@@ -701,15 +564,13 @@ code {
 }
 
 .wg-install__copy {
-  grid-column: 3;
-  grid-row: 1;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 44px;
   height: 44px;
-  margin: 0 6px 0 2px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -741,6 +602,78 @@ code {
   display: block;
 }
 
+.wg-install__copy-icon--copied {
+  display: none;
+}
+
+.wg-install__copy.is-copied .wg-install__copy-icon--copy {
+  display: none;
+}
+
+.wg-install__copy.is-copied .wg-install__copy-icon--copied {
+  display: block;
+}
+
+.wg-install__methods {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin: -1px 0 0;
+  padding: 3px;
+  border: 1px solid color-mix(in srgb, var(--wg-green) 18%, var(--line));
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: color-mix(in srgb, var(--accent-green-soft) 18%, var(--surface-soft));
+}
+
+.wg-install__method {
+  position: relative;
+  display: inline-flex;
+}
+
+.wg-install__method input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.wg-install__method span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 var(--space-sm);
+  border-radius: 6px;
+  color: var(--label);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+}
+
+.wg-install__method input:checked + span {
+  background: color-mix(in srgb, var(--wg-blue) 10%, var(--surface-strong));
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wg-blue) 22%, transparent);
+}
+
+.wg-install__method input:focus-visible + span {
+  outline: 2px solid color-mix(in srgb, var(--wg-blue) 70%, currentcolor);
+  outline-offset: 1px;
+}
+
+.wg-install__alt {
+  margin: var(--space-xs) 0 0;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .wg-terminal {
   position: relative;
   z-index: 1;
@@ -760,7 +693,7 @@ code {
   align-items: stretch;
   gap: 0;
   height: 36px;
-  padding: 0 0 0 12px;
+  padding: 0 0 0 var(--space-sm);
   border-bottom: 1px solid var(--chip-border);
   background: color-mix(in srgb, var(--surface) 82%, transparent);
 }
@@ -770,7 +703,7 @@ code {
   min-width: 0;
   display: flex;
   align-items: center;
-  padding-right: 8px;
+  padding-right: var(--space-xs);
   overflow: hidden;
   text-align: left;
   color: var(--dim);
@@ -834,7 +767,6 @@ code {
   height: 9px;
   background: transparent;
   border: 1px solid color-mix(in srgb, var(--fg) 58%, transparent);
-  box-sizing: border-box;
 }
 
 .wg-terminal__caption-btn--close::before {
@@ -864,8 +796,8 @@ code {
 }
 
 .wg-terminal__body {
-  min-height: 360px;
-  padding: 22px 24px;
+  min-height: 220px;
+  padding: var(--space-lg);
   overflow: hidden;
   text-align: left;
   font-family: var(--mono);
@@ -889,7 +821,7 @@ code {
   width: 8px;
 }
 
-.wg-terminal[data-motion="paused"] .wg-terminal__body:focus-visible {
+.wg-terminal__body:focus-visible {
   outline: 2px solid var(--wg-blue);
   outline-offset: -3px;
 }
@@ -897,10 +829,10 @@ code {
 .wg-terminal__body p {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-xs);
   align-items: flex-start;
   min-height: 22px;
-  margin: 0 0 10px;
+  margin: 0 0 var(--space-xs);
 }
 
 .wg-terminal__prompt {
@@ -917,10 +849,6 @@ code {
 
 .wg-terminal__line--dim {
   color: var(--dim);
-}
-
-.wg-terminal__line--accent {
-  color: var(--fg);
 }
 
 .wg-terminal__live {
@@ -961,145 +889,91 @@ code {
   margin-top: 0;
   margin-bottom: clamp(18px, 2vw, 28px);
   color: var(--fg);
-  font-size: clamp(22px, 1.7vw, 26px);
+  font-family: var(--display);
+  font-size: clamp(19px, 1.5vw, 22px);
   font-weight: 500;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
   text-wrap: balance;
 }
 
-.wg-feature-grid {
+.wg-features {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: var(--space-md);
-  align-items: stretch;
-}
-
-.wg-feature-card {
-  display: flex;
-  flex-direction: column;
-  grid-column: span 4;
-  min-height: 100%;
-  padding: clamp(20px, 2vw, 28px);
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  transition: background 0.18s, border-color 0.18s, transform 0.18s;
-}
-
-.wg-feature-card[data-feature="gpu"] {
-  grid-column: span 5;
-}
-
-.wg-feature-card[data-feature="native"] {
-  grid-column: span 4;
-}
-
-.wg-feature-card[data-feature="compat"] {
-  grid-column: span 3;
-}
-
-.wg-feature-card[data-feature="config"] {
-  grid-column: span 4;
-}
-
-.wg-feature-card[data-feature="libghostty"] {
-  grid-column: span 4;
-}
-
-.wg-feature-card[data-feature="oss"] {
-  grid-column: span 4;
-}
-
-.wg-feature-card:hover {
-  background: var(--surface-strong);
-  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
-  transform: translateY(-2px);
-}
-
-.wg-feature-card:nth-child(3n + 1):hover {
-  border-color: color-mix(in srgb, var(--wg-red) 38%, var(--line));
-}
-
-.wg-feature-card:nth-child(3n + 2):hover {
-  border-color: color-mix(in srgb, var(--wg-green) 36%, var(--line));
-}
-
-.wg-feature-card:nth-child(3n + 3):hover {
-  border-color: color-mix(in srgb, var(--wg-blue) 40%, var(--line));
-}
-
-.wg-feature-card__glyph {
-  margin-bottom: var(--space-md);
-  color: color-mix(in srgb, var(--fg) 92%, transparent);
-}
-
-.wg-feature-card__glyph svg {
-  display: block;
-  shape-rendering: geometricprecision;
-}
-
-.wg-feature-card:nth-child(3n + 1) .wg-feature-card__glyph {
-  color: color-mix(in srgb, var(--wg-red) 42%, var(--fg));
-}
-
-.wg-feature-card:nth-child(3n + 2) .wg-feature-card__glyph {
-  color: color-mix(in srgb, var(--wg-green) 40%, var(--fg));
-}
-
-.wg-feature-card:nth-child(3n + 3) .wg-feature-card__glyph {
-  color: color-mix(in srgb, var(--wg-blue) 44%, var(--fg));
-}
-
-.wg-feature-card h3 {
-  margin: 0 0 6px;
-  color: var(--fg);
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-}
-
-.wg-feature-card p {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 clamp(32px, 5vw, 64px);
   margin: 0;
-  max-width: 48ch;
-  color: var(--dim);
-  font-size: 13.5px;
-  line-height: 1.5;
+  padding: 0;
+  list-style: none;
 }
 
-.wg-why-grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 0.92fr) minmax(340px, 1.08fr);
-  gap: 8px clamp(32px, 5vw, 64px);
+.wg-feature {
+  padding: var(--space-lg) 0;
+  border-top: 1px solid var(--line);
+}
+
+.wg-feature__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0 0 var(--space-xs);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.wg-feature__dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.wg-feature__dot--red {
+  background: var(--wg-red);
+}
+
+.wg-feature__dot--green {
+  background: var(--wg-green);
+}
+
+.wg-feature__dot--blue {
+  background: var(--wg-blue);
+}
+
+.wg-feature__dot--yellow {
+  background: var(--wg-yellow);
+}
+
+.wg-feature p {
+  margin: 0;
+  max-width: 58ch;
+  color: var(--dim);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.wg-why {
+  max-width: 68ch;
   padding-top: var(--space-lg);
   border-top: 1px solid var(--line);
 }
 
-.wg-why-item {
-  min-height: 72px;
-  padding: var(--space-sm) 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 68%, transparent);
-}
-
-.wg-why-item h3 {
-  margin: 0 0 4px;
-  color: var(--fg);
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: -0.005em;
-}
-
-.wg-why-item p {
-  margin: 0;
-  max-width: 68ch;
+.wg-why p {
+  margin: 0 0 var(--space-md);
   color: var(--dim);
-  font-size: 13.5px;
-  line-height: 1.55;
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.wg-why p:last-child {
+  margin-bottom: 0;
 }
 
 .wg-footer {
-  margin-top: 32px;
-  padding-top: 28px;
-  padding-bottom: 40px;
+  margin-top: var(--space-xl);
+  padding-top: var(--space-lg);
+  padding-bottom: var(--space-2xl);
   border-top: 1px solid var(--line);
 }
 
@@ -1109,7 +983,7 @@ code {
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 20px;
+  gap: var(--space-lg);
 }
 
 .wg-footer__links,
@@ -1120,7 +994,7 @@ code {
 .wg-footer__links {
   display: flex;
   flex-wrap: wrap;
-  gap: 22px;
+  gap: var(--space-lg);
   font-size: 12px;
 }
 
@@ -1140,85 +1014,24 @@ code {
 }
 
 .wg-footer__bottom {
-  margin-top: 22px;
-  gap: 12px;
+  margin-top: var(--space-lg);
+  gap: var(--space-sm);
   color: var(--dim);
   font-size: 12px;
 }
 
-.wg-wordmark__text {
-  color: var(--fg);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  font-family: var(--sans);
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.wg-kbd {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--surface-strong);
-  color: var(--fg);
-  border: 1px solid var(--chip-border);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.wg-noscript {
-  padding: clamp(48px, 8vw, 96px) 0;
-}
-
-.wg-noscript h1,
-.wg-noscript h2 {
-  font-family: var(--display);
-  text-wrap: balance;
-}
-
-.wg-noscript h1 {
-  max-width: 14ch;
-  margin: 0 0 var(--space-md);
-  font-size: clamp(2.5rem, 7vw, 4.75rem);
-  line-height: 1;
-}
-
-.wg-noscript h2 {
-  margin: var(--space-xl) 0 var(--space-xs);
-  font-size: 1.25rem;
-}
-
-.wg-noscript p {
-  max-width: 68ch;
-  color: var(--dim);
-  line-height: 1.65;
-}
-
-.wg-noscript__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-}
-
-.wg-noscript pre {
-  max-width: 100%;
-  margin: 0;
-  padding: var(--space-md);
-  overflow-x: auto;
-  border: 1px solid var(--chip-border);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--fg);
+/* Progressive enhancement: controls that only work with JavaScript stay
+   hidden until the inline bootstrap swaps wg-no-js for wg-js. */
+.wg-no-js .wg-theme-toggle,
+.wg-no-js .wg-install__methods,
+.wg-no-js .wg-install__copy,
+.wg-no-js .wg-terminal__motion {
+  display: none;
 }
 
 @media (min-width: 981px) {
   .wg-hero__intro {
     gap: var(--space-sm);
-  }
-
-  .wg-hero__title {
-    margin-bottom: 0;
   }
 }
 
@@ -1230,52 +1043,25 @@ code {
   .wg-hero__title {
     max-width: none;
   }
-
-  .wg-feature-grid {
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-  }
-
-  .wg-feature-card,
-  .wg-feature-card[data-feature] {
-    grid-column: span 3;
-  }
-
-  .wg-feature-card[data-feature="gpu"] {
-    grid-column: span 6;
-  }
-
 }
 
 @media (max-width: 780px) {
-  .wg-why-grid {
-    grid-template-columns: 1fr;
-  }
-
   .wg-topbar__inner {
     min-height: auto;
     flex-wrap: wrap;
-    padding-top: 12px;
-    padding-bottom: 12px;
+    padding-top: var(--space-sm);
+    padding-bottom: var(--space-sm);
   }
 }
 
 @media (max-width: 720px) {
   .wg-container {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
-
-  .wg-feature-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .wg-feature-card,
-  .wg-feature-card[data-feature] {
-    grid-column: auto;
+    padding-left: var(--space-md);
+    padding-right: var(--space-md);
   }
 
   .wg-hero__title {
-    font-size: 3rem;
+    font-size: 2.3rem;
     max-width: 100%;
   }
 
@@ -1291,7 +1077,7 @@ code {
   .wg-hero__badge {
     width: 100%;
     border-radius: 20px;
-    padding: 8px 12px;
+    padding: var(--space-xs) var(--space-sm);
     gap: 6px;
     font-size: 10px;
   }
@@ -1316,40 +1102,31 @@ code {
     width: 100%;
   }
 
-  .wg-install-lane {
-    width: 100%;
-    max-width: 100%;
-  }
-
-  .wg-install-frame {
-    padding-bottom: 44px;
-  }
-
-  .wg-install-fluid__tab,
-  .wg-install-tabs {
-    bottom: 0;
-    width: 100%;
-    height: 44px;
-    border-radius: 0 0 10px 10px;
-  }
-
-  .wg-install-tabs {
-    padding: 0;
-    font-size: 11px;
-  }
-
-  .wg-install-tabs button {
-    flex: 1;
-    min-height: 44px;
-    padding: 0 12px;
-  }
-
   .wg-install {
     font-size: 11px;
   }
 
-  .wg-install__command {
-    line-height: 42px;
+  .wg-install__methods {
+    width: 100%;
+    padding: var(--space-2xs);
+  }
+
+  .wg-install__method {
+    flex: 1;
+  }
+
+  .wg-install__method span {
+    width: 100%;
+    min-height: 36px;
+    font-size: 11px;
+  }
+
+  .wg-features {
+    grid-template-columns: 1fr;
+  }
+
+  .wg-feature p {
+    max-width: none;
   }
 
   .wg-hero__terminal .wg-terminal {
@@ -1364,7 +1141,7 @@ code {
     flex: 1;
     min-height: 0;
     max-height: none;
-    padding: 12px 16px;
+    padding: var(--space-sm) var(--space-md);
     font-size: 12px;
     line-height: 1.45;
   }
@@ -1374,15 +1151,6 @@ code {
     min-height: 44px;
   }
 
-  .wg-feature-card p {
-    max-width: 33ch;
-  }
-
-  .wg-terminal__body {
-    min-height: 360px;
-    padding: 18px 18px 20px;
-  }
-
   .wg-footer__top,
   .wg-footer__bottom {
     align-items: flex-start;
@@ -1390,7 +1158,7 @@ code {
   }
 
   .wg-footer__links {
-    gap: 0 16px;
+    gap: 0 var(--space-md);
   }
 
   .wg-footer__links a,
@@ -1400,6 +1168,18 @@ code {
     justify-content: center;
     min-width: 44px;
     min-height: 44px;
+  }
+}
+
+@media (forced-colors: active) {
+  .wg-color-dot__chip,
+  .wg-feature__dot {
+    forced-color-adjust: none;
+  }
+
+  .wg-install__method input:checked + span {
+    background: SelectedItem;
+    color: SelectedItemText;
   }
 }
 
