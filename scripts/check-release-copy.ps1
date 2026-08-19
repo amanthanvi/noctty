@@ -20,11 +20,10 @@ $copyPaths = @(
     "docs/windows.md",
     "docs/windows-capability-matrix.md",
     "site/README.md",
-    "site/components/terminal.jsx",
-    "site/components/hero/version-chip-color.jsx",
-    "site/components/why/why-fork.jsx",
-    "site/components/features/feature-grid.jsx",
-    "site/bundle.js"
+    "site/index.html",
+    "site/terminal.js",
+    "site/version.js",
+    "site/install.js"
 )
 
 $failures = New-Object System.Collections.Generic.List[string]
@@ -185,7 +184,7 @@ foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
 Require-Contains -RelativePath "docs/status.md" -Needle "x64 and ARM64" -Reason "Status docs should match the supported public release architectures."
 Require-Contains -RelativePath "docs/status.md" -Needle "checksum metadata" -Reason "Updater docs should mention checksum-gated release metadata."
 
-foreach ($sitePath in @("site/components/terminal.jsx", "site/bundle.js")) {
+foreach ($sitePath in @("site/terminal.js")) {
     Require-Contains -RelativePath $sitePath -Needle 'PROCESSOR_ARCHITEW6432' -Reason "The public site terminal copy should detect the native OS architecture from WOW64 shells."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-setup.exe' -Reason "The public site terminal copy should not hard-code x64 download URLs."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-portable.zip' -Reason "The public site terminal copy should not hard-code x64 download URLs."
@@ -207,9 +206,9 @@ if ($latestVersion) {
     Require-Contains -RelativePath "README.md" -Needle $legacyName -Reason "README should document the legacy x64 checksum alias."
 
     $escapedVersion = [regex]::Escape($latestVersion)
-    Require-Regex -RelativePath "site/components/hero/version-chip-color.jsx" -Pattern "DEFAULT_WG_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
-    Require-Regex -RelativePath "site/components/terminal.jsx" -Pattern "WG_VERSION\s*=\s*window\.WG_VERSION\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
-    Require-Regex -RelativePath "site/bundle.js" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "Generated site bundle should contain the current README release version."
+    Require-Regex -RelativePath "site/version.js" -Pattern "DEFAULT_WG_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
+    Require-Regex -RelativePath "site/terminal.js" -Pattern "WG_VERSION\s*=\s*\(typeof window !== 'undefined' && window\.WG_VERSION\)\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
+    Require-Regex -RelativePath "site/index.html" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "The landing page should ship the current README release version as its compiled default."
     Require-Regex -RelativePath "docs/getting-started.md" -Pattern ('current stable release is\s+`?' + $escapedVersion + '`?(?![\d.])') -Reason "Getting-started stable version should match README."
 }
 

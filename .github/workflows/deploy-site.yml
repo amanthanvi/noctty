@@ -58,9 +58,7 @@ jobs:
         run: |
           ./scripts/check-site-copy.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm ci --prefix site --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { throw 'Site dependency installation failed.' }
-          ./scripts/check-site-bundle.ps1
+          node scripts/build-site-assets.mjs --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/get-site-header-contract.ps1 | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -185,6 +185,13 @@ fn collection(
             break :discover;
         };
 
+        // Backends that support runtime rescanning (Windows) refresh their
+        // font list here so that fonts installed while the app is running
+        // are picked up on config reload. This is a cheap staleness check
+        // when nothing changed. Other backends (fontconfig) are unsafe to
+        // reinit and don't declare `refresh`.
+        if (comptime @hasDecl(Discover, "refresh")) disco.refresh();
+
         // A buffer we use to store the font names for logging.
         var name_buf: [256]u8 = undefined;
 

@@ -2566,7 +2566,7 @@ $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $siteDeployWorkflow = Join-Path $repoRoot '.github\workflows\deploy-site.yml'
-$siteBundleBuilder = Join-Path $repoRoot 'scripts\build-site-bundle.mjs'
+$siteAssetBuilder = Join-Path $repoRoot 'scripts\build-site-assets.mjs'
 $sitePayloadBuilder = Join-Path $repoRoot 'scripts\build-site-payload.ps1'
 $siteHeaderContract = Join-Path $repoRoot 'scripts\get-site-header-contract.ps1'
 $siteDeploymentHeadGate = Join-Path $repoRoot 'scripts\require-site-deployment-head.ps1'
@@ -2612,7 +2612,7 @@ $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
 $siteDeployWorkflowText = Get-Content -LiteralPath $siteDeployWorkflow -Raw
-$siteBundleBuilderText = Get-Content -LiteralPath $siteBundleBuilder -Raw
+$siteAssetBuilderText = Get-Content -LiteralPath $siteAssetBuilder -Raw
 $sitePayloadBuilderText = Get-Content -LiteralPath $sitePayloadBuilder -Raw
 $cloudflarePagesVerifierText = Get-Content -LiteralPath $cloudflarePagesVerifier -Raw
 $siteHeadersText = Get-Content -LiteralPath $siteHeaders -Raw
@@ -8404,8 +8404,8 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: source"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?npm ci --prefix site --ignore-scripts.*?check-site-bundle\.ps1.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
-    -Description 'site copy is checked before dependencies and release copy binds to the published semver tag' `
+    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?node scripts/build-site-assets\.mjs --check.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
+    -Description 'site copy is checked before the deterministic asset gate and release copy binds to the published semver tag' `
     -Context "$siteDeployWorkflow :: site validation"
 $siteActionUses = [regex]::Matches(
     $siteDeployWorkflowText,
@@ -8528,14 +8528,34 @@ Assert-TextContract `
     -Context $sitePayloadBuilder
 Assert-TextContract `
     -Content $siteGitattributesText `
-    -Pattern '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/components/\*\*/\*\.jsx text eol=lf\r?$.*?^site/vendor/\*\.js text eol=lf\r?$.*?^scripts/build-site-bundle\.mjs text eol=lf\r?$' `
+    -Pattern '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/tests/\*\.mjs text eol=lf\r?$.*?^scripts/build-site-assets\.mjs text eol=lf\r?$' `
     -Description 'every text file in the site payload and its source graph has a deterministic LF checkout rule' `
     -Context $siteGitattributes
 Assert-TextContract `
-    -Content $siteBundleBuilderText `
-    -Pattern '(?ms)const normalizeLf = .*?styles\.css.*?normalizeLf\(fs\.readFileSync.*?app\.js.*?normalizeLf\(fs\.readFileSync' `
-    -Description 'cache keys hash the canonical LF representation used by clean CI checkouts' `
-    -Context $siteBundleBuilder
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)const checkOnly = process\.argv\.includes\("--check"\).*?if \(/\\r/\.test\(text\)\) \{.*?must be LF-normalized' `
+    -Description 'the asset builder has a --check mode and rejects CR bytes so hashes bind to clean LF checkouts' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)const inlineScriptPattern = /<script>\(\[\\s\\S\]\*\?\)<\\/script>/g.*?if \(indexScript !== notFoundScript\) \{.*?must be byte-identical' `
+    -Description 'both pages must carry one byte-identical inline bootstrap so the CSP pins exactly one script hash' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)const scriptHash = sha256Base64\(indexScript\).*?const handlerHash = sha256Base64\(indexOnload\).*?script-src ''self'' ''sha256-\$\{scriptHash\}''.*?script-src-attr ''unsafe-hashes'' ''sha256-\$\{handlerHash\}''' `
+    -Description 'the asset builder derives both CSP hashes from the live HTML sources' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)for \(const asset of \["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)' `
+    -Description 'SHA-256 cache keys cover every local script and stylesheet referenced by each page' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)if \(failures\.length > 0\) \{\s*throw new Error\(`Deterministic site asset check failed' `
+    -Description 'the deterministic asset check fails closed when committed hashes or cache keys are stale' `
+    -Context $siteAssetBuilder
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
     -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?get-site-header-contract\.ps1.*?Assert-PublicHeaderContract' `
@@ -8824,8 +8844,8 @@ Assert-TextContract `
     -Context "$cloudflarePagesVerifier :: Test-PublicPayloadOnce"
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
-    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/bundle\.js''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__winghostty_header_contract_''' `
-    -Description 'static-only response verification always checks bundle controls and excludes HTML route probes' `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__winghostty_header_contract_''' `
+    -Description 'static-only response verification always checks stylesheet asset controls and excludes HTML route probes' `
     -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
@@ -8860,9 +8880,18 @@ Assert-WorkflowContractAbsent `
     -Description 'path-specific cache rules cannot overlap the catch-all response policy'
 Assert-TextContract `
     -Content $siteHeadersText `
-    -Pattern "(?ms)script-src 'self' 'sha256-[^']+' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
-    -Description 'inline scripts and the font load handler use narrow CSP hashes' `
+    -Pattern "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
+    -Description 'the single shared inline bootstrap and the font load handler each use one narrow CSP hash' `
     -Context $siteHeaders
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern "style-src 'self' https://fonts\.googleapis\.com;" `
+    -Description 'stylesheet sources are pinned to self plus Google Fonts without inline styles' `
+    -Context $siteHeaders
+Assert-WorkflowContractAbsent `
+    -Path $siteHeaders `
+    -Pattern "(?i)'unsafe-inline'|style-src-attr" `
+    -Description 'the site CSP declares no unsafe-inline source and no style-src-attr directive'
 $siteHeaderContractJson = & $siteHeaderContract `
     -SiteDirectory (Join-Path $repoRoot 'site')
 $siteHeaderContractObject = $siteHeaderContractJson | ConvertFrom-Json -Depth 6
@@ -9106,7 +9135,7 @@ finally {
 }
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
-    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
+    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
     -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
     -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 $cacheControlContract = Get-PowerShellBlockText `
@@ -9194,9 +9223,28 @@ try {
         ) -or
         $manifestPaths -notcontains '_headers' -or
         $manifestPaths -contains '_redirects' -or
-        $manifestPaths -contains 'main.jsx' -or
-        @($manifestPaths | Where-Object { $_ -like 'components/*' }).Count -ne 0) {
+        $manifestPaths -contains 'README.md' -or
+        @($manifestPaths | Where-Object { $_ -like 'tests/*' }).Count -ne 0) {
         throw 'Site deploy manifest escaped the clean sorted static allowlist.'
+    }
+    foreach ($requiredPayloadPath in @(
+        'index.html',
+        '404.html',
+        'styles.css',
+        'app.js',
+        'version.js',
+        'install.js',
+        'terminal.js'
+    )) {
+        if ($manifestPaths -cnotcontains $requiredPayloadPath) {
+            throw "Site deploy manifest is missing $requiredPayloadPath."
+        }
+    }
+    $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
+    if ($payloadAssetPaths.Count -ne 2 -or
+        $payloadAssetPaths -cnotcontains 'assets/favicon.svg' -or
+        $payloadAssetPaths -cnotcontains 'assets/winghostty-social.png') {
+        throw 'Site deploy manifest assets escaped the favicon and social-preview allowlist.'
     }
 }
 finally {

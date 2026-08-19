@@ -2,16 +2,26 @@
 
 This directory is the Cloudflare Pages payload for `winghostty.com`.
 
-The landing page intentionally follows the original `Winghostty Marketing Site.zip`
-runtime shape:
+The site is hand-written static HTML with a small amount of vanilla
+JavaScript. There is no framework, no build-time bundler, and no npm
+dependency tree:
 
-- `index.html` - archive-derived page shell
-- `bundle.js` - precompiled browser entrypoint used by the landing page
-- `build.md` - notes from the original archive about the bundle workflow
-- `components/` - archive JSX references kept for design/source parity
-- `assets/` - SVG brand assets carried over from the archive
-- `404.html`, `styles.css`, `app.js` - standalone static extras already present in this repo
+- `index.html` - the landing page, including all marketing copy
+- `404.html` - the not-found page
+- `styles.css` - the whole stylesheet, plain CSS with `wg-` prefixed classes
+- `app.js` - theme toggle (shared by both pages)
+- `version.js` - GitHub Releases version fetch for the hero chip
+- `install.js` - install-method switcher and clipboard copy
+- `terminal.js` - the scripted terminal demo (also imported by the Node tests)
+- `assets/` - favicon and social-preview image
+- `tests/` - `node --test` unit tests for the terminal module
 - `_headers` - Cloudflare Pages cache and browser security policy
+
+Both pages carry one byte-identical inline theme bootstrap, so the CSP pins
+exactly one inline-script hash. `node scripts/build-site-assets.mjs` (from
+the repo root) recomputes that hash, the font-`onload` handler hash, and the
+`?v=` SHA-256 cache keys on local assets; `--check` is the CI determinism
+gate. Run it after editing any HTML, CSS, or JS file here.
 
 ## Source of truth
 
@@ -40,9 +50,8 @@ The checks fail on known bad claims and regressions, including:
 - silent-update wording or stale claims about missing signing
 - parity overclaims
 
-React UMD, Google Fonts (Bricolage Grotesque + JetBrains Mono), and the GitHub
-Releases version fetch are intentional for the static Pages payload. After JSX
-edits, run `node scripts/build-site-bundle.mjs` from the repo root.
+Google Fonts (JetBrains Mono) and the GitHub Releases version fetch are
+intentional for the static Pages payload.
 
 ## Cloudflare Pages
 
@@ -98,12 +107,12 @@ The Pages custom domain is:
 `site/_headers` keeps every response revalidated, including nested 404
 fallbacks. Cloudflare Pages still serves ETags and handles its edge cache,
 while browsers cannot retain stale routes or non-content-addressed assets
-without validation. Its CSP allowlists the two current inline theme bootstraps and the
-font stylesheet `onload` handler by exact SHA-256 hashes. `style-src` and
-`style-src-attr` retain `unsafe-inline` because the current React UI emits
-inline styles; removing that residual allowance requires a coordinated UI
-refactor. Any inline-script or handler edit must update both the CSP hashes and
-the flagship contract test.
+without validation. Its CSP allowlists the shared inline theme bootstrap and
+the font stylesheet `onload` handler by exact SHA-256 hashes; `style-src`
+carries no `unsafe-inline` because the pages ship no inline styles. Any
+inline-script or handler edit must be followed by
+`node scripts/build-site-assets.mjs`, which rewrites the CSP hashes, and by a
+matching flagship contract test update.
 
 To build the deploy payload locally:
 
