@@ -1,7 +1,9 @@
 # Winghostty Competitive Analysis Map
 
-Wayfinder map (`wayfinder:map`). Tracker: local markdown (this repo forbids
-GitHub issues per AGENTS.md). Tickets are files in
+Wayfinder map (`wayfinder:map`). Tracker: local markdown (AGENTS.md
+directs agents not to create GitHub issues unprompted; the roadmap's
+implementation issues were later opened at the user's explicit
+request). Tickets are files in
 [`tickets/`](tickets/); a ticket is claimed by filling its `Assignee`
 field, closed by setting `Status: closed` and appending a
 `## Resolution` section. A ticket is unblocked when every ticket in its
