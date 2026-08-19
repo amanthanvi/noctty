@@ -15,15 +15,16 @@ research-only: ConPTY handle/process lifetime semantics (what dies
 with the creating process; can a ConPTY be inherited, duplicated, or
 re-owned by a broker/daemon process); the broker-process architecture
 options and their costs (a separate session-host process owning ConPTYs
-+ an IPC/reattach protocol vs. OS-level tricks); how WezTerm's mux
-domains, Wave's SSH-durable job manager, Contour's daemon mode, and
-ghostinthewsl's VSOCK bridge each solve or dodge this; scrollback
-ownership during detach; and the failure modes (crash of the broker,
-update of the broker, elevation boundaries). Deliverable: a feasibility
-verdict (feasible-with-broker / feasible-only-for-WSL / infeasible),
-the minimal viable architecture sketch if feasible, and the cost class
-(confirming or revising the XL estimate). Report:
-`research/durable-session-spike.md`.
+
+- an IPC/reattach protocol vs. OS-level tricks); how WezTerm's mux
+  domains, Wave's SSH-durable job manager, Contour's daemon mode, and
+  ghostinthewsl's VSOCK bridge each solve or dodge this; scrollback
+  ownership during detach; and the failure modes (crash of the broker,
+  update of the broker, elevation boundaries). Deliverable: a feasibility
+  verdict (feasible-with-broker / feasible-only-for-WSL / infeasible),
+  the minimal viable architecture sketch if feasible, and the cost class
+  (confirming or revising the XL estimate). Report:
+  `research/durable-session-spike.md`.
 
 ## Resolution
 
@@ -50,6 +51,6 @@ substitution in `Subprocess.start`.
 exe (reusing `pty.zig`/`Command.zig`) that owns one pwsh-under-ConPTY,
 ring-buffers output, and serves a named pipe; test = attach, run a
 TUI, hard-kill the client, reattach, confirm the shell survived and
-the viewport repaints on a resize nudge. Whether/when to fund this
+the viewport repaints on a resize nudge (bounded-buffer acceptance criterion — ring size, overwrite-on-overflow, replay-newest, capped host memory — as defined in the report's increment section). Whether/when to fund this
 increment is a roadmap decision for the assembly ticket (T01), under
 F6's durability-aspiration tier.

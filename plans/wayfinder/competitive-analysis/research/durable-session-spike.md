@@ -64,7 +64,7 @@ maintainer states the intended model: "Like a pty, a pseudoconsole
 exists regardless of it having any attached children, and since it's
 held open, you should be able to reattach any number of children to it"
 ([microsoft/terminal#329](https://github.com/microsoft/terminal/issues/329)).
-The session outlives the *shell*; it does not outlive its *owner*.
+The session outlives the _shell_; it does not outlive its _owner_.
 
 **Handles can be handed to another process — but only hand-to-hand.**
 The constituent handles are ordinary kernel handles: Windows' own
@@ -100,8 +100,8 @@ broker could pin its ConPTY version independent of the OS.
 **Durability ceiling: the logon session.** Interactive console
 processes are terminated at user logoff
 ([HandlerRoutine, CTRL_LOGOFF_EVENT](https://learn.microsoft.com/en-us/windows/console/handlerroutine)).
-Any user-mode broker gives durability *across UI restarts within a
-logon session* — not across logoff/reboot. Cross-reboot durability
+Any user-mode broker gives durability _across UI restarts within a
+logon session_ — not across logoff/reboot. Cross-reboot durability
 would need a service in session 0 hosting interactive ptys, which is
 out of scope and hostile territory.
 
@@ -163,7 +163,7 @@ crash); pre-duplicating handles into a stub process that does nothing
 but hold them still leaves nobody draining the output pipe (child
 output stalls; pre-24H2 close semantics deadlock) and nobody owning
 resize/signal — the stub grows into a broker. `ConptyPackPseudoConsole`
-makes adoption *possible*, but only broker-shaped processes can use it.
+makes adoption _possible_, but only broker-shaped processes can use it.
 
 **C. Full mux server (WezTerm shape) — more than needed.** Server-side
 terminal model with a multiplexing protocol gives perfect reattach
@@ -176,12 +176,13 @@ should merely not preclude evolving toward it.
 the Linux side (tmux/auto-attach, or a ghostinthewsl-style VSOCK bridge
 with real Linux PTYs). Dodges ConPTY entirely and survives even
 UI+broker death, but covers only WSL profiles — PowerShell/cmd users
-(the benchmark winghostty user) get nothing. Reasonable as a *later*
+(the benchmark winghostty user) get nothing. Reasonable as a _later_
 fidelity upgrade for WSL profiles, not as the answer to F6.
 
 ### Minimal-viable sketch for winghostty (option A)
 
 Changes:
+
 - **New `src/session-host/`** (or a mode of the main exe): owns
   `Pty.open` + `Command.start` + Job Object; per-session bounded raw-VT
   ring buffer (spill-to-disk optional later); named-pipe control +
@@ -195,9 +196,7 @@ Changes:
   and "proxy" (resize/kill become protocol messages instead of
   `ResizePseudoConsole`/`ClosePseudoConsole`).
 - **`src/apprt/win32_session_state.zig`**: schema v2 adds a broker
-  session ID per leaf; restore flow tries reattach, falls back to fresh
-  spawn (current behavior) when the session is gone — durability
-  degrades to today's layout-only restore, never worse.
+  session ID per leaf; restore flow tries reattach and falls back to fresh spawn only on an explicit broker not-found — preserving `win32_session_persistence.zig`'s `LoadResult` distinctions (missing/oversized/transient/corrupt/loaded): transient broker startup/timeout/protocol failures are retried rather than respawned, and old records or stale broker IDs degrade to layout-only restore, so a transient attach failure can never leave the original session running while the UI spawns a duplicate shell. Durability degrades to today's layout-only restore, never worse.
 - **Stays untouched:** renderer, `Screen`/scrollback (still UI-side,
   rebuilt by replay), config, win32 chrome, all POSIX paths.
 
@@ -221,7 +220,7 @@ Changes:
   explicitly badged; v1 can scope durability to non-elevated only.
   Pipe DACLs must restrict to the owning user + integrity level.
 - **Scrollback ownership during detach:** while no UI is attached,
-  *someone* must drain the output pipe (otherwise child output
+  _someone_ must drain the output pipe (otherwise child output
   backpressures; pre-24H2, close paths can deadlock —
   [ClosePseudoConsole](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole)).
   The broker's ring buffer is therefore mandatory, not an optimization.
@@ -244,7 +243,7 @@ Changes:
 
 **XL confirmed** for the graduated feature (broker lifecycle +
 versioned protocol + reattach UX + elevation policy + ring
-buffer/replay + update strategy + tests). It is an XL of mostly *known*
+buffer/replay + update strategy + tests). It is an XL of mostly _known_
 engineering, though — the OS facts are settled and the pattern is
 shipped art (VS Code), not research risk.
 
@@ -252,8 +251,7 @@ shipped art (VS Code), not research risk.
 one Zig exe reusing `pty.zig`+`Command.zig` that spawns pwsh under a
 ConPTY it owns, ring-buffers output, and serves one named pipe; plus a
 trivial attach client. Test: attach, run a TUI, hard-kill the client,
-reattach from a new client, confirm the shell and TUI survived and the
-viewport repaints after a resize nudge. That one artifact retires the
+reattach from a new client, confirm the shell and TUI survived and the viewport repaints after a resize nudge. Bounded-buffer acceptance criterion: a fixed-size per-session ring (default 1 MiB, configurable) that overwrites oldest data on overflow, replays its full contents on attach, and is tested by generating more output than the ring holds while detached — reattach must show the newest data with host memory never exceeding the cap. That one artifact retires the
 core risk (lifetime semantics, drain-while-detached, replay adequacy)
 before any winghostty integration, and its protocol can be thrown away.
 Second increment: swap `Subprocess.start` to attach mode behind a
@@ -275,7 +273,7 @@ full mux buys fidelity and remoting but imports a protocol+memory
 liability; winghostty should start with the thin broker and bounded
 buffers, and treat mux-grade fidelity as a separate future decision.
 
-**Wave job manager.** Wave ships durability *only* where it's easy — a
+**Wave job manager.** Wave ships durability _only_ where it's easy — a
 remote job manager over Unix sockets keeps SSH shells alive and buffers
 output, while "Local terminals and WSL connections use standard
 sessions" ([durable sessions doc](https://docs.waveterm.dev/durable-sessions);

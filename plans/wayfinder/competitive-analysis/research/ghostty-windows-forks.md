@@ -133,7 +133,7 @@ guidance: **Direct3D renderer, Windows 10/11 only, minimal C++** — i.e.
 upstream is accepting incremental Windows work while explicitly
 declining to promise an official port
 ([community thread #12371](https://github.com/ghostty-org/ghostty/discussions/12371):
-"explicitly *not* about making an official Ghostty version for
+"explicitly _not_ about making an official Ghostty version for
 Windows"). Governance context: Ghostty is now a nonprofit paying
 contributors, with a vouch-gated contribution model
 ([PR #10559](https://github.com/ghostty-org/ghostty/pull/10559)), and
@@ -141,8 +141,7 @@ mitchellh says libghostty "backs more than a dozen terminal projects"
 and predicts libghostty users "will dwarf" GUI users by mid-2027
 ([HN](https://news.ycombinator.com/item?id=47207472)).
 
-**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12,
-2026) "has anyone used github.com/amanthanvi/winghostty?" and
+**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12, 2026) "has anyone used github.com/amanthanvi/winghostty?" and
 collaborator pluiedev replied the same day: "Note that projects
 unaffiliated with the Ghostty project must not use 'Ghostty' as a part
 of their branding, since it's a trademark owned by our nonprofit and
@@ -161,11 +160,11 @@ rename to "Spectre" shows the policy already reshaping the field.
   is the OpenGL 4.6/WGL outlier; winghostty (OpenGL 4.3/WGL + separate
   D3D11/DComp chrome) sits closer to shiweis than to upstream's stated
   direction.
-- The only published number in the family: winterm-ghostty's pty drain
+- The only published throughput number in the family: winterm-ghostty's pty drain
   throughput — ghostty pane ~28 MB/s vs Windows Terminal's cascadia
   38.1 MB/s after optimization
   ([repo](https://github.com/ibuildthecloud/winterm-ghostty)) — i.e.
-  the one measured effort is currently *slower* than the incumbent.
+  the one measured effort is currently _slower_ than the incumbent.
 - mite's <2 MB optimized exe is a startup/footprint benchmark claim
   worth remembering ([repo](https://github.com/marler8997/mite)).
 - No fork publishes latency, frame-time, or scroll benchmarks. Nobody
@@ -194,7 +193,7 @@ rename to "Spectre" shows the policy already reshaping the field.
   progress, default-terminal registration, or ARM64. **No fork ships
   ARM64** (Thr45hx is x64-only by name); winghostty's ARM64 support is
   unique in the entire field.
-- winterm-ghostty inherits *all* of Windows Terminal's integration
+- winterm-ghostty inherits _all_ of Windows Terminal's integration
   (Snap, jump lists, default-terminal handoff, MSIX) for free — the
   structural advantage of riding the incumbent shell.
 
@@ -209,7 +208,7 @@ actually delivers:
   built-in themes, URL detection, search
   ([README](https://github.com/shiweis/ghostty-windows)) — unverified,
   no binaries.
-- ghostinthewsl delivers kitty graphics *through real Linux PTYs*,
+- ghostinthewsl delivers kitty graphics _through real Linux PTYs_,
   sidestepping ConPTY stripping — for WSL-heavy users this is a real
   capability delta over every ConPTY-based port including winghostty.
 - winterm-ghostty: rendering, input, selection, clipboard, search,
@@ -279,24 +278,23 @@ actually delivers:
 
 Traction snapshot (2026-08-17, GitHub):
 
-| Project | Stars | Releases | Signing | Package mgr | Active? |
-|---|---|---|---|---|---|
-| **winghostty** | 255 | v1.3.123 (Aug 6) | Authenticode | winget + Scoop | yes |
-| Thr45hx/ghostty-windows | 59 | 1 (unsigned Inno, SHA-256) | none | none | barely |
-| Codavo/ghostinthewsl | 53 | 6 CI releases | none stated | none | yes |
-| mattn/ghostty (fork) | 45 | — | — | — | yes (upstream-directed) |
-| shiweis/ghostty-windows | 38 | **none** (build-only) | n/a | none | yes |
-| zcg/ghostty-win | 27 | none | n/a | none | **archived** |
-| mite / hollow | 22 / 22 | none / none stated | none | none | idle / yes |
-| winterm-ghostty | 5 | MSIX (self-signed) | self-signed | none | yes (new) |
+| Project                 | Stars   | Releases                   | Signing      | Package mgr    | Active?                 |
+| ----------------------- | ------- | -------------------------- | ------------ | -------------- | ----------------------- |
+| **winghostty**          | 255     | v1.3.123 (Aug 6)           | Authenticode | winget + Scoop | yes                     |
+| Thr45hx/ghostty-windows | 59      | 1 (unsigned Inno, SHA-256) | none         | none           | barely                  |
+| Codavo/ghostinthewsl    | 53      | 6 CI releases              | none stated  | none           | yes                     |
+| mattn/ghostty (fork)    | 45      | —                          | —            | —              | yes (upstream-directed) |
+| shiweis/ghostty-windows | 38      | **none** (build-only)      | n/a          | none           | yes                     |
+| zcg/ghostty-win         | 27      | none                       | n/a          | none           | **archived**            |
+| mite / hollow           | 22 / 22 | none / none stated         | none         | none           | idle / yes              |
+| winterm-ghostty         | 5       | MSIX (self-signed)         | self-signed  | none           | yes (new)               |
 
-- winghostty leads the family on every distribution axis: only signed
-  binaries, only winget/Scoop presence, only updater with
+- winghostty leads the family on every distribution axis: the only trusted (non-self-signed) Authenticode-signed binaries, only winget/Scoop presence, only updater with
   checksum+Authenticode gating. The sweep's judgment stands and is now
   quantified.
 - Fork onboarding friction is severe: shiweis (the most capable hard
   fork) requires installing Zig 0.16 and cross-compiling; Thr45hx's
-  installer needs admin and previously *corrupted PATH*
+  installer needs admin and previously _corrupted PATH_
   ([release notes](https://github.com/Thr45hx/ghostty-windows/releases)).
 - Nobody except winghostty documents an update mechanism.
 
@@ -306,8 +304,8 @@ Direct user feedback on the forks is sparse (few users); the observable
 complaints are field-level:
 
 - **Fork confusion:** the question that triggered the trademark
-  statement — "has anyone used winghostty?" — was asked *inside
-  upstream's ports thread* because users cannot evaluate the swarm
+  statement — "has anyone used winghostty?" — was asked _inside
+  upstream's ports thread_ because users cannot evaluate the swarm
   ([#12371](https://github.com/ghostty-org/ghostty/discussions/12371)).
 - **Branding pushback from upstream** is itself the loudest recorded
   "complaint" about the family, winghostty included (same thread).
@@ -316,7 +314,7 @@ complaints are field-level:
   corruption by the installer, missing themes/shell-integration files.
 - Upstream discussion sentiment (#2563): years of pent-up demand
   ("I would love ghostty.exe to run as a Windows .exe"), impatience
-  with WSL workarounds — demand winghostty can serve *today* but only
+  with WSL workarounds — demand winghostty can serve _today_ but only
   if discoverable and trusted.
 - jeffquast-style third-party verification does not exist for any fork;
   "stable for daily use" claims circulate unchallenged — a trust vacuum.
@@ -332,8 +330,7 @@ itself**, arriving incrementally via the tiered plan, mattn, and
 wintty's merged infrastructure PRs, and (b) **libghostty consumers**,
 the shape upstream is institutionally building toward — including
 winterm-ghostty's ride-the-incumbent wedge. The fragmented field does
-change winghostty's posture: the trademark statement makes "generic
-Ghostty fork" positioning legally untenable, and the fork swarm makes
+change winghostty's posture: the trademark statement puts "generic Ghostty fork" positioning in direct conflict with upstream's stated branding policy, and the fork swarm makes
 trust signals (signing, verification, benchmarks) the deciding axis.
 
 ### Does well (adopt-candidates)
@@ -353,7 +350,7 @@ trust signals (signing, verification, benchmarks) the deciding axis.
   pure keyboard-first territory PRODUCT.md claims but doesn't cover
   ([hollow](https://github.com/sudo-tee/hollow)).
 - **D3D11/DirectWrite terminal rendering path** — the family majority
-  *and* upstream's stated preference (#2563 Apr 2026 guidance); a
+  _and_ upstream's stated preference (#2563 Apr 2026 guidance); a
   D3D11 renderer option would future-proof winghostty against
   upstream-alignment work and Intel/OpenGL-driver pain.
 - **Reproducibility discipline** — winterm-ghostty's pinned-commit +
@@ -367,7 +364,7 @@ trust signals (signing, verification, benchmarks) the deciding axis.
 
 - **Unverifiable AI-generated capability claims** ("feature-complete,"
   "66/66 actions") with no binaries, signing, or third-party tests —
-  exploit by publishing signed releases *plus* verification: conformance
+  exploit by publishing signed releases _plus_ verification: conformance
   results, benchmark numbers, test-suite badges. Trust is the moat the
   swarm cannot cross.
 - **No releases at all** (shiweis) or unsigned admin-rights installers

@@ -40,6 +40,10 @@ run fixes them; CI gates against them once measured):
 - Memory: under 20 MB steady-state per additional pane.
 - Idle: effectively 0% GPU/CPU with no timer wake churn.
 
+The benchmark suite (roadmap C01) defines the measurement methodology,
+workload, baseline machine, and tolerances; CI gates activate once that
+suite lands its first same-machine baseline.
+
 ## Brand personality
 
 Native, credible, precise. The interface should stay calm during

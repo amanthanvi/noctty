@@ -7,7 +7,7 @@
 
 ## Question
 
-Cross-referencing all ten research reports against winghostty's actual
+Cross-referencing all twelve research reports against winghostty's actual
 current state (docs/status.md, docs/windows-capability-matrix.md,
 PRODUCT.md, DESIGN.md), what is the deduplicated, ranked list of
 candidate gaps, opportunities, and blind spots for the decision session?
@@ -28,15 +28,16 @@ proposing PRODUCT.md amendments, and 11 explicit rejects staged for
 fast ratification. Highest-leverage adopts: published Windows
 benchmarks + CI gates (C01), docs accuracy (C04 — code verification
 confirmed status.md materially undersells the product: quick terminal
-+ global hotkey, WinRT toasts, taskbar progress, and docked search all
-already exist in `src/apprt/`, so six reports' claimed "gaps" deduped
-into one documentation candidate), bundled newer OpenConsole
-`conpty.dll` with degraded-mode logging (C05), OS entry points
-(default-terminal registration, jump lists, Explorer menu; C11–C13),
-and scrollback-content restore (C15). Highest-impact defer: durable
-process-surviving sessions (C16, XL, needs a feasibility spike).
-Decision-first frame items: naming/trademark risk (F1) and
-upstream-relations posture (F2). No competitor healthily occupies
-winghostty's niche today; the live threats are upstream's trademark
-statement and upstream's libghostty/tiered-Windows convergence
-(12–24 month window).
+
+- global hotkey, WinRT toasts, taskbar progress, and docked search all
+  already exist in `src/apprt/`, so six reports' claimed "gaps" deduped
+  into one documentation candidate), bundled newer OpenConsole
+  `conpty.dll` with degraded-mode logging (C05), OS entry points
+  (default-terminal registration, jump lists, Explorer menu; C11–C13),
+  and scrollback-content restore (C15). Highest-impact defer: durable
+  process-surviving sessions (C16, XL, needs a feasibility spike).
+  Decision-first frame items: naming/trademark risk (F1) and
+  upstream-relations posture (F2). No competitor healthily occupies
+  winghostty's niche today; the live threats are upstream's trademark
+  statement and upstream's libghostty/tiered-Windows convergence
+  (12–24 month window).

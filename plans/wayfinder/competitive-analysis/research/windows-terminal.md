@@ -10,9 +10,9 @@ quarterly cadence that has visibly slipped (1.26 delayed, releases paused "for r
 and performance"). Its strengths are OS integration nobody else can match (default-terminal
 handoff, taskbar progress, quake mode, elevation model) and a now-fast AtlasEngine + 1.22
 ConPTY rewrite; its chronic weaknesses are input latency (~2x conhost), slow XAML startup,
-a sprawling dual JSON/UI settings system, 1.6k open issues, no session *content* philosophy
+a sprawling dual JSON/UI settings system, 1.6k open issues, no session _content_ philosophy
 beyond plain-text buffer snapshots, and no plugin/scripting model. Sixel shipped in 1.22 and
-the Kitty *keyboard* protocol in 1.25, but Kitty *graphics* remains an open request — the
+the Kitty _keyboard_ protocol in 1.25, but Kitty _graphics_ remains an open request — the
 capability gap winghostty already fills. The exploitable space is exactly what PRODUCT.md
 targets: instantaneous native feel, dependable session restore, and deep terminal capability.
 
@@ -40,7 +40,7 @@ targets: instantaneous native feel, dependable session restore, and deep termina
   Canary, free Copilot tier since Feb 2025
   ([MS docs](https://learn.microsoft.com/en-us/windows/terminal/terminal-chat),
   [GitHub changelog](https://github.blog/changelog/2025-02-26-github-copilot-now-available-for-free-in-windows-terminal-canary/)).
-- Relationship to upstream: *is* the upstream for the Windows console stack — every other
+- Relationship to upstream: _is_ the upstream for the Windows console stack — every other
   Windows terminal (including winghostty) sits on its ConPTY.
 
 ## 2. Performance & fluidity
@@ -95,7 +95,7 @@ The strongest section — this is what "table stakes" means to a Windows user:
 - ARM64: native builds; ships on ARM Windows 11.
 - WSL: first-class profile auto-detection; 1.24 preview added SSH profile auto-detection
   ([alternativeto news](https://alternativeto.net/news/2025/8/windows-terminal-1-24-preview-adds-new-windowing-system-ui-customization-ssh-profiles)).
-- ConPTY: it *owns* ConPTY, so it benefits first from every ConPTY fix (the 1.22 rewrite);
+- ConPTY: it _owns_ ConPTY, so it benefits first from every ConPTY fix (the 1.22 rewrite);
   third-party terminals inherit the interface later via Windows servicing. Passthrough mode
   ([#1173](https://github.com/microsoft/terminal/issues/1173)) is still not shipped —
   a chronic ecosystem-wide ceiling.
@@ -215,7 +215,7 @@ Recurring, sourced themes:
    ([HN #45890726](https://news.ycombinator.com/item?id=45890726)).
 3. **Settings sprawl and JSON/UI split** — UI rewrites user JSON
    ([#8991](https://github.com/microsoft/terminal/issues/8991)), settings scattered across
-   UI/JSON/defaults.json; the fact that 1.25's headline feature is *search inside settings*
+   UI/JSON/defaults.json; the fact that 1.25's headline feature is _search inside settings_
    is the tell.
 4. **Windowing/tear-out fragility** — megathread of drag/drop gaps
    ([#14900](https://github.com/microsoft/terminal/issues/14900)), crashes into mid-2026.
@@ -245,7 +245,7 @@ Recurring, sourced themes:
    snapshot beats nothing for the benchmark user.
 4. **Default-terminal registration** — WT owns the OS handoff; winghostty should register
    as a selectable default terminal app (Windows 11 supports third-party registration —
-   this is how a terminal becomes *the* terminal).
+   this is how a terminal becomes _the_ terminal).
 5. **Jump lists / SSH + profile auto-detection breadth** — WT auto-detects SSH hosts
    (1.24 preview) and exposes profiles in the taskbar jump list; winghostty detects shells
    only.
@@ -258,14 +258,14 @@ Recurring, sourced themes:
 
 ### Does badly (avoid / exploit)
 
-1. **Startup weight** — XAML/MSIX cold start is unfixable without an architecture change;
+1. **Startup weight** — XAML/MSIX cold start is a structural cost of its architecture;
    winghostty's native Win32 + OpenGL stack should make sub-100ms cold start a headline,
-   *measured and published* (WT publishes no startup numbers — a vacuum to occupy).
+   _measured and published_ (WT publishes no startup numbers — a vacuum to occupy).
 2. **Input latency** — 2x conhost, GPU-pipeline latency largely unaddressed for years.
    Publish camera-methodology latency benchmarks; PRODUCT.md's "instantaneous" claim needs
    numbers to beat the incumbent credibly.
 3. **Settings sprawl** — WT needed a search engine for its own settings; winghostty's
-   staged, source-preserving settings window that *never rewrites unrelated JSON* is the
+   staged, source-preserving settings window that _never rewrites unrelated JSON_ is the
    direct answer to [#8991](https://github.com/microsoft/terminal/issues/8991) — market it
    as such.
 4. **Feature-first, stabilize-later releases** — buffer restore and tear-out each shipped
@@ -279,8 +279,8 @@ Recurring, sourced themes:
    model look like?" winghostty's allowlisted `+perform-action` IPC is a seed; a documented
    automation surface (wezterm-cli-style) exploits WT's vacuum without becoming a plugin
    platform.
-7. **Session restore depth** — WT restores text; nobody on Windows restores *working
-   state* well. winghostty restoring layout+profile+cwd reliably, plus optional content
+7. **Session restore depth** — WT restores text; nobody on Windows restores _working
+   state_ well. winghostty restoring layout+profile+cwd reliably, plus optional content
    snapshots, leapfrogs rather than matches.
 
 ### Blind-spot candidates (no category in winghostty PRODUCT.md)

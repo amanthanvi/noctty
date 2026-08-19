@@ -4,7 +4,7 @@ The decided, prioritized competitive-response roadmap for winghostty,
 assembled 2026-08-19 from the competitive-analysis wayfinder effort:
 twelve research deep-dives, a cross-referenced synthesis, and a full
 adopt/reject/defer decision session. Every entry below carries an
-explicit ruling; nothing here is provisional.
+explicit ruling. The rulings are final; some implementation targets remain staged or provisional where noted inline (the performance budgets, C25's design gate, the conpty-host feasibility increment).
 
 - Judging frame: [PRODUCT.md](../PRODUCT.md) (as amended by this
   effort: performance budgets, launch topology, session tiers, narrow
@@ -21,7 +21,7 @@ explicit ruling; nothing here is provisional.
 - Cost classes: S ≲ days · M ≲ weeks · L ≈ month+ · XL ≈ quarter+.
 - Tracker: each work item is a GitHub issue on this fork
   ([#120–#146](https://github.com/amanthanvi/winghostty/issues?q=label%3Aroadmap),
-  labels `roadmap` + `wave-1/2/3`), linked from its heading below.
+  labels `roadmap` + `wave-1/2/3`), linked from its heading below. The wayfinder map's own process tickets remain closed local-markdown records of the completed analysis; GitHub issues are the sole tracker for this roadmap's implementation work.
 
 ## Strategy rulings (binding context)
 
@@ -188,8 +188,7 @@ lands. Evidence: synthesis C12; wintty §3/§10.4, conemu §3/§10.4.
 **Ruling:** adopt. **Why:** cheapest expected OS entry point; even
 minimal Alacritty ships it; Tabby users fight registry hacks for it.
 **Shape:** classic registry entries + Win11 `IExplorerCommand` for
-directory and directory-background; installer + portable-mode
-registration paths. Evidence: synthesis C13; alacritty §3, conemu,
+directory and directory-background; registration via the installer (portable-mode registration follows C29's portable work in Wave 2). Evidence: synthesis C13; alacritty §3, conemu,
 tabby §3.
 
 ### C19 · Prompt-mark navigation verbs, surfaced — S · [#128](https://github.com/amanthanvi/winghostty/issues/128)
@@ -238,8 +237,7 @@ wt §3, conemu §3, wintty §3.
 
 ### C15 · Scrollback-content restore — M · [#131](https://github.com/amanthanvi/winghostty/issues/131)
 
-**Ruling:** adopt. **Why:** the restart promise currently loses all
-pane context on restore; Windows Terminal ships buffer snapshots (with
+**Ruling:** adopt. **Why:** session restore currently brings back layout and pane metadata but no scrollback content, so restored panes start blank; Windows Terminal ships buffer snapshots (with
 instructive rollout bugs), Warp's restored blocks are a top retention
 feature; winghostty's transactional session machinery can do it
 reliably — the second tier of the amended session promise. **Shape:**

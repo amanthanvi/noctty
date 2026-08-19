@@ -313,9 +313,7 @@ logging + a public mangling catalog.**
   show the reliability bar); `[warp]` §5/§10.3 (restored blocks via SQLite —
   a top retention feature); `[lt]` §a.1 (users now expect more than layout).
   status.md: contents explicitly not restored.
-- _Why:_ "Session layout survives restarts" currently loses context the
-  moment the user looks at a restored pane; even flawed text restore beats
-  none, and winghostty's transactional session machinery can do it exactly.
+- _Why:_ existing restore preserves layout and pane metadata but no scrollback content, so a restored pane starts blank; even flawed text restore beats none, and winghostty's transactional session machinery can do it exactly.
 - _Cost:_ M.
 - _Recommendation:_ **Adopt.**
 

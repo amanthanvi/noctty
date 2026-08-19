@@ -66,9 +66,9 @@ protocol · R11 chrome-only differentiation.
   GPU-floor doc + graceful-fail S slice only (fallback renderer stays
   deferred), C04 status.md accuracy (ordered first).
 - C: C05 bundled newer OpenConsole conpty.dll + degraded-mode logging
-  + mangling catalog, C06 UTF-8 preamble with CJK guard, C07 cmd.exe
-  OSC 133 via PROMPT + optional Clink, C08 1.3-surface Win32 wiring
-  audit.
+  - mangling catalog, C06 UTF-8 preamble with CJK guard, C07 cmd.exe
+    OSC 133 via PROMPT + optional Clink, C08 1.3-surface Win32 wiring
+    audit.
 - D: C11 default-terminal registration, C12 jump lists, C13 Explorer
   context menu, C14 elevation model + elevated-window action
   (mixed-elevation tabs out).
@@ -100,7 +100,6 @@ localization · C37 serial/COM.
 "credibility"** — C04, C01, C03-S, C32-audit, C06, C07, C12, C13, C19;
 **Wave 2 "moats"** — C05, C11, C15, C17, C02, C08, C14, C28–C31,
 C33-recurring; **Wave 3 "depth"** — C18, C20, C25-staged, C34,
-C27-full-page. Each entry carries its ruling, rationale, and evidence
-links, ready for /implement. T01 also applies the adopted PRODUCT.md
+C27-full-page. Follow-up feasibility-spike rulings may amend the waves; the R13 spike's conpty-host M increment was added to Wave 2 (after C15) at assembly time. Each entry carries its ruling, rationale, and evidence links, ready for /implement. T01 also applies the adopted PRODUCT.md
 amendments (F4, F5, F6, F8). No items were contentious enough to spawn
 individual grilling tickets.

@@ -2,7 +2,7 @@
 
 Shallow sweep per ticket R10 (own format, not the full ten-section
 rubric). One dense paragraph per product; payload lists first. All
-claims research-sourced; today's reference date is 2026-08-17.
+claims research-sourced; research reference date: 2026-08-17.
 
 ## Executive summary
 
@@ -17,18 +17,17 @@ sessions, VT standards leadership), Extraterm (output framing, scroll
 minimap), mintty (Unicode currency, huge silent Git-Bash install base);
 (4) **a direct threat the nine dives miss** — a swarm of community
 `ghostty-windows` native ports (adilahmeddev `windows-apprt` lineage)
-occupying winghostty's exact niche. Promotion candidates: Wave Terminal
-and the ghostty-windows fork family.
+occupying winghostty's exact niche. Promotion candidates: Wave Terminal and the ghostty-windows fork family. (Update: both promotions ran; the completed deep dive found the fork swarm decaying, with upstream and libghostty consumers the credible threats — see ghostty-windows-forks.md.)
 
 ## (a) Blind-spot candidates for synthesis
 
 Things no PRODUCT.md category covers, ordered by judged importance:
 
-1. **Durable/detachable sessions** — terminal *contents and processes*
+1. **Durable/detachable sessions** — terminal _contents and processes_
    surviving UI restart or network drop (Contour daemon mode with
    local/network attach; Wave's "durable SSH sessions" v0.14.0,
    2026-02-10; tmux/zellij-under-WSL culture). winghostty's
-   `window-save-state` explicitly does *not* restore contents or
+   `window-save-state` explicitly does _not_ restore contents or
    children (docs/status.md) — the long tail shows users now expect
    more.
 2. **Fork-swarm / namespace risk** — multiple `ghostty-windows` native
@@ -80,7 +79,7 @@ Things no PRODUCT.md category covers, ordered by judged importance:
   since March 2026. A deep dive should establish real capability,
   activity, and whether consolidation/blessing risk is live. (Caveat:
   several repos look like near-identical clones of one another;
-  activity and quality are unverified — see paragraph below.)
+  activity and quality are unverified — see paragraph below. Superseded by the completed deep dive: no fork out-tracks winghostty; see ghostty-windows-forks.md.)
 - Not promoted: MobaXterm and Termius are SSH-workspace products whose
   lessons are captured here; Hyper and Fluent are dormant/dead;
   Contour, Extraterm, mintty are idea donors, not rivals for the
@@ -131,7 +130,7 @@ within days of this sweep and bugfix release notes through 2026
 Windows 10+ via ConPTY with installer and portable zip, though Windows
 is clearly a secondary platform. Distinctives the nine dives won't
 surface: **vi-like modal input**, **daemon mode with persistent
-sessions and local/network attach**, Sixel *and* ReGIS graphics, VT
+sessions and local/network attach**, Sixel _and_ ReGIS graphics, VT
 extensions (synchronized updates, buffer capture), and stewardship of
 `terminal-unicode-core` plus VT-extension spec work (org repos updated
 April 2026). Reliability is mixed — jeffquast's 2025 survey hit DEC
