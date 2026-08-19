@@ -19,6 +19,9 @@ explicit ruling; nothing here is provisional.
   Rio, upstream Ghostty, long-tail sweep, Wave Terminal,
   ghostty-windows forks, plus the durable-session spike.
 - Cost classes: S ≲ days · M ≲ weeks · L ≈ month+ · XL ≈ quarter+.
+- Tracker: each work item is a GitHub issue on this fork
+  ([#120–#146](https://github.com/amanthanvi/winghostty/issues?q=label%3Aroadmap),
+  labels `roadmap` + `wave-1/2/3`), linked from its heading below.
 
 ## Strategy rulings (binding context)
 
@@ -91,7 +94,7 @@ performance claim falsifiable, and take the cheap OS entry points.
 Order within the wave: C04 first (it corrects the record everything
 else builds on), then C01; the rest are parallelizable.
 
-### C04 · status.md and capability-matrix accuracy — S
+### C04 · status.md and capability-matrix accuracy — S · [#120](https://github.com/amanthanvi/winghostty/issues/120)
 
 **Ruling:** adopt, first. **Why:** code verification found the docs
 materially undersell the product — quick terminal with global hotkey
@@ -108,7 +111,7 @@ add the missing rows (also check status bar, link preview, paste
 protection); refresh the "last updated" contract. Evidence: synthesis
 ground-truth note; wintty report §10.
 
-### C01 · Published, reproducible Windows benchmark suite + CI perf gates — M
+### C01 · Published, reproducible Windows benchmark suite + CI perf gates — M · [#121](https://github.com/amanthanvi/winghostty/issues/121)
 
 **Ruling:** adopt. **Why:** "fastest, most fluid" is the product's
 entire thesis and no terminal in the field publishes credible Windows
@@ -126,7 +129,7 @@ the PRODUCT.md budgets (provisional until this suite's first baseline
 fixes them). Evidence: synthesis C01; alacritty §10.1, wintty §2/§10.9,
 wt §2/§10, rio §10.6, tabby §10.1, wave §10.2.
 
-### C03 · GPU floor documentation + graceful degraded-mode — S
+### C03 · GPU floor documentation + graceful degraded-mode — S · [#122](https://github.com/amanthanvi/winghostty/issues/122)
 
 **Ruling:** adopt the S slice only; any fallback renderer stays
 deferred. **Why:** corporate/VM/RDP machines are normal Windows dev
@@ -136,7 +139,7 @@ a path back to a working terminal." **Shape:** document the OpenGL
 with a visible, actionable message instead of a blank window. Evidence:
 synthesis C03; alacritty §10.4, warp §2, wez §2, wt §2.
 
-### C32 · Win32 paste-path security audit (fuzzing follows incrementally) — S audit, M fuzzing
+### C32 · Win32 paste-path security audit (fuzzing follows incrementally) — S audit, M fuzzing · [#123](https://github.com/amanthanvi/winghostty/issues/123)
 
 **Ruling:** adopt; audit immediately. **Why:** upstream's
 CVE-2026-26982 paste-sanitization fix was verified on upstream's
@@ -149,7 +152,7 @@ fuzzing of fork-only surfaces (paste paths, ConPTY I/O, session-state
 JSON, IPC) reusing upstream's corpus approach. Evidence: synthesis
 C32; up §6/§10.1, rio §6, tabby §6.
 
-### C06 · UTF-8 console preamble with CJK code-page guard — S
+### C06 · UTF-8 console preamble with CJK code-page guard — S · [#124](https://github.com/amanthanvi/winghostty/issues/124)
 
 **Ruling:** adopt. **Why:** Nerd-Font/oh-my-posh mojibake in
 cmd/PowerShell 5.1 is a first-session failure for exactly the
@@ -160,7 +163,7 @@ design to copy. **Shape:** `chcp 65001` for cmd,
 on legacy CJK ANSI code pages. Evidence: synthesis C06; wintty
 §3/§10.2.
 
-### C07 · cmd.exe shell integration via PROMPT + optional Clink — S
+### C07 · cmd.exe shell integration via PROMPT + optional Clink — S · [#125](https://github.com/amanthanvi/winghostty/issues/125)
 
 **Ruling:** adopt. **Why:** closes the last unsupported-shell gap
 (status.md: cmd is a "plain fallback"); cwd-correct restore and
@@ -170,7 +173,7 @@ environment variable; auto-load a Clink lua for 133;C/D + exit codes
 when Clink is present; degrade gracefully without it. Evidence:
 synthesis C07; wintty §4/§10.3.
 
-### C12 · Taskbar jump lists — S
+### C12 · Taskbar jump lists — S · [#126](https://github.com/amanthanvi/winghostty/issues/126)
 
 **Ruling:** adopt. **Why:** taskbar re-entry into a recent directory
 or pinned profile is core native feel for a user who pins the
@@ -180,7 +183,7 @@ absent (no `ICustomDestinationList` usage). **Shape:**
 integration) + pinned profiles; extend with named layouts once C17
 lands. Evidence: synthesis C12; wintty §3/§10.4, conemu §3/§10.4.
 
-### C13 · Explorer "Open winghostty here" context menu — S
+### C13 · Explorer "Open winghostty here" context menu — S · [#127](https://github.com/amanthanvi/winghostty/issues/127)
 
 **Ruling:** adopt. **Why:** cheapest expected OS entry point; even
 minimal Alacritty ships it; Tabby users fight registry hacks for it.
@@ -189,7 +192,7 @@ directory and directory-background; installer + portable-mode
 registration paths. Evidence: synthesis C13; alacritty §3, conemu,
 tabby §3.
 
-### C19 · Prompt-mark navigation verbs, surfaced — S
+### C19 · Prompt-mark navigation verbs, surfaced — S · [#128](https://github.com/amanthanvi/winghostty/issues/128)
 
 **Ruling:** adopt. **Why:** converts already-shipped OSC 133 shell
 integration (including PowerShell) into felt daily value —
@@ -206,7 +209,7 @@ The differentiators no Windows-native rival has: owned ConPTY,
 default-terminal capture, deep sessions, and the trust/distribution
 lead extended.
 
-### C05 · Own the ConPTY layer: bundled OpenConsole + degraded-mode logging + mangling catalog — M
+### C05 · Own the ConPTY layer: bundled OpenConsole + degraded-mode logging + mangling catalog — M · [#129](https://github.com/amanthanvi/winghostty/issues/129)
 
 **Ruling:** adopt. **Why:** the flagship capability claim (Kitty
 graphics, deep VT) currently depends on whatever conhost version the
@@ -221,7 +224,7 @@ extending [docs/windows-vt-conformance.md](../docs/windows-vt-conformance.md).
 Evidence: synthesis C05; wintty §3/§10.1/§10.5, rio §3/§10.1, warp §3,
 wt §3, forks (ghostinthewsl).
 
-### C11 · Default-terminal registration (`ITerminalHandoff`) — M
+### C11 · Default-terminal registration (`ITerminalHandoff`) — M · [#130](https://github.com/amanthanvi/winghostty/issues/130)
 
 **Ruling:** adopt. **Why:** how a terminal becomes _the_ terminal —
 captures consoles the user didn't explicitly launch (Explorer, IDEs).
@@ -233,7 +236,7 @@ consoles into a new tab/window; handle elevation and multi-instance
 policy; register from installer and settings. Evidence: synthesis C11;
 wt §3, conemu §3, wintty §3.
 
-### C15 · Scrollback-content restore — M
+### C15 · Scrollback-content restore — M · [#131](https://github.com/amanthanvi/winghostty/issues/131)
 
 **Ruling:** adopt. **Why:** the restart promise currently loses all
 pane context on restore; Windows Terminal ships buffer snapshots (with
@@ -245,7 +248,7 @@ restored clearly marked as a snapshot; size/redaction knobs; crash-safe
 write path reusing existing session-state transactions. Evidence:
 synthesis C15; wt §5/§10.3, warp §5/§10.3, lt §a.1.
 
-### conpty-host feasibility increment (from the durable-session spike) — M
+### conpty-host feasibility increment (from the durable-session spike) — M · [#132](https://github.com/amanthanvi/winghostty/issues/132)
 
 **Ruling:** scheduled here, after C15. **Why:** the spike verdict is
 feasible-with-broker — an `HPCON` dies with its owning process, so
@@ -261,7 +264,7 @@ graduates durable-session planning (C16); red caps the aspiration
 honestly. Evidence:
 [durable-session-spike report](wayfinder/competitive-analysis/research/durable-session-spike.md).
 
-### C17 · Named layouts: profile + split tree + hotkey in one object — M
+### C17 · Named layouts: profile + split tree + hotkey in one object — M · [#133](https://github.com/amanthanvi/winghostty/issues/133)
 
 **Ruling:** adopt. **Why:** turns session restore from "what I had"
 into "what I want" — project switching for the tabs-and-splits user;
@@ -272,7 +275,7 @@ tree) materialized via keybind, palette entry, CLI flag, and (with
 C12) jump-list click. Evidence: synthesis C17; conemu §5/§10.3, warp
 §5/§10.2, wez §5.
 
-### C02 · Power/battery awareness as a performance axis — M
+### C02 · Power/battery awareness as a performance axis — M · [#134](https://github.com/amanthanvi/winghostty/issues/134)
 
 **Ruling:** adopt. **Why:** the benchmark user works on a laptop;
 upstream structurally deprioritizes battery ("GPU or nothing"
@@ -283,7 +286,7 @@ unfocused-render throttling / target-fps knobs, occlusion-aware
 repaint; publish idle power in the benchmark suite. Evidence:
 synthesis C02; up §2/§9/§10.2, wintty §3/§10.8, rio §10.3.
 
-### C08 · Ghostty 1.3-surface Win32 wiring audit — S
+### C08 · Ghostty 1.3-surface Win32 wiring audit — S · [#135](https://github.com/amanthanvi/winghostty/issues/135)
 
 **Ruling:** adopt. **Why:** inherited-on-paper features that silently
 no-op on Windows are precisely the "generic parity fork" failure the
@@ -294,7 +297,7 @@ path, `scrollbar`, notify-on-command-finish → the existing toast
 pipeline, `key-remap`, clipboard-codepoint-map; record results in the
 capability matrix. Evidence: synthesis C08; up §7/§10.6, wt §10.6.
 
-### C14 · Elevation as a designed surface — M
+### C14 · Elevation as a designed surface — M · [#136](https://github.com/amanthanvi/winghostty/issues/136)
 
 **Ruling:** adopt (documented model + elevated-window action);
 mixed-elevation tabs are explicitly out. **Why:** the benchmark user
@@ -306,7 +309,7 @@ elevated sessions); add a "run elevated" profile flag + palette action
 opening a clearly-marked elevated window. Evidence: synthesis C14;
 conemu §3/§10.1, wt §3/§10.8, wave §3.
 
-### C28 · SmartScreen/signing reputation hardening — S/M
+### C28 · SmartScreen/signing reputation hardening — S/M · [#137](https://github.com/amanthanvi/winghostty/issues/137)
 
 **Ruling:** adopt. **Why:** the last trust gap in a
 best-in-field distribution story; first-run SmartScreen warnings kill
@@ -316,7 +319,7 @@ EV-grade reputation; sign or attest the portable ZIP container;
 document verification steps (feeds the trust page). Evidence:
 synthesis C28; alacritty §3/§10.5, rio §3, conemu §9.
 
-### C29 · Portable mode + portable-ZIP updater apply — M
+### C29 · Portable mode + portable-ZIP updater apply — M · [#138](https://github.com/amanthanvi/winghostty/issues/138)
 
 **Ruling:** adopt. **Why:** locked-down corporate machines are a
 genuine persona of the benchmark user; WezTerm's thumb-drive mode and
@@ -325,14 +328,14 @@ status.md's next list. **Shape:** config/state discovery beside the
 exe; implement staged apply/rollback for the portable ZIP channel.
 Evidence: synthesis C29; wez §3, tabby §3, lt (MobaXterm).
 
-### C30 · Chocolatey channel — S
+### C30 · Chocolatey channel — S · [#139](https://github.com/amanthanvi/winghostty/issues/139)
 
 **Ruling:** adopt. **Why:** enterprise fleets script choco; near-zero
 recurring cost next to the existing winget/Scoop automation. **Shape:**
 add a choco package to the release pipeline alongside winget/Scoop.
 Evidence: synthesis C30; wave §10.7, rio §10.6.
 
-### C31 · GitHub-coupling contingency — S
+### C31 · GitHub-coupling contingency — S · [#140](https://github.com/amanthanvi/winghostty/issues/140)
 
 **Ruling:** adopt. **Why:** upstream is leaving GitHub (destination
 unannounced) and the fork's updater hardcodes `api.github.com` —
@@ -340,7 +343,7 @@ infrastructure upstream itself just judged unreliable. **Shape:**
 abstract the updater endpoint; monitor upstream mirror freshness; keep
 sync tooling re-pointable. Evidence: synthesis C31; up §1/§10.5.
 
-### C33 · Upstream merge cadence + published merge policy — S/M recurring
+### C33 · Upstream merge cadence + published merge policy — S/M recurring · [#141](https://github.com/amanthanvi/winghostty/issues/141)
 
 **Ruling:** adopt — this is the standing mechanism of the hard-fork
 posture. **Why:** the moat is priced in merge labor; deferring
@@ -354,7 +357,7 @@ docs. Evidence: synthesis C33; up §10.2, forks §10, wintty §1.
 
 ## Wave 3 — Depth
 
-### C18 · Quick-select / hints + modal copy mode — M
+### C18 · Quick-select / hints + modal copy mode — M · [#142](https://github.com/amanthanvi/winghostty/issues/142)
 
 **Ruling:** adopt. **Why:** pure keyboard-first territory (principle 2) with no current implementation beyond URL hover-hints — regex
 capture of URLs/paths/hashes/IPs to open/copy/paste, plus modal
@@ -364,7 +367,7 @@ modal copy mode with vi-style motions; configurable patterns.
 Evidence: synthesis C18; alacritty §4/§10.2–3, wez §5/§10.3, rio
 §4/§10.4, lt §a.4.
 
-### C20 · Lean SSH host ingestion — M
+### C20 · Lean SSH host ingestion — M · [#143](https://github.com/amanthanvi/winghostty/issues/143)
 
 **Ruling:** adopt (lean slice only, per the amended user scope).
 **Why:** the benchmark user's week includes remote hosts (Tabby's 74k
@@ -375,7 +378,7 @@ surface hosts as launchable profiles/palette entries running the
 system `ssh`; no bundled client, no vault (deferred), no fleet tools
 (out). Evidence: synthesis C20; tabby §5/§10.1, wez §5/§10.5, wt §3.
 
-### C25 · Documented automation surface (CLI verb set) — L, staged
+### C25 · Documented automation surface (CLI verb set) — L, staged · [#144](https://github.com/amanthanvi/winghostty/issues/144)
 
 **Ruling:** adopt, staged — verb design waits until upstream 1.4's
 scriptability shape is visible (via C33 merges), so nothing is
@@ -389,7 +392,7 @@ profile/query state/run named layout); align with upstream's contract
 where sensible. Evidence: synthesis C25; wez §7/§10.2, wt §7/§10.6,
 conemu §7, wave §10.3, up §10.4.
 
-### C34 · Accessibility: finish UIA, publish a screen-reader matrix — M
+### C34 · Accessibility: finish UIA, publish a screen-reader matrix — M · [#145](https://github.com/amanthanvi/winghostty/issues/145)
 
 **Ruling:** adopt. **Why:** the entire competitive field ignores
 accessibility (one rival fork admits screen readers can't read its
@@ -399,7 +402,7 @@ the UIA work already on status.md's next list; publish a per-release
 Narrator/NVDA/JAWS compatibility matrix; state it on the trust page.
 Evidence: synthesis C34; forks §10.
 
-### C27 · Identity, trust, and verification page + migration guides — S
+### C27 · Identity, trust, and verification page + migration guides — S · [#146](https://github.com/amanthanvi/winghostty/issues/146)
 
 **Ruling:** adopt — full send under the current name (rename risk
 accepted with eyes open). **Why:** every distribution advantage
