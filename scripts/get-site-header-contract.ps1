@@ -293,9 +293,6 @@ if ($declaredHashes.Count -ne $expectedHashes.Count -or
         referrer_policy = $security['Referrer-Policy']
         permissions_policy = $permissions
     }
-    bundle = [ordered]@{
-        cache_control = $security['Cache-Control']
-    }
     not_found = [ordered]@{
         cache_control = 'no-store'
     }

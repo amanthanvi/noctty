@@ -262,13 +262,15 @@ function initTerminalDemo(root) {
     }
   });
 
-  // The markup ships with scene one pre-rendered for no-JS visitors and as
-  // the reduced-motion resting state, so a non-animating start keeps it.
+  // The markup ships with scene one pre-rendered for no-JS visitors. With
+  // JS running, a non-animating start re-renders that scene from the current
+  // data: version.js may have published a cached release before this module's
+  // listener existed, and the markup hardcodes the compiled version.
   if (shouldAnimate()) {
     resetScene();
     applyMotionState();
   } else {
-    lineIdx = scenes[sceneIdx].lines.length;
+    renderCompletedScene();
     applyMotionState();
   }
 }

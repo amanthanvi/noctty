@@ -65,7 +65,7 @@ jobs:
       - name: Site unit tests
         shell: pwsh
         run: |
-          node --test site/tests/terminal.test.mjs
+          node --test site/tests/terminal.test.mjs site/tests/build-site-assets.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Signing trust policy tests
