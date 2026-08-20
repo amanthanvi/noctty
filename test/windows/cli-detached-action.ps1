@@ -1,5 +1,5 @@
 param(
-    [string] $Action = '+boo',
+    [string] $Action = '+version',
     [int] $TimeoutSeconds = 5,
     [string] $ResourcesDir,
     [string[]] $ExtraArgs = @(),

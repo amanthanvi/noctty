@@ -19,16 +19,11 @@ const validate_config = @import("validate_config.zig");
 const crash_report = @import("crash_report.zig");
 const diagnostic_bundle = @import("diagnostic_bundle.zig");
 const show_face = @import("show_face.zig");
-const boo = @import("boo.zig");
 const new_window = @import("new_window.zig");
 const list_windows = @import("list_windows.zig");
 const perform_action = @import("perform_action.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
-
-pub fn requiresTerminalUi(self: Action) bool {
-    return self == .boo;
-}
 
 /// Run the action. This returns the exit code to exit with.
 pub fn run(self: Action, alloc: Allocator) !u8 {
@@ -75,7 +70,6 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"crash-report" => try crash_report.run(alloc),
         .@"diagnostic-bundle" => try diagnostic_bundle.run(alloc),
         .@"show-face" => try show_face.run(alloc),
-        .boo => try boo.run(alloc),
         .@"new-window" => try new_window.run(alloc),
         .@"list-windows" => try list_windows.run(alloc),
         .@"perform-action" => try perform_action.run(alloc),
@@ -104,7 +98,6 @@ pub fn options(comptime self: Action) type {
             .@"crash-report" => crash_report.Options,
             .@"diagnostic-bundle" => diagnostic_bundle.Options,
             .@"show-face" => show_face.Options,
-            .boo => boo.Options,
             .@"new-window" => new_window.Options,
             .@"list-windows" => list_windows.Options,
             .@"perform-action" => perform_action.Options,
@@ -220,20 +213,6 @@ test "parse action plus ignores -e" {
             actionpkg.detectIter(Action, &iter),
         );
     }
-}
-
-test "terminal UI actions are classified separately" {
-    const testing = std.testing;
-
-    try testing.expect(requiresTerminalUi(.boo));
-
-    try testing.expect(!requiresTerminalUi(.@"list-keybinds"));
-    try testing.expect(!requiresTerminalUi(.@"list-themes"));
-    try testing.expect(!requiresTerminalUi(.@"list-colors"));
-    try testing.expect(!requiresTerminalUi(.help));
-    try testing.expect(!requiresTerminalUi(.version));
-    try testing.expect(!requiresTerminalUi(.@"show-config"));
-    try testing.expect(!requiresTerminalUi(.@"crash-report"));
 }
 
 test "vt-probe action is registered" {

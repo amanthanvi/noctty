@@ -4,7 +4,6 @@ param(
     [string] $CliAction = '+help',
     [string] $CommandText = '',
     [string] $ExePathOverride = '',
-    [switch] $RunBooFirst,
     [int] $SeedTabs = 1,
     [int] $TimeoutSeconds = 20
 )
@@ -43,7 +42,6 @@ if (-not $env:NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
     if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
         $forwardedArgs += @('-ExePathOverride', $ExePathOverride)
     }
-    if ($RunBooFirst) { $forwardedArgs += '-RunBooFirst' }
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
 
@@ -164,7 +162,6 @@ $SWP_SHOWWINDOW = 0x0040
 $VISIBLE_TAB_MIN_ID = 1000
 $VISIBLE_TAB_MAX_ID_EXCLUSIVE = 1900
 $HOST_COMMAND_NEW_TAB_ID = 1904
-$BOO_AUTO_EXIT_MS = 1000
 $KEY_STROKE_DELAY_MS = 15
 $CAPTURE_PROMOTION_DELAY_MS = 150
 $CAPTURE_SETTLE_MS = 300
@@ -647,9 +644,6 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $co
 @(
     '@echo off'
     "cd /d `"$($layout.Temp)`""
-    if ($RunBooFirst) { "set NOCTTY_BOO_AUTO_EXIT_MS=$BOO_AUTO_EXIT_MS" }
-    if ($RunBooFirst) { 'noctty +boo' }
-    if ($RunBooFirst) { 'set NOCTTY_BOO_AUTO_EXIT_MS=' }
     'echo READY>interactive-win11-shell-command-live-ready.txt'
 ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
@@ -749,7 +743,7 @@ try {
         throw 'noctty live shell command run reported a runtime failure'
     }
 
-    Write-Host ("interactive-win11 shell command live validation: PASS (command={0}, action={1}, run_boo_first={2}, seed_tabs={3}, changed={4}, sampled={5}, stdout={6}, stderr={7}, ready={8}, control={9}, resolved={10}, post={11}, before={12}, after={13})" -f $typedCommandText, $CliAction, $RunBooFirst, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
+    Write-Host ("interactive-win11 shell command live validation: PASS (command={0}, action={1}, seed_tabs={2}, changed={3}, sampled={4}, stdout={5}, stderr={6}, ready={7}, control={8}, resolved={9}, post={10}, before={11}, after={12})" -f $typedCommandText, $CliAction, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
 }
 finally {
     if ($hostHwnd -ne [IntPtr]::Zero) {

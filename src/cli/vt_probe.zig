@@ -122,8 +122,8 @@ const capabilities = [_]capability{
         .id = "csi-2026-synchronized-output",
         .category = .csi,
         .direction = .parse,
-        .win32_runtime = .validated,
-        .evidence = "test/windows/interactive-win11-boo-performance.ps1",
+        .win32_runtime = .parser_only,
+        .evidence = "core synchronized-output tests; no Win32 repaint-cadence harness",
     },
     .{
         .id = "kitty-graphics",
@@ -260,7 +260,7 @@ test "vt-probe report includes core capabilities" {
     try testing.expectEqual(win32_runtime.validated, probe.capabilities[3].win32_runtime);
     try testing.expectEqual(win32_runtime.validated, probe.capabilities[5].win32_runtime);
     try testing.expectEqual(win32_runtime.validated, probe.capabilities[7].win32_runtime);
-    try testing.expectEqual(win32_runtime.validated, probe.capabilities[11].win32_runtime);
+    try testing.expectEqual(win32_runtime.parser_only, probe.capabilities[11].win32_runtime);
     try testing.expectEqual(win32_runtime.pending, probe.capabilities[12].win32_runtime);
 }
 
@@ -292,7 +292,7 @@ test "vt-probe plain output is deterministic" {
         \\capability=osc-4-palette category=osc direction=parse+emit win32-runtime=parser-only evidence="core color protocol tests; no Win32 rendered palette harness"
         \\capability=osc-10-11-colors category=osc direction=parse+emit win32-runtime=parser-only evidence="core color protocol tests; no Win32 rendered default-color harness"
         \\capability=osc-21-kitty-color-stack category=osc direction=parse win32-runtime=parser-only evidence="core kitty color protocol tests; no Win32 rendered color-stack harness"
-        \\capability=csi-2026-synchronized-output category=csi direction=parse win32-runtime=validated evidence="test/windows/interactive-win11-boo-performance.ps1"
+        \\capability=csi-2026-synchronized-output category=csi direction=parse win32-runtime=parser-only evidence="core synchronized-output tests; no Win32 repaint-cadence harness"
         \\capability=kitty-graphics category=graphics direction=parse win32-runtime=pending evidence="core Kitty graphics tests; no Win32 pixel/renderer harness"
         \\
     ,

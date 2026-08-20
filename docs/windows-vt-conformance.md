@@ -25,8 +25,6 @@ Current practical Win32 coverage:
   `test/windows/interactive-win11-command-finish.ps1`
 - OSC 9;4 taskbar progress:
   `test/windows/interactive-win11-progress.ps1`
-- CSI ?2026 synchronized output repaint behavior:
-  `test/windows/interactive-win11-boo-performance.ps1`
 
 Run the fast metadata validator:
 
@@ -47,4 +45,5 @@ have dedicated Win32 GUI harnesses:
 - OSC 8 link interaction
 - OSC 52 clipboard prompts, reads, and writes
 - Color rendering for OSC 4 / 10 / 11 / 21
+- CSI ?2026 synchronized output repaint cadence
 - Kitty graphics pixel validation

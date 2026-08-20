@@ -130,7 +130,6 @@ $expectedCommandPath = Join-Path $exeDir 'noctty.com'
 $cmdResolvedPath = Join-Path $layout.Temp 'cmd-resolved.txt'
 $cmdHelpPath = Join-Path $layout.Temp 'cmd-help.txt'
 $cmdVersionPath = Join-Path $layout.Temp 'cmd-version.txt'
-$cmdBooHelpPath = Join-Path $layout.Temp 'cmd-boo-help.txt'
 $cmdKeybindsPath = Join-Path $layout.Temp 'cmd-list-keybinds.txt'
 $cmdColorsPath = Join-Path $layout.Temp 'cmd-list-colors.txt'
 $cmdThemesPath = Join-Path $layout.Temp 'cmd-list-themes.txt'
@@ -138,14 +137,13 @@ $cmdPayloadPath = Join-Path $layout.Temp 'interactive-win11-shell-command.cmd'
 $cmdStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-stdout.log'
 $cmdStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-cmd-stderr.log'
 
-Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdBooHelpPath, $cmdKeybindsPath, $cmdColorsPath, $cmdThemesPath, $cmdPayloadPath, $cmdStdoutPath, $cmdStderrPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdKeybindsPath, $cmdColorsPath, $cmdThemesPath, $cmdPayloadPath, $cmdStdoutPath, $cmdStderrPath -ErrorAction SilentlyContinue
 
 @(
     '@echo off'
     "where noctty > `"$cmdResolvedPath`" || exit /b 1"
     "noctty +help > `"$cmdHelpPath`" || exit /b 1"
     "noctty +version > `"$cmdVersionPath`" || exit /b 1"
-    "noctty +boo --help > `"$cmdBooHelpPath`" || exit /b 1"
     "noctty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
     "noctty +list-colors > `"$cmdColorsPath`" || exit /b 1"
     "noctty +list-themes > `"$cmdThemesPath`" || exit /b 1"
@@ -166,7 +164,6 @@ if (-not $cmdResolved[0].Equals($expectedCommandPath, [System.StringComparison]:
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'cmd +help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdVersionPath) -Expected 'Build Config' -Label 'cmd +version'
-Assert-Contains -Text (Get-RequiredTextFile -Path $cmdBooHelpPath) -Expected 'The `boo` command is used to display the project animation in the terminal.' -Label 'cmd +boo --help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdKeybindsPath) -Expected 'keybind = ctrl+shift+,=reload_config' -Label 'cmd +list-keybinds'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdColorsPath) -Expected 'alice blue = #f0f8ff' -Label 'cmd +list-colors'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdThemesPath) -Expected '0x96f (resources)' -Label 'cmd +list-themes'
@@ -174,7 +171,6 @@ Assert-Contains -Text (Get-RequiredTextFile -Path $cmdThemesPath) -Expected '0x9
 $psResolvedPath = Join-Path $layout.Temp 'powershell-resolved.txt'
 $psHelpPath = Join-Path $layout.Temp 'powershell-help.txt'
 $psVersionPath = Join-Path $layout.Temp 'powershell-version.txt'
-$psBooHelpPath = Join-Path $layout.Temp 'powershell-boo-help.txt'
 $psKeybindsPath = Join-Path $layout.Temp 'powershell-list-keybinds.txt'
 $psColorsPath = Join-Path $layout.Temp 'powershell-list-colors.txt'
 $psThemesPath = Join-Path $layout.Temp 'powershell-list-themes.txt'
@@ -184,12 +180,11 @@ $psStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-powershe
 $psResolvedLiteral = Get-EscapedPowerShellLiteralPath -Path $psResolvedPath
 $psHelpLiteral = Get-EscapedPowerShellLiteralPath -Path $psHelpPath
 $psVersionLiteral = Get-EscapedPowerShellLiteralPath -Path $psVersionPath
-$psBooHelpLiteral = Get-EscapedPowerShellLiteralPath -Path $psBooHelpPath
 $psKeybindsLiteral = Get-EscapedPowerShellLiteralPath -Path $psKeybindsPath
 $psColorsLiteral = Get-EscapedPowerShellLiteralPath -Path $psColorsPath
 $psThemesLiteral = Get-EscapedPowerShellLiteralPath -Path $psThemesPath
 
-Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psBooHelpPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
 
 @(
     '$resolved = (Get-Command noctty).Source'
@@ -200,9 +195,6 @@ Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psBooHel
     '$version = noctty +version | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psVersionLiteral' -Value `$version -Encoding UTF8"
-    '$booHelp = noctty +boo --help | Out-String'
-    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
-    "Set-Content -LiteralPath '$psBooHelpLiteral' -Value `$booHelp -Encoding UTF8"
     '$keybinds = noctty +list-keybinds | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psKeybindsLiteral' -Value `$keybinds -Encoding UTF8"
@@ -226,7 +218,6 @@ if (-not $psResolved.Equals($expectedCommandPath, [System.StringComparison]::Ord
 }
 Assert-Contains -Text (Get-RequiredTextFile -Path $psHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'PowerShell +help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psVersionPath) -Expected 'Build Config' -Label 'PowerShell +version'
-Assert-Contains -Text (Get-RequiredTextFile -Path $psBooHelpPath) -Expected 'The `boo` command is used to display the project animation in the terminal.' -Label 'PowerShell +boo --help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psKeybindsPath) -Expected 'keybind = ctrl+shift+,=reload_config' -Label 'PowerShell +list-keybinds'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psColorsPath) -Expected 'alice blue = #f0f8ff' -Label 'PowerShell +list-colors'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psThemesPath) -Expected '0x96f (resources)' -Label 'PowerShell +list-themes'

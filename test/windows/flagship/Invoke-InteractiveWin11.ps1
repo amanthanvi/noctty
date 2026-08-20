@@ -17,7 +17,6 @@ $status = 'error'
 $failure = $null
 $commit = $null
 $measurements = [ordered]@{}
-$performanceHash = $null
 $oldForeground = $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
 
 if (-not ('Noctty.Flagship.DesktopProbe' -as [type])) {
@@ -101,30 +100,6 @@ finally {
         Set-Content -LiteralPath $transcriptPath -Value $redacted -Encoding utf8
         Remove-Item -LiteralPath $rawTranscriptPath -Force
     }
-    if ($status -eq 'pass') {
-        . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-        $perfLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'boo-performance'
-        $render = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-render.json') -Raw | ConvertFrom-Json
-        $termio = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-termio.json') -Raw | ConvertFrom-Json
-        $boo = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-boo.json') -Raw | ConvertFrom-Json
-        $measurements = [ordered]@{
-            paint_draw_count = [long]$render.paint_draw_count
-            startup_window_ms = [long]$render.startup_window_ms
-            startup_paint_gap_ceiling_ms = [long]$render.startup_paint_gap_ceiling_ms
-            paint_gap_limit_ms = [long]$render.paint_gap_limit_ms
-            paint_gap_over_limit_count = [long]$render.paint_gap_over_limit_count
-            max_paint_gap_ms = [long]$render.max_paint_gap_ms
-            max_sustained_paint_gap_ms = [long]$render.max_sustained_paint_gap_ms
-            max_paint_draw_duration_ms = [long]$render.max_paint_draw_duration_ms
-            process_output_count = [long]$termio.process_output_count
-            max_process_output_gap_ms = [long]$termio.max_process_output_gap_ms
-            frame_change_count = [long]$boo.frame_change_count
-            rendered_byte_count = [long]$boo.rendered_byte_count
-        }
-        $performancePath = Join-Path $outputPath 'boo-performance.json'
-        $measurements | ConvertTo-Json | Set-Content -LiteralPath $performancePath -Encoding utf8
-        $performanceHash = (Get-FileHash -LiteralPath $performancePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
     $finished = [DateTimeOffset]::UtcNow
     $logHash = if ($commit -and (Test-Path -LiteralPath $transcriptPath)) {
         (Get-FileHash -LiteralPath $transcriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -158,7 +133,6 @@ finally {
         })
         artifacts = @(
             [ordered]@{ kind = 'log'; path = 'transcript.log'; sha256 = $logHash }
-            [ordered]@{ kind = 'trace'; path = 'boo-performance.json'; sha256 = $performanceHash }
         )
         failure = $failure
     }

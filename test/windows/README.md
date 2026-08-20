@@ -80,8 +80,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\vt-probe-win32-conformance.ps1 -R
 ```
 
 Pass `-Runtime` to also run the heavier Win32 evidence harnesses currently
-referenced by `+vt-probe`: command finish / notification, taskbar progress,
-and synchronized-output repaint performance.
+referenced by `+vt-probe`: command finish / notification and taskbar
+progress.
 
 ## interactive-win11-progress.ps1
 

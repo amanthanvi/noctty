@@ -18,7 +18,6 @@
   ],
   "artifacts": [
     { "kind": "result", "path": "result.json" },
-    { "kind": "log", "path": "transcript.log" },
-    { "kind": "trace", "path": "boo-performance.json" }
+    { "kind": "log", "path": "transcript.log" }
   ]
 }

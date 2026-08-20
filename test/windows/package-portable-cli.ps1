@@ -44,8 +44,8 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
 & $shellHarness `
     -Shell cmd `
     -BinDir $portableRoot `
-    -Arguments @('+boo', '--help') `
-    -ExpectedText 'The `boo` command is used to display the project animation in the terminal.'
+    -Arguments @('+version', '--help') `
+    -ExpectedText 'The `version` command is used to display information about noctty.'
 
 & $shellHarness `
     -Shell powershell `
@@ -67,7 +67,7 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
 
 & $detachedHarness `
     -ExePath $portableExe `
-    -Action '+boo' `
+    -Action '+version' `
     -ResourcesDir $portableResources
 
 Write-Host "portable package CLI validation: PASS (root=$portableRoot)"

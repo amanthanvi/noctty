@@ -2765,14 +2765,13 @@ try {
     $slugFixtures = @(
         foreach ($keyValue in $keyInputKeyValues) {
             Get-KeyInputScenarioSlug -Key $keyValue
-            Get-KeyInputScenarioSlug -Key $keyValue -PostBoo
         }
     )
     if (@($slugFixtures | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
-        $slugFixtures.Count -ne 20 -or
+        $slugFixtures.Count -ne 10 -or
         @($slugFixtures | Sort-Object -Unique).Count -ne
             $slugFixtures.Count) {
-        throw 'The ten-key by PostBoo cross-product must produce exactly twenty unique artifact slugs.'
+        throw 'The ten-key set must produce exactly ten unique artifact slugs.'
     }
 }
 finally {
@@ -2803,9 +2802,6 @@ $scenarioSlugCalls = if ($scenarioSlugAssignments.Count -eq 1) {
 }
 $scenarioSlugKey = if ($scenarioSlugCalls.Count -eq 1) {
     Get-CommandParameterArgument -Command $scenarioSlugCalls[0] -Name 'Key'
-}
-$scenarioSlugPostBoo = if ($scenarioSlugCalls.Count -eq 1) {
-    Get-CommandParameterArgument -Command $scenarioSlugCalls[0] -Name 'PostBoo'
 }
 $artifactVariableNames = @(
     'artifactPrefix', 'stdoutPath', 'stderrPath', 'resultPath'
@@ -2869,8 +2865,6 @@ if ($sandboxCalls.Count -ne 1 -or
     ) -or
     $scenarioSlugCalls.Count -ne 1 -or
     (Get-VariableExpressionName -Node $scenarioSlugKey) -ne 'Key' -or
-    (Get-VariableExpressionName -Node $scenarioSlugPostBoo) -ne
-        'RunBooFirst' -or
     @($artifactAssignments | Where-Object {
         -not [object]::ReferenceEquals($_.Parent, $keyInputHarnessAst.EndBlock)
     }).Count -ne 0 -or

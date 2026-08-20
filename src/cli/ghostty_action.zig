@@ -54,9 +54,6 @@ pub const Action = enum {
     // Create a local, privacy-redacted diagnostic bundle.
     @"diagnostic-bundle",
 
-    // Boo!
-    boo,
-
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
 
