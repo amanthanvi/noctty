@@ -74,7 +74,7 @@ function Invoke-Seed {
     Write-Host "== $label =="
 
     if (-not (Test-Path $archive)) {
-        & bitsadmin /transfer "winghostty-$($Dep.File)" /download /priority foreground $Dep.Url $archive
+        & bitsadmin /transfer "noctty-$($Dep.File)" /download /priority foreground $Dep.Url $archive
         if ($LASTEXITCODE -ne 0) {
             if ($Dep.Optional) {
                 Write-Host "Skipping optional dependency archive: $($Dep.File)"

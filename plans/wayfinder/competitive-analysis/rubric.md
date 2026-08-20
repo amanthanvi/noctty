@@ -46,14 +46,14 @@ rather than guessing. No hands-on claims.
 9. **What users complain about** — top recurring negative themes from
    issues, discussions, Reddit/HN, reviews. Quote or link concrete
    instances.
-10. **Lessons for winghostty** — the payload. Three explicit lists:
-    - *Does well (adopt-candidates):* things winghostty measurably lacks
+10. **Lessons for noctty** — the payload. Three explicit lists:
+    - *Does well (adopt-candidates):* things noctty measurably lacks
       or does worse, per [docs/status.md](../../../docs/status.md) and
       [docs/windows-capability-matrix.md](../../../docs/windows-capability-matrix.md).
-    - *Does badly (avoid/exploit):* failures winghostty can learn from
+    - *Does badly (avoid/exploit):* failures noctty can learn from
       or differentiate against.
     - *Blind-spot candidates:* things this product considers that
-      winghostty's PRODUCT.md doesn't even have a category for.
+      noctty's PRODUCT.md doesn't even have a category for.
 
 ## Report format
 

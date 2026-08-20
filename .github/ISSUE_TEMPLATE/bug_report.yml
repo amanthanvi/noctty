@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in winghostty
+description: Report a reproducible problem in noctty
 labels: ["bug"]
 body:
   - type: markdown
@@ -18,7 +18,7 @@ body:
       label: Reproduction steps
       description: List the exact steps needed to reproduce the issue.
       placeholder: |
-        1. Launch winghostty.
+        1. Launch noctty.
         2. Open a second split.
         3. Minimize and restore the window.
         4. Observe the blank surface.
@@ -38,8 +38,8 @@ body:
       required: true
   - type: textarea
     attributes:
-      label: winghostty version
-      description: Paste the output of `winghostty +version`.
+      label: noctty version
+      description: Paste the output of `noctty +version`.
       render: text
     validations:
       required: true

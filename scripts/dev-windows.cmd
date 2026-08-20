@@ -99,7 +99,7 @@ zig version || exit /b 1
 cl 2>&1 | findstr /c:"Version" || exit /b 1
 for /f %%v in ('zig version') do set "ZIG_VERSION=%%v"
 echo %ZIG_VERSION% | findstr /b /c:"0.15." >nul || (
-  echo winghostty currently requires Zig 0.15.x. Resolved: %ZIG_VERSION%
+  echo noctty currently requires Zig 0.15.x. Resolved: %ZIG_VERSION%
   exit /b 1
 )
 

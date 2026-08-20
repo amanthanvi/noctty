@@ -6,7 +6,7 @@ Scope: Repo-owned local harness for manual interactive Windows validation
 
 ## Problem
 
-Agents and contributors can build and unit-test `winghostty`, but many worktrees
+Agents and contributors can build and unit-test `noctty`, but many worktrees
 do not have a repeatable way to launch the app in an isolated Windows runtime
 state for manual validation. The common result is a turn-ending caveat like
 "interactive Win11 validation in this environment" because the repo provides
@@ -19,7 +19,7 @@ human or agent can manually exercise the app.
 
 ## Goals
 
-- Provide a one-command path to launch `winghostty` for manual interactive
+- Provide a one-command path to launch `noctty` for manual interactive
   validation on Windows 11.
 - Isolate app runtime state per worktree so `main` and sibling worktrees do not
   clobber one another's config, cache, MRU, shell-integration payloads, crash
@@ -43,9 +43,9 @@ human or agent can manually exercise the app.
 ## User Stories
 
 - As a contributor in a worktree, I can run one script and get an isolated
-  `winghostty.exe` instance for manual testing.
+  `noctty.exe` instance for manual testing.
 - As an agent working in a detached worktree, I can launch the app without
-  polluting `%LOCALAPPDATA%\winghostty` used by another branch.
+  polluting `%LOCALAPPDATA%\noctty` used by another branch.
 - As a debugger reproducing a first-run bug, I can wipe only this worktree's
   runtime state and relaunch.
 - As a contributor investigating a shell/profile/config issue, I can open a
@@ -69,9 +69,9 @@ The harness will:
 3. Create the sandbox directory structure.
 4. Reuse the existing Windows bootstrap conventions from `scripts/dev-windows.*`
    so toolchain discovery stays consistent.
-5. Optionally build `zig-out/bin/winghostty.exe` if requested or if the binary
+5. Optionally build `zig-out/bin/noctty.exe` if requested or if the binary
    is missing.
-6. Launch `zig-out/bin/winghostty.exe` with environment overrides that redirect
+6. Launch `zig-out/bin/noctty.exe` with environment overrides that redirect
    app state into the sandbox.
 7. Optionally open an interactive shell with the same environment.
 
@@ -114,9 +114,9 @@ Runtime paths within that sandbox:
 
 This aligns with existing app behavior:
 
-- config defaults to `$LOCALAPPDATA/winghostty/config.ghostty`
-- shell integration installs under `%LOCALAPPDATA%\winghostty\shell-integration`
-- MRU persists under `%LOCALAPPDATA%\winghostty\palette-mru.txt`
+- config defaults to `$LOCALAPPDATA/noctty/config.ghostty`
+- shell integration installs under `%LOCALAPPDATA%\noctty\shell-integration`
+- MRU persists under `%LOCALAPPDATA%\noctty\palette-mru.txt`
 - crash/state files already follow XDG / local-app-data style resolution
 
 ## Deliberate Environment Choice
@@ -129,7 +129,7 @@ Reasoning:
 - The target is app-state isolation, not full user-profile emulation.
 - Keeping the real Windows user profile makes child shells and user-installed
   tools behave normally during manual testing.
-- `winghostty` already resolves its state/config paths through
+- `noctty` already resolves its state/config paths through
   `LOCALAPPDATA` / XDG-style directories, so overriding those variables is
   sufficient for the primary isolation goal.
 
@@ -172,7 +172,7 @@ Core responsibilities:
 - validate prerequisites using the same conventions as `dev-windows`
 - launch one of:
   - `zig build -Demit-exe=true`
-  - `zig-out/bin/winghostty.exe`
+  - `zig-out/bin/noctty.exe`
   - an interactive shell in sandbox mode
 
 Implementation should prefer:
@@ -207,7 +207,7 @@ The harness should not always rebuild.
 
 Default policy:
 
-- if `zig-out/bin/winghostty.exe` exists, launch it
+- if `zig-out/bin/noctty.exe` exists, launch it
 - if missing, build it with `zig build -Demit-exe=true`
 - if `-Rebuild` is set, always rebuild first
 - if `-NoBuild` is set and the binary is missing, fail with an actionable error
@@ -225,7 +225,7 @@ happy path from a fresh worktree.
 
 It must not touch:
 
-- the global `%LOCALAPPDATA%\winghostty`
+- the global `%LOCALAPPDATA%\noctty`
 - sibling worktree sandboxes
 - `.zig-cache`
 - `zig-out`
@@ -259,7 +259,7 @@ Expected failures should be actionable:
 - missing Git for Windows runtime
 - missing Zig
 - failed `zig build`
-- missing `winghostty.exe` when `-NoBuild` is used
+- missing `noctty.exe` when `-NoBuild` is used
 
 Failure messages should tell the operator exactly which path or tool is
 missing and what command to run next.
@@ -281,14 +281,14 @@ Manual verification checklist for the first implementation:
 1. Run the launcher from a fresh worktree with no existing sandbox.
 2. Confirm the script creates `.sandbox/win11/<id>/...`.
 3. Confirm first launch writes config under the sandboxed `LOCALAPPDATA`, not
-   the user's global `%LOCALAPPDATA%\winghostty`.
+   the user's global `%LOCALAPPDATA%\noctty`.
 4. Confirm `-ResetState` recreates a clean first-run experience.
 5. Confirm `-OpenShell` exposes the same sandbox env variables.
 6. Confirm sibling worktrees produce different sandbox roots.
 
 ## Acceptance Criteria
 
-- A contributor on Windows can launch `winghostty` for manual testing with one
+- A contributor on Windows can launch `noctty` for manual testing with one
   repo-owned command.
 - The launched app uses a stable per-worktree sandbox under
   `.sandbox/win11/<worktree-id>/`.

@@ -1,4 +1,4 @@
-//! AppUserModelID (AUMID) registration for winghostty.
+//! AppUserModelID (AUMID) registration for noctty.
 //!
 //! AUMID is the Windows identity that drives:
 //!   * Taskbar grouping (duplicates collapse under one icon).
@@ -18,10 +18,10 @@
 //!      allow HKCU writes, and the registry entry alone is enough for
 //!      warm-start toast attribution to look correct.
 //!
-//! The AUMID string `com.ghostty.winghostty` is deliberately distinct
-//! from upstream Ghostty's `com.ghostty.ghostty` so a side-by-side
-//! install doesn't collide. If upstream ever unifies packaging with
-//! this fork, bump the second segment on the fork side.
+//! The AUMID string `io.github.amanthanvi.noctty` lives in a namespace
+//! we own (matching the instance/bundle id) rather than any
+//! Ghostty-owned reverse-DNS prefix, so it cannot collide with — or
+//! imply affiliation with — an upstream Ghostty install.
 //!
 //! Start Menu shortcut creation is intentionally NOT here — it's
 //! installer-side work that belongs in `scripts/package-windows.ps1`,
@@ -72,8 +72,8 @@ extern "advapi32" fn RegSetValueExW(
 
 extern "advapi32" fn RegCloseKey(hKey: HKEY) callconv(.winapi) i32;
 
-const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("com.ghostty.winghostty");
-pub const aumid_utf8 = "com.ghostty.winghostty";
+const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
+pub const aumid_utf8 = "io.github.amanthanvi.noctty";
 
 /// Set the AUMID for the current process. Must run before any HWND is
 /// created; Windows copies the identity into the process's taskbar-
@@ -87,13 +87,13 @@ pub fn setProcessAumid() void {
     }
 }
 
-/// Write `HKCU\Software\Classes\AppUserModelId\com.ghostty.winghostty`
+/// Write `HKCU\Software\Classes\AppUserModelId\io.github.amanthanvi.noctty`
 /// with DisplayName + IconUri + ShowInSettings. Idempotent; writes every
 /// launch (cost is negligible and this keeps shell attribution in sync
 /// with the active dev/build path).
 pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral(
-        "Software\\Classes\\AppUserModelId\\com.ghostty.winghostty",
+        "Software\\Classes\\AppUserModelId\\io.github.amanthanvi.noctty",
     );
 
     var hkey: HKEY = undefined;
@@ -114,7 +114,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
     }
     defer _ = RegCloseKey(hkey);
 
-    const display_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty");
+    const display_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
     const set_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("DisplayName"), display_name);
     if (set_rc != ERROR_SUCCESS) {
         std.log.warn("AUMID: write DisplayName failed rc={d}", .{set_rc});
@@ -164,5 +164,5 @@ fn writeRegSz(hkey: HKEY, value_name: LPCWSTR, value: [:0]const u16) i32 {
 
 test "aumid string shape" {
     const testing = std.testing;
-    try testing.expectEqualStrings("com.ghostty.winghostty", aumid_utf8);
+    try testing.expectEqualStrings("io.github.amanthanvi.noctty", aumid_utf8);
 }

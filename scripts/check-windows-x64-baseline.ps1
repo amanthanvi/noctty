@@ -56,8 +56,8 @@ if (-not $objdumpPath) {
     throw "Windows x64 baseline check requires llvm-objdump on PATH or in the standard LLVM install directory."
 }
 
-$objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
-$objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-objdump-$([Guid]::NewGuid().ToString('N')).err"
+$objdumpOutput = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-objdump-$([Guid]::NewGuid().ToString('N')).txt"
+$objdumpError = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-objdump-$([Guid]::NewGuid().ToString('N')).err"
 $objdumpTimeoutMs = 120000
 $objdumpKillTimeoutMs = 5000
 $streamCopyTimeoutMs = 30000

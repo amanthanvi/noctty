@@ -17,12 +17,12 @@ separate session-host process that owns the ConPTYs and child processes,
 with the UI attaching over named pipes. This is proven, shipped art on
 Windows (VS Code's pty host does exactly this with ConPTY today), the
 handle-handoff mechanics are demonstrated by Windows' own defterm handoff,
-and winghostty's termio already treats the Windows pty as a plain pair of
+and noctty's termio already treats the Windows pty as a plain pair of
 pipe handles, which is precisely the shape a broker attach needs. **Cost
 class: XL confirmed** for the full feature (broker lifecycle, reattach
 protocol, scrollback ownership, failure modes), but the smallest testable
 increment — a standalone conpty-host spike proving kill-UI/reattach — is
-an M and should be built before any winghostty integration.
+an M and should be built before any noctty integration.
 
 ## 1. ConPTY lifetime findings (the load-bearing facts)
 
@@ -105,7 +105,7 @@ logon session_ — not across logoff/reboot. Cross-reboot durability
 would need a service in session 0 hosting interactive ptys, which is
 out of scope and hostile territory.
 
-## 2. Where winghostty stands today (code reading)
+## 2. Where noctty stands today (code reading)
 
 - `src/pty.zig` (`WindowsPty`, `CreatePseudoConsole` at ~line 430):
   the UI process creates the pipe pair (a named pipe for input because
@@ -134,7 +134,7 @@ one seam (`Subprocess.start`), not a rewrite of the IO stack.
 
 ## 3. Architecture options compared
 
-**A. Session-host broker (recommended).** A separate winghostty-session
+**A. Session-host broker (recommended).** A separate noctty-session
 process (same codebase, second exe or `--session-host` mode) owns
 `Pty.open`, `Command` spawn, the Job Object, and a bounded raw-VT ring
 buffer per session; the UI connects over a named pipe (per-user
@@ -176,10 +176,10 @@ should merely not preclude evolving toward it.
 the Linux side (tmux/auto-attach, or a ghostinthewsl-style VSOCK bridge
 with real Linux PTYs). Dodges ConPTY entirely and survives even
 UI+broker death, but covers only WSL profiles — PowerShell/cmd users
-(the benchmark winghostty user) get nothing. Reasonable as a _later_
+(the benchmark noctty user) get nothing. Reasonable as a _later_
 fidelity upgrade for WSL profiles, not as the answer to F6.
 
-### Minimal-viable sketch for winghostty (option A)
+### Minimal-viable sketch for noctty (option A)
 
 Changes:
 
@@ -234,7 +234,7 @@ Changes:
 - **Job objects / orphan control:** the `KILL_ON_JOB_CLOSE` job must be
   owned by the broker, and "close all sessions on real quit" becomes an
   explicit broker verb — otherwise durable sessions become orphan
-  leaks users blame on winghostty.
+  leaks users blame on noctty.
 - **Logoff/reboot:** not survivable by design (§1); the feature must be
   honestly scoped as "survives UI restarts and crashes," composing with
   the existing layout restore for the reboot case.
@@ -253,7 +253,7 @@ ConPTY it owns, ring-buffers output, and serves one named pipe; plus a
 trivial attach client. Test: attach, run a TUI, hard-kill the client,
 reattach from a new client, confirm the shell and TUI survived and the viewport repaints after a resize nudge. Bounded-buffer acceptance criterion: a fixed-size per-session ring (default 1 MiB, configurable) that overwrites oldest data on overflow, replays its full contents on attach, and is tested by generating more output than the ring holds while detached — reattach must show the newest data with host memory never exceeding the cap. That one artifact retires the
 core risk (lifetime semantics, drain-while-detached, replay adequacy)
-before any winghostty integration, and its protocol can be thrown away.
+before any noctty integration, and its protocol can be thrown away.
 Second increment: swap `Subprocess.start` to attach mode behind a
 config flag, sessions marked non-durable everywhere else.
 
@@ -270,7 +270,7 @@ setup implicated in minute-scale Windows startup stalls
 mux PDU allocation OOM
 ([#7527](https://github.com/wezterm/wezterm/issues/7527)). Lesson: the
 full mux buys fidelity and remoting but imports a protocol+memory
-liability; winghostty should start with the thin broker and bounded
+liability; noctty should start with the thin broker and bounded
 buffers, and treat mux-grade fidelity as a separate future decision.
 
 **Wave job manager.** Wave ships durability _only_ where it's easy — a
@@ -290,7 +290,7 @@ same broker shape, proving a single-binary terminal can grow one
 without a rewrite ([README](https://github.com/contour-terminal/contour/blob/master/README.md);
 local [long-tail.md](long-tail.md)). Whether daemon mode actually works
 on Windows/ConPTY is undocumented (README is silent; "new … and still
-settling") — uncertain, and winghostty should assume no one has proven
+settling") — uncertain, and noctty should assume no one has proven
 the ConPTY-broker terminal yet outside VS Code's embedded case: a real
 first-mover slot for a native Windows terminal.
 
@@ -315,5 +315,5 @@ launch — processes are not preserved
 because process durability requires exactly the server/broker WT has
 only as an open proposal
 ([#20077](https://github.com/microsoft/terminal/issues/20077)). That is
-the line winghostty would be crossing first among native Windows
+the line noctty would be crossing first among native Windows
 terminals.

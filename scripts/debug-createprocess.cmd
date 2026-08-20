@@ -3,9 +3,9 @@ setlocal
 
 set "ROOT=%~dp0.."
 set "CDB=C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
-set "CDB_SCRIPT=%TEMP%\winghostty-createprocess.cdb"
+set "CDB_SCRIPT=%TEMP%\noctty-createprocess.cdb"
 set "CDB_LOG=%ROOT%\cdb-createprocess.txt"
-set "GHOSTTY_EXE=%ROOT%\zig-out\bin\winghostty.exe"
+set "GHOSTTY_EXE=%ROOT%\zig-out\bin\noctty.exe"
 
 if not exist "%CDB%" (
   echo Missing cdb.exe at "%CDB%"
@@ -13,7 +13,7 @@ if not exist "%CDB%" (
 )
 
 if not exist "%GHOSTTY_EXE%" (
-  echo Missing winghostty.exe at "%GHOSTTY_EXE%"
+  echo Missing noctty.exe at "%GHOSTTY_EXE%"
   exit /b 1
 )
 

@@ -1,6 +1,6 @@
-# winghostty site
+# noctty site
 
-This directory is the Cloudflare Pages payload for `winghostty.com`.
+This directory is the Cloudflare Pages payload for `noctty.com`.
 
 The site is hand-written static HTML with a small amount of vanilla
 JavaScript. There is no framework, no build-time bundler, and no npm
@@ -55,7 +55,7 @@ intentional for the static Pages payload.
 
 ## Cloudflare Pages
 
-The existing `winghostty` project remains a Direct Upload Pages project. There
+The existing `noctty` project remains a Direct Upload Pages project. There
 is no `wrangler.toml`, `wrangler.json`, or Git-integrated Pages build.
 
 Production is owned by `.github/workflows/deploy-site.yml`. It runs for every
@@ -82,7 +82,7 @@ upload. The zone-owned `www` redirect is preflighted before production, so
 missing zone configuration cannot publish and then fail. Production
 verification requires the exact HTML, fallback, static assets, cache policy,
 and security headers at the immutable Pages deployment URL. At
-`winghostty.com`, it separately verifies Pages API domain attachment, every
+`noctty.com`, it separately verifies Pages API domain attachment, every
 non-HTML static asset byte, and the static response cache and security headers.
 Cloudflare can replace custom-domain HTML with a managed challenge, so the
 provenance records canonical HTML as unverified. Challenge HTML is never
@@ -96,13 +96,13 @@ production deployment in Cloudflare's rollback UI.
 
 `site/_redirects` is intentionally absent. Cloudflare Pages does not support a
 domain-level `www` redirect in that file. Configure the permanent
-`https://www.winghostty.com/*` to `https://winghostty.com/:splat` redirect at
+`https://www.noctty.com/*` to `https://noctty.com/:splat` redirect at
 the Cloudflare zone level (Bulk Redirect or Redirect Rule), with path and query
 preservation. The deployment workflow verifies the zone-level 301.
 
 The Pages custom domain is:
 
-- `winghostty.com`
+- `noctty.com`
 
 `site/_headers` keeps every response revalidated, including nested 404
 fallbacks. Cloudflare Pages still serves ETags and handles its edge cache,
@@ -117,7 +117,7 @@ matching flagship contract test update.
 To build the deploy payload locally:
 
 ```powershell
-$root = Join-Path $env:TEMP winghostty-site-payload
+$root = Join-Path $env:TEMP noctty-site-payload
 pwsh -File scripts/build-site-payload.ps1 `
   -OutputDirectory (Join-Path $root payload) `
   -ManifestPath (Join-Path $root payload.sha256)

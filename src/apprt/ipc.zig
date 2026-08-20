@@ -53,7 +53,7 @@ pub const Target = union(Key) {
     }
 };
 
-pub const automation_window_list_schema = "winghostty.windows.v2";
+pub const automation_window_list_schema = "noctty.windows.v2";
 pub const automation_window_list_api_version: u32 = 2;
 
 comptime {

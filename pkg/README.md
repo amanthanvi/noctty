@@ -1,16 +1,16 @@
 # Packages
 
-This folder contains packages written for and used by winghostty that could
+This folder contains packages written for and used by noctty that could
 potentially be useful for other projects. These are kept in-tree with
-winghostty because maintaining them as separate projects would mean
+noctty because maintaining them as separate projects would mean
 dedicated issues, PRs, etc. If you want to use them, you can copy and
 paste them into your project.
 
 ## License
 
 **This license only applies to the contents of the `pkg` folder within
-the winghostty project. This license does not apply to the rest of the
-winghostty project.**
+the noctty project. This license does not apply to the rest of the
+noctty project.**
 
 Copyright © 2024 Mitchell Hashimoto, Ghostty contributors
 

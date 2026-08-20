@@ -15,7 +15,7 @@
  * @mainpage libghostty-vt - Virtual Terminal Emulator Library
  *
  * libghostty-vt is a C library which implements a modern terminal emulator,
- * retained from the upstream terminal core used by winghostty.
+ * retained from the upstream terminal core used by noctty.
  *
  * libghostty-vt contains the logic for handling the core parts of a terminal
  * emulator: parsing terminal escape sequences, maintaining terminal state,

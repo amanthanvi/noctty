@@ -4,7 +4,7 @@
     .fingerprint = 0xa105002abbc8cf74,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        // winghostty dependency, keyed as `.ghostty` for compatibility. In
+        // noctty dependency, keyed as `.ghostty` for compatibility. In
         // reality, you'd probably use a URL-based
         // dependency like the one showed (and commented out) below this one.
         // We use a path dependency here for simplicity and to ensure our
@@ -13,7 +13,7 @@
 
         // Example of what a URL-based dependency looks like:
         // .ghostty = .{
-        //     .url = "https://github.com/amanthanvi/winghostty/archive/COMMIT.tar.gz",
+        //     .url = "https://github.com/amanthanvi/noctty/archive/COMMIT.tar.gz",
         //     .hash = "N-V-__8AAMVLTABmYkLqhZPLXnMl-KyN38R8UVYqGrxqO36s",
         // },
     },

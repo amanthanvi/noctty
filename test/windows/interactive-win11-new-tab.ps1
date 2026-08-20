@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -194,7 +194,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
             $script:Win11NewTabFoundHost = $hwnd
             return $false
         }
@@ -293,7 +293,7 @@ function Invoke-NewTabScenario {
     $launchArgs = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=winghostty-new-tab-$Name-$($Layout.SandboxId)"
+        "--class=noctty-new-tab-$Name-$($Layout.SandboxId)"
     )
 
     $process = Start-Process `
@@ -421,7 +421,7 @@ function Invoke-NewTabScenarioRun {
         -ResetState:$ResetState
     $scenarioLayout = $scenarioHarness.Layout
     $scenarioRepoRoot = $scenarioHarness.RepoRoot
-    $scenarioConfigDir = Join-Path $scenarioLayout.LocalAppData 'winghostty'
+    $scenarioConfigDir = Join-Path $scenarioLayout.LocalAppData 'noctty'
     $scenarioConfigPath = Join-Path $scenarioConfigDir 'config.ghostty'
     New-Item -ItemType Directory -Force -Path $scenarioConfigDir | Out-Null
     [System.IO.File]::WriteAllText(

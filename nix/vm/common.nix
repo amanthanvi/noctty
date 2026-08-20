@@ -26,7 +26,7 @@
 
   users.users.ghostty = {
     isNormalUser = true;
-    description = "winghostty";
+    description = "noctty";
     group = "ghostty";
     extraGroups = ["wheel"];
     hashedPassword = "";

@@ -1,10 +1,10 @@
-if (-not ('WinghosttyStatefulNative' -as [type])) {
+if (-not ('NocttyStatefulNative' -as [type])) {
     Add-Type -AssemblyName System.Drawing
     Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class WinghosttyStatefulNative {
+public static class NocttyStatefulNative {
     public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
     [StructLayout(LayoutKind.Sequential)] public struct RECT {
         public int Left; public int Top; public int Right; public int Bottom;
@@ -40,41 +40,41 @@ function Send-StatefulMessage(
 
 function Get-StatefulClassName([IntPtr] $Hwnd) {
     $value = [Text.StringBuilder]::new(128)
-    [void][WinghosttyStatefulNative]::GetClassNameW($Hwnd, $value, $value.Capacity)
+    [void][NocttyStatefulNative]::GetClassNameW($Hwnd, $value, $value.Capacity)
     return $value.ToString()
 }
 
 function Find-StatefulHost([int] $ProcessId) {
     $script:StatefulPid = [uint32]$ProcessId
     $script:StatefulHost = [IntPtr]::Zero
-    $callback = [WinghosttyStatefulNative+EnumProc] {
+    $callback = [NocttyStatefulNative+EnumProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
         [void][InteractiveWin11MessageNativeV2]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
-        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'winghostty.win32.host') {
+        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'noctty.win32.host') {
             $script:StatefulHost = $hwnd
             return $false
         }
         return $true
     }
-    [void][WinghosttyStatefulNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void][NocttyStatefulNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:StatefulHost
 }
 
 function Get-StatefulChildren([IntPtr] $Parent) {
     $script:StatefulChildren = [Collections.Generic.List[object]]::new()
-    $callback = [WinghosttyStatefulNative+EnumProc] {
+    $callback = [NocttyStatefulNative+EnumProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
-        if ([WinghosttyStatefulNative]::IsWindowVisible($hwnd)) {
+        if ([NocttyStatefulNative]::IsWindowVisible($hwnd)) {
             $script:StatefulChildren.Add([pscustomobject]@{
                 Hwnd = $hwnd
-                Id = [WinghosttyStatefulNative]::GetDlgCtrlID($hwnd)
+                Id = [NocttyStatefulNative]::GetDlgCtrlID($hwnd)
                 Class = Get-StatefulClassName $hwnd
             })
         }
         return $true
     }
-    [void][WinghosttyStatefulNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void][NocttyStatefulNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return @($script:StatefulChildren)
 }
 
@@ -83,12 +83,12 @@ function Get-StatefulTabCount([IntPtr] $HostHwnd) {
 }
 
 function Get-StatefulSurface([IntPtr] $HostHwnd) {
-    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'winghostty.win32' | Select-Object -First 1
+    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'noctty.win32' | Select-Object -First 1
 }
 
 function Get-StatefulWindowRect([IntPtr] $Hwnd) {
-    $rect = [WinghosttyStatefulNative+RECT]::new()
-    if (-not [WinghosttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) { return $null }
+    $rect = [NocttyStatefulNative+RECT]::new()
+    if (-not [NocttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) { return $null }
     return $rect
 }
 
@@ -106,21 +106,21 @@ function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text
         [Runtime.InteropServices.Marshal]::FreeHGlobal($textPointer)
     }
     $enChange = 0x0300
-    $controlId = [WinghosttyStatefulNative]::GetDlgCtrlID($Hwnd)
+    $controlId = [NocttyStatefulNative]::GetDlgCtrlID($Hwnd)
     $command = [uint64]([uint32]$controlId -bor ([uint32]$enChange -shl 16))
     [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd $Deadline $Process "WM_COMMAND EN_CHANGE id=$controlId")
 }
 
 function Show-StatefulHost([IntPtr] $HostHwnd) {
-    [void][WinghosttyStatefulNative]::ShowWindow($HostHwnd, 9)
-    [void][WinghosttyStatefulNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
-    [void][WinghosttyStatefulNative]::SetForegroundWindow($HostHwnd)
+    [void][NocttyStatefulNative]::ShowWindow($HostHwnd, 9)
+    [void][NocttyStatefulNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    [void][NocttyStatefulNative]::SetForegroundWindow($HostHwnd)
     Start-Sleep -Milliseconds 200
 }
 
 function Get-StatefulPixel([IntPtr] $Hwnd) {
-    $rect = [WinghosttyStatefulNative+RECT]::new()
-    if (-not [WinghosttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) {
+    $rect = [NocttyStatefulNative+RECT]::new()
+    if (-not [NocttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) {
         throw "GetWindowRect failed for hwnd=$Hwnd"
     }
     $bitmap = [Drawing.Bitmap]::new(1, 1)
@@ -161,7 +161,7 @@ function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] 
 
 function Wait-StatefulHost($Run, [DateTime] $Deadline) {
     $script:StatefulWaitProcess = $Run.Process
-    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty host window' -Process $Run.Process -Condition {
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty host window' -Process $Run.Process -Condition {
         [IntPtr]::Zero -ne (Find-StatefulHost $script:StatefulWaitProcess.Id)
     }
     return Find-StatefulHost $Run.Process.Id
@@ -215,7 +215,7 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
             -Hwnd $HostHwnd `
             -Message 0x0010 `
             -Deadline $Deadline `
-            -Description 'WM_CLOSE to winghostty' `
+            -Description 'WM_CLOSE to noctty' `
             -Flags $script:InteractiveWin11SmtoBlock `
             -ToleratedErrors @($script:InteractiveWin11ErrorInvalidWindowHandle) `
             -ObservedToleratedError $toleratedCloseError `
@@ -230,10 +230,10 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         if (-not $Run.Process.HasExited) {
             throw $sendError
         }
-        Write-Warning "WM_CLOSE send raced winghostty exit: $sendError"
+        Write-Warning "WM_CLOSE send raced noctty exit: $sendError"
     }
     try {
-        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
     }
     catch {
         if ($null -ne $closeSkipDetail) { throw "$($_.Exception.Message) ($closeSkipDetail)" }
@@ -242,6 +242,6 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
     if ($exitCode -ne 0) {
         $suffix = if ($null -ne $closeSkipDetail) { " ($closeSkipDetail)" } else { '' }
-        throw "winghostty exited with code $exitCode during graceful-close validation$suffix"
+        throw "noctty exited with code $exitCode during graceful-close validation$suffix"
     }
 }

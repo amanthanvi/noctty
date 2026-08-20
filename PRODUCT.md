@@ -1,18 +1,18 @@
 # Product
 
-This page defines what winghostty is for and how product decisions get
+This page defines what noctty is for and how product decisions get
 judged. The visual and interaction contract that implements these
 principles lives in [DESIGN.md](DESIGN.md).
 
 ## Users
 
-winghostty is for keyboard-first Windows developers who move between
+noctty is for keyboard-first Windows developers who move between
 PowerShell and WSL, keep several tabs and panes open, run long-lived
 shells and TUIs, expect their session layout to survive restarts, and
 reach the remote hosts in their SSH config. The canonical benchmark
 user values native Windows behavior, immediate feedback, and deep
 terminal capability more than cross-platform uniformity. Remote scope
-stays lean: winghostty surfaces and launches the user's own `ssh`; it
+stays lean: noctty surfaces and launches the user's own `ssh`; it
 does not bundle SSH clients, secret vaults, or fleet-management tools.
 
 The session promise is tiered: layout survives restarts (shipped),
@@ -22,7 +22,7 @@ aspiration, pursued only as feasibility work validates it.
 
 ## Product purpose
 
-winghostty exists to provide the fastest, most fluid native terminal
+noctty exists to provide the fastest, most fluid native terminal
 workflow for Windows developers. Success means PowerShell, WSL, tabs,
 splits, search, session restoration, and keyboard navigation all feel
 instantaneous and dependable, while keeping Ghostty's terminal core and

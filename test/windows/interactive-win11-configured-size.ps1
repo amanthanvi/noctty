@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -87,7 +87,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $resultPath -ErrorAction Sile
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-configured-size-$($layout.SandboxId)"
+    "--class=noctty-configured-size-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -147,7 +147,7 @@ try {
             if ($null -ne $result) {
                 break
             }
-            throw "winghostty exited before configured-size validation completed (exit code $($process.ExitCode))"
+            throw "noctty exited before configured-size validation completed (exit code $($process.ExitCode))"
         }
 
         Start-Sleep -Milliseconds 100

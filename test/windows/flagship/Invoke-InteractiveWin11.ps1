@@ -17,14 +17,13 @@ $status = 'error'
 $failure = $null
 $commit = $null
 $measurements = [ordered]@{}
-$performanceHash = $null
-$oldForeground = $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
+$oldForeground = $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
 
-if (-not ('Winghostty.Flagship.DesktopProbe' -as [type])) {
+if (-not ('Noctty.Flagship.DesktopProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-namespace Winghostty.Flagship {
+namespace Noctty.Flagship {
     public static class DesktopProbe {
         [StructLayout(LayoutKind.Sequential)]
         private struct USEROBJECTFLAGS {
@@ -56,7 +55,7 @@ namespace Winghostty.Flagship {
 }
 '@
 }
-$interactiveDesktop = [Environment]::UserInteractive -and [Winghostty.Flagship.DesktopProbe]::HasVisibleWindowStation()
+$interactiveDesktop = [Environment]::UserInteractive -and [Noctty.Flagship.DesktopProbe]::HasVisibleWindowStation()
 
 try {
     if (-not $interactiveDesktop) {
@@ -68,7 +67,7 @@ try {
     $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
     if ($IncludeForegroundHarness) {
-        $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
+        $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
     }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -88,7 +87,7 @@ catch {
 }
 finally {
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
-    $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
+    $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
     if ($commit -and (Test-Path -LiteralPath $rawTranscriptPath)) {
         $redacted = Get-Content -LiteralPath $rawTranscriptPath -Raw
         foreach ($replacement in @(
@@ -101,37 +100,13 @@ finally {
         Set-Content -LiteralPath $transcriptPath -Value $redacted -Encoding utf8
         Remove-Item -LiteralPath $rawTranscriptPath -Force
     }
-    if ($status -eq 'pass') {
-        . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-        $perfLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $repoRoot -SandboxName 'boo-performance'
-        $render = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-render.json') -Raw | ConvertFrom-Json
-        $termio = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-termio.json') -Raw | ConvertFrom-Json
-        $boo = Get-Content -LiteralPath (Join-Path $perfLayout.Temp 'interactive-win11-boo-performance-boo.json') -Raw | ConvertFrom-Json
-        $measurements = [ordered]@{
-            paint_draw_count = [long]$render.paint_draw_count
-            startup_window_ms = [long]$render.startup_window_ms
-            startup_paint_gap_ceiling_ms = [long]$render.startup_paint_gap_ceiling_ms
-            paint_gap_limit_ms = [long]$render.paint_gap_limit_ms
-            paint_gap_over_limit_count = [long]$render.paint_gap_over_limit_count
-            max_paint_gap_ms = [long]$render.max_paint_gap_ms
-            max_sustained_paint_gap_ms = [long]$render.max_sustained_paint_gap_ms
-            max_paint_draw_duration_ms = [long]$render.max_paint_draw_duration_ms
-            process_output_count = [long]$termio.process_output_count
-            max_process_output_gap_ms = [long]$termio.max_process_output_gap_ms
-            frame_change_count = [long]$boo.frame_change_count
-            rendered_byte_count = [long]$boo.rendered_byte_count
-        }
-        $performancePath = Join-Path $outputPath 'boo-performance.json'
-        $measurements | ConvertTo-Json | Set-Content -LiteralPath $performancePath -Encoding utf8
-        $performanceHash = (Get-FileHash -LiteralPath $performancePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
     $finished = [DateTimeOffset]::UtcNow
     $logHash = if ($commit -and (Test-Path -LiteralPath $transcriptPath)) {
         (Get-FileHash -LiteralPath $transcriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
     } else { $null }
 
     $result = [ordered]@{
-        schema_version = 'winghostty.verification.result.v1'
+        schema_version = 'noctty.verification.result.v1'
         scenario_id = 'windows.interactive-win11.composite'
         status = $status
         started_at = $started.ToString('o')
@@ -158,7 +133,6 @@ finally {
         })
         artifacts = @(
             [ordered]@{ kind = 'log'; path = 'transcript.log'; sha256 = $logHash }
-            [ordered]@{ kind = 'trace'; path = 'boo-performance.json'; sha256 = $performanceHash }
         )
         failure = $failure
     }

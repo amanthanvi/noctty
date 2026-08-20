@@ -8,9 +8,9 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const log = std.log.scoped(.update_github_releases);
 
 pub const repo_owner = "amanthanvi";
-pub const repo_name = "winghostty";
-pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
-pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
+pub const repo_name = "noctty";
+pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/noctty/releases/latest";
+pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
 const windows_asset_metadata = switch (builtin.cpu.arch) {
     .aarch64 => .{
@@ -26,7 +26,9 @@ const windows_asset_metadata = switch (builtin.cpu.arch) {
 
 pub const throttle_seconds: i64 = 24 * 60 * 60;
 const pinned_publisher_spki_sha256 = [_][Sha256.digest_length]u8{
-    // SHA-256(SubjectPublicKeyInfo DER) for CN=winghostty Local Dev Signing,
+    // SHA-256(SubjectPublicKeyInfo DER) for the pre-rename
+    // "CN=winghostty Local Dev Signing" certificate (that is the actual
+    // Subject on the existing key; the project is now Noctty),
     // valid 2026-04-30..2029-04-30. Extracted from v1.3.117 Windows setup asset.
     .{
         0x67, 0x1e, 0xc8, 0x22, 0xc4, 0x1f, 0x39, 0xb1,
@@ -473,7 +475,7 @@ fn downloadUrlToFile(alloc: Allocator, url: []const u8, dest_path: []const u8) !
         .location = .{ .url = url },
         .extra_headers = &.{
             .{ .name = "accept", .value = "application/octet-stream" },
-            .{ .name = "user-agent", .value = "winghostty-updater" },
+            .{ .name = "user-agent", .value = "noctty-updater" },
         },
         .response_writer = &file_writer.interface,
     });
@@ -923,7 +925,7 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
         .location = .{ .url = latest_stable_api_url },
         .extra_headers = &.{
             .{ .name = "accept", .value = "application/vnd.github+json" },
-            .{ .name = "user-agent", .value = "winghostty-updater" },
+            .{ .name = "user-agent", .value = "noctty-updater" },
             .{ .name = "x-github-api-version", .value = "2022-11-28" },
         },
         .response_writer = &response_buf.writer,
@@ -981,7 +983,7 @@ fn parseWindowsInstallCandidate(
 
     const expected_installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-{s}-windows-{s}-setup.exe",
+        "noctty-{s}-windows-{s}-setup.exe",
         .{ version_text, windowsInstallerArch() },
     );
     errdefer alloc.free(expected_installer_name);
@@ -1085,14 +1087,14 @@ test "state persists staged windows install metadata with escaped path" {
 
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
 
     var state: State = .{
         .last_checked_at = 123,
         .last_seen_version = try alloc.dupe(u8, "1.3.100"),
         .staged_version = try alloc.dupe(u8, "1.3.101"),
-        .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\winghostty-1.3.101-windows-x64-setup.exe"),
+        .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\noctty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
         .staged_at = 456,
         .apply_requested_at = 789,
@@ -1118,7 +1120,7 @@ test "record staged apply request requires staged installer metadata" {
 
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
 
     var state: State = .{
@@ -1140,12 +1142,12 @@ test "record staged apply request persists timestamp" {
 
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
 
     var state: State = .{
         .staged_version = try alloc.dupe(u8, "1.3.101"),
-        .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\winghostty-1.3.101-windows-x64-setup.exe"),
+        .staged_installer_path = try alloc.dupe(u8, "C:\\Users\\Aman\\updates\\noctty-1.3.101-windows-x64-setup.exe"),
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
     };
     defer state.deinit(alloc);
@@ -1165,7 +1167,7 @@ test "state JSON writer escapes ASCII control characters" {
 
     const tmp_path = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(tmp_path);
-    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "winghostty-test", "update-state.json" });
+    const state_path = try std.fs.path.join(alloc, &.{ tmp_path, "noctty-test", "update-state.json" });
     defer alloc.free(state_path);
 
     var state: State = .{
@@ -1190,10 +1192,10 @@ test "state JSON writer escapes ASCII control characters" {
 
 test "checksum parser accepts sha256 star filename lines" {
     const digest = try parseExpectedSha256(
-        \\d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d *winghostty-1.3.100-windows-x64-setup.exe
+        \\d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d *noctty-1.3.100-windows-x64-setup.exe
         \\00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *other.exe
     ,
-        "winghostty-1.3.100-windows-x64-setup.exe",
+        "noctty-1.3.100-windows-x64-setup.exe",
     );
     try std.testing.expectEqualStrings(
         "d00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00dd00df00d",
@@ -1206,7 +1208,7 @@ test "checksum parser rejects missing installer entry" {
         error.InstallerChecksumMissing,
         parseExpectedSha256(
             "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *other.exe",
-            "winghostty-1.3.100-windows-x64-setup.exe",
+            "noctty-1.3.100-windows-x64-setup.exe",
         ),
     );
 }
@@ -1215,10 +1217,10 @@ test "checksum parser rejects duplicate installer entries" {
     try std.testing.expectError(
         error.InstallerChecksumDuplicate,
         parseExpectedSha256(
-            \\00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *winghostty-1.3.100-windows-x64-setup.exe
-            \\ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100 *winghostty-1.3.100-windows-x64-setup.exe
+            \\00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff *noctty-1.3.100-windows-x64-setup.exe
+            \\ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100 *noctty-1.3.100-windows-x64-setup.exe
         ,
-            "winghostty-1.3.100-windows-x64-setup.exe",
+            "noctty-1.3.100-windows-x64-setup.exe",
         ),
     );
 }
@@ -1257,8 +1259,8 @@ test "windows install staging rejects relative state path before download" {
         .version_text = try alloc.dupe(u8, "1.3.100"),
         .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
         .windows_install = .{
-            .installer_name = try alloc.dupe(u8, "winghostty-1.3.100-windows-x64-setup.exe"),
-            .installer_url = try alloc.dupe(u8, "https://example.invalid/winghostty-1.3.100-windows-x64-setup.exe"),
+            .installer_name = try alloc.dupe(u8, "noctty-1.3.100-windows-x64-setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/noctty-1.3.100-windows-x64-setup.exe"),
             .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
         },
     };
@@ -1274,7 +1276,7 @@ test "release parser accepts checksum metadata without detached signature" {
     const alloc = std.testing.allocator;
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-1.3.100-windows-{s}-setup.exe",
+        "noctty-1.3.100-windows-{s}-setup.exe",
         .{windowsInstallerArch()},
     );
     defer alloc.free(installer_name);
@@ -1283,7 +1285,7 @@ test "release parser accepts checksum metadata without detached signature" {
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -1310,7 +1312,7 @@ test "release parser selects windows install candidate when checksum metadata is
     const alloc = std.testing.allocator;
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-1.3.100-windows-{s}-setup.exe",
+        "noctty-1.3.100-windows-{s}-setup.exe",
         .{windowsInstallerArch()},
     );
     defer alloc.free(installer_name);
@@ -1319,7 +1321,7 @@ test "release parser selects windows install candidate when checksum metadata is
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -1354,7 +1356,7 @@ test "release parser prefers architecture checksum metadata over legacy x64 meta
     const alloc = std.testing.allocator;
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-1.3.100-windows-{s}-setup.exe",
+        "noctty-1.3.100-windows-{s}-setup.exe",
         .{windowsInstallerArch()},
     );
     defer alloc.free(installer_name);
@@ -1363,7 +1365,7 @@ test "release parser prefers architecture checksum metadata over legacy x64 meta
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -1400,7 +1402,7 @@ test "release parser accepts legacy checksum metadata for x64 install candidate"
     const alloc = std.testing.allocator;
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-1.3.100-windows-{s}-setup.exe",
+        "noctty-1.3.100-windows-{s}-setup.exe",
         .{windowsInstallerArch()},
     );
     defer alloc.free(installer_name);
@@ -1408,7 +1410,7 @@ test "release parser accepts legacy checksum metadata for x64 install candidate"
         alloc,
         \\{{
         \\  "tag_name": "v1.3.100",
-        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v1.3.100",
+        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v1.3.100",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",
@@ -1447,7 +1449,7 @@ test "release parser accepts long semver tags for windows install candidate" {
 
     const installer_name = try std.fmt.allocPrint(
         alloc,
-        "winghostty-{s}-windows-{s}-setup.exe",
+        "noctty-{s}-windows-{s}-setup.exe",
         .{ version_text, windowsInstallerArch() },
     );
     defer alloc.free(installer_name);
@@ -1457,7 +1459,7 @@ test "release parser accepts long semver tags for windows install candidate" {
         alloc,
         \\{{
         \\  "tag_name": "v{s}",
-        \\  "html_url": "https://github.com/amanthanvi/winghostty/releases/tag/v{s}",
+        \\  "html_url": "https://github.com/amanthanvi/noctty/releases/tag/v{s}",
         \\  "assets": [
         \\    {{
         \\      "name": "{s}",

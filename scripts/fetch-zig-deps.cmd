@@ -65,7 +65,7 @@ set "URL=%~1"
 set "ARCHIVE=%DOWNLOAD_DIR%\%~2"
 echo == %~2 ==
 if not exist "%ARCHIVE%" (
-  bitsadmin /transfer winghostty-%~n2 /download /priority foreground %URL% "%ARCHIVE%" || exit /b 1
+  bitsadmin /transfer noctty-%~n2 /download /priority foreground %URL% "%ARCHIVE%" || exit /b 1
 )
 "%ZIG_EXE%" fetch --global-cache-dir "%ZIG_GLOBAL_CACHE_DIR%" "%ARCHIVE%" || exit /b 1
 exit /b 0
@@ -75,7 +75,7 @@ set "URL=%~1"
 set "ARCHIVE=%DOWNLOAD_DIR%\%~2"
 echo == %~2 (optional) ==
 if not exist "%ARCHIVE%" (
-  bitsadmin /transfer winghostty-%~n2 /download /priority foreground %URL% "%ARCHIVE%" >nul 2>nul || (
+  bitsadmin /transfer noctty-%~n2 /download /priority foreground %URL% "%ARCHIVE%" >nul 2>nul || (
     echo Skipping optional dependency archive: %~2
     exit /b 0
   )

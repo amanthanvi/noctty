@@ -7,7 +7,7 @@
 
 ## Question
 
-Cross-referencing all twelve research reports against winghostty's actual
+Cross-referencing all twelve research reports against noctty's actual
 current state (docs/status.md, docs/windows-capability-matrix.md,
 PRODUCT.md, DESIGN.md), what is the deduplicated, ranked list of
 candidate gaps, opportunities, and blind spots for the decision session?
@@ -38,6 +38,6 @@ confirmed status.md materially undersells the product: quick terminal
   process-surviving sessions (C16, XL, needs a feasibility spike).
   Decision-first frame items: naming/trademark risk (F1) and
   upstream-relations posture (F2). No competitor healthily occupies
-  winghostty's niche today; the live threats are upstream's trademark
+  noctty's niche today; the live threats are upstream's trademark
   statement and upstream's libghostty/tiered-Windows convergence
   (12–24 month window).

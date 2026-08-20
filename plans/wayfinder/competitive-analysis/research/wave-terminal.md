@@ -72,7 +72,7 @@ coasting on dependabot and drive-by PRs against 451 open issues.
 
 - **Windows 10 1809+ x64 only.** No ARM64 — open request since Oct 2024
   ([#928](https://github.com/wavetermdev/waveterm/issues/928)).
-  winghostty ships ARM64 today (docs/status.md).
+  noctty ships ARM64 today (docs/status.md).
 - **ConPTY:** delegated to a community fork — `go.mod` replaces
   `creack/pty` with `photostorm/pty` **pinned to a Sep 2023 commit**
   ([go.mod](https://raw.githubusercontent.com/wavetermdev/waveterm/main/go.mod)).
@@ -126,7 +126,7 @@ even that:
 - Shell integration (bash/zsh/fish/pwsh) exists mainly to feed **AI
   context** (shell state, exit codes, command history)
   ([v0.12.1 notes](https://docs.waveterm.dev/releasenotes)).
-- Contrast: winghostty inherits Ghostty's full VT core with Kitty
+- Contrast: noctty inherits Ghostty's full VT core with Kitty
   graphics, validated Win32 conformance (docs/windows-vt-conformance.md).
 
 ## 5. Workflow features
@@ -158,7 +158,7 @@ even that:
   ([#3323](https://github.com/wavetermdev/waveterm/issues/3323));
   "Advanced keybinding customization" is merely "planned" on the
   [roadmap](https://github.com/wavetermdev/waveterm/blob/main/ROADMAP.md).
-  For a keyboard-first user this is disqualifying; winghostty's full
+  For a keyboard-first user this is disqualifying; noctty's full
   keybind grammar + universal palette is a direct edge.
 - Other: secrets store with OS-native backends, block badges, process
   viewer, focus-follows-cursor, vim-style block navigation (v0.14.1).
@@ -244,54 +244,54 @@ even that:
 - **Windows+WSL copy corruption** ([#3288](https://github.com/wavetermdev/waveterm/issues/3288)),
   x64-only ([#928](https://github.com/wavetermdev/waveterm/issues/928)).
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
 ### Does well (adopt-candidates)
 
 1. **Durable sessions as a named, marketed feature.** Wave's SSH-only
    job-manager design proves demand and even shows the gap (users
    immediately asked for *local* durability, [#3248](https://github.com/wavetermdev/waveterm/issues/3248)).
-   winghostty's `window-save-state` restores layout but not
+   noctty's `window-save-state` restores layout but not
    contents/processes (docs/status.md) — local durable sessions on
    Windows (ConPTY child survives UI restart) would leapfrog Wave.
 2. **Quake-mode global hotkey** (v0.14.5) — rubric §5 surface with no
-   winghostty equivalent.
-3. **`wsh`-grade workspace scriptability.** winghostty's
+   noctty equivalent.
+3. **`wsh`-grade workspace scriptability.** noctty's
    `+perform-action`/`+list-windows` IPC is a seed; Wave shows the
    value of a full verb set (open/edit/set-config/tab management) —
    without Wave's remote-injection mistake.
 4. **First-class file preview as opt-in surface.** "Open a CSV, get a
    real table" is Wave's most-praised non-AI feature. A bounded,
    keyboard-first equivalent (preview pane for images/markdown via
-   Kitty graphics winghostty already renders) is worth a category
+   Kitty graphics noctty already renders) is worth a category
    discussion, not reflexive rejection.
 5. **Secrets in OS-native storage** exposed to shells on demand —
    Windows Credential Manager integration would be the native analog.
 6. **Docs transparency:** a dedicated, plain-language telemetry page
-   (even though winghostty collects nothing — say so as loudly).
+   (even though noctty collects nothing — say so as loudly).
 7. **winget + Chocolatey coverage:** Wave ships winget *and* choco;
-   winghostty has winget + Scoop; add Chocolatey for enterprise parity.
+   noctty has winget + Scoop; add Chocolatey for enterprise parity.
 
 ### Does badly (avoid / exploit)
 
 1. **Terminal fundamentals sacrificed to the workspace:** no graphics
    protocol ([#2172](https://github.com/wavetermdev/waveterm/issues/2172)),
    no synchronized output ([#2787](https://github.com/wavetermdev/waveterm/issues/2787)),
-   late OSC 7/52, mangled copies. Exploit: publish winghostty's VT
+   late OSC 7/52, mangled copies. Exploit: publish noctty's VT
    conformance matrix as a comparison asset.
 2. **Electron floor:** 400–800 MB and resize jank; "not for people
-   running a CLI agent all day" — the exact user winghostty targets in
+   running a CLI agent all day" — the exact user noctty targets in
    2026. Publish footprint/latency comparisons.
 3. **Fixed keybindings + no command palette** in a developer tool —
-   winghostty's keybind grammar + universal palette is a direct,
+   noctty's keybind grammar + universal palette is a direct,
    demonstrable edge; keep it prominent in messaging.
 4. **WSL modeled as a remote connection** with chronic breakage —
-   winghostty's WSL-as-profile approach is what the benchmark user
+   noctty's WSL-as-profile approach is what the benchmark user
    wants; never regress it into a "connection manager."
 5. **ConPTY outsourced to a stale fork** (photostorm/pty pinned to
-   2023) vs. winghostty owning its pty path — reliability moat.
+   2023) vs. noctty owning its pty path — reliability moat.
 6. **Single-founder company stall:** cadence collapsed within weeks of
-   the founder going quiet, despite 22k stars. Keep winghostty's
+   the founder going quiet, despite 22k stars. Keep noctty's
    status.md/date-stamped honesty and visible cadence; weight
    competitors by cadence, not stars.
 7. **AI-first roadmap crowding out terminal work** (command palette and
@@ -300,9 +300,9 @@ even that:
 8. **Full rewrite mid-life** (legacy Wave → v0.8) reset trust and
    ecosystem once already — architecture bets that require rewrites are
    existential for small teams.
-9. **x64-only Windows** — advertise winghostty ARM64 support.
+9. **x64-only Windows** — advertise noctty ARM64 support.
 10. **Opt-out telemetry and BYOK-gated-on-telemetry stumbles** — never
-    replicate; zero-telemetry is a stated winghostty differentiator.
+    replicate; zero-telemetry is a stated noctty differentiator.
 
 ### Blind-spot candidates (no PRODUCT.md category)
 
@@ -311,7 +311,7 @@ even that:
    demand it locally). PRODUCT.md's "session layout survives restarts"
    stops short of the emerging bar.
 2. **Workspace scriptability as a product surface** — a supported CLI
-   verb set over the running app (Wave's `wsh`), beyond winghostty's
+   verb set over the running app (Wave's `wsh`), beyond noctty's
    allowlisted automation; enables user tooling and tests.
 3. **Structured secret injection** — OS-keychain-backed secrets
    available to shells without dotfile plaintext.
@@ -327,12 +327,12 @@ even that:
    PRODUCT.md contemplates the terminal as an agent's host environment,
    yet "CLI agent all day" is now a primary Windows dev workload.
 6. **Company-form risk as a competitive lens** — evaluating rivals (and
-   presenting winghostty) on sustainability/bus-factor, which Wave's
+   presenting noctty) on sustainability/bus-factor, which Wave's
    2026 stall shows can invert a category leader in one quarter.
 
 ### Strategic verdict on the dive question
 
-Wave *validates* winghostty's terminal-first frame rather than
+Wave *validates* noctty's terminal-first frame rather than
 threatening it: the workspace drift wins press and stars, but the
 benchmark keyboard-first Windows developer shows up in Wave's own issue
 tracker asking for hideable chrome, rebindable keys, working WSL, clean

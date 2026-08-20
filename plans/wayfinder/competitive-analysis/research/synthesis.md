@@ -1,7 +1,7 @@
 # Synthesis: ranked gap list
 
 Cross-reference of the twelve research reports in this directory against
-winghostty ground truth (PRODUCT.md, docs/status.md,
+noctty ground truth (PRODUCT.md, docs/status.md,
 docs/windows-capability-matrix.md, **and the code** — see the ground-truth
 note below). Input to the batch decision session
 ([D01](../tickets/D01-decision-session.md)). Recommendations here are
@@ -38,7 +38,7 @@ performance benchmark harness (`src/bench/` holds one palette microbench).
 
 ## 1. Executive summary
 
-The Windows terminal field has no healthy occupant of winghostty's exact
+The Windows terminal field has no healthy occupant of noctty's exact
 position. The incumbent (Windows Terminal) is slowing and carries chronic
 cold-start/latency/settings debt; the strongest power-user rival (WezTerm)
 treats Windows as a port and hasn't shipped stable since Feb 2024; the
@@ -47,7 +47,7 @@ own users push back against; the minimal-fast pole (Alacritty) refuses the
 benchmark user's workflow needs and is tier-2 on Windows; and the
 Ghostty-on-Windows fork swarm is decaying, unsigned, and unverifiable. The
 real strategic threats are not products but **facts**: upstream's trademark
-statement naming winghostty (2026-07-12), and upstream's slow convergence on
+statement naming noctty (2026-07-12), and upstream's slow convergence on
 Windows via libghostty and tiered contributions (12–24 month window).
 Top-5 highest-leverage moves: (1) **publish reproducible Windows performance
 benchmarks** — every competitor either can't or won't, and PRODUCT.md's core
@@ -78,12 +78,12 @@ leverage. Cost: S ≲ days, M ≲ weeks, L ≈ month+, XL ≈ quarter+.
   numbers vs Windows Terminal / Alacritty / Tabby / Wave on the same machine, and gate regressions in CI. (CI gates run the software-reproducible metrics; camera/photodiode key-to-pixel latency is a scheduled lab measurement with a documented CI proxy, not a per-PR gate.)
 - _Evidence:_ `[ala]` §10.1 (vtebench, perf-as-artifact culture); `[wintty]`
   §2/§10.9 (rival's full metric plan exists but is unexecuted — publishing
-  first converts it into winghostty marketing); `[wt]` §2/§10 (no published
+  first converts it into noctty marketing); `[wt]` §2/§10 (no published
   startup numbers; ~2x conhost latency per
   [chadaustin.me](https://chadaustin.me/2024/02/windows-terminal-latency/) —
   a vacuum to occupy); `[rio]` §10.6 (unverifiable self-reported MiB/s);
   `[warp]` §10 blind-spot 6; `[tabby]` §10.1 and `[wave]` §10.2 (Electron
-  memory numbers users cite when leaving); `[forks]` §2 ("winghostty could
+  memory numbers users cite when leaving); `[forks]` §2 ("noctty could
   own this axis simply by measuring").
 - _Why:_ PRODUCT.md's purpose sentence ("fastest, most fluid") is the
   product's entire thesis and currently has zero evidence behind it; the
@@ -138,7 +138,7 @@ leverage. Cost: S ≲ days, M ≲ weeks, L ≈ month+, XL ≈ quarter+.
   in `src/apprt/`).
 - _Evidence:_ Code verification above; `[wintty]` §10 ground-truth caveat
   (first report to notice); six other reports independently mis-list quake
-  mode as a winghostty gap (`[wt]` `[warp]` `[tabby]` `[conemu]` `[lt]`
+  mode as a noctty gap (`[wt]` `[warp]` `[tabby]` `[conemu]` `[lt]`
   `[forks]`) — i.e., the docs actively misinform competitive analysis, and
   will misinform users identically. `[ala]` §10.3's "no search UI at all"
   claim is likewise wrong against `win32_search_bar.zig`.
@@ -164,9 +164,9 @@ logging + a public mangling catalog.**
   `[rio]` §3/§10.1 (manual `conpty.dll` sideload as the user-hostile
   version); `[warp]` §3 (forked ConPTY to fix DCS filtering/OSC reordering);
   `[wt]` §3 (passthrough #1173 never shipped — the ecosystem ceiling);
-  `[forks]` (ghostinthewsl embeds newer ConPTY too). winghostty verified:
+  `[forks]` (ghostinthewsl embeds newer ConPTY too). noctty verified:
   in-box `CreatePseudoConsole` only (`src/pty.zig:430`).
-- _Why:_ winghostty's flagship capability claim (Kitty graphics, deep VT) is
+- _Why:_ noctty's flagship capability claim (Kitty graphics, deep VT) is
   currently at the mercy of whatever conhost version the user's OS carries;
   this is the single biggest silent-failure risk in the product's core
   promise.
@@ -180,7 +180,7 @@ logging + a public mangling catalog.**
   PowerShell 5.1/7, behind a `utf8-console = auto|always|never` config with a
   guard refusing auto-forcing on legacy CJK ANSI code pages.
 - _Evidence:_ `[wintty]` §3/§10.2 (complete tested design to copy);
-  grep-verified absent in winghostty.
+  grep-verified absent in noctty.
 - _Why:_ Nerd-Font/oh-my-posh mojibake in cmd/PowerShell is a first-session
   failure for exactly the PowerShell-first benchmark user.
 - _Cost:_ S.
@@ -219,7 +219,7 @@ logging + a public mangling catalog.**
 - _What:_ Add sixel (and iTerm2 OSC 1337 display, whose parsing 1.3 already
   carries) alongside the shipped Kitty graphics.
 - _Evidence:_ `[rio]` §4 (ships all three); `[wt]` §4 (sixel shipped 1.22/23;
-  Kitty graphics still open — winghostty's current edge is Kitty, not
+  Kitty graphics still open — noctty's current edge is Kitty, not
   sixel); `[wez]` §4 (sixel "preliminary"); `[tabby]`/`[wave]` (none — not a
   competitive floor); `[lt]` (WSL legacy tooling uses sixel).
 - _Why:_ Some WSL-side tools are sixel-only; but Kitty covers modern TUIs
@@ -234,7 +234,7 @@ logging + a public mangling catalog.**
   (b) longer-term: a Hyper-V-socket bridge allocating real Linux PTYs for
   WSL sessions, bypassing ConPTY stripping entirely (L).
 - _Evidence:_ `[forks]` §3/§10 (ghostinthewsl's VSOCK bridge — "the
-  strongest technical challenge to winghostty's WSL story"; keepalive called
+  strongest technical challenge to noctty's WSL story"; keepalive called
   "a cheap adopt"); `[conemu]` §3 (wslbridge precedent); `[wave]` §10.4
   (WSL-as-remote-connection is the failure mode to avoid).
 - _Why:_ WSL is half the benchmark user's definition; a real-PTY path makes
@@ -247,14 +247,14 @@ logging + a public mangling catalog.**
 
 **C11. Default-terminal registration (`ITerminalHandoff`).**
 
-- _What:_ Register winghostty as a selectable Windows 11 "default terminal
+- _What:_ Register noctty as a selectable Windows 11 "default terminal
   application" so console apps launched from Explorer/IDEs open in it.
 - _Evidence:_ Open, unfulfilled requests against every rival: `[ala]`
   [#6036](https://github.com/alacritty/alacritty/issues/6036), `[wez]`
   #7534, `[warp]` #6261, `[tabby]` #4882; `[conemu]` §3 (burned a decade
   faking it via injection — the stickiest feature it had); `[wt]` §3 (only
   WT has it); `[wintty]` §3 (roadmap-only, rated high-complexity). Verified
-  absent in winghostty.
+  absent in noctty.
 - _Why:_ This is how a terminal becomes _the_ terminal — it captures the
   consoles the user didn't explicitly launch; first-mover among all
   non-Microsoft terminals.
@@ -273,7 +273,7 @@ logging + a public mangling catalog.**
 - _Cost:_ S.
 - _Recommendation:_ **Adopt.**
 
-**C13. Explorer "Open winghostty here" context menu.**
+**C13. Explorer "Open noctty here" context menu.**
 
 - _What:_ Classic registry + Win11 `IExplorerCommand` context-menu entry for
   directories/background.
@@ -286,14 +286,14 @@ logging + a public mangling catalog.**
 
 **C14. Elevation as a designed surface.**
 
-- _What:_ Document the elevation model (what running winghostty elevated
+- _What:_ Document the elevation model (what running noctty elevated
   means, what restore does with elevated sessions); add a "run elevated"
   profile flag / palette action that opens an elevated window with clear
   visual marking. Mixed-elevation tabs in one window are explicitly out.
 - _Evidence:_ `[conemu]` §3/§10.1 (`-new_console:a` elevated tabs — the
   unmatched decade-old affordance); `[wt]` §3/§10.8 (deliberate
   separate-window model, documented; users still complain); `[wave]` §3
-  (open "admin console" ask); winghostty docs silent beyond updater UAC.
+  (open "admin console" ask); noctty docs silent beyond updater UAC.
 - _Why:_ The benchmark user runs elevated shells weekly; an undesigned
   surface here violates "be native where behavior matters."
 - _Cost:_ M (posture + elevated-window action); mixed-elevation would be XL.
@@ -310,7 +310,7 @@ logging + a public mangling catalog.**
   show the reliability bar); `[warp]` §5/§10.3 (restored blocks via SQLite —
   a top retention feature); `[lt]` §a.1 (users now expect more than layout).
   status.md: contents explicitly not restored.
-- _Why:_ existing restore preserves layout and pane metadata but no scrollback content, so a restored pane starts blank; even flawed text restore beats none, and winghostty's transactional session machinery can do it exactly.
+- _Why:_ existing restore preserves layout and pane metadata but no scrollback content, so a restored pane starts blank; even flawed text restore beats none, and noctty's transactional session machinery can do it exactly.
 - _Cost:_ M.
 - _Recommendation:_ **Adopt.**
 
@@ -338,7 +338,7 @@ object.**
   click.
 - _Evidence:_ `[conemu]` §5/§10.3 (Tasks — the signature system); `[warp]`
   §5/§10.2 (Tab Configs/launch configurations); `[wez]` §5 (workspaces);
-  `[forks]` (hollow workspaces). winghostty restores only the _last_
+  `[forks]` (hollow workspaces). noctty restores only the _last_
   implicit layout.
 - _Why:_ Turns session restore from "what I had" into "what I want":
   project switching for the tabs-and-splits benchmark user.
@@ -353,7 +353,7 @@ object.**
 - _Evidence:_ `[ala]` §4/§10.2–3 (hints + vi mode — the polished
   reference); `[wez]` §5/§10.3 (quick select + copy mode); `[rio]` §4/§10.4
   (hints); `[forks]` (hollow quick-select); `[lt]` §a.4 (Contour modal
-  input). Only URL hover-hints exist in winghostty today.
+  input). Only URL hover-hints exist in noctty today.
 - _Why:_ Pure keyboard-first territory — PRODUCT.md's second principle with
   no current implementation; high daily-use frequency.
 - _Cost:_ M.
@@ -363,7 +363,7 @@ object.**
 
 - _What:_ Jump-to-previous/next-command, copy-last-command-output,
   re-run-last-command as palette actions/keybinds built on the OSC 133
-  marks winghostty already emits (incl. PowerShell).
+  marks noctty already emits (incl. PowerShell).
 - _Evidence:_ `[warp]` §10.4 ("80% of blocks' daily value with 0% of the
   ConPTY-fork cost"); `[rio]` §10.5 (ScrollToPrev/NextPrompt); `[lt]` §a.3
   (Extraterm framing — block value without AI); `[wt]` §4 (marks
@@ -383,7 +383,7 @@ object.**
   driver behind 74k stars; "even a lean version captures most value");
   `[wez]` §5/§10.5 (auto-populated SSH domains); `[wt]` §3 (1.24 SSH
   auto-detection); `[lt]` (Termius/MobaXterm define the SSH slice).
-- _Why:_ The benchmark user's week includes remote hosts; winghostty
+- _Why:_ The benchmark user's week includes remote hosts; noctty
   already wraps ssh for terminfo (`shell-integration` notes) — discovery is
   the missing piece.
 - _Cost:_ M.
@@ -438,7 +438,7 @@ object.**
   the biggest capability gap named); `[wt]` §7/§10.6 (a decade-old product
   still has no extensibility — vacuum); `[conemu]` §7 (GuiMacro precedent);
   `[wave]` §10.3 (`wsh` verb-set value, minus the remote-injection
-  mistake); `[ala]` §10.3 (unix-only IPC — winghostty already ahead on
+  mistake); `[ala]` §10.3 (unix-only IPC — noctty already ahead on
   Windows); `[up]` §10.4 (align with upstream's eventual contract);
   `[forks]` (hollow's LuaJIT shows where a rival differentiates).
 - _Why:_ Lets keyboard-first users and their scripts drive the terminal;
@@ -463,18 +463,18 @@ object.**
 
 **C27. Identity, trust, and verification page + migration guide.**
 
-- _What:_ A "why winghostty / how we differ from the fork swarm / how to
+- _What:_ A "why noctty / how we differ from the fork swarm / how to
   verify our binaries (signing, checksums, reproducibility) / what we will
   never do" page, plus a "migrate from Windows Terminal" (and Git
   Bash/mintty) guide; keep release cadence visible.
 - _Evidence:_ `[forks]` §9/§10 (fork confusion documented in upstream's own
   thread; "trust is the moat the swarm cannot cross"); `[wintty]` §10.1
-  (winghostty is today the only installable Ghostty-on-Windows with
+  (noctty is today the only installable Ghostty-on-Windows with
   releases — exploit loudly); `[warp]` §8/§10.5 (migration guide as
   deliberate adoption lever); `[lt]` (Git Bash users "never chose a
   terminal; they are winnable"); `[wez]`/`[conemu]`/`[wave]` (cadence
   visibility as retention — stale-stable and stalls bleed users).
-- _Why:_ Every distribution advantage winghostty already has is currently
+- _Why:_ Every distribution advantage noctty already has is currently
   unmarketed; conversion is blocked on discoverability and trust, not
   capability. Note: contingent on F1 (naming) ruling first.
 - _Cost:_ S.
@@ -561,7 +561,7 @@ object.**
 **C34. Finish and market accessibility (UIA/Narrator/NVDA matrix).**
 
 - _Evidence:_ `[forks]` §10 ("accessibility ignored across the field" —
-  winterm-ghostty admits screen readers can't read its panes; winghostty's
+  winterm-ghostty admits screen readers can't read its panes; noctty's
   partial UIA is unique — "worth finishing and stating"); status.md already
   lists it as next.
 - _Why:_ Differentiator no competitor in the niche attempts; aligns with
@@ -583,7 +583,7 @@ object.**
 **C36. Localization stance.**
 
 - _Evidence:_ `[wt]` blind-spot 6 (community translations); `[up]`
-  blind-spot 4 (six new languages in 1.3.0; winghostty UI is
+  blind-spot 4 (six new languages in 1.3.0; noctty UI is
   English-only).
 - _Cost:_ decision S, execution M. _Recommendation:_ **Defer** — write the
   stance down when F-items are settled; IME support already covers input.
@@ -603,14 +603,14 @@ object.**
 These challenge the positioning itself; each needs an explicit ruling, not a
 roadmap slot.
 
-**F1. Naming/trademark risk is live, specific, and aimed at winghostty.**
+**F1. Naming/trademark risk is live, specific, and aimed at noctty.**
 Ghostty collaborator pluiedev, 2026-07-12, replying to a question about
-winghostty by name: unaffiliated projects "must not use 'Ghostty' as a part
+noctty by name: unaffiliated projects "must not use 'Ghostty' as a part
 of their branding … they need to find a different name"
 ([discussion #12371](https://github.com/ghostty-org/ghostty/discussions/12371);
 `[forks]` §1/§10 — the field is already complying, cf. WolftacDigital →
 "Spectre"; `[wintty]` §1 corroborates the policing). Options: (a) proactive
-rename on winghostty's own schedule, (b) seek explicit permission
+rename on noctty's own schedule, (b) seek explicit permission
 (strengthened by an upstreaming posture, see F2), (c) wait — which invites a
 forced rename at the worst possible moment, after marketing spend (C27).
 _Amendment sketch:_ add an "Identity & naming" section to PRODUCT.md; treat
@@ -618,20 +618,20 @@ the name as a product decision with a deadline; keep "keeps Ghostty's
 terminal core intact" as factual description, not branding. **Rule first —
 gates C27 and all adoption spend.**
 
-**F2. Upstream-relations posture: what is winghostty when upstream ships
+**F2. Upstream-relations posture: what is noctty when upstream ships
 Windows?** Upstream has Windows CI (Dec 2025), an April 2026 tier plan
 (Direct3D, Win10/11, minimal C++), mattn at Tier 2, wintty's 17 merged PRs,
 and mitchellh's bet that libghostty consumers dwarf the GUI by mid-2027;
 official Windows exploration earliest Nov/Dec 2026, "still not planned"
-(`[forks]` §1/§10, `[up]` §1/§10.1). winghostty has a 12–24 month window as
+(`[forks]` §1/§10, `[up]` §1/§10.1). noctty has a 12–24 month window as
 the definitive Ghostty-on-Windows — and no stated posture for the day that
 ends. Sub-questions: libghostty tracking (consume it? restructure toward it?
 ignore it — and accept rising merge cost, C33); upstreaming-as-strategy
 (AGENTS.md currently forbids it, yet wintty converted PRs into goodwill and
 standing that a naming conversation would benefit from — `[forks]` §10);
-embeddability of winghostty's own `libghostty-vt` as a product surface
+embeddability of noctty's own `libghostty-vt` as a product surface
 (`[wintty]` blind-spot 1, `[rio]` blind-spot 4). _Amendment sketch:_ add an
-"Upstream & lineage" section: winghostty positions as its own product whose
+"Upstream & lineage" section: noctty positions as its own product whose
 durable value is the session/native-polish/trust layer upstream's tiers
 won't do first; define a libghostty checkpoint (reassess when it tags a
 release); explicitly revisit the no-upstreaming rule.
@@ -675,7 +675,7 @@ Wave's cadence collapsed within weeks of one founder going quiet at 22k
 stars; ConEmu, Hyper, the fork swarm's vanished root, and Tabby's dead sync
 service show the pattern; wintty monetizes via sponsorware; upstream became
 a nonprofit (`[wave]` §6/blind-spot 6, `[conemu]` §10.4, `[lt]`, `[wintty]`
-blind-spot 2, `[up]` blind-spot 2). winghostty is one maintainer promising
+blind-spot 2, `[up]` blind-spot 2). noctty is one maintainer promising
 "reliability as a feature." _Amendment sketch:_ a sustainability statement
 (funding for signing certs/infra, succession/continuity note, what happens
 to releases if the maintainer disappears) — also a trust asset for C27.
@@ -704,7 +704,7 @@ Things the evidence says NOT to do — listed for fast ratification.
   login/telemetry history is its dominant trust complaint years later
   (`[warp]` §9); Wave's opt-out telemetry and BYOK-gated-on-telemetry
   stumbles (`[wave]` §7); Tabby's dead sync service burns trust (`[tabby]`
-  §7). winghostty's local-only posture is a marketed asset — never regress.
+  §7). noctty's local-only posture is a marketed asset — never regress.
 - **R2. AI-first pivot / bundled chatbot.** Warp's fundamentals lagged its
   AI runway; Wave's AI roadmap crowded out keybindings and a command
   palette while reviewers judged the AI "generic" (`[warp]` §10.5, `[wave]`
@@ -726,7 +726,7 @@ Things the evidence says NOT to do — listed for fast ratification.
   _preview_ via already-shipped Kitty graphics (`[wave]` §10.4) — but not
   now.
 - **R6. Forced/silent auto-update.** Warp's top ops complaint
-  (`[warp]` §6). winghostty's user-initiated, checksum+Authenticode staged
+  (`[warp]` §6). noctty's user-initiated, checksum+Authenticode staged
   updates are exactly what those users beg for.
 - **R7. A plugin runtime / npm-style plugin economy (and any hosted sync
   service).** Tabby's plugin surface multiplied memory, security vulns, and

@@ -1,12 +1,12 @@
-# Packaging winghostty for distribution
+# Packaging noctty for distribution
 
 This repository publishes Windows user artifacts directly from GitHub
 Releases. The public packaging targets are:
 
-- `winghostty-<version>-windows-x64-setup.exe`
-- `winghostty-<version>-windows-x64-portable.zip`
-- `winghostty-<version>-windows-arm64-setup.exe`
-- `winghostty-<version>-windows-arm64-portable.zip`
+- `noctty-<version>-windows-x64-setup.exe`
+- `noctty-<version>-windows-x64-portable.zip`
+- `noctty-<version>-windows-arm64-setup.exe`
+- `noctty-<version>-windows-arm64-portable.zip`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
 - `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
@@ -14,15 +14,15 @@ Releases. The public packaging targets are:
 Primary distribution URL:
 
 ```text
-https://github.com/amanthanvi/winghostty/releases
+https://github.com/amanthanvi/noctty/releases
 ```
 
 ## Release inputs
 
-winghostty releases use plain semver tags such as `v1.3.100`:
+noctty releases use plain semver tags such as `v1.3.100`:
 
 - `major.minor` track the Ghostty upstream compatibility line
-- `patch` is the winghostty release number on that line
+- `patch` is the noctty release number on that line
 - fork releases start at patch `100` for a new upstream line
 
 The exact upstream base release is stored in
@@ -93,7 +93,7 @@ To exercise the local signing path, export these environment variables
 first:
 
 ```powershell
-$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\winghostty-signing.pfx"
+$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\noctty-signing.pfx"
 $env:WINDOWS_CODESIGN_PFX_PASSWORD = "<pfx-password>"
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true" # only for internal/self-signed PFXs
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 `
@@ -114,8 +114,8 @@ powershell -ExecutionPolicy Bypass -File scripts/package-package-managers.ps1 `
 
 This emits:
 
-- `dist/artifacts/winghostty-<version>-windows-x64/package-managers/scoop/`
-- `dist/artifacts/winghostty-<version>-windows-x64/package-managers/metadata.json`
+- `dist/artifacts/noctty-<version>-windows-x64/package-managers/scoop/`
+- `dist/artifacts/noctty-<version>-windows-x64/package-managers/metadata.json`
 
 ## Release automation
 
@@ -157,8 +157,8 @@ Recommended setup:
 Example `gh` commands:
 
 ```powershell
-$repo = "amanthanvi/winghostty"
-$pfxPath = "C:\secure\winghostty-signing.pfx"
+$repo = "amanthanvi/noctty"
+$pfxPath = "C:\secure\noctty-signing.pfx"
 $pfxBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfxPath))
 
 $pfxBase64 | gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
@@ -181,7 +181,7 @@ When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps
 internal/self-signed release probes green on the current runner, but it
-does not create public publisher trust on other machines. Until winghostty
+does not create public publisher trust on other machines. Until noctty
 moves from internal/self-signed signing to a publicly trusted certificate,
 treat SmartScreen and publisher trust as incomplete.
 
@@ -224,9 +224,9 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The official WinGet package is bootstrapped as `AmanThanvi.winghostty`.
+The official WinGet package is bootstrapped as `AmanThanvi.noctty`.
 Release preflight verifies that
-`microsoft/winget-pkgs/manifests/a/AmanThanvi/winghostty` exists before the
+`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists before the
 release workflow can claim package-manager readiness. Keep CI on the
 truthful `update` path; do not switch to `wingetcreate new` for automated
 releases.
@@ -244,12 +244,12 @@ is review-driven and should stay explicit.
 The official Scoop track is the fork-owned bucket:
 
 ```powershell
-scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
-scoop install winghostty/winghostty
+scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty
 ```
 
 Release preflight verifies that the configured manifest exists, defaulting
-to `bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
+to `bucket/noctty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
 ## Zig version
 
@@ -260,6 +260,6 @@ full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 ## Library consumers
 
 `libghostty-vt` remains intentionally retained and keeps its existing public
-name. The app binary and Windows packaging are rebranded to `winghostty`,
+name. The app binary and Windows packaging are rebranded to `noctty`,
 but the library surface is not being renamed as part of this packaging
 cleanup.

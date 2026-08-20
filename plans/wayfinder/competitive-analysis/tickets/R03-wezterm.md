@@ -8,7 +8,7 @@
 ## Question
 
 What are WezTerm's strengths, weaknesses, and blind-spot lessons for
-winghostty, per [rubric](../rubric.md)? It is the strongest
+noctty, per [rubric](../rubric.md)? It is the strongest
 cross-platform power-user terminal on Windows (Lua config, multiplexing,
 SSH domains, excellent font handling); probe especially its
 multiplexer/domain model and scripting surface as blind-spot candidates,

@@ -1,7 +1,7 @@
-//! PowerShell shell-integration installer for winghostty.
+//! PowerShell shell-integration installer for noctty.
 //!
 //! Lifecycle (called from `App.init`):
-//!   1. `resolveInstallPath` -> `%LOCALAPPDATA%\winghostty\shell-integration\
+//!   1. `resolveInstallPath` -> `%LOCALAPPDATA%\noctty\shell-integration\
 //!      powershell\integration.ps1`, creating intermediate dirs as needed.
 //!   2. `installIfStale` compares the on-disk SHA-256 against the comptime
 //!      `integration_script_sha256`. Writes atomically (temp + rename) only
@@ -45,7 +45,7 @@ pub fn resolveInstallPath(alloc: Allocator) ![]u8 {
     };
     defer alloc.free(local_app_data);
 
-    const sub = "winghostty" ++ std.fs.path.sep_str ++
+    const sub = "noctty" ++ std.fs.path.sep_str ++
         "shell-integration" ++ std.fs.path.sep_str ++ "powershell";
 
     const dir_path = try std.fs.path.join(alloc, &.{ local_app_data, sub });

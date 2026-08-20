@@ -117,10 +117,10 @@ fi
 # SSH Integration
 if [[ "$GHOSTTY_SHELL_FEATURES" == *ssh-* ]]; then
   function __ghostty_ssh_cache {
-    if [[ -n "$GHOSTTY_BIN_DIR" && -x "$GHOSTTY_BIN_DIR/winghostty" ]]; then
-      builtin command "$GHOSTTY_BIN_DIR/winghostty" +ssh-cache "$@"
-    elif builtin command -v winghostty >/dev/null 2>&1; then
-      builtin command winghostty +ssh-cache "$@"
+    if [[ -n "$GHOSTTY_BIN_DIR" && -x "$GHOSTTY_BIN_DIR/noctty" ]]; then
+      builtin command "$GHOSTTY_BIN_DIR/noctty" +ssh-cache "$@"
+    elif builtin command -v noctty >/dev/null 2>&1; then
+      builtin command noctty +ssh-cache "$@"
     else
       return 127
     fi

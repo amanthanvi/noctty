@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) !void {
         break :resources try GhosttyResources.init(b, &config, &deps);
     } else null;
 
-    // winghostty executable, the actual runnable app binary.
+    // noctty executable, the actual runnable app binary.
     const exe = try GhosttyExe.init(b, &config, &deps);
 
     // libghostty-vt is retained in this fork, but normal app builds

@@ -1,5 +1,5 @@
 name: Feature request
-description: Propose a focused improvement for winghostty
+description: Propose a focused improvement for noctty
 labels: ["enhancement"]
 body:
   - type: textarea
@@ -16,7 +16,7 @@ body:
       required: true
   - type: textarea
     attributes:
-      label: Why this belongs in winghostty
+      label: Why this belongs in noctty
       placeholder: This improves the Windows-native multi-tab workflow already supported by the project.
     validations:
       required: true

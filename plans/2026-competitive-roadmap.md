@@ -1,6 +1,6 @@
 # 2026 Competitive Roadmap
 
-The decided, prioritized competitive-response roadmap for winghostty,
+The decided, prioritized competitive-response roadmap for noctty,
 assembled 2026-08-19 from the competitive-analysis wayfinder effort:
 twelve research deep-dives, a cross-referenced synthesis, and a full
 adopt/reject/defer decision session. Every entry below carries an
@@ -20,14 +20,14 @@ explicit ruling. The rulings are final; some implementation targets remain stage
   ghostty-windows forks, plus the durable-session spike.
 - Cost classes: S ≲ days · M ≲ weeks · L ≈ month+ · XL ≈ quarter+.
 - Tracker: each work item is a GitHub issue on this fork
-  ([#120–#146](https://github.com/amanthanvi/winghostty/issues?q=label%3Aroadmap),
+  ([#120–#146](https://github.com/amanthanvi/noctty/issues?q=label%3Aroadmap),
   labels `roadmap` + `wave-1/2/3`), linked from its heading below. The wayfinder map's own process tickets remain closed local-markdown records of the completed analysis; GitHub issues are the sole tracker for this roadmap's implementation work.
 
 ## Strategy rulings (binding context)
 
 - **Naming:** wait and see. No rename, no permission request, no
   branding freeze. The trademark statement by an upstream collaborator
-  (2026-07-12, ghostty-org discussion #12371, naming winghostty) is a
+  (2026-07-12, ghostty-org discussion #12371, naming noctty) is a
   known, accepted risk.
 - **Upstream posture:** hard fork. No upstreaming ("we don't gunk up
   the upstream Ghostty repo"); open to adopting and adapting upstream
@@ -94,7 +94,7 @@ performance claim falsifiable, and take the cheap OS entry points.
 Order within the wave: C04 first (it corrects the record everything
 else builds on), then C01; the rest are parallelizable.
 
-### C04 · status.md and capability-matrix accuracy — S · [#120](https://github.com/amanthanvi/winghostty/issues/120)
+### C04 · status.md and capability-matrix accuracy — S · [#120](https://github.com/amanthanvi/noctty/issues/120)
 
 **Ruling:** adopt, first. **Why:** code verification found the docs
 materially undersell the product — quick terminal with global hotkey
@@ -111,7 +111,7 @@ add the missing rows (also check status bar, link preview, paste
 protection); refresh the "last updated" contract. Evidence: synthesis
 ground-truth note; wintty report §10.
 
-### C01 · Published, reproducible Windows benchmark suite + CI perf gates — M · [#121](https://github.com/amanthanvi/winghostty/issues/121)
+### C01 · Published, reproducible Windows benchmark suite + CI perf gates — M · [#121](https://github.com/amanthanvi/noctty/issues/121)
 
 **Ruling:** adopt. **Why:** "fastest, most fluid" is the product's
 entire thesis and no terminal in the field publishes credible Windows
@@ -127,7 +127,7 @@ GPU/CPU — run same-machine against Windows Terminal, Alacritty, Tabby,
 Wave; publish results in docs; wire regression gates into CI against the PRODUCT.md budgets (provisional until this suite's first baseline fixes them; CI gates the software-reproducible metrics, while camera/photodiode key-to-pixel latency is a scheduled lab measurement with a documented CI proxy). Evidence: synthesis C01; alacritty §10.1, wintty §2/§10.9,
 wt §2/§10, rio §10.6, tabby §10.1, wave §10.2.
 
-### C03 · GPU floor documentation + graceful degraded-mode — S · [#122](https://github.com/amanthanvi/winghostty/issues/122)
+### C03 · GPU floor documentation + graceful degraded-mode — S · [#122](https://github.com/amanthanvi/noctty/issues/122)
 
 **Ruling:** adopt the S slice only; any fallback renderer stays
 deferred. **Why:** corporate/VM/RDP machines are normal Windows dev
@@ -137,7 +137,7 @@ a path back to a working terminal." **Shape:** document the OpenGL
 with a visible, actionable message instead of a blank window. Evidence:
 synthesis C03; alacritty §10.4, warp §2, wez §2, wt §2.
 
-### C32 · Win32 paste-path security audit (fuzzing follows incrementally) — S audit, M fuzzing · [#123](https://github.com/amanthanvi/winghostty/issues/123)
+### C32 · Win32 paste-path security audit (fuzzing follows incrementally) — S audit, M fuzzing · [#123](https://github.com/amanthanvi/noctty/issues/123)
 
 **Ruling:** adopt; audit immediately. **Why:** upstream's
 CVE-2026-26982 paste-sanitization fix was verified on upstream's
@@ -150,7 +150,7 @@ fuzzing of fork-only surfaces (paste paths, ConPTY I/O, session-state
 JSON, IPC) reusing upstream's corpus approach. Evidence: synthesis
 C32; up §6/§10.1, rio §6, tabby §6.
 
-### C06 · UTF-8 console preamble with CJK code-page guard — S · [#124](https://github.com/amanthanvi/winghostty/issues/124)
+### C06 · UTF-8 console preamble with CJK code-page guard — S · [#124](https://github.com/amanthanvi/noctty/issues/124)
 
 **Ruling:** adopt. **Why:** Nerd-Font/oh-my-posh mojibake in
 cmd/PowerShell 5.1 is a first-session failure for exactly the
@@ -161,7 +161,7 @@ design to copy. **Shape:** `chcp 65001` for cmd,
 on legacy CJK ANSI code pages. Evidence: synthesis C06; wintty
 §3/§10.2.
 
-### C07 · cmd.exe shell integration via PROMPT + optional Clink — S · [#125](https://github.com/amanthanvi/winghostty/issues/125)
+### C07 · cmd.exe shell integration via PROMPT + optional Clink — S · [#125](https://github.com/amanthanvi/noctty/issues/125)
 
 **Ruling:** adopt. **Why:** closes the last unsupported-shell gap
 (status.md: cmd is a "plain fallback"); cwd-correct restore and
@@ -171,7 +171,7 @@ environment variable; auto-load a Clink lua for 133;C/D + exit codes
 when Clink is present; degrade gracefully without it. Evidence:
 synthesis C07; wintty §4/§10.3.
 
-### C12 · Taskbar jump lists — S · [#126](https://github.com/amanthanvi/winghostty/issues/126)
+### C12 · Taskbar jump lists — S · [#126](https://github.com/amanthanvi/noctty/issues/126)
 
 **Ruling:** adopt. **Why:** taskbar re-entry into a recent directory
 or pinned profile is core native feel for a user who pins the
@@ -181,7 +181,7 @@ absent (no `ICustomDestinationList` usage). **Shape:**
 integration) + pinned profiles; extend with named layouts once C17
 lands. Evidence: synthesis C12; wintty §3/§10.4, conemu §3/§10.4.
 
-### C13 · Explorer "Open winghostty here" context menu — S · [#127](https://github.com/amanthanvi/winghostty/issues/127)
+### C13 · Explorer "Open noctty here" context menu — S · [#127](https://github.com/amanthanvi/noctty/issues/127)
 
 **Ruling:** adopt. **Why:** cheapest expected OS entry point; even
 minimal Alacritty ships it; Tabby users fight registry hacks for it.
@@ -189,7 +189,7 @@ minimal Alacritty ships it; Tabby users fight registry hacks for it.
 directory and directory-background; registration via the installer (portable-mode registration follows C29's portable work in Wave 2). Evidence: synthesis C13; alacritty §3, conemu,
 tabby §3.
 
-### C19 · Prompt-mark navigation verbs, surfaced — S · [#128](https://github.com/amanthanvi/winghostty/issues/128)
+### C19 · Prompt-mark navigation verbs, surfaced — S · [#128](https://github.com/amanthanvi/noctty/issues/128)
 
 **Ruling:** adopt. **Why:** converts already-shipped OSC 133 shell
 integration (including PowerShell) into felt daily value —
@@ -206,7 +206,7 @@ The differentiators no Windows-native rival has: owned ConPTY,
 default-terminal capture, deep sessions, and the trust/distribution
 lead extended.
 
-### C05 · Own the ConPTY layer: bundled OpenConsole + degraded-mode logging + mangling catalog — M · [#129](https://github.com/amanthanvi/winghostty/issues/129)
+### C05 · Own the ConPTY layer: bundled OpenConsole + degraded-mode logging + mangling catalog — M · [#129](https://github.com/amanthanvi/noctty/issues/129)
 
 **Ruling:** adopt. **Why:** the flagship capability claim (Kitty
 graphics, deep VT) currently depends on whatever conhost version the
@@ -219,7 +219,7 @@ extending [docs/windows-vt-conformance.md](../docs/windows-vt-conformance.md).
 Evidence: synthesis C05; wintty §3/§10.1/§10.5, rio §3/§10.1, warp §3,
 wt §3, forks (ghostinthewsl).
 
-### C11 · Default-terminal registration (`ITerminalHandoff`) — M · [#130](https://github.com/amanthanvi/winghostty/issues/130)
+### C11 · Default-terminal registration (`ITerminalHandoff`) — M · [#130](https://github.com/amanthanvi/noctty/issues/130)
 
 **Ruling:** adopt. **Why:** how a terminal becomes _the_ terminal —
 captures consoles the user didn't explicitly launch (Explorer, IDEs).
@@ -231,18 +231,18 @@ consoles into a new tab/window; handle elevation and multi-instance
 policy; register from installer and settings. Evidence: synthesis C11;
 wt §3, conemu §3, wintty §3.
 
-### C15 · Scrollback-content restore — M · [#131](https://github.com/amanthanvi/winghostty/issues/131)
+### C15 · Scrollback-content restore — M · [#131](https://github.com/amanthanvi/noctty/issues/131)
 
 **Ruling:** adopt. **Why:** session restore currently brings back layout and pane metadata but no scrollback content, so restored panes start blank; Windows Terminal ships buffer snapshots (with
 instructive rollout bugs), Warp's restored blocks are a top retention
-feature; winghostty's transactional session machinery can do it
+feature; noctty's transactional session machinery can do it
 reliably — the second tier of the amended session promise. **Shape:**
 optionally persist last-N lines per pane with `window-save-state`,
 restored clearly marked as a snapshot; size/redaction knobs; crash-safe
 write path reusing existing session-state transactions. Evidence:
 synthesis C15; wt §5/§10.3, warp §5/§10.3, lt §a.1.
 
-### conpty-host feasibility increment (from the durable-session spike) — M · [#132](https://github.com/amanthanvi/winghostty/issues/132)
+### conpty-host feasibility increment (from the durable-session spike) — M · [#132](https://github.com/amanthanvi/noctty/issues/132)
 
 **Ruling:** scheduled here, after C15. **Why:** the spike verdict is
 feasible-with-broker — an `HPCON` dies with its owning process, so
@@ -258,7 +258,7 @@ graduates durable-session planning (C16); red caps the aspiration
 honestly. Evidence:
 [durable-session-spike report](wayfinder/competitive-analysis/research/durable-session-spike.md).
 
-### C17 · Named layouts: profile + split tree + hotkey in one object — M · [#133](https://github.com/amanthanvi/winghostty/issues/133)
+### C17 · Named layouts: profile + split tree + hotkey in one object — M · [#133](https://github.com/amanthanvi/noctty/issues/133)
 
 **Ruling:** adopt. **Why:** turns session restore from "what I had"
 into "what I want" — project switching for the tabs-and-splits user;
@@ -269,7 +269,7 @@ tree) materialized via keybind, palette entry, CLI flag, and (with
 C12) jump-list click. Evidence: synthesis C17; conemu §5/§10.3, warp
 §5/§10.2, wez §5.
 
-### C02 · Power/battery awareness as a performance axis — M · [#134](https://github.com/amanthanvi/winghostty/issues/134)
+### C02 · Power/battery awareness as a performance axis — M · [#134](https://github.com/amanthanvi/noctty/issues/134)
 
 **Ruling:** adopt. **Why:** the benchmark user works on a laptop;
 upstream structurally deprioritizes battery ("GPU or nothing"
@@ -280,7 +280,7 @@ unfocused-render throttling / target-fps knobs, occlusion-aware
 repaint; publish idle power in the benchmark suite. Evidence:
 synthesis C02; up §2/§9/§10.2, wintty §3/§10.8, rio §10.3.
 
-### C08 · Ghostty 1.3-surface Win32 wiring audit — S · [#135](https://github.com/amanthanvi/winghostty/issues/135)
+### C08 · Ghostty 1.3-surface Win32 wiring audit — S · [#135](https://github.com/amanthanvi/noctty/issues/135)
 
 **Ruling:** adopt. **Why:** inherited-on-paper features that silently
 no-op on Windows are precisely the "generic parity fork" failure the
@@ -291,19 +291,19 @@ path, `scrollbar`, notify-on-command-finish → the existing toast
 pipeline, `key-remap`, clipboard-codepoint-map; record results in the
 capability matrix. Evidence: synthesis C08; up §7/§10.6, wt §10.6.
 
-### C14 · Elevation as a designed surface — M · [#136](https://github.com/amanthanvi/winghostty/issues/136)
+### C14 · Elevation as a designed surface — M · [#136](https://github.com/amanthanvi/noctty/issues/136)
 
 **Ruling:** adopt (documented model + elevated-window action);
 mixed-elevation tabs are explicitly out. **Why:** the benchmark user
 runs elevated shells weekly; an undesigned surface violates "be native
 where behavior matters"; ConEmu's elevated tabs remain the unmatched
 affordance, WT documents a deliberate separate-window model. **Shape:**
-document what elevated winghostty means (incl. what restore does with
+document what elevated noctty means (incl. what restore does with
 elevated sessions); add a "run elevated" profile flag + palette action
 opening a clearly-marked elevated window. Evidence: synthesis C14;
 conemu §3/§10.1, wt §3/§10.8, wave §3.
 
-### C28 · SmartScreen/signing reputation hardening — S/M · [#137](https://github.com/amanthanvi/winghostty/issues/137)
+### C28 · SmartScreen/signing reputation hardening — S/M · [#137](https://github.com/amanthanvi/noctty/issues/137)
 
 **Ruling:** adopt. **Why:** the last trust gap in a
 best-in-field distribution story; first-run SmartScreen warnings kill
@@ -311,7 +311,7 @@ installs; Alacritty is unsigned since 2021, ConEmu shows the AV
 reputation death spiral. **Shape:** sign every release consistently (SignPath Foundation or equivalent) and build SmartScreen file-hash reputation over time — EV no longer grants instant reputation (Microsoft removed that privilege in 2024); sign or attest the portable ZIP container; document verification steps (feeds the trust page). Evidence:
 synthesis C28; alacritty §3/§10.5, rio §3, conemu §9.
 
-### C29 · Portable mode + portable-ZIP updater apply — M · [#138](https://github.com/amanthanvi/winghostty/issues/138)
+### C29 · Portable mode + portable-ZIP updater apply — M · [#138](https://github.com/amanthanvi/noctty/issues/138)
 
 **Ruling:** adopt. **Why:** locked-down corporate machines are a
 genuine persona of the benchmark user; WezTerm's thumb-drive mode and
@@ -320,14 +320,14 @@ status.md's next list. **Shape:** config/state discovery beside the
 exe; implement staged apply/rollback for the portable ZIP channel.
 Evidence: synthesis C29; wez §3, tabby §3, lt (MobaXterm).
 
-### C30 · Chocolatey channel — S · [#139](https://github.com/amanthanvi/winghostty/issues/139)
+### C30 · Chocolatey channel — S · [#139](https://github.com/amanthanvi/noctty/issues/139)
 
 **Ruling:** adopt. **Why:** enterprise fleets script choco; near-zero
 recurring cost next to the existing winget/Scoop automation. **Shape:**
 add a choco package to the release pipeline alongside winget/Scoop.
 Evidence: synthesis C30; wave §10.7, rio §10.6.
 
-### C31 · GitHub-coupling contingency — S · [#140](https://github.com/amanthanvi/winghostty/issues/140)
+### C31 · GitHub-coupling contingency — S · [#140](https://github.com/amanthanvi/noctty/issues/140)
 
 **Ruling:** adopt. **Why:** upstream is leaving GitHub (destination
 unannounced) and the fork's updater hardcodes `api.github.com` —
@@ -335,7 +335,7 @@ infrastructure upstream itself just judged unreliable. **Shape:**
 abstract the updater endpoint; monitor upstream mirror freshness; keep
 sync tooling re-pointable. Evidence: synthesis C31; up §1/§10.5.
 
-### C33 · Upstream merge cadence + published merge policy — S/M recurring · [#141](https://github.com/amanthanvi/winghostty/issues/141)
+### C33 · Upstream merge cadence + published merge policy — S/M recurring · [#141](https://github.com/amanthanvi/noctty/issues/141)
 
 **Ruling:** adopt — this is the standing mechanism of the hard-fork
 posture. **Why:** the moat is priced in merge labor; deferring
@@ -349,7 +349,7 @@ docs. Evidence: synthesis C33; up §10.2, forks §10, wintty §1.
 
 ## Wave 3 — Depth
 
-### C18 · Quick-select / hints + modal copy mode — M · [#142](https://github.com/amanthanvi/winghostty/issues/142)
+### C18 · Quick-select / hints + modal copy mode — M · [#142](https://github.com/amanthanvi/noctty/issues/142)
 
 **Ruling:** adopt. **Why:** pure keyboard-first territory (principle 2) with no current implementation beyond URL hover-hints — regex
 capture of URLs/paths/hashes/IPs to open/copy/paste, plus modal
@@ -359,18 +359,18 @@ modal copy mode with vi-style motions; configurable patterns.
 Evidence: synthesis C18; alacritty §4/§10.2–3, wez §5/§10.3, rio
 §4/§10.4, lt §a.4.
 
-### C20 · Lean SSH host ingestion — M · [#143](https://github.com/amanthanvi/winghostty/issues/143)
+### C20 · Lean SSH host ingestion — M · [#143](https://github.com/amanthanvi/noctty/issues/143)
 
 **Ruling:** adopt (lean slice only, per the amended user scope).
 **Why:** the benchmark user's week includes remote hosts (Tabby's 74k
 stars are built on connection management; WezTerm auto-populates SSH
-domains); discovery is the missing piece — winghostty already wraps
+domains); discovery is the missing piece — noctty already wraps
 ssh for terminfo. **Shape:** parse `%USERPROFILE%\.ssh\config`,
 surface hosts as launchable profiles/palette entries running the
 system `ssh`; no bundled client, no vault (deferred), no fleet tools
 (out). Evidence: synthesis C20; tabby §5/§10.1, wez §5/§10.5, wt §3.
 
-### C25 · Documented automation surface (CLI verb set) — L, staged · [#144](https://github.com/amanthanvi/winghostty/issues/144)
+### C25 · Documented automation surface (CLI verb set) — L, staged · [#144](https://github.com/amanthanvi/noctty/issues/144)
 
 **Ruling:** adopt, staged — verb design waits until upstream 1.4's
 scriptability shape is visible (via C33 merges), so nothing is
@@ -384,24 +384,24 @@ profile/query state/run named layout); align with upstream's contract
 where sensible. Evidence: synthesis C25; wez §7/§10.2, wt §7/§10.6,
 conemu §7, wave §10.3, up §10.4.
 
-### C34 · Accessibility: finish UIA, publish a screen-reader matrix — M · [#145](https://github.com/amanthanvi/winghostty/issues/145)
+### C34 · Accessibility: finish UIA, publish a screen-reader matrix — M · [#145](https://github.com/amanthanvi/noctty/issues/145)
 
 **Ruling:** adopt. **Why:** the entire competitive field ignores
 accessibility (one rival fork admits screen readers can't read its
-panes); winghostty's partial UIA work is unique — worth finishing and
+panes); noctty's partial UIA work is unique — worth finishing and
 stating; aligns with the existing WCAG commitment. **Shape:** complete
 the UIA work already on status.md's next list; publish a per-release
 Narrator/NVDA/JAWS compatibility matrix; state it on the trust page.
 Evidence: synthesis C34; forks §10.
 
-### C27 · Identity, trust, and verification page + migration guides — S · [#146](https://github.com/amanthanvi/winghostty/issues/146)
+### C27 · Identity, trust, and verification page + migration guides — S · [#146](https://github.com/amanthanvi/noctty/issues/146)
 
 **Ruling:** adopt — full send under the current name (rename risk
 accepted with eyes open). **Why:** every distribution advantage
-winghostty already has — signed releases, winget/Scoop, ARM64, CI,
+noctty already has — signed releases, winget/Scoop, ARM64, CI,
 session restore — is unmarketed; fork confusion is documented in
 upstream's own threads; trust is the moat the swarm can't cross.
-**Shape:** a "why winghostty / how we differ from the fork field / how
+**Shape:** a "why noctty / how we differ from the fork field / how
 to verify our binaries (signing, checksums) / what we will never do"
 page publishing the eleven non-goals; "migrate from Windows Terminal"
 and "migrate from Git Bash/mintty" guides; visible release cadence.

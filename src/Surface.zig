@@ -2541,7 +2541,7 @@ fn copySelectionToClipboards(
     }
 
     if (copied and self.config.app_notifications.@"clipboard-copy") {
-        try self.showAppNotification("winghostty", "Copied selection to clipboard");
+        try self.showAppNotification("noctty", "Copied selection to clipboard");
     }
 }
 

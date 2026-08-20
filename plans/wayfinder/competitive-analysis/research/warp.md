@@ -11,7 +11,7 @@ chrome tax (winit/wgpu), memory-leak and GPU-driver crash themes, WSL
 gaps, forced auto-update, and a trust deficit (login/telemetry history,
 AI pricing whiplash) that the keyboard-first Windows developer
 repeatedly cites as reasons to stay away. The sharpest lessons for
-winghostty: the workflow objects (named layouts, saved commands, quake
+noctty: the workflow objects (named layouts, saved commands, quake
 window, restored scrollback) are worth stealing; the cloud coupling,
 input-editor takeover, and update coercion are worth loudly not doing.
 
@@ -260,23 +260,23 @@ input-editor takeover, and update coercion are worth loudly not doing.
 - **Shell-tool conflicts**: fzf/Starship/oh-my-* incompatibilities from
   the block/input-editor takeover (§4 link).
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
 ### Does well (adopt-candidates)
 
 1. **Quake-style global-hotkey window.** Warp ships a configurable
-   dedicated dropdown window on Windows; winghostty has nothing in
+   dedicated dropdown window on Windows; noctty has nothing in
    this category (status.md lists no quick terminal). High-value for
    the keyboard-first benchmark user.
 2. **Named, declarative session layouts** (Tab Configs / launch
-   configurations): winghostty restores the *last* layout implicitly
+   configurations): noctty restores the *last* layout implicitly
    but has no way to define and launch a named multi-tab/split
    workspace on demand.
 3. **Scrollback content in session restore.** Warp restores recent
-   blocks (output) via SQLite; winghostty explicitly restores layout
+   blocks (output) via SQLite; noctty explicitly restores layout
    only, not contents. Even restoring the last N lines per pane would
    close a felt gap.
-4. **Block-derived navigation verbs without blocks.** winghostty
+4. **Block-derived navigation verbs without blocks.** noctty
    already has OSC 133 prompt marks + PowerShell integration; add
    jump-to-previous-command, copy-last-output, and re-run-command
    actions in the universal palette — 80% of blocks' daily value with
@@ -286,28 +286,28 @@ input-editor takeover, and update coercion are worth loudly not doing.
 6. **Being a great host for CLI agents.** Warp's Claude Code/Codex
    hosting leaks memory; a terminal that runs agent TUIs flawlessly
    (throughput, scrollback, no interception) is a real differentiator
-   winghostty already almost has — but should test and claim.
+   noctty already almost has — but should test and claim.
 
 ### Does badly (avoid / exploit)
 
 1. **Cloud coupling & trust deficit**: login-for-AI, opt-out
-   telemetry, closed Oz backend. winghostty's local-only crash dumps
+   telemetry, closed Oz backend. noctty's local-only crash dumps
    and no-upload code path are a marketable opposite — say it loudly.
-2. **Forced silent auto-update with no off switch.** winghostty's
+2. **Forced silent auto-update with no off switch.** noctty's
    user-initiated, checksum+Authenticode staged updates are exactly the
    policy Warp users beg for; never regress it.
 3. **Non-native chrome tax** (winit): broken double-click maximize,
    Snap Layouts doubts, dead RDP input, IME trouble, input-source-bound
-   keybindings. winghostty's native Win32 + DWM + IME + UIA work is the
+   keybindings. noctty's native Win32 + DWM + IME + UIA work is the
    direct counter; RDP and IME correctness are worth regression tests.
 4. **Intercepting the shell**: Warp's input editor and DCS protocol
-   fight fzf, Starship, PSReadLine, tmux. winghostty should keep the
+   fight fzf, Starship, PSReadLine, tmux. noctty should keep the
    shell's own editor sacred and advertise "your prompt tools just
    work."
 5. **Pricing/identity whiplash**: feature surface chased AI runway,
    terminal fundamentals (ligatures, zoom, sixel, cmd.exe) lagged.
-   Feature-count restraint is already winghostty's stated principle.
-6. **cmd.exe unsupported / WSL bugs**: winghostty's plain-fallback
+   Feature-count restraint is already noctty's stated principle.
+6. **cmd.exe unsupported / WSL bugs**: noctty's plain-fallback
    cmd.exe support and profile-picker WSL detection already beat Warp
    here; keep WSL launch reliability a tested invariant.
 
@@ -318,7 +318,7 @@ input-editor takeover, and update coercion are worth loudly not doing.
    agents," the category's center of gravity demands an explicit
    position (and it doubles as a privacy differentiator).
 2. **Reusable command knowledge**: saved parameterized commands,
-   snippets, runbooks (Warp Drive Workflows/Notebooks). winghostty's
+   snippets, runbooks (Warp Drive Workflows/Notebooks). noctty's
    palette has "recent commands" but no user-curated library, local or
    shared.
 3. **Team/collaboration layer**: shared config/workflows/rules across
@@ -328,8 +328,8 @@ input-editor takeover, and update coercion are worth loudly not doing.
    `delegation` API): absent from status.md and the capability matrix;
    Warp can't do it either — first-mover native win available.
 5. **Cross-device/settings sync**: Warp syncs Drive objects via
-   account; winghostty has no stated position on config portability.
+   account; noctty has no stated position on config portability.
 6. **Public benchmark posture**: Warp markets agent benchmarks and
-   even publishes (unflattering) terminal benchmarks. winghostty
+   even publishes (unflattering) terminal benchmarks. noctty
    claims "fastest, most fluid" with no published latency/throughput
    evidence category.

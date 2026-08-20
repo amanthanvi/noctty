@@ -13,10 +13,10 @@ $packageScript = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $detachedHarness = Join-Path $repoRoot 'test\windows\cli-detached-action.ps1'
 
-$stageBase = Join-Path $repoRoot ("dist\artifacts\winghostty-{0}-windows-{1}" -f $Version, $Architecture)
-$portableRoot = Join-Path $stageBase 'winghostty'
-$portableExe = Join-Path $portableRoot 'winghostty.exe'
-$portableCommand = Join-Path $portableRoot 'winghostty.com'
+$stageBase = Join-Path $repoRoot ("dist\artifacts\noctty-{0}-windows-{1}" -f $Version, $Architecture)
+$portableRoot = Join-Path $stageBase 'noctty'
+$portableExe = Join-Path $portableRoot 'noctty.exe'
+$portableCommand = Join-Path $portableRoot 'noctty.com'
 $portableResources = Join-Path $portableRoot 'share\ghostty'
 
 if (-not $SkipPackage) {
@@ -33,7 +33,7 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
     -Shell cmd `
     -BinDir $portableRoot `
     -Arguments @('+help') `
-    -ExpectedText 'Usage: winghostty [+action] [options]'
+    -ExpectedText 'Usage: noctty [+action] [options]'
 
 & $shellHarness `
     -Shell powershell `
@@ -44,8 +44,8 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
 & $shellHarness `
     -Shell cmd `
     -BinDir $portableRoot `
-    -Arguments @('+boo', '--help') `
-    -ExpectedText 'The `boo` command is used to display the project animation in the terminal.'
+    -Arguments @('+version') `
+    -ExpectedText '- channel:'
 
 & $shellHarness `
     -Shell powershell `
@@ -67,7 +67,7 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
 
 & $detachedHarness `
     -ExePath $portableExe `
-    -Action '+boo' `
+    -Action '+version' `
     -ResourcesDir $portableResources
 
 Write-Host "portable package CLI validation: PASS (root=$portableRoot)"

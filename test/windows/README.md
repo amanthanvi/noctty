@@ -21,12 +21,12 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-validate.ps1 -R
 
 Pass `-Rebuild` to force one upfront `zig build -Demit-exe=true` before
 the suite starts. The suite also does that upfront build automatically
-when tracked inputs are newer than `zig-out\bin\winghostty.exe`, so child
+when tracked inputs are newer than `zig-out\bin\noctty.exe`, so child
 harnesses reuse one fresh binary instead of rebuilding in parallel.
 
 ## interactive-win11-smoke.ps1
 
-Interactive Win11 startup smoke validation. It launches `winghostty`
+Interactive Win11 startup smoke validation. It launches `noctty`
 inside the repo-local Win11 sandbox and waits for shell startup to be
 observed in stderr.
 
@@ -39,7 +39,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-smoke.ps1 -Rese
 ## interactive-win11-command-finish.ps1
 
 Interactive Win11 validation for command-finished notifications. It launches
-`winghostty` inside the repo-local Win11 sandbox, emits raw OSC `133;C`,
+`noctty` inside the repo-local Win11 sandbox, emits raw OSC `133;C`,
 OSC `9;4`, and OSC `133;D;17`, and then validates that the
 command-finished path fired.
 
@@ -58,7 +58,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-command-finish.
 ```
 
 The harness rebuilds automatically when `build.zig`, `build.zig.zon`, or
-files under `src\` are newer than `zig-out\bin\winghostty.exe`. Pass
+files under `src\` are newer than `zig-out\bin\noctty.exe`. Pass
 `-Rebuild` to force a full rebuild anyway.
 
 ## vt-probe-win32-conformance.ps1
@@ -80,15 +80,15 @@ powershell.exe -ExecutionPolicy Bypass -File .\vt-probe-win32-conformance.ps1 -R
 ```
 
 Pass `-Runtime` to also run the heavier Win32 evidence harnesses currently
-referenced by `+vt-probe`: command finish / notification, taskbar progress,
-and synchronized-output repaint performance.
+referenced by `+vt-probe`: command finish / notification and taskbar
+progress.
 
 ## interactive-win11-progress.ps1
 
 Interactive Win11 validation for native progress state changes. It
-launches `winghostty` inside the repo-local Win11 sandbox, emits raw
+launches `noctty` inside the repo-local Win11 sandbox, emits raw
 OSC `9;4` state transitions for `set`, `pause`, `error`,
-`indeterminate`, and `remove`, captures the `winghostty` window via
+`indeterminate`, and `remove`, captures the `noctty` window via
 screenshots for each state, and fails if:
 
 - the runtime logs `taskbar progress init failed`,
@@ -125,7 +125,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-shaders.ps1 -Re
 ## interactive-win11-resize.ps1
 
 Interactive Win11 validation for resize repaint coverage. It launches
-`winghostty` with a light terminal background, synthesizes a live resize
+`noctty` with a light terminal background, synthesizes a live resize
 growth, exits the resize loop, captures the settled enlarged window, and fails
 if the newly exposed right or bottom content bands are mostly near-black or
 unpainted neutral gray.
@@ -139,7 +139,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-resize.ps1 -Res
 ## interactive-win11-ime-candidate.ps1
 
 Interactive Win11 validation for IME candidate anchoring. It launches
-`winghostty`, scripts the terminal cursor to a non-origin row/column,
+`noctty`, scripts the terminal cursor to a non-origin row/column,
 sends a synthetic mouse move near the surface origin to poison the old
 mouse-derived path, triggers `WM_IME_STARTCOMPOSITION` on the surface
 HWND, and reads the env-gated runtime trace for the composition/candidate
@@ -161,7 +161,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-ime-candidate.p
 ## interactive-win11-undo.ps1
 
 Interactive Win11 validation for the shipped undo/redo action set. It launches
-`winghostty`, exercises split creation, tab close/restore, and empty-host
+`noctty`, exercises split creation, tab close/restore, and empty-host
 survival after last-tab close, then verifies the visible tab/surface counts
 after each replay step. Last-tab headless undo/redo remains covered by focused
 Zig tests plus manual validation; this harness does not claim foreground
@@ -203,7 +203,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-session-restore
 
 Generic repo-local Win11 launcher for ad hoc debugging. It uses the
 same sandbox/bootstrap logic as the focused harnesses and can either
-launch `winghostty` directly or open a shell with the sandbox
+launch `noctty` directly or open a shell with the sandbox
 environment applied.
 
 Run with:

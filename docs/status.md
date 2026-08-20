@@ -1,6 +1,6 @@
 # Status
 
-What currently works in winghostty, what is experimental, and what is out
+What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
@@ -80,7 +80,7 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Updater
 
-- Checks `api.github.com/repos/amanthanvi/winghostty/releases/latest`, at
+- Checks `api.github.com/repos/amanthanvi/noctty/releases/latest`, at
   most once every 24 hours, and never replaces binaries silently.
 - `auto-update = download` stages only releases that pass their
   checksum metadata plus Authenticode verification; applying a staged
@@ -89,14 +89,14 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows package managers
 
-- WinGet package id: `AmanThanvi.winghostty`.
-- Scoop bucket: `https://github.com/amanthanvi/scoop-winghostty`.
+- WinGet package id: `AmanThanvi.noctty`.
+- Scoop bucket: `https://github.com/amanthanvi/scoop-noctty`.
 
 ### Crash reports
 
-- Crash dumps stay local under `%LOCALAPPDATA%\winghostty\crash`. There
+- Crash dumps stay local under `%LOCALAPPDATA%\noctty\crash`. There
   is no automatic upload, and no code path to upload exists in this repo.
-- `winghostty +crash-report` reads whatever is there. Details in
+- `noctty +crash-report` reads whatever is there. Details in
   [windows.md](windows.md#crash-reports-and-diagnostics).
 - Unreadable session state is quarantined, never deleted, and repeated
   startup failures fall back to safe mode; details in
@@ -130,7 +130,7 @@ and lands incrementally.
   [getting-started.md](getting-started.md#about-the-smartscreen-warning).
 - GitHub Issues are for reproducible bugs. For questions, feature
   discussion, and feedback, use
-  [Discussions](https://github.com/amanthanvi/winghostty/discussions).
+  [Discussions](https://github.com/amanthanvi/noctty/discussions).
 - No supported Linux packaging. Upstream's Flatpak and Snap surfaces
   are removed; the Nix files left over from upstream are untested and
   unsupported here.

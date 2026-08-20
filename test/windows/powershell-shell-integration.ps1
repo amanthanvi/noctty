@@ -17,7 +17,7 @@ function Assert-True {
 $script:OriginalPrompt = $function:global:prompt
 $script:OriginalOut = [Console]::Out
 $script:OriginalFeatures = $env:GHOSTTY_SHELL_FEATURES
-$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-ps-si-" + [guid]::NewGuid().ToString('n'))
+$script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ps-si-" + [guid]::NewGuid().ToString('n'))
 
 try {
     New-Item -ItemType Directory -Force -Path $script:TempDir | Out-Null

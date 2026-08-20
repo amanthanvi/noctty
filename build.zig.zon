@@ -1,8 +1,11 @@
 .{
-    .name = .winghostty,
+    .name = .noctty,
     .version = "1.3.2-dev",
     .paths = .{""},
-    .fingerprint = 0x3b92d6b5a312488b,
+    // Fingerprint: high 32 bits are CRC-32 of the package name, low 32
+    // bits are the original random id (kept across the winghostty->noctty
+    // rename so package identity is preserved).
+    .fingerprint = 0x80bfc21ea312488b,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         // Zig libs
