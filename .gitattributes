@@ -44,6 +44,9 @@ scripts/build-site-assets.mjs text eol=lf
 
 # Binary files
 *.png binary
+*.jpg binary
+*.webp binary
+*.woff2 binary
 *.ico binary
 *.icns binary
 *.ttf binary
