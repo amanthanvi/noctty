@@ -44,8 +44,8 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
 & $shellHarness `
     -Shell cmd `
     -BinDir $portableRoot `
-    -Arguments @('+version', '--help') `
-    -ExpectedText 'The `version` command is used to display information about noctty.'
+    -Arguments @('+version') `
+    -ExpectedText '- channel:'
 
 & $shellHarness `
     -Shell powershell `
