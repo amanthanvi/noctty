@@ -36,4 +36,5 @@ test {
     @import("std").testing.refAllDecls(@This());
 
     _ = @import("termio/shell_integration.zig");
+    _ = @import("termio/utf8_console.zig");
 }

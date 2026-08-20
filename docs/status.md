@@ -4,7 +4,7 @@ What currently works in winghostty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-19, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -32,8 +32,10 @@ paths, shells, updates, automation, and troubleshooting, see
 - Bidi, combining marks, grapheme cluster rendering.
 - Kitty graphics protocol and inline image display.
 - Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
-  (PowerShell through `shell-integration = detect`); `cmd.exe` is a
-  plain fallback without prompt/cwd/command-finish integration.
+  (PowerShell through `shell-integration = detect`). `cmd.exe` gets OSC
+  133 A/B plus OSC 9;9 cwd from `PROMPT`; command-start/exit (C/D) arrive
+  when Clink is present. UTF-8 console preamble is opt-in via
+  `utf8-console`.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained for Zig and C consumers.
 
@@ -70,11 +72,29 @@ Win32-validated VT protocol coverage is tracked in
   config without rewriting unrelated text.
 - Universal palette: actions, tabs, panes, profiles, themes, native
   settings, help, and recent commands in one fuzzy-searched,
-  keyboard-driven list.
+  keyboard-driven list. Prompt-mark verbs (jump previous/next, copy
+  last command output, re-run last command) are in the palette when
+  shell integration has marked prompts.
+- Quick terminal (`toggle_quick_terminal`) with Win32 `RegisterHotKey`
+  global binds while the process is running.
+- WinRT Action Center toasts with in-app banner fallback when notification
+  policy, Focus Assist, or runtime availability blocks delivery.
+- Native taskbar progress from terminal OSC 9;4 reports.
+- Docked scrollback search per pane (regex / case / word / wrap).
+- Hover-dwell link preview tooltip for OSC 8 hyperlinks.
+- Paste and drag-drop protection: core unsafe-paste confirm plus a
+  Win32 severity classifier (control characters, shell metacharacters,
+  mixed URL content, newlines).
+- Taskbar jump lists of recent working directories (from OSC 7 / OSC 9;9).
+- Explorer "Open winghostty here" on directories and directory
+  backgrounds (installer registry plus portable HKCU registration).
 
 ### Renderer
 
-- Terminal content renders with OpenGL 4.3+ via WGL.
+- Terminal content renders with OpenGL 4.3+ via WGL. Startup below that
+  floor fails with a visible, actionable dialog (no blank window). There
+  is no DirectX or ANGLE fallback renderer; RDP, VMs, and old iGPUs
+  need a working OpenGL 4.3 ICD. See [windows.md](windows.md#gpu-floor).
 - Window chrome uses a separate D3D11/DirectComposition + DirectWrite
   pipeline with GDI fallback; it never touches the terminal renderer.
 
@@ -157,5 +177,8 @@ No formal roadmap. Likely next areas:
 - Portable ZIP updater apply/rollback.
 - Broader local crash metadata and report packaging.
 - ARB-context OpenGL migration paired with atlas rebuild.
+- Competitive-response waves after Wave 1: bundled OpenConsole, default
+  terminal handoff, scrollback restore, named layouts. See
+  [plans/2026-competitive-roadmap.md](../plans/2026-competitive-roadmap.md).
 
 Contributions that advance any of the above are welcome.

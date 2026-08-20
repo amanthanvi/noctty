@@ -18,6 +18,7 @@ const fastmem = @import("../fastmem.zig");
 const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
 const shell_integration = @import("shell_integration.zig");
+const utf8_console = @import("utf8_console.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const Command = @import("../Command.zig");
@@ -626,6 +627,7 @@ pub const Config = struct {
     env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
+    utf8_console: configpkg.Config.Utf8Console = .auto,
     cursor_blink: ?bool = null,
     working_directory: ?[]const u8 = null,
     working_directory_home: bool = false,
@@ -811,6 +813,17 @@ const Subprocess = struct {
                 cfg.cursor_blink orelse true,
             );
 
+            if (builtin.os.tag == .windows) {
+                const mode: utf8_console.Mode = switch (cfg.utf8_console) {
+                    .auto => .auto,
+                    .always => .always,
+                    .never => .never,
+                };
+                if (utf8_console.shouldForceUtf8(mode, utf8_console.currentOutputCodePage())) {
+                    try env.put("GHOSTTY_UTF8_CONSOLE", "1");
+                }
+            }
+
             const force: ?shell_integration.Shell = switch (cfg.shell_integration) {
                 .none => {
                     // This is a source of confusion for users despite being
@@ -852,15 +865,21 @@ const Subprocess = struct {
             break :shell integration.command;
         };
 
+        const utf8_shell_command: configpkg.Command = if (builtin.os.tag == .windows and
+            env.get("GHOSTTY_UTF8_CONSOLE") != null)
+            try utf8_console.wrapCmdForUtf8(alloc, shell_command)
+        else
+            shell_command;
+
         const launch_command: configpkg.Command = if (builtin.os.tag == .windows)
             try windows_shell.prepareCommand(
                 alloc,
-                shell_command,
+                utf8_shell_command,
                 cfg.working_directory,
                 cfg.working_directory_home,
             )
         else
-            shell_command;
+            utf8_shell_command;
 
         // Add the environment variables that override any others.
         {

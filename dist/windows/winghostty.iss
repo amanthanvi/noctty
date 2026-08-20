@@ -66,5 +66,13 @@ Name: "{group}\winghostty"; Filename: "{app}\winghostty.exe"; AppUserModelID: "{
 Name: "{group}\Uninstall winghostty"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\winghostty"; Filename: "{app}\winghostty.exe"; Tasks: desktopicon; AppUserModelID: "{#AppUserModelId}"
 
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\winghostty"; ValueType: string; ValueName: ""; ValueData: "Open winghostty here"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\winghostty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\winghostty.exe"
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\winghostty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\winghostty.exe"" --working-directory=""%1"""
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\winghostty"; ValueType: string; ValueName: ""; ValueData: "Open winghostty here"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\winghostty"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\winghostty.exe"
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\winghostty\command"; ValueType: string; ValueName: ""; ValueData: """{app}\winghostty.exe"" --working-directory=""%V"""
+
 [Run]
 Filename: "{app}\winghostty.exe"; Description: "Launch winghostty"; Flags: nowait postinstall skipifsilent

@@ -23,6 +23,10 @@ pub const Shell = enum {
     /// points are left untouched so exit behavior and payload semantics
     /// are preserved.
     powershell,
+    /// Windows `cmd.exe`. Integration is PROMPT-based (OSC 133 A/B +
+    /// OSC 9;9 cwd). Command-start/exit (C/D) load only when Clink is
+    /// present on PATH.
+    cmd,
 };
 
 /// The result of setting up a shell integration.
@@ -85,6 +89,8 @@ pub fn setup(
         },
 
         .powershell => try setupPowerShell(alloc_arena, command, resource_dir),
+
+        .cmd => try setupCmd(alloc_arena, command, resource_dir, env),
     } orelse return null;
 
     return .{
@@ -111,6 +117,7 @@ test "force shell" {
 
         const command: config.Command = switch (shell) {
             .powershell => .{ .direct = &.{"pwsh.exe"} },
+            .cmd => .{ .direct = &.{"cmd.exe"} },
             else => .{ .shell = "sh" },
         };
 
@@ -121,7 +128,7 @@ test "force shell" {
             &env,
             shell,
         );
-        if (shell == .powershell and builtin.os.tag != .windows) {
+        if ((shell == .powershell or shell == .cmd) and builtin.os.tag != .windows) {
             try testing.expect(result == null);
         } else {
             try testing.expectEqual(shell, result.?.shell);
@@ -191,6 +198,12 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
         return .powershell;
     }
 
+    if (std.ascii.eqlIgnoreCase(exe, "cmd") or
+        std.ascii.eqlIgnoreCase(exe, "cmd.exe"))
+    {
+        return .cmd;
+    }
+
     return null;
 }
 
@@ -218,6 +231,9 @@ test detectShell {
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "PowerShell.EXE" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd.exe" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .direct = &.{"C:\\Windows\\System32\\cmd.exe"} }));
 
     if (comptime builtin.target.os.tag.isDarwin()) {
         try testing.expect(try detectShell(alloc, .{ .shell = "/bin/bash" }) == null);
@@ -510,6 +526,136 @@ fn setupPowerShell(
     )) orelse return null;
 
     return .{ .direct = injected };
+}
+
+/// OSC 133 A/B + OSC 9;9 cwd. `$E` is ESC in cmd PROMPT syntax.
+/// D is omitted here so Clink can emit a real exit code; without
+/// Clink, the next prompt still marks the previous command via A.
+pub const cmd_prompt_ab_cwd = "$E]133;A$E\\$E]9;9;$P$E\\$P$G$E]133;B$E\\";
+
+/// Same as `cmd_prompt_ab_cwd` but prefixes OSC 133 D (exit unknown)
+/// so jump-to-prompt still sees command boundaries without Clink.
+pub const cmd_prompt_dab_cwd = "$E]133;D$E\\$E]133;A$E\\$E]9;9;$P$E\\$P$G$E]133;B$E\\";
+
+fn setupCmd(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+) !?config.Command {
+    if (builtin.os.tag != .windows) return null;
+    if (!isInteractiveCmd(command, alloc)) return null;
+
+    const clink = clinkOnPath(alloc);
+    try env.put("PROMPT", if (clink) cmd_prompt_ab_cwd else cmd_prompt_dab_cwd);
+
+    if (clink) {
+        const clink_dir = try std.fs.path.join(alloc, &.{
+            resource_dir, "shell-integration", "cmd",
+        });
+        if (env.get("CLINK_PATH")) |old| {
+            const joined = try std.fmt.allocPrint(alloc, "{s};{s}", .{ clink_dir, old });
+            try env.put("CLINK_PATH", joined);
+        } else {
+            try env.put("CLINK_PATH", clink_dir);
+        }
+    }
+
+    return try command.clone(alloc);
+}
+
+fn isInteractiveCmd(command: config.Command, alloc: Allocator) bool {
+    var iter = command.argIterator(alloc) catch return false;
+    defer iter.deinit();
+    _ = iter.next() orelse return false;
+    while (iter.next()) |arg| {
+        if (isCmdNonInteractiveFlag(arg)) return false;
+    }
+    return true;
+}
+
+fn isCmdNonInteractiveFlag(arg: []const u8) bool {
+    if (arg.len < 2) return false;
+    const prefix = arg[0];
+    if (prefix != '/' and prefix != '-') return false;
+    return std.ascii.eqlIgnoreCase(arg[1..], "c") or
+        std.ascii.eqlIgnoreCase(arg[1..], "command");
+}
+
+fn clinkOnPath(alloc: Allocator) bool {
+    const path = std.process.getEnvVarOwned(alloc, "PATH") catch return false;
+    defer alloc.free(path);
+    var it = std.mem.splitScalar(u8, path, ';');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = std.fs.path.join(alloc, &.{ dir, "clink.exe" }) catch continue;
+        defer alloc.free(candidate);
+        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        return true;
+    }
+    return false;
+}
+
+test "cmd prompt strings contain OSC 133 A/B and OSC 9;9" {
+    const testing = std.testing;
+    try testing.expect(std.mem.indexOf(u8, cmd_prompt_ab_cwd, "]133;A") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd_prompt_ab_cwd, "]133;B") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd_prompt_ab_cwd, "]9;9;$P") != null);
+    try testing.expect(std.mem.indexOf(u8, cmd_prompt_ab_cwd, "]133;D") == null);
+    try testing.expect(std.mem.indexOf(u8, cmd_prompt_dab_cwd, "]133;D") != null);
+}
+
+test "cmd /c is not treated as interactive" {
+    const testing = std.testing;
+    try testing.expect(!isInteractiveCmd(.{ .direct = &.{ "cmd.exe", "/c", "echo" } }, testing.allocator));
+    try testing.expect(!isInteractiveCmd(.{ .direct = &.{ "cmd.exe", "/C", "dir" } }, testing.allocator));
+    try testing.expect(!isInteractiveCmd(.{ .direct = &.{ "cmd.exe", "-Command", "echo" } }, testing.allocator));
+    try testing.expect(isInteractiveCmd(.{ .direct = &.{"cmd.exe"} }, testing.allocator));
+    try testing.expect(isInteractiveCmd(.{ .direct = &.{ "cmd.exe", "/k", "chcp" } }, testing.allocator));
+}
+
+test "setup cmd: interactive injects PROMPT" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
+    const result = (try setup(alloc, res.path, .{ .direct = &.{"cmd.exe"} }, &env, .cmd)).?;
+    try testing.expectEqual(.cmd, result.shell);
+    try testing.expect(env.get("PROMPT") != null);
+    try testing.expect(std.mem.indexOf(u8, env.get("PROMPT").?, "]133;A") != null);
+}
+
+test "setup cmd: /c is not injected" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+
+    var res: TmpResourcesDir = try .init(alloc, .cmd);
+    defer res.deinit();
+
+    try testing.expect(try setup(
+        alloc,
+        res.path,
+        .{ .direct = &.{ "cmd.exe", "/c", "echo hi" } },
+        &env,
+        .cmd,
+    ) == null);
+    try testing.expect(env.get("PROMPT") == null);
 }
 
 /// Set up the shell integration features environment variable.
@@ -1343,6 +1489,10 @@ const TmpResourcesDir = struct {
             }),
             .powershell => try tmp_dir.dir.writeFile(.{
                 .sub_path = "shell-integration/powershell/integration.ps1",
+                .data = "",
+            }),
+            .cmd => try tmp_dir.dir.writeFile(.{
+                .sub_path = "shell-integration/cmd/clink.lua",
                 .data = "",
             }),
             else => {},

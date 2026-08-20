@@ -2716,6 +2716,26 @@ keybind: Keybinds = .{},
 /// The default value is `detect`.
 @"shell-integration": ShellIntegration = .detect,
 
+/// Whether to force a UTF-8 console preamble on Windows shells.
+///
+/// Nerd Font / oh-my-posh glyphs in `cmd.exe` and Windows PowerShell 5.1
+/// depend on the console output code page. This setting injects
+/// `chcp 65001` (cmd) or `[Console]::OutputEncoding` (PowerShell) at
+/// launch.
+///
+/// Allowable values:
+///
+///   * `auto` - Force UTF-8 unless the active console output code page
+///     is a legacy CJK ANSI page (932, 936, 949, 950). Those pages stay
+///     untouched because forcing UTF-8 can break OEM-encoded tools.
+///
+///   * `always` - Always inject the preamble.
+///
+///   * `never` - Never inject the preamble.
+///
+/// Has no effect on non-Windows hosts. Available in this Windows-only fork.
+@"utf8-console": Utf8Console = .auto,
+
 /// Shell integration features to enable. These require our shell integration
 /// to be loaded, either automatically via shell-integration or manually.
 ///
@@ -8299,6 +8319,12 @@ pub const ShellIntegration = enum {
     fish,
     nushell,
     zsh,
+};
+
+pub const Utf8Console = enum {
+    auto,
+    always,
+    never,
 };
 
 /// Shell integration features

@@ -4,6 +4,20 @@
 $ESC = [char]27
 $BEL = [char]7
 
+# UTF-8 console preamble (utf8-console = auto|always). Skipped when the
+# host did not set GHOSTTY_UTF8_CONSOLE — including auto-skip on CJK
+# ANSI code pages.
+if ($env:GHOSTTY_UTF8_CONSOLE -eq '1') {
+    try {
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding = $utf8
+        [Console]::InputEncoding = $utf8
+        $global:OutputEncoding = $utf8
+    } catch {
+        # Console handle may be redirected; leave encodings alone.
+    }
+}
+
 # ── Idempotent guard: save original prompt once ──────────────────────────
 if ($null -eq $Global:__ghostty_aid) {
     $Global:__ghostty_aid = [string]$PID

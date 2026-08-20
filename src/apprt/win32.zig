@@ -27,6 +27,8 @@ const win32_palette = @import("win32_palette.zig");
 const win32_layout = @import("win32_layout.zig");
 const win32_settings = @import("win32_settings.zig");
 const win32_aumid = @import("win32_aumid.zig");
+const win32_jump_list = @import("win32_jump_list.zig");
+const win32_explorer_verb = @import("win32_explorer_verb.zig");
 const win32_chrome_state = @import("win32_chrome_state.zig");
 const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
@@ -2692,6 +2694,8 @@ pub const App = struct {
     /// unavailable, in which case progress continues to render only in
     /// the window title/status text.
     taskbar_progress: ?win32_taskbar_progress.TaskbarProgress = null,
+    jump_list_recent: [win32_jump_list.max_recent][]u8 = undefined,
+    jump_list_recent_count: usize = 0,
     toast_activation_post_pending: std.atomic.Value(bool) = .init(false),
     /// Absolute path supplied via `--config-file <path>` on the CLI.
     /// Resolved ONCE against the startup cwd during `App.init` — that's
@@ -2798,6 +2802,13 @@ pub const App = struct {
             log.info("powershell integration install path={s} result={s}", .{ ps1_path, @tagName(result) });
         } else |err| {
             std.log.warn("powershell integration install path resolve failed err={}", .{err});
+        }
+
+        if (std.fs.selfExePathAlloc(core_app.alloc)) |exe_path| {
+            defer core_app.alloc.free(exe_path);
+            win32_explorer_verb.register(exe_path);
+        } else |err| {
+            std.log.debug("explorer verb skipped; self exe path err={}", .{err});
         }
 
         // Windows version probe. Win11 build 22000+ enables the
@@ -3074,6 +3085,11 @@ pub const App = struct {
         for (self.launcher_quick_slot_keys) |value| {
             if (value) |owned| self.core_app.alloc.free(owned);
         }
+        var jump_i: usize = 0;
+        while (jump_i < self.jump_list_recent_count) : (jump_i += 1) {
+            self.core_app.alloc.free(self.jump_list_recent[jump_i]);
+        }
+        self.jump_list_recent_count = 0;
         self.savePaletteMru();
         for (&self.palette_mru) |*slot| {
             if (slot.*) |owned| self.core_app.alloc.free(owned);
@@ -18049,6 +18065,10 @@ comptime {
     _ = win32_icons.centerSquare;
     _ = win32_icons.iconContentRect;
     _ = win32_icons.isDrawable;
+    _ = win32_jump_list.rememberPath;
+    _ = win32_jump_list.publish;
+    _ = win32_explorer_verb.directoryCommand;
+    _ = win32_explorer_verb.register;
     // Paste-protection severity classification.
     _ = win32_paste_protection.inspect;
     _ = win32_paste_protection.hasControlChars;
@@ -27429,6 +27449,20 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         try appendOwnedString(alloc, &self.pwd, pwd);
         self.invalidateStatusBarState();
+        win32_jump_list.rememberPath(
+            &self.app.jump_list_recent,
+            &self.app.jump_list_recent_count,
+            alloc,
+            pwd,
+            win32_jump_list.max_recent,
+        ) catch |err| {
+            std.log.debug("jump list remember failed err={}", .{err});
+            return;
+        };
+        if (std.fs.selfExePathAlloc(alloc)) |exe_path| {
+            defer alloc.free(exe_path);
+            win32_jump_list.publish(exe_path, self.app.jump_list_recent[0..self.app.jump_list_recent_count]);
+        } else |_| {}
     }
 
     fn setSecureInput(self: *Surface, value: apprt.action.SecureInput) !void {

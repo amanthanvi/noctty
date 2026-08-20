@@ -696,7 +696,30 @@ fn actionCommands(action: Action.Key) []const Command {
         .scroll_page_fractional,
         .scroll_page_lines,
         .adjust_selection,
-        .jump_to_prompt,
+        => comptime &.{},
+
+        .jump_to_prompt => comptime &.{ .{
+            .action = .{ .jump_to_prompt = -1 },
+            .title = "Jump to Previous Prompt",
+            .description = "Scroll to the previous shell-integration prompt mark.",
+        }, .{
+            .action = .{ .jump_to_prompt = 1 },
+            .title = "Jump to Next Prompt",
+            .description = "Scroll to the next shell-integration prompt mark.",
+        } },
+
+        .copy_last_command_output => comptime &.{.{
+            .action = .copy_last_command_output,
+            .title = "Copy Last Command Output",
+            .description = "Copy the text between the last two prompt marks to the clipboard.",
+        }},
+
+        .rerun_last_command => comptime &.{.{
+            .action = .rerun_last_command,
+            .title = "Re-run Last Command",
+            .description = "Send the previous command line plus Enter. Requires shell integration.",
+        }},
+
         .write_scrollback_file,
         .goto_tab,
         .resize_split,

@@ -489,6 +489,19 @@ pub const Action = union(enum) {
     /// Positive values scroll downwards, and negative values scroll upwards.
     jump_to_prompt: i16,
 
+    /// Copy the text between the last two OSC 133 prompt marks (typically
+    /// the previous command plus its output) to the clipboard.
+    ///
+    /// Requires shell integration. Does nothing when fewer than two
+    /// prompt marks exist.
+    copy_last_command_output,
+
+    /// Re-run the previous command by sending its first line plus Enter.
+    ///
+    /// Requires shell integration. Does nothing when fewer than two
+    /// prompt marks exist. Does not intercept the shell's editor.
+    rerun_last_command,
+
     /// Write the entire scrollback into a temporary file with the specified
     /// action. The action determines what to do with the filepath.
     ///
@@ -1350,6 +1363,8 @@ pub const Action = union(enum) {
             .scroll_page_lines,
             .adjust_selection,
             .jump_to_prompt,
+            .copy_last_command_output,
+            .rerun_last_command,
             .write_scrollback_file,
             .write_screen_file,
             .write_selection_file,
@@ -3354,6 +3369,16 @@ test "parse: action with int" {
         const binding = try parseSingle("a=jump_to_prompt:10");
         try testing.expect(binding.action == .jump_to_prompt);
         try testing.expectEqual(@as(i16, 10), binding.action.jump_to_prompt);
+    }
+
+    {
+        const binding = try parseSingle("a=copy_last_command_output");
+        try testing.expect(binding.action == .copy_last_command_output);
+    }
+
+    {
+        const binding = try parseSingle("a=rerun_last_command");
+        try testing.expect(binding.action == .rerun_last_command);
     }
 }
 

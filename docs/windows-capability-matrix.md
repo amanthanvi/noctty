@@ -5,7 +5,7 @@ Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-08-19.
 
 ## Status legend
 
@@ -31,7 +31,7 @@ Last reviewed: 2026-08-12.
 
 | Ghostty docs surface                                                                         | winghostty note                                                                                                                                                                                                                                                                       |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows, `cmd.exe` stays a plain fallback. See [shell integration notes](#shell-integration).                                                                                                                             |
+| [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows. `cmd.exe` gets OSC 133 A/B + OSC 9;9 from `PROMPT`; C/D marks require Clink. See [shell integration notes](#shell-integration).                                                                                   |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                         |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                         |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
@@ -45,13 +45,23 @@ Last reviewed: 2026-08-12.
 | Ghostty docs surface                                                              | winghostty note                                                                                                            |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
-| [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
+| [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. Below that floor, startup fails with a visible dialog. See [renderer notes](#renderer) and [windows.md](windows.md#gpu-floor).          |
 | [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream.      |
 | Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
 | Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).              |
 | Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                 |
+| Quick terminal                                                                    | `toggle_quick_terminal` plus `quick-terminal-*` config; global binds via `RegisterHotKey`. See [windows.md](windows.md#quick-terminal-and-global-hotkeys). |
+| Desktop notifications                                                             | WinRT toasts first, host banner fallback. See [windows.md](windows.md#notifications-and-progress).                         |
+| Taskbar progress                                                                  | OSC 9;4 maps to `ITaskbarList3` progress on the host HWND.                                                                 |
+| Docked scrollback search                                                          | Per-pane search bar with regex / case / word / wrap.                                                                       |
+| Link preview                                                                      | Hover-dwell tooltip for OSC 8 URLs.                                                                                        |
+| Paste protection                                                                  | Core unsafe-paste confirm plus Win32 classifier on clipboard and drag-drop. See [windows.md](windows.md#paste-path-security). |
+| Jump lists                                                                        | `ICustomDestinationList` recent directories from OSC 7 / 9;9.                                                              |
+| Explorer "Open here"                                                              | Classic HKCU verbs on Directory and Directory\\Background.                                                                 |
+| Prompt-mark navigation                                                            | Palette + default `jump_to_prompt` binds; copy-last-output and re-run last command.                                        |
+| UTF-8 console preamble                                                            | `utf8-console = auto\|always\|never`; auto skips legacy CJK ANSI code pages.                                               |
 
 ## Notes
 
@@ -69,7 +79,12 @@ that:
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
   does not auto-install remote terminfo; uncached hosts use
   `xterm-256color`.
-- `cmd.exe` remains a plain fallback shell without automatic integration.
+- `cmd.exe` automatic integration sets `PROMPT` for OSC 133 A/B and
+  OSC 9;9 cwd. Command-start (C) and exit-code (D) marks load only
+  when Clink is on PATH (`src/shell-integration/cmd/clink.lua`).
+- `utf8-console = auto|always|never` applies a UTF-8 console preamble
+  (`chcp 65001` for cmd, `[Console]::OutputEncoding` for PowerShell).
+  `auto` refuses to force UTF-8 on legacy CJK ANSI code pages.
 
 ### Accessibility
 

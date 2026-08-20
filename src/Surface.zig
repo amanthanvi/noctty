@@ -717,6 +717,7 @@ pub fn init(
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
             .shell_integration_features = config.@"shell-integration-features",
+            .utf8_console = config.@"utf8-console",
             .cursor_blink = config.@"cursor-style-blink",
             .working_directory = if (config.@"working-directory") |wd| wd.value() else null,
             .working_directory_home = if (config.@"working-directory") |wd| wd == .home else false,
@@ -2245,6 +2246,77 @@ pub fn hasSelection(self: *const Surface) bool {
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
     return self.io.terminal.screens.active.selection != null;
+}
+
+fn lastCompletedPromptPin(self: *Surface) ?terminal.Pin {
+    const screen = self.io.terminal.screens.active;
+    const br = screen.pages.getBottomRight(.screen) orelse return null;
+    var it = br.promptIterator(.left_up, screen.pages.getTopLeft(.screen));
+    _ = it.next() orelse return null;
+    return it.next();
+}
+
+fn lastCommandSelection(self: *Surface, content: terminal.Cell.SemanticContent) ?terminal.Selection {
+    const prompt = self.lastCompletedPromptPin() orelse return null;
+    const hl = self.io.terminal.screens.active.pages.highlightSemanticContent(
+        prompt,
+        content,
+    ) orelse {
+        if (content != .output) return null;
+        const screen = self.io.terminal.screens.active;
+        const br = screen.pages.getBottomRight(.screen) orelse return null;
+        var it = br.promptIterator(.left_up, screen.pages.getTopLeft(.screen));
+        const current = it.next() orelse return null;
+        const prev = it.next() orelse return null;
+        var end = current.up(1) orelse return null;
+        end.x = end.node.data.size.cols - 1;
+        return .init(prev.left(prev.x), end, false);
+    };
+    return .init(hl.start, hl.end, false);
+}
+
+fn copyLastCommandOutput(self: *Surface) !bool {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    const sel = self.lastCommandSelection(.output) orelse return false;
+    try self.copySelectionToClipboards(sel, &.{.standard}, .plain);
+    return true;
+}
+
+fn rerunLastCommand(self: *Surface) !bool {
+    self.renderer_state.mutex.lock();
+    const sel = self.lastCommandSelection(.input) orelse {
+        self.renderer_state.mutex.unlock();
+        return false;
+    };
+    const text = try self.io.terminal.screens.active.selectionString(self.alloc, .{
+        .sel = sel,
+        .trim = true,
+    });
+    self.renderer_state.mutex.unlock();
+    defer self.alloc.free(text);
+    if (text.len == 0) return false;
+
+    const line = std.mem.trim(u8, firstLine(text), " \t\r");
+    if (line.len == 0) return false;
+
+    var buf = try self.alloc.alloc(u8, line.len + 1);
+    @memcpy(buf[0..line.len], line);
+    buf[line.len] = '\r';
+    self.queueIo(try termio.Message.writeReq(self.alloc, buf), .unlocked);
+    self.alloc.free(buf);
+    return true;
+}
+
+fn firstLine(text: []const u8) []const u8 {
+    if (std.mem.indexOfAny(u8, text, "\r\n")) |i| return text[0..i];
+    return text;
+}
+
+test "firstLine splits on CR LF" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("echo hi", firstLine("echo hi\r\nmore"));
+    try testing.expectEqualStrings("only", firstLine("only"));
 }
 
 /// Returns the selected text. This is allocated.
@@ -5668,6 +5740,10 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .jump_to_prompt = @intCast(delta),
             }, .unlocked);
         },
+
+        .copy_last_command_output => return try self.copyLastCommandOutput(),
+
+        .rerun_last_command => return try self.rerunLastCommand(),
 
         .write_screen_file => |v| try self.writeScreenFile(
             .screen,

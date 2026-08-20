@@ -74,9 +74,19 @@ The profile picker detects common Windows shells:
 Shell integration is automatic for PowerShell and directly launched
 Unix-like shells such as Git Bash; WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
-working-directory updates and OSC 133 prompt markers. `cmd.exe` is a
-plain fallback shell today, with no automatic prompt, cwd, or
-command-finish integration.
+working-directory updates and OSC 133 prompt markers.
+
+`cmd.exe` is no longer a plain fallback: winghostty sets `PROMPT` so
+the next prompt emits OSC 133 A/B and OSC 9;9 (cwd). Command-start (C)
+and exit-code (D) marks are added when [Clink](https://chrisant996.github.io/clink/)
+is on `PATH`. Jump-to-prompt, copy-last-output, and re-run-last-command
+use those marks; see [Prompt-mark navigation](#prompt-mark-navigation).
+
+`utf8-console = auto|always|never` (default `auto`) applies a UTF-8
+console preamble so Nerd Font / oh-my-posh glyphs survive `cmd` and
+Windows PowerShell 5.1. `auto` skips forcing UTF-8 when the active
+console output code page is a legacy CJK ANSI page (932, 936, 949,
+950), because that can break existing OEM-encoded tools.
 
 WSL shows up in the picker, but it never becomes the default shell
 implicitly, because `wsl.exe --status` can report a healthy installation
@@ -86,6 +96,68 @@ in explicitly:
 ```ini
 command = wsl.exe
 ```
+
+## OS entry points
+
+Taskbar jump lists show recent working directories reported by shell
+integration (OSC 7 / OSC 9;9). Clicking a destination opens a new
+window in that directory via `--working-directory`.
+
+The installer and portable first-run registration add Explorer
+**Open winghostty here** on folders and folder backgrounds. Portable
+builds write HKCU verbs pointing at the current `winghostty.exe`;
+uninstall / moving the portable folder leaves those verbs stale until
+the next launch from the new path.
+
+## Prompt-mark navigation
+
+With shell integration loaded, these actions are in the command palette
+and (for jump) on the default keybinds:
+
+| Action | Default bind | What it does |
+| --- | --- | --- |
+| Jump to previous prompt | `Ctrl+Shift+PageUp` | Scroll to the previous OSC 133 prompt |
+| Jump to next prompt | `Ctrl+Shift+PageDown` | Scroll to the next OSC 133 prompt |
+| Copy last command output | palette | Copies text between the last two prompt marks |
+| Re-run last command | palette | Sends the first line after the previous prompt, then Enter |
+
+These never intercept the shell's own editor (no Warp-style input
+takeover). They only read marks the shell already emitted.
+
+## GPU floor
+
+winghostty requires **OpenGL 4.3+ via WGL** for terminal content. There
+is no DirectX or ANGLE fallback in this build. Corporate VMs, RDP
+sessions, and older iGPUs that only expose a software or 3.x ICD will
+not get a blank window: startup shows a dialog that names the failed
+step, the Win32 error, and the 4.3 requirement.
+
+What to try:
+
+1. Update the OEM GPU driver (AMD then NVIDIA on hybrid laptops).
+2. In Windows Graphics settings, pin `winghostty.exe` to the discrete
+   or integrated GPU and retry.
+3. For RDP / nested VMs, enable GPU remoting or run on a session with a
+   real OpenGL 4.3 ICD. RemoteFX / basic RDP WARP often cannot satisfy
+   the floor.
+
+Chrome still paints with D3D11/DirectComposition even when the terminal
+renderer is the one that failed; that does not replace the GL path.
+
+## Paste-path security
+
+Clipboard paste and Explorer / browser drag-drop share one confirm
+path:
+
+1. Core `clipboard-paste-protection` (newlines and bracketed-paste-end).
+2. The Win32 classifier in `src/apprt/win32_paste_protection.zig`
+   (control characters, shell metacharacters including `$var` / `%VAR%`,
+   mixed URL content).
+
+Unsafe payloads open the non-modal confirm overlay; they are never
+routed through `textCallback` (that path treats newlines as typed
+intent). This is the fork's coverage of upstream CVE-2026-26982 plus
+the Win32-only drop surfaces that AFL++ does not exercise.
 
 ## App identity
 
@@ -293,9 +365,9 @@ verify the distribution starts in a normal PowerShell session first.
 
 ### OpenGL driver issues
 
-winghostty needs OpenGL 4.3 or newer. If the window fails to render or
-exits early on older hardware, update GPU drivers before filing a
-rendering bug.
+See [GPU floor](#gpu-floor). If the window fails to render or exits
+early on older hardware, update GPU drivers before filing a rendering
+bug.
 
 If startup fails with `LoadLibrary failed with error 126` or the startup
 dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
@@ -319,3 +391,11 @@ current `zig-out\bin` binary rather than an older Scoop shim or a
 manually added install directory earlier on `PATH`. On Windows,
 `winghostty.com` may be selected before `winghostty.exe` for CLI
 invocations.
+
+## Benchmarks
+
+Published Windows numbers live in
+[windows-benchmarks.md](windows-benchmarks.md). The harness is
+`scripts/bench-windows.ps1`. PRODUCT.md budgets stay provisional until
+the first same-machine baseline against Windows Terminal, Alacritty,
+Tabby, and Wave.

@@ -627,6 +627,8 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .scroll_page_lines,
         .adjust_selection,
         .jump_to_prompt,
+        .copy_last_command_output,
+        .rerun_last_command,
         .new_window,
         .new_tab,
         .previous_tab,
