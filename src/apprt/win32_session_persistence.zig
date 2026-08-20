@@ -242,7 +242,7 @@ test "win32 session persistence OOM load is transient and leaves source present"
 }
 
 test "win32 session persistence schema round-trips multi-window selected indices" {
-    const nodes = [_]schema.Node{.{ .pane = .{ .cwd = "C:\\src\\winghostty" } }};
+    const nodes = [_]schema.Node{.{ .pane = .{ .cwd = "C:\\src\\noctty" } }};
     const first_tabs = [_]schema.Tab{
         .{ .selected_leaf = 0, .layout = .{ .root = 0, .nodes = &nodes } },
         .{ .selected_leaf = 0, .layout = .{ .root = 0, .nodes = &nodes } },

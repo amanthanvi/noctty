@@ -330,7 +330,7 @@ const test_items = [_]Item{
     },
     .{
         .id = .{ .kind = .theme, .value = 60 },
-        .title = "Winghostty Dark",
+        .title = "Noctty Dark",
         .keywords = "appearance color",
     },
     .{

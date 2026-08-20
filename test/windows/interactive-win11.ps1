@@ -43,7 +43,7 @@ $ErrorActionPreference = $callerErrorActionPreference
 Assert-Equal $ErrorActionPreference $callerErrorActionPreference 'dot-sourcing the helper library should not overwrite caller ErrorActionPreference'
 $ErrorActionPreference = 'Stop'
 
-$pathScratch = Join-Path $env:TEMP 'winghostty-interactive-win11-path-test'
+$pathScratch = Join-Path $env:TEMP 'noctty-interactive-win11-path-test'
 $samePathA = Join-Path $pathScratch 'worktrees\feature-a\repo'
 $samePathB = '{0}\' -f ($samePathA.Replace('\', '/'))
 $otherPath = Join-Path $pathScratch 'worktrees\feature-b\repo'
@@ -81,16 +81,16 @@ Assert-True ($launchArgs -contains '--linux-cgroup=always') 'launch args should 
 Assert-True ($launchArgs -contains '--linux-cgroup-hard-fail=true') 'launch args should fail when Job Object attachment fails'
 Assert-True ($launchArgs -contains '--windows-job-object-kill-on-close=true') 'launch args should terminate contained descendants when the host exits'
 Assert-True ($launchArgs -contains '--single-instance=false') 'launch args should disable single-instance forwarding'
-Assert-True ($launchArgs -contains "--class=winghostty-interactive-$($layout.SandboxId)") 'launch args should include a sandbox-unique class'
+Assert-True ($launchArgs -contains "--class=noctty-interactive-$($layout.SandboxId)") 'launch args should include a sandbox-unique class'
 
 $defaultBuildInputs = @(Get-InteractiveWin11DefaultBuildInputs -RepoRoot $layout.RepoRoot)
 Assert-Equal $defaultBuildInputs.Count 3 'default build inputs should track build files and src'
 Assert-Equal $defaultBuildInputs[0] (Join-Path $layout.RepoRoot 'build.zig') 'default build inputs should include build.zig'
 Assert-Equal $defaultBuildInputs[1] (Join-Path $layout.RepoRoot 'build.zig.zon') 'default build inputs should include build.zig.zon'
 Assert-Equal $defaultBuildInputs[2] (Join-Path $layout.RepoRoot 'src') 'default build inputs should include src'
-Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $layout.RepoRoot) (Get-InteractiveWin11NormalizedPath -Path (Join-Path $layout.RepoRoot 'zig-out\bin\winghostty.exe')) 'exe path helper should normalize the expected build output path'
+Assert-Equal (Get-InteractiveWin11ExePath -RepoRoot $layout.RepoRoot) (Get-InteractiveWin11NormalizedPath -Path (Join-Path $layout.RepoRoot 'zig-out\bin\noctty.exe')) 'exe path helper should normalize the expected build output path'
 
-$scratchRepo = Join-Path $env:TEMP 'winghostty-interactive-win11-test'
+$scratchRepo = Join-Path $env:TEMP 'noctty-interactive-win11-test'
 $scratchLayout = Get-InteractiveWin11SandboxLayout -RepoRoot $scratchRepo
 New-Item -ItemType Directory -Force -Path $scratchLayout.Temp | Out-Null
 Set-Content -Path (Join-Path $scratchLayout.Temp 'marker.txt') -Value 'ok'
@@ -125,12 +125,12 @@ catch {
 Assert-True $resetBlocked 'prefix-collision sandbox target should be refused'
 Assert-True (Test-Path $escapeRoot) 'refused sandbox target should not be deleted'
 
-$launchScratch = Join-Path $env:TEMP 'winghostty-interactive-win11-launch-test'
+$launchScratch = Join-Path $env:TEMP 'noctty-interactive-win11-launch-test'
 Remove-Item -LiteralPath $launchScratch -Recurse -Force -ErrorAction SilentlyContinue
 
-$missingExe = Join-Path $launchScratch 'zig-out\bin\winghostty.exe'
-$existingExe = Join-Path $launchScratch 'ready\zig-out\bin\winghostty.exe'
-$directoryExe = Join-Path $launchScratch 'dir\zig-out\bin\winghostty.exe'
+$missingExe = Join-Path $launchScratch 'zig-out\bin\noctty.exe'
+$existingExe = Join-Path $launchScratch 'ready\zig-out\bin\noctty.exe'
+$directoryExe = Join-Path $launchScratch 'dir\zig-out\bin\noctty.exe'
 $staleInputDir = Join-Path $launchScratch 'stale\src'
 $staleInputFile = Join-Path $staleInputDir 'win32.zig'
 $metadataInputDir = Join-Path $launchScratch 'metadata\src'
@@ -187,7 +187,7 @@ try {
 }
 catch {
     $missingBinaryBlocked = $true
-    Assert-True ($_.Exception.Message -like '*winghostty.exe*') 'missing binary with no-build should mention winghostty.exe'
+    Assert-True ($_.Exception.Message -like '*noctty.exe*') 'missing binary with no-build should mention noctty.exe'
 }
 
 Assert-True $missingBinaryBlocked 'missing binary with no-build should throw'

@@ -8,17 +8,17 @@ per-product frame does not fit a ten-project field.
 
 The "adilahmeddev lineage" the sweep flagged is real but decaying — the
 root fork is deleted/private, one AI-era port is already archived, and
-no hard fork out-tracks winghostty (255★) on stars, releases, signing,
+no hard fork out-tracks noctty (255★) on stars, releases, signing,
 or packaging. The live threat is not any fork: it is upstream itself —
 Windows CI, a tiered contribution plan, mattn actively working Tier 2,
 wintty's 17 merged PRs, and mitchellh's bet that libghostty consumers
 dwarf the GUI by mid-2027. Ghostty maintainer pluiedev stated (Jul 12,
-2026, prompted by a question about winghostty) that unaffiliated
+2026, prompted by a question about noctty) that unaffiliated
 projects **must not use "Ghostty" in their branding** — a live
-rename/trademark risk for winghostty itself. Strategic conclusion:
-winghostty wins the fork field today on trust and completeness, but
+rename/trademark risk for noctty itself. Strategic conclusion:
+noctty wins the fork field today on trust and completeness, but
 "THE Ghostty on Windows" title will be claimed by upstream or a blessed
-libghostty consumer, so winghostty should position as its own product,
+libghostty consumer, so noctty should position as its own product,
 prepare a naming posture, and exploit the field's unverifiable-AI-claims
 problem with signed, verified, benchmarked releases.
 
@@ -26,7 +26,7 @@ problem with signed, verified, benchmarked releases.
 
 Four architectural archetypes, ordered by threat relevance:
 
-**A. Hard forks with a Win32 apprt (winghostty's own archetype):**
+**A. Hard forks with a Win32 apprt (noctty's own archetype):**
 
 - **adilahmeddev `windows-apprt` lineage (root: gone).**
   `github.com/adilahmeddev/ghostty` and `/ghostty-windows` both return
@@ -141,14 +141,14 @@ mitchellh says libghostty "backs more than a dozen terminal projects"
 and predicts libghostty users "will dwarf" GUI users by mid-2027
 ([HN](https://news.ycombinator.com/item?id=47207472)).
 
-**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12, 2026) "has anyone used github.com/amanthanvi/winghostty?" and
+**Trademark (load-bearing).** In #12371, Crypto-Spartan asked (Jul 12, 2026) "has anyone used github.com/amanthanvi/noctty?" and
 collaborator pluiedev replied the same day: "Note that projects
 unaffiliated with the Ghostty project must not use 'Ghostty' as a part
 of their branding, since it's a trademark owned by our nonprofit and
 not open for the public to freely use," adding that fork maintainers
 should be told "they need to find a different name"
 ([#12371](https://github.com/ghostty-org/ghostty/discussions/12371)).
-winghostty was the named trigger for this statement. WolftacDigital's
+noctty was the named trigger for this statement. WolftacDigital's
 rename to "Spectre" shows the policy already reshaping the field.
 
 ## 2. Performance & fluidity
@@ -157,7 +157,7 @@ rename to "Spectre" shows the policy already reshaping the field.
   dominant choice (adilahmeddev lineage, mite, winterm-ghostty, zcg's
   D2D/D3D11) — and matches upstream's stated Direct3D preference for
   eventual official Windows work (#2563, Apr 2026 guidance). shiweis
-  is the OpenGL 4.6/WGL outlier; winghostty (OpenGL 4.3/WGL + separate
+  is the OpenGL 4.6/WGL outlier; noctty (OpenGL 4.3/WGL + separate
   D3D11/DComp chrome) sits closer to shiweis than to upstream's stated
   direction.
 - The only published throughput number in the family: winterm-ghostty's pty drain
@@ -168,7 +168,7 @@ rename to "Spectre" shows the policy already reshaping the field.
 - mite's <2 MB optimized exe is a startup/footprint benchmark claim
   worth remembering ([repo](https://github.com/marler8997/mite)).
 - No fork publishes latency, frame-time, or scroll benchmarks. Nobody
-  in the field can substantiate a fluidity story; winghostty could own
+  in the field can substantiate a fluidity story; noctty could own
   this axis simply by measuring.
 
 ## 3. Native Windows integration
@@ -180,18 +180,18 @@ rename to "Spectre" shows the policy already reshaping the field.
   terminfo auto-install and WSL VM keepalive
   ([repo](https://github.com/Codavo/ghostinthewsl)); one #12371
   commenter alternatively embeds a newer ConPTY (Aug 2, 2026). This is
-  the strongest technical challenge to winghostty's WSL story, which is
+  the strongest technical challenge to noctty's WSL story, which is
   plain ConPTY.
 - **IME:** the Thr45hx build ships with IME cursor-positioning broken
   ([BUILD-LOG](https://github.com/Thr45hx/ghostty-windows/blob/master/BUILD-LOG.md));
-  shiweis claims working CJK IME. winghostty's shipped IME is ahead of
+  shiweis claims working CJK IME. noctty's shipped IME is ahead of
   the lineage snapshot.
 - **Chrome:** zcg had Mica/Acrylic custom title bars; shiweis/Thr45hx
-  use GDI overlays for tabs/search/palette — cheaper than winghostty's
+  use GDI overlays for tabs/search/palette — cheaper than noctty's
   DirectWrite/DComp chrome pipeline but visually cruder.
 - Nobody in the family documents Snap Layouts, jump lists, taskbar
   progress, default-terminal registration, or ARM64. **No fork ships
-  ARM64** (Thr45hx is x64-only by name); winghostty's ARM64 support is
+  ARM64** (Thr45hx is x64-only by name); noctty's ARM64 support is
   unique in the entire field.
 - winterm-ghostty inherits _all_ of Windows Terminal's integration
   (Snap, jump lists, default-terminal handoff, MSIX) for free — the
@@ -201,7 +201,7 @@ rename to "Spectre" shows the policy already reshaping the field.
 
 All archetype-A/B efforts inherit Ghostty's VT core, so paper
 capability (VT depth, Kitty graphics, OSC 8/52, mouse modes) is
-identical to winghostty's; differences are in what the platform layer
+identical to noctty's; differences are in what the platform layer
 actually delivers:
 
 - shiweis claims full VT + Kitty graphics under OpenGL 4.6 and 463
@@ -210,12 +210,12 @@ actually delivers:
   no binaries.
 - ghostinthewsl delivers kitty graphics _through real Linux PTYs_,
   sidestepping ConPTY stripping — for WSL-heavy users this is a real
-  capability delta over every ConPTY-based port including winghostty.
+  capability delta over every ConPTY-based port including noctty.
 - winterm-ghostty: rendering, input, selection, clipboard, search,
   marks, IME "all work" per README; screen readers cannot read ghostty
   panes (accessibility unstarted).
 - hollow adds keyboard quick-select of links/IPs/paths/filenames — a
-  keyboard-first capability winghostty lacks.
+  keyboard-first capability noctty lacks.
 - Upstream tracking matters for capability drift: shiweis merges
   upstream main continuously (Zig 0.16, Kitty-image fixes, July 2026);
   a hard fork that stops merging (Thr45hx, frozen at 1.3.0-dev) decays
@@ -226,18 +226,18 @@ actually delivers:
 - Tabs + splits: table stakes across the family (Thr45hx, shiweis,
   hollow, winterm via WT).
 - **Quick/dropdown terminal with global hotkey:** shiweis ships it;
-  winghostty has no such surface (echoes the long-tail finding).
+  noctty has no such surface (echoes the long-tail finding).
 - **Command palette:** shiweis has a filterable action palette;
-  winghostty's universal palette (blended actions/tabs/panes/profiles/
+  noctty's universal palette (blended actions/tabs/panes/profiles/
   themes/settings) is richer than anything in the field.
 - **Workspaces:** hollow's workspaces + floating/maximized panes go
-  beyond winghostty's window/tab/split model.
+  beyond noctty's window/tab/split model.
 - **Session restore: nobody in the family has it.** No fork documents
-  layout persistence, let alone winghostty's windows/tabs/splits/
+  layout persistence, let alone noctty's windows/tabs/splits/
   profiles/cwd restore with quarantine-and-safe-mode recovery. This is
-  winghostty's single clearest workflow moat over the family.
+  noctty's single clearest workflow moat over the family.
 - Broadcast input, profiles-as-UI, undo/redo of structural operations:
-  absent everywhere except winghostty.
+  absent everywhere except noctty.
 
 ## 6. Reliability & quality signals
 
@@ -261,7 +261,7 @@ actually delivers:
 ## 7. Configuration & extensibility
 
 - Forks inherit Ghostty's config grammar unchanged; none add a
-  settings GUI (winghostty's native settings window is unique in the
+  settings GUI (noctty's native settings window is unique in the
   field).
 - **hollow's LuaJIT layer** (`hollow.config/term/events/keymap/ui/htp`
   APIs, plugin system for custom panes/overlays/widgets) is the
@@ -280,7 +280,7 @@ Traction snapshot (2026-08-17, GitHub):
 
 | Project                 | Stars   | Releases                   | Signing      | Package mgr    | Active?                 |
 | ----------------------- | ------- | -------------------------- | ------------ | -------------- | ----------------------- |
-| **winghostty**          | 255     | v1.3.123 (Aug 6)           | Authenticode | winget + Scoop | yes                     |
+| **noctty**          | 255     | v1.3.123 (Aug 6)           | Authenticode | winget + Scoop | yes                     |
 | Thr45hx/ghostty-windows | 59      | 1 (unsigned Inno, SHA-256) | none         | none           | barely                  |
 | Codavo/ghostinthewsl    | 53      | 6 CI releases              | none stated  | none           | yes                     |
 | mattn/ghostty (fork)    | 45      | —                          | —            | —              | yes (upstream-directed) |
@@ -289,14 +289,14 @@ Traction snapshot (2026-08-17, GitHub):
 | mite / hollow           | 22 / 22 | none / none stated         | none         | none           | idle / yes              |
 | winterm-ghostty         | 5       | MSIX (self-signed)         | self-signed  | none           | yes (new)               |
 
-- winghostty leads the family on every distribution axis: the only trusted (non-self-signed) Authenticode-signed binaries, only winget/Scoop presence, only updater with
+- noctty leads the family on every distribution axis: the only trusted (non-self-signed) Authenticode-signed binaries, only winget/Scoop presence, only updater with
   checksum+Authenticode gating. The sweep's judgment stands and is now
   quantified.
 - Fork onboarding friction is severe: shiweis (the most capable hard
   fork) requires installing Zig 0.16 and cross-compiling; Thr45hx's
   installer needs admin and previously _corrupted PATH_
   ([release notes](https://github.com/Thr45hx/ghostty-windows/releases)).
-- Nobody except winghostty documents an update mechanism.
+- Nobody except noctty documents an update mechanism.
 
 ## 9. What users complain about
 
@@ -304,25 +304,25 @@ Direct user feedback on the forks is sparse (few users); the observable
 complaints are field-level:
 
 - **Fork confusion:** the question that triggered the trademark
-  statement — "has anyone used winghostty?" — was asked _inside
+  statement — "has anyone used noctty?" — was asked _inside
   upstream's ports thread_ because users cannot evaluate the swarm
   ([#12371](https://github.com/ghostty-org/ghostty/discussions/12371)).
 - **Branding pushback from upstream** is itself the loudest recorded
-  "complaint" about the family, winghostty included (same thread).
+  "complaint" about the family, noctty included (same thread).
 - Thr45hx's own release notes document the classic unsigned-solo-build
   failure modes users hit: AVX-512 crash on older CPUs, PATH
   corruption by the installer, missing themes/shell-integration files.
 - Upstream discussion sentiment (#2563): years of pent-up demand
   ("I would love ghostty.exe to run as a Windows .exe"), impatience
-  with WSL workarounds — demand winghostty can serve _today_ but only
+  with WSL workarounds — demand noctty can serve _today_ but only
   if discoverable and trusted.
 - jeffquast-style third-party verification does not exist for any fork;
   "stable for daily use" claims circulate unchallenged — a trust vacuum.
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
 **Strategic verdict on the ticket's question:** no hard fork is likelier
-than winghostty to become the de-facto Ghostty on Windows — winghostty
+than noctty to become the de-facto Ghostty on Windows — noctty
 leads on traction, packaging, trust, and feature completeness, and the
 lineage is decaying (root deleted, one archive, one frozen). The
 credible claimants to "THE Ghostty on Windows" are (a) **upstream
@@ -330,35 +330,35 @@ itself**, arriving incrementally via the tiered plan, mattn, and
 wintty's merged infrastructure PRs, and (b) **libghostty consumers**,
 the shape upstream is institutionally building toward — including
 winterm-ghostty's ride-the-incumbent wedge. The fragmented field does
-change winghostty's posture: the trademark statement puts "generic Ghostty fork" positioning in direct conflict with upstream's stated branding policy, and the fork swarm makes
+change noctty's posture: the trademark statement puts "generic Ghostty fork" positioning in direct conflict with upstream's stated branding policy, and the fork swarm makes
 trust signals (signing, verification, benchmarks) the deciding axis.
 
 ### Does well (adopt-candidates)
 
 - **Quick terminal (global-hotkey slide-in)** — shiweis ships it; no
-  winghostty surface (docs/status.md), and the long-tail sweep flagged
+  noctty surface (docs/status.md), and the long-tail sweep flagged
   the same gap ([shiweis](https://github.com/shiweis/ghostty-windows)).
 - **WSL PTY bypass via Hyper-V sockets/VSOCK** — real Linux PTYs, full
-  kitty graphics, terminfo auto-install, WSL keepalive vs winghostty's
+  kitty graphics, terminfo auto-install, WSL keepalive vs noctty's
   plain-ConPTY WSL ([ghostinthewsl](https://github.com/Codavo/ghostinthewsl)).
   The keepalive alone is a cheap adopt.
 - **Explicit upstream-merge cadence, documented** — shiweis's visible
   "merged N upstream commits" policy keeps Ghostty 1.3+ capability
-  current; winghostty's docs state no drift/merge policy
+  current; noctty's docs state no drift/merge policy
   ([commits](https://github.com/shiweis/ghostty-windows/commits/main)).
 - **Keyboard quick-select of links/paths/IPs on screen** (hollow) —
   pure keyboard-first territory PRODUCT.md claims but doesn't cover
   ([hollow](https://github.com/sudo-tee/hollow)).
 - **D3D11/DirectWrite terminal rendering path** — the family majority
   _and_ upstream's stated preference (#2563 Apr 2026 guidance); a
-  D3D11 renderer option would future-proof winghostty against
+  D3D11 renderer option would future-proof noctty against
   upstream-alignment work and Intel/OpenGL-driver pain.
 - **Reproducibility discipline** — winterm-ghostty's pinned-commit +
   exported-patch-series model makes a fork auditable; good answer to
   "how do I know what you changed?"
   ([winterm-ghostty](https://github.com/ibuildthecloud/winterm-ghostty)).
 - **Desktop notifications (OSC 9/777-style)** — shiweis lists them;
-  absent from winghostty's documented surface.
+  absent from noctty's documented surface.
 
 ### Does badly (avoid / exploit)
 
@@ -368,7 +368,7 @@ trust signals (signing, verification, benchmarks) the deciding axis.
   results, benchmark numbers, test-suite badges. Trust is the moat the
   swarm cannot cross.
 - **No releases at all** (shiweis) or unsigned admin-rights installers
-  that corrupted PATH (Thr45hx) — winghostty's
+  that corrupted PATH (Thr45hx) — noctty's
   Authenticode + winget/Scoop + gated updater is its clearest edge;
   keep it loud in positioning.
 - **Bus-factor-1 disappearance**: the lineage root deleted itself;
@@ -377,16 +377,16 @@ trust signals (signing, verification, benchmarks) the deciding axis.
 - **Frozen snapshots decay** — Thr45hx is stuck at 1.3.0-dev while
   upstream ships scrollback search etc.; avoid by institutionalizing
   upstream merges (see adopt list).
-- **x64-only everywhere** — winghostty's ARM64 build is unique in the
+- **x64-only everywhere** — noctty's ARM64 build is unique in the
   entire family; advertise it.
 - **Accessibility ignored across the field** (winterm-ghostty admits
   screen readers can't read its panes; nobody else mentions UIA) —
-  winghostty's partial UIA/TextPattern work is a differentiator worth
+  noctty's partial UIA/TextPattern work is a differentiator worth
   finishing and stating.
 
 ### Blind-spot candidates
 
-- **Trademark/naming risk is live, specific, and aimed at winghostty**:
+- **Trademark/naming risk is live, specific, and aimed at noctty**:
   upstream collaborator, Jul 12 2026 — unaffiliated projects "must not
   use 'Ghostty' as a part of their branding"; maintainers should be
   told "they need to find a different name"
@@ -401,26 +401,26 @@ trust signals (signing, verification, benchmarks) the deciding axis.
   and mitchellh's mid-2027 libghostty prediction
   ([HN](https://news.ycombinator.com/item?id=47207472)) mean the
   blessed path is "app built on libghostty," not "fork of ghostty."
-  PRODUCT.md has no category for how winghostty relates to that
+  PRODUCT.md has no category for how noctty relates to that
   trajectory (track libghostty API? restructure toward it? ignore?).
 - **Upstream Windows arrival as a dated threat**: Windows CI (Dec
   2025), tier plan with D3D/Win10-11/minimal-C++ guidance (Apr 2026),
   mattn on Tier 2, wintty's 17 merged PRs — an official or blessed
-  Windows Ghostty plausibly lands within winghostty's planning horizon.
-  No PRODUCT.md category answers "what is winghostty when upstream
+  Windows Ghostty plausibly lands within noctty's planning horizon.
+  No PRODUCT.md category answers "what is noctty when upstream
   ships Windows?" (Candidate answer: the session-restore + native-
   polish + trust product — the things upstream's tiers won't do first.)
 - **Upstreaming as strategy**: wintty converted Windows work into 17
-  merged upstream PRs and goodwill; winghostty contributes nothing
+  merged upstream PRs and goodwill; noctty contributes nothing
   upstream today. Separable pieces (build fixes, ConPTY glue, VT
   conformance results) could buy standing under the vouch model —
   relevant if a naming/permission conversation ever happens.
 - **Ride-the-incumbent distribution** (winterm-ghostty): shipping the
   engine inside Windows Terminal turns the platform default from enemy
-  into channel. Not winghostty's play, but a category of competitor
+  into channel. Not noctty's play, but a category of competitor
   PRODUCT.md doesn't anticipate: users who get "Ghostty rendering"
   without leaving Windows Terminal.
-- **Fork-field hygiene as user-facing content**: a "why winghostty /
+- **Fork-field hygiene as user-facing content**: a "why noctty /
   how we differ from the swarm / how to verify our binaries" page
   converts the confusion documented in #12371 into acquisitions;
   nothing in PRODUCT.md covers competitive self-identification.

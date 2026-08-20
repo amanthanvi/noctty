@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -75,7 +75,7 @@ function Invoke-AppShellRun {
     $launchArgs = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=winghostty-shell-command-$Name-$($layout.SandboxId)"
+        "--class=noctty-shell-command-$Name-$($layout.SandboxId)"
         '-e'
     ) + $ShellArgs
 
@@ -90,17 +90,17 @@ function Invoke-AppShellRun {
 
     try {
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            throw "winghostty $Name run timed out after $TimeoutSeconds seconds"
+            throw "noctty $Name run timed out after $TimeoutSeconds seconds"
         }
 
         $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
         if ($exitCode -ne 0) {
-            throw "winghostty $Name run exited with code $exitCode"
+            throw "noctty $Name run exited with code $exitCode"
         }
 
         $stderr = Get-InteractiveWin11TextFile -Path $StderrPath
         if ($stderr -match 'error starting IO thread:|panic: reached unreachable code') {
-            throw "winghostty $Name run reported a runtime failure"
+            throw "noctty $Name run reported a runtime failure"
         }
 
         return $stderr
@@ -125,7 +125,7 @@ if ($launchAction -eq 'build') {
 Assert-InteractiveWin11ExeExists -ExePath $exePath
 
 $exeDir = Split-Path -Parent $exePath
-$expectedCommandPath = Join-Path $exeDir 'winghostty.com'
+$expectedCommandPath = Join-Path $exeDir 'noctty.com'
 
 $cmdResolvedPath = Join-Path $layout.Temp 'cmd-resolved.txt'
 $cmdHelpPath = Join-Path $layout.Temp 'cmd-help.txt'
@@ -142,13 +142,13 @@ Remove-Item -LiteralPath $cmdResolvedPath, $cmdHelpPath, $cmdVersionPath, $cmdBo
 
 @(
     '@echo off'
-    "where winghostty > `"$cmdResolvedPath`" || exit /b 1"
-    "winghostty +help > `"$cmdHelpPath`" || exit /b 1"
-    "winghostty +version > `"$cmdVersionPath`" || exit /b 1"
-    "winghostty +boo --help > `"$cmdBooHelpPath`" || exit /b 1"
-    "winghostty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
-    "winghostty +list-colors > `"$cmdColorsPath`" || exit /b 1"
-    "winghostty +list-themes > `"$cmdThemesPath`" || exit /b 1"
+    "where noctty > `"$cmdResolvedPath`" || exit /b 1"
+    "noctty +help > `"$cmdHelpPath`" || exit /b 1"
+    "noctty +version > `"$cmdVersionPath`" || exit /b 1"
+    "noctty +boo --help > `"$cmdBooHelpPath`" || exit /b 1"
+    "noctty +list-keybinds > `"$cmdKeybindsPath`" || exit /b 1"
+    "noctty +list-colors > `"$cmdColorsPath`" || exit /b 1"
+    "noctty +list-themes > `"$cmdThemesPath`" || exit /b 1"
 ) | Set-Content -LiteralPath $cmdPayloadPath -Encoding ASCII
 
 $null = Invoke-AppShellRun `
@@ -162,9 +162,9 @@ if ($cmdResolved.Count -lt 1) {
     throw "cmd run produced no command resolution output ($cmdResolvedPath)"
 }
 if (-not $cmdResolved[0].Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "cmd resolved unexpected first winghostty command: $($cmdResolved[0])"
+    throw "cmd resolved unexpected first noctty command: $($cmdResolved[0])"
 }
-Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: winghostty [+action] [options]' -Label 'cmd +help'
+Assert-Contains -Text (Get-RequiredTextFile -Path $cmdHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'cmd +help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdVersionPath) -Expected 'Build Config' -Label 'cmd +version'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdBooHelpPath) -Expected 'The `boo` command is used to display the project animation in the terminal.' -Label 'cmd +boo --help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $cmdKeybindsPath) -Expected 'keybind = ctrl+shift+,=reload_config' -Label 'cmd +list-keybinds'
@@ -192,24 +192,24 @@ $psThemesLiteral = Get-EscapedPowerShellLiteralPath -Path $psThemesPath
 Remove-Item -LiteralPath $psResolvedPath, $psHelpPath, $psVersionPath, $psBooHelpPath, $psKeybindsPath, $psColorsPath, $psThemesPath, $psPayloadPath, $psStdoutPath, $psStderrPath -ErrorAction SilentlyContinue
 
 @(
-    '$resolved = (Get-Command winghostty).Source'
+    '$resolved = (Get-Command noctty).Source'
     "Set-Content -LiteralPath '$psResolvedLiteral' -Value `$resolved -Encoding ASCII"
-    '$help = winghostty +help | Out-String'
+    '$help = noctty +help | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psHelpLiteral' -Value `$help -Encoding UTF8"
-    '$version = winghostty +version | Out-String'
+    '$version = noctty +version | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psVersionLiteral' -Value `$version -Encoding UTF8"
-    '$booHelp = winghostty +boo --help | Out-String'
+    '$booHelp = noctty +boo --help | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psBooHelpLiteral' -Value `$booHelp -Encoding UTF8"
-    '$keybinds = winghostty +list-keybinds | Out-String'
+    '$keybinds = noctty +list-keybinds | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psKeybindsLiteral' -Value `$keybinds -Encoding UTF8"
-    '$colors = winghostty +list-colors | Out-String'
+    '$colors = noctty +list-colors | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psColorsLiteral' -Value `$colors -Encoding UTF8"
-    '$themes = winghostty +list-themes | Out-String'
+    '$themes = noctty +list-themes | Out-String'
     'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
     "Set-Content -LiteralPath '$psThemesLiteral' -Value `$themes -Encoding UTF8"
 ) | Set-Content -LiteralPath $psPayloadPath -Encoding UTF8
@@ -222,9 +222,9 @@ $null = Invoke-AppShellRun `
 
 $psResolved = (Get-RequiredTextFile -Path $psResolvedPath).Trim()
 if (-not $psResolved.Equals($expectedCommandPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "PowerShell resolved unexpected winghostty command: $psResolved"
+    throw "PowerShell resolved unexpected noctty command: $psResolved"
 }
-Assert-Contains -Text (Get-RequiredTextFile -Path $psHelpPath) -Expected 'Usage: winghostty [+action] [options]' -Label 'PowerShell +help'
+Assert-Contains -Text (Get-RequiredTextFile -Path $psHelpPath) -Expected 'Usage: noctty [+action] [options]' -Label 'PowerShell +help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psVersionPath) -Expected 'Build Config' -Label 'PowerShell +version'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psBooHelpPath) -Expected 'The `boo` command is used to display the project animation in the terminal.' -Label 'PowerShell +boo --help'
 Assert-Contains -Text (Get-RequiredTextFile -Path $psKeybindsPath) -Expected 'keybind = ctrl+shift+,=reload_config' -Label 'PowerShell +list-keybinds'

@@ -4,7 +4,7 @@
   "triggerOnUpdates": true,
   "statusCheck": true,
   "ignorePatterns": ".zig-cache/**\nzig-out/**\ndist/windows/**/*.zip\ndist/windows/**/*.msix\n**/*.png\n**/*.ico",
-  "instructions": "This repository is winghostty, a Windows-focused Ghostty fork. Review against amanthanvi/winghostty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes and targeted zig build test -Dtest-filter validation.",
+  "instructions": "This repository is noctty, a Windows-focused Ghostty fork. Review against amanthanvi/noctty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes and targeted zig build test -Dtest-filter validation.",
   "rules": [
     {
       "id": "win32-search-generation",
@@ -20,7 +20,7 @@
     },
     {
       "id": "fork-target",
-      "rule": "Repository operations and review suggestions must target amanthanvi/winghostty and must not assume upstream ghostty-org/ghostty publishing paths.",
+      "rule": "Repository operations and review suggestions must target amanthanvi/noctty and must not assume upstream ghostty-org/ghostty publishing paths.",
       "severity": "medium"
     }
   ]

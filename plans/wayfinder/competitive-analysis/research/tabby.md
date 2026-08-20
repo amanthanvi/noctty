@@ -4,7 +4,7 @@ Researched 2026-08-17. Evidence: GitHub repo/issues/releases, tabby.sh, DeepWiki
 
 ## Executive summary
 
-Tabby is a ~74k-star MIT Electron/Angular/xterm.js terminal + SSH/serial/telnet client that wins users *despite* its weight because it bundles a PuTTY/mRemoteNG-class connection manager, an encrypted secrets vault, a GUI-first settings surface, and an npm plugin system into one cross-platform app ([README](https://github.com/Eugeny/tabby)). Its Windows story is broad but shallow: every shell (PowerShell, WSL, Cygwin, Cmder, Clink completion), portable mode, quake mode — yet no default-terminal registration and Electron-grade startup and RAM. Performance is its permanent open wound: 200–400MB idle RAM, documented 30–60s first-tab startup pathologies, 740MB GPU RAM vs Windows Terminal's 32MB, and a 15GB memory-leak report ([#10857](https://github.com/Eugeny/tabby/issues/10857), [discussion #5667](https://github.com/Eugeny/tabby/discussions/5667), [#10414](https://github.com/Eugeny/tabby/issues/10414)). Governance is effectively one person (Eugeny); the companion tabby-web sync service is unmaintained for lack of sponsors, and a 2026 reviewer notes the plugin ecosystem "has gone quiet" ([tabby-web README](https://github.com/Eugeny/tabby-web), [MOLTamp](https://moltamp.com/blog/best-tabby-terminal-plugins-2026/)). Core lesson for winghostty: Tabby proves demand for *managed connections + GUI config + secrets* on Windows is huge, and that users will pay a heavy performance tax to get it — winghostty can offer the workflow value without the tax.
+Tabby is a ~74k-star MIT Electron/Angular/xterm.js terminal + SSH/serial/telnet client that wins users *despite* its weight because it bundles a PuTTY/mRemoteNG-class connection manager, an encrypted secrets vault, a GUI-first settings surface, and an npm plugin system into one cross-platform app ([README](https://github.com/Eugeny/tabby)). Its Windows story is broad but shallow: every shell (PowerShell, WSL, Cygwin, Cmder, Clink completion), portable mode, quake mode — yet no default-terminal registration and Electron-grade startup and RAM. Performance is its permanent open wound: 200–400MB idle RAM, documented 30–60s first-tab startup pathologies, 740MB GPU RAM vs Windows Terminal's 32MB, and a 15GB memory-leak report ([#10857](https://github.com/Eugeny/tabby/issues/10857), [discussion #5667](https://github.com/Eugeny/tabby/discussions/5667), [#10414](https://github.com/Eugeny/tabby/issues/10414)). Governance is effectively one person (Eugeny); the companion tabby-web sync service is unmaintained for lack of sponsors, and a 2026 reviewer notes the plugin ecosystem "has gone quiet" ([tabby-web README](https://github.com/Eugeny/tabby-web), [MOLTamp](https://moltamp.com/blog/best-tabby-terminal-plugins-2026/)). Core lesson for noctty: Tabby proves demand for *managed connections + GUI config + secrets* on Windows is huge, and that users will pay a heavy performance tax to get it — noctty can offer the workflow value without the tax.
 
 ## 1. Identity & strategy
 
@@ -39,11 +39,11 @@ Tabby is a ~74k-star MIT Electron/Angular/xterm.js terminal + SSH/serial/telnet 
 
 ## 4. Terminal capability
 
-- **VT depth**: xterm.js — "VT220 with extensions" per README; solid for everyday TUIs but shallower than Ghostty's core (which winghostty inherits). Full Unicode incl. double-width; ligatures; bracketed paste ([README](https://github.com/Eugeny/tabby), [DeepWiki](https://deepwiki.com/Eugeny/tabby/1.1-features-and-capabilities)).
-- **Graphics**: none shipping. Sixel requests open since 2022 ([#6032](https://github.com/Eugeny/tabby/issues/6032), [#7063](https://github.com/Eugeny/tabby/issues/7063)); Kitty graphics protocol request open and among top-voted ([#9819](https://github.com/Eugeny/tabby/issues/9819)). winghostty already ships Kitty graphics — a direct capability win.
+- **VT depth**: xterm.js — "VT220 with extensions" per README; solid for everyday TUIs but shallower than Ghostty's core (which noctty inherits). Full Unicode incl. double-width; ligatures; bracketed paste ([README](https://github.com/Eugeny/tabby), [DeepWiki](https://deepwiki.com/Eugeny/tabby/1.1-features-and-capabilities)).
+- **Graphics**: none shipping. Sixel requests open since 2022 ([#6032](https://github.com/Eugeny/tabby/issues/6032), [#7063](https://github.com/Eugeny/tabby/issues/7063)); Kitty graphics protocol request open and among top-voted ([#9819](https://github.com/Eugeny/tabby/issues/9819)). noctty already ships Kitty graphics — a direct capability win.
 - **Hyperlinks/clipboard**: xterm.js link handling; clipboard OSC support not prominently documented (uncertain — likely partial).
 - **Shell integration**: no OSC 133 prompt-marks/command-duration story comparable to Ghostty/WezTerm; Tabby's "integration" means shell *profiles* and Clink completion, not semantic prompt zones (medium confidence from docs absence + issue #632 asking for output highlighting).
-- **Zmodem file transfer** over SSH — a capability winghostty has no analog for ([README](https://github.com/Eugeny/tabby)).
+- **Zmodem file transfer** over SSH — a capability noctty has no analog for ([README](https://github.com/Eugeny/tabby)).
 - **Search & scrollback**: in-buffer search exists; scrollback is xterm.js in-memory (no unlimited/disk-backed scrollback). New in 1.0.234: "export terminal contents to file" ([release notes](https://github.com/Eugeny/tabby/releases/tag/v1.0.234)).
 
 ## 5. Workflow features
@@ -53,7 +53,7 @@ The section that explains 74k stars:
 - **SSH connection manager**: saved profiles in tree/groups (profile *tree view* added v1.0.235), jump-host chaining, X11 + port forwarding, agent forwarding, login scripts, auto-sudo-password, `tabby://` URL scheme for deep-linking connections (v1.0.231) ([releases](https://github.com/Eugeny/tabby/releases), [README](https://github.com/Eugeny/tabby)).
 - **Encrypted secrets vault**: master-passphrase container for SSH passwords/keys — Slant reviewers repeatedly cite this as the reason to pick Tabby over mRemoteNG/PuTTY ([Slant](https://www.slant.co/versus/26039/34714/~tabby-terminal_vs_mremoteng)).
 - **Serial + telnet**: saved serial connections, readline, hex I/O, auto-reconnect — owns the embedded-dev niche no fast terminal serves ([README](https://github.com/Eugeny/tabby)).
-- **Tabs/splits**: tabs, split panes, pinned tabs (v1.0.235), per-tab activity/progress notifications; tab persistence restores open tabs across restarts (medium confidence — "recover tabs" setting; terminal contents not restored). Drag-tab-to-new-window is the single most-upvoted open issue ([#581](https://github.com/Eugeny/tabby/issues/581)) — winghostty also lacks cross-window drag, worth noting demand.
+- **Tabs/splits**: tabs, split panes, pinned tabs (v1.0.235), per-tab activity/progress notifications; tab persistence restores open tabs across restarts (medium confidence — "recover tabs" setting; terminal contents not restored). Drag-tab-to-new-window is the single most-upvoted open issue ([#581](https://github.com/Eugeny/tabby/issues/581)) — noctty also lacks cross-window drag, worth noting demand.
 - **Quake mode + global hotkey**, fully configurable multi-chord hotkeys, incl. mouse-wheel-as-hotkey (v1.0.235).
 - **SFTP**: built-in SFTP tab/panel for SSH sessions with upload/download ([releases](https://github.com/Eugeny/tabby/releases/tag/v1.0.233)).
 - **No command palette** in the Raycast/VS Code sense; no tmux -CC (top-voted request [#5030](https://github.com/Eugeny/tabby/issues/5030)); broadcast-input exists only via community plugins (low confidence).
@@ -68,7 +68,7 @@ The section that explains 74k stars:
 
 ## 7. Configuration & extensibility
 
-- **GUI-first config**: everything — profiles, hotkeys, appearance, SSH, vault — is editable in a settings UI; backing store is a YAML config file (config.yaml) that can be hand-edited/synced (file-format detail: medium confidence). This "GUI first, file underneath" model is exactly what winghostty's native settings window converges on.
+- **GUI-first config**: everything — profiles, hotkeys, appearance, SSH, vault — is editable in a settings UI; backing store is a YAML config file (config.yaml) that can be hand-edited/synced (file-format detail: medium confidence). This "GUI first, file underneath" model is exactly what noctty's native settings window converges on.
 - **Plugins**: npm packages (`tabby-plugin` keyword) discovered/installed from an in-app Plugin Manager; can add connection types, UI, settings panels ([HACKING.md](https://github.com/Eugeny/tabby/blob/master/HACKING.md), [DeepWiki plugin dev](https://deepwiki.com/Eugeny/tabby/9.2-plugin-development)). Notable: Docker containers-as-connections, SFTP panel, workspace manager, save-output, AI command suggesters, theme packs (Catppuccin/Gruvbox).
 - **Ecosystem health**: declining — "plugin-friendly… but its plugin ecosystem has gone quiet" ([MOLTamp 2026](https://moltamp.com/blog/best-tabby-terminal-plugins-2026/)). Plugins also multiply the security and memory surface.
 - **Config sync**: the official story collapsed. tabby-web (browser Tabby + sync backend) is unmaintained; sync now depends on self-hosting tabby-web or third-party plugins targeting S3/Cloudflare Workers ([tabby-web](https://github.com/Eugeny/tabby-web), [tabby-cloud-sync-settings](https://github.com/niceit/tabby-cloud-sync-settings), [community CF-workers service](https://tabby.waynecommand.com/)). Users keep asking for self-owned sync ([#10993](https://github.com/Eugeny/tabby/issues/10993)).
@@ -90,32 +90,32 @@ The section that explains 74k stars:
 5. **Missing depth**: no sixel/Kitty graphics, no mosh, no tmux -CC, no tab tear-off, no first-party sync anymore (top-voted issues, §5/§7).
 6. **Windows-version fragility**: fails to launch after some Windows 11 updates ([#10284](https://github.com/Eugeny/tabby/issues/10284), [#9448](https://github.com/Eugeny/tabby/issues/9448)).
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
 ### Does well (adopt-candidates)
 
 Judged against docs/status.md + windows-capability-matrix.md:
 
-1. **SSH connection manager as a first-class profile type** — saved hosts with groups/tree, jump hosts, port forwarding, agent forwarding. winghostty's profile picker knows local shells + WSL only; Tabby proves the "remote hosts are profiles too" model is the #1 adoption driver on Windows. Even a lean version (saved `ssh` command profiles + `%USERPROFILE%\.ssh\config` ingestion into the universal palette) captures most value at near-zero weight.
+1. **SSH connection manager as a first-class profile type** — saved hosts with groups/tree, jump hosts, port forwarding, agent forwarding. noctty's profile picker knows local shells + WSL only; Tabby proves the "remote hosts are profiles too" model is the #1 adoption driver on Windows. Even a lean version (saved `ssh` command profiles + `%USERPROFILE%\.ssh\config` ingestion into the universal palette) captures most value at near-zero weight.
 2. **Encrypted secrets vault** (master-passphrase, or better: Windows Hello/Credential Manager–backed) — repeatedly the cited reason users choose Tabby over PuTTY/mRemoteNG.
-3. **Quake mode / global-hotkey dropdown terminal** — winghostty has no quick-terminal; Tabby, WT, and upstream Ghostty (macOS) all treat it as core.
-4. **Portable mode as a deliberate feature** (`data` dir next to exe) — winghostty has a portable ZIP but no portable *state* story and no ZIP updater apply; corporate locked-down users are a real Windows constituency.
-5. **Per-tab activity/progress notification badges** — visible progress on background tabs matches PRODUCT.md's "keep progress visible" principle; winghostty has no equivalent.
-6. **`app://` deep links for sessions** (`tabby://` scheme) — launch-into-profile URLs compose with launchers/scripts; cheap given winghostty's existing single-instance IPC.
-7. **Pinned tabs + tab tear-off demand signal** — Tabby's most-upvoted issue is drag-tab-to-new-window; winghostty explicitly lacks cross-window OLE transfer. Demand is validated; shipping it is differentiation against both Tabby and WT.
+3. **Quake mode / global-hotkey dropdown terminal** — noctty has no quick-terminal; Tabby, WT, and upstream Ghostty (macOS) all treat it as core.
+4. **Portable mode as a deliberate feature** (`data` dir next to exe) — noctty has a portable ZIP but no portable *state* story and no ZIP updater apply; corporate locked-down users are a real Windows constituency.
+5. **Per-tab activity/progress notification badges** — visible progress on background tabs matches PRODUCT.md's "keep progress visible" principle; noctty has no equivalent.
+6. **`app://` deep links for sessions** (`tabby://` scheme) — launch-into-profile URLs compose with launchers/scripts; cheap given noctty's existing single-instance IPC.
+7. **Pinned tabs + tab tear-off demand signal** — Tabby's most-upvoted issue is drag-tab-to-new-window; noctty explicitly lacks cross-window OLE transfer. Demand is validated; shipping it is differentiation against both Tabby and WT.
 
 ### Does badly (avoid / exploit)
 
-1. **The performance tax is permanent and structural** (Electron + xterm.js + Chromium compositor): 300MB idle, GPU-RAM bloat, multi-second startup. winghostty's headline claim — instantaneous native startup, tiny footprint — should be *benchmarked publicly against Tabby and WT*, because Tabby users cite exactly these numbers when leaving.
-2. **Regression-prone releases with no beta channel** — SSH auth broke in a point release for daily-driver users. Exploit: winghostty's checksum+Authenticode staged updater and safe-mode/quarantine recovery are a credible "we don't brick your workflow" story; keep investing there.
+1. **The performance tax is permanent and structural** (Electron + xterm.js + Chromium compositor): 300MB idle, GPU-RAM bloat, multi-second startup. noctty's headline claim — instantaneous native startup, tiny footprint — should be *benchmarked publicly against Tabby and WT*, because Tabby users cite exactly these numbers when leaving.
+2. **Regression-prone releases with no beta channel** — SSH auth broke in a point release for daily-driver users. Exploit: noctty's checksum+Authenticode staged updater and safe-mode/quarantine recovery are a credible "we don't brick your workflow" story; keep investing there.
 3. **Single-maintainer + 2.7k open issues + abandoned sync service** — feature surface outran sustaining capacity. Avoid: don't ship services (sync!) or plugin surfaces you can't sustain; Tabby's dead tabby-web actively burns user trust.
-4. **Security vulns from URL handlers + web runtime + npm plugins** (repeated 2026 injection/traversal fixes). winghostty's allowlisted-IPC + no-plugin-runtime posture is defensible — if it adds deep links or extensions, learn from Tabby's vuln classes first.
+4. **Security vulns from URL handlers + web runtime + npm plugins** (repeated 2026 injection/traversal fixes). noctty's allowlisted-IPC + no-plugin-runtime posture is defensible — if it adds deep links or extensions, learn from Tabby's vuln classes first.
 5. **Web chrome instead of native** — Win11-update launch breakage, no default-terminal registration, registry-hack Explorer integration. Exploit by doing the native things Tabby structurally can't: default-terminal handoff (IDefaultTerminalApp), Explorer context menu, jump lists.
 
 ### Blind-spot candidates (no category in PRODUCT.md)
 
 1. **Remote connection management as a product pillar** — PRODUCT.md frames the benchmark user as PowerShell+WSL local; Tabby's entire success says Windows devs are *also* SSH-fleet operators. There is no PRODUCT.md category for remote hosts, saved connections, or secrets.
 2. **Serial/COM-port workflows** — embedded developers on Windows are a durable niche (device flashing, USB-serial consoles) that keeps choosing Tabby/PuTTY; nothing in PRODUCT.md contemplates non-shell transports.
-3. **Settings/profile sync across machines** — work desktop + laptop is normal; Tabby's sync collapse shows both the demand and the maintenance trap. A file-based, cloud-agnostic answer (config in a syncable dir + conflict-aware merge, which winghostty's revision-aware settings merge nearly is) would fill this without a service.
+3. **Settings/profile sync across machines** — work desktop + laptop is normal; Tabby's sync collapse shows both the demand and the maintenance trap. A file-based, cloud-agnostic answer (config in a syncable dir + conflict-aware merge, which noctty's revision-aware settings merge nearly is) would fill this without a service.
 4. **File-transfer affordances** (SFTP panel, Zmodem, drag-out of files) — PRODUCT.md covers drag-and-drop *in* only.
 5. **In-app extensibility/plugin economy** — Tabby shows a plugin manager drives community energy (Docker tabs, AI helpers, themes) but also drags in memory, security, and abandonment risk; PRODUCT.md has no stated position either way, and it should have an explicit one.

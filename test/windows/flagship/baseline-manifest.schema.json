@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://winghostty.dev/schemas/verification/baseline-manifest.v1.json",
-  "title": "winghostty frozen baseline manifest v1",
+  "$id": "https://noctty.com/schemas/verification/baseline-manifest.v1.json",
+  "title": "noctty frozen baseline manifest v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "captured_at", "git_commit", "platform", "artifacts"],
   "properties": {
-    "schema_version": { "const": "winghostty.verification.baseline-manifest.v1" },
+    "schema_version": { "const": "noctty.verification.baseline-manifest.v1" },
     "captured_at": { "type": "string", "format": "date-time" },
     "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "platform": {

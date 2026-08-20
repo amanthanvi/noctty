@@ -455,6 +455,13 @@ code {
   text-wrap: pretty;
 }
 
+.wg-hero__formerly {
+  margin: 0;
+  color: var(--dim);
+  font-size: 0.8125rem;
+  letter-spacing: 0.02em;
+}
+
 .wg-accent-red {
   color: var(--wg-red);
 }

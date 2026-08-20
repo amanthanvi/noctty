@@ -29,7 +29,7 @@
   strip = optimize != "Debug" && optimize != "ReleaseSafe";
 in
   assert lib.assertMsg (builtins.pathExists ../dist/linux)
-    "winghostty no longer ships dist/linux; nix/package.nix still targets the upstream GTK/Linux app and is unsupported in this Windows-focused fork";
+    "noctty no longer ships dist/linux; nix/package.nix still targets the upstream GTK/Linux app and is unsupported in this Windows-focused fork";
   stdenv.mkDerivation (finalAttrs: {
     pname = "ghostty";
     version = "1.3.2-dev";
@@ -131,7 +131,7 @@ in
     '';
 
     meta = {
-      homepage = "https://github.com/amanthanvi/winghostty";
+      homepage = "https://github.com/amanthanvi/noctty";
       license = lib.licenses.mit;
       platforms = [
         "x86_64-linux"

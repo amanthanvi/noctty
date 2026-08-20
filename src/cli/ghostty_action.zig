@@ -60,10 +60,10 @@ pub const Action = enum {
     // Use IPC to tell the running Ghostty to open a new window.
     @"new-window",
 
-    // List read-only automation state for the running winghostty instance.
+    // List read-only automation state for the running noctty instance.
     @"list-windows",
 
-    // Forward a safe keybinding action to the running winghostty instance.
+    // Forward a safe keybinding action to the running noctty instance.
     @"perform-action",
 
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {

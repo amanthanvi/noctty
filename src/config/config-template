@@ -1,24 +1,24 @@
-# This is the configuration file for winghostty.
+# This is the configuration file for noctty.
 #
 # This template file has been automatically created at the following
-# path since winghostty couldn't find any existing config files on your system:
+# path since noctty couldn't find any existing config files on your system:
 #
 #   {[path]s}
 #
-# The template does not set any default options, since winghostty ships
+# The template does not set any default options, since noctty ships
 # with sensible defaults for all options.
-# Note that you should not paste the output of `winghostty +show-config
+# Note that you should not paste the output of `noctty +show-config
 # --default` into your config: some default options actually conflict with each other
 # when explicitly set in a configuration file. Instead, only set the
 # options you actually need.
 #
-# Run `winghostty +show-config --default --docs` to view a list of
+# Run `noctty +show-config --default --docs` to view a list of
 # all available config options and their default values.
 #
 # Additionally, each config option is also explained in detail
 # in the generated config docs and CLI help shipped with this repository.
 #
-# winghostty can reload the configuration while running by using the menu
+# noctty can reload the configuration while running by using the menu
 # options or the bound key (default: Command + Shift + comma on macOS and
 # Control + Shift + comma on other platforms). Not all config options can be
 # reloaded while running; some only apply to new windows and others may require

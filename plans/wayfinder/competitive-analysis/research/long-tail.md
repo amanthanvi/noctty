@@ -17,7 +17,7 @@ sessions, VT standards leadership), Extraterm (output framing, scroll
 minimap), mintty (Unicode currency, huge silent Git-Bash install base);
 (4) **a direct threat the nine dives miss** — a swarm of community
 `ghostty-windows` native ports (adilahmeddev `windows-apprt` lineage)
-occupying winghostty's exact niche. Promotion candidates: Wave Terminal and the ghostty-windows fork family. (Update: both promotions ran; the completed deep dive found the fork swarm decaying, with upstream and libghostty consumers the credible threats — see ghostty-windows-forks.md.)
+occupying noctty's exact niche. Promotion candidates: Wave Terminal and the ghostty-windows fork family. (Update: both promotions ran; the completed deep dive found the fork swarm decaying, with upstream and libghostty consumers the credible threats — see ghostty-windows-forks.md.)
 
 ## (a) Blind-spot candidates for synthesis
 
@@ -26,7 +26,7 @@ Things no PRODUCT.md category covers, ordered by judged importance:
 1. **Durable/detachable sessions** — terminal _contents and processes_
    surviving UI restart or network drop (Contour daemon mode with
    local/network attach; Wave's "durable SSH sessions" v0.14.0,
-   2026-02-10; tmux/zellij-under-WSL culture). winghostty's
+   2026-02-10; tmux/zellij-under-WSL culture). noctty's
    `window-save-state` explicitly does _not_ restore contents or
    children (docs/status.md) — the long tail shows users now expect
    more.
@@ -57,7 +57,7 @@ Things no PRODUCT.md category covers, ordered by judged importance:
 9. **Quake-mode global-hotkey terminal** — Wave added it (v0.14.5,
    2026-04-16); Fluent Terminal had it years ago; upstream Ghostty has
    quick-terminal on macOS/Linux. Rubric §5 names it, so deep dives
-   may catch it, but winghostty's status.md has no such surface.
+   may catch it, but noctty's status.md has no such surface.
 10. **WSLg as a competitor vector** — kitty and other Linux terminals
     run on Windows 11 via WSLg with no port; the rival set is not only
     native apps.
@@ -74,12 +74,12 @@ Things no PRODUCT.md category covers, ordered by judged importance:
   terminal becomes a workspace?", Wave is the case study.
 - **The ghostty-windows fork family** (adilahmeddev `windows-apprt`
   lineage and its many mirrors) — same upstream, same platform, same
-  users as winghostty; ~34k lines of Windows-specific code, D3D11
+  users as noctty; ~34k lines of Windows-specific code, D3D11
   primary renderer, DirectWrite fonts, claimed daily-driver stability
   since March 2026. A deep dive should establish real capability,
   activity, and whether consolidation/blessing risk is live. (Caveat:
   several repos look like near-identical clones of one another;
-  activity and quality are unverified — see paragraph below. Superseded by the completed deep dive: no fork out-tracks winghostty; see ghostty-windows-forks.md.)
+  activity and quality are unverified — see paragraph below. Superseded by the completed deep dive: no fork out-tracks noctty; see ghostty-windows-forks.md.)
 - Not promoted: MobaXterm and Termius are SSH-workspace products whose
   lessons are captured here; Hyper and Fluent are dormant/dead;
   Contour, Extraterm, mintty are idea donors, not rivals for the
@@ -91,7 +91,7 @@ Things no PRODUCT.md category covers, ordered by judged importance:
 
 Open-source (Apache-2.0), Electron front end with a Go backend, 22.1k
 stars, Windows 10 1809+ **x64 only** — no Windows ARM64, which
-winghostty ships ([repo](https://github.com/wavetermdev/waveterm)). It
+noctty ships ([repo](https://github.com/wavetermdev/waveterm)). It
 replaces linear scrollback with a tiled workspace of blocks/widgets:
 terminals, remote file editor with syntax highlighting, file previews
 (markdown/images/CSV/PDF), embedded browser, AI chat (OpenAI, Claude,
@@ -104,7 +104,7 @@ durable SSH sessions that survive network interruption; v0.14.5
 and judge the AI layer "good but generic," a thin default-OpenAI wrapper
 ([moltamp review](https://moltamp.com/blog/wave-terminal-review-2026/)).
 Lesson pair: the workspace/durable-session ideas are real; the
-performance floor is winghostty's opening.
+performance floor is noctty's opening.
 
 ### Fluent Terminal
 
@@ -112,12 +112,12 @@ Dead. UWP + xterm.js, 9.6k stars, explicitly "no longer being
 maintained"; the maintainer's README recommends Windows Terminal, which
 "contains everything I originally set out to achieve … and more"
 ([repo](https://github.com/felixse/FluentTerminal)). In its day it
-pioneered on-Windows features winghostty still lacks: quake mode,
+pioneered on-Windows features noctty still lacks: quake mode,
 Explorer context-menu integration, SSH/Mosh profiles, theme
 import/export. Two lessons: a solo project differentiating on chrome
 dies the day the platform vendor ships a competent default; and a bet
 on a fragile Windows UI framework (UWP sandboxing, brokered ConPTY)
-ages badly — evidence for winghostty's raw-Win32 choice. Its graceful,
+ages badly — evidence for noctty's raw-Win32 choice. Its graceful,
 explicit sunset note is also a governance model worth copying if it
 ever comes to that.
 
@@ -180,7 +180,7 @@ example, OSC 7 localhost paths
 [releases](https://github.com/mintty/mintty/releases)). Deep xterm
 compatibility and Sixel, but it predates ConPTY: its Cygwin/MSYS2 pty
 means native Windows console programs historically need winpty
-shimming — the classic interop complaint winghostty's ConPTY path
+shimming — the classic interop complaint noctty's ConPTY path
 simply doesn't have. WSLtty repackages mintty as a WSL front end and
 tracks mintty releases
 ([wsltty](https://github.com/mintty/wsltty/releases)). Lessons: Unicode
@@ -210,12 +210,12 @@ Windows users run it under WSLg
 Two consequences matter. First, **protocol gravity**: kitty's keyboard
 protocol is now table stakes — Windows Terminal Preview 1.25 adopted it
 ([4sysops](https://4sysops.com/archives/windows-terminal-preview-125-kitty-protocol-settings-search-and-gui-for-key-bindings/));
-winghostty inherits kitty graphics and keyboard support via the Ghostty
+noctty inherits kitty graphics and keyboard support via the Ghostty
 core, but must track the moving target (kitten ssh, remote-control API,
 OSC 99 notifications). Second, **WSLg is a distribution channel for
 rivals**: a Windows 11 dev can run kitty, or any Linux terminal, with
 no port. jeffquast's 2025 survey crowns kitty and Ghostty the Unicode
-correctness champions — winghostty should loudly inherit that mantle on
+correctness champions — noctty should loudly inherit that mantle on
 Windows.
 
 ### MobaXterm
@@ -231,7 +231,7 @@ keys in the 2025–26 cycle
 it owns the enterprise remote-ops niche (PuTTY remains the legacy
 fallback in the same category per 2026 roundups). Blind-spot donations:
 enterprise auth (CryptoAPI smart cards, FIDO2) and portable-first
-distribution as a first-class channel — winghostty's portable ZIP still
+distribution as a first-class channel — noctty's portable ZIP still
 lacks updater apply (docs/status.md).
 
 ### yaw (new 2026 entrant)
@@ -250,7 +250,7 @@ Electron memory caveat as Wave. Watch, don't chase.
 ### ghostty-windows community fork family
 
 The find of the sweep: multiple native Windows ports of Ghostty exist
-besides winghostty. The root is adilahmeddev's `windows-apprt` fork
+besides noctty. The root is adilahmeddev's `windows-apprt` fork
 (~34,337 lines of Windows-specific code: Win32 runtime, DirectWrite
 fonts, **D3D11-primary renderer with OpenGL fallback**, GDI chrome), on
 which Thr45hx published an Inno-Setup-installed build documented as
@@ -264,32 +264,32 @@ automation tests
 ([example README](https://github.com/InsipidPoint/ghostty-windows/blob/main/README.md)).
 **Uncertainty:** several appear to be mirrors or possibly AI-generated
 clones of one another; stars, real activity, and code quality are
-unverified. Strategically this is winghostty's exact niche contested:
+unverified. Strategically this is noctty's exact niche contested:
 users can't distinguish forks, upstream could bless one, and none ship
-signed winget/Scoop packaging — winghostty's Authenticode + package-id
+signed winget/Scoop packaging — noctty's Authenticode + package-id
 story is currently its clearest edge over them. Promote to a deep dive.
 
-## Lessons for winghostty
+## Lessons for noctty
 
 ### Does well (adopt candidates)
 
 - **Quake-mode global hotkey** (Wave v0.14.5; Fluent had it in 2019) —
   no equivalent surface in docs/status.md.
 - **Durable/attachable sessions** that keep contents and processes
-  alive (Contour daemon+attach; Wave durable SSH) vs. winghostty's
+  alive (Contour daemon+attach; Wave durable SSH) vs. noctty's
   layout-only restore.
 - **Command-output framing / block scrollback without AI** and a
   **scrollback minimap** (Extraterm).
 - **Modal vi-like input mode** for keyboard selection/navigation
   (Contour) — pure keyboard-first territory.
 - **Explorer context-menu integration** (Fluent) — absent from
-  winghostty's documented Windows integration.
+  noctty's documented Windows integration.
 - **Unicode/emoji currency cadence** (mintty on Unicode 17.0 with
   emoji default within months).
 - **Enterprise auth**: Windows Hello (Termius), CryptoAPI smart cards
   and FIDO2 (MobaXterm) for SSH flows.
 - **Portable-first distribution with working portable update**
-  (MobaXterm single exe) — winghostty's portable-ZIP apply is still
+  (MobaXterm single exe) — noctty's portable-ZIP apply is still
   unimplemented.
 - **VT-standards participation** (Contour's unicode-core and VT
   extension specs) as a credibility channel.
@@ -297,11 +297,11 @@ story is currently its clearest edge over them. Promote to a deep dive.
 ### Does badly (avoid / exploit)
 
 - **Electron cost is the category's open wound** — Wave at 400–800 MB
-  with resize jank, Hyper, yaw. Winghostty's native Zig/Win32 fluidity
+  with resize jank, Hyper, yaw. Noctty's native Zig/Win32 fluidity
   is the exploit; publish comparative footprint/latency numbers.
 - **Stars without stewardship** (Hyper: 44.7k stars, dormant) —
   momentum signals to weight are cadence and responsiveness; keep
-  winghostty's release/issue hygiene visible.
+  noctty's release/issue hygiene visible.
 - **Platform-framework bets die** (Fluent's UWP) — validates raw Win32;
   never couple core UX to a fashionable Windows UI layer.
 - **Chrome-only differentiation loses to the platform vendor**
@@ -309,10 +309,10 @@ story is currently its clearest edge over them. Promote to a deep dive.
   sessions) is the only defensible ground, exactly PRODUCT.md's line.
 - **Thin AI wrappers add no moat** (Wave's "good but generic" AI) —
   do not bolt on AI to check a box.
-- **x64-only Windows builds** (Wave) — winghostty's ARM64 support is a
+- **x64-only Windows builds** (Wave) — noctty's ARM64 support is a
   concrete differentiator worth advertising.
 - **Legacy pty interop pain** (mintty's Cygwin pty vs. native console
-  apps) — position winghostty as the upgrade for Git Bash users who
+  apps) — position noctty as the upgrade for Git Bash users who
   never chose their terminal.
 - **Unsigned fork builds** (ghostty-windows swarm) — exploit trust:
   signed installers, winget/Scoop, checksummed releases, and a clear

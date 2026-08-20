@@ -26,7 +26,7 @@ export function observeElementVisibility(Observer, element, onChange) {
   return () => observer.disconnect();
 }
 
-const WG_REPO = 'amanthanvi/winghostty';
+const WG_REPO = 'amanthanvi/noctty';
 const PROMPT = 'PS C:\\Users\\dev>';
 
 let WG_VERSION = (typeof window !== 'undefined' && window.WG_VERSION) || '1.3.123';
@@ -38,8 +38,8 @@ export function buildScenes(v) {
       lines: [
         { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
         { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-setup.exe -OutFile winghostty-setup.exe` },
-        { kind: 'cmd', text: '.\\winghostty-setup.exe' },
+        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-setup.exe -OutFile noctty-setup.exe` },
+        { kind: 'cmd', text: '.\\noctty-setup.exe' },
         { kind: 'out', text: '→ installer build: Start menu entry and standard uninstall path' },
         { kind: 'out', text: '→ x64 and ARM64 installers are Authenticode-signed.' },
         { kind: 'out', text: '→ SmartScreen may still warn while reputation builds.' },
@@ -50,17 +50,17 @@ export function buildScenes(v) {
       lines: [
         { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
         { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/winghostty-${v}-windows-$arch-portable.zip -OutFile winghostty.zip` },
-        { kind: 'cmd', text: 'Expand-Archive winghostty.zip -DestinationPath .\\winghostty' },
-        { kind: 'cmd', text: '.\\winghostty\\winghostty.exe' },
+        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-portable.zip -OutFile noctty.zip` },
+        { kind: 'cmd', text: 'Expand-Archive noctty.zip -DestinationPath .\\noctty' },
+        { kind: 'cmd', text: '.\\noctty\\noctty.exe' },
         { kind: 'out', text: '→ same signed Win32 runtime, no install step required' },
       ],
     },
     {
       title: 'make it yours',
       lines: [
-        { kind: 'cmd', text: 'winghostty +show-config --default --docs' },
-        { kind: 'out', text: '→ config lives at: %LOCALAPPDATA%\\winghostty\\config.ghostty' },
+        { kind: 'cmd', text: 'noctty +show-config --default --docs' },
+        { kind: 'out', text: '→ config lives at: %LOCALAPPDATA%\\noctty\\config.ghostty' },
         { kind: 'out', text: '→ download mode stages a verified signed installer; you choose when to run it' },
         { kind: 'out', text: '→ profile picker: PowerShell, cmd, Git Bash, and opt-in WSL' },
       ],

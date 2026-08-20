@@ -67,7 +67,7 @@ function Get-KeyInputScenarioSlug {
 
 $scenarioSlug = Get-KeyInputScenarioSlug -Key $Key -PostBoo:$RunBooFirst
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED) {
     $forwardedArgs = @('-Key', $Key, '-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($RunBooFirst) { $forwardedArgs += '-RunBooFirst' }
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
@@ -77,7 +77,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -281,7 +281,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
             $script:Win11KeyInputFoundHost = $hwnd
             return $false
         }
@@ -302,7 +302,7 @@ function Find-SurfaceWindow {
     $callback = [Win11KeyInputNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32') {
             $script:Win11KeyInputFoundSurface = $hwnd
             return $false
         }
@@ -489,25 +489,25 @@ $commandPrelude = ''
 if ($RunBooFirst) {
     Remove-Item -LiteralPath $preReadKeyReadyPath, $preReadKeyStatePath, $preReadKeyTracePath -ErrorAction SilentlyContinue
     $commandPrelude = @'
-$winghosttyCommand = Get-Command winghostty -ErrorAction Stop
+$nocttyCommand = Get-Command noctty -ErrorAction Stop
 [ordered]@{
     phase = 'before-boo'
-    commandSource = $winghosttyCommand.Source
+    commandSource = $nocttyCommand.Source
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath '__STATE_PATH__' -Encoding ASCII
 $booStart = Get-Date
 try {
-    $env:WINGHOSTTY_BOO_AUTO_EXIT_MS = '1000'
-    $env:WINGHOSTTY_BOO_STATE_FILE = '__TRACE_PATH__'
-    & winghostty +boo
+    $env:NOCTTY_BOO_AUTO_EXIT_MS = '1000'
+    $env:NOCTTY_BOO_STATE_FILE = '__TRACE_PATH__'
+    & noctty +boo
     $booExitCode = $LASTEXITCODE
 }
 finally {
-    Remove-Item Env:WINGHOSTTY_BOO_AUTO_EXIT_MS -ErrorAction SilentlyContinue
-    Remove-Item Env:WINGHOSTTY_BOO_STATE_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:NOCTTY_BOO_AUTO_EXIT_MS -ErrorAction SilentlyContinue
+    Remove-Item Env:NOCTTY_BOO_STATE_FILE -ErrorAction SilentlyContinue
 }
 [ordered]@{
     phase = 'after-boo'
-    commandSource = $winghosttyCommand.Source
+    commandSource = $nocttyCommand.Source
     exitCode = $booExitCode
     elapsedMs = [int]((Get-Date) - $booStart).TotalMilliseconds
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath '__STATE_PATH__' -Encoding ASCII
@@ -636,12 +636,12 @@ try {
 
         $preReadKeyState = Get-Content -LiteralPath $preReadKeyStatePath -Raw | ConvertFrom-Json
         if ($preReadKeyState.exitCode -ne 0) {
-            throw "winghostty +boo exited with code $($preReadKeyState.exitCode) from $($preReadKeyState.commandSource)"
+            throw "noctty +boo exited with code $($preReadKeyState.exitCode) from $($preReadKeyState.commandSource)"
         }
         $expectedCommandDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $exePath))
         $actualCommandDir = [System.IO.Path]::GetFullPath((Split-Path -Parent ([string] $preReadKeyState.commandSource)))
         if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($actualCommandDir, $expectedCommandDir)) {
-            throw "winghostty +boo resolved from unexpected location '$($preReadKeyState.commandSource)' (expected dir '$expectedCommandDir', got '$actualCommandDir')"
+            throw "noctty +boo resolved from unexpected location '$($preReadKeyState.commandSource)' (expected dir '$expectedCommandDir', got '$actualCommandDir')"
         }
 
         Start-Sleep -Milliseconds 300
@@ -663,7 +663,7 @@ try {
             $info = Get-GuiThreadInfo -Hwnd $hostHwnd
             $focused = $null -ne $info -and
                 $info.FocusHwnd -ne [IntPtr]::Zero -and
-                (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'winghostty.win32'
+                (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'noctty.win32'
             if (-not $focused) {
                 [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
             }
@@ -701,7 +701,7 @@ try {
             $keyInputProcess.Refresh()
             if ($keyInputProcess.HasExited) {
                 $exitCode = Get-InteractiveWin11ProcessExitCode -Process $keyInputProcess -ProcessHandle $keyInputProcessHandle
-                throw "winghostty exited while waiting for key input result file (exit code $exitCode)"
+                throw "noctty exited while waiting for key input result file (exit code $exitCode)"
             }
             return $false
         }

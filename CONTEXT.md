@@ -1,6 +1,6 @@
-# winghostty Product Context
+# noctty Product Context
 
-This context defines the product language used to evaluate winghostty's
+This context defines the product language used to evaluate noctty's
 direction and user experience.
 
 ## Language

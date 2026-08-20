@@ -9,7 +9,7 @@
 
 Spawned by the decision session's C16 defer-with-spike ruling and the
 F6 session-promise tiers (process durability is now a named
-aspiration). Can shells and TUIs running under winghostty survive a UI
+aspiration). Can shells and TUIs running under noctty survive a UI
 process restart on Windows, and what would reattach require? Probe,
 research-only: ConPTY handle/process lifetime semantics (what dies
 with the creating process; can a ConPTY be inherited, duplicated, or
@@ -43,7 +43,7 @@ crash still kills sessions.
 
 **Cost class: XL confirmed** for the graduated feature (broker
 lifecycle, versioned protocol, elevation policy, ring-buffer/replay) —
-but it is known engineering, not research risk; winghostty's termio
+but it is known engineering, not research risk; noctty's termio
 already consumes plain pipe handles, so attach is a one-seam
 substitution in `Subprocess.start`.
 

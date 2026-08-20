@@ -87,7 +87,7 @@ pub fn raiseNotification(
     const message_bstr = allocNotificationBstr(std.heap.page_allocator, message) catch return;
     defer com.SysFreeString(message_bstr);
     const activity_id = com.SysAllocString(
-        std.unicode.utf8ToUtf16LeStringLiteral("winghostty.command-palette"),
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty.command-palette"),
     ) orelse return;
     defer com.SysFreeString(activity_id);
     const hr = com.UiaRaiseNotificationEvent(

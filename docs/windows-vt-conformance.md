@@ -7,7 +7,7 @@ Win32 runtime.
 Each capability line includes:
 
 - `category`: protocol family (`terminfo`, `osc`, `csi`, or `graphics`).
-- `direction`: whether winghostty advertises, parses, or parses and emits it.
+- `direction`: whether noctty advertises, parses, or parses and emits it.
 - `win32-runtime`: Win32 validation status.
 - `evidence`: harness or test family behind the status.
 

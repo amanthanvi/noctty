@@ -1,4 +1,4 @@
-# Winghostty Competitive Analysis Map
+# Noctty Competitive Analysis Map
 
 Wayfinder map (`wayfinder:map`). Tracker: local markdown (AGENTS.md
 directs agents not to create GitHub issues unprompted; the roadmap's
@@ -25,7 +25,7 @@ adopt / reject / defer decision with rationale, ready to hand to
 
 ## Notes
 
-- Domain: Windows terminal emulators. Winghostty is a Windows-only hard
+- Domain: Windows terminal emulators. Noctty is a Windows-only hard
   fork of Ghostty (Zig, native Win32 apprt, OpenGL/DirectComposition).
 - Judging frame: [PRODUCT.md](../../../PRODUCT.md) benchmark user and
   principles are the default lens, **amendable** — findings that
@@ -38,7 +38,7 @@ adopt / reject / defer decision with rationale, ready to hand to
   changelogs, third-party reports. No hands-on evaluation (consciously
   ruled out; see Out of scope).
 - All deep dives share the rubric in [rubric.md](rubric.md) so findings
-  aggregate; each dive ends with an explicit "Lessons for winghostty"
+  aggregate; each dive ends with an explicit "Lessons for noctty"
   section (does well / does badly / blind-spot candidates).
 - Skills for HITL tickets: `/grilling`, `/batch-grill-me`,
   `/domain-modeling`.
@@ -71,11 +71,11 @@ adopt / reject / defer decision with rationale, ready to hand to
   telemetry, forced updates.
 - [Deep dive: Alacritty](tickets/R05-alacritty.md) — minimal-fast
   benchmark whose speed is no longer unique; tier-2 on Windows
-  (unsigned, no ARM64, "use tmux" fails natively) — leaves winghostty's
+  (unsigned, no ARM64, "use tmux" fails natively) — leaves noctty's
   benchmark user unserved.
 - [Deep dive: Tabby](tickets/R06-tabby.md) — proves Windows devs pay a
   huge Electron tax for SSH/serial connection management, secrets
-  vault, GUI settings; winghostty can deliver that value natively.
+  vault, GUI settings; noctty can deliver that value natively.
 - [Deep dive: ConEmu / Cmder](tickets/R07-conemu.md) — invented
   affordances no successor matched (elevated tabs, task system, OSC
   9;4); architecture became its ceiling; Cmder proves
@@ -93,15 +93,15 @@ adopt / reject / defer decision with rationale, ready to hand to
   Extraterm/mintty donate ideas. Promoted Wave Terminal and the
   ghostty-windows fork family to full dives.
 - [Deep dive: Wave Terminal](tickets/R11-wave-terminal.md) — the
-  workspace-drift flagship validates winghostty's terminal-first frame:
+  workspace-drift flagship validates noctty's terminal-first frame:
   users beg it to be more terminal; development stalled (founder silent
   since 2026-05-10). Adopt durable sessions, scriptability, quake mode;
   exploit Electron/VT/keybinding weaknesses.
 - [Deep dive: ghostty-windows community fork family](tickets/R12-ghostty-windows-forks.md)
-  — the fork swarm is decaying and none out-tracks winghostty; the real
+  — the fork swarm is decaying and none out-tracks noctty; the real
   contest is upstream itself (Windows CI, Apr 2026 tier plan,
   libghostty). Live finding: upstream maintainer says unaffiliated
-  projects must not use "Ghostty" in branding, naming winghostty
+  projects must not use "Ghostty" in branding, naming noctty
   specifically — rename risk is a decision item.
 - [Synthesis: ranked gap list](tickets/S01-synthesis.md) — 37 candidates
   (26 provisional adopts, 11 defers), 9 PRODUCT.md frame challenges, 11

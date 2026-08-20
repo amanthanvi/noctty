@@ -39,7 +39,7 @@ reviews:
         This is public static client code on Cloudflare Pages. Do not suggest embedding GitHub tokens in the browser; the intended release lookup behavior is unauthenticated fetch with sessionStorage caching, timeout, and explicit rate-limit bail-out.
     - path: "**/*.zig"
       instructions: |
-        This repository is winghostty, a Windows-focused Ghostty fork. Review against amanthanvi/winghostty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes, targeted `zig build test -Dtest-filter=<name>` validation, and `zig fmt` on touched Zig files.
+        This repository is noctty, a Windows-focused Ghostty fork. Review against amanthanvi/noctty, not ghostty-org/ghostty. Do not suggest reintroducing the removed macos/ Xcode app or src/apprt/gtk runtime. Prefer minimal Zig changes, targeted `zig build test -Dtest-filter=<name>` validation, and `zig fmt` on touched Zig files.
     - path: "src/apprt/win32*.zig"
       instructions: |
         Win32 UI fixes should preserve child HWND invalidation, split-pane focus tracking, and repaint coalescing semantics documented in AGENTS.md. Flag stale paint, lifetime, and message-ordering regressions over stylistic nits.

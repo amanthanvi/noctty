@@ -13,8 +13,8 @@ if ($TimeoutSeconds -le 0) {
 }
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$exePath = if ($ExePath) { $ExePath } else { Join-Path $repoRoot 'zig-out\bin\winghostty.exe' }
-$expectedTitle = 'winghostty CLI action failed'
+$exePath = if ($ExePath) { $ExePath } else { Join-Path $repoRoot 'zig-out\bin\noctty.exe' }
+$expectedTitle = 'noctty CLI action failed'
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 
 if (-not (Test-Path $exePath)) {
@@ -28,7 +28,7 @@ function Find-DetachedCliResourcesDir {
     }
 
     return Get-ChildItem $artifactsDir -Directory |
-        ForEach-Object { Join-Path $_.FullName 'winghostty\share\ghostty' } |
+        ForEach-Object { Join-Path $_.FullName 'noctty\share\ghostty' } |
         Where-Object { Test-Path (Join-Path $_ 'themes') } |
         Select-Object -First 1
 }

@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $readmePath = Join-Path $repoRoot 'README.md'
 $readme = [System.IO.File]::ReadAllText($readmePath)
-if ($readme -notmatch 'winghostty\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/winghostty/releases/tag/v\k<version>\)') {
+if ($readme -notmatch 'noctty\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/noctty/releases/tag/v\k<version>\)') {
     throw 'Could not determine the current release version from README.md.'
 }
 $previous = $Matches.version

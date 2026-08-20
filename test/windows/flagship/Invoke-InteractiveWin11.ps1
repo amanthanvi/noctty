@@ -18,13 +18,13 @@ $failure = $null
 $commit = $null
 $measurements = [ordered]@{}
 $performanceHash = $null
-$oldForeground = $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
+$oldForeground = $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS
 
-if (-not ('Winghostty.Flagship.DesktopProbe' -as [type])) {
+if (-not ('Noctty.Flagship.DesktopProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-namespace Winghostty.Flagship {
+namespace Noctty.Flagship {
     public static class DesktopProbe {
         [StructLayout(LayoutKind.Sequential)]
         private struct USEROBJECTFLAGS {
@@ -56,7 +56,7 @@ namespace Winghostty.Flagship {
 }
 '@
 }
-$interactiveDesktop = [Environment]::UserInteractive -and [Winghostty.Flagship.DesktopProbe]::HasVisibleWindowStation()
+$interactiveDesktop = [Environment]::UserInteractive -and [Noctty.Flagship.DesktopProbe]::HasVisibleWindowStation()
 
 try {
     if (-not $interactiveDesktop) {
@@ -68,7 +68,7 @@ try {
     $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
     if ($IncludeForegroundHarness) {
-        $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
+        $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = '1'
     }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -88,7 +88,7 @@ catch {
 }
 finally {
     New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
-    $env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
+    $env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS = $oldForeground
     if ($commit -and (Test-Path -LiteralPath $rawTranscriptPath)) {
         $redacted = Get-Content -LiteralPath $rawTranscriptPath -Raw
         foreach ($replacement in @(
@@ -131,7 +131,7 @@ finally {
     } else { $null }
 
     $result = [ordered]@{
-        schema_version = 'winghostty.verification.result.v1'
+        schema_version = 'noctty.verification.result.v1'
         scenario_id = 'windows.interactive-win11.composite'
         status = $status
         started_at = $started.ToString('o')

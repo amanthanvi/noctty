@@ -149,7 +149,7 @@ pub const options = struct {
 /// The `vt-probe` command prints a deterministic VT capability summary for
 /// developer diagnostics.
 ///
-/// This is a static probe of compiled winghostty support. It does not query a
+/// This is a static probe of compiled noctty support. It does not query a
 /// live terminal, start the GUI, or depend on ConPTY runtime state.
 pub fn run(alloc: Allocator) !u8 {
     var opts: options = .{};

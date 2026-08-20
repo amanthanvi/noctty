@@ -83,6 +83,6 @@ test('demo scenes keep the release-copy guardrail needles', () => {
   assert.match(text, /windows-\$arch-portable\.zip/);
   assert.match(text, /x64 and ARM64/);
   assert.match(text, /SmartScreen may still warn while reputation builds\./);
-  assert.match(text, /%LOCALAPPDATA%\\winghostty\\config\.ghostty/);
-  assert.match(text, /winghostty-9\.9\.9-windows-\$arch-setup\.exe/);
+  assert.match(text, /%LOCALAPPDATA%\\noctty\\config\.ghostty/);
+  assert.match(text, /noctty-9\.9\.9-windows-\$arch-setup\.exe/);
 });

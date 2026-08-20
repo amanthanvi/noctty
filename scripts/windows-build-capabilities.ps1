@@ -31,7 +31,7 @@ function Write-WindowsBuildCapabilitiesManifest {
     }
 
     [ordered] @{
-        schema_version = "winghostty.windows-build-capabilities.v1"
+        schema_version = "noctty.windows-build-capabilities.v1"
         version = $Version
         architecture = $Architecture
         custom_shaders = $true
@@ -72,7 +72,7 @@ function Assert-WindowsBuildCapabilitiesManifest {
         throw "Invalid build capability manifest $Path`: $($_.Exception.Message)"
     }
 
-    if ($manifest.schema_version -cne "winghostty.windows-build-capabilities.v1" -or
+    if ($manifest.schema_version -cne "noctty.windows-build-capabilities.v1" -or
         $manifest.version -cne $Version -or
         $manifest.architecture -cne $Architecture -or
         $manifest.custom_shaders -ne $true) {

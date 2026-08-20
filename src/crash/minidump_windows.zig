@@ -144,19 +144,19 @@ fn formatDumpPath(
     const sep: []const u8 = if (std.fs.path.isSep(base_dir[base_dir.len - 1])) "" else &.{std.fs.path.sep};
     return try std.fmt.bufPrint(
         buf,
-        "{s}{s}winghostty-{d}-{d}.dmp",
+        "{s}{s}noctty-{d}-{d}.dmp",
         .{ base_dir, sep, pid, timestamp_ms },
     );
 }
 
 test "formatDumpPath appends separator and dmp extension" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try formatDumpPath(&buf, "C:\\Users\\a\\winghostty\\crash", 42, 1234);
-    try std.testing.expectEqualStrings("C:\\Users\\a\\winghostty\\crash\\winghostty-42-1234.dmp", path);
+    const path = try formatDumpPath(&buf, "C:\\Users\\a\\noctty\\crash", 42, 1234);
+    try std.testing.expectEqualStrings("C:\\Users\\a\\noctty\\crash\\noctty-42-1234.dmp", path);
 }
 
 test "formatDumpPath keeps existing separator" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try formatDumpPath(&buf, "C:\\crash\\", 7, 9);
-    try std.testing.expectEqualStrings("C:\\crash\\winghostty-7-9.dmp", path);
+    try std.testing.expectEqualStrings("C:\\crash\\noctty-7-9.dmp", path);
 }

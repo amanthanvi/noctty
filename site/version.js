@@ -3,7 +3,7 @@
 // below the compiled version.
 
 const DEFAULT_WG_VERSION = '1.3.123';
-const WG_REPO = 'amanthanvi/winghostty';
+const WG_REPO = 'amanthanvi/noctty';
 const CACHE_KEY = 'wg-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const RELEASE_FETCH_TIMEOUT_MS = 4000;

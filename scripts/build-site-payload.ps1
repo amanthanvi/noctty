@@ -53,7 +53,7 @@ $allowlist = [string[]] @(
     '_headers'
     'app.js'
     'assets/favicon.svg'
-    'assets/winghostty-social.png'
+    'assets/noctty-social.png'
     'index.html'
     'install.js'
     'styles.css'

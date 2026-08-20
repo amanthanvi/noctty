@@ -696,7 +696,7 @@ test "native driver attaches commits and detaches a real top-level HWND" {
     const hwnd = CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
-        std.unicode.utf8ToUtf16LeStringLiteral("winghostty compositor smoke"),
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty compositor smoke"),
         0,
         0,
         0,

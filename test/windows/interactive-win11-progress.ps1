@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -36,7 +36,7 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class WinghosttyWin32 {
+public static class NocttyWin32 {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -112,8 +112,8 @@ function Show-ProgressHarnessWindow {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    [void] [WinghosttyWin32]::ShowWindow($Hwnd, 9)
-    [void] [WinghosttyWin32]::SetForegroundWindow($Hwnd)
+    [void] [NocttyWin32]::ShowWindow($Hwnd, 9)
+    [void] [NocttyWin32]::SetForegroundWindow($Hwnd)
 }
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'progress' -ResetState:$ResetState -IncludeResourcesDir
@@ -189,8 +189,8 @@ function Capture-WindowImage {
         [Parameter(Mandatory)] [string] $Path
     )
 
-    $rect = New-Object WinghosttyWin32+RECT
-    if (-not [WinghosttyWin32]::GetWindowRect($Hwnd, [ref] $rect)) {
+    $rect = New-Object NocttyWin32+RECT
+    if (-not [NocttyWin32]::GetWindowRect($Hwnd, [ref] $rect)) {
         throw "GetWindowRect failed for hwnd=$Hwnd"
     }
 
@@ -288,7 +288,7 @@ $runtimeFailurePattern = 'taskbar progress init failed|taskbar progress sync fai
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-progress-$($layout.SandboxId)"
+    "--class=noctty-progress-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -315,7 +315,7 @@ try {
         $process.Refresh()
         if ($process.MainWindowHandle -ne 0) {
             Assert-Win32CallSucceeded `
-                -Succeeded ([WinghosttyWin32]::MoveWindow($process.MainWindowHandle, 80, 80, 1000, 720, $true)) `
+                -Succeeded ([NocttyWin32]::MoveWindow($process.MainWindowHandle, 80, 80, 1000, 720, $true)) `
                 -Operation "MoveWindow(hwnd=$($process.MainWindowHandle))"
             Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
             break
@@ -324,7 +324,7 @@ try {
     }
 
     if ($process.MainWindowHandle -eq 0) {
-        throw 'winghostty main window handle was not ready before timeout.'
+        throw 'noctty main window handle was not ready before timeout.'
     }
 
     foreach ($state in $states) {
@@ -345,7 +345,7 @@ try {
             }
 
             if ($process.HasExited) {
-                throw "winghostty exited before state '$stateName' was captured (exit code $($process.ExitCode))"
+                throw "noctty exited before state '$stateName' was captured (exit code $($process.ExitCode))"
             }
 
             Start-Sleep -Milliseconds 100

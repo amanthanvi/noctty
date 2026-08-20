@@ -2,12 +2,12 @@
 LANGUAGE 0, 0
 
 #define RT_MANIFEST 1
-RT_MANIFEST 24 "winghostty.manifest"
+RT_MANIFEST 24 "noctty.manifest"
 
 #define ID_ICON_GHOSTTY 1
 // GhosttyExe.zig passes an icon-content hash define so .ico-only changes
 // invalidate Zig's cached resource compilation.
-ID_ICON_GHOSTTY ICON "winghostty.ico"
+ID_ICON_GHOSTTY ICON "noctty.ico"
 
 VS_VERSION_INFO VERSIONINFO
 //FILEVERSION     VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_COMMIT_HEIGHT
@@ -23,11 +23,11 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
         //VALUE "CompanyName",        "???"
-        VALUE "FileDescription",    "winghostty"
+        VALUE "FileDescription",    "noctty"
         //VALUE "FileVersion",        VERSION
         //VALUE "LegalCopyright",     "(C) 2024 ???"
-        VALUE "OriginalFilename", "winghostty.exe"
-        VALUE "ProductName",        "winghostty"
+        VALUE "OriginalFilename", "noctty.exe"
+        VALUE "ProductName",        "noctty"
         //VALUE "ProductVersion",     VERSION
         END
     END

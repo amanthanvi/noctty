@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
-$fixtureRoot = Join-Path $tempRoot "winghostty-release-copy-date-$PID-$([Guid]::NewGuid().ToString('N'))"
+$fixtureRoot = Join-Path $tempRoot "noctty-release-copy-date-$PID-$([Guid]::NewGuid().ToString('N'))"
 
 try {
     [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null

@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 20
     environment: cloudflare-pages-production
     env:
-      CLOUDFLARE_PAGES_PROJECT: winghostty
+      CLOUDFLARE_PAGES_PROJECT: noctty
       CLOUDFLARE_PAGES_PRODUCTION_BRANCH: main
 
     steps:
@@ -78,13 +78,13 @@ jobs:
         id: payload
         shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP "winghostty-site-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $root = Join-Path $env:RUNNER_TEMP "noctty-site-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $first = Join-Path $root 'payload'
           $second = Join-Path $root 'payload-repeat'
           $firstManifest = Join-Path $root 'payload.sha256'
           $secondManifest = Join-Path $root 'payload-repeat.sha256'
-          $evidence = Join-Path $env:RUNNER_TEMP "winghostty-site-evidence-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $wrangler = Join-Path $env:RUNNER_TEMP "winghostty-wrangler-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $evidence = Join-Path $env:RUNNER_TEMP "noctty-site-evidence-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $wrangler = Join-Path $env:RUNNER_TEMP "noctty-wrangler-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 
           ./scripts/build-site-payload.ps1 -OutputDirectory $first -ManifestPath $firstManifest
           ./scripts/build-site-payload.ps1 -OutputDirectory $second -ManifestPath $secondManifest
@@ -136,7 +136,7 @@ jobs:
           workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
           command: >-
             pages deploy "${{ steps.payload.outputs.directory }}"
-            --project-name=winghostty
+            --project-name=noctty
             --branch="${{ steps.canary_meta.outputs.branch }}"
             --commit-hash="${{ steps.source.outputs.sha }}"
             --commit-dirty=false
@@ -202,7 +202,7 @@ jobs:
           workingDirectory: ${{ steps.payload.outputs.wrangler_directory }}
           command: >-
             pages deploy "${{ steps.payload.outputs.directory }}"
-            --project-name=winghostty
+            --project-name=noctty
             --branch=main
             --commit-hash="${{ steps.source.outputs.sha }}"
             --commit-dirty=false
@@ -227,7 +227,7 @@ jobs:
             -ExpectedBranch main `
             -ExpectedCommit $env:DEPLOY_SHA `
             -BaseUrl $env:DEPLOYMENT_URL `
-            -CanonicalBaseUrl 'https://winghostty.com/' `
+            -CanonicalBaseUrl 'https://noctty.com/' `
             -PayloadDirectory $env:PAYLOAD_DIRECTORY `
             -ManifestPath $env:PAYLOAD_MANIFEST `
             -ProvenancePath $provenancePath `
@@ -239,7 +239,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: site-deployment-provenance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/winghostty-site-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/noctty-site-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           include-hidden-files: false
           retention-days: 30

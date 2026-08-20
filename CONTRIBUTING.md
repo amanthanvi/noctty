@@ -1,6 +1,6 @@
-# Contributing to winghostty
+# Contributing to noctty
 
-Thanks for working on winghostty.
+Thanks for working on noctty.
 
 This repository is a public, Windows-only project. Issues and pull
 requests are welcome, but contributions need to be small in scope, well
@@ -8,7 +8,7 @@ reasoned, and validated against the Windows runtime shipped here.
 
 For usage questions, design discussion, or anything that isn't a
 reproducible bug, use
-[Discussions](https://github.com/amanthanvi/winghostty/discussions).
+[Discussions](https://github.com/amanthanvi/noctty/discussions).
 GitHub Issues on this repo are reserved for reproducible bugs so real
 bugs don't get buried.
 
@@ -23,7 +23,7 @@ bugs don't get buried.
 4. Preserve `libghostty-vt`; it remains a supported deliverable in this
    repo.
 5. Keep docs, packaging, and user-visible strings aligned with the
-   shipped `winghostty` product identity.
+   shipped `noctty` product identity.
 
 ## Before you open a PR
 

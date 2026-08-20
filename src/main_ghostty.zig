@@ -29,13 +29,13 @@ pub fn main() !MainReturn {
 
     if (comptime builtin.mode == .Debug) {
         std.log.warn("This is a debug build. Performance will be very poor.", .{});
-        std.log.warn("You should only use a debug build for developing winghostty.", .{});
+        std.log.warn("You should only use a debug build for developing noctty.", .{});
         std.log.warn("Otherwise, please rebuild in a release mode.", .{});
     }
 
     // Execute our action if we have one
     if (state.action) |action| {
-        std.log.info("executing winghostty CLI action={}", .{action});
+        std.log.info("executing noctty CLI action={}", .{action});
         posix.exit(process_shared.runCliAction(action, alloc));
     }
 

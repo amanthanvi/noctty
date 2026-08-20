@@ -367,7 +367,7 @@ fn runWindows(
 fn autoExitAfterNsFromEnv(gpa: Allocator) ?u64 {
     const raw = (os_env.getEnvVarOwnedTrimmedNotEmpty(
         gpa,
-        "WINGHOSTTY_BOO_AUTO_EXIT_MS",
+        "NOCTTY_BOO_AUTO_EXIT_MS",
     ) catch return null) orelse return null;
     defer gpa.free(raw);
 
@@ -378,7 +378,7 @@ fn autoExitAfterNsFromEnv(gpa: Allocator) ?u64 {
 fn traceStatePathFromEnv(gpa: Allocator) ?[]const u8 {
     return os_env.getEnvVarOwnedTrimmedNotEmpty(
         gpa,
-        "WINGHOSTTY_BOO_STATE_FILE",
+        "NOCTTY_BOO_STATE_FILE",
     ) catch null;
 }
 
@@ -396,7 +396,7 @@ fn writeTraceSnapshot(
 ) void {
     const trace_path = path orelse return;
     const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
-        std.log.warn("failed to open WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        std.log.warn("failed to open NOCTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
         return;
     };
     defer file.close();
@@ -417,11 +417,11 @@ fn writeTraceSnapshot(
         .run_elapsed_ms = @divFloor(run_elapsed_ns, std.time.ns_per_ms),
         .total_elapsed_ms = if (total_elapsed_ns) |ns| @divFloor(ns, std.time.ns_per_ms) else null,
     }, .{})}) catch |err| {
-        std.log.warn("failed to write WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        std.log.warn("failed to write NOCTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
         return;
     };
     stream.flush() catch |err| {
-        std.log.warn("failed to flush WINGHOSTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
+        std.log.warn("failed to flush NOCTTY_BOO_STATE_FILE path={s}: {}", .{ trace_path, err });
         return;
     };
 }

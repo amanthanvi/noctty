@@ -16,7 +16,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -26,7 +26,7 @@ if (-not $env:WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode

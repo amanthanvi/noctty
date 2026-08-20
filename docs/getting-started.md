@@ -1,6 +1,6 @@
 # Getting started
 
-Download, install, and set up winghostty on Windows. You need Windows 10
+Download, install, and set up noctty on Windows. You need Windows 10
 or 11 on x64 or ARM64 and a GPU driver with OpenGL 4.3 or newer.
 
 ## 1. Install with a package manager
@@ -8,29 +8,29 @@ or 11 on x64 or ARM64 and a GPU driver with OpenGL 4.3 or newer.
 The quickest path. With WinGet:
 
 ```powershell
-winget install AmanThanvi.winghostty
+winget install AmanThanvi.noctty
 ```
 
 Or with Scoop, from the project's own bucket:
 
 ```powershell
-scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
-scoop install winghostty/winghostty
+scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty
 ```
 
 Both tracks point at the same GitHub Release assets and checksums.
-Scoop also puts `winghostty` on your PATH; WinGet does not, so the PATH
+Scoop also puts `noctty` on your PATH; WinGet does not, so the PATH
 note at the end of step 2 applies to WinGet installs too. Either way,
 you can continue at step 3.
 
 ## 2. Or download and install manually
 
-Go to [Releases](https://github.com/amanthanvi/winghostty/releases). The
+Go to [Releases](https://github.com/amanthanvi/noctty/releases). The
 current stable release is `1.3.123`, and `<arch>` is `x64` or `arm64`;
 both architectures ship every asset:
 
-- Installer: `winghostty-<version>-windows-<arch>-setup.exe`
-- Portable ZIP: `winghostty-<version>-windows-<arch>-portable.zip`
+- Installer: `noctty-<version>-windows-<arch>-setup.exe`
+- Portable ZIP: `noctty-<version>-windows-<arch>-portable.zip`
 - Checksums: `SHA256SUMS-windows-<arch>.txt`
 
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
@@ -40,13 +40,13 @@ Verify the download before you run it. Grab
 you actually downloaded. For the installer:
 
 ```powershell
-Get-FileHash .\winghostty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+Get-FileHash .\noctty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
 ```
 
 For the portable ZIP:
 
 ```powershell
-Get-FileHash .\winghostty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
+Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
 ```
 
 Compare the result against the matching line in
@@ -56,23 +56,23 @@ or extract that file; delete it and download it again.
 ### Installer
 
 1. Check the hash first, then double-click
-   `winghostty-<version>-windows-<arch>-setup.exe`.
+   `noctty-<version>-windows-<arch>-setup.exe`.
 2. If SmartScreen says _"Windows protected your PC"_, click **More info**,
    then **Run anyway**. See the note below on why this warning appears.
 3. Accept the MIT license and install.
-4. Launch **winghostty** from the Start menu.
+4. Launch **noctty** from the Start menu.
 
 ### Portable
 
-1. Extract the ZIP anywhere (for example, `C:\Tools\winghostty\`).
-2. Run `winghostty.exe`. SmartScreen may show the same warning here.
+1. Extract the ZIP anywhere (for example, `C:\Tools\noctty\`).
+2. Run `noctty.exe`. SmartScreen may show the same warning here.
 
-Keep the whole extracted folder together: `winghostty.exe` needs the
+Keep the whole extracted folder together: `noctty.exe` needs the
 `share` folder next to it for themes, terminfo, and shell integration.
 
-Neither the installer nor the portable ZIP adds `winghostty` to your
-PATH. The `winghostty +...` commands below assume you've either added
-the folder containing `winghostty.exe` to PATH or are running them from
+Neither the installer nor the portable ZIP adds `noctty` to your
+PATH. The `noctty +...` commands below assume you've either added
+the folder containing `noctty.exe` to PATH or are running them from
 that folder.
 
 ### About the SmartScreen warning
@@ -98,8 +98,8 @@ published release the same way.
 
 ## 3. First launch
 
-On first launch, winghostty creates `%LOCALAPPDATA%\winghostty\` and
-writes a config template at `%LOCALAPPDATA%\winghostty\config.ghostty`
+On first launch, noctty creates `%LOCALAPPDATA%\noctty\` and
+writes a config template at `%LOCALAPPDATA%\noctty\config.ghostty`
 with inline syntax notes. It then picks a conservative default shell; you
 can override that in your config (see step 6).
 
@@ -108,7 +108,7 @@ can override that in your config (see step 6).
 Open the config file:
 
 ```powershell
-notepad "$env:LOCALAPPDATA\winghostty\config.ghostty"
+notepad "$env:LOCALAPPDATA\noctty\config.ghostty"
 ```
 
 Add a few options:
@@ -116,7 +116,7 @@ Add a few options:
 ```ini
 font-family = JetBrains Mono
 font-size   = 12
-# Pick a theme from: winghostty +list-themes
+# Pick a theme from: noctty +list-themes
 # Theme files are config files; only use themes from sources you trust.
 theme       = Dracula
 ```
@@ -126,7 +126,7 @@ Save, then reload config without restarting: `Ctrl+Shift+,`
 See every option with inline docs:
 
 ```powershell
-winghostty +show-config --default --docs | more
+noctty +show-config --default --docs | more
 ```
 
 ## 5. Keybindings
@@ -152,7 +152,7 @@ ones you'll use daily:
 Full list:
 
 ```powershell
-winghostty +list-keybinds
+noctty +list-keybinds
 ```
 
 `Ctrl+Shift+O` also splits right; `Ctrl+Shift+\` is the advertised
@@ -166,11 +166,11 @@ keybind = ctrl+shift+r=reload_config
 ```
 
 Keybind grammar (chords, `catch_all`, modifiers) is documented inline in
-`winghostty +show-config --default --docs`.
+`noctty +show-config --default --docs`.
 
 ## 6. Pick your shell
 
-winghostty auto-detects installed Windows shells (PowerShell, `cmd`, Git
+noctty auto-detects installed Windows shells (PowerShell, `cmd`, Git
 Bash, and WSL distributions) and exposes them through an in-app profile
 picker. To pin a specific shell as your default instead, set it in your
 config:
@@ -218,29 +218,29 @@ If configuration or saved session state prevents a normal launch, start
 once with built-in defaults and no session restore:
 
 ```powershell
-winghostty --safe-mode
+noctty --safe-mode
 ```
 
-Crash dumps, if any, stay local under `%LOCALAPPDATA%\winghostty\crash`.
-Read them with `winghostty +crash-report`. Recovery behavior,
+Crash dumps, if any, stay local under `%LOCALAPPDATA%\noctty\crash`.
+Read them with `noctty +crash-report`. Recovery behavior,
 crash-report details, and diagnostic bundles are covered in
 [windows.md](windows.md#crash-reports-and-diagnostics).
 
 ## 9. Automate it
 
-winghostty has a local automation surface: `winghostty +list-windows`
+noctty has a local automation surface: `noctty +list-windows`
 reports windows, tabs, and panes as JSON, and
-`winghostty +perform-action` invokes keybinding actions over IPC. The
+`noctty +perform-action` invokes keybinding actions over IPC. The
 full surface, including the actions it blocks, is documented in
 [windows.md](windows.md#automation).
 
 ## 10. Uninstall
 
-- Installer builds: _Settings → Apps → Installed apps → winghostty →
+- Installer builds: _Settings → Apps → Installed apps → noctty →
   Uninstall_.
 - Portable builds: delete the folder you extracted to.
 
-Your config and any crash logs live under `%LOCALAPPDATA%\winghostty\`
+Your config and any crash logs live under `%LOCALAPPDATA%\noctty\`
 and are not removed by either path. Delete that folder manually for a
 clean slate.
 
@@ -255,5 +255,5 @@ clean slate.
 - [HACKING.md](../HACKING.md): build, test, and runtime notes for
   developers
 - [CONTRIBUTING.md](../CONTRIBUTING.md): how to submit changes
-- [Discussions](https://github.com/amanthanvi/winghostty/discussions):
+- [Discussions](https://github.com/amanthanvi/noctty/discussions):
   questions and feedback

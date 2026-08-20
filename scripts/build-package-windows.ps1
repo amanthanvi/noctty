@@ -20,10 +20,10 @@ $ErrorActionPreference = "Stop"
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
-$buildCapabilitiesPath = Join-Path $zigOutBin "winghostty-build-capabilities.json"
+$buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
-    "winghostty.com",
-    "winghostty.exe",
+    "noctty.com",
+    "noctty.exe",
     "ghostty-vt.dll"
 )
 

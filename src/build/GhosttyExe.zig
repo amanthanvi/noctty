@@ -4,19 +4,19 @@ const std = @import("std");
 const Config = @import("Config.zig");
 const SharedDeps = @import("SharedDeps.zig");
 
-/// The primary winghostty executable.
+/// The primary noctty executable.
 exe: *std.Build.Step.Compile,
 
 /// The install step for the executable.
 install_step: *std.Build.Step.InstallArtifact,
 
-/// Console launcher that shells resolve before winghostty.exe.
+/// Console launcher that shells resolve before noctty.exe.
 command_exe: ?*std.Build.Step.Compile = null,
 command_install_step: ?*std.Build.Step.InstallFile = null,
 
 pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty {
     const exe: *std.Build.Step.Compile = b.addExecutable(.{
-        .name = "winghostty",
+        .name = "noctty",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = cfg.target,
@@ -44,14 +44,14 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
         .windows => {
             exe.subsystem = .Windows;
             exe.addWin32ResourceFile(.{
-                .file = b.path("dist/windows/winghostty.rc"),
+                .file = b.path("dist/windows/noctty.rc"),
                 .flags = &.{try win32IconResourceStamp(b)},
             });
 
             const command = b.addExecutable(.{
-                .name = "winghostty-command",
+                .name = "noctty-command",
                 .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/main_winghostty_command.zig"),
+                    .root_source_file = b.path("src/main_noctty_command.zig"),
                     .target = cfg.target,
                     .optimize = cfg.optimize,
                     .strip = cfg.strip,
@@ -63,7 +63,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             command.subsystem = .Console;
             _ = try deps.add(command);
             command_exe = command;
-            command_install_step = b.addInstallBinFile(command.getEmittedBin(), "winghostty.com");
+            command_install_step = b.addInstallBinFile(command.getEmittedBin(), "noctty.com");
         },
 
         else => {},
@@ -77,7 +77,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     };
 }
 
-/// Add the winghostty exe to the install target.
+/// Add the noctty exe to the install target.
 pub fn install(self: *const Ghostty) void {
     const b = self.install_step.step.owner;
     b.getInstallStep().dependOn(&self.install_step.step);
@@ -87,14 +87,14 @@ pub fn install(self: *const Ghostty) void {
 fn win32IconResourceStamp(b: *std.Build) ![]const u8 {
     const icon_bytes = try std.fs.cwd().readFileAlloc(
         b.allocator,
-        "dist/windows/winghostty.ico",
+        "dist/windows/noctty.ico",
         1024 * 1024,
     );
     defer b.allocator.free(icon_bytes);
 
     return try std.fmt.allocPrint(
         b.allocator,
-        "/DWINGHOSTTY_ICON_HASH_{x}",
+        "/DNOCTTY_ICON_HASH_{x}",
         .{std.hash.Wyhash.hash(0, icon_bytes)},
     );
 }

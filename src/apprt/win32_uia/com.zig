@@ -66,7 +66,7 @@ pub const VARIANT_RECORD = extern struct {
 
 /// Simplified VARIANT covering only the fields we populate (I4, BSTR, BOOL).
 /// The two-pointer record arm preserves the full OAIDL payload-union size even
-/// though winghostty never emits VT_RECORD. The i64 arm preserves the SDK's
+/// though noctty never emits VT_RECORD. The i64 arm preserves the SDK's
 /// eight-byte VARIANT alignment on 32-bit Windows.
 pub const VARIANT = extern struct {
     vt: u16,

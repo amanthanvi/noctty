@@ -48,7 +48,7 @@ pub const Format = enum {
             \\---
             \\title: Keybinding Action Reference
             \\description: Reference of all Ghostty keybinding actions.
-            \\editOnGithubLink: https://github.com/amanthanvi/winghostty/edit/main/src/input/Binding.zig
+            \\editOnGithubLink: https://github.com/amanthanvi/noctty/edit/main/src/input/Binding.zig
             \\---
             \\
             \\This is a reference of all Ghostty keybinding actions.

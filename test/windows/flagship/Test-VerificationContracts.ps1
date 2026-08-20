@@ -2300,7 +2300,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = $typeName -as [type]' }
-    [pscustomobject]@{ Reject = $false; Text = '$factory = "WinghosttyStatefulNative" -as [type]' }
+    [pscustomobject]@{ Reject = $false; Text = '$factory = "NocttyStatefulNative" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
@@ -3727,14 +3727,14 @@ function Format-PowerShellLiteral {
 }
 
 $binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
-$guiExe = Join-Path $binDir 'winghostty.exe'
-$commandExe = Join-Path $binDir 'winghostty.com'
+$guiExe = Join-Path $binDir 'noctty.exe'
+$commandExe = Join-Path $binDir 'noctty.com'
 $cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
 foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
     if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
-        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the noctty binaries are absent."
     }
 }
 
@@ -3744,21 +3744,21 @@ $shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"
         if ($LASTEXITCODE -ne 0) {
-            throw "cmd could not resolve winghostty from PATH."
+            throw "cmd could not resolve noctty from PATH."
         }
         $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
         if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
+            throw "cmd resolved noctty to the wrong artifact: $resolvedPath"
         }
 
-        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
-            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'noctty' } else { "noctty $cmdArgs" }
             @(
                 '@echo off'
                 "set `"PATH=$envPath`""
@@ -3800,24 +3800,24 @@ switch ($Shell) {
         $oldPath = $env:PATH
         $env:PATH = $envPath
         try {
-            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command noctty).Source"
             if ($LASTEXITCODE -ne 0) {
-                throw "PowerShell could not resolve winghostty from PATH."
+                throw "PowerShell could not resolve noctty from PATH."
             }
             $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
             if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
+                throw "PowerShell resolved noctty to the wrong artifact: $resolvedPath"
             }
 
-            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
                 $env:PATH = $envPath
                 $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
                 @(
                     '$argsList = @(' + $argLiterals + ')'
-                    '$output = & winghostty @argsList | Out-String'
+                    '$output = & noctty @argsList | Out-String'
                     '$exitCode = $LASTEXITCODE'
                     '[Console]::Out.Write($output)'
                     'exit $exitCode'
@@ -3885,8 +3885,8 @@ if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without e
 Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Context $cliShellHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
-    '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
-    '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
+    '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
 )
 $accessibilityTokens = $null
 $accessibilityErrors = $null
@@ -4049,7 +4049,7 @@ $openSettingsLoops = @($accessibilityHarnessAst.FindAll({
     $settingsClassReferences = @($node.Body.FindAll({
         param($child)
         $child -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-            $child.Value -eq 'winghostty.win32.settings'
+            $child.Value -eq 'noctty.win32.settings'
     }, $true))
     return $settingsClassReferences.Count -gt 0 -and
         (Get-NamedMemberExpressions `
@@ -5082,7 +5082,7 @@ $stressBoundaryContract = [regex]::Match(
 if (-not $stressBoundaryContract.Success -or $accessibilityHarnessText -match 'echo \$stressFirstMarker') {
     throw 'Accessibility sustained-output boundaries must be generated only by command execution, never echoed literally in the typed command.'
 }
-if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''winghostty settings''' -or
+if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''noctty settings''' -or
     $accessibilityHarnessText -notmatch '\$settingsExpectedControls = \[ordered\]@\{' -or
     $accessibilityHarnessText -notmatch 'settingsControlOverlapComparisons' -or
     $accessibilityHarnessText -notmatch 'settingsContainmentChecks' -or
@@ -5090,7 +5090,7 @@ if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''
     $accessibilityHarnessText -notmatch 'Automation\]::Compare\(\s*\$settingsSharedSectionContainer' -or
     $accessibilityHarnessText -notmatch '\$containerSelection\.Current\.GetSelection\(\)' -or
     $accessibilityHarnessText -notmatch '\$focusSection\.SetFocus\(\)\s*\$focusSectionSelection\.Select\(\)' -or
-    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds = @\(\[WinghosttyAccessibilityNative\]::VisibleTerminalChildren' -or
+    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds = @\(\[NocttyAccessibilityNative\]::VisibleTerminalChildren' -or
     $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds -notcontains \$settingsOpenFocusedHwnd') {
     throw 'Accessibility settings evidence must assert root identity, named roles, shared selection semantics, peer overlap, and client containment.'
 }
@@ -5501,7 +5501,7 @@ if ($restoreBaselineFunctions.Count -ne 1) {
     throw "Expected exactly one Restore-AccessibilityConfigBaseline definition; found $($restoreBaselineFunctions.Count)."
 }
 . ([scriptblock]::Create($restoreBaselineFunctions[0].Extent.Text))
-$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winghostty-config-restore-' + [Guid]::NewGuid().ToString('N'))
+$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('noctty-config-restore-' + [Guid]::NewGuid().ToString('N'))
 $restoreProbePath = Join-Path $restoreProbeDirectory 'config.ghostty'
 [System.IO.Directory]::CreateDirectory($restoreProbeDirectory) | Out-Null
 try {
@@ -5568,7 +5568,7 @@ if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query''' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus' -or
     $accessibilityHarnessText -notmatch '(?s)\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll.*?\$script:paletteUnavailableFocused = \[System\.Windows\.Automation\.AutomationElement\]::FocusedElement.*?\$queryStillFocused = \$null -ne \$script:paletteUnavailableFocused -and\s*\$script:paletteUnavailableFocused\.Current\.ProcessId -eq \$process\.Id -and\s*\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit -and\s*\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query'' -and\s*\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus.*?return \$script:paletteUnavailableItems\.Count -eq 0 -and\s*\$queryStillFocused -and' -or
-    $accessibilityHarnessText -notmatch '-not \[WinghosttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
+    $accessibilityHarnessText -notmatch '-not \[NocttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
     $accessibilityHarnessText -notmatch "-Description 'command palette native List recovery after zero matches'" -or
     $accessibilityHarnessText -notmatch '\$paletteRecoveredSelectionPattern\.Current\.GetSelection\(\)' -or
     $accessibilityHarnessText -notmatch '\$script:paletteRecoveredFocus\.Current\.HasKeyboardFocus' -or
@@ -5691,7 +5691,7 @@ if ($postWrapperParameters.Count -ne 7 -or
     $null -ne $postWrapperFunction.Body.ProcessBlock -or $null -ne $postWrapperFunction.Body.CleanBlock -or
     $postWrapperTraps.Count -ne 0 -or $postWrapperStatements.Count -ne 6 -or
     $postWrapperStatements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
-    $postWrapperStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$Process\.HasExited\) \{\s*throw "Refusing to post \$Description because winghostty already exited \(exit code \$\(\$Process\.ExitCode\)\)\."\s*\}$' -or
+    $postWrapperStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$Process\.HasExited\) \{\s*throw "Refusing to post \$Description because noctty already exited \(exit code \$\(\$Process\.ExitCode\)\)\."\s*\}$' -or
     $postWrapperStatements[2].Extent.Text.Trim() -ne '[void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb ''post'')' -or
     $postWrapperStatements[3].Extent.Text.Trim() -ne '$lastError = 0' -or
     $postWrapperStatements[4].Extent.Text.Trim() -ne 'if ($Deadline -le [DateTime]::UtcNow) { throw "Timed out waiting for $Description." }' -or
@@ -6389,7 +6389,7 @@ if ($sessionPassCommands.Count -ne 1) {
 $sessionBootstrapIfs = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text -match '^if \(-not \$env:WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED\)'
+        $node.Extent.Text -match '^if \(-not \$env:NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED\)'
 }, $true))
 if ($sessionBootstrapIfs.Count -ne 1) {
     throw 'Session restore story must contain one exact bootstrap guard.'
@@ -6433,7 +6433,7 @@ if ($sessionSnapshotRetryLoops.Count -ne 1 -or $sessionSnapshotWaitIfs.Count -ne
 }
 $sessionSnapshotFunctionStatements = @($sessionSnapshotFunctions[0].Body.EndBlock.Statements)
 if ($sessionSnapshotFunctionStatements.Count -ne 5 -or
-    $sessionSnapshotFunctionStatements[0].Extent.Text.Trim() -ne '$cli = Join-Path (Split-Path -Parent $exe) ''winghostty.com''' -or
+    $sessionSnapshotFunctionStatements[0].Extent.Text.Trim() -ne '$cli = Join-Path (Split-Path -Parent $exe) ''noctty.com''' -or
     $sessionSnapshotFunctionStatements[1].Extent.Text.Trim() -ne 'if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }' -or
     $sessionSnapshotFunctionStatements[2].Extent.Text.Trim() -ne '$lastError = ''''' -or
     -not [object]::ReferenceEquals($sessionSnapshotFunctionStatements[3], $sessionSnapshotRetryLoops[0]) -or
@@ -6478,7 +6478,7 @@ $sessionRunsAssignments = @($sessionHarnessAst.FindAll({
 $sessionInstanceClassAssignments = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Extent.Text.Trim() -eq '$instanceClass = "winghostty-interactive-$($layout.SandboxId)"'
+        $node.Extent.Text.Trim() -eq '$instanceClass = "noctty-interactive-$($layout.SandboxId)"'
 }, $true))
 $sessionTopLevelStatements = @($sessionHarnessAst.EndBlock.Statements)
 $sessionRunsInitializationIndex = -1
@@ -7854,7 +7854,7 @@ $defenderScanStep = Get-YamlStepBlock `
     -Source $releaseWorkflow
 Assert-TextContract `
     -Content $defenderScanStep `
-    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?winghostty/winghostty\.com.*?winghostty/winghostty\.exe.*?winghostty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?winghostty-release-verify-\$arch.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$arch.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed' `
     -Context "$releaseWorkflow :: Scan Windows release artifacts with Microsoft Defender"
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
@@ -7990,10 +7990,10 @@ $signingTestAst = [System.Management.Automation.Language.Parser]::ParseInput(
 $signingTestInitializers = @($signingTestAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.GetCommandName() -eq 'Initialize-WinghosttyAuthenticodeVerifier'
+        $node.GetCommandName() -eq 'Initialize-NocttyAuthenticodeVerifier'
 }, $true))
 $firstDirectVerifierIndex = $signingTrustTestText.IndexOf(
-    '[WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)'
+    '[NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)'
 )
 if ($signingTestErrors.Count -ne 0 -or
     $signingTestInitializers.Count -ne 1 -or
@@ -8034,7 +8034,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
     @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
-    @{ Pattern = "winghostty/winghostty\.com'.*?winghostty/winghostty\.exe'.*?winghostty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
+    @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Assert-TextContract `
@@ -8136,7 +8136,7 @@ Assert-WorkflowContract `
     -Description 'shader harness refocuses the host immediately before both screen-pixel captures'
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Verify default source-build shader mode' -Source $testWorkflow) `
-    -Pattern '(?ms)winghostty\.com \+version.*?Build Config.*?custom shaders: disabled' `
+    -Pattern '(?ms)noctty\.com \+version.*?Build Config.*?custom shaders: disabled' `
     -Description 'default source build executes the CLI and reports custom shaders disabled' `
     -Context "$testWorkflow :: Verify default source-build shader mode"
 Assert-WorkflowContract `
@@ -8266,11 +8266,11 @@ Assert-WorkflowContract `
     -Description 'accessibility evidence requires runner provenance to be a JSON object'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern "schema_version -ne 'winghostty\.interactive-runner-provenance\.v1'" `
+    -Pattern "schema_version -ne 'noctty\.interactive-runner-provenance\.v1'" `
     -Description 'accessibility evidence rejects unsupported runner provenance schemas'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
-    -Pattern 'WINGHOSTTY_EXPECTED_CHECKOUT_SHA' `
+    -Pattern 'NOCTTY_EXPECTED_CHECKOUT_SHA' `
     -Description 'interactive provenance can verify an exact PR head checkout instead of only GITHUB_SHA'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
@@ -8320,7 +8320,7 @@ Assert-WorkflowContract `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
 Assert-WorkflowContract `
     -Path $windowsPackager `
-    -Pattern '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?winghostty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest' `
+    -Pattern '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?noctty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest' `
     -Description 'Windows packaging verifies hash-bound shader capability for every target and executes native packages'
 Assert-WorkflowContract `
     -Path $windowsBuildCapabilities `
@@ -8436,7 +8436,7 @@ foreach ($deployStepName in @(
         -Source $siteDeployWorkflow
     Assert-TextContract `
         -Content $deployStep `
-        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
+        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=noctty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
         -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version and visible diagnostics' `
         -Context "$siteDeployWorkflow :: $deployStepName"
     if ($deployStep -match '(?m)^\s*quiet:') {
@@ -8452,7 +8452,7 @@ foreach ($phase in @('canary', 'production')) {
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw) `
-    -Pattern '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/winghostty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all' `
+    -Pattern '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/noctty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all' `
     -Description 'the shared site gate binds both phases to a clean exact fork-local main head' `
     -Context $siteDeploymentHeadGate
 Assert-TextContract `
@@ -8471,7 +8471,7 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: payload"
 Assert-TextContract `
     -Content $sitePayloadStep `
-    -Pattern '(?ms)winghostty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory=' `
+    -Pattern '(?ms)noctty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory=' `
     -Description 'Wrangler installs in a runner-temporary directory outside the checkout' `
     -Context "$siteDeployWorkflow :: payload"
 Assert-TextContract `
@@ -8486,7 +8486,7 @@ Assert-TextContract `
     -Context "$siteDeployWorkflow :: redirect preflight"
 Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow) `
-    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://winghostty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect' `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://noctty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect' `
     -Description 'production verification binds the canonical domain and zone redirect' `
     -Context "$siteDeployWorkflow :: production verification"
 Assert-TextContract `
@@ -8513,17 +8513,17 @@ Assert-TextContract `
     -Context $site404
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
-    -Pattern '"/__winghostty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"' `
+    -Pattern '"/__noctty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"' `
     -Description 'deployment verification exercises the 404 fallback below a multi-segment path' `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
     -Content $siteIndexText `
-    -Pattern '(?ms)property="og:image" content="https://winghostty\.com/assets/winghostty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://winghostty\.com/assets/winghostty-social\.png"' `
+    -Pattern '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.png"' `
     -Description 'social previews use a current raster large-image card with explicit dimensions' `
     -Context $siteIndex
 Assert-TextContract `
     -Content $sitePayloadBuilderText `
-    -Pattern "'assets/winghostty-social\.png'" `
+    -Pattern "'assets/noctty-social\.png'" `
     -Description 'the deterministic Cloudflare payload includes the social preview image' `
     -Context $sitePayloadBuilder
 Assert-TextContract `
@@ -8644,15 +8644,15 @@ $publicBaseUriFunctionText = Get-PowerShellBlockText `
     -HeaderPattern '^function\s+ConvertTo-PublicBaseUri(?=\s|\{)'
 . ([scriptblock]::Create($publicBaseUriFunctionText))
 $immutablePagesOrigin = ConvertTo-PublicBaseUri `
-    -Value 'https://69cd5628.winghostty.pages.dev/' `
+    -Value 'https://69cd5628.noctty.pages.dev/' `
     -Kind pages
 if ($immutablePagesOrigin.DnsSafeHost -cne
-    '69cd5628.winghostty.pages.dev') {
+    '69cd5628.noctty.pages.dev') {
     throw 'Immutable Pages deployment origin was not preserved.'
 }
 foreach ($mutablePagesUrl in @(
-    'https://winghostty.pages.dev/',
-    'https://main.winghostty.pages.dev/'
+    'https://noctty.pages.dev/',
+    'https://main.noctty.pages.dev/'
 )) {
     $mutablePagesOriginRejected = $false
     try {
@@ -8844,12 +8844,12 @@ Assert-TextContract `
     -Context "$cloudflarePagesVerifier :: Test-PublicPayloadOnce"
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
-    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__winghostty_header_contract_''' `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__noctty_header_contract_''' `
     -Description 'static-only response verification always checks stylesheet asset controls and excludes HTML route probes' `
     -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 Assert-TextContract `
     -Content $cloudflarePagesVerifierText `
-    -Pattern '(?ms)schema_version\s*=\s*''winghostty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false' `
+    -Pattern '(?ms)schema_version\s*=\s*''noctty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false' `
     -Description 'deployment provenance distinguishes immutable HTML, canonical static assets, and unverified canonical HTML' `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
@@ -8925,7 +8925,7 @@ Assert-TextContract `
 
 $siteCspFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "winghostty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "noctty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $siteCspFixtureRoot = [IO.Path]::GetFullPath($siteCspFixtureRoot)
 $siteCspTempPrefix = [IO.Path]::GetFullPath(
     [IO.Path]::GetTempPath()
@@ -8959,12 +8959,12 @@ try {
     }
     $swappedHeaders = $fixtureHeadersText.Replace(
         "'$scriptHash'",
-        "'__WINGHOSTTY_SCRIPT_HASH__'"
+        "'__NOCTTY_SCRIPT_HASH__'"
     ).Replace(
         "'$attributeHash'",
         "'$scriptHash'"
     ).Replace(
-        "'__WINGHOSTTY_SCRIPT_HASH__'",
+        "'__NOCTTY_SCRIPT_HASH__'",
         "'$attributeHash'"
     )
     [IO.File]::WriteAllText(
@@ -9135,7 +9135,7 @@ finally {
 }
 Assert-TextContract `
     -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
-    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
+    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__noctty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
     -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
     -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
 $cacheControlContract = Get-PowerShellBlockText `
@@ -9173,7 +9173,7 @@ Assert-TextContract `
 
 $sitePayloadFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "winghostty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "noctty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $sitePayloadFixtureRoot = [IO.Path]::GetFullPath($sitePayloadFixtureRoot)
 $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') +
     [IO.Path]::DirectorySeparatorChar
@@ -9243,7 +9243,7 @@ try {
     $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
     if ($payloadAssetPaths.Count -ne 2 -or
         $payloadAssetPaths -cnotcontains 'assets/favicon.svg' -or
-        $payloadAssetPaths -cnotcontains 'assets/winghostty-social.png') {
+        $payloadAssetPaths -cnotcontains 'assets/noctty-social.png') {
         throw 'Site deploy manifest assets escaped the favicon and social-preview allowlist.'
     }
 }

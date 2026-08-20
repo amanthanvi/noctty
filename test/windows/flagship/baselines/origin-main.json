@@ -1,5 +1,5 @@
 {
-  "schema_version": "winghostty.verification.baseline-manifest.v1",
+  "schema_version": "noctty.verification.baseline-manifest.v1",
   "captured_at": "2026-07-11T08:15:02.4458521Z",
   "git_commit": "77c5354f6d908323678587bdf076c770f6c6f973",
   "platform": {

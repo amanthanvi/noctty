@@ -13,7 +13,7 @@ ConPTY rewrite; its chronic weaknesses are input latency (~2x conhost), slow XAM
 a sprawling dual JSON/UI settings system, 1.6k open issues, no session _content_ philosophy
 beyond plain-text buffer snapshots, and no plugin/scripting model. Sixel shipped in 1.22 and
 the Kitty _keyboard_ protocol in 1.25, but Kitty _graphics_ remains an open request — the
-capability gap winghostty already fills. The exploitable space is exactly what PRODUCT.md
+capability gap noctty already fills. The exploitable space is exactly what PRODUCT.md
 targets: instantaneous native feel, dependable session restore, and deep terminal capability.
 
 ---
@@ -41,7 +41,7 @@ targets: instantaneous native feel, dependable session restore, and deep termina
   ([MS docs](https://learn.microsoft.com/en-us/windows/terminal/terminal-chat),
   [GitHub changelog](https://github.blog/changelog/2025-02-26-github-copilot-now-available-for-free-in-windows-terminal-canary/)).
 - Relationship to upstream: _is_ the upstream for the Windows console stack — every other
-  Windows terminal (including winghostty) sits on its ConPTY.
+  Windows terminal (including noctty) sits on its ConPTY.
 
 ## 2. Performance & fluidity
 
@@ -230,60 +230,60 @@ Recurring, sourced themes:
    exists as workaround
    ([FAQ](https://learn.microsoft.com/en-us/windows/terminal/faq))).
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
-### Does well (adopt-candidates — winghostty measurably lacks these)
+### Does well (adopt-candidates — noctty measurably lacks these)
 
 1. **Quake mode / global summon with tray icon** — WT's most-loved workflow feature
-   (megathread [#8888](https://github.com/microsoft/terminal/issues/8888)); winghostty's
+   (megathread [#8888](https://github.com/microsoft/terminal/issues/8888)); noctty's
    status.md has no dropdown/global-hotkey surface. Upstream Ghostty has quick terminal on
    macOS; a Win32-native, pre-warmed quake window is a direct adopt.
 2. **Taskbar progress via OSC 9;4** — cheap, visible, native; matches PRODUCT.md's
-   "progress visible without noise." Not in winghostty's capability matrix.
-3. **Buffer-content restore** — WT restores previous output text at startup; winghostty's
+   "progress visible without noise." Not in noctty's capability matrix.
+3. **Buffer-content restore** — WT restores previous output text at startup; noctty's
    `window-save-state` explicitly does not restore contents. Even WT's flawed plain-text
    snapshot beats nothing for the benchmark user.
-4. **Default-terminal registration** — WT owns the OS handoff; winghostty should register
+4. **Default-terminal registration** — WT owns the OS handoff; noctty should register
    as a selectable default terminal app (Windows 11 supports third-party registration —
    this is how a terminal becomes _the_ terminal).
 5. **Jump lists / SSH + profile auto-detection breadth** — WT auto-detects SSH hosts
-   (1.24 preview) and exposes profiles in the taskbar jump list; winghostty detects shells
+   (1.24 preview) and exposes profiles in the taskbar jump list; noctty detects shells
    only.
-6. **Kitty keyboard protocol** (WT 1.25) — verify winghostty inherits this from Ghostty
+6. **Kitty keyboard protocol** (WT 1.25) — verify noctty inherits this from Ghostty
    core and validate it on Win32 input path; if not validated, it's now table stakes.
 7. **URL-safety prompt** (`safeUriSchemes`, 1.25) — a small trust feature aligned with
-   winghostty's privacy posture.
+   noctty's privacy posture.
 8. **Elevation-aware UX** — a deliberate, documented elevation model (even if different
-   from WT's separate-window rule); winghostty docs are silent on running elevated.
+   from WT's separate-window rule); noctty docs are silent on running elevated.
 
 ### Does badly (avoid / exploit)
 
 1. **Startup weight** — XAML/MSIX cold start is a structural cost of its architecture;
-   winghostty's native Win32 + OpenGL stack should make sub-100ms cold start a headline,
+   noctty's native Win32 + OpenGL stack should make sub-100ms cold start a headline,
    _measured and published_ (WT publishes no startup numbers — a vacuum to occupy).
 2. **Input latency** — 2x conhost, GPU-pipeline latency largely unaddressed for years.
    Publish camera-methodology latency benchmarks; PRODUCT.md's "instantaneous" claim needs
    numbers to beat the incumbent credibly.
-3. **Settings sprawl** — WT needed a search engine for its own settings; winghostty's
+3. **Settings sprawl** — WT needed a search engine for its own settings; noctty's
    staged, source-preserving settings window that _never rewrites unrelated JSON_ is the
    direct answer to [#8991](https://github.com/microsoft/terminal/issues/8991) — market it
    as such.
 4. **Feature-first, stabilize-later releases** — buffer restore and tear-out each shipped
-   then crashed for months. winghostty's undo/redo-transactional structural model is the
+   then crashed for months. noctty's undo/redo-transactional structural model is the
    differentiator; keep flagship features behind reliability gates.
 5. **Graphics gap** — WT has Sixel only; Kitty graphics is an open issue
-   ([#8389](https://github.com/microsoft/terminal/issues/8389)). winghostty already ships
+   ([#8389](https://github.com/microsoft/terminal/issues/8389)). noctty already ships
    Kitty graphics — this is a concrete "deep terminal capability" wedge; validate + demo it
    on Windows (TUIs: yazi, chafa, notcurses).
 6. **No extensibility story** — a decade-old product still asking "what does an extension
-   model look like?" winghostty's allowlisted `+perform-action` IPC is a seed; a documented
+   model look like?" noctty's allowlisted `+perform-action` IPC is a seed; a documented
    automation surface (wezterm-cli-style) exploits WT's vacuum without becoming a plugin
    platform.
 7. **Session restore depth** — WT restores text; nobody on Windows restores _working
-   state_ well. winghostty restoring layout+profile+cwd reliably, plus optional content
+   state_ well. noctty restoring layout+profile+cwd reliably, plus optional content
    snapshots, leapfrogs rather than matches.
 
-### Blind-spot candidates (no category in winghostty PRODUCT.md)
+### Blind-spot candidates (no category in noctty PRODUCT.md)
 
 1. **AI-in-terminal** — Terminal Chat/Copilot is Microsoft's differentiating bet; PRODUCT.md
    has no position on AI assistance (even "explicitly out of scope" is a position worth
@@ -291,15 +291,15 @@ Recurring, sourced themes:
 2. **Quake/dropdown terminal as a product surface** — PRODUCT.md's workflow list (tabs,
    splits, search, restore) has no category for summon-from-anywhere terminal access.
 3. **Elevation/UAC as a designed surface** — mixed-elevation policy, elevated-profile UX,
-   and the security boundary story are absent from winghostty docs.
+   and the security boundary story are absent from noctty docs.
 4. **Snippets/saved-commands and non-terminal panes** (scratchpad) — WT treats "remembering
-   commands" as a first-class emergency workflow; winghostty's palette has recent commands
+   commands" as a first-class emergency workflow; noctty's palette has recent commands
    but no persistent snippet store.
 5. **Inbox/OS distribution & default-terminal politics** — competing against a preinstalled
-   default is a go-to-market problem PRODUCT.md never names: winghostty must articulate why
+   default is a go-to-market problem PRODUCT.md never names: noctty must articulate why
    someone replaces the default, not just how it differs.
 6. **Localization** — WT ships community translations (Serbian, Ukrainian in 1.25) and
-   cross-language command-palette matching; winghostty docs never mention non-English users.
+   cross-language command-palette matching; noctty docs never mention non-English users.
 7. **Progress/notification OS surfaces beyond the window** (taskbar, tray, toasts) — WT
-   treats the Windows shell itself as part of the terminal UX; winghostty's design frame
+   treats the Windows shell itself as part of the terminal UX; noctty's design frame
    stops at the window edge.

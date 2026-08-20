@@ -10,7 +10,7 @@ embeddable `rio-vt`/`librio` crates plus a WASM/npm web build. But Windows is
 visibly the third platform: unsigned installers, open startup-crash/opacity/
 paste bugs, manual `conpty.dll` sideloading for image protocols, no WSL story,
 no session restore (open request since 2023), no profiles, no palette — so it
-does not yet threaten winghostty's benchmark user, though its trajectory and
+does not yet threaten noctty's benchmark user, though its trajectory and
 the author's proven ability to ship workflow features (in closed-source
 Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
 
@@ -30,7 +30,7 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
   `alacritty_terminal`"
   ([blog](https://rioterm.com/blog/2026/07/27/rio-vt-and-librio),
   [HN](https://news.ycombinator.com/item?id=49084236)). This directly mirrors
-  winghostty's retained `libghostty-vt`.
+  noctty's retained `libghostty-vt`.
 - Governance/bus factor: effectively a single-author project. GitHub commit
   search shows 339 commits on main between 2026-07-01 and 2026-08-17, of
   which 329 are by raphamorim (~97%) (GitHub commit search API, 2026-08-17).
@@ -129,7 +129,7 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
   shell configuration ([docs](https://rioterm.com/docs/features/shell-integration));
   OSC 133 semantic-prompt tracking with `ScrollToPrevPrompt`/`ScrollToNextPrompt`
   actions landed recently ([changelog](https://rioterm.com/changelog)). No
-  automatic per-shell injection comparable to Ghostty/winghostty.
+  automatic per-shell injection comparable to Ghostty/noctty.
 - Search: exists and lives in the engine, but has regressed before ("Search
   seems broken in 0.2.0", [#785](https://github.com/raphamorim/rio/issues/785));
   vi-mode search was a long-open request
@@ -232,30 +232,30 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
 - Name confusion with Plan 9's rio ("a cruel joke on Rob Pike",
   [HN](https://news.ycombinator.com/item?id=49084236)).
 
-## 10. Lessons for winghostty
+## 10. Lessons for noctty
 
 ### Does well (adopt-candidates)
 
 1. **ConPTY version escape hatch.** Rio detects/loads a newer `conpty.dll` +
    `OpenConsole.exe` placed beside the exe to un-break image-protocol
    passthrough ([install docs](https://rioterm.com/docs/install/windows)).
-   winghostty's status/matrix never mentions its ConPTY version strategy;
+   noctty's status/matrix never mentions its ConPTY version strategy;
    shipping or documenting a modern-ConPTY path (and regression-testing
    ConPTY-specific artifacts like the 150–200 ms synchronized-update echo lag
-   Rio fixed in 0.5.5) would harden the exact pipeline winghostty lives on.
-2. **Sixel + iTerm2 image protocols.** winghostty ships Kitty graphics only
+   Rio fixed in 0.5.5) would harden the exact pipeline noctty lives on.
+2. **Sixel + iTerm2 image protocols.** noctty ships Kitty graphics only
    (docs/status.md); Rio ships all three. Sixel matters for legacy tooling
    and some TUIs the benchmark user hits in WSL.
 3. **Power-aware rendering knobs.** `target-fps`, `disable-unfocused-render`,
    low-power adapter preference ([config docs](https://rioterm.com/docs/config)).
-   winghostty documents no energy/battery renderer controls; laptop devs
+   noctty documents no energy/battery renderer controls; laptop devs
    notice.
 4. **Keyboard hints (pattern capture).** Rio's hints let a keyboard-first
    user grab URLs/paths without the mouse ([features](https://rioterm.com/docs/features));
-   nothing equivalent appears in winghostty's status.md, and it fits
+   nothing equivalent appears in noctty's status.md, and it fits
    PRODUCT.md's keyboard-first principle directly.
 5. **Prompt-jump scrollback navigation.** OSC 133 `ScrollToPrev/NextPrompt`
-   actions ([changelog](https://rioterm.com/changelog)); winghostty emits
+   actions ([changelog](https://rioterm.com/changelog)); noctty emits
    OSC 133 marks (shell integration) but status.md never surfaces prompt
    jumping as a Windows-validated workflow — verify and advertise it.
 6. **Extra install channels.** Chocolatey and MSYS2 alongside winget/Scoop
@@ -268,9 +268,9 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
 
 1. **Windows as the translation-layer platform.** macOS/Linux got native
    backends; Windows still pays the wgpu tax and accumulates open rendering
-   bugs (opacity #992, startup #1804). Exploit: winghostty's OpenGL+DComp
+   bugs (opacity #992, startup #1804). Exploit: noctty's OpenGL+DComp
    pipeline is built *for* Windows — say so, with Rio as the contrast.
-2. **Unsigned binaries and "click Run anyway" docs.** winghostty's
+2. **Unsigned binaries and "click Run anyway" docs.** noctty's
    Authenticode signing + checksum-verified updater is a direct trust
    differentiator ([install docs](https://rioterm.com/docs/install/windows)
    vs. docs/status.md).
@@ -280,7 +280,7 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
    cadence: velocity reads as churn to the benchmark user.
 4. **Workflow layer withheld from OSS.** Session restore, quick terminal,
    command bar, and spaces went into closed-source, macOS-only Canario while
-   Rio's #322 sits open since 2023. winghostty ships session restore and a
+   Rio's #322 sits open since 2023. noctty ships session restore and a
    universal palette in the open product today — a durable moat against Rio
    on Windows.
 5. **Bus factor 1.** ~97% of recent commits are one person, who has already
@@ -305,9 +305,9 @@ Canario, tellingly) make it the fastest-moving adjacent competitor to watch.
 3. **Energy/battery as a performance axis.** PRODUCT.md defines success as
    fast/fluid but has no category for power draw, unfocused-window duty
    cycling, or adapter selection on hybrid-GPU laptops.
-4. **Embeddable-engine ecosystem as product strategy.** winghostty keeps
+4. **Embeddable-engine ecosystem as product strategy.** noctty keeps
    `libghostty-vt` buildable but PRODUCT.md treats it as an artifact, not a
    strategy; Rio is actively marketing its engine (C ABI, npm) to grow an
    ecosystem that feeds the terminal.
-5. **Wide color gamut / advanced color rendering.** No winghostty category
+5. **Wide color gamut / advanced color rendering.** No noctty category
    for color-management fidelity on modern HDR/P3 Windows displays.

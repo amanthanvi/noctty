@@ -1,5 +1,5 @@
 {
-  "schema_version": "winghostty.verification.scenario.v1",
+  "schema_version": "noctty.verification.scenario.v1",
   "id": "windows.interactive-win11.composite",
   "title": "Windows 11 interactive composite",
   "category": "interaction",

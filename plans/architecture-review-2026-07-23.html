@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>winghostty architecture review — terminal accessibility and Settings theme</title>
+  <title>noctty architecture review — terminal accessibility and Settings theme</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script type="module">
     import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -119,7 +119,7 @@ flowchart LR
       <ul class="mt-4 list-disc space-y-2 pl-5 text-sm text-slate-300">
         <li>Final-tree PASS: targeted terminal-output/session, <code>TerminalProvider</code>, and <code>win32_settings</code> tests; executable build; flagship contracts; and full Zig suite.</li>
         <li>PASS: five exact native key-input scenarios with unique artifacts—classic A, classic Space, BMP Unicode, supplementary Unicode, and a 256-unit Unicode burst—plus a pure 256-authorization backlog test.</li>
-        <li>Final-tree PASS: full accessibility harness with <code>-ResetState -TimeoutSeconds 20 -IdleSoakSeconds 60</code>. Evidence: <code>.sandbox/win11/github-winghostty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json</code>, <code>outcome=pass</code>, 119.962 seconds. This is not a claim that the broader composite suite ran.</li>
+        <li>Final-tree PASS: full accessibility harness with <code>-ResetState -TimeoutSeconds 20 -IdleSoakSeconds 60</code>. Evidence: <code>.sandbox/win11/github-noctty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json</code>, <code>outcome=pass</code>, 119.962 seconds. This is not a claim that the broader composite suite ran.</li>
         <li>Final-tree PASS: UIA notification/TextPattern behavior, inactive-pane silence, 60-second idle with zero TextChanged/resource growth, exact High Contrast restore with backdrop <code>1</code>, and DPI 96/High Contrast off/zero unexpected processes at cleanup.</li>
         <li>Final-tree PASS: Dark Save and fresh-process relaunch preserve combo index <code>3</code>, exact host/Settings pixels, immersive-dark DWM <code>1</code>, and host/Settings backdrop <code>1</code>; sandbox config bytes are restored.</li>
         <li>Source closure: committed, charset-mapped semantic print/REP/CR/LF/tab output now originates at the authoritative parser seam; hidden status output is excluded; RIS emits a silent continuity reset; interest epochs reject stale batches; raw Win32 VT parsing and Termio forwarding are deleted. Attached, focused panes with an acquired provider remain capture-interested independently of listener activity, while UIA event emission remains listener-gated. Focused semantic-output, transport, and announcement filters pass.</li>
