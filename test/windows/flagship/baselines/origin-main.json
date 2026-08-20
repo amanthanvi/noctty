@@ -1,25 +1,25 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-07-11T08:15:02.4458521Z",
-  "git_commit": "77c5354f6d908323678587bdf076c770f6c6f973",
+  "captured_at": "2026-08-20T22:17:32.0000000Z",
+  "git_commit": "8cc68f5157e2408c49897488f6b2906d122567c5",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Pre-rewrite Windows-checkout source contracts, verified unchanged from origin/main and hashed after checkout normalization."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward from 77c5354f6d908323678587bdf076c770f6c6f973 after auditing every hunk, and hashed after checkout normalization."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "478052c66ab49f430f547ff1d730c6985459b53968b68756924d01006821afd8",
+      "sha256": "86fe63ff9dc6bc9ed18ac7b04dd202bbdf6236531700bbad39bc2392b54982a2",
       "scenario_id": null
     },
     {
       "id": "portable-cli-harness",
       "kind": "contract",
       "path": "test/windows/package-portable-cli.ps1",
-      "sha256": "269f010e479c78720b3649ded80199039d89a779e109a720675f640d42d4a518",
+      "sha256": "2cf7f80d466761f7d6c5e1f87d0b55150f778a6813df131d6177643ede8b9f7f",
       "scenario_id": "windows.portable-cli.x64"
     }
   ]
