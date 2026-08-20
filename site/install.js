@@ -19,7 +19,7 @@ function writeClipboardTextFallback(text) {
   textarea.setAttribute('readonly', '');
   textarea.setAttribute('aria-hidden', 'true');
   textarea.tabIndex = -1;
-  textarea.className = 'wg-clipboard-stage';
+  textarea.className = 'nc-clipboard-stage';
   document.body.appendChild(textarea);
 
   let copied = false;
@@ -43,9 +43,9 @@ function writeClipboardText(text) {
   return writeClipboardTextFallback(text);
 }
 
-const command = document.getElementById('wg-install-command');
-const copyButton = document.getElementById('wg-install-copy');
-const status = document.getElementById('wg-install-status');
+const command = document.getElementById('nc-install-command');
+const copyButton = document.getElementById('nc-install-copy');
+const status = document.getElementById('nc-install-status');
 const radios = Array.from(document.querySelectorAll('input[name="install-method"]'));
 
 if (command && copyButton && status && radios.length) {

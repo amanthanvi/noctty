@@ -8,12 +8,13 @@ dependency tree:
 
 - `index.html` - the landing page, including all marketing copy
 - `404.html` - the not-found page
-- `styles.css` - the whole stylesheet, plain CSS with `wg-` prefixed classes
+- `styles.css` - the whole stylesheet, plain CSS with `nc-` prefixed classes
 - `app.js` - theme toggle (shared by both pages)
 - `version.js` - GitHub Releases version fetch for the hero chip
 - `install.js` - install-method switcher and clipboard copy
 - `terminal.js` - the scripted terminal demo (also imported by the Node tests)
-- `assets/` - favicon and social-preview image
+- `assets/` - favicon, self-hosted fonts, hero backdrop, app capture,
+  and the social-preview image
 - `tests/` - `node --test` unit tests for the terminal module
 - `_headers` - Cloudflare Pages cache and browser security policy
 
@@ -22,6 +23,46 @@ exactly one inline-script hash. `node scripts/build-site-assets.mjs` (from
 the repo root) recomputes that hash, the font-`onload` handler hash, and the
 `?v=` SHA-256 cache keys on local assets; `--check` is the CI determinism
 gate. Run it after editing any HTML, CSS, or JS file here.
+
+Fonts are self-hosted, so the pages carry no inline event handlers at all and
+the CSP pins `script-src-attr 'none'` with `style-src`/`font-src` limited to
+`'self'`. Both `scripts/build-site-assets.mjs` and
+`scripts/get-site-header-contract.ps1` fail the build if an inline handler or a
+third-party font origin reappears.
+
+## Design brief
+
+The landing page is a Persuade surface: a Windows developer arrives asking
+whether this is a serious, maintained project, and leaves with it installed.
+Credibility therefore leads, and the distinctive capabilities carry the middle
+of the page. The site describes what Noctty does well and never argues against
+other terminals.
+
+**Nocturnal identity.** Ink-indigo night, moonlight cream, one periwinkle
+accent, and an aurora green reserved for verified/secure states. The palette
+deliberately replaces the pre-rebrand scheme, which used Microsoft's four logo
+colors. Dark is the default because the use scene is a terminal at night;
+light ("dawn") is a first-class state, not a fallback.
+
+**Type.** Space Grotesk carries the display voice, Segoe UI Variable the body
+(the platform's own voice, which suits a native Windows product), and JetBrains
+Mono every command, key, and terminal line. Both webfonts are variable, subset
+to latin, self-hosted, and OFL-licensed; their licenses ship in `assets/fonts/`.
+
+**Structure.** Deliberately not a grid of identical feature cards. The hero
+pairs the claim with a live terminal; an assurance strip carries the release
+facts; three alternating capability blocks each show a real artifact (the app
+capture, a rendered palette, a rendered settings list); then the upstream
+relationship and accessibility status are stated plainly.
+
+**Motion.** One authored moment: the hero rises out of the dark on first paint
+while the sky settles. Everything is inside `prefers-reduced-motion:
+no-preference`, and the terminal demo has a visible Pause control.
+
+**Imagery.** `hero-sky.webp` and the social card were generated with
+GPT-Image-2 and then cropped, darkened, and composited locally.
+`app-window.webp` is a real capture of the shipping app, cropped to its
+content band.
 
 ## Source of truth
 

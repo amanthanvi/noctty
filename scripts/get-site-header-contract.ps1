@@ -145,23 +145,16 @@ foreach ($htmlName in @('index.html', '404.html')) {
     [void]$expectedScriptHashes.Add(
         (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
     )
+    # Fonts are self-hosted, so no page may carry an inline event handler at
+    # all. The CSP pins script-src-attr 'none', which is strictly stronger
+    # than hashing a handler with 'unsafe-hashes'.
     $eventAttributeCount = [regex]::Matches(
         $html,
         '(?is)\s+on[a-z][a-z0-9_-]*\s*='
     ).Count
-    $eventHandlers = @([regex]::Matches(
-        $html,
-        '(?is)\s+on[a-z][a-z0-9_-]*\s*=\s*(?<quote>["''])(?<body>.*?)\k<quote>'
-    ))
-    if ($eventAttributeCount -ne 1 -or $eventHandlers.Count -ne 1) {
-        throw "Expected exactly one quoted CSP-hashed event handler in $htmlName."
+    if ($eventAttributeCount -ne 0) {
+        throw "Expected no inline event handler attributes in $htmlName; the site CSP pins script-src-attr 'none'."
     }
-    $decodedEventHandler = [Net.WebUtility]::HtmlDecode(
-        $eventHandlers[0].Groups['body'].Value
-    )
-    [void]$expectedScriptAttributeHashes.Add(
-        (Get-CspSha256Source -Value $decodedEventHandler)
-    )
 }
 
 $csp = $security['Content-Security-Policy']
@@ -217,9 +210,7 @@ function Assert-ExactCspDirectiveSources {
 $expectedScriptSources = @("'self'") + @(
     $expectedScriptHashes | ForEach-Object { "'$_'" }
 )
-$expectedScriptAttributeSources = @("'unsafe-hashes'") + @(
-    $expectedScriptAttributeHashes | ForEach-Object { "'$_'" }
-)
+$expectedScriptAttributeSources = @("'none'")
 $expectedCspDirectives = [ordered]@{
     'default-src' = @("'self'")
     'base-uri' = @("'none'")
@@ -228,11 +219,8 @@ $expectedCspDirectives = [ordered]@{
     'form-action' = @("'self'")
     'script-src' = $expectedScriptSources
     'script-src-attr' = $expectedScriptAttributeSources
-    'style-src' = @(
-        "'self'",
-        'https://fonts.googleapis.com'
-    )
-    'font-src' = @("'self'", 'https://fonts.gstatic.com')
+    'style-src' = @("'self'")
+    'font-src' = @("'self'")
     'connect-src' = @("'self'", 'https://api.github.com')
     'img-src' = @("'self'", 'data:')
     'frame-src' = @("'none'")

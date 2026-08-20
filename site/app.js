@@ -1,7 +1,7 @@
 (function () {
   var root = document.documentElement;
   var toggle = document.getElementById("theme-toggle");
-  var storageKey = "wg-theme";
+  var storageKey = "nc-theme";
   var blinkTimer = null;
 
   function applyTheme(theme) {
