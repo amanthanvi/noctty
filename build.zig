@@ -82,6 +82,27 @@ pub fn build(b: *std.Build) !void {
     // noctty executable, the actual runnable app binary.
     const exe = try GhosttyExe.init(b, &config, &deps);
 
+    // Standalone feasibility spike. This artifact is intentionally absent
+    // from the normal build and every product packaging path.
+    if (config.emit_conpty_host) {
+        const conpty_host = b.addExecutable(.{
+            .name = "conpty-host",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/conpty_host.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        conpty_host.subsystem = .Console;
+        conpty_host.linkSystemLibrary("advapi32");
+        _ = try deps.add(conpty_host);
+        b.installArtifact(conpty_host);
+    }
+
     // libghostty-vt is retained in this fork, but normal app builds
     // shouldn't pay to build/install it unless explicitly requested.
     if (want_lib_vt_graph) {
