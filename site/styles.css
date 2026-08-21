@@ -114,6 +114,14 @@ html {
   html {
     scroll-behavior: auto;
   }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 body {
@@ -698,6 +706,18 @@ svg {
   width: 7px;
   color: var(--peri);
   animation: nc-blink 1.05s steps(1, end) infinite;
+}
+
+/* terminal.js flips data-motion when the demo is paused, scrolled away, or
+   hidden. The caret must obey it, and must not blink under reduced motion. */
+[data-nc-terminal][data-motion="paused"] .nc-caret {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nc-caret {
+    animation: none;
+  }
 }
 
 @keyframes nc-blink {
