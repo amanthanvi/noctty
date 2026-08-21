@@ -1323,24 +1323,6 @@ pub fn buildHostBannerText(
     };
 }
 
-fn commandPaletteUniqueMatch(snap: PaletteSnapshot, input_text: []const u8) ?[]const u8 {
-    if (input_text.len == 0) return null;
-    var buf: [palette_max_tokens][]const u8 = undefined;
-    const tokens = tokenizePaletteQuery(input_text, &buf);
-    if (tokens.len == 0) return null;
-
-    var best_rank: f64 = std.math.inf(f64);
-    var best_index: ?usize = null;
-    for (snap.commands, snap.cvals, 0..) |cmd, cval, i| {
-        const r = rankPaletteEntry(cmd, cval, tokens) orelse continue;
-        if (r < best_rank) {
-            best_rank = r;
-            best_index = i;
-        }
-    }
-    return if (best_index) |i| std.mem.span(snap.cvals[i].action) else null;
-}
-
 fn commandPaletteCompletionCandidate(
     snap: PaletteSnapshot,
     seed: []const u8,
