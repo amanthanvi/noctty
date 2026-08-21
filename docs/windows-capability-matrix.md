@@ -103,10 +103,11 @@ that:
   `xterm-256color`.
 - Automatic `cmd.exe` integration wraps the existing `PROMPT` (or cmd's
   `$P$G` default) to emit OSC 133 A/B prompt marks and OSC 9;9 cwd reports.
-  When Clink is detected, noctty appends its shipped Lua directory to
-  `CLINK_PATH` so Clink also emits OSC 133 C/D command marks and exit codes.
-  Without Clink, prompt/cwd marks still work but command-finish marks and exit
-  codes are unavailable.
+  When Clink is detected, noctty prepends its shipped Lua directory to
+  `CLINK_PATH`; an already-active Clink can then load it and emit OSC 133 C/D
+  command marks and exit codes. Noctty does not activate Clink. Without the
+  loaded Clink script, prompt/cwd marks still work but command-finish marks and
+  exit codes are unavailable.
 
 ### Keyboard input
 

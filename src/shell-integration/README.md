@@ -20,7 +20,7 @@ README or the public noctty repository documentation
 | Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
 | Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
 | PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `noctty +ssh-cache`, otherwise falls back to `xterm-256color` |
-| cmd.exe | No | No | No | No |
+| cmd.exe | Yes on Windows for interactive launches via `PROMPT`; `CLINK_PATH` exposes the optional script to active Clink | OSC 9;9 + OSC 133 A/B; active Clink adds OSC 133 C/D | No | No |
 
 ### Bash
 
@@ -165,10 +165,13 @@ connection. On Windows PowerShell that path is not portable enough to run
 silently, so uncached hosts remain on `xterm-256color` until the terminfo is
 installed by another shell integration path or manually added to the SSH cache.
 
-`cmd.exe` is intentionally not auto-integrated. Command Prompt has no reliable
-prompt/pre-exec hook equivalent, so the Windows profile picker surfaces it as a
-plain fallback shell without OSC 7 cwd tracking, prompt marks, or command-finish
-notifications.
+Interactive `cmd.exe` launches are auto-integrated by wrapping the inherited
+`PROMPT` (or cmd's `$P$G` default) with OSC 133 A/B prompt marks and OSC 9;9 cwd
+reports. When Clink is detected, noctty prepends the shipped cmd Lua directory
+to `CLINK_PATH`, but does not activate Clink. An already-active Clink discovers
+the script and adds OSC 133 C/D command boundaries; without it, prompt/cwd marks
+remain available. See [windows.md](../../docs/windows.md#shells) for configured
+`PROMPT` precedence and Clink exit-code details.
 
 ### SSH terminfo cache
 
