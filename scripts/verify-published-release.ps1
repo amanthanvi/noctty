@@ -8,64 +8,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$repository = 'amanthanvi/winghostty'
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
+$repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
+    'amanthanvi/winghostty'
+} else {
+    $env:GITHUB_REPOSITORY
+}
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
-
-function Assert-PublishedSignature {
-    param(
-        [Parameter(Mandatory)] [string]$Path,
-        [Parameter(Mandatory)] [string]$Label,
-        [Parameter(Mandatory)] [string[]]$AllowedPins,
-        [Parameter(Mandatory)] [bool]$TrustSelfSigned
-    )
-
-    $signature = Get-AuthenticodeSignature -LiteralPath $Path
-    $certificate = $signature.SignerCertificate
-    if ($null -eq $certificate) {
-        throw "$Label has no Authenticode signer certificate: $Path"
-    }
-    $statusAccepted = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
-    if (-not $statusAccepted -and $TrustSelfSigned -and
-        $certificate.Subject -eq $certificate.Issuer -and
-        (Test-SelfSignedTrustStatus -Signature $signature -Path $Path)) {
-        $statusAccepted = $true
-    }
-    if (-not $statusAccepted) {
-        throw "$Label Authenticode signature is not valid: $($signature.Status) $($signature.StatusMessage)"
-    }
-
-    $pin = Get-CertificateSpkiSha256 -Certificate $certificate
-    if ($AllowedPins -notcontains $pin) {
-        throw "$Label signer SPKI SHA-256 $pin is absent from the updater publisher-pin allowlist."
-    }
-    return [pscustomobject]@{
-        Label = $Label
-        Thumbprint = $certificate.Thumbprint
-        SpkiSha256 = $pin
-        Status = [string]$signature.Status
-    }
-}
-
-function Get-ChecksumEntries {
-    param([Parameter(Mandatory)] [string]$Path)
-
-    $entries = [ordered]@{}
-    foreach ($line in @(Get-Content -LiteralPath $Path)) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $match = [regex]::Match($line, '^(?<hash>[0-9a-fA-F]{64}) \*(?<name>[^\\/]+)$')
-        if (-not $match.Success) {
-            throw "Malformed checksum line in $Path`: $line"
-        }
-        $name = $match.Groups['name'].Value
-        if ($entries.Contains($name)) {
-            throw "Duplicate checksum entry '$name' in $Path."
-        }
-        $entries[$name] = $match.Groups['hash'].Value.ToLowerInvariant()
-    }
-    return $entries
-}
 
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'GitHub CLI (gh) is required to verify a published release.'
@@ -131,7 +82,7 @@ try {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Downloaded release asset is missing: $path"
         }
-        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256Lower -Path $path
         $digest = [string]$asset.digest
         if ($digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
             throw "GitHub did not publish a SHA-256 digest for asset $($asset.name)."
@@ -162,13 +113,13 @@ try {
             throw "$checksumsName must contain exactly the setup and portable assets for $architecture."
         }
         foreach ($name in $expectedChecksumNames) {
-            $actualHash = (Get-FileHash -LiteralPath (Join-Path $DownloadDirectory $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualHash = Get-FileSha256Lower -Path (Join-Path $DownloadDirectory $name)
             if ($checksums[$name] -ne $actualHash) {
                 throw "$checksumsName does not match downloaded asset $name."
             }
         }
 
-        $signatureEvidence.Add((Assert-PublishedSignature `
+        $signatureEvidence.Add((Assert-ReleaseSignature `
             -Path (Join-Path $DownloadDirectory $setupName) `
             -Label "Setup $architecture" `
             -AllowedPins $allowedPins `
@@ -181,7 +132,7 @@ try {
             if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
                 throw "$portableName is missing signed binary $relativePath."
             }
-            $signatureEvidence.Add((Assert-PublishedSignature `
+            $signatureEvidence.Add((Assert-ReleaseSignature `
                 -Path $binaryPath `
                 -Label "$relativePath $architecture" `
                 -AllowedPins $allowedPins `

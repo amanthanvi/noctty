@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sys = @import("win32/sys.zig");
 const boundary = @import("win32_compositor.zig");
 const content_native = @import("win32_compositor_content_native.zig");
 const window_content_native = @import("win32_compositor_window_content_native.zig");
@@ -17,14 +18,9 @@ const HRESULT = windows.HRESULT;
 const BOOL = i32;
 const UINT = u32;
 const HMODULE = ?*anyopaque;
-const HWND = ?*anyopaque;
+const HWND = sys.HWND;
 
-const RECT = extern struct {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-};
+const RECT = sys.RECT;
 
 const S_OK: HRESULT = 0;
 const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
@@ -104,28 +100,7 @@ const DCompositionCreateDeviceFn = *const fn (
 ) callconv(.winapi) HRESULT;
 
 const IsWindowFn = *const fn (HWND) callconv(.winapi) BOOL;
-const GetAncestorFn = *const fn (HWND, UINT) callconv(.winapi) HWND;
-
-extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) HMODULE;
-extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) BOOL;
-extern "user32" fn CreateWindowExW(
-    ex_style: u32,
-    class_name: [*:0]const u16,
-    window_name: [*:0]const u16,
-    style: u32,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    parent: HWND,
-    menu: ?*anyopaque,
-    instance: HMODULE,
-    param: ?*anyopaque,
-) callconv(.winapi) HWND;
-extern "user32" fn DestroyWindow(hwnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn GetClientRect(hwnd: HWND, rect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.winapi) UINT;
+const GetAncestorFn = *const fn (HWND, UINT) callconv(.winapi) ?HWND;
 
 const Api = struct {
     d3d11_module: HMODULE = null,
@@ -143,15 +118,15 @@ const Api = struct {
 
         var self: Api = .{};
         errdefer self.unload();
-        self.d3d11_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
+        self.d3d11_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
             return error.Unavailable;
-        self.dcomp_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dcomp.dll")) orelse
+        self.dcomp_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dcomp.dll")) orelse
             return error.Unavailable;
-        self.d2d1_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d2d1.dll")) orelse
+        self.d2d1_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d2d1.dll")) orelse
             return error.Unavailable;
-        self.dwrite_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dwrite.dll")) orelse
+        self.dwrite_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dwrite.dll")) orelse
             return error.Unavailable;
-        self.user32_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll")) orelse
+        self.user32_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll")) orelse
             return error.Unavailable;
 
         self.d3d11_create_device = loadProc(D3D11CreateDeviceFn, self.d3d11_module, "D3D11CreateDevice") orelse
@@ -160,8 +135,8 @@ const Api = struct {
             return error.Unavailable;
         // Drawing factories are capability prerequisites, but no factory is
         // created until shell content actually needs D2D/DWrite resources.
-        if (GetProcAddress(self.d2d1_module, "D2D1CreateFactory") == null) return error.Unavailable;
-        if (GetProcAddress(self.dwrite_module, "DWriteCreateFactory") == null) return error.Unavailable;
+        if (sys.GetProcAddress(self.d2d1_module, "D2D1CreateFactory") == null) return error.Unavailable;
+        if (sys.GetProcAddress(self.dwrite_module, "DWriteCreateFactory") == null) return error.Unavailable;
         self.is_window = loadProc(IsWindowFn, self.user32_module, "IsWindow") orelse
             return error.Unavailable;
         self.get_ancestor = loadProc(GetAncestorFn, self.user32_module, "GetAncestor") orelse
@@ -178,17 +153,17 @@ const Api = struct {
         self.dcomposition_create_device = null;
         self.is_window = null;
         self.get_ancestor = null;
-        if (self.user32_module) |module| _ = FreeLibrary(module);
-        if (self.dwrite_module) |module| _ = FreeLibrary(module);
-        if (self.d2d1_module) |module| _ = FreeLibrary(module);
-        if (self.dcomp_module) |module| _ = FreeLibrary(module);
-        if (self.d3d11_module) |module| _ = FreeLibrary(module);
+        if (self.user32_module) |module| _ = sys.FreeLibrary(module);
+        if (self.dwrite_module) |module| _ = sys.FreeLibrary(module);
+        if (self.d2d1_module) |module| _ = sys.FreeLibrary(module);
+        if (self.dcomp_module) |module| _ = sys.FreeLibrary(module);
+        if (self.d3d11_module) |module| _ = sys.FreeLibrary(module);
         self.* = .{};
     }
 };
 
 fn loadProc(comptime T: type, module: HMODULE, comptime name: [:0]const u8) ?T {
-    const raw = GetProcAddress(module, name.ptr) orelse return null;
+    const raw = sys.GetProcAddress(module, name.ptr) orelse return null;
     return @ptrCast(@alignCast(raw));
 }
 
@@ -557,7 +532,9 @@ pub const NativeDriver = struct {
         const is_window = self.api.is_window orelse return false;
         const get_ancestor = self.api.get_ancestor orelse return false;
         const hwnd: HWND = @ptrFromInt(window);
-        return is_window(hwnd) != 0 and get_ancestor(hwnd, GA_ROOT) == hwnd;
+        if (is_window(hwnd) == 0) return false;
+        const ancestor = get_ancestor(hwnd, GA_ROOT) orelse return false;
+        return ancestor == hwnd;
     }
 };
 
@@ -569,8 +546,8 @@ const ClientGeometry = struct {
 
 fn clientGeometry(hwnd: HWND) ?ClientGeometry {
     var rect: RECT = undefined;
-    if (GetClientRect(hwnd, &rect) == 0) return null;
-    const dpi_value = GetDpiForWindow(hwnd);
+    if (sys.GetClientRect(hwnd, &rect) == 0) return null;
+    const dpi_value = sys.GetDpiForWindow(hwnd);
     const dpi: f32 = @floatFromInt(if (dpi_value == 0) @as(UINT, 96) else dpi_value);
     const scale = 96.0 / dpi;
     return .{
@@ -693,7 +670,7 @@ test "native driver attaches commits and detaches a real top-level HWND" {
     defer backend.deinit();
     if (backend.status().state != .ready) return error.SkipZigTest;
 
-    const hwnd = CreateWindowExW(
+    const hwnd = sys.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
         std.unicode.utf8ToUtf16LeStringLiteral("winghostty compositor smoke"),
@@ -707,7 +684,7 @@ test "native driver attaches commits and detaches a real top-level HWND" {
         null,
         null,
     ) orelse return error.SkipZigTest;
-    defer _ = DestroyWindow(hwnd);
+    defer _ = sys.DestroyWindow(hwnd);
 
     try backend.attachWindow(@intFromPtr(hwnd));
     try std.testing.expect(backend.status().compositionActive());

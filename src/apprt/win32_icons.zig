@@ -23,6 +23,7 @@
 const std = @import("std");
 const geometry = @import("win32_geometry.zig");
 const win32_types = @import("win32_types.zig");
+const sys = @import("win32/sys.zig");
 
 // -- Public types -----------------------------------------------------------
 
@@ -53,7 +54,7 @@ pub const Kind = enum {
 
 // -- Win32 GDI externs ------------------------------------------------------
 
-const POINT = geometry.Point;
+const POINT = sys.POINT;
 
 const HBRUSH = win32_types.HBRUSH;
 const HDC = win32_types.HDC;
@@ -64,19 +65,6 @@ const PS_SOLID: i32 = 0;
 const PS_NULL: i32 = 5;
 const TRANSPARENT: i32 = 1;
 const NULL_BRUSH_INDEX: i32 = 5;
-
-extern "gdi32" fn CreatePen(style: i32, width: i32, color: u32) callconv(.winapi) HPEN;
-extern "gdi32" fn SelectObject(hdc: HDC, obj: HGDIOBJ) callconv(.winapi) HGDIOBJ;
-extern "gdi32" fn DeleteObject(obj: HGDIOBJ) callconv(.winapi) i32;
-extern "gdi32" fn MoveToEx(hdc: HDC, x: i32, y: i32, lp: ?*POINT) callconv(.winapi) i32;
-extern "gdi32" fn LineTo(hdc: HDC, x: i32, y: i32) callconv(.winapi) i32;
-extern "gdi32" fn Ellipse(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
-extern "gdi32" fn Rectangle(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) i32;
-extern "gdi32" fn Polygon(hdc: HDC, points: [*]const POINT, count: i32) callconv(.winapi) i32;
-extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.winapi) i32;
-extern "gdi32" fn CreateSolidBrush(color: u32) callconv(.winapi) HBRUSH;
-extern "gdi32" fn SetTextColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn GetStockObject(index: i32) callconv(.winapi) HGDIOBJ;
 
 // -- Geometry helpers (pure -- no GDI) --------------------------------------
 
@@ -142,41 +130,41 @@ const GdiState = struct {
 
 fn setupGdi(hdc: HDC, color: u32, is_hc: bool) ?GdiState {
     const stroke_w: i32 = if (is_hc) 1 else 2;
-    const pen = CreatePen(PS_SOLID, stroke_w, color) orelse return null;
+    const pen = sys.CreatePen(PS_SOLID, stroke_w, color) orelse return null;
     const brush = if (is_hc)
-        GetStockObject(NULL_BRUSH_INDEX) orelse {
-            _ = DeleteObject(pen);
+        sys.GetStockObject(NULL_BRUSH_INDEX) orelse {
+            _ = sys.DeleteObject(pen);
             return null;
         }
     else
-        CreateSolidBrush(color) orelse {
-            _ = DeleteObject(pen);
+        sys.CreateSolidBrush(color) orelse {
+            _ = sys.DeleteObject(pen);
             return null;
         };
-    const old_pen = SelectObject(hdc, pen) orelse {
-        _ = DeleteObject(pen);
-        if (!is_hc) _ = DeleteObject(brush);
+    const old_pen = sys.SelectObject(hdc, pen) orelse {
+        _ = sys.DeleteObject(pen);
+        if (!is_hc) _ = sys.DeleteObject(brush);
         return null;
     };
-    const old_brush = SelectObject(hdc, brush) orelse {
-        _ = SelectObject(hdc, old_pen);
-        _ = DeleteObject(pen);
-        if (!is_hc) _ = DeleteObject(brush);
+    const old_brush = sys.SelectObject(hdc, brush) orelse {
+        _ = sys.SelectObject(hdc, old_pen);
+        _ = sys.DeleteObject(pen);
+        if (!is_hc) _ = sys.DeleteObject(brush);
         return null;
     };
     return .{ .pen = pen, .brush = brush, .old_pen = old_pen, .old_brush = old_brush };
 }
 
 fn teardownGdi(hdc: HDC, gs: GdiState, is_hc: bool) void {
-    _ = SelectObject(hdc, gs.old_brush);
-    _ = SelectObject(hdc, gs.old_pen);
-    if (!is_hc) _ = DeleteObject(gs.brush);
-    _ = DeleteObject(gs.pen);
+    _ = sys.SelectObject(hdc, gs.old_brush);
+    _ = sys.SelectObject(hdc, gs.old_pen);
+    if (!is_hc) _ = sys.DeleteObject(gs.brush);
+    _ = sys.DeleteObject(gs.pen);
 }
 
 fn line(hdc: HDC, x1: i32, y1: i32, x2: i32, y2: i32) void {
-    _ = MoveToEx(hdc, x1, y1, null);
-    _ = LineTo(hdc, x2, y2);
+    _ = sys.MoveToEx(hdc, x1, y1, null);
+    _ = sys.LineTo(hdc, x2, y2);
 }
 
 // -- Per-icon draw routines -------------------------------------------------
@@ -212,21 +200,21 @@ fn drawArrowDown(hdc: HDC, r: Rect) void {
 
 fn drawSplitH(hdc: HDC, r: Rect) void {
     const mid = r.top + @divTrunc(r.height(), 2);
-    _ = Rectangle(hdc, r.left, r.top, r.right, mid - 1);
-    _ = Rectangle(hdc, r.left, mid + 1, r.right, r.bottom);
+    _ = sys.Rectangle(hdc, r.left, r.top, r.right, mid - 1);
+    _ = sys.Rectangle(hdc, r.left, mid + 1, r.right, r.bottom);
 }
 
 fn drawSplitV(hdc: HDC, r: Rect) void {
     const mid = r.left + @divTrunc(r.width(), 2);
-    _ = Rectangle(hdc, r.left, r.top, mid - 1, r.bottom);
-    _ = Rectangle(hdc, mid + 1, r.top, r.right, r.bottom);
+    _ = sys.Rectangle(hdc, r.left, r.top, mid - 1, r.bottom);
+    _ = sys.Rectangle(hdc, mid + 1, r.top, r.right, r.bottom);
 }
 
 fn drawPin(hdc: HDC, r: Rect) void {
     const cx = r.left + @divTrunc(r.width(), 2);
     const head_r = @max(@divTrunc(r.width(), 4), 2);
     // head circle
-    _ = Ellipse(hdc, cx - head_r, r.top, cx + head_r, r.top + head_r * 2);
+    _ = sys.Ellipse(hdc, cx - head_r, r.top, cx + head_r, r.top + head_r * 2);
     // shaft
     line(hdc, cx, r.top + head_r * 2, cx, r.bottom);
 }
@@ -251,24 +239,24 @@ fn drawWarn(hdc: HDC, r: Rect) void {
         .{ .x = r.left, .y = r.bottom },
         .{ .x = r.right, .y = r.bottom },
     };
-    _ = Polygon(hdc, &pts, 3);
+    _ = sys.Polygon(hdc, &pts, 3);
     // exclamation mark: vertical bar + dot
     const bang_top = r.top + @divTrunc(r.height(), 3);
     const bang_bot = r.bottom - @divTrunc(r.height(), 4);
     line(hdc, cx, bang_top, cx, bang_bot);
     const dot_y = r.bottom - @divTrunc(r.height(), 8);
-    _ = Ellipse(hdc, cx - 1, dot_y - 1, cx + 1, dot_y + 1);
+    _ = sys.Ellipse(hdc, cx - 1, dot_y - 1, cx + 1, dot_y + 1);
 }
 
 fn drawCircleGlyph(hdc: HDC, r: Rect, comptime glyph: enum { info, success, err_x }) void {
-    _ = Ellipse(hdc, r.left, r.top, r.right, r.bottom);
+    _ = sys.Ellipse(hdc, r.left, r.top, r.right, r.bottom);
     const cx = r.left + @divTrunc(r.width(), 2);
     const cy = r.top + @divTrunc(r.height(), 2);
     const qh = @divTrunc(r.height(), 4);
     switch (glyph) {
         .info => {
             // dot
-            _ = Ellipse(hdc, cx - 1, cy - qh - 1, cx + 1, cy - qh + 1);
+            _ = sys.Ellipse(hdc, cx - 1, cy - qh - 1, cx + 1, cy - qh + 1);
             // vertical stroke
             line(hdc, cx, cy - qh + 3, cx, cy + qh);
         },
@@ -302,21 +290,21 @@ fn drawMaximize(hdc: HDC, r: Rect) void {
     // `Rectangle` would FILL the rect (producing a solid-coloured
     // block, which the user sees as a "blank button"). Swap to the
     // stock NULL brush while we draw so only the outline renders.
-    const null_brush = GetStockObject(NULL_BRUSH_INDEX) orelse return;
-    const saved = SelectObject(hdc, null_brush) orelse return;
-    defer _ = SelectObject(hdc, saved);
-    _ = Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+    const null_brush = sys.GetStockObject(NULL_BRUSH_INDEX) orelse return;
+    const saved = sys.SelectObject(hdc, null_brush) orelse return;
+    defer _ = sys.SelectObject(hdc, saved);
+    _ = sys.Rectangle(hdc, r.left, r.top, r.right, r.bottom);
 }
 
 fn drawRestore(hdc: HDC, r: Rect) void {
-    const null_brush = GetStockObject(NULL_BRUSH_INDEX) orelse return;
-    const saved = SelectObject(hdc, null_brush) orelse return;
-    defer _ = SelectObject(hdc, saved);
+    const null_brush = sys.GetStockObject(NULL_BRUSH_INDEX) orelse return;
+    const saved = sys.SelectObject(hdc, null_brush) orelse return;
+    defer _ = sys.SelectObject(hdc, saved);
     const off = @max(@divTrunc(r.width(), 4), 2);
     // back square (shifted right + up)
-    _ = Rectangle(hdc, r.left + off, r.top, r.right, r.bottom - off);
+    _ = sys.Rectangle(hdc, r.left + off, r.top, r.right, r.bottom - off);
     // front square (shifted left + down)
-    _ = Rectangle(hdc, r.left, r.top + off, r.right - off, r.bottom);
+    _ = sys.Rectangle(hdc, r.left, r.top + off, r.right - off, r.bottom);
 }
 
 fn drawSearch(hdc: HDC, r: Rect) void {
@@ -324,7 +312,7 @@ fn drawSearch(hdc: HDC, r: Rect) void {
     const lens_r = @divTrunc(sz * 5, 12);
     const cx = r.left + lens_r;
     const cy = r.top + lens_r;
-    _ = Ellipse(hdc, cx - lens_r, cy - lens_r, cx + lens_r, cy + lens_r);
+    _ = sys.Ellipse(hdc, cx - lens_r, cy - lens_r, cx + lens_r, cy + lens_r);
     // handle: diagonal from bottom-right of circle toward bottom-right corner
     const hx = cx + @divTrunc(lens_r * 7, 10);
     const hy = cy + @divTrunc(lens_r * 7, 10);
@@ -337,7 +325,7 @@ fn drawSettings(hdc: HDC, r: Rect) void {
     const outer = @divTrunc(@min(r.width(), r.height()), 2);
     const inner = @divTrunc(outer, 3);
     // centre dot
-    _ = Ellipse(hdc, cx - inner, cy - inner, cx + inner, cy + inner);
+    _ = sys.Ellipse(hdc, cx - inner, cy - inner, cx + inner, cy + inner);
     // six teeth at 60-degree intervals, rendered as short radial lines
     const angles = [6]struct { dx: i32, dy: i32 }{
         .{ .dx = 0, .dy = -100 },
@@ -364,7 +352,7 @@ fn drawSettings(hdc: HDC, r: Rect) void {
 fn drawRegex(hdc: HDC, r: Rect) void {
     // dot
     const dot_y = r.bottom - 2;
-    _ = Ellipse(hdc, r.left, dot_y - 2, r.left + 3, dot_y + 1);
+    _ = sys.Ellipse(hdc, r.left, dot_y - 2, r.left + 3, dot_y + 1);
     // asterisk: two crossing lines
     const sx = r.left + @divTrunc(r.width(), 3);
     const mid_y = r.top + @divTrunc(r.height(), 2);
@@ -385,7 +373,7 @@ fn drawCaseSens(hdc: HDC, r: Rect) void {
     const arx = r.left + @divTrunc(r.width() * 5, 8);
     const ar = @divTrunc(r.width(), 6);
     const acy = r.top + @divTrunc(r.height() * 2, 3);
-    _ = Ellipse(hdc, arx - ar, acy - ar, arx + ar, acy + ar);
+    _ = sys.Ellipse(hdc, arx - ar, acy - ar, arx + ar, acy + ar);
     line(hdc, arx + ar, r.top + @divTrunc(r.height(), 3), arx + ar, r.bottom);
 }
 
@@ -394,13 +382,13 @@ fn drawWholeWord(hdc: HDC, r: Rect) void {
     const ar = @divTrunc(r.width(), 6);
     const acx = r.left + @divTrunc(r.width(), 4);
     const acy = r.top + @divTrunc(r.height() * 2, 3);
-    _ = Ellipse(hdc, acx - ar, acy - ar, acx + ar, acy + ar);
+    _ = sys.Ellipse(hdc, acx - ar, acy - ar, acx + ar, acy + ar);
     line(hdc, acx + ar, r.top + @divTrunc(r.height(), 3), acx + ar, r.bottom);
     // "b": vertical stroke + circle on the right
     const bx = r.left + @divTrunc(r.width() * 3, 5);
     line(hdc, bx, r.top, bx, r.bottom);
     const bcx = bx + ar;
-    _ = Ellipse(hdc, bcx - ar, acy - ar, bcx + ar, acy + ar);
+    _ = sys.Ellipse(hdc, bcx - ar, acy - ar, bcx + ar, acy + ar);
 }
 
 // -- Public draw entry point ------------------------------------------------
@@ -418,7 +406,7 @@ pub fn drawIcon(
     const content = iconContentRect(rect);
     if (!isDrawable(content, 4)) return;
 
-    _ = SetBkMode(hdc, TRANSPARENT);
+    _ = sys.SetBkMode(hdc, TRANSPARENT);
 
     const gs = setupGdi(hdc, color, is_hc) orelse return;
     defer teardownGdi(hdc, gs, is_hc);

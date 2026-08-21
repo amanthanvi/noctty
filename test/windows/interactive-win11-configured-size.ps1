@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Poll cadence while waiting for configured-size evidence.
+$script:CONFIGURED_SIZE_POLL_MS = 100
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +17,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'configured-size' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
@@ -150,7 +146,7 @@ try {
             throw "winghostty exited before configured-size validation completed (exit code $($process.ExitCode))"
         }
 
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:CONFIGURED_SIZE_POLL_MS
     }
 
     if ($null -eq $result) {

@@ -2,7 +2,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
 
 & node (Join-Path $PSScriptRoot 'build-site-bundle.mjs') --check
 if ($LASTEXITCODE -ne 0) {

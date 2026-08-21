@@ -25,6 +25,8 @@ const win32_types = @import("win32_types.zig");
 const win32_theme = @import("win32_theme.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const settings_transaction = @import("win32_settings_transaction.zig");
+const sys = @import("win32/sys.zig");
+const SetFocus = sys.SetFocus;
 
 /// Minimal set of Win32 aliases + externs we need here. Shared ABI structs
 /// live in `win32_types.zig` so this module stays free of an `*App` type
@@ -49,7 +51,7 @@ const COLORREF = win32_types.COLORREF;
 const RECT = win32_types.RECT;
 const GUID = windows.GUID;
 const HRESULT = windows.HRESULT;
-const HMONITOR = *anyopaque;
+const HMONITOR = sys.HMONITOR;
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
@@ -505,89 +507,6 @@ fn comboIndexFromLinkPreviews(value: Config.LinkPreviews) usize {
     };
 }
 
-extern "user32" fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) callconv(.winapi) ATOM;
-extern "user32" fn CreateWindowExW(
-    dwExStyle: u32,
-    lpClassName: LPCWSTR,
-    lpWindowName: LPCWSTR,
-    dwStyle: u32,
-    X: i32,
-    Y: i32,
-    nWidth: i32,
-    nHeight: i32,
-    hWndParent: ?HWND,
-    hMenu: HMENU,
-    hInstance: HINSTANCE,
-    lpParam: ?*anyopaque,
-) callconv(.winapi) ?HWND;
-extern "user32" fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn CallWindowProcW(lpPrevWndFunc: ?*const anyopaque, hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
-extern "user32" fn EnableWindow(hWnd: HWND, bEnable: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
-extern "user32" fn GetFocus() callconv(.winapi) ?HWND;
-extern "user32" fn GetParent(hWnd: HWND) callconv(.winapi) ?HWND;
-extern "user32" fn IsChild(hWndParent: HWND, hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsWindowVisible(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsWindowEnabled(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn PostMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) BOOL;
-extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
-extern "user32" fn GetDpiForWindow(hWnd: HWND) callconv(.winapi) UINT;
-extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?HWND, X: i32, Y: i32, cx: i32, cy: i32, uFlags: UINT) callconv(.winapi) BOOL;
-extern "user32" fn SystemParametersInfoW(uiAction: UINT, uiParam: UINT, pvParam: *RECT, fWinIni: UINT) callconv(.winapi) BOOL;
-extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: u32) callconv(.winapi) ?HMONITOR;
-extern "user32" fn GetMonitorInfoW(hMonitor: HMONITOR, lpmi: *MONITORINFO) callconv(.winapi) BOOL;
-extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: LPCWSTR) callconv(.winapi) HCURSOR;
-extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) callconv(.winapi) LONG_PTR;
-extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
-extern "user32" fn BeginPaint(hWnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.winapi) HDC;
-extern "user32" fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) callconv(.winapi) BOOL;
-extern "user32" fn GetDC(hWnd: HWND) callconv(.winapi) HDC;
-extern "user32" fn ReleaseDC(hWnd: HWND, hDC: HDC) callconv(.winapi) i32;
-extern "user32" fn DrawTextW(hDC: HDC, lpchText: [*:0]const u16, cchText: i32, lprc: *RECT, format: UINT) callconv(.winapi) i32;
-extern "user32" fn IsWindow(hWnd: ?HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn InvalidateRect(hWnd: HWND, lpRect: ?*const RECT, bErase: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: [*]u16, nMaxCount: i32) callconv(.winapi) i32;
-extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn SetScrollRange(hWnd: HWND, nBar: c_int, nMinPos: c_int, nMaxPos: c_int, bRedraw: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn SetScrollPos(hWnd: HWND, nBar: c_int, nPos: c_int, bRedraw: BOOL) callconv(.winapi) c_int;
-extern "user32" fn ShowScrollBar(hWnd: HWND, wBar: c_int, bShow: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn SetWindowRgn(hWnd: HWND, hRgn: ?HRGN, bRedraw: BOOL) callconv(.winapi) c_int;
-extern "user32" fn GetSysColor(nIndex: c_int) callconv(.winapi) COLORREF;
-extern "user32" fn NotifyWinEvent(event: u32, hwnd: HWND, idObject: i32, idChild: i32) callconv(.winapi) void;
-extern "user32" fn EnumChildWindows(hWndParent: HWND, lpEnumFunc: *const fn (HWND, LPARAM) callconv(.winapi) BOOL, lParam: LPARAM) callconv(.winapi) BOOL;
-extern "gdi32" fn CreateFontW(
-    cHeight: i32,
-    cWidth: i32,
-    cEscapement: i32,
-    cOrientation: i32,
-    cWeight: i32,
-    bItalic: u32,
-    bUnderline: u32,
-    bStrikeOut: u32,
-    iCharSet: u32,
-    iOutPrecision: u32,
-    iClipPrecision: u32,
-    iQuality: u32,
-    iPitchAndFamily: u32,
-    pszFaceName: LPCWSTR,
-) callconv(.winapi) HGDIOBJ;
-extern "gdi32" fn DeleteObject(ho: HGDIOBJ) callconv(.winapi) BOOL;
-extern "gdi32" fn SelectObject(hdc: HDC, h: HGDIOBJ) callconv(.winapi) HGDIOBJ;
-extern "gdi32" fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) callconv(.winapi) ?HRGN;
-extern "kernel32" fn MulDiv(nNumber: i32, nNumerator: i32, nDenominator: i32) callconv(.winapi) i32;
-extern "gdi32" fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
-extern "gdi32" fn GetStockObject(i: i32) callconv(.winapi) HGDIOBJ;
-extern "gdi32" fn SetDCBrushColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
-extern "gdi32" fn CreateSolidBrush(color: COLORREF) callconv(.winapi) HBRUSH;
-extern "gdi32" fn SetBkColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
-extern "gdi32" fn SetTextColor(hdc: HDC, color: COLORREF) callconv(.winapi) COLORREF;
-extern "gdi32" fn SetBkMode(hdc: HDC, mode: c_int) callconv(.winapi) c_int;
 const DC_BRUSH: i32 = 18;
 const TRANSPARENT: c_int = 1;
 const COLOR_WINDOW: c_int = 5;
@@ -607,12 +526,7 @@ const MINMAXINFO = extern struct {
     ptMinTrackSize: POINT,
     ptMaxTrackSize: POINT,
 };
-const MONITORINFO = extern struct {
-    cbSize: u32,
-    rcMonitor: RECT,
-    rcWork: RECT,
-    dwFlags: u32,
-};
+const MONITORINFO = sys.MONITORINFO;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.settings");
 const edit_text_max_code_units: usize = 4096;
@@ -749,10 +663,10 @@ const SettingsThemeAdapter = struct {
     }
 
     fn deleteBrushes(self: *SettingsThemeAdapter) void {
-        if (self.window_brush) |brush| _ = DeleteObject(brush);
-        if (self.rail_brush) |brush| _ = DeleteObject(brush);
-        if (self.edit_brush) |brush| _ = DeleteObject(brush);
-        if (self.button_brush) |brush| _ = DeleteObject(brush);
+        if (self.window_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.rail_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.edit_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.button_brush) |brush| _ = sys.DeleteObject(brush);
         self.window_brush = null;
         self.rail_brush = null;
         self.edit_brush = null;
@@ -769,20 +683,20 @@ const SettingsThemeAdapter = struct {
         defer self.applying = false;
         self.deleteBrushes();
         self.colors = colors;
-        self.window_brush = CreateSolidBrush(colors.window_bg);
-        self.rail_brush = CreateSolidBrush(colors.rail_bg);
-        self.edit_brush = CreateSolidBrush(colors.edit_bg);
-        self.button_brush = CreateSolidBrush(colors.button_bg);
+        self.window_brush = sys.CreateSolidBrush(colors.window_bg);
+        self.rail_brush = sys.CreateSolidBrush(colors.rail_bg);
+        self.edit_brush = sys.CreateSolidBrush(colors.edit_bg);
+        self.button_brush = sys.CreateSolidBrush(colors.button_bg);
 
         win32_theme.WindowThemeAdapter.applySettings(hwnd, colors);
         applyNativeControlTheme(hwnd, colors);
-        _ = EnumChildWindows(
+        _ = sys.EnumChildWindows(
             hwnd,
             applyNativeControlThemeToChild,
             @bitCast(@intFromPtr(&self.colors)),
         );
-        _ = InvalidateRect(hwnd, null, 1);
-        _ = EnumChildWindows(hwnd, invalidateThemeChild, 0);
+        _ = sys.InvalidateRect(hwnd, null, 1);
+        _ = sys.EnumChildWindows(hwnd, invalidateThemeChild, 0);
     }
 
     fn controlBrush(self: *const SettingsThemeAdapter, message: UINT) HBRUSH {
@@ -807,7 +721,7 @@ fn applyNativeControlThemeToChild(hwnd: HWND, lParam: LPARAM) callconv(.winapi) 
 }
 
 fn invalidateThemeChild(hwnd: HWND, _: LPARAM) callconv(.winapi) BOOL {
-    _ = InvalidateRect(hwnd, null, 1);
+    _ = sys.InvalidateRect(hwnd, null, 1);
     return 1;
 }
 
@@ -1029,15 +943,15 @@ pub const SettingsWindow = struct {
     }
 
     fn deleteUiFont(self: *SettingsWindow) void {
-        if (self.ui_font) |font| _ = DeleteObject(font);
+        if (self.ui_font) |font| _ = sys.DeleteObject(font);
         self.ui_font = null;
-        if (self.header_font) |font| _ = DeleteObject(font);
+        if (self.header_font) |font| _ = sys.DeleteObject(font);
         self.header_font = null;
     }
 
     pub fn deinit(self: *SettingsWindow) void {
         if (self.hwnd) |h| {
-            if (IsWindow(h) != 0) _ = DestroyWindow(h);
+            if (sys.IsWindow(h) != 0) _ = sys.DestroyWindow(h);
         }
         self.releaseSectionUiaProviders();
         self.releaseTextUiaProviders();
@@ -1199,7 +1113,7 @@ pub const SettingsWindow = struct {
             !self.hasRawScalarEdits() and
             self.conflictCount() == 0 and
             self.hasPendingChanges();
-        if (self.btn_save) |button| _ = EnableWindow(button, @intFromBool(enabled));
+        if (self.btn_save) |button| _ = sys.EnableWindow(button, @intFromBool(enabled));
         self.updateClosePromptActions();
     }
 
@@ -1290,7 +1204,7 @@ pub const SettingsWindow = struct {
                 self.setStatus(self.raw_scalar_error[@intFromEnum(field)].?);
                 if (focus) if (destination.hwnd) |control| {
                     self.setActiveSection(destination.section);
-                    _ = SetFocus(control);
+                    _ = sys.SetFocus(control);
                     self.ensureControlVisible(control);
                 };
             },
@@ -1299,7 +1213,7 @@ pub const SettingsWindow = struct {
                 self.validation_control = control;
                 self.setStatus(self.owned_validation_message orelse "A settings value is invalid.");
                 if (focus) {
-                    _ = SetFocus(control);
+                    _ = sys.SetFocus(control);
                     self.ensureControlVisible(control);
                 }
             },
@@ -1428,10 +1342,10 @@ pub const SettingsWindow = struct {
     }
 
     fn moveFocusBeforeDisablingMutableControls(self: *SettingsWindow) void {
-        const focused = GetFocus() orelse return;
+        const focused = sys.GetFocus() orelse return;
         var should_move = false;
         for (self.mutableControls()) |control| {
-            if (control != null and (control.? == focused or IsChild(control.?, focused) != 0)) {
+            if (control != null and (control.? == focused or sys.IsChild(control.?, focused) != 0)) {
                 should_move = true;
                 break;
             }
@@ -1453,12 +1367,12 @@ pub const SettingsWindow = struct {
             self.btn_close_keep_editing
         else
             self.sectionButton(self.active_section);
-        if (target) |hwnd| _ = SetFocus(hwnd);
+        if (target) |hwnd| _ = sys.SetFocus(hwnd);
     }
 
     fn setMutableControlsEnabled(self: *SettingsWindow, enabled: bool) void {
         for (self.mutableControls()) |control| {
-            if (control) |hwnd| _ = EnableWindow(hwnd, @intFromBool(enabled));
+            if (control) |hwnd| _ = sys.EnableWindow(hwnd, @intFromBool(enabled));
         }
     }
 
@@ -1625,22 +1539,22 @@ pub const SettingsWindow = struct {
             }
         };
         self.active_owned_conflict_field = next_owned;
-        const focused = GetFocus();
+        const focused = sys.GetFocus();
         const conflict_button_focused = focused != null and
             (focused == self.btn_conflict_keep or focused == self.btn_conflict_use_disk);
         const show: i32 = if (!self.close_prompt_visible and (next != null or next_owned != null)) SW_SHOWNORMAL else SW_HIDE;
-        if (self.btn_conflict_keep) |button| _ = ShowWindow(button, show);
-        if (self.btn_conflict_use_disk) |button| _ = ShowWindow(button, show);
+        if (self.btn_conflict_keep) |button| _ = sys.ShowWindow(button, show);
+        if (self.btn_conflict_use_disk) |button| _ = sys.ShowWindow(button, show);
         if (show == SW_HIDE and conflict_button_focused) self.focusAfterConflictResolution();
     }
 
     fn focusAfterConflictResolution(self: *SettingsWindow) void {
         const validation = if (self.validation_control) |control|
-            if (IsWindowVisible(control) != 0 and IsWindowEnabled(control) != 0) control else null
+            if (sys.IsWindowVisible(control) != 0 and sys.IsWindowEnabled(control) != 0) control else null
         else
             null;
         const save_hwnd = if (self.btn_save) |button|
-            if (IsWindowVisible(button) != 0 and IsWindowEnabled(button) != 0) button else null
+            if (sys.IsWindowVisible(button) != 0 and sys.IsWindowEnabled(button) != 0) button else null
         else
             null;
         const section = self.sectionButton(self.active_section);
@@ -1650,7 +1564,7 @@ pub const SettingsWindow = struct {
             .section => section,
             .none => null,
         };
-        if (target) |control| _ = SetFocus(control);
+        if (target) |control| _ = sys.SetFocus(control);
     }
 
     fn resolveOwnedConflict(self: *SettingsWindow, field: OwnedSettingField, resolution: ConflictResolution) void {
@@ -1816,7 +1730,7 @@ pub const SettingsWindow = struct {
                 std.log.warn("settings text UIA provider unavailable index={} err={}", .{ index, err });
                 continue;
             };
-            const previous = SetWindowLongPtrW(
+            const previous = sys.SetWindowLongPtrW(
                 text,
                 GWLP_WNDPROC,
                 @as(LONG_PTR, @intCast(@intFromPtr(&settingsTextProc))),
@@ -1828,7 +1742,7 @@ pub const SettingsWindow = struct {
             const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
             if (self.text_uia_prev_proc) |existing| {
                 if (existing != proc) {
-                    _ = SetWindowLongPtrW(text, GWLP_WNDPROC, previous);
+                    _ = sys.SetWindowLongPtrW(text, GWLP_WNDPROC, previous);
                     _ = win32_uia.SettingsControlProvider.Release(&provider.base);
                     continue;
                 }
@@ -1932,7 +1846,7 @@ pub const SettingsWindow = struct {
                 std.log.warn("settings control UIA provider unavailable index={} err={}", .{ index, err });
                 continue;
             };
-            const previous = SetWindowLongPtrW(
+            const previous = sys.SetWindowLongPtrW(
                 control,
                 GWLP_WNDPROC,
                 @as(LONG_PTR, @intCast(@intFromPtr(&settingsControlProc))),
@@ -1996,7 +1910,7 @@ pub const SettingsWindow = struct {
                 std.log.warn("settings section UIA provider unavailable section={s} err={}", .{ section.headerText(), err });
                 continue;
             };
-            const previous = SetWindowLongPtrW(
+            const previous = sys.SetWindowLongPtrW(
                 button,
                 GWLP_WNDPROC,
                 @as(LONG_PTR, @intCast(@intFromPtr(&settingsSectionButtonProc))),
@@ -2008,7 +1922,7 @@ pub const SettingsWindow = struct {
             const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
             if (self.section_button_prev_proc) |existing| {
                 if (existing != proc) {
-                    _ = SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
+                    _ = sys.SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
                     _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
                     continue;
                 }
@@ -2031,7 +1945,7 @@ pub const SettingsWindow = struct {
         layoutChildren(self);
         if (changed) {
             if (self.sectionProvider(next)) |provider| provider.raiseSelected();
-            if (self.hwnd) |h| _ = InvalidateRect(h, null, 1);
+            if (self.hwnd) |h| _ = sys.InvalidateRect(h, null, 1);
         }
     }
 
@@ -2039,9 +1953,9 @@ pub const SettingsWindow = struct {
         const clamped = std.math.clamp(next, 0, self.content_scroll_max);
         if (clamped == self.content_scroll_y) return;
         self.content_scroll_y = clamped;
-        if (self.hwnd) |hwnd| _ = SetScrollPos(hwnd, SB_VERT, clamped, 1);
+        if (self.hwnd) |hwnd| _ = sys.SetScrollPos(hwnd, SB_VERT, clamped, 1);
         layoutChildren(self);
-        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 1);
+        if (self.hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 1);
     }
 
     fn refreshNativeSectionText(self: *SettingsWindow) void {
@@ -2059,13 +1973,13 @@ pub const SettingsWindow = struct {
     fn setStatus(self: *SettingsWindow, text: []const u8) void {
         const status = self.text_status orelse return;
         if (!setWindowTextUtf8IfChanged(status, text)) return;
-        NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, status, @bitCast(OBJID_CLIENT), @bitCast(CHILDID_SELF));
+        sys.NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, status, @bitCast(OBJID_CLIENT), @bitCast(CHILDID_SELF));
     }
 
     fn recreateUiFont(self: *SettingsWindow) void {
         const hwnd = self.hwnd orelse return;
-        const next = CreateFontW(
-            -MulDiv(9, @intCast(self.dpi), 72),
+        const next = sys.CreateFontW(
+            -sys.MulDiv(9, @intCast(self.dpi), 72),
             0,
             0,
             0,
@@ -2080,8 +1994,8 @@ pub const SettingsWindow = struct {
             0,
             std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI"),
         ) orelse return;
-        const next_header = CreateFontW(
-            -MulDiv(12, @intCast(self.dpi), 72),
+        const next_header = sys.CreateFontW(
+            -sys.MulDiv(12, @intCast(self.dpi), 72),
             0,
             0,
             0,
@@ -2102,14 +2016,14 @@ pub const SettingsWindow = struct {
         self.header_font = next_header;
         self.close_prompt_measure_width = -1;
         self.close_prompt_measure_height = 0;
-        _ = EnumChildWindows(hwnd, applyChildFont, @bitCast(@intFromPtr(next)));
+        _ = sys.EnumChildWindows(hwnd, applyChildFont, @bitCast(@intFromPtr(next)));
         if (next_header) |font| {
             if (self.text_header) |header| {
-                _ = SendMessageW(header, WM_SETFONT, @intFromPtr(font), 1);
+                _ = sys.SendMessageW(header, WM_SETFONT, @intFromPtr(font), 1);
             }
         }
-        if (previous) |font| _ = DeleteObject(font);
-        if (previous_header) |font| _ = DeleteObject(font);
+        if (previous) |font| _ = sys.DeleteObject(font);
+        if (previous_header) |font| _ = sys.DeleteObject(font);
     }
 
     pub fn themeChanged(self: *SettingsWindow) void {
@@ -2118,7 +2032,7 @@ pub const SettingsWindow = struct {
         }
         self.recreateUiFont();
         layoutChildren(self);
-        if (self.hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 1);
+        if (self.hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 1);
     }
 
     fn resolveThemeColors(self: *const SettingsWindow) win32_theme.SettingsColors {
@@ -2137,11 +2051,11 @@ pub const SettingsWindow = struct {
         return win32_theme.settingsColors(
             theme,
             .{
-                .window = GetSysColor(COLOR_WINDOW),
-                .window_text = GetSysColor(COLOR_WINDOWTEXT),
-                .button_face = GetSysColor(COLOR_BTNFACE),
-                .button_text = GetSysColor(COLOR_BTNTEXT),
-                .gray_text = GetSysColor(COLOR_GRAYTEXT),
+                .window = sys.GetSysColor(COLOR_WINDOW),
+                .window_text = sys.GetSysColor(COLOR_WINDOWTEXT),
+                .button_face = sys.GetSysColor(COLOR_BTNFACE),
+                .button_text = sys.GetSysColor(COLOR_BTNTEXT),
+                .gray_text = sys.GetSysColor(COLOR_GRAYTEXT),
             },
             high_contrast,
         );
@@ -2151,10 +2065,10 @@ pub const SettingsWindow = struct {
         const hwnd = self.hwnd orelse return;
         var child_rect: RECT = undefined;
         var client_rect: RECT = undefined;
-        if (GetWindowRect(control, &child_rect) == 0 or
-            GetClientRect(hwnd, &client_rect) == 0) return;
+        if (sys.GetWindowRect(control, &child_rect) == 0 or
+            sys.GetClientRect(hwnd, &client_rect) == 0) return;
         var child_origin: POINT = .{ .x = child_rect.left, .y = child_rect.top };
-        if (ScreenToClient(hwnd, &child_origin) == 0) return;
+        if (sys.ScreenToClient(hwnd, &child_origin) == 0) return;
         const top = child_origin.y;
         const bottom = top + child_rect.bottom - child_rect.top;
         const viewport_top = settingsContentViewportTop(self, client_rect);
@@ -2177,47 +2091,47 @@ pub const SettingsWindow = struct {
 
         for (std.enums.values(Section)) |section| {
             if (self.sectionButton(section)) |button| {
-                _ = SendMessageW(
+                _ = sys.SendMessageW(
                     button,
                     BM_SETCHECK,
                     if (section == self.active_section) BST_CHECKED else BST_UNCHECKED,
                     0,
                 );
-                const style: u32 = @truncate(@as(usize, @bitCast(GetWindowLongPtrW(button, GWL_STYLE))));
+                const style: u32 = @truncate(@as(usize, @bitCast(sys.GetWindowLongPtrW(button, GWL_STYLE))));
                 const next_style = if (section == self.active_section) style | WS_TABSTOP else style & ~WS_TABSTOP;
-                if (next_style != style) _ = SetWindowLongPtrW(button, GWL_STYLE, @intCast(next_style));
+                if (next_style != style) _ = sys.SetWindowLongPtrW(button, GWL_STYLE, @intCast(next_style));
             }
         }
 
-        if (self.btn_open_editor) |btn| _ = ShowWindow(btn, show_advanced);
-        if (self.btn_keybindings_editor) |btn| _ = ShowWindow(btn, show_keybindings);
-        if (self.edit_scrollback) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_confirm_close) |e| _ = ShowWindow(e, show_terminal);
-        if (self.combo_copy_on_select) |e| _ = ShowWindow(e, show_terminal);
-        if (self.chk_trim_trail) |e| _ = ShowWindow(e, show_terminal);
-        if (self.chk_desktop_notifications) |e| _ = ShowWindow(e, show_privacy);
-        if (self.chk_app_notify_clipboard) |e| _ = ShowWindow(e, show_privacy);
-        if (self.chk_app_notify_config) |e| _ = ShowWindow(e, show_privacy);
-        if (self.combo_clipboard_read) |e| _ = ShowWindow(e, show_privacy);
-        if (self.combo_clipboard_write) |e| _ = ShowWindow(e, show_privacy);
-        if (self.combo_link_url) |e| _ = ShowWindow(e, show_privacy);
-        if (self.combo_link_previews) |e| _ = ShowWindow(e, show_privacy);
-        if (self.edit_font_family) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_font_size) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_theme) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_bg_opacity) |e| _ = ShowWindow(e, show_appearance);
-        if (self.combo_window_theme) |e| _ = ShowWindow(e, show_appearance);
-        if (self.combo_cursor_style) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_pad_x) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_pad_y) |e| _ = ShowWindow(e, show_appearance);
-        if (self.chk_bg_blur) |e| _ = ShowWindow(e, show_appearance);
-        if (self.combo_pad_balance) |e| _ = ShowWindow(e, show_appearance);
-        if (self.edit_command) |e| _ = ShowWindow(e, show_shell);
-        if (self.combo_shell_integ) |e| _ = ShowWindow(e, show_shell);
-        if (self.combo_auto_update) |e| _ = ShowWindow(e, show_updates);
-        if (self.combo_auto_update_channel) |e| _ = ShowWindow(e, show_updates);
+        if (self.btn_open_editor) |btn| _ = sys.ShowWindow(btn, show_advanced);
+        if (self.btn_keybindings_editor) |btn| _ = sys.ShowWindow(btn, show_keybindings);
+        if (self.edit_scrollback) |e| _ = sys.ShowWindow(e, show_terminal);
+        if (self.combo_confirm_close) |e| _ = sys.ShowWindow(e, show_terminal);
+        if (self.combo_copy_on_select) |e| _ = sys.ShowWindow(e, show_terminal);
+        if (self.chk_trim_trail) |e| _ = sys.ShowWindow(e, show_terminal);
+        if (self.chk_desktop_notifications) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.chk_app_notify_clipboard) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.chk_app_notify_config) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.combo_clipboard_read) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.combo_clipboard_write) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.combo_link_url) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.combo_link_previews) |e| _ = sys.ShowWindow(e, show_privacy);
+        if (self.edit_font_family) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_font_size) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_theme) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_bg_opacity) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.combo_window_theme) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.combo_cursor_style) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_pad_x) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_pad_y) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.chk_bg_blur) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.combo_pad_balance) |e| _ = sys.ShowWindow(e, show_appearance);
+        if (self.edit_command) |e| _ = sys.ShowWindow(e, show_shell);
+        if (self.combo_shell_integ) |e| _ = sys.ShowWindow(e, show_shell);
+        if (self.combo_auto_update) |e| _ = sys.ShowWindow(e, show_updates);
+        if (self.combo_auto_update_channel) |e| _ = sys.ShowWindow(e, show_updates);
         for (settings_label_specs, self.field_labels) |spec, label| {
-            if (label) |hwnd| _ = ShowWindow(hwnd, if (spec.section == self.active_section) SW_SHOWNORMAL else SW_HIDE);
+            if (label) |hwnd| _ = sys.ShowWindow(hwnd, if (spec.section == self.active_section) SW_SHOWNORMAL else SW_HIDE);
         }
     }
 
@@ -2233,7 +2147,7 @@ pub const SettingsWindow = struct {
         self.markRawScalarEdit(.scrollback_limit);
 
         var buf_w: [32]u16 = undefined;
-        const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
+        const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
         if (n <= 0) return self.setRawScalarValidationError(.scrollback_limit, edit, "Scrollback limit is required.");
         var utf8_buf: [64]u8 = undefined;
         const utf8 = std.unicode.utf16LeToUtf8(&utf8_buf, buf_w[0..@intCast(n)]) catch
@@ -2256,7 +2170,7 @@ pub const SettingsWindow = struct {
         var buf_w: [32]u16 = undefined;
         const w = utf8ToW(&buf_w, text);
         self.suppress_edit_events = true;
-        _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
+        _ = sys.SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
         self.suppress_edit_events = false;
     }
 
@@ -2292,7 +2206,7 @@ pub const SettingsWindow = struct {
         const edit = self.edit_font_size orelse return;
         self.markRawScalarEdit(.font_size);
         var buf_w: [32]u16 = undefined;
-        const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
+        const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
         if (n <= 0) return self.setRawScalarValidationError(.font_size, edit, "Font size is required.");
         var utf8_buf: [64]u8 = undefined;
         const utf8 = std.unicode.utf16LeToUtf8(&utf8_buf, buf_w[0..@intCast(n)]) catch
@@ -2318,7 +2232,7 @@ pub const SettingsWindow = struct {
         var buf_w: [32]u16 = undefined;
         const w = utf8ToW(&buf_w, text);
         self.suppress_edit_events = true;
-        _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
+        _ = sys.SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
         self.suppress_edit_events = false;
     }
 
@@ -2365,7 +2279,7 @@ pub const SettingsWindow = struct {
         const edit = self.edit_bg_opacity orelse return;
         self.markRawScalarEdit(.background_opacity);
         var buf_w: [32]u16 = undefined;
-        const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
+        const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
         if (n <= 0) return self.setRawScalarValidationError(.background_opacity, edit, "Background opacity is required.");
         var utf8_buf: [64]u8 = undefined;
         const utf8 = std.unicode.utf16LeToUtf8(&utf8_buf, buf_w[0..@intCast(n)]) catch
@@ -2389,7 +2303,7 @@ pub const SettingsWindow = struct {
         var buf_w: [32]u16 = undefined;
         const w = utf8ToW(&buf_w, text);
         self.suppress_edit_events = true;
-        _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
+        _ = sys.SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
         self.suppress_edit_events = false;
     }
 
@@ -2487,7 +2401,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const chk = self.chk_trim_trail orelse return;
-        const state = SendMessageW(chk, BM_GETCHECK, 0, 0);
+        const state = sys.SendMessageW(chk, BM_GETCHECK, 0, 0);
         p.*.@"clipboard-trim-trailing-spaces" = (state == BST_CHECKED);
         self.trackEdit(.trim_trailing_spaces, false);
     }
@@ -2496,7 +2410,7 @@ pub const SettingsWindow = struct {
         const chk = self.chk_trim_trail orelse return;
         const p = self.pending orelse return;
         self.suppress_edit_events = true;
-        _ = SendMessageW(
+        _ = sys.SendMessageW(
             chk,
             BM_SETCHECK,
             if (p.@"clipboard-trim-trailing-spaces") BST_CHECKED else BST_UNCHECKED,
@@ -2509,7 +2423,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const chk = self.chk_desktop_notifications orelse return;
-        p.*.@"desktop-notifications" = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        p.*.@"desktop-notifications" = sys.SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
         self.trackEdit(.desktop_notifications, false);
     }
 
@@ -2517,7 +2431,7 @@ pub const SettingsWindow = struct {
         const chk = self.chk_desktop_notifications orelse return;
         const p = self.pending orelse return;
         self.suppress_edit_events = true;
-        _ = SendMessageW(
+        _ = sys.SendMessageW(
             chk,
             BM_SETCHECK,
             if (p.@"desktop-notifications") BST_CHECKED else BST_UNCHECKED,
@@ -2533,7 +2447,7 @@ pub const SettingsWindow = struct {
             .clipboard => self.chk_app_notify_clipboard,
             .config => self.chk_app_notify_config,
         } orelse return;
-        const enabled = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const enabled = sys.SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED;
         switch (field) {
             .clipboard => {
                 p.*.@"app-notifications".@"clipboard-copy" = enabled;
@@ -2557,7 +2471,7 @@ pub const SettingsWindow = struct {
             .config => p.@"app-notifications".@"config-reload",
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(chk, BM_SETCHECK, if (enabled) BST_CHECKED else BST_UNCHECKED, 0);
+        _ = sys.SendMessageW(chk, BM_SETCHECK, if (enabled) BST_CHECKED else BST_UNCHECKED, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2568,7 +2482,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_confirm_close orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"confirm-close-surface" = switch (idx) {
             0 => .false,
@@ -2588,7 +2502,7 @@ pub const SettingsWindow = struct {
             .always => 2,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2596,7 +2510,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_copy_on_select orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"copy-on-select" = switch (idx) {
             0 => .false,
@@ -2616,7 +2530,7 @@ pub const SettingsWindow = struct {
             .clipboard => 2,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2624,7 +2538,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = combo_opt orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         @field(p.*, field_name) = clipboardAccessFromComboIndex(idx) orelse return;
         if (comptime std.mem.eql(u8, field_name, "clipboard-read")) {
@@ -2639,7 +2553,7 @@ pub const SettingsWindow = struct {
         const p = self.pending orelse return;
         const idx = comboIndexFromClipboardAccess(@field(p, field_name));
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2647,7 +2561,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_link_url orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"link-url" = linkUrlFromComboIndex(idx) orelse return;
         self.trackEdit(.link_url, false);
@@ -2658,7 +2572,7 @@ pub const SettingsWindow = struct {
         const p = self.pending orelse return;
         const idx = comboIndexFromLinkUrl(p.@"link-url");
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2666,7 +2580,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_link_previews orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"link-previews" = linkPreviewsFromComboIndex(idx) orelse return;
         self.trackEdit(.link_previews, false);
@@ -2677,7 +2591,7 @@ pub const SettingsWindow = struct {
         const p = self.pending orelse return;
         const idx = comboIndexFromLinkPreviews(p.@"link-previews");
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2685,7 +2599,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_window_theme orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"window-theme" = switch (idx) {
             0 => .auto,
@@ -2709,7 +2623,7 @@ pub const SettingsWindow = struct {
             .ghostty => 4,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2717,7 +2631,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_shell_integ orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"shell-integration" = switch (idx) {
             0 => .none,
@@ -2745,7 +2659,7 @@ pub const SettingsWindow = struct {
             .zsh => 6,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2753,7 +2667,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_cursor_style orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"cursor-style" = switch (idx) {
             0 => .bar,
@@ -2775,7 +2689,7 @@ pub const SettingsWindow = struct {
             .block_hollow => 3,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2786,7 +2700,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const chk = self.chk_bg_blur orelse return;
-        const state = SendMessageW(chk, BM_GETCHECK, 0, 0);
+        const state = sys.SendMessageW(chk, BM_GETCHECK, 0, 0);
         p.*.@"background-blur" = backgroundBlurFromCheckbox(
             p.*.@"background-blur",
             state == BST_CHECKED,
@@ -2799,7 +2713,7 @@ pub const SettingsWindow = struct {
         const p = self.pending orelse return;
         const enabled = p.@"background-blur".win32SystemBackdropEnabled();
         self.suppress_edit_events = true;
-        _ = SendMessageW(
+        _ = sys.SendMessageW(
             chk,
             BM_SETCHECK,
             if (enabled) BST_CHECKED else BST_UNCHECKED,
@@ -2812,7 +2726,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_pad_balance orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"window-padding-balance" = switch (idx) {
             0 => .false,
@@ -2832,7 +2746,7 @@ pub const SettingsWindow = struct {
             .equal => 2,
         };
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2840,7 +2754,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_auto_update orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"auto-update" = switch (idx) {
             0 => null,
@@ -2861,7 +2775,7 @@ pub const SettingsWindow = struct {
             .download => 3,
         } else 0;
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2869,7 +2783,7 @@ pub const SettingsWindow = struct {
         if (self.suppress_edit_events) return;
         const p = &(self.pending orelse return);
         const combo = self.combo_auto_update_channel orelse return;
-        const idx = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+        const idx = sys.SendMessageW(combo, CB_GETCURSEL, 0, 0);
         if (idx < 0) return;
         p.*.@"auto-update-channel" = switch (idx) {
             0 => null,
@@ -2888,7 +2802,7 @@ pub const SettingsWindow = struct {
             .tip => 2,
         } else 0;
         self.suppress_edit_events = true;
-        _ = SendMessageW(combo, CB_SETCURSEL, idx, 0);
+        _ = sys.SendMessageW(combo, CB_SETCURSEL, idx, 0);
         self.suppress_edit_events = false;
     }
 
@@ -2933,7 +2847,7 @@ pub const SettingsWindow = struct {
         self.syncPaddingFromEdit(.x);
         self.syncPaddingFromEdit(.y);
         if (self.validation_control) |control| {
-            _ = SetFocus(control);
+            _ = sys.SetFocus(control);
             self.ensureControlVisible(control);
             return;
         }
@@ -3006,10 +2920,10 @@ pub const SettingsWindow = struct {
 
     fn updateClosePromptActions(self: *SettingsWindow) void {
         const actions = closePromptActions(self.close_prompt_visible, self.save_in_flight, self.close_posted);
-        if (self.btn_close_save) |button| _ = EnableWindow(button, @intFromBool(actions.save));
-        if (self.btn_close_discard) |button| _ = EnableWindow(button, @intFromBool(actions.discard));
+        if (self.btn_close_save) |button| _ = sys.EnableWindow(button, @intFromBool(actions.save));
+        if (self.btn_close_discard) |button| _ = sys.EnableWindow(button, @intFromBool(actions.discard));
         if (self.btn_close_keep_editing) |button| {
-            _ = EnableWindow(button, @intFromBool(actions.keep_editing));
+            _ = sys.EnableWindow(button, @intFromBool(actions.keep_editing));
         }
     }
 
@@ -3017,13 +2931,13 @@ pub const SettingsWindow = struct {
         const text = self.text_close_prompt orelse return;
         setWindowTextUtf8(text, closePromptText(self.save_in_flight));
         if (announce) {
-            NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, text, @bitCast(OBJID_CLIENT), @bitCast(CHILDID_SELF));
+            sys.NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, text, @bitCast(OBJID_CLIENT), @bitCast(CHILDID_SELF));
         }
     }
 
     fn showClosePrompt(self: *SettingsWindow) void {
         if (self.close_prompt_visible) {
-            if (self.btn_close_keep_editing) |button| _ = SetFocus(button);
+            if (self.btn_close_keep_editing) |button| _ = sys.SetFocus(button);
             return;
         }
         self.close_prompt_visible = true;
@@ -3031,21 +2945,21 @@ pub const SettingsWindow = struct {
         // carries close intent. The prompt remains visible so the user can
         // keep editing, but successful completion must honor the request.
         self.close_after_save = self.save_in_flight;
-        self.close_prior_focus = GetFocus();
-        if (self.text_status) |text| _ = ShowWindow(text, SW_HIDE);
-        if (self.btn_conflict_keep) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.btn_conflict_use_disk) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.btn_save) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.text_close_prompt) |text| _ = ShowWindow(text, SW_SHOWNORMAL);
-        if (self.btn_close_save) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
-        if (self.btn_close_discard) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
-        if (self.btn_close_keep_editing) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
+        self.close_prior_focus = sys.GetFocus();
+        if (self.text_status) |text| _ = sys.ShowWindow(text, SW_HIDE);
+        if (self.btn_conflict_keep) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.btn_conflict_use_disk) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.btn_save) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_SHOWNORMAL);
+        if (self.btn_close_save) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
+        if (self.btn_close_discard) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
+        if (self.btn_close_keep_editing) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
         self.syncClosePromptText(true);
         self.updateClosePromptActions();
         layoutChildren(self);
         // Conservative default: closing must never be the result of an
         // accidental Enter after the window-close gesture.
-        if (self.btn_close_keep_editing) |button| _ = SetFocus(button);
+        if (self.btn_close_keep_editing) |button| _ = sys.SetFocus(button);
     }
 
     fn cancelClosePrompt(self: *SettingsWindow) void {
@@ -3054,27 +2968,27 @@ pub const SettingsWindow = struct {
         self.close_prompt_visible = false;
         self.close_after_save = false;
         self.close_prior_focus = null;
-        if (self.text_close_prompt) |text| _ = ShowWindow(text, SW_HIDE);
-        if (self.btn_close_save) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.btn_close_discard) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.btn_close_keep_editing) |button| _ = ShowWindow(button, SW_HIDE);
-        if (self.text_status) |text| _ = ShowWindow(text, SW_SHOWNORMAL);
-        if (self.btn_save) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
+        if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_HIDE);
+        if (self.btn_close_save) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.btn_close_discard) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.btn_close_keep_editing) |button| _ = sys.ShowWindow(button, SW_HIDE);
+        if (self.text_status) |text| _ = sys.ShowWindow(text, SW_SHOWNORMAL);
+        if (self.btn_save) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
         self.syncConflictControls();
         self.updateSaveEnabled();
         layoutChildren(self);
 
         if (prior_focus) |control| {
             const belongs_to_settings = if (self.hwnd) |settings_hwnd|
-                control == settings_hwnd or IsChild(settings_hwnd, control) != 0
+                control == settings_hwnd or sys.IsChild(settings_hwnd, control) != 0
             else
                 false;
-            if (belongs_to_settings and IsWindow(control) != 0 and IsWindowVisible(control) != 0 and IsWindowEnabled(control) != 0) {
-                _ = SetFocus(control);
+            if (belongs_to_settings and sys.IsWindow(control) != 0 and sys.IsWindowVisible(control) != 0 and sys.IsWindowEnabled(control) != 0) {
+                _ = sys.SetFocus(control);
                 return;
             }
         }
-        if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
+        if (self.sectionButton(self.active_section)) |button| _ = sys.SetFocus(button);
     }
 
     fn saveAndClose(self: *SettingsWindow) void {
@@ -3108,7 +3022,7 @@ pub const SettingsWindow = struct {
         const hwnd = self.hwnd orelse return;
         self.close_posted = true;
         self.updateClosePromptActions();
-        if (PostMessageW(hwnd, WM_SETTINGS_CLOSE_NOW, 0, 0) == 0) {
+        if (sys.PostMessageW(hwnd, WM_SETTINGS_CLOSE_NOW, 0, 0) == 0) {
             self.close_posted = false;
             self.updateClosePromptActions();
             self.setStatus("Could not close the settings window; your edits are preserved.");
@@ -3119,11 +3033,11 @@ pub const SettingsWindow = struct {
     fn closeNow(self: *SettingsWindow, hwnd: HWND) void {
         if (self.close_notified) return;
         self.close_notified = true;
-        _ = ShowWindow(hwnd, SW_HIDE);
-        if (DestroyWindow(hwnd) == 0) {
+        _ = sys.ShowWindow(hwnd, SW_HIDE);
+        if (sys.DestroyWindow(hwnd) == 0) {
             self.close_notified = false;
             self.close_posted = false;
-            _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+            _ = sys.ShowWindow(hwnd, SW_SHOWNORMAL);
             self.updateClosePromptActions();
             self.setStatus("Could not close the settings window; your edits are preserved.");
             self.cancelClosePrompt();
@@ -3260,7 +3174,7 @@ pub const SettingsWindow = struct {
             .auto_update_channel => .{ .section = .updates, .hwnd = self.combo_auto_update_channel },
         };
         self.setActiveSection(destination.section);
-        if (destination.hwnd) |control| _ = SetFocus(control);
+        if (destination.hwnd) |control| _ = sys.SetFocus(control);
     }
 
     /// Bring the settings window up. Idempotent: a subsequent open
@@ -3268,7 +3182,7 @@ pub const SettingsWindow = struct {
     /// instead of duplicating it.
     pub fn open(self: *SettingsWindow) !void {
         if (self.hwnd) |h| {
-            if (IsWindow(h) != 0) {
+            if (sys.IsWindow(h) != 0) {
                 switch (pendingCloseReopenAction(self.close_posted, self.close_after_save)) {
                     .none => {},
                     .cancel_saved_close => {
@@ -3285,8 +3199,8 @@ pub const SettingsWindow = struct {
                     },
                 }
                 self.cancelClosePrompt();
-                if (IsIconic(h) != 0) _ = ShowWindow(h, SW_RESTORE) else _ = ShowWindow(h, SW_SHOWNORMAL);
-                _ = SetForegroundWindow(h);
+                if (sys.IsIconic(h) != 0) _ = sys.ShowWindow(h, SW_RESTORE) else _ = sys.ShowWindow(h, SW_SHOWNORMAL);
+                _ = sys.SetForegroundWindow(h);
                 return;
             }
             self.hwnd = null;
@@ -3307,13 +3221,13 @@ pub const SettingsWindow = struct {
                 .cbWndExtra = 0,
                 .hInstance = self.handle.hinstance,
                 .hIcon = null,
-                .hCursor = LoadCursorW(null, @ptrFromInt(IDC_ARROW)),
+                .hCursor = sys.LoadCursorW(null, @ptrFromInt(IDC_ARROW)),
                 .hbrBackground = null,
                 .lpszMenuName = null,
                 .lpszClassName = class_name,
                 .hIconSm = null,
             };
-            self.class_atom = RegisterClassExW(&wc);
+            self.class_atom = sys.RegisterClassExW(&wc);
             if (self.class_atom == 0) {
                 return windows.unexpectedError(windows.kernel32.GetLastError());
             }
@@ -3321,7 +3235,7 @@ pub const SettingsWindow = struct {
 
         const title = std.unicode.utf8ToUtf16LeStringLiteral("winghostty settings");
         const owner_hwnd = if (self.handle.ownerWindow) |get_owner| get_owner(self.handle.ctx) else null;
-        const hwnd = CreateWindowExW(
+        const hwnd = sys.CreateWindowExW(
             WS_EX_APPWINDOW,
             class_name,
             title,
@@ -3340,32 +3254,32 @@ pub const SettingsWindow = struct {
             self,
         ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
         self.hwnd = hwnd;
-        self.dpi = normalizedDpi(GetDpiForWindow(hwnd));
+        self.dpi = normalizedDpi(sys.GetDpiForWindow(hwnd));
 
         // PerMonitorV2 coordinates are physical pixels. Start at the intended
         // logical size, capped to the current work area, so a high-DPI monitor
         // does not receive a tiny and immediately overlapping first frame.
         var work_area: RECT = undefined;
         var have_work_area = false;
-        if (owner_hwnd) |owner| if (MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST)) |monitor| {
+        if (owner_hwnd) |owner| if (sys.MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST)) |monitor| {
             var info: MONITORINFO = .{
                 .cbSize = @sizeOf(MONITORINFO),
                 .rcMonitor = undefined,
                 .rcWork = undefined,
                 .dwFlags = 0,
             };
-            if (GetMonitorInfoW(monitor, &info) != 0) {
+            if (sys.GetMonitorInfoW(monitor, &info) != 0) {
                 work_area = info.rcWork;
                 have_work_area = true;
             }
         };
-        if (!have_work_area) have_work_area = SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0) != 0;
+        if (!have_work_area) have_work_area = sys.SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0) != 0;
         if (have_work_area) {
             const work_width = work_area.right - work_area.left;
             const work_height = work_area.bottom - work_area.top;
             const width = @min(self.px(960), @divTrunc(work_width * 9, 10));
             const height = @min(self.px(840), @divTrunc(work_height * 9, 10));
-            _ = SetWindowPos(
+            _ = sys.SetWindowPos(
                 hwnd,
                 null,
                 work_area.left + @divTrunc(work_width - width, 2),
@@ -3381,7 +3295,7 @@ pub const SettingsWindow = struct {
         self.text_summary = makeStatic(hwnd, self.handle.hinstance, Section.appearance.placeholderText());
         self.text_status = makeStatic(hwnd, self.handle.hinstance, "");
         self.text_close_prompt = makeStatic(hwnd, self.handle.hinstance, "Save changes before closing?");
-        if (self.text_close_prompt) |text| _ = ShowWindow(text, SW_HIDE);
+        if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_HIDE);
         self.text_help = makeStatic(hwnd, self.handle.hinstance, "");
         for (settings_label_specs, 0..) |spec, i| {
             self.field_labels[i] = makeStatic(hwnd, self.handle.hinstance, spec.text);
@@ -3405,7 +3319,7 @@ pub const SettingsWindow = struct {
         // in the Advanced section; hidden when another section is
         // active.
         const btn_label = std.unicode.utf8ToUtf16LeStringLiteral("Open in default editor");
-        self.btn_open_editor = CreateWindowExW(
+        self.btn_open_editor = sys.CreateWindowExW(
             0,
             btn_class,
             btn_label,
@@ -3423,7 +3337,7 @@ pub const SettingsWindow = struct {
         // and fires a hard reload. Save errors are logged and the draft
         // remains in memory for retry.
         const btn_save_label = std.unicode.utf8ToUtf16LeStringLiteral("Save");
-        self.btn_save = CreateWindowExW(
+        self.btn_save = sys.CreateWindowExW(
             0,
             btn_class,
             btn_save_label,
@@ -3437,7 +3351,7 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             null,
         );
-        self.btn_conflict_keep = CreateWindowExW(
+        self.btn_conflict_keep = sys.CreateWindowExW(
             0,
             btn_class,
             std.unicode.utf8ToUtf16LeStringLiteral("Keep mine"),
@@ -3451,7 +3365,7 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             null,
         );
-        self.btn_conflict_use_disk = CreateWindowExW(
+        self.btn_conflict_use_disk = sys.CreateWindowExW(
             0,
             btn_class,
             std.unicode.utf8ToUtf16LeStringLiteral("Use disk"),
@@ -3465,7 +3379,7 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             null,
         );
-        self.btn_close_save = CreateWindowExW(
+        self.btn_close_save = sys.CreateWindowExW(
             0,
             btn_class,
             std.unicode.utf8ToUtf16LeStringLiteral("Save and close"),
@@ -3479,7 +3393,7 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             null,
         );
-        self.btn_close_discard = CreateWindowExW(
+        self.btn_close_discard = sys.CreateWindowExW(
             0,
             btn_class,
             std.unicode.utf8ToUtf16LeStringLiteral("Discard changes"),
@@ -3493,7 +3407,7 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             null,
         );
-        self.btn_close_keep_editing = CreateWindowExW(
+        self.btn_close_keep_editing = sys.CreateWindowExW(
             0,
             btn_class,
             std.unicode.utf8ToUtf16LeStringLiteral("Keep editing"),
@@ -3509,7 +3423,7 @@ pub const SettingsWindow = struct {
         );
 
         const btn_keybind_label = std.unicode.utf8ToUtf16LeStringLiteral("Open config for keybinds");
-        self.btn_keybindings_editor = CreateWindowExW(
+        self.btn_keybindings_editor = sys.CreateWindowExW(
             0,
             btn_class,
             btn_keybind_label,
@@ -3700,19 +3614,11 @@ pub const SettingsWindow = struct {
 
         layoutChildren(self);
         self.applySectionVisibility();
-        _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-        _ = SetForegroundWindow(hwnd);
-        if (self.sectionButton(self.active_section)) |button| _ = SetFocus(button);
+        _ = sys.ShowWindow(hwnd, SW_SHOWNORMAL);
+        _ = sys.SetForegroundWindow(hwnd);
+        if (self.sectionButton(self.active_section)) |button| _ = sys.SetFocus(button);
     }
 };
-
-extern "ole32" fn CoCreateInstance(
-    class_id: *const GUID,
-    outer: ?*anyopaque,
-    context: u32,
-    interface_id: *const GUID,
-    result: *?*anyopaque,
-) callconv(.winapi) HRESULT;
 
 const IAccPropServicesVtbl = extern struct {
     QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -3757,7 +3663,7 @@ const IAccPropServices = extern struct {
 
 fn createAccPropServices() ?*IAccPropServices {
     var raw: ?*anyopaque = null;
-    const hr = CoCreateInstance(
+    const hr = sys.CoCreateInstance(
         &CLSID_ACC_PROP_SERVICES,
         null,
         CLSCTX_INPROC_SERVER,
@@ -3813,17 +3719,17 @@ fn annotateAccessibleControls(self: *SettingsWindow) void {
 
 fn populateCombo(combo_opt: ?HWND, items: []const []const u8) void {
     const combo = combo_opt orelse return;
-    _ = SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    _ = sys.SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     for (items) |item| {
         var buf_w: [64]u16 = undefined;
         const w = utf8ToW(&buf_w, item);
-        _ = SendMessageW(combo, CB_ADDSTRING, 0, @bitCast(@intFromPtr(w)));
+        _ = sys.SendMessageW(combo, CB_ADDSTRING, 0, @bitCast(@intFromPtr(w)));
     }
 }
 
 fn makeStatic(parent: HWND, hinstance: HINSTANCE, text: []const u8) ?HWND {
     var text_w: [2048]u16 = undefined;
-    return CreateWindowExW(
+    return sys.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
         utf8ToW(&text_w, text),
@@ -3842,22 +3748,22 @@ fn makeStatic(parent: HWND, hinstance: HINSTANCE, text: []const u8) ?HWND {
 fn setWindowTextUtf8(hwnd_opt: ?HWND, text: []const u8) void {
     const hwnd = hwnd_opt orelse return;
     var text_w: [2048]u16 = undefined;
-    _ = SendMessageW(hwnd, WM_SETTEXT, 0, @bitCast(@intFromPtr(utf8ToW(&text_w, text))));
+    _ = sys.SendMessageW(hwnd, WM_SETTEXT, 0, @bitCast(@intFromPtr(utf8ToW(&text_w, text))));
 }
 
 fn setWindowTextUtf8IfChanged(hwnd: HWND, text: []const u8) bool {
     var current: [2048]u16 = undefined;
-    const current_len: usize = @intCast(@max(0, GetWindowTextW(hwnd, &current, @intCast(current.len))));
+    const current_len: usize = @intCast(@max(0, sys.GetWindowTextW(hwnd, &current, @intCast(current.len))));
     var desired: [2048]u16 = undefined;
     const desired_z = utf8ToW(&desired, text);
     const desired_slice = std.mem.span(desired_z);
     if (std.mem.eql(u16, current[0..current_len], desired_slice)) return false;
-    _ = SendMessageW(hwnd, WM_SETTEXT, 0, @bitCast(@intFromPtr(desired_z)));
+    _ = sys.SendMessageW(hwnd, WM_SETTEXT, 0, @bitCast(@intFromPtr(desired_z)));
     return true;
 }
 
 fn applyChildFont(hwnd: HWND, lParam: LPARAM) callconv(.winapi) BOOL {
-    _ = SendMessageW(hwnd, WM_SETFONT, @as(WPARAM, @bitCast(lParam)), 1);
+    _ = sys.SendMessageW(hwnd, WM_SETFONT, @as(WPARAM, @bitCast(lParam)), 1);
     return 1;
 }
 
@@ -3869,7 +3775,7 @@ fn makeEdit(
     extra_style: u32,
 ) ?HWND {
     const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
-    const edit = CreateWindowExW(
+    const edit = sys.CreateWindowExW(
         0,
         edit_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
@@ -3883,7 +3789,7 @@ fn makeEdit(
         hinstance,
         null,
     );
-    if (edit) |e| _ = SendMessageW(e, EM_LIMITTEXT, edit_text_max_code_units - 1, 0);
+    if (edit) |e| _ = sys.SendMessageW(e, EM_LIMITTEXT, edit_text_max_code_units - 1, 0);
     return edit;
 }
 
@@ -3895,7 +3801,7 @@ fn makeCheckbox(
     width: i32,
 ) ?HWND {
     const btn_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
-    return CreateWindowExW(
+    return sys.CreateWindowExW(
         0,
         btn_class,
         label,
@@ -3919,7 +3825,7 @@ fn makeCombo(
     items: []const []const u8,
 ) ?HWND {
     const combo_class = std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX");
-    const combo = CreateWindowExW(
+    const combo = sys.CreateWindowExW(
         0,
         combo_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
@@ -3953,7 +3859,7 @@ fn makeSectionButton(
         .advanced => BTN_SECTION_ADVANCED,
     };
     const group_style: u32 = if (section == .appearance) WS_GROUP | WS_TABSTOP else 0;
-    return CreateWindowExW(
+    return sys.CreateWindowExW(
         0,
         class,
         section.label(),
@@ -4201,19 +4107,19 @@ test "settings save command rechecks dispatch state" {
 }
 
 fn windowWorkArea(hwnd: HWND, work_area: *RECT) bool {
-    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) |monitor| {
+    if (sys.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) |monitor| {
         var info: MONITORINFO = .{
             .cbSize = @sizeOf(MONITORINFO),
             .rcMonitor = undefined,
             .rcWork = undefined,
             .dwFlags = 0,
         };
-        if (GetMonitorInfoW(monitor, &info) != 0) {
+        if (sys.GetMonitorInfoW(monitor, &info) != 0) {
             work_area.* = info.rcWork;
             return true;
         }
     }
-    return SystemParametersInfoW(SPI_GETWORKAREA, 0, work_area, 0) != 0;
+    return sys.SystemParametersInfoW(SPI_GETWORKAREA, 0, work_area, 0) != 0;
 }
 
 fn cappedMinimum(logical: i32, dpi: u32, work_extent: i32) i32 {
@@ -4452,21 +4358,21 @@ test "settings custom UIA providers require confirmed STA initialization" {
 fn clipChildToViewport(parent: HWND, child: ?HWND, viewport_top: i32, viewport_bottom: i32) bool {
     const hwnd = child orelse return true;
     var rect: RECT = undefined;
-    if (GetWindowRect(hwnd, &rect) == 0) return false;
+    if (sys.GetWindowRect(hwnd, &rect) == 0) return false;
     var origin: POINT = .{ .x = rect.left, .y = rect.top };
-    if (ScreenToClient(parent, &origin) == 0) return false;
+    if (sys.ScreenToClient(parent, &origin) == 0) return false;
     const width = @max(0, rect.right - rect.left);
     const height = @max(0, rect.bottom - rect.top);
     const clip_top = std.math.clamp(viewport_top - origin.y, 0, height);
     const clip_bottom = std.math.clamp(viewport_bottom - origin.y, clip_top, height);
     if (clip_top == 0 and clip_bottom == height) {
-        _ = SetWindowRgn(hwnd, null, 1);
+        _ = sys.SetWindowRgn(hwnd, null, 1);
         return false;
     }
     const fully_clipped = viewportRegionIsFullyClipped(width, clip_top, clip_bottom);
-    const region = CreateRectRgn(0, clip_top, width, clip_bottom) orelse return false;
-    if (SetWindowRgn(hwnd, region, 1) == 0) {
-        _ = DeleteObject(region);
+    const region = sys.CreateRectRgn(0, clip_top, width, clip_bottom) orelse return false;
+    if (sys.SetWindowRgn(hwnd, region, 1) == 0) {
+        _ = sys.DeleteObject(region);
         return false;
     }
     return fully_clipped;
@@ -4490,11 +4396,11 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
         return self.close_prompt_measure_height;
     }
     const hwnd = self.hwnd orelse return minimum;
-    const hdc = GetDC(hwnd) orelse return minimum;
-    defer _ = ReleaseDC(hwnd, hdc);
-    const previous_font = if (self.ui_font) |font| SelectObject(hdc, font) else null;
+    const hdc = sys.GetDC(hwnd) orelse return minimum;
+    defer _ = sys.ReleaseDC(hwnd, hdc);
+    const previous_font = if (self.ui_font) |font| sys.SelectObject(hdc, font) else null;
     defer {
-        if (previous_font) |font| _ = SelectObject(hdc, font);
+        if (previous_font) |font| _ = sys.SelectObject(hdc, font);
     }
 
     var text_w: [256]u16 = undefined;
@@ -4505,7 +4411,7 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
         .right = @max(1, pane_width),
         .bottom = 0,
     };
-    _ = DrawTextW(
+    _ = sys.DrawTextW(
         hdc,
         text.ptr,
         @intCast(text.len),
@@ -4561,7 +4467,7 @@ fn settingsContentViewportTop(self: *SettingsWindow, client_rect: RECT) i32 {
 fn layoutChildren(self: *SettingsWindow) void {
     const hwnd = self.hwnd orelse return;
     var rect: RECT = undefined;
-    if (GetClientRect(hwnd, &rect) == 0) return;
+    if (sys.GetClientRect(hwnd, &rect) == 0) return;
 
     // Left rail — stack section buttons top-down.
     const rail_width = self.px(left_rail_width);
@@ -4582,7 +4488,7 @@ fn layoutChildren(self: *SettingsWindow) void {
         self.btn_section_advanced,
     }) |btn_opt| {
         if (btn_opt) |btn| {
-            _ = MoveWindow(btn, btn_x, y, btn_w, button_height, 1);
+            _ = sys.MoveWindow(btn, btn_x, y, btn_w, button_height, 1);
         }
         y += button_height + button_gap;
     }
@@ -4606,22 +4512,22 @@ fn layoutChildren(self: *SettingsWindow) void {
     const content_bottom = pane_top + stack_top + (content_rows - 1) * row_gap + control_height;
     self.content_scroll_max = @max(0, content_bottom - (rect.bottom - side));
     self.content_scroll_y = std.math.clamp(self.content_scroll_y, 0, self.content_scroll_max);
-    _ = SetScrollRange(hwnd, SB_VERT, 0, self.content_scroll_max, 1);
-    _ = SetScrollPos(hwnd, SB_VERT, self.content_scroll_y, 1);
-    _ = ShowScrollBar(hwnd, SB_VERT, @intFromBool(self.content_scroll_max > 0));
+    _ = sys.SetScrollRange(hwnd, SB_VERT, 0, self.content_scroll_max, 1);
+    _ = sys.SetScrollPos(hwnd, SB_VERT, self.content_scroll_y, 1);
+    _ = sys.ShowScrollBar(hwnd, SB_VERT, @intFromBool(self.content_scroll_max > 0));
     const content_top = pane_top + stack_top - self.content_scroll_y;
 
     const header_right = @max(pane_left, rect.right - side - self.px(110));
-    if (self.text_header) |text| _ = MoveWindow(text, pane_left, pane_top, header_right - pane_left, self.px(28), 1);
-    if (self.text_summary) |text| _ = MoveWindow(text, pane_left, pane_top + self.px(34), header_right - pane_left, self.px(40), 1);
-    if (self.text_status) |text| _ = MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, self.px(24), 1);
-    if (self.text_close_prompt) |text| _ = MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, prompt_height, 1);
-    if (self.btn_conflict_keep) |button| _ = MoveWindow(button, pane_left, pane_top + self.px(104), self.px(110), self.px(28), 1);
-    if (self.btn_conflict_use_disk) |button| _ = MoveWindow(button, pane_left + self.px(120), pane_top + self.px(104), self.px(110), self.px(28), 1);
+    if (self.text_header) |text| _ = sys.MoveWindow(text, pane_left, pane_top, header_right - pane_left, self.px(28), 1);
+    if (self.text_summary) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(34), header_right - pane_left, self.px(40), 1);
+    if (self.text_status) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, self.px(24), 1);
+    if (self.text_close_prompt) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, prompt_height, 1);
+    if (self.btn_conflict_keep) |button| _ = sys.MoveWindow(button, pane_left, pane_top + self.px(104), self.px(110), self.px(28), 1);
+    if (self.btn_conflict_use_disk) |button| _ = sys.MoveWindow(button, pane_left + self.px(120), pane_top + self.px(104), self.px(110), self.px(28), 1);
     const close_action_top = pane_top + self.px(76) + prompt_height + self.px(8);
-    if (self.btn_close_save) |button| _ = MoveWindow(button, pane_left, close_action_top, close_actions.first_width, self.px(32), 1);
-    if (self.btn_close_discard) |button| _ = MoveWindow(button, pane_left + close_actions.second_x, close_action_top + close_actions.second_y, close_actions.second_width, self.px(32), 1);
-    if (self.btn_close_keep_editing) |button| _ = MoveWindow(button, pane_left + close_actions.third_x, close_action_top + close_actions.third_y, close_actions.third_width, self.px(32), 1);
+    if (self.btn_close_save) |button| _ = sys.MoveWindow(button, pane_left, close_action_top, close_actions.first_width, self.px(32), 1);
+    if (self.btn_close_discard) |button| _ = sys.MoveWindow(button, pane_left + close_actions.second_x, close_action_top + close_actions.second_y, close_actions.second_width, self.px(32), 1);
+    if (self.btn_close_keep_editing) |button| _ = sys.MoveWindow(button, pane_left + close_actions.third_x, close_action_top + close_actions.third_y, close_actions.third_width, self.px(32), 1);
 
     var active_label_index: usize = 0;
     for (settings_label_specs, self.field_labels) |spec, label_opt| {
@@ -4632,7 +4538,7 @@ fn layoutChildren(self: *SettingsWindow) void {
         const column_width = @divTrunc(pane_width - (if (columns == 2) column_gap else 0), @as(i32, @intCast(columns)));
         const column: i32 = @intCast(active_label_index % columns);
         const row: i32 = @intCast(active_label_index / columns);
-        _ = MoveWindow(
+        _ = sys.MoveWindow(
             label,
             pane_left + column * (column_width + column_gap),
             content_top + row * row_gap - self.px(field_label_offset),
@@ -4643,7 +4549,7 @@ fn layoutChildren(self: *SettingsWindow) void {
         active_label_index += 1;
     }
     if (self.text_help) |text| {
-        _ = MoveWindow(text, pane_left, content_top + row_gap, pane_width, @max(self.px(240), rect.bottom - content_top - row_gap - side), 1);
+        _ = sys.MoveWindow(text, pane_left, content_top + row_gap, pane_width, @max(self.px(240), rect.bottom - content_top - row_gap - side), 1);
     }
 
     // Terminal section stack. All rows share this section and are
@@ -4653,19 +4559,19 @@ fn layoutChildren(self: *SettingsWindow) void {
     {
         var ty: i32 = content_top;
         if (self.edit_scrollback) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), control_height, 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), control_height, 1);
             ty += row_gap;
         }
         if (self.combo_confirm_close) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
             ty += row_gap;
         }
         if (self.combo_copy_on_select) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
             ty += row_gap;
         }
         if (self.chk_trim_trail) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(260), pane_width), checkbox_height, 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(260), pane_width), checkbox_height, 1);
         }
     }
 
@@ -4687,7 +4593,7 @@ fn layoutChildren(self: *SettingsWindow) void {
             const control_hwnd = control.hwnd orelse continue;
             const column: i32 = @intCast(i % columns);
             const row: i32 = @intCast(i / columns);
-            _ = MoveWindow(
+            _ = sys.MoveWindow(
                 control_hwnd,
                 pane_left + column * (column_width + column_gap),
                 content_top + row * row_gap,
@@ -4719,7 +4625,7 @@ fn layoutChildren(self: *SettingsWindow) void {
             const control_hwnd = control.hwnd orelse continue;
             const column: i32 = @intCast(i % columns);
             const row: i32 = @intCast(i / columns);
-            _ = MoveWindow(
+            _ = sys.MoveWindow(
                 control_hwnd,
                 pane_left + column * (column_width + column_gap),
                 content_top + row * row_gap,
@@ -4734,32 +4640,32 @@ fn layoutChildren(self: *SettingsWindow) void {
     {
         var ty: i32 = content_top;
         if (self.edit_command) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(360), pane_width), control_height, 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(360), pane_width), control_height, 1);
             ty += row_gap;
         }
         if (self.combo_shell_integ) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(200), 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(200), 1);
         }
     }
 
     if (self.btn_keybindings_editor) |btn| {
-        _ = MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
+        _ = sys.MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
     }
 
     // Updates section.
     {
         var ty: i32 = content_top;
         if (self.combo_auto_update) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
             ty += row_gap;
         }
         if (self.combo_auto_update_channel) |e| {
-            _ = MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(140), 1);
+            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(140), 1);
         }
     }
 
     if (self.btn_open_editor) |btn| {
-        _ = MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
+        _ = sys.MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
     }
 
     // Save button — always-visible primary action in the header. Keeping it
@@ -4767,7 +4673,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     if (self.btn_save) |btn| {
         const w = self.px(90);
         const h = self.px(32);
-        _ = MoveWindow(
+        _ = sys.MoveWindow(
             btn,
             rect.right - w - side,
             pane_top,
@@ -4792,17 +4698,8 @@ fn layoutChildren(self: *SettingsWindow) void {
     }
 }
 
-extern "user32" fn MoveWindow(
-    hWnd: HWND,
-    X: i32,
-    Y: i32,
-    nWidth: i32,
-    nHeight: i32,
-    bRepaint: BOOL,
-) callconv(.winapi) BOOL;
-
 fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.text_uia_prev_proc;
         if (settings.textIndex(hwnd)) |index| {
@@ -4814,18 +4711,18 @@ fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callc
             if (msg == WM_NCDESTROY) {
                 if (settings.text_uia_providers[index]) |provider| provider.detach();
                 if (previous) |proc| {
-                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
-                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                    _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
                 }
             }
         }
-        if (previous) |proc| return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+        if (previous) |proc| return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         if (settings.controlIndex(hwnd)) |index| {
             const previous = settings.control_uia_prev_procs[index];
@@ -4837,12 +4734,12 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
             if (msg == WM_NCDESTROY) {
                 if (settings.control_uia_providers[index]) |provider| provider.detach();
                 if (previous) |proc| {
-                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
-                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                    _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
                 }
             }
             if (previous) |proc| {
-                const result = CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
                 if (msg == WM_SETFOCUS) {
                     if (settings.control_uia_providers[index]) |provider| provider.raiseFocusChanged();
                 }
@@ -4850,11 +4747,11 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
             }
         }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-    const owner = if (GetParent(hwnd)) |parent| recoverOwner(parent) else null;
+    const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.section_button_prev_proc;
         if (settings.sectionForButton(hwnd)) |section| {
@@ -4866,13 +4763,13 @@ fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPAR
             if (msg == WM_NCDESTROY) {
                 if (settings.sectionProvider(section)) |provider| provider.detach();
                 if (previous) |proc| {
-                    _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
-                    return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                    _ = sys.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, @as(LONG_PTR, @intCast(@intFromPtr(proc))));
+                    return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
                 }
             }
         }
         if (previous) |proc| {
-            const result = CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
             if (msg == WM_SETFOCUS) {
                 if (settings.sectionForButton(hwnd)) |section| {
                     if (settings.sectionProvider(section)) |provider| provider.raiseFocusChanged();
@@ -4881,14 +4778,14 @@ fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPAR
             return result;
         }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     if (msg == WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
-            _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, @intCast(@intFromPtr(ptr)));
         }
     }
 
@@ -4900,7 +4797,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                     if (win32_uia.returnSettingsSectionGroupProvider(hwnd, wParam, lParam, provider)) |result| return result;
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
@@ -4927,7 +4824,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 else
                     colors.window_bg;
                 const foreground = if (child) |control|
-                    if (IsWindowEnabled(control) == 0)
+                    if (sys.IsWindowEnabled(control) == 0)
                         colors.disabled_text
                     else if (edit_like)
                         colors.edit_text
@@ -4937,20 +4834,20 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                         colors.text
                 else
                     colors.text;
-                _ = SetTextColor(hdc, foreground);
-                _ = SetBkColor(hdc, background);
-                if (msg == WM_CTLCOLORSTATIC) _ = SetBkMode(hdc, TRANSPARENT);
+                _ = sys.SetTextColor(hdc, foreground);
+                _ = sys.SetBkColor(hdc, background);
+                if (msg == WM_CTLCOLORSTATIC) _ = sys.SetBkMode(hdc, TRANSPARENT);
                 if (o.theme_adapter.controlBrush(msg)) |brush| {
                     return pointerLresult(brush);
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_DPICHANGED => {
             if (owner) |o| {
                 o.dpi = normalizedDpi(@intCast(wParam & 0xFFFF));
                 const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                _ = SetWindowPos(
+                _ = sys.SetWindowPos(
                     hwnd,
                     null,
                     suggested.left,
@@ -4961,7 +4858,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 );
                 o.recreateUiFont();
                 layoutChildren(o);
-                _ = InvalidateRect(hwnd, null, 1);
+                _ = sys.InvalidateRect(hwnd, null, 1);
             }
             return 0;
         },
@@ -5039,8 +4936,8 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             }
             if (clickedButton(id, notify, BTN_SAVE)) {
                 if (owner) |o| {
-                    const button_enabled = if (o.btn_save) |button| IsWindowEnabled(button) != 0 else false;
-                    const button_visible = if (o.btn_save) |button| IsWindowVisible(button) != 0 else false;
+                    const button_enabled = if (o.btn_save) |button| sys.IsWindowEnabled(button) != 0 else false;
+                    const button_visible = if (o.btn_save) |button| sys.IsWindowVisible(button) != 0 else false;
                     if (saveCommandCanDispatch(
                         o.close_prompt_visible,
                         o.save_in_flight,
@@ -5214,7 +5111,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         WM_CLOSE => {
             if (owner) |o| {
@@ -5241,15 +5138,15 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             // the HWND without the user closing it) doesn't re-enter
             // the quit-timer path during teardown.
             if (owner) |o| o.clearChildRefs();
-            _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            _ = sys.SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        else => return DefWindowProcW(hwnd, msg, wParam, lParam),
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
 }
 
 fn recoverOwner(hwnd: HWND) ?*SettingsWindow {
-    const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    const raw = sys.GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (raw == 0) return null;
     return @ptrFromInt(@as(usize, @intCast(raw)));
 }
@@ -5283,32 +5180,32 @@ fn settingsControlRelease(ctx: *anyopaque) void {
 
 fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     var ps: PAINTSTRUCT = undefined;
-    const hdc = BeginPaint(hwnd, &ps);
-    defer _ = EndPaint(hwnd, &ps);
+    const hdc = sys.BeginPaint(hwnd, &ps);
+    defer _ = sys.EndPaint(hwnd, &ps);
 
     var rect: RECT = undefined;
-    if (GetClientRect(hwnd, &rect) == 0) return;
+    if (sys.GetClientRect(hwnd, &rect) == 0) return;
 
     const colors = owner.theme_adapter.colors;
-    const fallback_brush = GetStockObject(DC_BRUSH);
+    const fallback_brush = sys.GetStockObject(DC_BRUSH);
     const window_brush = owner.theme_adapter.window_brush orelse fallback_brush;
     if (owner.theme_adapter.window_brush == null) {
-        _ = SetDCBrushColor(hdc, colors.window_bg);
+        _ = sys.SetDCBrushColor(hdc, colors.window_bg);
     }
-    _ = FillRect(hdc, &rect, window_brush);
+    _ = sys.FillRect(hdc, &rect, window_brush);
 
     var rail_rect = rect;
     rail_rect.right = owner.px(left_rail_width);
     const rail_brush = owner.theme_adapter.rail_brush orelse fallback_brush;
     if (owner.theme_adapter.rail_brush == null) {
-        _ = SetDCBrushColor(hdc, colors.rail_bg);
+        _ = sys.SetDCBrushColor(hdc, colors.rail_bg);
     }
-    _ = FillRect(hdc, &rail_rect, rail_brush);
+    _ = sys.FillRect(hdc, &rail_rect, rail_brush);
 }
 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
     var buf_w: [edit_text_max_code_units]u16 = undefined;
-    const n = GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
+    const n = sys.GetWindowTextW(edit, &buf_w, @intCast(buf_w.len));
     const written = std.unicode.utf16LeToUtf8(buf, buf_w[0..@intCast(n)]) catch return null;
     return buf[0..written];
 }
@@ -5317,7 +5214,7 @@ fn setEditText(edit: HWND, text: []const u8, suppress: *bool) void {
     var buf_w: [edit_text_max_code_units]u16 = undefined;
     const w = utf8ToW(&buf_w, text);
     suppress.* = true;
-    _ = SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
+    _ = sys.SendMessageW(edit, WM_SETTEXT, 0, @bitCast(@intFromPtr(w)));
     suppress.* = false;
 }
 

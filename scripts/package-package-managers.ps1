@@ -23,11 +23,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 
 $Architectures = @($Architectures | ForEach-Object { (Get-WindowsPackageArchitecture -Architecture $_).Name })
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$repoRoot = Get-RepoRoot
 $tagValue = if ($Tag) { $Tag } else { "v$Version" }
 if ($ArtifactRoot -and $Architectures.Count -ne 1) {
     throw "-ArtifactRoot can only be used with one architecture."
@@ -100,7 +101,7 @@ function Get-AssetChecksum {
         throw "Missing checksum entry for $AssetName in $ChecksumsPath"
     }
 
-    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $AssetPath).Hash.ToLowerInvariant()
+    $actual = Get-FileSha256Lower -Path $AssetPath
     if ($actual -ne $checksum) {
         throw "Checksum mismatch for $AssetName. Expected $checksum, got $actual."
     }

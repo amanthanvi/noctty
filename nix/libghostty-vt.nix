@@ -24,7 +24,6 @@ stdenv.mkDerivation (finalAttrs: {
       lib.fileset.unions [
         ../images
         ../include
-        ../po
         ../pkg
         ../src
         ../vendor

@@ -1,18 +1,18 @@
 [CmdletBinding()]
 param([switch]$Rebuild, [switch]$ResetState, [switch]$ExerciseHighContrast, [int]$TimeoutSeconds = 60)
 $ErrorActionPreference = 'Stop'
+# Settling delay after restoring palette-theme presentation state.
+$script:PALETTE_THEME_SETTLE_MS = 750
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED) {
-    $args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
-    if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
-    $code = 0
-    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
-    exit $code
-}
+$args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
+if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
+Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' `
+    -ArgumentList $args
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'palette-theme' -ResetState:$ResetState -IncludeResourcesDir
 $layout = $harness.Layout
@@ -138,7 +138,7 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula background render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
-    Start-Sleep -Milliseconds 750
+    Start-Sleep -Milliseconds $script:PALETTE_THEME_SETTLE_MS
     Write-Host ('theme preview framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f preview render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
     $themeList = Get-StatefulChildren $hostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1

@@ -8,7 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot "common.ps1")
+$repoRoot = Get-RepoRoot
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "release-copy-date.ps1")
 

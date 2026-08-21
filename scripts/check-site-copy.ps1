@@ -2,17 +2,23 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-$siteRoot = Join-Path $PSScriptRoot "..\\site"
-$siteRoot = [System.IO.Path]::GetFullPath($siteRoot)
+. (Join-Path $PSScriptRoot "common.ps1")
+$siteRoot = Join-Path (Get-RepoRoot) "site"
 
 if (-not (Test-Path $siteRoot)) {
     throw "Site root not found: $siteRoot"
 }
 
-$textFiles = Get-ChildItem -Path $siteRoot -Recurse -File | Where-Object {
-    $_.Extension -in @(".html", ".css", ".js", ".jsx", ".md", ".txt", ".svg") -or
-    $_.Name -in @("_redirects")
-}
+$textFiles = @(
+    Get-ChildItem -LiteralPath $siteRoot -File | Where-Object {
+        $_.Extension -in @(".html", ".css", ".js", ".jsx", ".md", ".txt") -and
+        $_.Name -ne "bundle.js"
+    }
+    Get-ChildItem -LiteralPath (Join-Path $siteRoot "components") -Recurse -File | Where-Object {
+        $_.Extension -in @(".js", ".jsx")
+    }
+    Get-ChildItem -LiteralPath (Join-Path $siteRoot "assets") -Recurse -File -Filter "*.svg"
+)
 
 $forbiddenRules = @(
     @{ Pattern = "(?i)\bscoop install winghostty\b(?!/)"; Regex = $true; Reason = "Official Scoop installs should use the bucket-qualified command: scoop install winghostty/winghostty." },
@@ -36,20 +42,20 @@ $forbiddenRules = @(
 )
 
 $requiredRules = @(
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/winghostty/releases/latest"; Reason = "Primary download CTA should point to latest release." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "%LOCALAPPDATA%\\winghostty\\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/winghostty"; Reason = "Landing page should keep a repo link." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "winget install AmanThanvi.winghostty"; Reason = "Hero copy should surface the official WinGet install command." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "scoop install winghostty/winghostty"; Reason = "Copied install text should include the official Scoop install command." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/scoop-winghostty"; Reason = "Copied Scoop install text should include the official bucket source." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Native settings"; Reason = "Landing page should describe the current native settings window." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "Universal palette"; Reason = "Landing page should describe the current universal palette." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "partial, not complete"; Reason = "Landing page must keep Windows accessibility status explicitly partial." },
+    @{ Path = Join-Path $siteRoot "components/heroes.jsx"; Pattern = "https://github.com/amanthanvi/winghostty/releases/latest"; Reason = "Primary download CTA should point to latest release." },
+    @{ Path = Join-Path $siteRoot "components/terminal.jsx"; Pattern = "%LOCALAPPDATA%\\winghostty\\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
+    @{ Path = Join-Path $siteRoot "components/footer/footer.jsx"; Pattern = "https://github.com/amanthanvi/winghostty"; Reason = "Landing page should keep a repo link." },
+    @{ Path = Join-Path $siteRoot "components/install/install-block.jsx"; Pattern = "winget install AmanThanvi.winghostty"; Reason = "Hero copy should surface the official WinGet install command." },
+    @{ Path = Join-Path $siteRoot "components/install/install-block.jsx"; Pattern = "scoop install winghostty/winghostty"; Reason = "Copied install text should include the official Scoop install command." },
+    @{ Path = Join-Path $siteRoot "components/install/install-block.jsx"; Pattern = "https://github.com/amanthanvi/scoop-winghostty"; Reason = "Copied Scoop install text should include the official bucket source." },
+    @{ Path = Join-Path $siteRoot "components/features/feature-grid.jsx"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },
+    @{ Path = Join-Path $siteRoot "components/features/feature-grid.jsx"; Pattern = "Native settings"; Reason = "Landing page should describe the current native settings window." },
+    @{ Path = Join-Path $siteRoot "components/features/feature-grid.jsx"; Pattern = "Universal palette"; Reason = "Landing page should describe the current universal palette." },
+    @{ Path = Join-Path $siteRoot "components/why/why-fork.jsx"; Pattern = "partial, not complete"; Reason = "Landing page must keep Windows accessibility status explicitly partial." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = '<link rel="canonical" href="https://winghostty.com/"'; Reason = "Landing page should publish its canonical URL." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "<noscript>"; Reason = "Landing page should retain a useful no-JavaScript fallback." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "https://github.com/amanthanvi/winghostty/discussions"; Reason = "Footer should link to project Discussions." },
-    @{ Path = Join-Path $siteRoot "bundle.js"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
+    @{ Path = Join-Path $siteRoot "components/footer/footer.jsx"; Pattern = "https://github.com/amanthanvi/winghostty/discussions"; Reason = "Footer should link to project Discussions." },
+    @{ Path = Join-Path $siteRoot "components/footer/footer.jsx"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
 )
 
 $failures = New-Object System.Collections.Generic.List[string]

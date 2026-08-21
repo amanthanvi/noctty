@@ -6,3 +6,10 @@ updates:
     schedule:
       # Check for updates to GitHub Actions every weekday
       interval: "daily"
+
+  # Maintain dependencies for the website
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      # Check for updates to website dependencies every week
+      interval: "weekly"

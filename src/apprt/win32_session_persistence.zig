@@ -1,6 +1,7 @@
 //! Windows session-state file I/O and recovery policy.
 
 const std = @import("std");
+const sys = @import("win32/sys.zig");
 const schema = @import("win32_session_state.zig");
 const Allocator = std.mem.Allocator;
 
@@ -111,17 +112,14 @@ fn replaceFileAtomicWindows(absolute_path: []const u8, temporary_path: []const u
     const temporary_w = try std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, temporary_path);
     defer std.heap.page_allocator.free(temporary_w);
 
-    if (ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) == 0 and
-        MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) == 0)
+    if (sys.ReplaceFileW(target_w.ptr, temporary_w.ptr, null, 0, null, null) == 0 and
+        sys.MoveFileExW(temporary_w.ptr, target_w.ptr, MOVEFILE_REPLACE_EXISTING) == 0)
     {
         return windows.unexpectedError(windows.kernel32.GetLastError());
     }
 }
 
 const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
-extern "kernel32" fn ReplaceFileW([*:0]const u16, [*:0]const u16, ?[*:0]const u16, u32, ?*anyopaque, ?*anyopaque) callconv(.winapi) i32;
-extern "kernel32" fn MoveFileExW([*:0]const u16, [*:0]const u16, u32) callconv(.winapi) i32;
-
 test "win32 session persistence load distinguishes missing corrupt oversized and transient reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

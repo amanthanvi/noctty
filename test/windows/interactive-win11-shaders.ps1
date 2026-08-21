@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Settling delay before shader-output validation.
+$script:SHADER_SETTLE_MS = 750
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +17,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 if ($Rebuild) {
     Push-Location $repoRoot
@@ -143,7 +139,7 @@ try {
     $surface = $script:shaderSurface
     $hostHwnd = Find-StatefulHost $process.Id
     Show-StatefulHost $hostHwnd
-    Start-Sleep -Milliseconds 750
+    Start-Sleep -Milliseconds $script:SHADER_SETTLE_MS
 
     $rect = Get-StatefulWindowRect $surface.Hwnd
     if ($null -eq $rect) {

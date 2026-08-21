@@ -34,11 +34,6 @@
     "url": "https://deps.files.ghostty.org/gobject-2025-11-08-23-1.tar.zst",
     "hash": "sha256-2b1DBvAIHY5LhItq3+q9L6tJgi7itnnrSAHc7fXWDEg="
   },
-  "N-V-__8AALiNBAA-_0gprYr92CjrMj1I5bqNu0TSJOnjFNSr": {
-    "name": "gtk4_layer_shell",
-    "url": "https://deps.files.ghostty.org/gtk4-layer-shell-1.1.0.tar.gz",
-    "hash": "sha256-mChCgSYKXu9bT2OlXxbEv2p4ihAgptsDfssPcfozaYg="
-  },
   "N-V-__8AAG02ugUcWec-Ndp-i7JTsJ0dgF8nnJRUInkGLG7G": {
     "name": "harfbuzz",
     "url": "https://deps.files.ghostty.org/harfbuzz-11.0.0.tar.xz",

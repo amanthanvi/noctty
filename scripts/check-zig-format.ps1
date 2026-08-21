@@ -2,7 +2,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
 $paths = @('build.zig') + @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- 'src/*.zig' 'src/**/*.zig' 'pkg/*.zig' 'pkg/**/*.zig')
 if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed while collecting Zig sources.' }
 $paths = @($paths | Where-Object { $_ -ne 'src/build/uucode_tables.zig' } | Sort-Object -Unique)

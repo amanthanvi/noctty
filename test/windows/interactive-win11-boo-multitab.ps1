@@ -7,6 +7,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Poll cadence while waiting for multi-tab process output.
+$script:BOO_MULTITAB_POLL_MS = 100
+# Settling delay before the multi-tab input sequence.
+$script:BOO_MULTITAB_SETTLE_MS = 300
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -24,35 +28,27 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_BOO_MULTITAB_BOOTSTRAPPED) {
-    $forwardedArgs = @(
-        '-SeedTabs', $SeedTabs.ToString(),
-        '-EscapeAfterMs', $EscapeAfterMs.ToString(),
-        '-TimeoutSeconds', $TimeoutSeconds.ToString()
-    )
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_BOO_MULTITAB_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @(
+    '-SeedTabs', $SeedTabs.ToString(),
+    '-EscapeAfterMs', $EscapeAfterMs.ToString(),
+    '-TimeoutSeconds', $TimeoutSeconds.ToString()
+)
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_BOO_MULTITAB_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 if (-not ('InteractiveWin11BooMultiTabNative' -as [type])) {
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-using System.Text;
 
 public static class InteractiveWin11BooMultiTabNative {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -62,40 +58,10 @@ public static class InteractiveWin11BooMultiTabNative {
     }
 
     [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll")]
-    public static extern int GetDlgCtrlID(IntPtr hwndCtl);
-
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetParent(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll", SetLastError=true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-
 }
 
 public sealed class InteractiveWin11BooMultiTabChildControl {
@@ -147,7 +113,7 @@ function Get-WindowClassName {
     )
 
     $builder = [System.Text.StringBuilder]::new(256)
-    [void] [InteractiveWin11BooMultiTabNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    [void] [InteractiveWin11WindowNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
     return $builder.ToString()
 }
 
@@ -157,11 +123,11 @@ function Find-HostWindow {
     )
 
     $script:InteractiveWin11BooMultiTabFoundHost = [IntPtr]::Zero
-    $callback = [InteractiveWin11BooMultiTabNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         [uint32] $windowPid = 0
-        [void] [InteractiveWin11BooMultiTabNative]::GetWindowThreadProcessId($hwnd, [ref] $windowPid)
+        [void] [InteractiveWin11WindowNative]::GetWindowThreadProcessId($hwnd, [ref] $windowPid)
         if ($windowPid -ne $ProcessId) {
             return $true
         }
@@ -174,7 +140,7 @@ function Find-HostWindow {
         return $true
     }
 
-    [void] [InteractiveWin11BooMultiTabNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:InteractiveWin11BooMultiTabFoundHost
 }
 
@@ -184,13 +150,13 @@ function Find-SurfaceWindow {
     )
 
     $script:InteractiveWin11BooMultiTabFoundSurface = [IntPtr]::Zero
-    $callback = [InteractiveWin11BooMultiTabNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         if (
             (Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32' -and
-            [InteractiveWin11BooMultiTabNative]::GetParent($hwnd) -eq $Parent -and
-            [InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)
+            [InteractiveWin11WindowNative]::GetParent($hwnd) -eq $Parent -and
+            [InteractiveWin11WindowNative]::IsWindowVisible($hwnd)
         ) {
             $script:InteractiveWin11BooMultiTabFoundSurface = $hwnd
             return $false
@@ -199,7 +165,7 @@ function Find-SurfaceWindow {
         return $true
     }
 
-    [void] [InteractiveWin11BooMultiTabNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:InteractiveWin11BooMultiTabFoundSurface
 }
 
@@ -217,11 +183,11 @@ function Test-SurfaceWindow {
         return $false
     }
 
-    if ([InteractiveWin11BooMultiTabNative]::GetParent($Hwnd) -ne $ExpectedParent) {
+    if ([InteractiveWin11WindowNative]::GetParent($Hwnd) -ne $ExpectedParent) {
         return $false
     }
 
-    if (-not [InteractiveWin11BooMultiTabNative]::IsWindowVisible($Hwnd)) {
+    if (-not [InteractiveWin11WindowNative]::IsWindowVisible($Hwnd)) {
         return $false
     }
 
@@ -234,13 +200,13 @@ function Get-VisibleChildControls {
     )
 
     $script:InteractiveWin11BooMultiTabChildControls = [System.Collections.Generic.List[InteractiveWin11BooMultiTabChildControl]]::new()
-    $callback = [InteractiveWin11BooMultiTabNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ([InteractiveWin11BooMultiTabNative]::IsWindowVisible($hwnd)) {
+        if ([InteractiveWin11WindowNative]::IsWindowVisible($hwnd)) {
             $control = [InteractiveWin11BooMultiTabChildControl]::new(
                 $hwnd,
-                [InteractiveWin11BooMultiTabNative]::GetDlgCtrlID($hwnd)
+                [InteractiveWin11WindowNative]::GetDlgCtrlID($hwnd)
             )
             [void] $script:InteractiveWin11BooMultiTabChildControls.Add($control)
         }
@@ -248,7 +214,7 @@ function Get-VisibleChildControls {
         return $true
     }
 
-    [void] [InteractiveWin11BooMultiTabNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:InteractiveWin11BooMultiTabChildControls.ToArray()
 }
 
@@ -291,8 +257,8 @@ function Invoke-TabButtonActivation {
 
     if (
         -not [InteractiveWin11BooMultiTabNative]::IsWindow($Tab.Hwnd) -or
-        [InteractiveWin11BooMultiTabNative]::GetParent($Tab.Hwnd) -ne $ExpectedParent -or
-        [InteractiveWin11BooMultiTabNative]::GetDlgCtrlID($Tab.Hwnd) -ne $Tab.Id
+        [InteractiveWin11WindowNative]::GetParent($Tab.Hwnd) -ne $ExpectedParent -or
+        [InteractiveWin11WindowNative]::GetDlgCtrlID($Tab.Hwnd) -ne $Tab.Id
     ) {
         throw "initial tab button handle is stale or was recycled; control=$($Tab.Id)"
     }
@@ -371,7 +337,7 @@ try {
     } | ConvertTo-Json -Compress | Set-Content -LiteralPath '__STATE_PATH__' -Encoding ASCII
 
     while (-not (Test-Path -LiteralPath '__GO_PATH__')) {
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:BOO_MULTITAB_POLL_MS
     }
 
     [ordered]@{
@@ -457,7 +423,7 @@ try {
     }
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
-    Show-InteractiveWin11Window -Hwnd $hostHwnd -NativeType ([InteractiveWin11BooMultiTabNative]) -SetForeground
+    Show-InteractiveWin11Window -Hwnd $hostHwnd -NativeType ([InteractiveWin11WindowNative]) -SetForeground
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
@@ -487,7 +453,7 @@ try {
         Test-SurfaceWindow -Hwnd $initialSurfaceHwnd -ExpectedParent $hostHwnd
     }
     $surfaceHwnd = $initialSurfaceHwnd
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $script:BOO_MULTITAB_SETTLE_MS
 
     'go' | Set-Content -LiteralPath $goPath -Encoding ASCII
 

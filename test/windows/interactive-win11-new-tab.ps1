@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Tight poll cadence for maximize-state drift observation.
+$script:NEW_TAB_STATE_POLL_MS = 10
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -14,85 +16,19 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_NEW_TAB_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type -TypeDefinition @'
 using System;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class Win11NewTabNative {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct POINT {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RECT {
-        public int Left;
-        public int Top;
-        public int Right;
-        public int Bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct WINDOWPLACEMENT {
-        public uint length;
-        public uint flags;
-        public uint showCmd;
-        public POINT ptMinPosition;
-        public POINT ptMaxPosition;
-        public RECT rcNormalPosition;
-    }
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll")]
-    public static extern int GetDlgCtrlID(IntPtr hwndCtl);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsZoomed(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT lpwndpl);
-
-}
 
 public sealed class Win11NewTabChildControl {
     public Win11NewTabChildControl(IntPtr hwnd, int id) {
@@ -120,7 +56,7 @@ function Get-WindowClassName {
     )
 
     $builder = [System.Text.StringBuilder]::new(256)
-    [void] [Win11NewTabNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    [void] [InteractiveWin11WindowNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
     return $builder.ToString()
 }
 
@@ -129,8 +65,8 @@ function Get-WindowRectObject {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    $rect = [Win11NewTabNative+RECT]::new()
-    if (-not [Win11NewTabNative]::GetWindowRect($Hwnd, [ref] $rect)) {
+    $rect = [InteractiveWin11WindowNative+RECT]::new()
+    if (-not [InteractiveWin11WindowNative]::GetWindowRect($Hwnd, [ref] $rect)) {
         $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "GetWindowRect failed for hwnd=$Hwnd (Win32 error $lastError)"
     }
@@ -148,9 +84,9 @@ function Get-WindowPlacementObject {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    $placement = [Win11NewTabNative+WINDOWPLACEMENT]::new()
-    $placement.length = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type] [Win11NewTabNative+WINDOWPLACEMENT])
-    if (-not [Win11NewTabNative]::GetWindowPlacement($Hwnd, [ref] $placement)) {
+    $placement = [InteractiveWin11WindowNative+WINDOWPLACEMENT]::new()
+    $placement.length = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type] [InteractiveWin11WindowNative+WINDOWPLACEMENT])
+    if (-not [InteractiveWin11WindowNative]::GetWindowPlacement($Hwnd, [ref] $placement)) {
         $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "GetWindowPlacement failed for hwnd=$Hwnd (Win32 error $lastError)"
     }
@@ -185,11 +121,11 @@ function Find-HostWindow {
 
     $script:Win11NewTabTargetProcessId = [uint32] $ProcessId
     $script:Win11NewTabFoundHost = [IntPtr]::Zero
-    $callback = [Win11NewTabNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         $windowProcessId = [uint32] 0
-        [void] [Win11NewTabNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
+        [void] [InteractiveWin11WindowNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
         if ($windowProcessId -ne $script:Win11NewTabTargetProcessId) {
             return $true
         }
@@ -202,7 +138,7 @@ function Find-HostWindow {
         return $true
     }
 
-    [void] [Win11NewTabNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:Win11NewTabFoundHost
 }
 
@@ -212,13 +148,13 @@ function Get-VisibleChildControls {
     )
 
     $script:Win11NewTabChildControls = [System.Collections.Generic.List[Win11NewTabChildControl]]::new()
-    $callback = [Win11NewTabNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ([Win11NewTabNative]::IsWindowVisible($hwnd)) {
+        if ([InteractiveWin11WindowNative]::IsWindowVisible($hwnd)) {
             $control = [Win11NewTabChildControl]::new(
                 $hwnd,
-                [Win11NewTabNative]::GetDlgCtrlID($hwnd)
+                [InteractiveWin11WindowNative]::GetDlgCtrlID($hwnd)
             )
             [void] $script:Win11NewTabChildControls.Add($control)
         }
@@ -226,7 +162,7 @@ function Get-VisibleChildControls {
         return $true
     }
 
-    [void] [Win11NewTabNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:Win11NewTabChildControls.ToArray()
 }
 
@@ -326,9 +262,9 @@ function Invoke-NewTabScenario {
 
         $normalRectBeforeMaximize = Get-WindowRectObject -Hwnd $hostHwnd
         $normalPlacementBeforeMaximize = Get-WindowPlacementObject -Hwnd $hostHwnd
-        [void] [Win11NewTabNative]::ShowWindow($hostHwnd, 3)
+        [void] [InteractiveWin11WindowNative]::ShowWindow($hostHwnd, 3)
         Wait-InteractiveWin11Until -Deadline $deadline -Description "maximized host ($Name)" -Process $process -Condition {
-            [Win11NewTabNative]::IsZoomed($hostHwnd)
+            [InteractiveWin11WindowNative]::IsZoomed($hostHwnd)
         }
 
         $maximizedPlacementBeforeNewTab = Get-WindowPlacementObject -Hwnd $hostHwnd
@@ -350,12 +286,12 @@ function Invoke-NewTabScenario {
             $samplePlacement = Get-WindowPlacementObject -Hwnd $hostHwnd
             $samples.Add([pscustomobject]@{
                 Ticks = [DateTime]::UtcNow.Ticks
-                Zoomed = [bool][Win11NewTabNative]::IsZoomed($hostHwnd)
+                Zoomed = [bool][InteractiveWin11WindowNative]::IsZoomed($hostHwnd)
                 ShowCmd = $samplePlacement.ShowCmd
                 Rect = $sampleRect
                 Normal = $samplePlacement.NormalPosition
             }) | Out-Null
-            Start-Sleep -Milliseconds 10
+            Start-Sleep -Milliseconds $script:NEW_TAB_STATE_POLL_MS
         }
 
         $afterRect = $samples[$samples.Count - 1].Rect
@@ -380,7 +316,7 @@ function Invoke-NewTabScenario {
 
         [void] (Invoke-InteractiveWin11Message -Hwnd $hostHwnd -Message 0x0112 -WParam (New-WParam -Low 0xF120) -Deadline $deadline -Description 'SC_RESTORE' -Process $process)
         Wait-InteractiveWin11Until -Deadline $deadline -Description "restored host ($Name)" -Process $process -Condition {
-            -not [Win11NewTabNative]::IsZoomed($hostHwnd)
+            -not [InteractiveWin11WindowNative]::IsZoomed($hostHwnd)
         }
 
         $restoredRect = Get-WindowRectObject -Hwnd $hostHwnd

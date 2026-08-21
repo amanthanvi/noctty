@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot "common.ps1")
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
@@ -23,7 +24,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$repoRoot = Get-RepoRoot
 $outputRootPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
 $userHome = if ($env:USERPROFILE) {
     $env:USERPROFILE
@@ -555,7 +556,7 @@ try {
     }
 
     $hashLines = foreach ($target in $hashTargets) {
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $target.Path).Hash.ToLowerInvariant()
+        $hash = Get-FileSha256Lower -Path $target.Path
         "$hash *$($target.Name)"
     }
 

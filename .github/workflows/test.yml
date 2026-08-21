@@ -1,7 +1,8 @@
 name: Test
 
 on:
-  push: {}
+  push:
+    branches: [main]
   pull_request: {}
   schedule:
     - cron: "17 6 * * *"
@@ -59,6 +60,10 @@ jobs:
       - name: Install site dependencies
         shell: pwsh
         run: npm ci --prefix site
+
+      - name: Test site
+        shell: pwsh
+        run: npm test --prefix site
 
       - name: Deterministic site bundle check
         shell: pwsh

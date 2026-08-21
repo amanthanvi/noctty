@@ -34,28 +34,23 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
-    $forwardedArgs = @('-CliAction', $CliAction, '-SeedTabs', $SeedTabs.ToString(), '-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if (-not [string]::IsNullOrWhiteSpace($CommandText)) {
-        $forwardedArgs += @('-CommandText', $CommandText)
-    }
-    if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
-        $forwardedArgs += @('-ExePathOverride', $ExePathOverride)
-    }
-    if ($RunBooFirst) { $forwardedArgs += '-RunBooFirst' }
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
+$forwardedArgs = @('-CliAction', $CliAction, '-SeedTabs', $SeedTabs.ToString(), '-TimeoutSeconds', $TimeoutSeconds.ToString())
+if (-not [string]::IsNullOrWhiteSpace($CommandText)) {
+    $forwardedArgs += @('-CommandText', $CommandText)
 }
+if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
+    $forwardedArgs += @('-ExePathOverride', $ExePathOverride)
+}
+if ($RunBooFirst) { $forwardedArgs += '-RunBooFirst' }
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 if (-not ('Win11ShellCommandLiveNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -128,26 +123,6 @@ public static class Win11ShellCommandLiveNative {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern short VkKeyScanW(char ch);
 
-    public static bool ForceForeground(IntPtr hWnd) {
-        keybd_event(0x12, 0, 0, UIntPtr.Zero);
-        keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
-        uint ignored;
-        uint targetThread = GetWindowThreadProcessId(hWnd, out ignored);
-        IntPtr foreground = GetForegroundWindow();
-        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
-        uint currentThread = GetCurrentThreadId();
-        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
-        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
-        try {
-            BringWindowToTop(hWnd);
-            SetForegroundWindow(hWnd);
-            return GetForegroundWindow() == hWnd;
-        }
-        finally {
-            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
-            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
-        }
-    }
 }
 '@
 }
@@ -540,7 +515,7 @@ function Promote-WindowForCapture {
         0,
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
-    [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
+    [void] [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $true, $false)
 
     $captureDeadline = (Get-Date).AddMilliseconds($CAPTURE_PROMOTION_DELAY_MS * 4)
     while ((Get-Date) -lt $captureDeadline) {
@@ -550,7 +525,7 @@ function Promote-WindowForCapture {
         }
 
         Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
-        [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
+        [void] [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $true, $false)
     }
 
     throw "Failed to foreground capture target hwnd=$Hwnd before screenshot sampling"

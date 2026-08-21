@@ -5,39 +5,33 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Observation delay after closing the last undo-story tab.
+$script:UNDO_LAST_TAB_SETTLE_MS = 500
 
 $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
 }
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-using System.Text;
 
 public static class Win11UndoNative {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -47,29 +41,7 @@ public static class Win11UndoNative {
     }
 
     [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-    [DllImport("user32.dll")]
-    public static extern int GetDlgCtrlID(IntPtr hwndCtl);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
-
 }
 
 public sealed class Win11UndoChildControl {
@@ -126,7 +98,7 @@ function Get-WindowClassName {
     )
 
     $builder = [System.Text.StringBuilder]::new(256)
-    [void] [Win11UndoNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    [void] [InteractiveWin11WindowNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
     return $builder.ToString()
 }
 
@@ -137,11 +109,11 @@ function Find-HostWindow {
 
     $script:Win11UndoTargetProcessId = [uint32] $ProcessId
     $script:Win11UndoFoundHost = [IntPtr]::Zero
-    $callback = [Win11UndoNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         $windowProcessId = [uint32] 0
-        [void] [Win11UndoNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
+        [void] [InteractiveWin11WindowNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
         if ($windowProcessId -ne $script:Win11UndoTargetProcessId) {
             return $true
         }
@@ -154,7 +126,7 @@ function Find-HostWindow {
         return $true
     }
 
-    [void] [Win11UndoNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:Win11UndoFoundHost
 }
 
@@ -164,13 +136,13 @@ function Get-VisibleChildControls {
     )
 
     $script:Win11UndoChildControls = [System.Collections.Generic.List[Win11UndoChildControl]]::new()
-    $callback = [Win11UndoNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ([Win11UndoNative]::IsWindowVisible($hwnd)) {
+        if ([InteractiveWin11WindowNative]::IsWindowVisible($hwnd)) {
             $control = [Win11UndoChildControl]::new(
                 $hwnd,
-                [Win11UndoNative]::GetDlgCtrlID($hwnd)
+                [InteractiveWin11WindowNative]::GetDlgCtrlID($hwnd)
             )
             [void] $script:Win11UndoChildControls.Add($control)
         }
@@ -178,7 +150,7 @@ function Get-VisibleChildControls {
         return $true
     }
 
-    [void] [Win11UndoNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:Win11UndoChildControls.ToArray()
 }
 
@@ -238,17 +210,6 @@ function Get-LogPatternCount {
     return [regex]::Matches($content, [regex]::Escape($Pattern)).Count
 }
 
-function Wait-Until {
-    param(
-        [Parameter(Mandatory)] [scriptblock] $Condition,
-        [Parameter(Mandatory)] [string] $Description,
-        [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
-    )
-
-    Wait-InteractiveWin11Until @PSBoundParameters
-}
-
 function Invoke-HostCommand {
     param(
         [Parameter(Mandatory)] [IntPtr] $HostHwnd,
@@ -270,7 +231,7 @@ function Invoke-CommandPaletteAction {
 
     Invoke-HostCommand -HostHwnd $HostHwnd -CommandId 1901 -Deadline $Deadline -Process $Process
     $script:Win11UndoPaletteHostHwnd = $HostHwnd
-    Wait-Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'command palette edit control' -Process $Process -Condition {
         $null -ne (Get-VisibleChildById -Parent $script:Win11UndoPaletteHostHwnd -Id 2002)
     }
 
@@ -332,11 +293,11 @@ function Invoke-DragFirstTabIntoActiveSurface {
     }
 
     $tabClient = [Win11UndoNative+RECT]::new()
-    $tabScreen = [Win11UndoNative+RECT]::new()
-    $surfaceScreen = [Win11UndoNative+RECT]::new()
+    $tabScreen = [InteractiveWin11WindowNative+RECT]::new()
+    $surfaceScreen = [InteractiveWin11WindowNative+RECT]::new()
     if (-not [Win11UndoNative]::GetClientRect($sourceTab.Hwnd, [ref] $tabClient) -or
-        -not [Win11UndoNative]::GetWindowRect($sourceTab.Hwnd, [ref] $tabScreen) -or
-        -not [Win11UndoNative]::GetWindowRect($targetSurface.Hwnd, [ref] $surfaceScreen)) {
+        -not [InteractiveWin11WindowNative]::GetWindowRect($sourceTab.Hwnd, [ref] $tabScreen) -or
+        -not [InteractiveWin11WindowNative]::GetWindowRect($targetSurface.Hwnd, [ref] $surfaceScreen)) {
         throw 'failed to read drag geometry'
     }
 
@@ -392,7 +353,7 @@ $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $hostHwnd = [IntPtr]::Zero
 
 try {
-    Wait-Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
         if ($process.HasExited) {
             throw "winghostty exited before host creation (exit code $($process.ExitCode))"
         }
@@ -402,58 +363,58 @@ try {
     }
     $hostHwnd = $script:Win11UndoHostHwnd
 
-    Wait-Until -Deadline $deadline -Description 'initial shell startup' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial shell startup' -Process $process -Condition {
         (Get-LogPatternCount -Path $stderrPath -Pattern $successPattern) -ge 1
     }
 
-    Wait-Until -Deadline $deadline -Description 'initial tab button' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial tab button' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'initial tab count'
 
-    Wait-Until -Deadline $deadline -Description 'initial surface child' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'initial surface child' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'initial visible surface count'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::NewSplitDown) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'split surface creation' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'split surface creation' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
-    Wait-Until -Deadline $deadline -Description 'split shell startup' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'split shell startup' -Process $process -Condition {
         (Get-LogPatternCount -Path $stderrPath -Pattern $successPattern) -ge 2
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'visible surface count after new_split:down'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'undo removed split surface' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'undo removed split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible surface count after split undo'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'redo restored split surface' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'redo restored split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'visible surface count after split redo'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'second undo removed split surface' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'second undo removed split surface' -Process $process -Condition {
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible surface count after second split undo'
 
     Invoke-HostCommand -HostHwnd $hostHwnd -CommandId 1904 -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'second tab button' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'second tab button' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
     }
-    Wait-Until -Deadline $deadline -Description 'second shell startup' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'second shell startup' -Process $process -Condition {
         (Get-LogPatternCount -Path $stderrPath -Pattern $successPattern) -ge 3
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 2 'tab count after new_tab'
 
     Invoke-DragFirstTabIntoActiveSurface -HostHwnd $hostHwnd -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'tab drag split transfer' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'tab drag split transfer' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1 -and
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
@@ -461,48 +422,48 @@ try {
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 2 'pane count after drag split transfer'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'undo tab drag split transfer' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'undo tab drag split transfer' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleSurfaceCount -Parent $hostHwnd) 1 'visible pane count after drag transfer undo'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'redo tab drag split transfer' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'redo tab drag split transfer' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1 -and
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 2
     }
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'restore two tabs after drag transfer checks' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'restore two tabs after drag transfer checks' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2 -and
         (Get-VisibleSurfaceCount -Parent $hostHwnd) -eq 1
     }
 
     Invoke-CloseSecondTab -HostHwnd $hostHwnd -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'second tab close' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'second tab close' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after close_tab:this'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Undo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'undo restored closed tab' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'undo restored closed tab' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 2
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 2 'tab count after undo'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::Redo) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'redo closed restored tab' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'redo closed restored tab' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 1
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 1 'tab count after redo'
 
     Invoke-CommandPaletteAction -HostHwnd $hostHwnd -Action ([Win11UndoPaletteAction]::CloseTabThis) -Deadline $deadline -Process $process
-    Wait-Until -Deadline $deadline -Description 'last tab close' -Process $process -Condition {
+    Wait-InteractiveWin11Until -Deadline $deadline -Description 'last tab close' -Process $process -Condition {
         (Get-VisibleTabCount -Parent $hostHwnd) -eq 0
     }
     Assert-Equal (Get-VisibleTabCount -Parent $hostHwnd) 0 'tab count after last close_tab:this'
 
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds $script:UNDO_LAST_TAB_SETTLE_MS
     if ($process.HasExited) {
         throw 'winghostty exited after last-tab close'
     }

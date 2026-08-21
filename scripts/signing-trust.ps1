@@ -279,6 +279,72 @@ function Test-SelfSignedTrustStatus {
     )
 }
 
+function Assert-ReleaseSignature {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $Label,
+
+        [Parameter(Mandatory)]
+        [string[]] $AllowedPins,
+
+        [Parameter(Mandatory)]
+        [bool] $TrustSelfSigned
+    )
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $certificate = $signature.SignerCertificate
+    if ($null -eq $certificate) {
+        throw "$Label has no Authenticode signer certificate: $Path"
+    }
+
+    $statusAccepted = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+    if (-not $statusAccepted -and $TrustSelfSigned -and
+        $certificate.Subject -eq $certificate.Issuer -and
+        (Test-SelfSignedTrustStatus -Signature $signature -Path $Path)) {
+        $statusAccepted = $true
+    }
+    if (-not $statusAccepted) {
+        throw "$Label Authenticode signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+    }
+
+    $pin = Get-CertificateSpkiSha256 -Certificate $certificate
+    if ($AllowedPins -notcontains $pin) {
+        throw "$Label signer SPKI SHA-256 is not allowed: $pin"
+    }
+
+    return [pscustomobject]@{
+        Label = $Label
+        Thumbprint = $certificate.Thumbprint
+        SpkiSha256 = $pin
+        Status = [string]$signature.Status
+    }
+}
+
+function Get-ChecksumEntries {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $entries = [ordered]@{}
+    foreach ($line in @(Get-Content -LiteralPath $Path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $match = [regex]::Match($line, '^(?<hash>[0-9a-fA-F]{64}) \*(?<name>[^\\/]+)$')
+        if (-not $match.Success) {
+            throw "Malformed checksum line in $Path`: $line"
+        }
+        $name = $match.Groups['name'].Value
+        if ($entries.Contains($name)) {
+            throw "Duplicate checksum entry '$name' in $Path."
+        }
+        $entries[$name] = $match.Groups['hash'].Value.ToLowerInvariant()
+    }
+    return $entries
+}
+
 function Import-CodeSigningCertificate {
     param(
         [string] $PfxBase64,

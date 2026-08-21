@@ -5,7 +5,7 @@
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Pre-rewrite Windows-checkout source contracts, verified unchanged from origin/main and hashed after checkout normalization."
+    "description": "Reviewed Windows-checkout source contracts: session schema unchanged from origin/main; portable CLI runner pinned by an explicit post-wiring digest."
   },
   "artifacts": [
     {
@@ -19,7 +19,7 @@
       "id": "portable-cli-harness",
       "kind": "contract",
       "path": "test/windows/package-portable-cli.ps1",
-      "sha256": "269f010e479c78720b3649ded80199039d89a779e109a720675f640d42d4a518",
+      "sha256": "f1aad78377e3ce303e9a2bc9a4d77ca947cf5332741d4c881eb215cacca3162e",
       "scenario_id": "windows.portable-cli.x64"
     }
   ]

@@ -14,11 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$repoRoot = Get-RepoRoot
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $buildCapabilitiesPath = Join-Path $zigOutBin "winghostty-build-capabilities.json"
 $runtimeFiles = @(

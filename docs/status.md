@@ -131,9 +131,8 @@ and lands incrementally.
 - GitHub Issues are for reproducible bugs. For questions, feature
   discussion, and feedback, use
   [Discussions](https://github.com/amanthanvi/winghostty/discussions).
-- No supported Linux packaging. Upstream's Flatpak and Snap surfaces
-  are removed; the Nix files left over from upstream are untested and
-  unsupported here.
+- No supported Linux application packaging. Upstream's Flatpak and Snap
+  surfaces are removed; the curated Nix flake supports only `libghostty-vt`.
 - A few generated artifacts still reference upstream: the
   `libghostty-vt` pkg-config `URL` field, the vim syntax-file headers,
   and a link in the generated bash completions point at

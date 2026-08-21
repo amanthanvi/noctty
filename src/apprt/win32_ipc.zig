@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../apprt.zig");
+const sys = @import("win32/sys.zig");
 
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
@@ -34,13 +35,6 @@ pub const PerformActionPayload = struct {
     target: apprt.ipc.AutomationActionTarget,
     action_text: []u8,
 };
-
-extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
-
-extern "kernel32" fn ConnectNamedPipe(
-    hNamedPipe: windows.HANDLE,
-    lpOverlapped: ?*anyopaque,
-) callconv(.winapi) BOOL;
 
 fn appendU32(dst: *std.ArrayList(u8), alloc: Allocator, value: u32) !void {
     var buf: [4]u8 = undefined;
@@ -270,7 +264,7 @@ pub fn readDataResponseWithTimeout(
     pipe: windows.HANDLE,
     timeout_ms: u64,
 ) ![]u8 {
-    const deadline_ms = GetTickCount64() +| timeout_ms;
+    const deadline_ms = sys.GetTickCount64() +| timeout_ms;
     var header: [5]u8 = undefined;
     try readExactUntil(pipe, &header, deadline_ms);
     if (readU32(header[0..4]) != wire_version) return error.InvalidIpcResponse;
@@ -309,11 +303,11 @@ pub fn readExactWithTimeout(
     dst: []u8,
     timeout_ms: u64,
 ) !void {
-    return readExactUntil(pipe, dst, GetTickCount64() +| timeout_ms);
+    return readExactUntil(pipe, dst, sys.GetTickCount64() +| timeout_ms);
 }
 
 fn deadline() u64 {
-    return GetTickCount64() +| io_timeout_ms;
+    return sys.GetTickCount64() +| io_timeout_ms;
 }
 
 fn pipeIoPending(err: windows.Win32Error) bool {
@@ -327,7 +321,7 @@ fn readExactUntil(
 ) !void {
     var offset: usize = 0;
     while (offset < dst.len) {
-        if (GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
         var read_len: u32 = 0;
         if (windows.kernel32.ReadFile(
             pipe,
@@ -351,7 +345,7 @@ fn readExactUntil(
 }
 
 pub fn writeAll(pipe: windows.HANDLE, src: []const u8) !void {
-    const started_at = GetTickCount64();
+    const started_at = sys.GetTickCount64();
     var offset: usize = 0;
     while (offset < src.len) {
         var write_len: u32 = 0;
@@ -364,7 +358,7 @@ pub fn writeAll(pipe: windows.HANDLE, src: []const u8) !void {
         ) == 0) {
             const err = windows.kernel32.GetLastError();
             if (pipeIoPending(err)) {
-                if (GetTickCount64() -| started_at >= io_timeout_ms) {
+                if (sys.GetTickCount64() -| started_at >= io_timeout_ms) {
                     return error.IpcTimeout;
                 }
                 std.Thread.sleep(poll_interval_ns);
@@ -383,7 +377,7 @@ test "win32 IPC silent client read is bounded" {
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
         std.testing.allocator,
         "\\\\.\\pipe\\winghostty-ipc-timeout-{d}",
-        .{GetTickCount64()},
+        .{sys.GetTickCount64()},
         0,
     );
     defer std.testing.allocator.free(pipe_name_utf8);
@@ -406,7 +400,7 @@ test "win32 IPC silent client read is bounded" {
     try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(server);
 
-    try std.testing.expectEqual(@as(BOOL, 0), ConnectNamedPipe(server, null));
+    try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
     try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
 
     const client = windows.kernel32.CreateFileW(
@@ -421,7 +415,7 @@ test "win32 IPC silent client read is bounded" {
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
 
-    const connected = ConnectNamedPipe(server, null);
+    const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
         try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
     }

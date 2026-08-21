@@ -12,7 +12,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+. (Join-Path $PSScriptRoot "common.ps1")
+$repoRoot = Get-RepoRoot
 $releaseMetaPath = Join-Path $repoRoot "dist/windows/release-metadata.json"
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
 

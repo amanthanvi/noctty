@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $ExpectedText,
 
+    [string] $ExePath = $null,
+
     [int] $TimeoutSeconds = 5
 )
 
@@ -16,7 +18,9 @@ if ($TimeoutSeconds -le 0) {
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-$exePath = Join-Path $repoRoot 'zig-out\bin\winghostty.exe'
+if ([string]::IsNullOrWhiteSpace($ExePath)) {
+    $ExePath = Join-Path $repoRoot 'zig-out\bin\winghostty.exe'
+}
 $scratchDir = Join-Path $repoRoot 'zig-out\cli-redirected'
 $actionSlug = $Action.TrimStart('+')
 $actionSlug = $actionSlug -replace '[\\/:*?"<>|]', '_'
@@ -27,15 +31,15 @@ if ([string]::IsNullOrWhiteSpace($actionSlug)) {
 $stdoutPath = Join-Path $scratchDir "$actionSlug.stdout.txt"
 $stderrPath = Join-Path $scratchDir "$actionSlug.stderr.txt"
 
-if (-not (Test-Path $exePath)) {
-    throw "Missing built executable: $exePath. Run `zig build -Demit-exe=true` first."
+if (-not (Test-Path $ExePath)) {
+    throw "Missing built executable: $ExePath. Run `zig build -Demit-exe=true` first."
 }
 
 New-Item -ItemType Directory -Force -Path $scratchDir | Out-Null
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
 $process = Start-Process `
-    -FilePath $exePath `
+    -FilePath $ExePath `
     -ArgumentList $Action `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `

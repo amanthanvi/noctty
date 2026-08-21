@@ -1,17 +1,17 @@
 [CmdletBinding()]
 param([switch]$Rebuild, [switch]$ResetState, [int]$TimeoutSeconds = 30)
 $ErrorActionPreference = 'Stop'
+# Retry cadence for session-automation snapshot queries.
+$script:SESSION_RESTORE_RETRY_MS = 250
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED) {
-    $args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
-    $code = 0
-    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
-    exit $code
-}
+$args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED' `
+    -ArgumentList $args
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'session-restore' -ResetState:$ResetState
 $layout = $harness.Layout
@@ -44,12 +44,12 @@ function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
         $queryExitCode = Get-InteractiveWin11ProcessExitCode -Process $query -ProcessHandle $queryHandle
         if ($queryExitCode -ne 0) {
             $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { "exit ${queryExitCode}: $(Get-Content $err -Raw)" } else { "exit $queryExitCode" }
-            Start-Sleep -Milliseconds 250
+            Start-Sleep -Milliseconds $script:SESSION_RESTORE_RETRY_MS
             continue
         }
         if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return Get-Content $out -Raw | ConvertFrom-Json }
         $lastError = if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) { Get-Content $err -Raw } else { 'empty stdout' }
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds $script:SESSION_RESTORE_RETRY_MS
     }
     throw "Session automation query failed after three attempts: $lastError"
 }

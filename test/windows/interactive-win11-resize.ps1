@@ -5,6 +5,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Settling delay between resize-state transitions.
+$script:RESIZE_STEP_SETTLE_MS = 150
+# Poll cadence while waiting for resize evidence.
+$script:RESIZE_POLL_MS = 100
+# Settling delay before the initial live-resize sample.
+$script:RESIZE_INITIAL_SETTLE_MS = 600
+# Settling delay after live-resize completion transitions.
+$script:RESIZE_COMPLETION_SETTLE_MS = 700
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +23,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_RESIZE_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_RESIZE_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_RESIZE_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -309,7 +311,7 @@ function Capture-WindowImage {
             $bmp.Dispose()
         }
         Show-ResizeHarnessWindow -Hwnd $Hwnd
-        Start-Sleep -Milliseconds 150
+        Start-Sleep -Milliseconds $script:RESIZE_STEP_SETTLE_MS
     }
 
     throw "CopyFromScreen failed after 3 attempts for hwnd=$Hwnd rect=$($rect | ConvertTo-Json -Compress): $lastError"
@@ -558,7 +560,7 @@ try {
             throw "winghostty exited before resize validation could start (exit code $($process.ExitCode))"
         }
 
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:RESIZE_POLL_MS
     }
 
     if ($process.MainWindowHandle -eq 0) {
@@ -577,7 +579,7 @@ try {
     Assert-Win32CallSucceeded `
         -Succeeded ([WinghosttyResizeWin32]::MoveWindow($process.MainWindowHandle, $x, $y, $initialWidth, $initialHeight, $true)) `
         -Operation "initial MoveWindow(hwnd=$($process.MainWindowHandle))"
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds $script:RESIZE_INITIAL_SETTLE_MS
 
     $scenarioDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Invoke-HostCommand -HostHwnd $process.MainWindowHandle -CommandId $hostNewTabCommandId -Deadline $scenarioDeadline -Process $process
@@ -597,16 +599,16 @@ try {
         -Operation "grown MoveWindow(hwnd=$($process.MainWindowHandle))"
     Show-ResizeHarnessWindow -Hwnd $process.MainWindowHandle
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $script:RESIZE_STEP_SETTLE_MS
     Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $liveScreenshotPath
     $liveRatios = Assert-ResizeImageHasNoUnpaintedExpansionBands -Path $liveScreenshotPath
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
-    Start-Sleep -Milliseconds 700
+    Start-Sleep -Milliseconds $script:RESIZE_COMPLETION_SETTLE_MS
 
     [void] (Invoke-InteractiveWin11Message -Hwnd $process.MainWindowHandle -Message $wmExitSizeMove -Deadline $scenarioDeadline -Description 'WM_EXITSIZEMOVE' -Flags $script:InteractiveWin11SmtoBlock -Process $process)
     $enteredSizeMove = $false
     [void] [WinghosttyResizeWin32]::UpdateWindow($process.MainWindowHandle)
-    Start-Sleep -Milliseconds 700
+    Start-Sleep -Milliseconds $script:RESIZE_COMPLETION_SETTLE_MS
 
     $surfaceHwnd = [WinghosttyResizeWin32]::FindWindowExW($process.MainWindowHandle, [IntPtr]::Zero, $surfaceWindowClassName, $null)
     if ($surfaceHwnd -eq [IntPtr]::Zero) {

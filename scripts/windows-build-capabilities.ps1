@@ -1,3 +1,5 @@
+. (Join-Path $PSScriptRoot 'common.ps1')
+
 function Write-WindowsBuildCapabilitiesManifest {
     [CmdletBinding()]
     param(
@@ -25,9 +27,7 @@ function Write-WindowsBuildCapabilitiesManifest {
             throw "Cannot record build capability for missing runtime artifact: $runtimePath"
         }
 
-        $artifactHashes[$runtimeFile] = (
-            Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
+        $artifactHashes[$runtimeFile] = Get-FileSha256Lower -Path $runtimePath
     }
 
     [ordered] @{
@@ -90,9 +90,7 @@ function Assert-WindowsBuildCapabilitiesManifest {
             throw "Build capability manifest has no hash for $runtimeFile."
         }
 
-        $actualHash = (
-            Get-FileHash -LiteralPath $runtimePath -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256Lower -Path $runtimePath
         if ($actualHash -cne [string] $hashProperty.Value) {
             throw "Build capability manifest hash mismatch for $runtimeFile."
         }

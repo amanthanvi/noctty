@@ -20,7 +20,11 @@ Windows-only Ghostty fork.
 ## Directory Structure
 
 - Shared Zig core: `src/`
-- Win32 application runtime: `src/apprt/win32.zig` + `src/apprt/win32_theme.zig`
+- Win32 application runtime: `src/apprt/win32.zig` coordinates App, Host, and
+  Surface behavior; `src/apprt/win32_theme.zig` owns theme policy; focused
+  support modules under `src/apprt/win32/` own Win32 constants/externs,
+  labels/input, startup/render tracing, chrome rectangle math, and GDI paint
+  primitives.
 - Windows packaging: `dist/windows/` + `scripts/package-windows.ps1`
 - libghostty-vt headers: `include/ghostty/`
 
@@ -191,7 +195,7 @@ runtime. Do not reintroduce them.
 - 2026-04-15: In `scripts/package-windows.ps1`, avoid `Compress-Archive` for the portable ZIP; on Windows it can intermittently fail on staged theme files with spaces (for example `Monokai Classic`) even when staging itself is correct.
 - 2026-04-15: Fresh GitHub Actions checkouts cannot build or test without `src/unicode/generated_props.zig` and `src/unicode/generated_symbols.zig`; keep them versioned until the stale `uucode` generator path is repaired.
 - 2026-04-15: `scripts/package-windows.ps1` must build with `-Demit-lib-vt=true`; otherwise warm local trees can mask that fresh CI runners never produced `zig-out/bin/ghostty-vt.dll`.
-- 2026-04-15: In this Windows-focused fork, `nix/package.nix` and `nix/libghostty-vt.nix` can silently stale when `dist/linux` is removed; salvage `libghostty-vt`, but make the GTK/Linux app derivation fail fast with an explicit unsupported message.
+- 2026-04-15: In this Windows-focused fork, preserve the curated `libghostty-vt`-only Nix layout; do not reintroduce unsupported GTK/Linux app derivations.
 - 2026-04-16: `apprt.surface.newConfig()` returns a shallow clone; when overriding `Config.command` on that clone, never deinit the inherited command because it is still owned by the source config arena.
 - 2026-04-16: The Win32 chrome metric constants (`host_tab_height`, `host_overlay_height`, `host_overlay_padding`, `host_pane_divider_width`, etc.) now derive from `win32_theme.ThemeMetrics` defaults. Keep the top-level `const` aliases in place for call-site compatibility; new code should consume `ThemeMetrics` via the `Theme` aggregate.
 - 2026-04-16: In HC mode, `pane_divider` uses `COLOR_WINDOWFRAME` and `pane_divider_focused` uses `COLOR_HIGHLIGHT`; do not collapse both to `hi_bg` because that erases the focused/unfocused cue required by multi-pane layouts.
