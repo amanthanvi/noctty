@@ -265,6 +265,16 @@ pass the explicit `--include-crash-dumps` flag.
 
 ## Troubleshooting
 
+### ConPTY source
+
+`noctty +version` reports `ConPTY : bundled (<absolute DLL path>)` or
+`ConPTY : inbox`; `+diagnostic-bundle` records the same selection in its
+manifest. Set `NOCTTY_CONPTY=inbox` before launch to force the in-box source for
+diagnosis. Normal app launches warn when the fallback is selected. The shell
+remains usable, but on the tested in-box conhost Kitty-graphics APC and Sixel
+DCS payloads are stripped rather than delivered to noctty. See the
+[transport catalog](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
+
 ### SmartScreen
 
 SmartScreen warns on release downloads because the current signing

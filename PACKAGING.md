@@ -32,9 +32,11 @@ The exact upstream base release is stored in
 The bundled ConPTY redistributable is independently pinned in
 `dist/windows/conpty-redist.json`. The current pin is
 `Microsoft.Windows.Console.ConPTY` `1.24.260710001` under the MIT license.
-That file is the single source for the exact NuGet URL, package SHA256, and
-the x64/ARM64 archive entry paths and SHA256 values for `conpty.dll` and
-`OpenConsole.exe`.
+That file records the exact NuGet URL, package SHA256, and the x64/ARM64
+archive entry paths and SHA256 values for `conpty.dll` and `OpenConsole.exe`.
+The release verification contract in
+`test/windows/flagship/Test-VerificationContracts.ps1` independently pins the
+same values, so a pin refresh must update both files.
 
 The release workflow builds the Windows executable, stages runtime files,
 then produces:
@@ -104,8 +106,10 @@ To refresh the pin:
 2. Download that version's `.nupkg` and compute its SHA256.
 3. Open the package as a ZIP, select the matching x64 and ARM64
    `conpty.dll`/`OpenConsole.exe` entries, and compute all four SHA256 values.
-4. Update only `dist/windows/conpty-redist.json`, preserving the package ID,
-   license, project URL, exact entry paths, and lowercase SHA256 encoding.
+4. Update `dist/windows/conpty-redist.json` and the matching value pins in
+   `test/windows/flagship/Test-VerificationContracts.ps1`, preserving the
+   package ID, license, project URL, exact entry paths, and lowercase SHA256
+   encoding.
 5. Package both architectures with `-RequireConPty`; the packager re-verifies
    the archive, each extracted file, and both PE machine types before staging.
 

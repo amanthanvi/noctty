@@ -22,5 +22,7 @@ else
     .{};
 
 test {
+    if (build_config.exe_entrypoint == .ghostty)
+        @import("pty.zig").runConPtyTransportProbeChildIfRequested();
     _ = entrypoint;
 }

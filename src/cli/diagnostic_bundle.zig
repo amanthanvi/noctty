@@ -150,6 +150,19 @@ test "diagnostic manifest defaults exclude sensitive data" {
     try std.testing.expect(!manifest.privacy.working_directories);
     try std.testing.expect(!manifest.privacy.config_values);
     if (builtin.os.tag == .windows) try std.testing.expect(manifest.conpty != null);
+
+    var json_buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&json_buffer);
+    var serialized_manifest = manifest;
+    serialized_manifest.conpty = .{
+        .source = .bundled,
+        .dll_path = "C:\\Users\\example-user\\noctty\\conpty.dll",
+    };
+    try std.json.Stringify.value(serialized_manifest, .{}, &writer);
+    const json = writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, json, "example-user") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "dll_path") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "bundled") != null);
 }
 
 test "diagnostic crash dump copy uses canonical output path" {

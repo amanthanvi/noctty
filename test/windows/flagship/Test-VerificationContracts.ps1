@@ -8381,17 +8381,17 @@ if ($conptyRedistHelperErrors.Count -ne 0) {
     throw "ConPTY redistributable helper does not parse: $($conptyRedistHelperErrors[0].Message)"
 }
 $conptyRedistHelperSha256 =
-    '845b9d8cf8b9fcef4b29b2ac5d30d4c12b9b116806f913c3da14ba5c683fbb7f'
+    '365826625d6969feaa0f6a292825a8655057e191407e8ef72d1434805bac68b2'
 if ((Get-CanonicalTextSha256 -Text $conptyRedistHelperText) -cne $conptyRedistHelperSha256) {
     throw 'ConPTY redistributable helper changed without a contract review.'
 }
 $conptyRuntimeSha256 =
-    '931409f7ec022f8f8f1cd4ef920bfa641e8e4f34ef65be40e47d2fdaf08dadab'
+    'f4b96f4b28df351a1682f85756741f62d98f3e7588361aad04fc824507ad05c8'
 if ((Get-CanonicalTextSha256 -Text $conptyRuntimeText) -cne $conptyRuntimeSha256) {
     throw 'ConPTY runtime changed without a contract review.'
 }
 $diagnosticBundleSha256 =
-    '717a1caaab9ea3c9446f052f7a40aef91ca3385cd77c6d08315f38f47b7f1e39'
+    '1c43ad028978ba571bdec9a0767d41cc64a807edf63d578136e143601d640cc3'
 if ((Get-CanonicalTextSha256 -Text $diagnosticBundleText) -cne $diagnosticBundleSha256) {
     throw 'Diagnostic bundle ConPTY reporting changed without a contract review.'
 }

@@ -88,6 +88,15 @@ function Install-ConPtyRedist {
     $packageName = [System.IO.Path]::GetFileName(([System.Uri]$pin.nupkg.url).AbsolutePath)
     $packagePath = Join-Path $cacheDirectory $packageName
 
+    if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
+        try {
+            Assert-ConPtySha256 -Path $packagePath -Expected $pin.nupkg.sha256 -Label "Cached ConPTY package"
+        }
+        catch {
+            Remove-Item -LiteralPath $packagePath -Force
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
         $downloadPath = Join-Path $cacheDirectory "$packageName.download-$([Guid]::NewGuid().ToString('N'))"
         try {
