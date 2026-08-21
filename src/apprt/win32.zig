@@ -2861,6 +2861,13 @@ pub const App = struct {
             @tagName(compositor_status.state),
             if (compositor_status.fallback_reason) |reason| @tagName(reason) else null,
         });
+
+        // Core conditional configuration defaults to light. Synchronize it
+        // with Windows before the first surface is created so conditional
+        // themes and terminal color-scheme reports start on the right branch.
+        self.syncSystemColorScheme() catch |err| {
+            log.warn("initial win32 color scheme sync failed err={}", .{err});
+        };
     }
 
     /// Bring the STA apartment online for in-process COM consumers
@@ -4537,14 +4544,15 @@ pub const App = struct {
             },
 
             .reload_config => {
-                if (target != .app) return false;
                 if (value.soft) {
-                    try self.core_app.updateConfig(self, &self.config);
-                    if (self.config.@"app-notifications".@"config-reload") {
-                        try self.showDesktopNotification(.app, "noctty", "Configuration reloaded");
+                    switch (target) {
+                        .app => try self.core_app.updateConfig(self, &self.config),
+                        .surface => |core_surface| try core_surface.updateConfig(&self.config),
                     }
                     return true;
                 }
+
+                if (target != .app) return false;
 
                 // Same startup-cwd restoration dance as
                 // `settingsSaveAndReload`: `Config.load` calls
@@ -5461,6 +5469,17 @@ pub const App = struct {
                 log.warn("win32 scrollbar refresh failed err={}", .{err});
             };
         }
+    }
+
+    fn syncSystemColorScheme(self: *App) !void {
+        const scheme = systemColorSchemeForDarkMode(isSystemDarkMode());
+
+        // Surface state must change before the app-wide reload because
+        // App.updateConfig applies each surface's own conditional state.
+        for (self.windows.items) |surface| {
+            try surface.core().colorSchemeCallback(scheme);
+        }
+        try self.core_app.colorSchemeEvent(self, scheme);
     }
 
     fn reconfigureTheme(self: *App) void {
@@ -10099,7 +10118,7 @@ const Host = struct {
                 .name = theme.name,
                 .display_name = self.storePaletteCatalogLabel(theme.name),
                 .description = switch (theme.location) {
-                    .user => "User theme",
+                    .user, .legacy_user => "User theme",
                     .resources => "Bundled theme",
                 },
                 .enabled = true,
@@ -17023,6 +17042,15 @@ fn isSystemDarkMode() bool {
     return data == 0; // 0 = dark mode, 1 = light mode
 }
 
+fn systemColorSchemeForDarkMode(is_dark: bool) apprt.ColorScheme {
+    return if (is_dark) .dark else .light;
+}
+
+test "issue149 Windows dark mode maps to terminal color scheme" {
+    try std.testing.expectEqual(apprt.ColorScheme.light, systemColorSchemeForDarkMode(false));
+    try std.testing.expectEqual(apprt.ColorScheme.dark, systemColorSchemeForDarkMode(true));
+}
+
 fn readDynamicScrollbars(default_value: bool) bool {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Control Panel\\Accessibility");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("DynamicScrollbars");
@@ -21862,6 +21890,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();
                 v.app.reconfigureTheme();
+                v.app.syncSystemColorScheme() catch |err| {
+                    log.warn("win32 color scheme sync failed err={}", .{err});
+                };
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },

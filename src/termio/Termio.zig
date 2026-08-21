@@ -338,6 +338,7 @@ pub const DerivedConfig = struct {
     pub fn init(
         alloc_gpa: Allocator,
         config: *const configpkg.Config,
+        conditional_state: configpkg.ConditionalState,
     ) !DerivedConfig {
         var arena = ArenaAllocator.init(alloc_gpa);
         errdefer arena.deinit();
@@ -369,7 +370,10 @@ pub const DerivedConfig = struct {
             .osc_color_report_format = config.@"osc-color-report-format",
             .clipboard_write = config.@"clipboard-write",
             .enquiry_response = try alloc.dupe(u8, config.@"enquiry-response"),
-            .conditional_state = config._conditional_state,
+            // Config.changeConditionalState intentionally skips replay when no
+            // config field uses the changed condition. The terminal still
+            // needs the live state for color-scheme reports in that case.
+            .conditional_state = conditional_state,
 
             // This has to be last so that we copy AFTER the arena allocations
             // above happen (Zig assigns in order).
@@ -1024,11 +1028,18 @@ pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !voi
     if (!force and !self.renderer_state.terminal.modes.get(.report_color_scheme)) {
         return;
     }
-    const output = switch (self.config.conditional_state.theme) {
+    try self.queueWrite(
+        td,
+        colorSchemeReportBytes(self.config.conditional_state.theme),
+        false,
+    );
+}
+
+fn colorSchemeReportBytes(theme: configpkg.ConditionalState.Theme) []const u8 {
+    return switch (theme) {
         .light => "\x1B[?997;2n",
         .dark => "\x1B[?997;1n",
     };
-    try self.queueWrite(td, output, false);
 }
 
 /// ThreadData is the data created and stored in the termio thread
@@ -1140,4 +1151,42 @@ test "shouldWakeRendererAfterOutput wakes when synchronized output ends with pen
         false,
         false,
     ));
+}
+
+test "issue149 explicit config colors reach derived config and terminal colors" {
+    const testing = std.testing;
+
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+    config.background = .{ .r = 0x13, .g = 0x27, .b = 0x38 };
+    config.foreground = .{ .r = 0xFE, .g = 0xDC, .b = 0xBA };
+    try config.palette.parseCLI("5=#123456");
+
+    const conditional_state: configpkg.ConditionalState = .{ .theme = .dark };
+    var derived = try DerivedConfig.init(testing.allocator, &config, conditional_state);
+    defer derived.deinit();
+    try testing.expectEqual(config.background, derived.background);
+    try testing.expectEqual(config.foreground, derived.foreground);
+    try testing.expectEqual(config.palette.value[5], derived.palette[5]);
+    try testing.expectEqual(conditional_state, derived.conditional_state);
+
+    var terminal = try terminalpkg.Terminal.init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .colors = .{
+            .background = .init(derived.background.toTerminalRGB()),
+            .foreground = .init(derived.foreground.toTerminalRGB()),
+            .cursor = .unset,
+            .palette = .init(derived.palette),
+        },
+    });
+    defer terminal.deinit(testing.allocator);
+    try testing.expectEqual(config.background.toTerminalRGB(), terminal.colors.background.get().?);
+    try testing.expectEqual(config.foreground.toTerminalRGB(), terminal.colors.foreground.get().?);
+    try testing.expectEqual(config.palette.value[5], terminal.colors.palette.current[5]);
+}
+
+test "issue149 color scheme report bytes distinguish dark and light" {
+    try std.testing.expectEqualStrings("\x1B[?997;1n", colorSchemeReportBytes(.dark));
+    try std.testing.expectEqualStrings("\x1B[?997;2n", colorSchemeReportBytes(.light));
 }
