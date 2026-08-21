@@ -1,10 +1,28 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const windows = @import("os/main.zig").windows;
+const internal_os = @import("os/main.zig");
+const windows = internal_os.windows;
 const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
 const log = std.log.scoped(.pty);
+
+pub const ConPtySource = enum {
+    bundled,
+    inbox,
+};
+
+pub const ConPtyInfo = struct {
+    source: ConPtySource,
+    dll_path: ?[]const u8,
+};
+
+/// Returns the process-wide ConPTY selection. On Windows this initializes the
+/// same resolver used by Pty.open; other platforms do not have ConPTY.
+pub fn conPtyInfo() ?ConPtyInfo {
+    if (comptime builtin.os.tag != .windows) return null;
+    return WindowsConPty.functions().info();
+}
 
 /// Redeclare this winsize struct so we can just use a Zig struct. This
 /// layout should be correct on all tested platforms. The defaults on this
@@ -321,6 +339,156 @@ const PosixPty = struct {
     }
 };
 
+const WindowsConPty = struct {
+    const BundledLoadError = error{
+        PathUnavailable,
+        NotFound,
+        LoadFailed,
+        OpenConsoleMissing,
+        CreateSymbolMissing,
+        ResizeSymbolMissing,
+        CloseSymbolMissing,
+    };
+
+    const Functions = struct {
+        source: ConPtySource,
+        module: ?windows.HMODULE = null,
+        bundled_path: ?[]const u8 = null,
+        create: windows.exp.CreatePseudoConsoleFn,
+        resize: windows.exp.ResizePseudoConsoleFn,
+        close: windows.exp.ClosePseudoConsoleFn,
+
+        fn info(self: *const Functions) ConPtyInfo {
+            return .{
+                .source = self.source,
+                .dll_path = self.bundled_path,
+            };
+        }
+    };
+
+    var resolved: ?Functions = null;
+    var resolver_once = std.once(initialize);
+
+    fn functions() *const Functions {
+        resolver_once.call();
+        return &resolved.?;
+    }
+
+    fn initialize() void {
+        resolved = resolve();
+    }
+
+    fn resolve() Functions {
+        if (!forceInbox()) {
+            if (loadBundled()) |bundled| {
+                log.info("using bundled ConPTY: {s}", .{bundled.bundled_path.?});
+                return bundled;
+            } else |err| {
+                const reason = switch (err) {
+                    error.PathUnavailable => "bundled ConPTY path could not be resolved",
+                    error.NotFound => "bundled ConPTY not found",
+                    error.LoadFailed => "bundled ConPTY failed to load",
+                    error.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole.exe",
+                    error.CreateSymbolMissing => "bundled ConPTY is missing CreatePseudoConsole",
+                    error.ResizeSymbolMissing => "bundled ConPTY is missing ResizePseudoConsole",
+                    error.CloseSymbolMissing => "bundled ConPTY is missing ClosePseudoConsole",
+                };
+                log.warn(
+                    "{s}; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
+                    .{reason},
+                );
+            }
+        }
+
+        return .{
+            .source = .inbox,
+            .create = &windows.exp.kernel32.CreatePseudoConsole,
+            .resize = &windows.exp.kernel32.ResizePseudoConsole,
+            .close = &windows.exp.kernel32.ClosePseudoConsole,
+        };
+    }
+
+    fn forceInbox() bool {
+        const value = std.process.getEnvVarOwned(
+            std.heap.page_allocator,
+            "NOCTTY_CONPTY",
+        ) catch return false;
+        defer std.heap.page_allocator.free(value);
+
+        return std.ascii.eqlIgnoreCase(value, "inbox");
+    }
+
+    fn loadBundled() BundledLoadError!Functions {
+        var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe_dir = std.fs.selfExeDirPath(&exe_dir_buf) catch
+            return error.PathUnavailable;
+        const path = std.fs.path.join(
+            std.heap.page_allocator,
+            &.{ exe_dir, "conpty.dll" },
+        ) catch return error.PathUnavailable;
+        errdefer std.heap.page_allocator.free(path);
+
+        const path_w = std.unicode.wtf8ToWtf16LeAllocZ(
+            std.heap.page_allocator,
+            path,
+        ) catch return error.PathUnavailable;
+        defer std.heap.page_allocator.free(path_w);
+
+        const flags = windows.exp.LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+            windows.exp.LOAD_LIBRARY_SEARCH_SYSTEM32;
+        const module = windows.kernel32.LoadLibraryExW(
+            path_w.ptr,
+            null,
+            flags,
+        ) orelse return switch (windows.kernel32.GetLastError()) {
+            .FILE_NOT_FOUND, .PATH_NOT_FOUND, .MOD_NOT_FOUND => error.NotFound,
+            else => error.LoadFailed,
+        };
+        errdefer _ = windows.kernel32.FreeLibrary(module);
+
+        const open_console_path = std.fs.path.join(
+            std.heap.page_allocator,
+            &.{ exe_dir, "OpenConsole.exe" },
+        ) catch return error.PathUnavailable;
+        defer std.heap.page_allocator.free(open_console_path);
+        std.fs.accessAbsolute(open_console_path, .{}) catch
+            return error.OpenConsoleMissing;
+
+        const create: windows.exp.CreatePseudoConsoleFn = @ptrCast(@alignCast(
+            windows.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse
+                return error.CreateSymbolMissing,
+        ));
+        const resize: windows.exp.ResizePseudoConsoleFn = @ptrCast(@alignCast(
+            windows.kernel32.GetProcAddress(module, "ResizePseudoConsole") orelse
+                return error.ResizeSymbolMissing,
+        ));
+        const close: windows.exp.ClosePseudoConsoleFn = @ptrCast(@alignCast(
+            windows.kernel32.GetProcAddress(module, "ClosePseudoConsole") orelse
+                return error.CloseSymbolMissing,
+        ));
+
+        return .{
+            .source = .bundled,
+            .module = module,
+            .bundled_path = path,
+            .create = create,
+            .resize = resize,
+            .close = close,
+        };
+    }
+
+    fn resetForTest() void {
+        std.debug.assert(builtin.is_test);
+
+        if (resolved) |value| {
+            if (value.module) |module| _ = windows.kernel32.FreeLibrary(module);
+            if (value.bundled_path) |path| std.heap.page_allocator.free(path);
+        }
+        resolved = null;
+        resolver_once = std.once(initialize);
+    }
+};
+
 /// Windows PTY creation and management.
 const WindowsPty = struct {
     pub const Error = OpenError || GetSizeError || SetSizeError;
@@ -427,7 +595,8 @@ const WindowsPty = struct {
         try windows.SetHandleInformation(pty.out_pipe, windows.HANDLE_FLAG_INHERIT, 0);
         try windows.SetHandleInformation(pty.out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
 
-        const result = windows.exp.kernel32.CreatePseudoConsole(
+        const conpty = WindowsConPty.functions();
+        const result = conpty.create(
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
             pty.in_pipe_pty,
             pty.out_pipe_pty,
@@ -445,7 +614,7 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.in_pipe);
         _ = windows.CloseHandle(self.out_pipe_pty);
         _ = windows.CloseHandle(self.out_pipe);
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        WindowsConPty.functions().close(self.pseudo_console);
         self.* = undefined;
     }
 
@@ -460,7 +629,7 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        const result = windows.exp.kernel32.ResizePseudoConsole(
+        const result = WindowsConPty.functions().resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );
@@ -476,6 +645,50 @@ const WindowsPty = struct {
         return null;
     }
 };
+
+test "Windows ConPTY resolver selects inbox and default auto backends" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const original_raw = std.process.getEnvVarOwned(
+        testing.allocator,
+        "NOCTTY_CONPTY",
+    ) catch null;
+    defer if (original_raw) |value| testing.allocator.free(value);
+    const original = if (original_raw) |value|
+        try testing.allocator.dupeZ(u8, value)
+    else
+        null;
+    defer if (original) |value| testing.allocator.free(value);
+    defer {
+        WindowsConPty.resetForTest();
+        if (original) |value| {
+            _ = internal_os.setenv("NOCTTY_CONPTY", value);
+        } else {
+            _ = internal_os.unsetenv("NOCTTY_CONPTY");
+        }
+    }
+
+    WindowsConPty.resetForTest();
+    try testing.expectEqual(@as(c_int, 0), internal_os.setenv("NOCTTY_CONPTY", "inbox"));
+    try testing.expectEqual(ConPtySource.inbox, conPtyInfo().?.source);
+    {
+        var inbox_pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
+        defer inbox_pty.deinit();
+        try inbox_pty.setSize(.{ .ws_row = 40, .ws_col = 120 });
+        try testing.expectEqual(@as(u16, 40), (try inbox_pty.getSize()).ws_row);
+    }
+
+    WindowsConPty.resetForTest();
+    try testing.expectEqual(@as(c_int, 0), internal_os.unsetenv("NOCTTY_CONPTY"));
+    try testing.expect(conPtyInfo() != null);
+    {
+        var auto_pty = try WindowsPty.open(.{ .ws_row = 24, .ws_col = 80 });
+        defer auto_pty.deinit();
+        try auto_pty.setSize(.{ .ws_row = 50, .ws_col = 100 });
+        try testing.expectEqual(@as(u16, 100), (try auto_pty.getSize()).ws_col);
+    }
+}
 
 test {
     const testing = std.testing;

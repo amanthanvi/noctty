@@ -5,6 +5,7 @@ const actionpkg = @import("action.zig");
 const args = @import("args.zig");
 const build_config = @import("../build_config.zig");
 const crash = @import("../crash/main.zig");
+const pty = @import("../pty.zig");
 
 pub const Options = struct {
     /// Directory to create. Defaults to `noctty-diagnostic-bundle`.
@@ -33,6 +34,7 @@ const Manifest = struct {
     architecture: []const u8 = @tagName(builtin.cpu.arch),
     optimize: []const u8 = build_config.mode_string,
     renderer: []const u8 = @tagName(build_config.renderer),
+    conpty: ?pty.ConPtyInfo,
     crash_report_count: usize,
     crash_dumps_included: bool,
     privacy: Privacy = .{},
@@ -95,6 +97,7 @@ fn create(alloc: Allocator, opts: Options, stdout: *std.Io.Writer) !u8 {
     var file_buf: [4096]u8 = undefined;
     var file_writer = manifest_file.writer(&file_buf);
     try std.json.Stringify.value(Manifest{
+        .conpty = pty.conPtyInfo(),
         .crash_report_count = reports,
         .crash_dumps_included = opts.@"include-crash-dumps",
     }, .{ .whitespace = .indent_2 }, &file_writer.interface);
@@ -135,6 +138,7 @@ fn collectCrashDir(
 
 test "diagnostic manifest defaults exclude sensitive data" {
     const manifest: Manifest = .{
+        .conpty = pty.conPtyInfo(),
         .crash_report_count = 0,
         .crash_dumps_included = false,
     };
@@ -145,6 +149,7 @@ test "diagnostic manifest defaults exclude sensitive data" {
     try std.testing.expect(!manifest.privacy.environment);
     try std.testing.expect(!manifest.privacy.working_directories);
     try std.testing.expect(!manifest.privacy.config_values);
+    if (builtin.os.tag == .windows) try std.testing.expect(manifest.conpty != null);
 }
 
 test "diagnostic crash dump copy uses canonical output path" {

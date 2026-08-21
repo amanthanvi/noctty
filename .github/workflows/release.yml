@@ -257,6 +257,7 @@ jobs:
           -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
+          -RequireConPty
 
       - name: Build and package ARM64 release artifacts
         shell: pwsh
@@ -270,6 +271,7 @@ jobs:
           -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
+          -RequireConPty
 
       - name: Verify signed release artifacts
         shell: pwsh
@@ -388,7 +390,9 @@ jobs:
           $portablePayloads = @(
             "noctty/noctty.com",
             "noctty/noctty.exe",
-            "noctty/ghostty-vt.dll"
+            "noctty/ghostty-vt.dll",
+            "noctty/conpty.dll",
+            "noctty/OpenConsole.exe"
           )
           $scanPaths = @(
             foreach ($arch in (Get-WindowsPackageArchitectures)) {
@@ -410,8 +414,8 @@ jobs:
               }
             }
           )
-          if ($scanPaths.Count -ne 8) {
-            throw "Expected exactly eight release artifacts for Defender scanning; found $($scanPaths.Count)."
+          if ($scanPaths.Count -ne 12) {
+            throw "Expected exactly twelve release artifacts for Defender scanning; found $($scanPaths.Count)."
           }
 
           foreach ($scanPath in $scanPaths) {

@@ -63,6 +63,7 @@ VersionInfoOriginalFileName=noctty-{#MyAppVersion}-windows-{#PackageArch}-setup.
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
+; The recursive stage rule includes the bundled ConPTY pair and its license.
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]

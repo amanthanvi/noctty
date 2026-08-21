@@ -29,6 +29,13 @@ The exact upstream base release is stored in
 `dist/windows/release-metadata.json`. For example, a release tagged
 `v1.3.105` can still declare `upstreamBaseVersion = 1.3.2`.
 
+The bundled ConPTY redistributable is independently pinned in
+`dist/windows/conpty-redist.json`. The current pin is
+`Microsoft.Windows.Console.ConPTY` `1.24.260710001` under the MIT license.
+That file is the single source for the exact NuGet URL, package SHA256, and
+the x64/ARM64 archive entry paths and SHA256 values for `conpty.dll` and
+`OpenConsole.exe`.
+
 The release workflow builds the Windows executable, stages runtime files,
 then produces:
 
@@ -40,12 +47,13 @@ then produces:
 
 Local unsigned packaging is allowed for smoke validation, but the GitHub
 Release workflow requires signing and fails closed when signing is absent.
-The release installer and Windows PE files inside the portable ZIP are
-Authenticode-signed; the ZIP container itself is checksummed, not
-Authenticode-signed.
+The release installer and noctty-built Windows PE files inside the portable
+ZIP are Authenticode-signed; the pinned Microsoft `conpty.dll` and
+`OpenConsole.exe` remain byte-for-byte vendor artifacts and are not re-signed.
+The ZIP container itself is checksummed, not Authenticode-signed.
 
 Before publication, the Release workflow updates Microsoft Defender
-signatures and scans both setup artifacts plus the six PE files extracted from
+signatures and scans both setup artifacts plus the ten PE files extracted from
 the portable ZIPs, with remediation disabled. A missing or inactive scanner,
 update or scan error, or detection fails the release. This is a current-engine
 regression gate for the published Windows executable bytes; it does not replace
@@ -62,7 +70,7 @@ zig build -Demit-exe=true
 
 x64 packaging also requires LLVM's `llvm-objdump` on `PATH` or in the
 standard LLVM installation directory. The packaging gate disassembles every
-runtime PE and rejects AMD-only SSE4a instructions so published x64 builds
+noctty-built runtime PE and rejects AMD-only SSE4a instructions so published x64 builds
 retain the documented baseline CPU compatibility. Executable PE sections are
 treated as code; intentional constants must remain in non-executable sections.
 
@@ -79,6 +87,30 @@ Then stage release assets:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version 1.3.100
 ```
+
+The packaging script caches the verified NuGet package outside the source tree
+under `%LOCALAPPDATA%\noctty\cache\conpty\<version>`. A valid cached package is
+re-hashed on every use and supports offline packaging. If no valid cache exists
+and the download fails, local packaging warns clearly, omits the bundled pair,
+and continues; the resulting package uses the in-box conhost and may silently
+strip Kitty graphics APC and Sixel DCS passthrough on some Windows builds.
+Pass `-RequireConPty` to make that download failure fatal. The GitHub Release
+workflow always passes this switch for both x64 and ARM64.
+
+To refresh the pin:
+
+1. Select an exact `Microsoft.Windows.Console.ConPTY` version; never use a
+   floating or `latest` URL.
+2. Download that version's `.nupkg` and compute its SHA256.
+3. Open the package as a ZIP, select the matching x64 and ARM64
+   `conpty.dll`/`OpenConsole.exe` entries, and compute all four SHA256 values.
+4. Update only `dist/windows/conpty-redist.json`, preserving the package ID,
+   license, project URL, exact entry paths, and lowercase SHA256 encoding.
+5. Package both architectures with `-RequireConPty`; the packager re-verifies
+   the archive, each extracted file, and both PE machine types before staging.
+
+Microsoft's MIT text is committed as `dist/windows/LICENSE-conpty.txt` and is
+staged beside noctty's `LICENSE` in every portable and installer package.
 
 In a native Windows ARM64 PowerShell process, the packaging script defaults
 to ARM64. An x64/emulated shell defaults to x64, even on ARM64 hardware.

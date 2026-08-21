@@ -2605,6 +2605,11 @@ $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$windowsPackageBuilder = Join-Path $repoRoot 'scripts\build-package-windows.ps1'
+$conptyRedistHelper = Join-Path $repoRoot 'scripts\conpty-redist.ps1'
+$conptyRedistPin = Join-Path $repoRoot 'dist\windows\conpty-redist.json'
+$conptyRuntime = Join-Path $repoRoot 'src\pty.zig'
+$diagnosticBundle = Join-Path $repoRoot 'src\cli\diagnostic_bundle.zig'
 $windowsBuildCapabilities = Join-Path $repoRoot 'scripts\windows-build-capabilities.ps1'
 $signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
 $signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
@@ -2626,6 +2631,10 @@ $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
 $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
+$windowsPackageBuilderText = Get-Content -LiteralPath $windowsPackageBuilder -Raw
+$conptyRedistHelperText = Get-Content -LiteralPath $conptyRedistHelper -Raw
+$conptyRuntimeText = Get-Content -LiteralPath $conptyRuntime -Raw
+$diagnosticBundleText = Get-Content -LiteralPath $diagnosticBundle -Raw
 $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
@@ -6704,7 +6713,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '48322e91a5f0b006f1f01a427dd5abb92e714e230379431514393d50c90c81d9'
+    'ab23b46bf73ad25009e43674725eac912bcb4269576463bc8d733eaf210e9943'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7848,7 +7857,7 @@ $defenderScanStep = Get-YamlStepBlock `
     -Source $releaseWorkflow
 Assert-TextContract `
     -Content $defenderScanStep `
-    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$arch.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/conpty\.dll.*?noctty/OpenConsole\.exe.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$arch.*?scanPaths\.Count -ne 12.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed' `
     -Context "$releaseWorkflow :: Scan Windows release artifacts with Microsoft Defender"
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
@@ -8316,6 +8325,116 @@ Assert-WorkflowContract `
     -Path $windowsPackager `
     -Pattern '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?noctty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest' `
     -Description 'Windows packaging verifies hash-bound shader capability for every target and executes native packages'
+Assert-WorkflowContract `
+    -Path $windowsPackager `
+    -Pattern '(?ms)\. \(Join-Path \$PSScriptRoot "conpty-redist\.ps1"\).*?foreach \(\$runtimeFile in \$runtimeFiles\).*?Invoke-SignFile.*?Install-ConPtyRedist.*?-PinPath \$conptyPinPath.*?-Architecture \$Architecture.*?-Destination \$portableRoot.*?-CacheRoot \$conptyCacheRoot.*?-RequireConPty:\$RequireConPty.*?if \(\$conptyStaged\) \{.*?Copy-Item.*?LICENSE-conpty\.txt.*?\}' `
+    -Description 'Windows packaging stages pinned ConPTY after the noctty-only signing loop and includes its license only with the pair'
+Assert-WorkflowContract `
+    -Path $windowsPackageBuilder `
+    -Pattern '(?ms)\[switch\]\$RequireConPty.*?if \(\$RequireConPty\) \{\s*\$packageArgs\.RequireConPty = \$true\s*\}.*?package-windows\.ps1.*?@packageArgs' `
+    -Description 'Windows build-package wrapper forwards required ConPTY mode to the packager'
+Assert-WorkflowContractAbsent `
+    -Path $conptyRedistHelper `
+    -Pattern 'Invoke-SignFile|signtool|Set-AuthenticodeSignature' `
+    -Description 'Microsoft ConPTY binaries remain outside noctty signing'
+Assert-WorkflowContract `
+    -Path $conptyRedistHelper `
+    -Pattern '(?ms)Invoke-WebRequest.*?catch \{.*?if \(\$RequireConPty\).*?Write-Warning.*?return \$false.*?Assert-ConPtySha256 -Path \$downloadPath.*?Move-Item.*?Assert-ConPtySha256 -Path \$packagePath' `
+    -Description 'ConPTY downloads fail optionally only at the network boundary and every archive is hash-checked'
+Assert-WorkflowContract `
+    -Path $conptyRedistHelper `
+    -Pattern '(?ms)Expand-ConPtyEntry.*?conptyDll\.entryPath.*?Expand-ConPtyEntry.*?openConsoleExe\.entryPath.*?Assert-ConPtySha256.*?conptyDll\.sha256.*?Assert-ConPtySha256.*?openConsoleExe\.sha256.*?Assert-PeMachine.*?temporaryConPty.*?Assert-PeMachine.*?temporaryOpenConsole.*?Copy-Item.*?temporaryConPty.*?Copy-Item.*?temporaryOpenConsole' `
+    -Description 'ConPTY staging verifies both pinned files and both PE machines before committing the pair'
+Assert-WorkflowContract `
+    -Path $conptyRedistHelper `
+    -Pattern '(?ms)\$entryStream = \$entry\.Open\(\).*?\$entryStream\.CopyTo\(\$output\).*?\$entryStream\.Dispose\(\)' `
+    -Description 'ConPTY ZIP extraction does not shadow the PowerShell input automatic variable'
+Assert-WorkflowContract `
+    -Path $conptyRuntime `
+    -Pattern '(?ms)fn forceInbox\(\) bool.*?NOCTTY_CONPTY.*?return std\.ascii\.eqlIgnoreCase\(value, "inbox"\).*?LoadLibraryExW.*?OpenConsole\.exe.*?accessAbsolute.*?return error\.OpenConsoleMissing' `
+    -Description 'ConPTY selection only forces inbox explicitly and rejects a bundled DLL without its companion executable'
+Assert-WorkflowContract `
+    -Path $conptyRuntime `
+    -Pattern 'error\.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole\.exe"' `
+    -Description 'ConPTY fallback names a missing OpenConsole companion concretely'
+Assert-WorkflowContractAbsent `
+    -Path $conptyRuntime `
+    -Pattern 'const Override|requestedOverride|eqlIgnoreCase\(value, "bundled"\)' `
+    -Description 'ConPTY selection does not pretend auto and bundled are distinct modes'
+Assert-WorkflowContract `
+    -Path $diagnosticBundle `
+    -Pattern '(?ms)conpty: \?pty\.ConPtyInfo.*?\.conpty = pty\.conPtyInfo\(\)' `
+    -Description 'diagnostic bundles reuse the ConPTY resolver fact without a duplicate manifest type or probe'
+Assert-WorkflowContractAbsent `
+    -Path $diagnosticBundle `
+    -Pattern 'const ConPty = struct|fn conPtyManifest' `
+    -Description 'diagnostic bundles do not duplicate the ConPTY info shape'
+
+$conptyRedistHelperTokens = $null
+$conptyRedistHelperErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput(
+    $conptyRedistHelperText,
+    [ref]$conptyRedistHelperTokens,
+    [ref]$conptyRedistHelperErrors
+)
+if ($conptyRedistHelperErrors.Count -ne 0) {
+    throw "ConPTY redistributable helper does not parse: $($conptyRedistHelperErrors[0].Message)"
+}
+$conptyRedistHelperSha256 =
+    '845b9d8cf8b9fcef4b29b2ac5d30d4c12b9b116806f913c3da14ba5c683fbb7f'
+if ((Get-CanonicalTextSha256 -Text $conptyRedistHelperText) -cne $conptyRedistHelperSha256) {
+    throw 'ConPTY redistributable helper changed without a contract review.'
+}
+$conptyRuntimeSha256 =
+    '931409f7ec022f8f8f1cd4ef920bfa641e8e4f34ef65be40e47d2fdaf08dadab'
+if ((Get-CanonicalTextSha256 -Text $conptyRuntimeText) -cne $conptyRuntimeSha256) {
+    throw 'ConPTY runtime changed without a contract review.'
+}
+$diagnosticBundleSha256 =
+    '717a1caaab9ea3c9446f052f7a40aef91ca3385cd77c6d08315f38f47b7f1e39'
+if ((Get-CanonicalTextSha256 -Text $diagnosticBundleText) -cne $diagnosticBundleSha256) {
+    throw 'Diagnostic bundle ConPTY reporting changed without a contract review.'
+}
+
+$conptyPin = Get-Content -LiteralPath $conptyRedistPin -Raw | ConvertFrom-Json
+$conptyPinRootFields = @('schemaVersion', 'packageId', 'version', 'license', 'projectUrl', 'nupkg', 'architectures')
+if (@(Compare-Object $conptyPinRootFields @($conptyPin.PSObject.Properties.Name) -SyncWindow 0).Count -ne 0 -or
+    $conptyPin.schemaVersion -ne 1 -or
+    $conptyPin.packageId -cne 'Microsoft.Windows.Console.ConPTY' -or
+    $conptyPin.version -cne '1.24.260710001' -or
+    $conptyPin.license -cne 'MIT' -or
+    $conptyPin.projectUrl -cne 'https://github.com/microsoft/terminal' -or
+    $conptyPin.nupkg.url -cne 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/1.24.260710001/microsoft.windows.console.conpty.1.24.260710001.nupkg' -or
+    $conptyPin.nupkg.sha256 -cne '175640566a3b59c4b132070ee96c2c77e5ab7edd2e92732a5eb3610bbf63d90e' -or
+    @(Compare-Object @('x64', 'arm64') @($conptyPin.architectures.PSObject.Properties.Name) -SyncWindow 0).Count -ne 0) {
+    throw 'ConPTY redistributable package identity, version, license, URL, archive hash, or architectures drifted.'
+}
+$conptyPinEntries = @(
+    @{ Architecture = 'x64'; Field = 'conptyDll'; Path = 'runtimes/win-x64/native/conpty.dll'; Sha256 = '39fba2713e2495117b1591ae8c32a3b904bea7aa66069cf7815e2844c76d75d8' },
+    @{ Architecture = 'x64'; Field = 'openConsoleExe'; Path = 'build/native/runtimes/x64/OpenConsole.exe'; Sha256 = 'b7fd936c2668b87b9ecf7b3366dc6568afc1c6f981874cba3e955a1c35cf8160' },
+    @{ Architecture = 'arm64'; Field = 'conptyDll'; Path = 'runtimes/win-arm64/native/conpty.dll'; Sha256 = 'db3d173640b172bafd42d5b541b638a9aeec1c7d0e40dd636bf02822a32c912c' },
+    @{ Architecture = 'arm64'; Field = 'openConsoleExe'; Path = 'build/native/runtimes/arm64/OpenConsole.exe'; Sha256 = 'ed7622fd0d3bedc9ab9f122f5e58edf0def9e7999224f52dd395ba9f54edbe09' }
+)
+foreach ($expected in $conptyPinEntries) {
+    $actual = $conptyPin.architectures.PSObject.Properties[$expected.Architecture].Value.PSObject.Properties[$expected.Field].Value
+    if (@(Compare-Object @('entryPath', 'sha256') @($actual.PSObject.Properties.Name) -SyncWindow 0).Count -ne 0 -or
+        $actual.entryPath -cne $expected.Path -or
+        $actual.sha256 -cne $expected.Sha256 -or
+        $actual.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "ConPTY redistributable entry drifted: $($expected.Architecture) $($expected.Field)"
+    }
+}
+
+foreach ($packageStepSpec in @(
+    @{ Name = 'Build and package x64 release artifacts'; Architecture = 'x64' },
+    @{ Name = 'Build and package ARM64 release artifacts'; Architecture = 'arm64' }
+)) {
+    $packageStep = Get-YamlStepBlock -Content $releaseWorkflowText -Name $packageStepSpec.Name -Source $releaseWorkflow
+    if (([regex]::Matches($packageStep, '(?m)^\s*-RequireConPty\s*$')).Count -ne 1 -or
+        $packageStep -notmatch "(?ms)build-package-windows\.ps1.*?-Architecture $($packageStepSpec.Architecture).*?-RequireInstaller.*?-RequireSigning.*?-RequireConPty") {
+        throw "$($packageStepSpec.Name) must require bundled ConPTY exactly once."
+    }
+}
 Assert-WorkflowContract `
     -Path $windowsBuildCapabilities `
     -Pattern '(?ms)Get-FileHash.*?custom_shaders = \$true.*?custom_shaders -ne \$true.*?Get-FileHash.*?\$actualHash -cne \[string\] \$hashProperty\.Value' `
