@@ -1,18 +1,18 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-08-20T22:17:32.0000000Z",
-  "git_commit": "8cc68f5157e2408c49897488f6b2906d122567c5",
+  "captured_at": "2026-08-21T23:54:04.0000000Z",
+  "git_commit": "ffdad4085ad03e7c09f9bdb0cea6eaf60653ac64",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward from 77c5354f6d908323678587bdf076c770f6c6f973 after auditing every hunk, and hashed after checkout normalization."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward from 8cc68f5157e2408c49897488f6b2906d122567c5 after auditing every hunk of the issue #123 Win32 paste-path security change, and hashed after checkout normalization. The session artifact change is additive: the on-disk schema gains no field and loses none; parsing switched to alloc_always to stop restored strings aliasing a freed buffer, and validateAlloc now rejects control- or newline-bearing pane metadata, which the existing corrupt-state quarantine path handles."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "86fe63ff9dc6bc9ed18ac7b04dd202bbdf6236531700bbad39bc2392b54982a2",
+      "sha256": "2d60cd0b9bf5c0f9fea7e5d456ee64524ee3679fb8b6e8f0a9e0fc72709ef0c1",
       "scenario_id": null
     },
     {
