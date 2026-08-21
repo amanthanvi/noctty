@@ -556,3 +556,80 @@ test "getIndex box glyph" {
     try testing.expectEqual(Style.regular, idx.style);
     try testing.expectEqual(@intFromEnum(Collection.Index.Special.sprite), idx.idx);
 }
+
+test "getIndex nerd font PUA fallback order" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var c = Collection.init();
+    c.load_options = .{ .library = lib };
+
+    const primary_idx = try c.add(alloc, try .init(
+        lib,
+        font.embedded.test_nerd_font,
+        .{ .size = .{ .points = 12 } },
+    ), .{
+        .style = .regular,
+        .fallback = false,
+        .size_adjustment = .none,
+    });
+    _ = try c.add(alloc, try .init(
+        lib,
+        font.embedded.variable,
+        .{ .size = .{ .points = 12 } },
+    ), .{
+        .style = .regular,
+        .fallback = true,
+        .size_adjustment = font.default_fallback_adjustment,
+    });
+    const symbols_idx = try c.add(alloc, try .init(
+        lib,
+        font.embedded.symbols_nerd_font,
+        .{ .size = .{ .points = 12 } },
+    ), .{
+        .style = .regular,
+        .fallback = true,
+        .size_adjustment = .none,
+    });
+
+    var r: CodepointResolver = .{
+        .collection = c,
+        .sprite = .{
+            .metrics = font.Metrics.calc(.{
+                .px_per_em = 30.0,
+                .cell_width = 18.0,
+                .ascent = 30.0,
+                .descent = -6.0,
+                .line_gap = 0.0,
+            }),
+        },
+    };
+    defer r.deinit(alloc);
+
+    var powerline_cp: u32 = 0xE0B0;
+    while (powerline_cp <= 0xE0B6) : (powerline_cp += 1) {
+        try testing.expectEqual(
+            font.sprite_index,
+            r.getIndex(alloc, powerline_cp, .regular, null).?,
+        );
+    }
+
+    for ([_]u32{ 0xF023, 0xE5FF }) |cp| {
+        try testing.expectEqual(
+            primary_idx,
+            r.getIndex(alloc, cp, .regular, null).?,
+        );
+    }
+
+    // U+E6B6 is absent from the embedded Nerd primary but present in the
+    // embedded Symbols Nerd Font, so it pins the final fallback outcome.
+    try testing.expect((try r.collection.getFace(primary_idx)).glyphIndex(0xE6B6) == null);
+    try testing.expect((try r.collection.getFace(symbols_idx)).glyphIndex(0xE6B6) != null);
+    try testing.expectEqual(
+        symbols_idx,
+        r.getIndex(alloc, 0xE6B6, .regular, null).?,
+    );
+}
