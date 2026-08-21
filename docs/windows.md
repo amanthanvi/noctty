@@ -71,6 +71,19 @@ integration inside the distribution. PowerShell integration emits OSC 7
 working-directory updates and OSC 133 prompt markers. `cmd.exe` is a plain
 fallback shell with no automatic prompt, cwd, or command-finish integration.
 
+`utf8-console` (`auto`, `always`, `never`) controls UTF-8 setup for bare
+interactive `cmd.exe` launches and for Windows PowerShell 5.1 and PowerShell 7
+sessions. `auto` (the default) enables UTF-8 unless the machine ANSI or OEM
+code page is a legacy CJK page (932, 936, 949, 950, or 1361); `always` ignores
+that guard; `never` leaves the encoding alone. The cmd preamble applies only to
+an interactive launch with no `/c`, `/r`, or `/k` payload: option switches such
+as `/d`, `/q`, and `/v:on` are kept in order ahead of it, and it is a no-op
+when the console already uses code page 65001. The PowerShell half runs inside
+the injected shell-integration script, so it does nothing with
+`shell-integration = none` or a command line that injection declines
+(`-Command`, `-File`, `-EncodedCommand`, `-NonInteractive`). WSL and Git Bash
+are unaffected.
+
 WSL appears in the picker but never becomes the default shell implicitly,
 because `wsl.exe --status` can report a healthy installation even when
 launching a session would fail. To make it the default:

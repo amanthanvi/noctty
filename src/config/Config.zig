@@ -3176,6 +3176,26 @@ keybind: Keybinds = .{},
 /// hard-fail attachment to make descendant cleanup deterministic.
 @"windows-job-object-kill-on-close": bool = false,
 
+/// Controls the Windows console UTF-8 preamble for interactive Command Prompt
+/// and PowerShell sessions. This has no effect on WSL or Git Bash sessions.
+///
+/// The available modes are:
+///
+///   * `auto` (default) - Enable UTF-8 unless either the machine ANSI or OEM
+///     code page is a legacy CJK page: 932 (Shift-JIS), 936 (GBK), 949
+///     (EUC-KR), or 950 (Big5). Those code pages are left unchanged to avoid
+///     breaking programs that depend on them.
+///   * `always` - Enable UTF-8 even when a legacy CJK code page is active.
+///   * `never` - Do not set an environment signal, change Command Prompt
+///     arguments, or alter PowerShell console encodings.
+///
+/// Both `auto` and `always` skip the preamble when either code page is already
+/// 65001. For a bare interactive `cmd.exe`, the preamble runs `chcp 65001`
+/// silently before the prompt. For interactive Windows PowerShell 5.1 and
+/// PowerShell 7 (`pwsh`), the existing shell integration sets both
+/// `[Console]::InputEncoding` and `[Console]::OutputEncoding` to UTF-8.
+@"utf8-console": Utf8Console = .auto,
+
 /// Retained compatibility settings from the removed GTK runtime.
 ///
 /// These keys continue to parse so existing configs remain loadable, but they
@@ -8903,6 +8923,9 @@ pub const ShellIntegration = enum {
     nushell,
     zsh,
 };
+
+/// See utf8-console.
+pub const Utf8Console = windows_shell.Utf8Console;
 
 /// Shell integration features
 pub const ShellIntegrationFeatures = packed struct {
