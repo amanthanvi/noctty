@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Get-RepoRoot
 $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
-    'amanthanvi/winghostty'
+    'amanthanvi/noctty'
 } else {
     $env:GITHUB_REPOSITORY
 }
@@ -98,10 +98,10 @@ $evidenceArtifact = @($artifacts.artifacts | Where-Object {
 })
 if ($evidenceArtifact.Count -ne 1) { throw "Workflow run $runId lacks one unexpired interactive evidence artifact." }
 
-$downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-accessibility-evidence-$([Guid]::NewGuid().ToString('N'))"
+$downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-accessibility-evidence-$([Guid]::NewGuid().ToString('N'))"
 try {
     & gh run download $runId `
-        --repo amanthanvi/winghostty `
+        --repo amanthanvi/noctty `
         --name "flagship-interactive-win11-$runId" `
         --dir $downloadRoot
     if ($LASTEXITCODE -ne 0) { throw "Could not download interactive evidence artifact for run $runId." }
@@ -117,7 +117,7 @@ try {
     }
     $uiaTrees = @(Get-ChildItem -LiteralPath $downloadRoot -Filter uia-tree.json -Recurse)
     if ($uiaTrees.Count -lt 1) { throw "Interactive artifact for run $runId lacks automated UIA evidence." }
-    $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter winghostty-runner-provenance.json -Recurse)
+    $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter noctty-runner-provenance.json -Recurse)
     if ($provenancePaths.Count -ne 1) { throw "Interactive artifact for run $runId lacks exactly one runner provenance file." }
     try {
         $provenance = Get-Content -LiteralPath $provenancePaths[0].FullName -Raw | ConvertFrom-Json -NoEnumerate
@@ -129,7 +129,7 @@ try {
         $provenance.GetType() -ne [System.Management.Automation.PSCustomObject]) {
         throw "Interactive runner provenance for run $runId must be a JSON object."
     }
-    if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1') {
+    if ($provenance.schema_version -ne 'noctty.interactive-runner-provenance.v1') {
         throw "Interactive runner provenance for run $runId has unsupported schema '$($provenance.schema_version)'."
     }
     $minimumRunnerVersion = [version]'2.327.1'
@@ -159,7 +159,7 @@ try {
         $provenanceWindowsBuild -lt 22000 -or
         $provenanceProcessSession -le 0 -or
         $provenanceProcessSession -ne $provenanceActiveSession -or
-        $provenance.repository -ne 'amanthanvi/winghostty' -or
+        $provenance.repository -ne 'amanthanvi/noctty' -or
         $provenance.workflow -ne 'Test' -or
         [string]$provenance.run_id -ne [string]$runId -or
         $provenanceRunAttempt -lt 1 -or

@@ -26,22 +26,43 @@ foreach ($siteScript in @(
         }
     )
 }
-$sitePackageJsonPath = Join-Path $repoRoot 'site\package.json'
-$sitePackage = Get-Content -LiteralPath $sitePackageJsonPath -Raw | ConvertFrom-Json
-if ($sitePackage.scripts.PSObject.Properties.Name -contains 'doctor' -or
-    $sitePackage.scripts.PSObject.Properties.Name -contains 'doctor:score' -or
-    $sitePackage.devDependencies.PSObject.Properties.Name -contains 'react-doctor' -or
-    -not ($sitePackage.scripts.PSObject.Properties.Name -contains 'test') -or
-    (Test-Path -LiteralPath (Join-Path $repoRoot 'site\doctor.config.json'))) {
-    throw 'Site package metadata must retain tests while react-doctor and its config remain removed.'
-}
 $siteCopyChecker = Join-Path $repoRoot 'scripts\check-site-copy.ps1'
+$authoredSiteSources = @(
+    'site\index.html',
+    'site\install.js',
+    'site\terminal.js',
+    'site\version.js',
+    'site\app.js'
+)
+foreach ($authoredSiteSource in $authoredSiteSources) {
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $authoredSiteSource) -PathType Leaf)) {
+        throw "Authored static site source is missing: $authoredSiteSource"
+    }
+}
 Invoke-ContractTable -Contracts @(
     @{
         File = $siteCopyChecker
-        Pattern = '(?ms)components/heroes\.jsx.*?components/terminal\.jsx.*?components/footer/footer\.jsx.*?components/install/install-block\.jsx.*?components/features/feature-grid\.jsx.*?components/why/why-fork\.jsx'
+        Pattern = '(?ms)\$textFiles = Get-ChildItem -Path \$siteRoot -Recurse -File \| Where-Object \{\s*\$_\.Extension -in @\(\s*"\.html",\s*"\.css",\s*"\.js",\s*"\.jsx",\s*"\.md",\s*"\.txt",\s*"\.svg"\s*\) -or\s*\$_\.Name -in @\(\s*"_redirects"\s*\)\s*\}\s*\$forbiddenRules = @\('
         Kind = 'Workflow'
-        Description = 'marketing-copy assertions read authored JSX sources instead of generated bundle text'
+        Description = 'forbidden-copy assertions recursively scan every authored static source in the complete extension and _redirects allowlist'
+    }
+    @{
+        File = "$testWorkflow :: deterministic site asset check"
+        Content = {
+            (Get-YamlStepBlock -Content $testWorkflowText -Name 'Deterministic site asset check' -Source $testWorkflow)
+        }
+        Pattern = '(?ms)node scripts/build-site-assets\.mjs --check.*?LASTEXITCODE'
+        Kind = 'Text'
+        Description = 'the test workflow checks the deterministic static-site asset graph directly'
+    }
+    @{
+        File = "$testWorkflow :: site unit tests"
+        Content = {
+            (Get-YamlStepBlock -Content $testWorkflowText -Name 'Site unit tests' -Source $testWorkflow)
+        }
+        Pattern = '(?ms)node --test site/tests/terminal\.test\.mjs site/tests/build-site-assets\.test\.mjs.*?LASTEXITCODE'
+        Kind = 'Text'
+        Description = 'the test workflow runs both static-site Node test files directly without package metadata'
     }
 )
 
@@ -117,9 +138,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow)
         }
-        Pattern = '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?npm ci --prefix site --ignore-scripts.*?check-site-bundle\.ps1.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE'
+        Pattern = '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?node scripts/build-site-assets\.mjs --check.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE'
         Kind = 'Text'
-        Description = 'site copy is checked before dependencies and release copy binds to the published semver tag'
+        Description = 'site copy is checked before the deterministic asset gate and release copy binds to the published semver tag'
     }
 )
 $siteActionUses = [regex]::Matches(
@@ -155,7 +176,7 @@ foreach ($deployStepName in @(
             Content = {
                 $deployStep
             }
-            Pattern = '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=winghostty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false'
+            Pattern = '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=noctty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false'
             Kind = 'Text'
             Description = 'isolated Wrangler deploys the same clean exact-commit payload with the required version and visible diagnostics'
         }
@@ -183,7 +204,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw)
         }
-        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/winghostty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
+        Pattern = '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/noctty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all'
         Kind = 'Text'
         Description = 'the shared site gate binds both phases to a clean exact fork-local main head'
     }
@@ -216,7 +237,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $sitePayloadStep
         }
-        Pattern = '(?ms)winghostty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory='
+        Pattern = '(?ms)noctty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory='
         Kind = 'Text'
         Description = 'Wrangler installs in a runner-temporary directory outside the checkout'
     }
@@ -243,7 +264,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow)
         }
-        Pattern = '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://winghostty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect'
+        Pattern = '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://noctty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect'
         Kind = 'Text'
         Description = 'production verification binds the canonical domain and zone redirect'
     }
@@ -288,7 +309,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $cloudflarePagesVerifierText
         }
-        Pattern = '"/__winghostty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"'
+        Pattern = '"/__noctty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"'
         Kind = 'Text'
         Description = 'deployment verification exercises the 404 fallback below a multi-segment path'
     }
@@ -297,7 +318,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteIndexText
         }
-        Pattern = '(?ms)property="og:image" content="https://winghostty\.com/assets/winghostty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://winghostty\.com/assets/winghostty-social\.png"'
+        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.png"'
         Kind = 'Text'
         Description = 'social previews use a current raster large-image card with explicit dimensions'
     }
@@ -306,7 +327,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $sitePayloadBuilderText
         }
-        Pattern = "'assets/winghostty-social\.png'"
+        Pattern = "'assets/noctty-social\.png'"
         Kind = 'Text'
         Description = 'the deterministic Cloudflare payload includes the social preview image'
     }
@@ -315,18 +336,54 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteGitattributesText
         }
-        Pattern = '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/components/\*\*/\*\.jsx text eol=lf\r?$.*?^site/vendor/\*\.js text eol=lf\r?$.*?^scripts/build-site-bundle\.mjs text eol=lf\r?$'
+        Pattern = '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/tests/\*\.mjs text eol=lf\r?$.*?^scripts/build-site-assets\.mjs text eol=lf\r?$'
         Kind = 'Text'
         Description = 'every text file in the site payload and its source graph has a deterministic LF checkout rule'
     }
     @{
-        File = $siteBundleBuilder
+        File = $siteAssetBuilder
         Content = {
-            $siteBundleBuilderText
+            $siteAssetBuilderText
         }
-        Pattern = '(?ms)const normalizeLf = .*?styles\.css.*?normalizeLf\(fs\.readFileSync.*?app\.js.*?normalizeLf\(fs\.readFileSync'
+        Pattern = '(?ms)const checkOnly = process\.argv\.includes\("--check"\).*?if \(/\\r/\.test\(text\)\) \{.*?must be LF-normalized'
         Kind = 'Text'
-        Description = 'cache keys hash the canonical LF representation used by clean CI checkouts'
+        Description = 'the asset builder has a --check mode and rejects CR bytes so hashes bind to clean LF checkouts'
+    }
+    @{
+        File = $siteAssetBuilder
+        Content = {
+            $siteAssetBuilderText
+        }
+        Pattern = '(?ms)function getInlineScriptContract.*?\["index\.html", "404\.html"\].*?inlineScripts\.length !== 1.*?sharedScript !== undefined.*?must be byte-identical'
+        Kind = 'Text'
+        Description = 'both pages must carry one byte-identical inline bootstrap so the CSP pins exactly one script hash'
+    }
+    @{
+        File = $siteAssetBuilder
+        Content = {
+            $siteAssetBuilderText
+        }
+        Pattern = '(?ms)scriptHashes: \[`sha256-\$\{sha256Base64\(sharedScript\)\}`\].*?scriptAttributeHashes: \[`sha256-\$\{sha256Base64\(sharedOnload\)\}`\].*?script-src.*?scriptHashes.*?script-src-attr.*?scriptAttributeHashes'
+        Kind = 'Text'
+        Description = 'the asset builder derives both CSP hashes from the live HTML sources'
+    }
+    @{
+        File = $siteAssetBuilder
+        Content = {
+            $siteAssetBuilderText
+        }
+        Pattern = '(?ms)for \(const asset of \["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)'
+        Kind = 'Text'
+        Description = 'SHA-256 cache keys cover every local script and stylesheet referenced by each page'
+    }
+    @{
+        File = $siteAssetBuilder
+        Content = {
+            $siteAssetBuilderText
+        }
+        Pattern = '(?ms)if \(failures\.length > 0\) \{\s*throw new Error\(`Deterministic site asset check failed'
+        Kind = 'Text'
+        Description = 'the deterministic asset check fails closed when committed hashes or cache keys are stale'
     }
     @{
         File = $cloudflarePagesVerifier
@@ -429,15 +486,15 @@ $publicBaseUriFunctionText = Get-PowerShellBlockText `
     -HeaderPattern '^function\s+ConvertTo-PublicBaseUri(?=\s|\{)'
 . ([scriptblock]::Create($publicBaseUriFunctionText))
 $immutablePagesOrigin = ConvertTo-PublicBaseUri `
-    -Value 'https://69cd5628.winghostty.pages.dev/' `
+    -Value 'https://69cd5628.noctty.pages.dev/' `
     -Kind pages
 if ($immutablePagesOrigin.DnsSafeHost -cne
-    '69cd5628.winghostty.pages.dev') {
+    '69cd5628.noctty.pages.dev') {
     throw 'Immutable Pages deployment origin was not preserved.'
 }
 foreach ($mutablePagesUrl in @(
-    'https://winghostty.pages.dev/',
-    'https://main.winghostty.pages.dev/'
+    'https://noctty.pages.dev/',
+    'https://main.noctty.pages.dev/'
 )) {
     $mutablePagesOriginRejected = $false
     try {
@@ -537,8 +594,8 @@ function Assert-ImmutablePagesDeploymentOrigin {
     $script:originBindingProbeDeploymentId = $DeploymentId
 }
 try {
-    $pagesOrigin = [Uri]'https://11111111.winghostty.pages.dev/'
-    $apiOrigin = [Uri]'https://22222222.winghostty.pages.dev/'
+    $pagesOrigin = [Uri]'https://11111111.noctty.pages.dev/'
+    $apiOrigin = [Uri]'https://22222222.noctty.pages.dev/'
     $DeploymentId = '11111111-1d01-4095-9774-6f8cfe7d7d1e'
     $mismatchMessage = $null
     try {
@@ -689,16 +746,16 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)')
         }
-        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/bundle\.js''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__winghostty_header_contract_'''
+        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__noctty_header_contract_'''
         Kind = 'Text'
-        Description = 'static-only response verification always checks bundle controls and excludes HTML route probes'
+        Description = 'static-only response verification always checks stylesheet asset controls and excludes HTML route probes'
     }
     @{
         File = $cloudflarePagesVerifier
         Content = {
             $cloudflarePagesVerifierText
         }
-        Pattern = '(?ms)schema_version\s*=\s*''winghostty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false'
+        Pattern = '(?ms)schema_version\s*=\s*''noctty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false'
         Kind = 'Text'
         Description = 'deployment provenance distinguishes immutable HTML, canonical static assets, and unverified canonical HTML'
     }
@@ -751,9 +808,24 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteHeadersText
         }
-        Pattern = "(?ms)script-src 'self' 'sha256-[^']+' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';"
+        Pattern = "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';"
         Kind = 'Text'
-        Description = 'inline scripts and the font load handler use narrow CSP hashes'
+        Description = 'the single shared inline bootstrap and the font load handler each use one narrow CSP hash'
+    }
+    @{
+        File = $siteHeaders
+        Content = {
+            $siteHeadersText
+        }
+        Pattern = "style-src 'self' https://fonts\.googleapis\.com;"
+        Kind = 'Text'
+        Description = 'stylesheet sources are pinned to self plus Google Fonts without inline styles'
+    }
+    @{
+        File = $siteHeaders
+        Pattern = "(?i)'unsafe-inline'|style-src-attr"
+        Kind = 'WorkflowAbsent'
+        Description = 'the site CSP declares no unsafe-inline source and no style-src-attr directive'
     }
 )
 $siteHeaderContractJson = & $siteHeaderContract `
@@ -773,29 +845,29 @@ if ([string]$siteHeaderContractObject.not_found.cache_control -cne 'no-store') {
 }
 Invoke-ContractTable -Contracts @(
     @{
-        File = $siteBundleBuilder
+        File = $siteAssetBuilder
         Content = {
-            $siteBundleBuilderText
+            $siteAssetBuilderText
         }
-        Pattern = '(?ms)function getInlineScriptContract.*?index\.html.*?404\.html.*?inlineScripts\.length !== 1.*?eventAttributeCount !== 1.*?cspSha256\(decodeHtmlAttribute.*?scriptHashes.*?scriptAttributeHashes'
+        Pattern = '(?ms)--print-header-contract.*?generated_headers_base64.*?script_hashes.*?script_attribute_hashes'
         Kind = 'Text'
-        Description = 'the site builder derives exact inline-script and decoded event-handler hashes from both HTML documents'
+        Description = 'the site asset builder exposes its generated _headers and derived CSP hashes as one machine-readable contract'
     }
     @{
-        File = $siteBundleBuilder
+        File = $siteAssetBuilder
         Content = {
-            $siteBundleBuilderText
+            $siteAssetBuilderText
         }
         Pattern = '(?ms)function getHeaderContract.*?default-src.*?script-src.*?script-src-attr.*?upgrade-insecure-requests.*?contentSecurityPolicy.*?generated_headers_base64.*?content_security_policy: contentSecurityPolicy'
         Kind = 'Text'
         Description = 'one builder-owned directive table emits the exact CSP and generated _headers byte contract'
     }
     @{
-        File = $siteBundleBuilder
+        File = $siteAssetBuilder
         Content = {
-            $siteBundleBuilderText
+            $siteAssetBuilderText
         }
-        Pattern = '(?ms)expectedHeaders = Buffer\.from.*?generated_headers_base64.*?checkOnly.*?readFileSync\(headersFile\)\.equals\(expectedHeaders\).*?_headers is stale.*?writeFileSync\(headersFile, expectedHeaders\)'
+        Pattern = '(?ms)function updateOrCheck.*?checkOnly.*?failures\.push.*?fs\.writeFileSync.*?expectedHeaders = Buffer\.from.*?generated_headers_base64.*?updateOrCheck\("_headers", expectedHeaders, headers\)'
         Kind = 'Text'
         Description = 'normal builds generate _headers and check mode requires byte-exact generated output'
     }
@@ -804,7 +876,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteHeaderContract -Raw)
         }
-        Pattern = '(?ms)--print-header-contract.*?--site-directory.*?generated_headers_base64.*?SequenceEqual\[byte\].*?does not byte-match.*?derivedHeaderContract\.root\.content_security_policy.*?ConvertTo-Json'
+        Pattern = '(?ms)build-site-assets\.mjs.*?--print-header-contract.*?--site-directory.*?generated_headers_base64.*?SequenceEqual\[byte\].*?does not byte-match.*?derivedHeaderContract\.root\.content_security_policy.*?ConvertTo-Json'
         Kind = 'Text'
         Description = 'the PowerShell header contract consumes and byte-verifies the builder-derived source of truth'
     }
@@ -815,7 +887,7 @@ Invoke-ContractTable -Contracts @(
         }
         Pattern = '(?ms)function Assert-ReviewedContentSecurityPolicy.*?ScriptHashes.*?ScriptAttributeHashes.*?base-uri.*?''none''.*?object-src.*?''none''.*?frame-ancestors.*?''none''.*?style-src.*?https://fonts\.googleapis\.com.*?font-src.*?https://fonts\.gstatic\.com.*?connect-src.*?https://api\.github\.com.*?declaredDirectives\.Count.*?dynamicHashDirectives\.Count.*?Assert-ReviewedContentSecurityPolicy.*?-Policy \$csp.*?-ScriptHashes @\(\$derivedHeaderContract\.script_hashes\).*?-ScriptAttributeHashes @\(\$derivedHeaderContract\.script_attribute_hashes\)'
         Kind = 'Text'
-        Description = 'the verifier independently pins the complete CSP directive and external-origin allowlist while accepting only derived SHA-256 slots'
+        Description = 'the verifier independently pins the CSP directives and origins while accepting only builder-derived SHA-256 slots'
     }
     @{
         File = $siteHeaderContract
@@ -828,57 +900,9 @@ Invoke-ContractTable -Contracts @(
     }
 )
 
-$siteHeaderContractText = Get-Content -LiteralPath $siteHeaderContract -Raw
-$reviewedCspContract = Get-PowerShellBlockText `
-    -Content $siteHeaderContractText `
-    -HeaderPattern '^function\s+Assert-ReviewedContentSecurityPolicy(?=\s|\{)'
-. ([scriptblock]::Create($reviewedCspContract))
-$trackedCsp = [regex]::Match(
-    $siteHeadersText,
-    '(?m)^\s+Content-Security-Policy:\s*(?<value>.+)$'
-).Groups['value'].Value.Trim()
-$missingGitHubOriginCsp = $trackedCsp.Replace(' https://api.github.com', '')
-if ($missingGitHubOriginCsp -ceq $trackedCsp) {
-    throw 'Required-origin CSP mutation target is missing.'
-}
-$trackedScriptHashes = @(
-    [regex]::Matches(
-        [regex]::Match(
-            $trackedCsp,
-            '(?:^|; )script-src (?<sources>[^;]+)'
-        ).Groups['sources'].Value,
-        "'(?<hash>sha256-[^']+)'"
-    ) | ForEach-Object { $_.Groups['hash'].Value }
-)
-$trackedScriptAttributeHashes = @(
-    [regex]::Matches(
-        [regex]::Match(
-            $trackedCsp,
-            '(?:^|; )script-src-attr (?<sources>[^;]+)'
-        ).Groups['sources'].Value,
-        "'(?<hash>sha256-[^']+)'"
-    ) | ForEach-Object { $_.Groups['hash'].Value }
-)
-$missingGitHubOriginRejected = $false
-try {
-    Assert-ReviewedContentSecurityPolicy `
-        -Policy $missingGitHubOriginCsp `
-        -ScriptHashes $trackedScriptHashes `
-        -ScriptAttributeHashes $trackedScriptAttributeHashes
-}
-catch {
-    if ($_.Exception.Message -notmatch 'independently reviewed') {
-        throw
-    }
-    $missingGitHubOriginRejected = $true
-}
-if (-not $missingGitHubOriginRejected) {
-    throw 'Site CSP contract accepted removal of the required GitHub API origin.'
-}
-
 $siteCspFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "winghostty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "noctty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $siteCspFixtureRoot = [IO.Path]::GetFullPath($siteCspFixtureRoot)
 $siteCspTempPrefix = [IO.Path]::GetFullPath(
     [IO.Path]::GetTempPath()
@@ -898,6 +922,37 @@ try {
             -Force
     $fixtureHeadersPath = Join-Path $siteCspFixtureRoot '_headers'
     $fixtureHeadersText = [IO.File]::ReadAllText($fixtureHeadersPath)
+    $missingGitHubOriginHeaders = $fixtureHeadersText.Replace(
+        ' https://api.github.com',
+        ''
+    )
+    if ($missingGitHubOriginHeaders -ceq $fixtureHeadersText) {
+        throw 'Required-origin CSP mutation target is missing.'
+    }
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $missingGitHubOriginHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $missingGitHubOriginRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'does not byte-match|independently reviewed|connect-src sources do not exactly match') {
+            throw
+        }
+        $missingGitHubOriginRejected = $true
+    }
+    if (-not $missingGitHubOriginRejected) {
+        throw 'Site CSP contract accepted removal of the required GitHub API origin.'
+    }
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $fixtureHeadersText,
+        [Text.UTF8Encoding]::new($false)
+    )
     $scriptHash = [regex]::Match(
         $fixtureHeadersText,
         "script-src 'self' '(?<hash>sha256-[^']+)'"
@@ -912,12 +967,12 @@ try {
     }
     $swappedHeaders = $fixtureHeadersText.Replace(
         "'$scriptHash'",
-        "'__WINGHOSTTY_SCRIPT_HASH__'"
+        "'__NOCTTY_SCRIPT_HASH__'"
     ).Replace(
         "'$attributeHash'",
         "'$scriptHash'"
     ).Replace(
-        "'__WINGHOSTTY_SCRIPT_HASH__'",
+        "'__NOCTTY_SCRIPT_HASH__'",
         "'$attributeHash'"
     )
     [IO.File]::WriteAllText(
@@ -1032,7 +1087,7 @@ try {
     }
     catch {
         if ($_.Exception.Message -notmatch
-            'HTML-derived header contract') {
+            'Could not derive the site header contract') {
             throw
         }
         $editedHandlerRejected = $true
@@ -1092,7 +1147,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)')
         }
-        Pattern = "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/bundle\.js'.*?ExpectedStatus = 200.*?__winghostty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control"
+        Pattern = "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__noctty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control"
         Kind = 'Text'
         Description = 'public header verification covers canonical HTML, an asset, and a nested 404 fallback'
     }
@@ -1142,7 +1197,7 @@ Invoke-ContractTable -Contracts @(
 
 $sitePayloadFixtureRoot = Join-Path (
     [IO.Path]::GetTempPath()
-) "winghostty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+) "noctty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
 $sitePayloadFixtureRoot = [IO.Path]::GetFullPath($sitePayloadFixtureRoot)
 $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') +
     [IO.Path]::DirectorySeparatorChar
@@ -1192,9 +1247,28 @@ try {
         ) -or
         $manifestPaths -notcontains '_headers' -or
         $manifestPaths -contains '_redirects' -or
-        $manifestPaths -contains 'main.jsx' -or
-        @($manifestPaths | Where-Object { $_ -like 'components/*' }).Count -ne 0) {
+        $manifestPaths -contains 'README.md' -or
+        @($manifestPaths | Where-Object { $_ -like 'tests/*' }).Count -ne 0) {
         throw 'Site deploy manifest escaped the clean sorted static allowlist.'
+    }
+    foreach ($requiredPayloadPath in @(
+        'index.html',
+        '404.html',
+        'styles.css',
+        'app.js',
+        'version.js',
+        'install.js',
+        'terminal.js'
+    )) {
+        if ($manifestPaths -cnotcontains $requiredPayloadPath) {
+            throw "Site deploy manifest is missing $requiredPayloadPath."
+        }
+    }
+    $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
+    if ($payloadAssetPaths.Count -ne 2 -or
+        $payloadAssetPaths -cnotcontains 'assets/favicon.svg' -or
+        $payloadAssetPaths -cnotcontains 'assets/noctty-social.png') {
+        throw 'Site deploy manifest assets escaped the favicon and social-preview allowlist.'
     }
 }
 finally {

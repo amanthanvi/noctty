@@ -528,7 +528,7 @@ const MINMAXINFO = extern struct {
 };
 const MONITORINFO = sys.MONITORINFO;
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.settings");
+const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
 const edit_text_max_code_units: usize = 4096;
 const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
@@ -3233,7 +3233,7 @@ pub const SettingsWindow = struct {
             }
         }
 
-        const title = std.unicode.utf8ToUtf16LeStringLiteral("winghostty settings");
+        const title = std.unicode.utf8ToUtf16LeStringLiteral("noctty settings");
         const owner_hwnd = if (self.handle.ownerWindow) |get_owner| get_owner(self.handle.ctx) else null;
         const hwnd = sys.CreateWindowExW(
             WS_EX_APPWINDOW,
@@ -5602,13 +5602,13 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
     defer arena.deinit();
 
     var source: Config.Command = undefined;
-    try source.parseCLI(arena.allocator(), "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"");
+    try source.parseCLI(arena.allocator(), "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\noctty\"");
 
     var buf: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try writeCommandForEdit(&writer, source);
     try testing.expectEqualStrings(
-        "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"",
+        "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\noctty\"",
         writer.buffered(),
     );
 
@@ -5617,7 +5617,7 @@ test "win32_settings: direct command edit text quotes argv boundaries" {
     try testing.expect(round_trip == .direct);
     try testing.expectEqual(@as(usize, 4), round_trip.direct.len);
     try testing.expectEqualStrings("echo hello", round_trip.direct[2]);
-    try testing.expectEqualStrings("C:\\Program Files\\winghostty", round_trip.direct[3]);
+    try testing.expectEqualStrings("C:\\Program Files\\noctty", round_trip.direct[3]);
 }
 
 test "win32_settings: keybinding help points to discoverability commands" {

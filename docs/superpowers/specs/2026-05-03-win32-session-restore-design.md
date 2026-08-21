@@ -120,27 +120,27 @@ Session restore state should live under the XDG state directory already used by
 the repo on Windows:
 
 ```text
-${XDG_STATE_HOME}/winghostty/window-state.json
+${XDG_STATE_HOME}/noctty/window-state.json
 ```
 
 On a default Windows install, this resolves to:
 
 ```text
-%LOCALAPPDATA%\winghostty\window-state.json
+%LOCALAPPDATA%\noctty\window-state.json
 ```
 
 Supporting files:
 
 ```text
-${XDG_STATE_HOME}/winghostty/window-state.next.json
-${XDG_STATE_HOME}/winghostty/window-state.dirty
-${XDG_STATE_HOME}/winghostty/window-state.corrupt-<timestamp>.json
+${XDG_STATE_HOME}/noctty/window-state.next.json
+${XDG_STATE_HOME}/noctty/window-state.dirty
+${XDG_STATE_HOME}/noctty/window-state.corrupt-<timestamp>.json
 ```
 
 Rationale:
 
 - `src/os/xdg.zig` already provides the correct Win32 resolution order.
-- `LOCALAPPDATA\winghostty\...` already houses adjacent runtime artifacts such
+- `LOCALAPPDATA\noctty\...` already houses adjacent runtime artifacts such
   as PowerShell shell integration and palette MRU data.
 - `scripts/interactive-win11-lib.ps1` already redirects `XDG_STATE_HOME` into a
   per-worktree sandbox, which gives the restore flow an isolated validation

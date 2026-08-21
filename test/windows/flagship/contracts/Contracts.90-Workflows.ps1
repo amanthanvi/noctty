@@ -1,9 +1,9 @@
 Invoke-ContractTable -Contracts @(
     @{
         File = (Join-Path $repoRoot '.github\dependabot.yml')
-        Pattern = '(?ms)package-ecosystem: "npm"\s+directory: "/site"\s+schedule:\s+.*?interval: "weekly"'
-        Kind = 'Workflow'
-        Description = 'Dependabot checks site npm dependencies weekly'
+        Pattern = '(?m)package-ecosystem:\s*"npm"'
+        Kind = 'WorkflowAbsent'
+        Description = 'the dependency-free static site has no stale npm dependency updater'
     }
     @{
         File = $testWorkflow
@@ -19,9 +19,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow)
         }
-        Pattern = '(?ms)- name: Install site dependencies.*?npm ci --prefix site.*?- name: Test site.*?npm test --prefix site.*?- name: Deterministic site bundle check'
+        Pattern = '(?ms)- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?- name: Site unit tests.*?node --test site/tests/terminal\.test\.mjs site/tests/build-site-assets\.test\.mjs.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
         Kind = 'Text'
-        Description = 'site tests run immediately after deterministic dependency installation and before bundle verification'
+        Description = 'dependency-free site asset and unit-test gates run in fail-closed order'
     }
     @{
         File = "$testWorkflow :: Remote release copy checks"
@@ -186,7 +186,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $testWorkflowText -Name 'Verify default source-build shader mode' -Source $testWorkflow)
         }
-        Pattern = '(?ms)winghostty\.com \+version.*?Build Config.*?custom shaders: disabled'
+        Pattern = '(?ms)noctty\.com \+version.*?Build Config.*?custom shaders: disabled'
         Kind = 'Text'
         Description = 'default source build executes the CLI and reports custom shaders disabled'
     }
@@ -365,13 +365,13 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $accessibilityChecker
-        Pattern = "schema_version -ne 'winghostty\.interactive-runner-provenance\.v1'"
+        Pattern = "schema_version -ne 'noctty\.interactive-runner-provenance\.v1'"
         Kind = 'Workflow'
         Description = 'accessibility evidence rejects unsupported runner provenance schemas'
     }
     @{
         File = $runnerProvenanceChecker
-        Pattern = 'WINGHOSTTY_EXPECTED_CHECKOUT_SHA'
+        Pattern = 'NOCTTY_EXPECTED_CHECKOUT_SHA'
         Kind = 'Workflow'
         Description = 'interactive provenance can verify an exact PR head checkout instead of only GITHUB_SHA'
     }

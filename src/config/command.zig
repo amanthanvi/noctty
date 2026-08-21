@@ -294,13 +294,13 @@ pub const Command = union(enum) {
         const alloc = arena.allocator();
 
         var v: Self = undefined;
-        try v.parseCLI(alloc, "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\winghostty\"");
+        try v.parseCLI(alloc, "direct:cmd.exe /c \"echo hello\" \"C:\\Program Files\\noctty\"");
         try testing.expect(v == .direct);
         try testing.expectEqual(@as(usize, 4), v.direct.len);
         try testing.expectEqualStrings("cmd.exe", v.direct[0]);
         try testing.expectEqualStrings("/c", v.direct[1]);
         try testing.expectEqualStrings("echo hello", v.direct[2]);
-        try testing.expectEqualStrings("C:\\Program Files\\winghostty", v.direct[3]);
+        try testing.expectEqualStrings("C:\\Program Files\\noctty", v.direct[3]);
     }
 
     test "Command: writeDirectArg round-trips direct args" {
@@ -313,10 +313,10 @@ pub const Command = union(enum) {
         try writer.writeByte(' ');
         try writeDirectArg(&writer, "echo hello");
         try writer.writeByte(' ');
-        try writeDirectArg(&writer, "C:\\Program Files\\winghostty");
+        try writeDirectArg(&writer, "C:\\Program Files\\noctty");
 
         try testing.expectEqualStrings(
-            "direct:cmd.exe \"echo hello\" \"C:\\Program Files\\winghostty\"",
+            "direct:cmd.exe \"echo hello\" \"C:\\Program Files\\noctty\"",
             writer.buffered(),
         );
 
@@ -326,7 +326,7 @@ pub const Command = union(enum) {
         try v.parseCLI(arena.allocator(), writer.buffered());
         try testing.expect(v == .direct);
         try testing.expectEqualStrings("echo hello", v.direct[1]);
-        try testing.expectEqualStrings("C:\\Program Files\\winghostty", v.direct[2]);
+        try testing.expectEqualStrings("C:\\Program Files\\noctty", v.direct[2]);
     }
 
     test "Command: parseCLI unknown prefix falls back to shell" {

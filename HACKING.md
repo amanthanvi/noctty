@@ -1,7 +1,7 @@
-# Developing winghostty
+# Developing noctty
 
 This fork is Windows-only. The native app target is Win32, the default
-build is `winghostty.exe`, and the retained secondary deliverable is
+build is `noctty.exe`, and the retained secondary deliverable is
 `libghostty-vt`.
 
 If you plan to change code here, read [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -17,7 +17,7 @@ Use the standard Zig workflow from the repository root:
 | Command                                | Description                                |
 | -------------------------------------- | ------------------------------------------ |
 | `zig build`                            | Build the Win32 app and bundled resources  |
-| `zig build -Demit-exe=true`            | Force-install `zig-out/bin/winghostty.exe` |
+| `zig build -Demit-exe=true`            | Force-install `zig-out/bin/noctty.exe` |
 | `zig build test -Dtest-filter=<name>`  | Run targeted tests (preferred)             |
 | `zig build test -Demit-test-exe=true`  | Run the full test suite (slow)             |
 | `zig build test -Dtest-filter=win32`   | Run Win32-focused tests                    |
@@ -61,7 +61,7 @@ powershell -ExecutionPolicy Bypass -File scripts/interactive-win11.ps1
 
 This launches the worktree executable with repo-local runtime state under
 `.sandbox/win11/<worktree-id>/` instead of global
-`%LOCALAPPDATA%\winghostty`. Pass `-Rebuild` when you need a fresh
+`%LOCALAPPDATA%\noctty`. Pass `-Rebuild` when you need a fresh
 executable after source edits, `-ResetState` for clean first-run repros,
 and `-OpenShell` to open a shell with the same sandbox environment.
 
@@ -118,7 +118,7 @@ Logging to `stderr` is always available. Debug builds also emit
 additional diagnostic output.
 
 Win32-specific local traces used during bring-up may also write to
-`winghostty-win32.log` in the current working directory.
+`noctty-win32.log` in the current working directory.
 
 ## Formatting
 

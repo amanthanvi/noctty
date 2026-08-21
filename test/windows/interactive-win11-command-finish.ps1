@@ -23,7 +23,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'command-finish' -ResetState:$ResetState -IncludeResourcesDir
@@ -68,7 +68,7 @@ Start-Sleep -Seconds 4
 "@ | Set-Content -LiteralPath $payloadPath -Encoding UTF8
 
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$aumid = 'com.ghostty.winghostty'
+$aumid = 'io.github.amanthanvi.noctty'
 $toastMgr = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
 $notifier = $toastMgr::CreateToastNotifier($aumid)
 $settingValue = [int] $notifier.Setting
@@ -80,7 +80,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-command-finish-$($layout.SandboxId)"
+    "--class=noctty-command-finish-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -129,7 +129,7 @@ try {
             $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
 
             if ($launchStopwatch.ElapsedMilliseconds -lt $minimumRuntimeMs) {
-                $failureReason = "winghostty exited too early for command-finish validation (exit code $exitCode, runtime $($launchStopwatch.ElapsedMilliseconds)ms)"
+                $failureReason = "noctty exited too early for command-finish validation (exit code $exitCode, runtime $($launchStopwatch.ElapsedMilliseconds)ms)"
             } elseif ($notificationsEnabled) {
                 $validated = $true
             } elseif ($notifierDisabledFallback) {

@@ -1,4 +1,4 @@
-//! Tab drag state machine, insertion-index math, and CF_WINGHOSTTY_TAB
+//! Tab drag state machine, insertion-index math, and CF_NOCTTY_TAB
 //! payload format for cross-window tab transfer.
 //!
 //! State machine semantics:
@@ -20,7 +20,7 @@
 //!   The `Payload.pid` field is a correctness guard, not a security
 //!   boundary. A local attacker with the same integrity level can forge
 //!   the PID trivially. The sentinel exists to reject:
-//!     (a) accidental cross-process drops (two winghostty instances),
+//!     (a) accidental cross-process drops (two noctty instances),
 //!     (b) clipboard format name collisions with unrelated apps,
 //!     (c) stale data from a crashed source process.
 //!   Real cross-process tab transfer (if ever needed) requires shared
@@ -179,14 +179,14 @@ pub fn isNoOpDrop(source_index: usize, insertion_index: usize) bool {
 }
 
 // ---------------------------------------------------------------------------
-// CF_WINGHOSTTY_TAB payload
+// CF_NOCTTY_TAB payload
 // ---------------------------------------------------------------------------
 
-/// Registered clipboard format name: "com.ghostty.winghostty.tab.v1"
-pub const clipboard_format_name = "com.ghostty.winghostty.tab.v1";
+/// Registered clipboard format name: "io.github.amanthanvi.noctty.tab.v1"
+pub const clipboard_format_name = "io.github.amanthanvi.noctty.tab.v1";
 
 /// Bytes we put on the drag data object. Includes a PID sentinel
-/// so cross-process drops (different winghostty install, or a
+/// so cross-process drops (different noctty install, or a
 /// spoof attempt) fail cleanly on decode. The pointer is a
 /// `*DragState` -- caller interprets it. `version` is a u32 for
 /// forward-compat (bump when the payload shape changes).

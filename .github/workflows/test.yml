@@ -57,17 +57,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
 
-      - name: Install site dependencies
+      - name: Deterministic site asset check
         shell: pwsh
-        run: npm ci --prefix site
+        run: |
+          node scripts/build-site-assets.mjs --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Test site
+      - name: Site unit tests
         shell: pwsh
-        run: npm test --prefix site
-
-      - name: Deterministic site bundle check
-        shell: pwsh
-        run: ./scripts/check-site-bundle.ps1
+        run: |
+          node --test site/tests/terminal.test.mjs site/tests/build-site-assets.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Signing trust policy tests
         shell: pwsh
@@ -112,10 +112,10 @@ jobs:
       - name: Verify default source-build shader mode
         shell: pwsh
         run: |
-          $versionText = & .\zig-out\bin\winghostty.com +version | Out-String
+          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
           Write-Host $versionText
           if ($LASTEXITCODE -ne 0) {
-            throw "winghostty.com +version failed with exit code $LASTEXITCODE."
+            throw "noctty.com +version failed with exit code $LASTEXITCODE."
           }
           if ($versionText -notmatch "Build Config" -or
               $versionText -notmatch "custom shaders: disabled") {
@@ -158,7 +158,7 @@ jobs:
           retention-days: 14
           path: |
             test/windows/flagship/artifacts/portable-x64
-            dist/artifacts/winghostty-0.0.1-windows-x64
+            dist/artifacts/noctty-0.0.1-windows-x64
 
   windows-interactive:
     name: Windows 11 Interactive Composite
@@ -167,7 +167,7 @@ jobs:
     # Dispatch Test with run_interactive_win11=true and arm the runner to
     # produce release evidence.
     if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
-    runs-on: [self-hosted, Windows, X64, winghostty-interactive]
+    runs-on: [self-hosted, Windows, X64, noctty-interactive]
     timeout-minutes: 60
 
     steps:
@@ -187,8 +187,8 @@ jobs:
       - name: Prove interactive runner provenance
         shell: pwsh
         env:
-          WINGHOSTTY_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/winghostty-runner-provenance.json"
+          NOCTTY_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/noctty-runner-provenance.json"
 
       - name: Run interactive Win11 composite
         shell: pwsh
@@ -227,4 +227,4 @@ jobs:
           path: |
             test/windows/flagship/artifacts/interactive-win11
             ${{ github.workspace }}/.sandbox/win11/**/logs/**
-            ${{ runner.temp }}/winghostty-runner-provenance.json
+            ${{ runner.temp }}/noctty-runner-provenance.json

@@ -1,5 +1,5 @@
 {
-  "schema_version": "winghostty.verification.result.v1",
+  "schema_version": "noctty.verification.result.v1",
   "example": true,
   "scenario_id": "example.windows.portable-cli.x64",
   "status": "pass",

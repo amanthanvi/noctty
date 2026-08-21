@@ -146,7 +146,7 @@ $paletteOriginalExe = Get-Variable -Name exe -ValueOnly -ErrorAction SilentlyCon
 $paletteOriginalTimeout = Get-Variable -Name TimeoutSeconds -ValueOnly -ErrorAction SilentlyContinue
 $paletteOriginalRuns = Get-Variable -Name runs -ValueOnly -ErrorAction SilentlyContinue
 $layout = [pscustomobject]@{ SandboxId = 'contract' }
-$exe = 'contract-winghostty.exe'
+$exe = 'contract-noctty.exe'
 $TimeoutSeconds = 3
 $runs = [Collections.Generic.List[object]]::new()
 $script:paletteCanaryMode = 'retry-then-pass'

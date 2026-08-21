@@ -1,18 +1,18 @@
-% WINGHOSTTY(5) Version @@VERSION@@ | winghostty terminal configuration file
+% NOCTTY(5) Version @@VERSION@@ | noctty terminal configuration file
 
 # NAME
 
-**winghostty** - winghostty terminal configuration file
+**noctty** - noctty terminal configuration file
 
 # DESCRIPTION
 
-To configure winghostty, you must use a configuration file. GUI-based configuration
+To configure noctty, you must use a configuration file. GUI-based configuration
 is on the roadmap but not yet supported. The configuration file must be placed
-at `$XDG_CONFIG_HOME/winghostty/config.ghostty`, which defaults to `~/.config/winghostty/config.ghostty`
+at `$XDG_CONFIG_HOME/noctty/config.ghostty`, which defaults to `~/.config/noctty/config.ghostty`
 if the [XDG environment is not set](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html).
 
 **If you are using macOS, the configuration file can also be placed at
-`$HOME/Library/Application Support/io.github.amanthanvi.winghostty/config.ghostty`.** This is the
+`$HOME/Library/Application Support/io.github.amanthanvi.noctty/config.ghostty`.** This is the
 default configuration location for macOS. It will be searched before any of the
 XDG environment locations listed above.
 
@@ -56,7 +56,7 @@ The file format is documented below as an example:
     palette = 15=#fbf1c7
 
 You can view all available configuration options and their documentation by
-executing the command `winghostty +show-config --default --docs`. Note that this will
+executing the command `noctty +show-config --default --docs`. Note that this will
 output the full default configuration with docs to stdout, so you may want to
 pipe that through a pager, an editor, etc.
 
@@ -68,49 +68,49 @@ attach the doc comment to.
 You can also see and read all available configuration options in the source
 Config structure. The available keys are the keys verbatim, and their possible
 values are typically documented in the comments. You also can search for
-the public config files of other winghostty and Ghostty users for examples and inspiration.
+the public config files of other noctty and Ghostty users for examples and inspiration.
 
 ## Configuration Errors
 
-If your configuration file has any errors, winghostty does its best to ignore
+If your configuration file has any errors, noctty does its best to ignore
 them and move on. Configuration errors will be logged.
 
 ## Debugging Configuration
 
 You can verify that configuration is being properly loaded by looking at the
-debug output of winghostty.
+debug output of noctty.
 
 In the debug output, you should see in the first 20 lines or so messages about
 loading (or not loading) a configuration file, as well as any errors it may have
 encountered. Configuration errors are also shown in a dedicated window on both
-macOS and Linux (GTK). winghostty does not treat configuration errors as fatal and
+macOS and Linux (GTK). noctty does not treat configuration errors as fatal and
 will fall back to default values for erroneous keys.
 
-You can also view the full configuration winghostty is loading using `winghostty
+You can also view the full configuration noctty is loading using `noctty
 +show-config` from the command-line. Use the `--help` flag to additional options
 for that command.
 
 ## Logging
 
-winghostty can write logs to a number of destinations. On all platforms, logging to
-`stderr` is available. Depending on the platform and how winghostty was launched,
+noctty can write logs to a number of destinations. On all platforms, logging to
+`stderr` is available. Depending on the platform and how noctty was launched,
 logs sent to `stderr` may be stored by the system and made available for later
 retrieval.
 
-On Linux if winghostty is launched by the default `systemd` user service, you can use
-`journald` to see logs: `journalctl --user --unit app-io.github.amanthanvi.winghostty.service`.
+On Linux if noctty is launched by the default `systemd` user service, you can use
+`journald` to see logs: `journalctl --user --unit app-io.github.amanthanvi.noctty.service`.
 
 On macOS logging to the macOS unified log is available and enabled by default.
---Use the system `log` CLI to view winghostty logs: `sudo log stream --level debug
---predicate 'subsystem=="io.github.amanthanvi.winghostty"'`.
+--Use the system `log` CLI to view noctty logs: `sudo log stream --level debug
+--predicate 'subsystem=="io.github.amanthanvi.noctty"'`.
 
-winghostty logging can be configured in two ways. The first is by what
-optimization level winghostty is compiled with. If winghostty is compiled with `Debug`
-optimizations debug logs will be output to `stderr`. If winghostty is compiled with
+noctty logging can be configured in two ways. The first is by what
+optimization level noctty is compiled with. If noctty is compiled with `Debug`
+optimizations debug logs will be output to `stderr`. If noctty is compiled with
 any other optimization the debug logs will not be output to `stderr`.
 
-winghostty also checks the `GHOSTTY_LOG` environment variable. It can be used
-to control which destinations receive logs. winghostty currently defines two
+noctty also checks the `GHOSTTY_LOG` environment variable. It can be used
+to control which destinations receive logs. noctty currently defines two
 destinations:
 
 - `stderr` - logging to `stderr`.

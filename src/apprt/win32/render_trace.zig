@@ -58,7 +58,7 @@ pub const RenderTrace = struct {
     pub fn init(alloc: Allocator) RenderTrace {
         const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
             alloc,
-            "WINGHOSTTY_RENDER_TRACE_FILE",
+            "NOCTTY_RENDER_TRACE_FILE",
         ) catch return .{}) orelse return .{};
 
         return initWithClaimedPath(alloc, &render_trace_file_claimed, owned);

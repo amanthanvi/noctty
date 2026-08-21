@@ -38,7 +38,7 @@ $sessionBootstrapCalls = @(
 if ($sessionBootstrapCalls.Count -ne 1 -or
     -not (Test-CommandHasStringArgument `
         -Command $sessionBootstrapCalls[0] `
-        -Value 'WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED')) {
+        -Value 'NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED')) {
     throw 'Session restore must invoke the shared bootstrap gate once with its stable sentinel.'
 }
 
@@ -60,14 +60,14 @@ Assert-NoUnreachableStatements `
 . ([scriptblock]::Create($sessionSnapshotFunctions[0].Extent.Text))
 $sessionProbeDirectory = Join-Path (
     [IO.Path]::GetTempPath()
-) ('winghostty-session-contract-' + [Guid]::NewGuid().ToString('N'))
+) ('noctty-session-contract-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($sessionProbeDirectory) | Out-Null
-$exe = Join-Path $sessionProbeDirectory 'winghostty.exe'
-$sessionProbeCli = Join-Path $sessionProbeDirectory 'winghostty.com'
+$exe = Join-Path $sessionProbeDirectory 'noctty.exe'
+$sessionProbeCli = Join-Path $sessionProbeDirectory 'noctty.com'
 [IO.File]::WriteAllText($sessionProbeCli, 'contract shim')
 $sessionOriginalRepoRoot = $repoRoot
 $layout = [pscustomobject]@{ Logs = $sessionProbeDirectory }
-$instanceClass = 'winghostty-interactive-contract'
+$instanceClass = 'noctty-interactive-contract'
 $repoRoot = 'contract-repo-root'
 $script:SESSION_RESTORE_RETRY_MS = 17
 $script:sessionSnapshotProbeMode = 'success-on-third'
@@ -92,7 +92,7 @@ function script:Start-Process {
     $attempt = $script:sessionSnapshotStartCalls
     $script:sessionSnapshotLog.Add("start:$attempt")
     if ($FilePath -ne $sessionProbeCli -or
-        ($ArgumentList -join '|') -ne '+list-windows|--class=winghostty-interactive-contract' -or
+        ($ArgumentList -join '|') -ne '+list-windows|--class=noctty-interactive-contract' -or
         $WorkingDirectory -ne $repoRoot -or
         -not $PassThru) {
         throw 'Session snapshot mock received the wrong automation query arguments.'

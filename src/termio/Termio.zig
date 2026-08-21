@@ -45,7 +45,7 @@ const OutputTrace = struct {
     fn init(alloc: Allocator) OutputTrace {
         const owned = (internal_os.getEnvVarOwnedTrimmedNotEmpty(
             alloc,
-            "WINGHOSTTY_TERMIO_TRACE_FILE",
+            "NOCTTY_TERMIO_TRACE_FILE",
         ) catch return .{}) orelse return .{};
 
         return initWithClaimedPath(alloc, &output_trace_file_claimed, owned);

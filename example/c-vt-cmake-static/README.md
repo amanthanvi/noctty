@@ -16,6 +16,6 @@ cmake --build build
 To build against a local checkout instead of fetching from GitHub:
 
 ```shell-session
-cmake -B build -DFETCHCONTENT_SOURCE_DIR_WINGHOSTTY=../..
+cmake -B build -DFETCHCONTENT_SOURCE_DIR_NOCTTY=../..
 cmake --build build
 ```

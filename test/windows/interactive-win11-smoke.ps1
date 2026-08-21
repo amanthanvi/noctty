@@ -25,7 +25,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SMOKE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SMOKE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'smoke' -ResetState:$ResetState
@@ -80,7 +80,7 @@ try {
         }
 
         if ($process.HasExited) {
-            $failureReason = "winghostty exited before shell startup was observed (exit code $($process.ExitCode))"
+            $failureReason = "noctty exited before shell startup was observed (exit code $($process.ExitCode))"
             break
         }
     }
@@ -91,7 +91,7 @@ try {
         while ([DateTime]::UtcNow -lt $closeDeadline) {
             $process.Refresh()
             if ($process.HasExited) {
-                $failureReason = "winghostty exited before exposing a main window handle for WM_CLOSE validation (exit code $($process.ExitCode))"
+                $failureReason = "noctty exited before exposing a main window handle for WM_CLOSE validation (exit code $($process.ExitCode))"
                 break
             }
             if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
@@ -101,7 +101,7 @@ try {
         }
 
         if (-not $failureReason -and $process.MainWindowHandle -eq [IntPtr]::Zero) {
-            $failureReason = 'winghostty never exposed a main window handle for WM_CLOSE validation'
+            $failureReason = 'noctty never exposed a main window handle for WM_CLOSE validation'
         }
         elseif (-not $failureReason) {
             $processHandle = $process.Handle
@@ -123,7 +123,7 @@ try {
                     }
                 }
                 $closeProcess = $process
-                Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'winghostty smoke graceful exit' -Condition {
+                Wait-InteractiveWin11Until -Deadline $closeDeadline -Description 'noctty smoke graceful exit' -Condition {
                     $closeProcess.Refresh()
                     $closeProcess.HasExited
                 }
@@ -136,19 +136,19 @@ try {
                         $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
                     }
                     catch {
-                        $failureReason = "winghostty exited after WM_CLOSE but exit code could not be read: $($_.Exception.Message)"
+                        $failureReason = "noctty exited after WM_CLOSE but exit code could not be read: $($_.Exception.Message)"
                     }
                 }
 
                 if (-not $failureReason -and $exitCode -ne 0) {
-                    $failureReason = "winghostty exited after WM_CLOSE with exit code $exitCode"
+                    $failureReason = "noctty exited after WM_CLOSE with exit code $exitCode"
                 }
                 elseif (-not $failureReason) {
                     $closePassed = $true
                 }
             }
             catch {
-                $failureReason = "winghostty graceful-close validation failed: $($_.Exception.Message)"
+                $failureReason = "noctty graceful-close validation failed: $($_.Exception.Message)"
             }
         }
     }

@@ -24,7 +24,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = $typeName -as [type]' }
-    [pscustomobject]@{ Reject = $false; Text = '$factory = "WinghosttyStatefulNative" -as [type]' }
+    [pscustomobject]@{ Reject = $false; Text = '$factory = "NocttyStatefulNative" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
@@ -291,7 +291,7 @@ $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
 $siteDeployWorkflow = Join-Path $repoRoot '.github\workflows\deploy-site.yml'
-$siteBundleBuilder = Join-Path $repoRoot 'scripts\build-site-bundle.mjs'
+$siteAssetBuilder = Join-Path $repoRoot 'scripts\build-site-assets.mjs'
 $sitePayloadBuilder = Join-Path $repoRoot 'scripts\build-site-payload.ps1'
 $siteHeaderContract = Join-Path $repoRoot 'scripts\get-site-header-contract.ps1'
 $siteDeploymentHeadGate = Join-Path $repoRoot 'scripts\require-site-deployment-head.ps1'
@@ -308,7 +308,6 @@ $interactiveWin11WindowLib = Join-Path $repoRoot 'scripts\interactive-win11-wind
 $cliShellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
 $statefulWin11Lib = Join-Path $repoRoot 'test\windows\interactive-win11-stateful-lib.ps1'
 $accessibilityHarness = Join-Path $repoRoot 'test\windows\interactive-win11-accessibility.ps1'
-$booMultitabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-boo-multitab.ps1'
 $imeCandidateHarness = Join-Path $repoRoot 'test\windows\interactive-win11-ime-candidate.ps1'
 $sessionRestoreHarness = Join-Path $repoRoot 'test\windows\interactive-win11-session-restore.ps1'
 $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palette-theme.ps1'
@@ -373,7 +372,7 @@ $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
 $siteDeployWorkflowText = Get-Content -LiteralPath $siteDeployWorkflow -Raw
-$siteBundleBuilderText = Get-Content -LiteralPath $siteBundleBuilder -Raw
+$siteAssetBuilderText = Get-Content -LiteralPath $siteAssetBuilder -Raw
 $sitePayloadBuilderText = Get-Content -LiteralPath $sitePayloadBuilder -Raw
 $cloudflarePagesVerifierText = Get-Content -LiteralPath $cloudflarePagesVerifier -Raw
 $siteHeadersText = Get-Content -LiteralPath $siteHeaders -Raw
@@ -389,7 +388,6 @@ $interactiveWin11WindowLibText = Get-Content -LiteralPath $interactiveWin11Windo
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
 $accessibilityHarnessText = Get-Content -LiteralPath $accessibilityHarness -Raw
-$booMultitabHarnessText = Get-Content -LiteralPath $booMultitabHarness -Raw
 $imeCandidateHarnessText = Get-Content -LiteralPath $imeCandidateHarness -Raw
 $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifier -Raw
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw

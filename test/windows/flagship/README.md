@@ -68,7 +68,7 @@ tests must remain unchanged and green.
 Hosted Windows CI runs the x64 portable smoke through
 `Invoke-PortableSmoke.ps1`. The full composite runs only on opted-in
 manual dispatches (`run_interactive_win11=true`) on the unlocked
-self-hosted runner labeled `winghostty-interactive`; no standing runner
+self-hosted runner labeled `noctty-interactive`; no standing runner
 exists, so the machine is registered ephemerally when release evidence
 is needed. Fork pull requests never execute on that runner.
 The job fails unless the runner is Windows 11 x64, non-system, attached to the

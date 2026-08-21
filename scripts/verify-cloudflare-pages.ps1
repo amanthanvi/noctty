@@ -6,8 +6,8 @@ param(
     [ValidateSet('Deployment', 'Redirect')]
     [string] $Mode,
 
-    [ValidatePattern('^winghostty$')]
-    [string] $ProjectName = 'winghostty',
+    [ValidatePattern('^noctty$')]
+    [string] $ProjectName = 'noctty',
 
     [ValidatePattern('^main$')]
     [string] $ProductionBranch = 'main',
@@ -76,7 +76,7 @@ $apiClient = [Net.Http.HttpClient]::new($apiHandler)
 $apiClient.Timeout = [TimeSpan]::FromSeconds(30)
 $apiClient.DefaultRequestHeaders.Authorization =
     [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $ApiToken)
-$apiClient.DefaultRequestHeaders.UserAgent.ParseAdd('winghostty-site-verifier/1')
+$apiClient.DefaultRequestHeaders.UserAgent.ParseAdd('noctty-site-verifier/1')
 $apiRoot = 'https://api.cloudflare.com/client/v4/accounts/' +
     [Uri]::EscapeDataString($AccountId) +
     '/pages/projects/' +
@@ -290,11 +290,11 @@ function ConvertTo-PublicBaseUri {
         throw 'Deployment verification URL must be an HTTPS origin.'
     }
     if ($Kind -eq 'pages' -and
-        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.winghostty\.pages\.dev$') {
-        throw 'Deployment URL is not an immutable winghostty Pages origin.'
+        $uri.DnsSafeHost -cnotmatch '^[0-9a-f]{8}\.noctty\.pages\.dev$') {
+        throw 'Deployment URL is not an immutable noctty Pages origin.'
     }
-    if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'winghostty.com') {
-        throw 'Canonical URL must be https://winghostty.com/.'
+    if ($Kind -eq 'canonical' -and $uri.DnsSafeHost -cne 'noctty.com') {
+        throw 'Canonical URL must be https://noctty.com/.'
     }
     return $uri
 }
@@ -308,7 +308,7 @@ function Assert-ImmutablePagesDeploymentOrigin {
     $idMatch = [regex]::Match($DeploymentId, '^(?<label>[0-9a-f]{8})-')
     if (-not $idMatch.Success -or
         $Origin.DnsSafeHost -cne
-            "$($idMatch.Groups['label'].Value).winghostty.pages.dev") {
+            "$($idMatch.Groups['label'].Value).noctty.pages.dev") {
         throw 'Immutable Pages origin does not match the deployment ID.'
     }
 }
@@ -324,7 +324,7 @@ function New-PublicAssetUri {
     if ($RelativePath -ceq 'index.html') {
         $path = '/'
     } elseif ($RelativePath -ceq '404.html') {
-        $path = "/__winghostty_missing_$($Commit.Substring(0, 12))/nested/page"
+        $path = "/__noctty_missing_$($Commit.Substring(0, 12))/nested/page"
     } else {
         $escapedSegments = $RelativePath.Split('/') |
             ForEach-Object { [Uri]::EscapeDataString($_) }
@@ -332,7 +332,7 @@ function New-PublicAssetUri {
     }
     $builder = [UriBuilder]::new($Origin)
     $builder.Path = $path
-    $builder.Query = 'winghostty_deployment=' + [Uri]::EscapeDataString($Id)
+    $builder.Query = 'noctty_deployment=' + [Uri]::EscapeDataString($Id)
     return $builder.Uri
 }
 
@@ -348,7 +348,7 @@ $publicHandler.AllowAutoRedirect = $false
 $publicHandler.AutomaticDecompression = [Net.DecompressionMethods]::None
 $publicClient = [Net.Http.HttpClient]::new($publicHandler)
 $publicClient.Timeout = [TimeSpan]::FromSeconds(30)
-$publicClient.DefaultRequestHeaders.UserAgent.ParseAdd('winghostty-site-verifier/1')
+$publicClient.DefaultRequestHeaders.UserAgent.ParseAdd('noctty-site-verifier/1')
 $publicClient.DefaultRequestHeaders.CacheControl =
     [Net.Http.Headers.CacheControlHeaderValue]::new()
 $publicClient.DefaultRequestHeaders.CacheControl.NoCache = $true
@@ -479,13 +479,13 @@ function Test-PublicHeaderContractOnce {
         }
     }
     $probes += [pscustomobject]@{
-        Path = '/bundle.js'
+        Path = '/styles.css'
         ExpectedStatus = 200
-        ExpectedCache = [string]$Contract.bundle.cache_control
+        ExpectedCache = [string]$Contract.root.cache_control
     }
     if (-not $StaticOnly) {
         $probes += [pscustomobject]@{
-            Path = '/__winghostty_header_contract_' +
+            Path = '/__noctty_header_contract_' +
                 [Uri]::EscapeDataString($Id) + '/nested/page'
             ExpectedStatus = 404
             ExpectedCache = [string]$Contract.not_found.cache_control
@@ -494,7 +494,7 @@ function Test-PublicHeaderContractOnce {
     foreach ($probe in $probes) {
         $builder = [UriBuilder]::new($Origin)
         $builder.Path = $probe.Path
-        $builder.Query = 'winghostty_deployment=' + [Uri]::EscapeDataString($Id)
+        $builder.Query = 'noctty_deployment=' + [Uri]::EscapeDataString($Id)
         $request =
             [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $builder.Uri)
         $response = $null
@@ -562,17 +562,17 @@ function Assert-WwwRedirectContract {
         [Parameter(Mandatory)] [string] $Commit
     )
 
-    $suffix = "/__winghostty_redirect_$($Commit.Substring(0, 12))" +
-        "?winghostty_deployment=$([Uri]::EscapeDataString($Id))"
-    $source = [Uri]::new("https://www.winghostty.com$suffix")
-    $expected = [Uri]::new("https://winghostty.com$suffix")
+    $suffix = "/__noctty_redirect_$($Commit.Substring(0, 12))" +
+        "?noctty_deployment=$([Uri]::EscapeDataString($Id))"
+    $source = [Uri]::new("https://www.noctty.com$suffix")
+    $expected = [Uri]::new("https://noctty.com$suffix")
     $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, $source)
     $response = $null
     try {
         $response = $publicClient.SendAsync($request).GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 301 -or
             $null -eq $response.Headers.Location) {
-            throw 'www.winghostty.com is not configured with the required zone-level 301 redirect.'
+            throw 'www.noctty.com is not configured with the required zone-level 301 redirect.'
         }
         $location = if ($response.Headers.Location.IsAbsoluteUri) {
             $response.Headers.Location
@@ -580,11 +580,11 @@ function Assert-WwwRedirectContract {
             [Uri]::new($source, $response.Headers.Location)
         }
         if ($location.AbsoluteUri -cne $expected.AbsoluteUri) {
-            throw 'www.winghostty.com redirect does not preserve the path and query at the apex.'
+            throw 'www.noctty.com redirect does not preserve the path and query at the apex.'
         }
     }
     catch {
-        if ($_.Exception.Message -like 'www.winghostty.com*') { throw }
+        if ($_.Exception.Message -like 'www.noctty.com*') { throw }
         throw 'Unable to verify the www zone-level redirect.'
     }
     finally {
@@ -708,13 +708,13 @@ try {
                     throw 'www redirect verification requires CanonicalBaseUrl.'
                 }
                 Assert-WwwRedirectContract -Id $DeploymentId -Commit $ExpectedCommit
-                [void]$verifiedHosts.Add('www.winghostty.com')
+                [void]$verifiedHosts.Add('www.noctty.com')
             }
 
             $manifestHash = Get-FileSha256Lower `
                 -Path ([IO.Path]::GetFullPath($ManifestPath))
             Write-RedactedJson -Path $ProvenancePath -Value ([ordered]@{
-                schema_version = 'winghostty.cloudflare-pages-provenance.v2'
+                schema_version = 'noctty.cloudflare-pages-provenance.v2'
                 verified_at = [DateTimeOffset]::UtcNow.ToString('o')
                 project_name = $ProjectName
                 deployment_id = $DeploymentId

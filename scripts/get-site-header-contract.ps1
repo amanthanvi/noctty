@@ -49,10 +49,8 @@ function Assert-ReviewedContentSecurityPolicy {
         'form-action' = [string[]] @("'self'")
         'style-src' = [string[]] @(
             "'self'",
-            "'unsafe-inline'",
             'https://fonts.googleapis.com'
         )
-        'style-src-attr' = [string[]] @("'unsafe-inline'")
         'font-src' = [string[]] @("'self'", 'https://fonts.gstatic.com')
         'connect-src' = [string[]] @("'self'", 'https://api.github.com')
         'img-src' = [string[]] @("'self'", 'data:')
@@ -140,7 +138,7 @@ if (-not (Test-Path -LiteralPath $headersPath -PathType Leaf)) {
     throw 'Site header contract is missing _headers.'
 }
 
-$headerBuilder = Join-Path (Get-RepoRoot) 'scripts/build-site-bundle.mjs'
+$headerBuilder = Join-Path (Get-RepoRoot) 'scripts/build-site-assets.mjs'
 $derivedHeaderJson = & node $headerBuilder `
     --print-header-contract `
     "--site-directory=$siteRoot"
@@ -156,7 +154,7 @@ if (-not [Linq.Enumerable]::SequenceEqual[byte](
         $actualHeaderBytes,
         $expectedHeaderBytes
     )) {
-    throw 'Site _headers does not byte-match the HTML-derived header contract. Run npm --prefix site run build.'
+    throw 'Site _headers does not byte-match the HTML-derived header contract. Run node scripts/build-site-assets.mjs.'
 }
 
 $blocks = [Collections.Generic.Dictionary[
@@ -273,9 +271,6 @@ if ($csp -cne [string] $derivedHeaderContract.root.content_security_policy) {
         x_frame_options = $derivedHeaderContract.root.x_frame_options
         referrer_policy = $derivedHeaderContract.root.referrer_policy
         permissions_policy = $derivedHeaderContract.root.permissions_policy
-    }
-    bundle = [ordered]@{
-        cache_control = $derivedHeaderContract.bundle.cache_control
     }
     not_found = [ordered]@{
         cache_control = $derivedHeaderContract.not_found.cache_control

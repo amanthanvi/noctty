@@ -519,7 +519,7 @@ fn appendProfile(
 }
 
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "WINGHOSTTY_WIN32_PROFILE_ORDER") catch
+    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
         return null;
     errdefer alloc.free(raw);
 
@@ -1320,7 +1320,7 @@ test "prepareCommand injects translated cwd for wsl direct command" {
 
     const command = try directCommand(alloc, &.{"wsl.exe"});
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\winghostty", false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1332,7 +1332,7 @@ test "prepareCommand injects translated cwd for wsl direct command" {
     try testing.expectEqual(@as(usize, 3), prepared.direct.len);
     try testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", prepared.direct[0]);
     try testing.expectEqualStrings("--cd", prepared.direct[1]);
-    try testing.expectEqualStrings("/mnt/d/work/winghostty", prepared.direct[2]);
+    try testing.expectEqualStrings("/mnt/d/work/noctty", prepared.direct[2]);
 }
 
 test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
@@ -1341,7 +1341,7 @@ test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
 
     const command = try directCommand(alloc, &.{ "wsl.exe", "~" });
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\winghostty", false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1353,7 +1353,7 @@ test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
     try testing.expectEqual(@as(usize, 3), prepared.direct.len);
     try testing.expectEqualStrings("C:\\Windows\\System32\\wsl.exe", prepared.direct[0]);
     try testing.expectEqualStrings("--cd", prepared.direct[1]);
-    try testing.expectEqualStrings("/mnt/d/work/winghostty", prepared.direct[2]);
+    try testing.expectEqualStrings("/mnt/d/work/noctty", prepared.direct[2]);
 }
 
 test "prepareCommand rewrites wsl home sentinel to explicit --cd" {

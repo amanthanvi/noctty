@@ -25,7 +25,7 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $windowsPackager
-        Pattern = '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?winghostty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest'
+        Pattern = '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?noctty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest'
         Kind = 'Workflow'
         Description = 'Windows packaging verifies hash-bound shader capability for every target and executes native packages'
     }

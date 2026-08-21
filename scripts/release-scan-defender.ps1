@@ -70,13 +70,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $portablePayloads = @(
-    'winghostty/winghostty.com',
-    'winghostty/winghostty.exe',
-    'winghostty/ghostty-vt.dll'
+    'noctty/noctty.com',
+    'noctty/noctty.exe',
+    'noctty/ghostty-vt.dll'
 )
 $scanPaths = @(
     foreach ($architecture in (Get-WindowsPackageArchitectures)) {
-        $artifactDirectory = Join-Path $ArtifactRoot "winghostty-$Version-windows-$architecture"
+        $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
         $setupName = New-WindowsPackageArtifactName `
             -Version $Version `
             -Architecture $architecture `
@@ -87,7 +87,7 @@ $scanPaths = @(
         }
         $setupPath
 
-        $extractDirectory = Join-Path $ExtractionRoot "winghostty-release-verify-$architecture"
+        $extractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-$architecture"
         foreach ($relativePath in $portablePayloads) {
             $payloadPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {

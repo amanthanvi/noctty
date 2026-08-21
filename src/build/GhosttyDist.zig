@@ -2,7 +2,6 @@ const GhosttyDist = @This();
 
 const std = @import("std");
 const Config = @import("Config.zig");
-const GhosttyFrameData = @import("GhosttyFrameData.zig");
 pub const Resource = @import("DistResource.zig").Resource;
 
 /// The final source tarball.
@@ -20,17 +19,6 @@ check_step: *std.Build.Step,
 pub fn init(b: *std.Build, cfg: *const Config) !GhosttyDist {
     // The name prefix used for all paths in the archive.
     const name = if (cfg.emit_lib_vt) "libghostty-vt" else "ghostty";
-
-    // Get the resources we're going to inject into the source tarball.
-    // lib-vt doesn't need app resources or frame data.
-    const alloc = b.allocator;
-    var resources: std.ArrayListUnmanaged(Resource) = .empty;
-    if (!cfg.emit_lib_vt) {
-        {
-            const framedata = GhosttyFrameData.distResources(b);
-            try resources.append(alloc, framedata.framedata);
-        }
-    }
 
     // git archive to create the final tarball. "git archive" is the
     // easiest way I can find to create a tarball that ignores stuff
@@ -51,26 +39,6 @@ pub fn init(b: *std.Build, cfg: *const Config) !GhosttyDist {
             name, cfg.version,
         }));
         git_archive.addPrefixedFileArg("--add-file=", version);
-    }
-
-    // Add all of our resources into the tarball.
-    for (resources.items) |resource| {
-        // Our dist path basename may not match our generated file basename,
-        // and git archive requires this. To be safe, we copy the file once
-        // to ensure the basename matches and then use that as the final
-        // generated file.
-        const copied = b.addWriteFiles().addCopyFile(
-            resource.generated,
-            std.fs.path.basename(resource.dist),
-        );
-
-        // --add-file uses the most recent --prefix to determine the path
-        // in the archive to copy the file (the directory only).
-        git_archive.addArg(b.fmt("--prefix={s}-{f}/{s}/", .{
-            name,                                 cfg.version,
-            std.fs.path.dirname(resource.dist).?,
-        }));
-        git_archive.addPrefixedFileArg("--add-file=", copied);
     }
 
     // Add our output
@@ -140,13 +108,6 @@ pub fn init(b: *std.Build, cfg: *const Config) !GhosttyDist {
 
         break :step step;
     };
-
-    // Check that all our dist resources are at the proper path.
-    for (resources.items) |resource| {
-        const path = extract_dir.path(b, resource.dist);
-        const check_path = b.addCheckFile(path, .{});
-        check_test.step.dependOn(&check_path.step);
-    }
 
     // For lib-vt, also verify the CMake build works from the tarball.
     if (cfg.emit_lib_vt) {

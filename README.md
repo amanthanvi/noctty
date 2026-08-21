@@ -1,18 +1,24 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/winghostty-flag.svg" />
-    <img src="images/winghostty-flag-light.svg" alt="Winghostty" width="320" />
+    <source media="(prefers-color-scheme: dark)" srcset="images/noctty-flag.svg" />
+    <img src="images/noctty-flag-light.svg" alt="Noctty" width="320" />
   </picture>
 </p>
 
 <p align="center">
-  <em>Ghostty's terminal core in a fast, native Windows app.</em>
+  <strong>Noctty</strong> (formerly WingHostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
   <br />
   Tabs, splits, and session restore · Native Win32, OpenGL renderer · No telemetry
 </p>
 
 <p align="center">
-  <a href="https://github.com/amanthanvi/winghostty/releases">Releases</a>
+  <sub>WingHostty was renamed to Noctty in August 2026 following a
+  <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>;
+  same project, same maintainer.</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/amanthanvi/noctty/releases">Releases</a>
   ·
   <a href="docs/getting-started.md">Getting started</a>
   ·
@@ -24,14 +30,14 @@
 </p>
 
 <p align="center">
-  <img src="images/winghostty-screenshot.png" alt="winghostty with two tabs and a vertical split, Dracula theme" width="820" />
+  <img src="images/noctty-screenshot.png" alt="noctty with two tabs and a vertical split, Dracula theme" width="820" />
 </p>
 
 ---
 
-## What is winghostty?
+## What is noctty?
 
-winghostty is a terminal emulator for Windows, built on the terminal
+noctty is a terminal emulator for Windows, built on the terminal
 core of [Ghostty](https://github.com/ghostty-org/ghostty) and wrapped in
 a Win32 app written for this fork. That gets you:
 
@@ -47,44 +53,44 @@ a Win32 app written for this fork. That gets you:
   integration, and most Ghostty config options and themes
 - No telemetry, and crash dumps are never uploaded
 
-winghostty is built for developers who are comfortable editing a
+noctty is built for developers who are comfortable editing a
 plain-text config file and clicking through a SmartScreen warning on
 first install.
 
 ## Install
 
-winghostty runs on Windows 10 and 11, x64 and ARM64, and needs a GPU
+noctty runs on Windows 10 and 11, x64 and ARM64, and needs a GPU
 driver with OpenGL 4.3 or newer. Latest stable release:
-[winghostty 1.3.123](https://github.com/amanthanvi/winghostty/releases/tag/v1.3.123),
+[noctty 1.3.123](https://github.com/amanthanvi/noctty/releases/tag/v1.3.123),
 published 2026-08-06.
 
 ```powershell
-winget install AmanThanvi.winghostty
+winget install AmanThanvi.noctty
 ```
 
 Or with Scoop:
 
 ```powershell
-scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
-scoop install winghostty/winghostty
+scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty
 ```
 
 Or download directly from
-[Releases](https://github.com/amanthanvi/winghostty/releases). The
+[Releases](https://github.com/amanthanvi/noctty/releases). The
 installers add a Start menu entry; the portable ZIPs run from any
 folder:
 
 | File                                                                                                                                                                 | What it is      |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| [`winghostty-1.3.123-windows-x64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/winghostty-1.3.123-windows-x64-setup.exe)           | x64 installer   |
-| [`winghostty-1.3.123-windows-arm64-setup.exe`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/winghostty-1.3.123-windows-arm64-setup.exe)       | ARM64 installer |
-| [`winghostty-1.3.123-windows-x64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/winghostty-1.3.123-windows-x64-portable.zip)     | x64 portable    |
-| [`winghostty-1.3.123-windows-arm64-portable.zip`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/winghostty-1.3.123-windows-arm64-portable.zip) | ARM64 portable  |
-| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
-| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
+| [`noctty-1.3.123-windows-x64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-setup.exe)           | x64 installer   |
+| [`noctty-1.3.123-windows-arm64-setup.exe`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-setup.exe)       | ARM64 installer |
+| [`noctty-1.3.123-windows-x64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-x64-portable.zip)     | x64 portable    |
+| [`noctty-1.3.123-windows-arm64-portable.zip`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/noctty-1.3.123-windows-arm64-portable.zip) | ARM64 portable  |
+| [`SHA256SUMS-windows-x64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-x64.txt)                                       | x64 checksums   |
+| [`SHA256SUMS-windows-arm64.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS-windows-arm64.txt)                                   | ARM64 checksums |
 
 The older
-[`SHA256SUMS.txt`](https://github.com/amanthanvi/winghostty/releases/download/v1.3.123/SHA256SUMS.txt)
+[`SHA256SUMS.txt`](https://github.com/amanthanvi/noctty/releases/download/v1.3.123/SHA256SUMS.txt)
 is still published as an x64 auto-update compatibility alias.
 
 The installers and the binaries inside the portable ZIP are
@@ -97,14 +103,14 @@ and walks through install, portable use, and uninstall.
 
 ## First launch
 
-On first launch, winghostty writes a config template to
-`%LOCALAPPDATA%\winghostty\config.ghostty`. The template sets no options;
+On first launch, noctty writes a config template to
+`%LOCALAPPDATA%\noctty\config.ghostty`. The template sets no options;
 defaults live in the binary. A minimal config:
 
 ```ini
 font-family = JetBrains Mono
 font-size   = 12
-# Pick a theme from: winghostty +list-themes
+# Pick a theme from: noctty +list-themes
 # Theme files are config files; only use themes from sources you trust.
 theme       = Dracula
 ```
@@ -119,7 +125,7 @@ panes, `Ctrl+Shift+P` opens the command palette, and `Ctrl+Shift+C` /
 
 ## Status
 
-winghostty is young: it has a single maintainer, and its first public
+noctty is young: it has a single maintainer, and its first public
 release was April 2026. It installs as its own top-level app, so you can
 keep Windows Terminal, WezTerm, or Alacritty next to it while you try
 it. macOS and Linux app runtimes are not planned.
@@ -130,21 +136,21 @@ with upstream Ghostty, see
 [docs/windows-capability-matrix.md](docs/windows-capability-matrix.md).
 
 Questions and feedback go to
-[Discussions](https://github.com/amanthanvi/winghostty/discussions).
+[Discussions](https://github.com/amanthanvi/noctty/discussions).
 GitHub Issues are reserved for reproducible bugs.
 
 ## Privacy, updates, and crashes
 
-winghostty sends no telemetry and no analytics. The only outbound
+noctty sends no telemetry and no analytics. The only outbound
 network activity is the GitHub Releases updater, and only when you
 enable `auto-update`. It checks at most once every 24 hours, can stage a
 verified installer in `download` mode, and never installs anything
 without you starting it.
 
 Crash dumps are never uploaded; they stay under
-`%LOCALAPPDATA%\winghostty\crash`, readable with
-`winghostty +crash-report`. If a broken config or saved session state
-blocks launch, `winghostty --safe-mode` starts once with built-in
+`%LOCALAPPDATA%\noctty\crash`, readable with
+`noctty +crash-report`. If a broken config or saved session state
+blocks launch, `noctty --safe-mode` starts once with built-in
 defaults.
 
 Updater verification, crash-report details, and diagnostic bundles are
@@ -160,14 +166,14 @@ toolchain on PATH, and Git for Windows. Then build:
 zig build -Demit-exe=true
 ```
 
-Output lands at `zig-out\bin\winghostty.exe`. Toolchain details,
+Output lands at `zig-out\bin\noctty.exe`. Toolchain details,
 dependency cache seeding, the pre-configured dev shell, and test commands
 are in [HACKING.md](HACKING.md). Building the installer and portable ZIP
 yourself is covered in [PACKAGING.md](PACKAGING.md).
 
 ## Relationship to Ghostty
 
-winghostty is a fork of Ghostty: upstream is tracked as the `upstream`
+noctty is a fork of Ghostty: upstream is tracked as the `upstream`
 Git remote, and the fork relationship is visible in full Git history.
 
 Shared with upstream: the terminal core (`src/terminal/`), fonts
@@ -194,7 +200,7 @@ prefers the Windows-native result.
 Bug reports, reproducible issues, and focused PRs are welcome. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) and [AI_POLICY.md](AI_POLICY.md)
 first. For usage questions and design discussion, use
-[Discussions](https://github.com/amanthanvi/winghostty/discussions).
+[Discussions](https://github.com/amanthanvi/noctty/discussions).
 Pull requests get automated review from Greptile:
 
 [![Greptile: The War on Bugs](https://www.greptile.com/badge.svg)](https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source)

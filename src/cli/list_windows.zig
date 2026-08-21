@@ -10,7 +10,7 @@ pub const Options = struct {
     _arena: ?ArenaAllocator = null,
 
     /// If set, query a custom single-instance namespace instead of the
-    /// default local winghostty instance.
+    /// default local noctty instance.
     class: ?[:0]const u8 = null,
 
     pub fn deinit(self: *Options) void {
@@ -26,7 +26,7 @@ pub const Options = struct {
 };
 
 /// The `list-windows` command prints a read-only automation snapshot for the
-/// matching local winghostty instance as JSON.
+/// matching local noctty instance as JSON.
 ///
 /// The current schema exposes only stable host/tab/pane identifiers, focus
 /// state, active-pane state, and structural counts. It does not expose
@@ -36,7 +36,7 @@ pub const Options = struct {
 /// Flags:
 ///
 ///   * `--class=<class>`: Query a custom instance namespace instead of the
-///     default local winghostty instance.
+///     default local noctty instance.
 pub fn run(alloc: Allocator) !u8 {
     var iter = try args.argsIterator(alloc);
     defer iter.deinit();
@@ -103,7 +103,7 @@ fn runArgsWithQuery(
     defer if (payload) |bytes| alloc.free(bytes);
 
     const json = payload orelse {
-        try stderr.print("No matching winghostty instance is listening for automation queries.\n", .{});
+        try stderr.print("No matching noctty instance is listening for automation queries.\n", .{});
         return 1;
     };
 
@@ -130,7 +130,7 @@ test "automation-window-list cli prints json payload" {
                 .class => |class| try testing.allocator.dupe(u8, class),
                 .detect => return error.UnexpectedTarget,
             };
-            return try alloc.dupe(u8, "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[]}");
+            return try alloc.dupe(u8, "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[]}");
         }
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
@@ -157,7 +157,7 @@ test "automation-window-list cli prints json payload" {
 
     try testing.expectEqual(@as(u8, 0), exit_code);
     try testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[]}\n",
+        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[]}\n",
         stdout_buf.written(),
     );
     try testing.expectEqualStrings("", stderr_buf.written());
@@ -272,7 +272,7 @@ test "automation-window-list cli reports missing instance" {
     try testing.expectEqual(@as(u8, 1), exit_code);
     try testing.expectEqualStrings("", stdout_buf.written());
     try testing.expectEqualStrings(
-        "No matching winghostty instance is listening for automation queries.\n",
+        "No matching noctty instance is listening for automation queries.\n",
         stderr_buf.written(),
     );
 }

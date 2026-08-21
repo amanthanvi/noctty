@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repoRoot = Get-RepoRoot
 $repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
-    'amanthanvi/winghostty'
+    'amanthanvi/noctty'
 } else {
     $env:GITHUB_REPOSITORY
 }
@@ -40,7 +40,7 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture $architecture -Kind checksums))
 }
 $expectedNames.Add((New-WindowsPackageArtifactName -Version $Version -Architecture x64 -Kind legacy-checksums))
-$expectedNames.Add('winghostty-icon.svg')
+$expectedNames.Add('noctty-icon.svg')
 if ($expectedNames.Count -ne 8) {
     throw "Published release contract must require exactly eight assets; generated $($expectedNames.Count)."
 }
@@ -58,7 +58,7 @@ if ($missing.Count -gt 0 -or $unexpected.Count -gt 0) {
 
 $createdTempDirectory = [string]::IsNullOrWhiteSpace($DownloadDirectory)
 if ($createdTempDirectory) {
-    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-published-$Version-$([Guid]::NewGuid().ToString('N'))"
+    $DownloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-published-$Version-$([Guid]::NewGuid().ToString('N'))"
 }
 $DownloadDirectory = [System.IO.Path]::GetFullPath($DownloadDirectory)
 if (Test-Path -LiteralPath $DownloadDirectory) {
@@ -127,7 +127,7 @@ try {
 
         $extractDirectory = Join-Path $DownloadDirectory "extract-$architecture"
         Expand-Archive -LiteralPath (Join-Path $DownloadDirectory $portableName) -DestinationPath $extractDirectory
-        foreach ($relativePath in @('winghostty/winghostty.com', 'winghostty/winghostty.exe', 'winghostty/ghostty-vt.dll')) {
+        foreach ($relativePath in @('noctty/noctty.com', 'noctty/noctty.exe', 'noctty/ghostty-vt.dll')) {
             $binaryPath = Join-Path $extractDirectory $relativePath
             if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) {
                 throw "$portableName is missing signed binary $relativePath."

@@ -12,7 +12,7 @@ pub const Options = struct {
     _arena: ?ArenaAllocator = null,
 
     /// If set, query a custom single-instance namespace instead of the
-    /// default local winghostty instance.
+    /// default local noctty instance.
     class: ?[:0]const u8 = null,
 
     /// If set, perform the action against a specific surface from
@@ -32,16 +32,16 @@ pub const Options = struct {
 };
 
 /// The `perform-action` command forwards one safe keybinding action to a
-/// running local winghostty instance.
+/// running local noctty instance.
 ///
 /// The action uses the same syntax as `keybind` values, for example:
 ///
-///   * `winghostty +perform-action new_tab`
-///   * `winghostty +perform-action --surface-id=42 toggle_fullscreen`
+///   * `noctty +perform-action new_tab`
+///   * `noctty +perform-action --surface-id=42 toggle_fullscreen`
 ///
 /// The default target is the focused surface for surface-scoped actions and the
 /// app for app-scoped actions. `--surface-id` accepts pane IDs from
-/// `winghostty +list-windows` and is only valid for surface-scoped actions.
+/// `noctty +list-windows` and is only valid for surface-scoped actions.
 ///
 /// To keep this automation surface bounded, terminal-input and arbitrary file
 /// helper actions such as `text`, `csi`, `esc`, `paste_from_clipboard`,
@@ -180,7 +180,7 @@ fn runArgsWithPerform(
 
     if (ok) return 0;
 
-    try stderr.print("No matching winghostty instance is listening for automation actions.\n", .{});
+    try stderr.print("No matching noctty instance is listening for automation actions.\n", .{});
     return 1;
 }
 

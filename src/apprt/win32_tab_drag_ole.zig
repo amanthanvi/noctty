@@ -1,7 +1,7 @@
 //! OLE drag-source adapter for cross-window tab drag.
 //!
 //! Implements `IDataObject`, `IDropSource`, and `IEnumFORMATETC` as minimal
-//! COM objects that ferry a `CF_WINGHOSTTY_TAB` payload through the system
+//! COM objects that ferry a `CF_NOCTTY_TAB` payload through the system
 //! `DoDragDrop` loop. The payload is intentionally process-local metadata
 //! (PID + opaque pointer), not a serialised terminal/session image; drop
 //! targets must reject it when the PID differs. Each struct is one-shot:
@@ -82,17 +82,17 @@ const STGMEDIUM = ole_types.STGMEDIUM;
 
 const Payload = tab_drag.Payload;
 
-// ── CF_WINGHOSTTY_TAB registration ─────────────────────────────────────
+// ── CF_NOCTTY_TAB registration ─────────────────────────────────────
 
-var cf_winghostty_tab_id: UINT = 0;
+var cf_noctty_tab_id: UINT = 0;
 
 fn ensureClipboardFormat() UINT {
-    if (cf_winghostty_tab_id != 0) return cf_winghostty_tab_id;
+    if (cf_noctty_tab_id != 0) return cf_noctty_tab_id;
     const u32fns = loadUser32() orelse return 0;
-    cf_winghostty_tab_id = u32fns.RegisterClipboardFormatW(
+    cf_noctty_tab_id = u32fns.RegisterClipboardFormatW(
         std.unicode.utf8ToUtf16LeStringLiteral(tab_drag.clipboard_format_name),
     );
-    return cf_winghostty_tab_id;
+    return cf_noctty_tab_id;
 }
 
 /// Public accessor so tests and callers can get the registered format ID.
@@ -631,7 +631,7 @@ pub const DragResult = enum {
     failed,
 };
 
-/// Initiate an OLE drag-drop loop carrying `payload` as `CF_WINGHOSTTY_TAB`.
+/// Initiate an OLE drag-drop loop carrying `payload` as `CF_NOCTTY_TAB`.
 ///
 /// Blocks until the user drops or cancels. Returns the drag outcome;
 /// `drop_effect` receives the negotiated `DROPEFFECT` on success.

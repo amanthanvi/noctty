@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to package, without a leading v. Use the winghostty fork scheme such as 1.3.100
+        description: Release version to package, without a leading v. Use the noctty fork scheme such as 1.3.100
         required: true
         type: string
       prerelease:
@@ -173,7 +173,7 @@ jobs:
 
           $versionMatch = [regex]::Match($version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
           if (-not $versionMatch.Success) {
-            throw "Unsupported release version format '$version'. winghostty releases must use plain semver <major>.<minor>.<patch>."
+            throw "Unsupported release version format '$version'. noctty releases must use plain semver <major>.<minor>.<patch>."
           }
 
           $releaseMetaPath = Join-Path $PWD "dist/windows/release-metadata.json"
@@ -197,13 +197,13 @@ jobs:
 
           $patch = [int]$versionMatch.Groups['patch'].Value
           if ($patch -lt $firstForkPatch) {
-            throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. winghostty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
+            throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. noctty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
           }
 
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
-          "title=winghostty $version" >> $env:GITHUB_OUTPUT
+          "title=noctty $version" >> $env:GITHUB_OUTPUT
           "version_line=$versionLine" >> $env:GITHUB_OUTPUT
           "upstream_base_version=$upstreamBaseVersion" >> $env:GITHUB_OUTPUT
           "first_fork_patch=$firstForkPatch" >> $env:GITHUB_OUTPUT

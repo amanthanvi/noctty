@@ -313,7 +313,7 @@ const WNDPROC = win32_types.WNDPROC;
 const SHORT = i16;
 
 const ipc_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
-const ipc_pipe_prefix = "\\\\.\\pipe\\winghostty.";
+const ipc_pipe_prefix = "\\\\.\\pipe\\noctty.";
 
 const POINT = sys.POINT;
 const RECT = sys.RECT;
@@ -400,17 +400,17 @@ const SystemWheelSettings = win32_input.SystemWheelSettings;
 const WheelNormalizationContext = win32_input.WheelNormalizationContext;
 const NormalizedWheelScroll = win32_input.NormalizedWheelScroll;
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32");
-const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.host");
-const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.palette_list");
-const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("winghostty.win32.scrollbar");
+const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
+const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
+const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
+const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
 
 /// Palette list row height at 96 DPI. Scaled via `Host.scaled` at paint.
 const palette_row_height: i32 = 36;
 /// Max rows visible at once; beyond this, mouse wheel scrolls.
 const palette_max_visible_rows: usize = 7;
-const default_title = std.unicode.utf8ToUtf16LeStringLiteral("winghostty");
-const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("winghostty quick terminal");
+const default_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
+const quick_terminal_title = std.unicode.utf8ToUtf16LeStringLiteral("noctty quick terminal");
 const prompt_label_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
 const prompt_edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
 const prompt_button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
@@ -710,9 +710,9 @@ fn applySplitWorkingDirectoryFromSource(
 
 fn defaultIpcNamespace() []const u8 {
     return if (builtin.mode == .Debug)
-        "io.github.amanthanvi.winghostty-debug"
+        "io.github.amanthanvi.noctty-debug"
     else
-        "io.github.amanthanvi.winghostty";
+        "io.github.amanthanvi.noctty";
 }
 
 fn sanitizeIpcNamespace(alloc: Allocator, raw: ?[]const u8) ![]const u8 {
@@ -1149,13 +1149,13 @@ const UpdateNotice = struct {
             .message_text = if (staged)
                 try std.fmt.allocPrint(
                     alloc,
-                    "Update downloaded and verified: winghostty {s} is ready to install.",
+                    "Update downloaded and verified: noctty {s} is ready to install.",
                     .{version_text},
                 )
             else
                 try std.fmt.allocPrint(
                     alloc,
-                    "Update available: winghostty {s} is ready on GitHub Releases.",
+                    "Update available: noctty {s} is ready on GitHub Releases.",
                     .{version_text},
                 ),
             .staged = staged,
@@ -1283,7 +1283,7 @@ test "win32 settings save rejects files above the read cap" {
 fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
     const local = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return null;
     defer alloc.free(local);
-    const dir = std.fs.path.join(alloc, &.{ local, "winghostty" }) catch return null;
+    const dir = std.fs.path.join(alloc, &.{ local, "noctty" }) catch return null;
     defer alloc.free(dir);
     return std.fs.path.join(alloc, &.{ dir, name }) catch null;
 }
@@ -1597,7 +1597,7 @@ pub const App = struct {
         // host banner/log path in `showDesktopNotificationWithLaunch`.
         // MUST run AFTER `setProcessAumid` so `CreateToastNotifierWithId`
         // attributes toasts to our AUMID.
-        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("com.ghostty.winghostty");
+        const aumid_utf16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
         self.winrt_toast = win32_toast_winrt.WinrtToast.init(core_app.alloc, aumid_utf16) catch |err| blk: {
             std.log.warn("winrt toast init failed err={}; falling back to host notifications", .{err});
             break :blk null;
@@ -1607,7 +1607,7 @@ pub const App = struct {
         }
 
         // Install the PowerShell shell-integration script into
-        // %LOCALAPPDATA%\winghostty\shell-integration\powershell\
+        // %LOCALAPPDATA%\noctty\shell-integration\powershell\
         // if missing or the on-disk hash doesn't match the embedded
         // payload (forces updates when we ship a new version). This
         // keeps the manual `$PROFILE` fallback on a stable path even
@@ -1929,20 +1929,20 @@ pub const App = struct {
         }
     }
 
-    /// Resolve `%LOCALAPPDATA%\winghostty\<name>`. Caller frees with
+    /// Resolve `%LOCALAPPDATA%\noctty\<name>`. Caller frees with
     /// `core_app.alloc`. Returns null if `LOCALAPPDATA` is unreadable
     /// or allocation fails.
     fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
         return localAppDataPathAlloc(self.core_app.alloc, name);
     }
 
-    /// Resolve `%LOCALAPPDATA%\winghostty\palette-mru.txt`. Caller frees
+    /// Resolve `%LOCALAPPDATA%\noctty\palette-mru.txt`. Caller frees
     /// with `core_app.alloc`.
     fn paletteMruPath(self: *const App) ?[]u8 {
         return self.localAppDataPath("palette-mru.txt");
     }
 
-    /// Resolve `%LOCALAPPDATA%\winghostty\session-state.json`. Caller
+    /// Resolve `%LOCALAPPDATA%\noctty\session-state.json`. Caller
     /// frees with `core_app.alloc`.
     fn sessionStatePath(self: *const App) ?[]u8 {
         return self.localAppDataPath("session-state.json");
@@ -3019,7 +3019,7 @@ pub const App = struct {
                 return;
             }
         }
-        try showInfoMessage(.app, "winghostty", message);
+        try showInfoMessage(.app, "noctty", message);
     }
 
     /// True when any user-facing top-level UI window is still alive —
@@ -3352,7 +3352,7 @@ pub const App = struct {
                 if (value.soft) {
                     try self.core_app.updateConfig(self, &self.config);
                     if (self.config.@"app-notifications".@"config-reload") {
-                        try self.showDesktopNotification(.app, "winghostty", "Configuration reloaded");
+                        try self.showDesktopNotification(.app, "noctty", "Configuration reloaded");
                     }
                     return true;
                 }
@@ -3398,7 +3398,7 @@ pub const App = struct {
                 defer config.deinit();
                 try self.core_app.updateConfig(self, &config);
                 if (self.config.@"app-notifications".@"config-reload") {
-                    try self.showDesktopNotification(.app, "winghostty", "Configuration reloaded");
+                    try self.showDesktopNotification(.app, "noctty", "Configuration reloaded");
                 }
                 return true;
             },
@@ -6163,8 +6163,8 @@ pub const App = struct {
         body: []const u8,
         launch: ?[]const u8,
     ) !void {
-        const caption = if (title.len > 0) title else "winghostty";
-        const message = if (title.len > 0 and !std.mem.eql(u8, title, "winghostty"))
+        const caption = if (title.len > 0) title else "noctty";
+        const message = if (title.len > 0 and !std.mem.eql(u8, title, "noctty"))
             try std.fmt.allocPrint(self.core_app.alloc, "{s}: {s}", .{ caption, body })
         else
             try self.core_app.alloc.dupe(u8, body);
@@ -6218,7 +6218,7 @@ pub const App = struct {
         );
         defer self.core_app.alloc.free(message);
         if (try self.showHostBanner(target, .info, message)) return;
-        try showInfoMessage(target, "winghostty", message);
+        try showInfoMessage(target, "noctty", message);
     }
 
     const CommandFinishPlan = struct {
@@ -6377,7 +6377,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                     if (request.manual) {
                         completion.manual_message = std.fmt.allocPrint(
                             alloc,
-                            "winghostty {s} was downloaded, verified, and staged.",
+                            "noctty {s} was downloaded, verified, and staged.",
                             .{release.version_text},
                         ) catch null;
                     }
@@ -6397,7 +6397,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                 completion.manual_message = if (request.manual)
                     std.fmt.allocPrint(
                         alloc,
-                        "Unable to prepare the update notice for winghostty {s}.",
+                        "Unable to prepare the update notice for noctty {s}.",
                         .{release.version_text},
                     ) catch null
                 else
@@ -6408,7 +6408,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
             if (request.manual) {
                 completion.manual_message = std.fmt.allocPrint(
                     alloc,
-                    "winghostty {s} is already current on the stable channel.",
+                    "noctty {s} is already current on the stable channel.",
                     .{request.current_version_string},
                 ) catch null;
             }
@@ -8846,8 +8846,8 @@ const Host = struct {
                 },
                 .keyboard_shortcuts => self.showPaletteHelp("Keyboard shortcuts are configured in Settings > Keybindings."),
                 .configuration => self.showPaletteHelp("Open Settings, then Advanced, to edit the configuration file."),
-                .troubleshooting => self.showPaletteHelp("Run winghostty +diagnostic-bundle when reporting a problem."),
-                .diagnostics => self.showPaletteHelp("Run winghostty +diagnostic-bundle to export a redacted support bundle."),
+                .troubleshooting => self.showPaletteHelp("Run noctty +diagnostic-bundle when reporting a problem."),
+                .diagnostics => self.showPaletteHelp("Run noctty +diagnostic-bundle to export a redacted support bundle."),
                 .accessibility => self.showPaletteHelp("Keyboard: Ctrl+Page Up or Page Down changes tabs; Ctrl+Shift+Backslash splits right; Ctrl+Shift+E splits down; Alt+Arrow moves between panes."),
             },
             .recent_command => |payload| return self.invokePaletteAction(payload, false),
@@ -13078,8 +13078,8 @@ const Host = struct {
         const hwnd = self.hwnd orelse return false;
         const alloc = self.app.core_app.alloc;
         const surface = self.activeSurface() orelse {
-            if (!windowTitleSyncChanged(self.cached_window_title, "winghostty")) return false;
-            try appendOwnedString(alloc, &self.cached_window_title, "winghostty");
+            if (!windowTitleSyncChanged(self.cached_window_title, "noctty")) return false;
+            try appendOwnedString(alloc, &self.cached_window_title, "noctty");
             _ = sys.SetWindowTextW(hwnd, default_title);
             return true;
         };
@@ -19172,14 +19172,14 @@ fn startupProfilePickerEnabled(raw: []const u8) bool {
 }
 
 fn detectStartupProfilePicker(alloc: Allocator) bool {
-    const raw = std.process.getEnvVarOwned(alloc, "WINGHOSTTY_WIN32_STARTUP_PROFILE_PICKER") catch
+    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_STARTUP_PROFILE_PICKER") catch
         return false;
     defer alloc.free(raw);
     return startupProfilePickerEnabled(raw);
 }
 
 fn detectDefaultProfileHint(alloc: Allocator) ?[:0]const u8 {
-    const raw = std.process.getEnvVarOwned(alloc, "WINGHOSTTY_WIN32_DEFAULT_PROFILE") catch
+    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE") catch
         return null;
     if (raw.len == 0) {
         alloc.free(raw);
@@ -19194,7 +19194,7 @@ fn detectDefaultProfileHint(alloc: Allocator) ?[:0]const u8 {
 }
 
 fn detectDefaultProfileTarget(alloc: Allocator) ProfileOpenTarget {
-    const raw = std.process.getEnvVarOwned(alloc, "WINGHOSTTY_WIN32_DEFAULT_PROFILE_TARGET") catch
+    const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_DEFAULT_PROFILE_TARGET") catch
         return .tab;
     defer alloc.free(raw);
     return parseProfileOpenTarget(raw) orelse .tab;
@@ -19283,7 +19283,7 @@ fn imeWindowFormsTracePath(alloc: Allocator) ?[]const u8 {
         ime_window_forms_trace_path_loaded = true;
         ime_window_forms_trace_path = internal_os.getEnvVarOwnedTrimmedNotEmpty(
             alloc,
-            "WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE",
+            "NOCTTY_WIN32_IME_FORM_TRACE_FILE",
         ) catch null;
     }
 
@@ -23689,7 +23689,7 @@ pub const Surface = struct {
 
         try host.showConfirm(
             "Allow clipboard paste?",
-            "winghostty needs confirmation before completing this clipboard paste or read request.",
+            "noctty needs confirmation before completing this clipboard paste or read request.",
             "Allow",
             "Cancel",
             surfaceConfirmPasteAccept,
@@ -23748,7 +23748,7 @@ pub const Surface = struct {
 
         try host.showConfirm(
             "Allow clipboard write?",
-            "winghostty needs confirmation before allowing this application to write to the Windows clipboard.",
+            "noctty needs confirmation before allowing this application to write to the Windows clipboard.",
             "Allow",
             "Cancel",
             surfaceConfirmWriteAccept,
@@ -26873,7 +26873,7 @@ test "win32 allocIpcPipeName prefixes sanitized namespace" {
     const pipe_name_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, pipe_name[0..pipe_name.len]);
     defer std.testing.allocator.free(pipe_name_utf8);
 
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\winghostty.demo_class", pipe_name_utf8);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class", pipe_name_utf8);
 }
 
 test "win32 normalizeForwardedStartupArg drops class and normalizes working directory" {
@@ -27293,7 +27293,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
+        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
         json,
     );
 }
@@ -27341,7 +27341,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     defer std.testing.allocator.free(json);
 
     try std.testing.expectEqualStrings(
-        "{\"schema\":\"winghostty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
+        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
         json,
     );
 }
@@ -27364,7 +27364,7 @@ test "win32 IPC silent client read is bounded" {
 
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
         std.testing.allocator,
-        "\\\\.\\pipe\\winghostty-ipc-timeout-{d}",
+        "\\\\.\\pipe\\noctty-ipc-timeout-{d}",
         .{sys.GetTickCount64()},
         0,
     );
@@ -27869,14 +27869,14 @@ test "win32 WSL split cwd treats startup cwd as stale fallback" {
     try std.testing.expect(try shouldTreatWslSplitPwdAsStartupFallback(
         std.testing.allocator,
         command,
-        "/mnt/c/Users/example/src/winghostty",
-        "C:\\Users\\example\\src\\winghostty",
+        "/mnt/c/Users/example/src/noctty",
+        "C:\\Users\\example\\src\\noctty",
     ));
     try std.testing.expect(!try shouldTreatWslSplitPwdAsStartupFallback(
         std.testing.allocator,
         command,
         "/home/user",
-        "C:\\Users\\example\\src\\winghostty",
+        "C:\\Users\\example\\src\\noctty",
     ));
 }
 
@@ -27886,8 +27886,8 @@ test "win32 non-WSL split cwd keeps startup cwd candidate" {
     try std.testing.expect(!try shouldTreatWslSplitPwdAsStartupFallback(
         std.testing.allocator,
         command,
-        "C:\\Users\\example\\src\\winghostty",
-        "C:\\Users\\example\\src\\winghostty",
+        "C:\\Users\\example\\src\\noctty",
+        "C:\\Users\\example\\src\\noctty",
     ));
 }
 
@@ -28852,8 +28852,8 @@ test "win32 installer apply args preserve install dir and log path" {
     const alloc = std.testing.allocator;
     const args = try buildInstallerApplyArgs(
         alloc,
-        "C:\\Program Files\\winghostty",
-        "C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log",
+        "C:\\Program Files\\noctty",
+        "C:\\Users\\Aman\\AppData\\Local\\noctty\\updates\\1.3.101\\logs\\apply.log",
     );
     defer alloc.free(args);
 
@@ -28862,8 +28862,8 @@ test "win32 installer apply args preserve install dir and log path" {
     try std.testing.expect(std.mem.indexOf(u8, args, "/NORESTART") != null);
     try std.testing.expect(std.mem.indexOf(u8, args, "/CLOSEAPPLICATIONS") != null);
     try std.testing.expect(std.mem.indexOf(u8, args, "/RESTARTAPPLICATIONS") != null);
-    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\winghostty\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, args, "/LOG=\"C:\\Users\\Aman\\AppData\\Local\\winghostty\\updates\\1.3.101\\logs\\apply.log\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/DIR=\"C:\\Program Files\\noctty\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "/LOG=\"C:\\Users\\Aman\\AppData\\Local\\noctty\\updates\\1.3.101\\logs\\apply.log\"") != null);
 }
 
 test "win32 installer apply args double embedded quotes" {
@@ -28881,7 +28881,7 @@ test "win32 installer apply args double embedded quotes" {
 test "win32 installer apply guard recognizes Inno uninstaller markers" {
     try std.testing.expect(isInnoUninstallerFileName("unins000.exe", ".exe"));
     try std.testing.expect(isInnoUninstallerFileName("UNINS001.DAT", ".dat"));
-    try std.testing.expect(!isInnoUninstallerFileName("winghostty.exe", ".exe"));
+    try std.testing.expect(!isInnoUninstallerFileName("noctty.exe", ".exe"));
     try std.testing.expect(!isInnoUninstallerFileName("unins.exe", ".exe"));
 }
 
