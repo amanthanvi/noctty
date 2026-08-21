@@ -159,6 +159,18 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Copy the selected text as HTML to the clipboard.",
         } },
 
+        .copy_last_command_output => comptime &.{.{
+            .action = .copy_last_command_output,
+            .title = "Copy Last Command Output",
+            .description = "Copy the output of the most recent completed command to the clipboard. Requires OSC 133 shell integration.",
+        }},
+
+        .rerun_last_command => comptime &.{.{
+            .action = .rerun_last_command,
+            .title = "Rerun Last Command",
+            .description = "Run the most recent recoverable single-line command again. Requires OSC 133 B/C command marks.",
+        }},
+
         .copy_url_to_clipboard => comptime &.{.{
             .action = .copy_url_to_clipboard,
             .title = "Copy URL to Clipboard",
@@ -524,6 +536,19 @@ fn actionCommands(action: Action.Key) []const Command {
             },
         },
 
+        .jump_to_prompt => comptime &.{
+            .{
+                .action = .{ .jump_to_prompt = -1 },
+                .title = "Jump to Previous Prompt",
+                .description = "Jump to the previous shell prompt.",
+            },
+            .{
+                .action = .{ .jump_to_prompt = 1 },
+                .title = "Jump to Next Prompt",
+                .description = "Jump to the next shell prompt.",
+            },
+        },
+
         .goto_window => comptime &.{
             .{
                 .action = .{ .goto_window = .previous },
@@ -729,7 +754,6 @@ fn actionCommands(action: Action.Key) []const Command {
         .scroll_page_fractional,
         .scroll_page_lines,
         .adjust_selection,
-        .jump_to_prompt,
         .write_scrollback_file,
         .goto_tab,
         .resize_split,
@@ -791,4 +815,22 @@ test "command defaults expose exactly one elevated window action" {
         }
     }
     try std.testing.expectEqual(@as(usize, 1), count);
+}
+
+test "command defaults expose last-command and prompt navigation verbs" {
+    const expected = [_]Action{
+        .{ .jump_to_prompt = -1 },
+        .{ .jump_to_prompt = 1 },
+        .copy_last_command_output,
+        .rerun_last_command,
+    };
+    var found = [_]bool{false} ** expected.len;
+
+    for (defaults) |cmd| {
+        for (expected, 0..) |action, i| {
+            if (cmd.action.equal(action)) found[i] = true;
+        }
+    }
+
+    for (found) |value| try std.testing.expect(value);
 }

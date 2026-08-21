@@ -349,6 +349,14 @@ pub const Action = union(enum) {
     /// Copy the selected text to the clipboard.
     copy_to_clipboard: CopyToClipboard,
 
+    /// Copy the output of the most recent command completed by shell
+    /// integration to the default clipboard.
+    copy_last_command_output,
+
+    /// Re-run the most recent single-line command recoverable from shell
+    /// integration. This never reads or modifies the shell's line editor.
+    rerun_last_command,
+
     /// Paste the contents of the default clipboard.
     paste_from_clipboard,
 
@@ -1366,6 +1374,8 @@ pub const Action = union(enum) {
             .end_search,
             .reset,
             .copy_to_clipboard,
+            .copy_last_command_output,
+            .rerun_last_command,
             .copy_url_to_clipboard,
             .copy_title_to_clipboard,
             .paste_from_clipboard,
