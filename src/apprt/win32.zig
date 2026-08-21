@@ -910,8 +910,13 @@ const WHEEL_PAGESCROLL = 0xFFFF_FFFF;
 const ERROR_FILE_NOT_FOUND = 2;
 const PIPE_READMODE_BYTE = 0x00000000;
 const PIPE_WAIT = 0x00000000;
+const PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
 const PIPE_ACCESS_DUPLEX = 0x00000003;
 const PIPE_UNLIMITED_INSTANCES = 255;
+const ipc_server_pipe_mode = windows.PIPE_TYPE_BYTE |
+    PIPE_READMODE_BYTE |
+    win32_ipc.pipe_nowait |
+    PIPE_REJECT_REMOTE_CLIENTS;
 const ipc_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
 const ipc_pipe_prefix = "\\\\.\\pipe\\noctty.";
 
@@ -2136,7 +2141,7 @@ fn ipcServerMain(app: *App) void {
         const pipe = CreateNamedPipeW(
             pipe_name.ptr,
             PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+            ipc_server_pipe_mode,
             PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
             16 * 1024,
@@ -27129,6 +27134,7 @@ pub const Surface = struct {
         self.positionImeWindow();
     }
 
+    // Must route through formatFilePayload + surfaceDropPayloadCallback so paste protection applies.
     fn handleDropFiles(self: *Surface, wParam: WPARAM) void {
         if (!self.core_initialized) return;
         const hDrop: *anyopaque = @ptrFromInt(wParam);
@@ -27138,8 +27144,11 @@ pub const Surface = struct {
         if (file_count == 0) return;
 
         const alloc = self.app.core_app.alloc;
-        var result: std.ArrayListUnmanaged(u8) = .empty;
-        defer result.deinit(alloc);
+        var paths: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (paths.items) |path| alloc.free(path);
+            paths.deinit(alloc);
+        }
 
         var i: UINT = 0;
         while (i < file_count) : (i += 1) {
@@ -27152,46 +27161,21 @@ pub const Surface = struct {
             defer alloc.free(buf);
             _ = DragQueryFileW(hDrop, i, buf.ptr, wchar_len + 1);
 
-            // Convert UTF-16 to UTF-8
-            var utf8_buf: [1024]u8 = undefined;
-            const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, buf[0..wchar_len]) catch continue;
-            const path = utf8_buf[0..utf8_len];
-
-            // Add separator between multiple files
-            if (result.items.len > 0) {
-                result.append(alloc, ' ') catch continue;
-            }
-
-            // Quote paths containing spaces or special characters
-            const needs_quoting = std.mem.indexOfAny(u8, path, " \t'\"\\(){}[]$&;|<>!~`#") != null;
-            if (needs_quoting) {
-                result.append(alloc, '\'') catch continue;
-                // Escape any existing single quotes within the path
-                for (path) |c| {
-                    if (c == '\'') {
-                        result.appendSlice(alloc, "'\\''") catch continue;
-                    } else {
-                        result.append(alloc, c) catch continue;
-                    }
-                }
-                result.append(alloc, '\'') catch continue;
-            } else {
-                result.appendSlice(alloc, path) catch continue;
-            }
+            const path = std.unicode.utf16LeToUtf8Alloc(alloc, buf[0..wchar_len]) catch continue;
+            paths.append(alloc, path) catch {
+                alloc.free(path);
+                continue;
+            };
         }
 
-        if (result.items.len == 0) return;
+        if (paths.items.len == 0) return;
+        const payload = win32_surface_drop.formatFilePayload(alloc, paths.items, .{}) catch |err| {
+            log.warn("win32 drop files format failed err={}", .{err});
+            return;
+        };
+        defer alloc.free(payload);
 
-        // Write the path(s) to the terminal via a synthetic key event
-        var event: input.KeyEvent = .{
-            .action = .press,
-            .key = .unidentified,
-            .mods = .{},
-        };
-        event.utf8 = result.items;
-        _ = self.core_surface.keyCallback(event) catch |err| {
-            log.err("win32 drop files failed err={}", .{err});
-        };
+        surfaceDropPayloadCallback(self, payload);
     }
 
     fn handleMouseMove(self: *Surface, lParam: LPARAM, mods: input.Mods) void {
@@ -32745,6 +32729,28 @@ test "win32 IPC silent client read is bounded" {
         error.IpcTimeout,
         win32_ipc.readExactWithTimeout(server, &byte, 10),
     );
+}
+
+test "security regression win32 IPC server pipe mode rejects remote clients" {
+    try std.testing.expectEqual(
+        @as(u32, PIPE_REJECT_REMOTE_CLIENTS),
+        @as(u32, ipc_server_pipe_mode & PIPE_REJECT_REMOTE_CLIENTS),
+    );
+}
+
+test "security regression win32 paste WM_DROPFILES matches OLE formatting and classifies metacharacters" {
+    const paths = [_][]const u8{
+        "C:\\Program Files\\noctty.txt",
+        "C:\\drop\\a& echo DROP_PROBE &.txt",
+    };
+    const payload = try win32_surface_drop.formatFilePayload(std.testing.allocator, &paths, .{});
+    defer std.testing.allocator.free(payload);
+
+    try std.testing.expectEqualStrings(
+        "\"C:\\Program Files\\noctty.txt\" \"C:\\drop\\a& echo DROP_PROBE &.txt\"",
+        payload,
+    );
+    try std.testing.expect(win32_paste_protection.inspect(payload).severity != .safe);
 }
 
 test "win32 win32_ipc.encodeListWindowsRequest preserves legacy zero-argc trailer" {

@@ -27,3 +27,5 @@ Include:
 This is a small maintained project, so response time is best-effort.
 Reports that are clear, reproducible, and scoped to this repository will
 be easier to triage quickly.
+
+See [the Win32 paste-path security audit](docs/security-audit-paste-paths.md) for the current source-to-sink review.

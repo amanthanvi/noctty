@@ -44,9 +44,12 @@ extern "C" {
  * Check if paste data is safe to paste into the terminal.
  *
  * Data is considered unsafe if it contains:
- * - Newlines (`\n`) which can inject commands
+ * - Newlines (`\n`) or carriage returns (`\r`) which can inject commands
  * - The bracketed paste end sequence (`\x1b[201~`) which can be used
  *   to exit bracketed paste mode and inject commands
+ *
+ * Noctty fork delta from upstream libghostty-vt: carriage returns are also
+ * rejected because a lone CR submits input in non-bracketed mode.
  *
  * This check is conservative and considers data unsafe regardless of
  * current terminal state.
