@@ -257,6 +257,8 @@ shell survived and the viewport repaints on a resize nudge. Green
 graduates durable-session planning (C16); red caps the aspiration
 honestly. Evidence:
 [durable-session-spike report](wayfinder/competitive-analysis/research/durable-session-spike.md).
+**Result (2026-08-21): GREEN; C16 may graduate to planning, while the
+XL implementation remains deferred and unscheduled.**
 
 ### C17 · Named layouts: profile + split tree + hotkey in one object — M · [#133](https://github.com/amanthanvi/noctty/issues/133)
 

@@ -317,3 +317,70 @@ only as an open proposal
 ([#20077](https://github.com/microsoft/terminal/issues/20077)). That is
 the line noctty would be crossing first among native Windows
 terminals.
+
+## Feasibility increment result (2026-08-21)
+
+**Verdict: GREEN.** The broker shape works on the tested Windows 25H2
+build 26200.9168. The opt-in `conpty-host` spike is one console
+executable with `serve` and `attach` modes. The host directly reuses
+`Pty.open` / `WindowsPty` from `src/pty.zig` and the ConPTY launch path
+in `src/Command.zig`, owns one `pwsh.exe`, drains ConPTY output on a
+dedicated thread even with no client, retains raw output in a
+preallocated 1 MiB overwrite ring, and accepts one client at a time on
+a `LOCAL` named pipe protected by an explicit current-user DACL and
+`PIPE_REJECT_REMOTE_CLIENTS`. Its deliberately disposable protocol has
+only attach, detach, resize, input, and output frames.
+
+`test/windows/conpty-host-spike.ps1` asserted the experiment end to
+end. It started and recorded every process it controlled; attached to
+the shell; recorded the shell PID and a shell variable; ran a
+five-second viewport-reporting command; force-killed the exact first
+client PID while that command was active; proved the shell PID remained
+live; attached a fresh client; resized from 80x24 to 100x31 and observed
+the running command repaint at 100x31; waited for that command to
+finish; queried and matched the original PID and variable; detached
+again; generated more than the 1 MiB ring capacity; and reattached to
+prove the detached command's completion sentinel existed before
+reattach, the client received at least the full 1 MiB retained replay,
+the newest marker and completion marker were present, and the oldest
+marker had been overwritten. Before that final attach, it required the
+host's drained-output total to remain unchanged for 750 ms after the
+shell wrote its out-of-band completion file, preventing trailing output
+from satisfying the marker assertions as live traffic instead of replay.
+It also checked every emitted ring stat for `retained <= capacity`,
+sampled host private memory throughout detached overflow, exercised the
+explicit detach frame, and cleaned up only retained process objects for
+recorded PIDs.
+
+The final hardened green run reported:
+
+```text
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":82080,"killed_client_pid":76568,"shell_pid":48160,"same_shell_pid":true,"shell_state_intact":true,"viewport_repaint":"100x31","detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2574025,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"host_private_baseline_bytes":21626880,"host_private_max_detached_bytes":21626880,"host_private_growth_bytes":0,"private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+reject-remote","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+```
+
+The memory claim is intentionally precise: total process private memory
+was 21,626,880 bytes before detached overflow, so the whole process was
+not and cannot be under a 1 MiB ring cap. The retained-output allocation
+never exceeded 1,048,576 bytes, and private-memory growth while draining
+at least 2,574,025 bytes detached was 0 bytes. This proves bounded retained
+output for this run, not a long-duration whole-process memory budget. An
+attached client also causes a transient, capacity-sized replay snapshot;
+the snapshot is copied under the ring mutex and sent after unlocking so a
+slow replay cannot stop the continuously running ConPTY drain thread.
+
+Residual unknowns remain product-sized: alt-screen TUI replay fidelity
+beyond the viewport-repaint probe; a stalled attached client can still
+monopolize the spike's single connection until it disconnects, although
+it no longer blocks ConPTY draining; multi-session and multi-client
+lifecycle; broker crashes; elevation and integrity-level separation;
+upgrade/protocol migration; long-duration memory behavior; and
+adversarial validation from another user or integrity level. The DACL
+construction was exercised only by the owning user. No application
+integration was attempted.
+
+The ceiling is unchanged and absolute: this design can survive UI
+restarts and crashes only while the broker remains alive in the same
+logon session. It can never survive logoff or reboot, and a broker crash
+still kills its ConPTY and shell. With that ceiling, deferred C16
+durable-session planning may graduate; the XL implementation remains
+unscheduled.
