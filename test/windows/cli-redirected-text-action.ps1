@@ -46,12 +46,16 @@ $process = Start-Process `
     -WindowStyle Hidden `
     -PassThru
 
+# Capture the handle while the process is still alive. Reading it after exit
+# can yield null, and the exit-code helper needs a real handle.
+$processHandle = $process.Handle
+
 try {
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         throw "Redirected CLI action did not exit within ${TimeoutSeconds}s. A dialog or hung child likely blocked completion."
     }
 
-    $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $process.Handle
+    $exitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
     if ($exitCode -ne 0) {
         throw "Redirected CLI action should exit with code 0, got $exitCode."
     }
