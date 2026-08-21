@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-21, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -31,9 +31,10 @@ paths, shells, updates, automation, and troubleshooting, see
   (all OSC 52 selectors target the single native Windows clipboard).
 - Bidi, combining marks, grapheme cluster rendering.
 - Kitty graphics protocol and inline image display.
-- Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
-  (PowerShell through `shell-integration = detect`); `cmd.exe` is a
-  plain fallback without prompt/cwd/command-finish integration.
+- Shell integration for bash, zsh, fish, elvish, nushell, PowerShell, and
+  `cmd.exe` through automatic detection. Command Prompt gets prompt/cwd marks
+  from `PROMPT`; Clink adds command-start/finish marks and exit codes when
+  present.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained for Zig and C consumers.
 
