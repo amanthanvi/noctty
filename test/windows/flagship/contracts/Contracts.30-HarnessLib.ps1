@@ -217,6 +217,38 @@ foreach ($source in $resolutionSourceAsts) {
     }
 }
 $interactiveWin11LibAst = @($resolutionSourceAsts | Where-Object { $_.Path -eq $interactiveWin11Lib })[0].Ast
+$waitUntilFunctions = @($interactiveWin11LibAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Wait-InteractiveWin11Until'
+}, $true))
+if ($waitUntilFunctions.Count -ne 1) {
+    throw 'Interactive harness library must own exactly one Wait-InteractiveWin11Until function.'
+}
+. ([scriptblock]::Create($waitUntilFunctions[0].Extent.Text))
+$waitUntilCurrentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+try {
+    & {
+        $Process = 'caller-process-sentinel'
+        Wait-InteractiveWin11Until `
+            -Condition { $Process -ceq 'caller-process-sentinel' } `
+            -Description 'caller Process binding contract' `
+            -Deadline ([DateTime]::UtcNow.AddSeconds(1)) `
+            -PollMilliseconds 1 `
+            -ConditionFirst `
+            -TimeoutMessage 'Wait-InteractiveWin11Until shadowed the caller Process variable.'
+    }
+    Wait-InteractiveWin11Until `
+        -Condition { $true } `
+        -Description 'Process alias binding contract' `
+        -Deadline ([DateTime]::UtcNow.AddSeconds(1)) `
+        -Process $waitUntilCurrentProcess `
+        -ConditionFirst
+}
+finally {
+    $waitUntilCurrentProcess.Dispose()
+    Remove-Item -LiteralPath Function:\Wait-InteractiveWin11Until -ErrorAction SilentlyContinue
+}
 $harnessMainFunctions = @($interactiveWin11LibAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

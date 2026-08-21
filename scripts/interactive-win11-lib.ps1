@@ -610,7 +610,7 @@ function Wait-InteractiveWin11Until {
         [Parameter(Mandatory)] [scriptblock] $Condition,
         [Parameter(Mandatory)] [string] $Description,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process,
+        [Alias('Process')] [System.Diagnostics.Process] $WatchProcess,
         [ValidateRange(1, [int]::MaxValue)] [int] $PollMilliseconds = 100,
         [string] $TimeoutMessage,
         [switch] $ConditionFirst
@@ -618,8 +618,8 @@ function Wait-InteractiveWin11Until {
 
     if ($ConditionFirst) {
         while ($true) {
-            if ($null -ne $Process -and $Process.HasExited) {
-                throw "noctty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+            if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
+                throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
             }
 
             if (& $Condition) {
@@ -634,8 +634,8 @@ function Wait-InteractiveWin11Until {
     }
     else {
     while ($true) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "noctty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+        if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
+            throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
         }
 
         if ([DateTime]::UtcNow -ge $Deadline) {
