@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" class="nc-no-js" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Noctty — a native Windows terminal</title>
+  <title>Noctty, a native Windows terminal</title>
   <meta name="description" content="Noctty is a native Windows terminal built on Ghostty's terminal core: tabs, splits, session restoration, a keyboard-driven palette, and Authenticode-signed x64 and ARM64 releases." />
   <meta name="robots" content="index, follow" />
   <meta name="theme-color" content="#05060d" media="(prefers-color-scheme: dark)" />
@@ -11,7 +11,7 @@
   <link rel="canonical" href="https://noctty.com/" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Noctty" />
-  <meta property="og:title" content="Noctty — a native Windows terminal" />
+  <meta property="og:title" content="Noctty, a native Windows terminal" />
   <meta property="og:description" content="Tabs, splits, session restoration, and a keyboard-driven palette in a signed native Win32 app, built on Ghostty's terminal core." />
   <meta property="og:url" content="https://noctty.com/" />
   <meta property="og:image" content="https://noctty.com/assets/noctty-social.jpg" />
@@ -20,16 +20,17 @@
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="The Noctty crescent mark under a night sky, with the line: a native Windows terminal, built for the night shift." />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Noctty — a native Windows terminal" />
+  <meta name="twitter:title" content="Noctty, a native Windows terminal" />
   <meta name="twitter:description" content="Tabs, splits, session restoration, and a keyboard-driven palette in a signed native Win32 app, built on Ghostty's terminal core." />
   <meta name="twitter:image" content="https://noctty.com/assets/noctty-social.jpg" />
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="styles.css?v=60821c5f5874272c5c0b0946c6df598e901972519ec6e429d7bcdcc9291e43c1" />
+  <link rel="stylesheet" href="styles.css?v=f20a9b90c2eece8fabe746b5c1a98e6ed2cb7530cee9288f3f0328857e483bee" />
   <script>
     (function () {
       var root = document.documentElement;
+      root.className = root.className.replace(/nc-no-js/, "nc-js");
       try {
         var stored = localStorage.getItem("nc-theme");
         if (!stored) {
@@ -82,36 +83,25 @@
 
       <div class="nc-shell nc-hero__grid">
         <div class="nc-hero__copy">
-          <p class="nc-chip nc-rise">
-            <span class="nc-sr-only" id="nc-version-summary">Version 1.3.123, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
-            <span aria-hidden="true"><span class="nc-chip__version" id="nc-version">v1.3.123</span></span>
-            <span class="nc-chip__latest" aria-hidden="true">latest</span>
-            <span class="nc-chip__sep" aria-hidden="true"></span>
-            <span aria-hidden="true">Win 10/11</span>
-            <span class="nc-chip__sep" aria-hidden="true"></span>
-            <span aria-hidden="true">x64 + ARM64</span>
+          <h1 class="nc-hero__title" id="hero-title">A native terminal for Windows.</h1>
+
+          <p class="nc-hero__lede">
+            Noctty runs Ghostty's terminal core inside a Win32 app. It has tabs,
+            splits, and a command palette. Close it and open it again and the
+            layout is still there.
           </p>
 
-          <h1 class="nc-hero__title nc-rise nc-rise--2" id="hero-title">
-            Work through<span class="nc-hero__title-dim"> the night.</span>
-          </h1>
-
-          <p class="nc-hero__lede nc-rise nc-rise--3">
-            <strong>Noctty is a native Windows terminal</strong> built on Ghostty's
-            terminal core. Tabs and splits, a layout that survives restarts, and a
-            palette that reaches every action — in a signed Win32 app that starts
-            fast and gets out of your way.
-          </p>
-          <p class="nc-hero__formerly nc-rise nc-rise--3">Noctty — formerly WingHostty</p>
-
-          <div class="nc-hero__actions nc-rise nc-rise--4">
+          <div class="nc-hero__actions">
             <a class="nc-button nc-button--primary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">
               Download for Windows
             </a>
-            <a class="nc-button nc-button--ghost" href="#install">Package managers</a>
+            <span class="nc-hero__meta">
+              <span class="nc-sr-only" id="nc-version-summary">Version 1.3.123, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
+              <span aria-hidden="true"><span id="nc-version">v1.3.123</span>, Windows 10 and 11, x64 and ARM64</span>
+            </span>
           </div>
 
-          <div class="nc-install nc-install--hero nc-rise nc-rise--4">
+          <div class="nc-install">
             <div class="nc-install__row">
               <span class="nc-install__sigil" aria-hidden="true">$</span>
               <code class="nc-install__command" id="nc-install-command">winget install AmanThanvi.noctty</code>
@@ -139,9 +129,9 @@
           </div>
         </div>
 
-        <div class="nc-window nc-rise nc-rise--3" data-nc-terminal>
+        <div class="nc-window" data-nc-terminal>
           <div class="nc-window__bar">
-            <span class="nc-window__title">noctty — PowerShell</span>
+            <span class="nc-window__title">noctty, PowerShell</span>
             <button type="button" class="nc-window__motion" data-nc-motion>Pause</button>
             <span class="nc-window__dots" aria-hidden="true">
               <span class="nc-window__dot"></span>
@@ -152,210 +142,139 @@
           <div class="nc-terminal__body" role="log" aria-live="off" tabindex="0" aria-label="Terminal demo output">
             <noscript>
               <p><span class="nc-terminal__prompt">PS C:\Users\dev&gt;</span><span class="nc-terminal__live">winget install AmanThanvi.noctty</span></p>
-              <div class="nc-terminal__line nc-terminal__line--dim">→ Installs the signed x64 or ARM64 build for Windows 10 and 11.</div>
+              <div class="nc-terminal__line nc-terminal__line--dim">Installs the signed x64 or ARM64 build for Windows 10 and 11.</div>
             </noscript>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="nc-assurance" aria-labelledby="assurance-title">
-      <h2 class="nc-sr-only" id="assurance-title">Release assurances</h2>
-      <ul class="nc-shell nc-assurance__list" role="list">
-        <li class="nc-assurance__item">
-          <svg class="nc-assurance__icon" width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M10 2.5 16 5v4.6c0 3.7-2.4 6.9-6 7.9-3.6-1-6-4.2-6-7.9V5l6-2.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
-            <path d="m7.4 9.9 1.9 1.9 3.4-3.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-          <div>
-            <p class="nc-assurance__title">Signed installers</p>
-            <p class="nc-assurance__note">Installers and binaries are Authenticode-signed. SmartScreen may still warn while reputation builds.</p>
-          </div>
-        </li>
-        <li class="nc-assurance__item">
-          <svg class="nc-assurance__icon" width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <rect x="3" y="4.5" width="14" height="11" rx="1.6" stroke="currentColor" stroke-width="1.4" />
-            <path d="M7 15.5v2M13 15.5v2M6.5 17.5h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-          </svg>
-          <div>
-            <p class="nc-assurance__title">x64 and ARM64</p>
-            <p class="nc-assurance__note">Native builds for both architectures, each exercised by CI on every change.</p>
-          </div>
-        </li>
-        <li class="nc-assurance__item">
-          <svg class="nc-assurance__icon" width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M3.2 3.2 16.8 16.8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.4" />
-          </svg>
-          <div>
-            <p class="nc-assurance__title">No telemetry</p>
-            <p class="nc-assurance__note">No analytics. The only network call is the update check you can turn off.</p>
-          </div>
-        </li>
-        <li class="nc-assurance__item">
-          <svg class="nc-assurance__icon" width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-            <path d="M4 3.5h8.5L16 7v9.5H4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
-            <path d="M12 3.5V7h4" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
-          </svg>
-          <div>
-            <p class="nc-assurance__title">MIT licensed</p>
-            <p class="nc-assurance__note">Source, build scripts, and release automation are public on GitHub.</p>
-          </div>
-        </li>
-      </ul>
+    <section class="nc-facts" aria-labelledby="facts-title">
+      <h2 class="nc-sr-only" id="facts-title">What ships</h2>
+      <dl class="nc-shell nc-facts__list">
+        <div class="nc-facts__row">
+          <dt>signing</dt>
+          <dd>Authenticode, both architectures. SmartScreen can still warn while reputation builds.</dd>
+        </div>
+        <div class="nc-facts__row">
+          <dt>builds</dt>
+          <dd>x64 and ARM64, each one exercised by CI on every change.</dd>
+        </div>
+        <div class="nc-facts__row">
+          <dt>network</dt>
+          <dd>One update check against GitHub Releases. No telemetry, no analytics.</dd>
+        </div>
+        <div class="nc-facts__row">
+          <dt>license</dt>
+          <dd>MIT. Source, build scripts, and release automation are public.</dd>
+        </div>
+      </dl>
     </section>
 
     <section class="nc-shell nc-section" id="capabilities" aria-labelledby="capabilities-title">
-      <div class="nc-section__head">
-        <p class="nc-eyebrow">Built for long sessions</p>
-        <h2 class="nc-section__title" id="capabilities-title">What Noctty does well</h2>
-        <p class="nc-section__intro">
-          The terminal core comes from Ghostty. The Windows application around it —
-          windowing, session handling, settings, and the updater — is this project's
-          own work, written for how Windows actually behaves.
-        </p>
-      </div>
+      <h2 class="nc-section__title" id="capabilities-title">Tabs and splits</h2>
 
-      <article class="nc-capability">
-        <div class="nc-capability__copy">
-          <h3 class="nc-capability__name">Session restoration</h3>
-          <p class="nc-capability__body">
+      <figure class="nc-figure">
+        <img class="nc-shot nc-specimen" src="assets/app-window.webp" width="1600" height="290" loading="lazy" decoding="async"
+             alt="Noctty running on Windows with two tabs and a vertical split, each pane showing a PowerShell session listing project directories." />
+        <figcaption class="nc-figure__caption">Two tabs, one vertical split. Both come back on the next launch.</figcaption>
+      </figure>
+
+      <div class="nc-columns">
+        <div>
+          <h3>Session restoration</h3>
+          <p>
             Close Noctty and open it again to the same windows, tabs, and split
             layout. Working directories, profiles, and explicit titles come back
-            with them, so a restart costs you the reopen, not the rebuild.
+            with them.
+            Each pane can run its own shell: PowerShell, cmd, Git Bash, or WSL
+            if you opt in.
           </p>
-          <ul class="nc-detail" role="list">
-            <li>Layout, working directories, and titles restore on launch</li>
-            <li>Per-profile shells: PowerShell, cmd, Git Bash, opt-in WSL</li>
-            <li>Pane contents return as clearly-marked snapshots</li>
-          </ul>
         </div>
-        <figure class="nc-figure">
-          <img class="nc-shot nc-specimen" src="assets/app-window.webp" width="1600" height="290" loading="lazy" decoding="async"
-               alt="Noctty running on Windows with two tabs and a vertical split, each pane showing a PowerShell session listing project directories." />
-          <figcaption class="nc-figure__caption">Two tabs and a vertical split, restored on launch.</figcaption>
-        </figure>
-      </article>
-
-      <article class="nc-capability nc-capability--reverse">
-        <div class="nc-capability__copy">
-          <h3 class="nc-capability__name">Universal palette</h3>
-          <p class="nc-capability__body">
-            One shortcut, then a few characters, reaches anything: an action, a tab,
-            a pane, a profile, a theme, or a setting. Fuzzy matching means you type
-            what you remember rather than where it lives.
+        <div>
+          <h3>Universal palette</h3>
+          <p>
+            One shortcut opens a list of everything you can do: actions, tabs,
+            panes, profiles, themes, settings. Matching is fuzzy, so a partial
+            name finds the entry. Nothing in the list needs the mouse.
           </p>
-          <ul class="nc-detail" role="list">
-            <li>Actions, tabs, panes, profiles, themes, and settings in one list</li>
-            <li>Keyboard-first, with every entry reachable without the mouse</li>
-          </ul>
         </div>
-        <div class="nc-specimen" aria-hidden="true">
-          <div class="nc-palette__field">
-            <span class="nc-palette__caret">›</span>
-            <span>spl<span class="nc-palette__ghost">it right</span></span>
-            <span class="nc-palette__hint">Ctrl+Shift+P</span>
-          </div>
-          <ul class="nc-palette__list">
-            <li class="nc-palette__row nc-palette__row--active"><span><mark>Spl</mark>it pane right</span><span class="nc-palette__kbd">Ctrl+Shift+\</span></li>
-            <li class="nc-palette__row"><span><mark>Spl</mark>it pane down</span><span class="nc-palette__kbd">Ctrl+Shift+E</span></li>
-            <li class="nc-palette__row"><span><mark>Spl</mark>it: focus right pane</span><span class="nc-palette__kbd">Alt+→</span></li>
-            <li class="nc-palette__row"><span>Profile: PowerShell (<mark>spl</mark>it)</span><span class="nc-palette__kbd">↵</span></li>
-          </ul>
-        </div>
-      </article>
-
-      <article class="nc-capability">
-        <div class="nc-capability__copy">
-          <h3 class="nc-capability__name">Native settings</h3>
-          <p class="nc-capability__body">
-            A real settings window covers appearance, shells, keybindings, privacy,
-            and updates. Changes are staged and then written without rewriting the
-            unrelated lines of your config file.
+        <div>
+          <h3>Native settings</h3>
+          <p>
+            There is a settings window for appearance, shells, keybindings,
+            privacy, and updates. It stages your changes and writes only the
+            lines you touched, so comments and ordering survive. The file is at
+            <code>%LOCALAPPDATA%\noctty\config.ghostty</code>
+            if you would rather edit it directly.
           </p>
-          <ul class="nc-detail" role="list">
-            <li>Edits stay surgical: your comments and ordering survive</li>
-            <li>Config lives at <code>%LOCALAPPDATA%\noctty\config.ghostty</code></li>
-            <li>Updates are checked, verified, then applied when you say so</li>
-          </ul>
         </div>
-        <div class="nc-specimen" aria-hidden="true">
-          <div class="nc-window__bar">
-            <span class="nc-window__title">noctty settings</span>
-          </div>
-          <ul class="nc-palette__list">
-            <li class="nc-palette__row">Appearance<span class="nc-palette__kbd">theme: nocturne</span></li>
-            <li class="nc-palette__row">Shells<span class="nc-palette__kbd">4 profiles</span></li>
-            <li class="nc-palette__row">Keybindings<span class="nc-palette__kbd">62 bound</span></li>
-            <li class="nc-palette__row nc-palette__row--active">Updates<span class="nc-palette__kbd">verify, then ask</span></li>
-            <li class="nc-palette__row">Privacy<span class="nc-palette__kbd">telemetry: none</span></li>
-          </ul>
+        <div>
+          <h3>Default keys</h3>
+          <table class="nc-keys">
+            <tbody>
+              <tr><th scope="row">Command palette</th><td>Ctrl+Shift+P</td></tr>
+              <tr><th scope="row">New tab</th><td>Ctrl+Shift+T</td></tr>
+              <tr><th scope="row">Split pane right</th><td>Ctrl+Shift+\</td></tr>
+              <tr><th scope="row">Split pane down</th><td>Ctrl+Shift+E</td></tr>
+              <tr><th scope="row">Move between panes</th><td>Alt+Arrow</td></tr>
+            </tbody>
+          </table>
         </div>
-      </article>
+      </div>
     </section>
 
     <section class="nc-shell nc-section" id="upstream" aria-labelledby="upstream-title">
-      <div class="nc-section__head">
-        <p class="nc-eyebrow">Honest about the parts</p>
-        <h2 class="nc-section__title" id="upstream-title">How it's built</h2>
-      </div>
+      <h2 class="nc-section__title" id="upstream-title">How it's built</h2>
 
-      <div class="nc-prose">
+      <div class="nc-columns">
         <div>
-          <h3>Ghostty's core, a Windows application</h3>
           <p>
-            Ghostty does not ship a Windows app today, so Noctty builds one around
-            Ghostty's terminal core. Parsing, fonts, rendering, input, and shell
-            integration are shared with upstream and track it closely.
+            Ghostty does not ship a Windows app today, so Noctty builds one
+            around Ghostty's terminal core. Parsing, fonts, rendering, input,
+            and shell integration are shared with upstream and track it closely.
           </p>
           <p>
             The Win32 runtime, windowing, tab and split management, the settings
             window, and the updater are this fork's own work. Noctty is an
-            independent project and is not affiliated with the Ghostty non-profit.
+            independent project and is not affiliated with the Ghostty
+            non-profit.
           </p>
         </div>
         <div>
-          <h3>What to expect</h3>
           <p>
-            Public releases run on Windows 10 and 11 for x64 and ARM64, with
-            Authenticode-signed installers and binaries. The project moves quickly,
-            so the release notes are worth reading before you update.
+            The project moves quickly, so the release notes are worth reading
+            before you update. An update is staged only after its signature and
+            checksum verify, and then it waits for you.
           </p>
-          <p>
-            There is no telemetry and there are no analytics. The only network
-            traffic is the update check against GitHub Releases, and an update is
-            staged only after its signature and checksum verify — then it waits for
-            you.
-          </p>
-          <div class="nc-note">
-            <strong>Accessibility is partial, not complete.</strong> Terminal text,
-            focus, selection, the command palette, and native settings controls have
-            UI Automation coverage today. Broader per-widget and screen-reader
+          <p class="nc-note">
+            Accessibility is partial, not complete. Terminal text, focus,
+            selection, the command palette, and native settings controls have UI
+            Automation coverage today. Broader per-widget and screen-reader
             validation is still in progress.
-          </div>
+          </p>
         </div>
       </div>
     </section>
 
-    <section class="nc-cta" id="install" aria-labelledby="install-title">
-      <div class="nc-shell">
-        <h2 class="nc-cta__title" id="install-title">Start tonight</h2>
-        <p class="nc-cta__sub">
-          Install with WinGet or Scoop, or take the signed installer straight from
-          the latest GitHub release. A portable zip ships with every release.
+    <section class="nc-shell nc-section nc-close" id="install" aria-labelledby="install-title">
+      <h2 class="nc-section__title" id="install-title">Install</h2>
+      <div class="nc-close__grid">
+        <pre class="nc-code"><code>winget install AmanThanvi.noctty
+
+scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty</code></pre>
+        <p class="nc-close__note">
+          Or take the signed installer straight from the
+          <a href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">latest release</a>.
+          A portable zip ships with every release, and
+          <a href="https://github.com/amanthanvi/noctty#getting-started" target="_blank" rel="noopener noreferrer">the setup guide</a>
+          covers first run.
         </p>
-        <div class="nc-cta__actions">
-          <a class="nc-button nc-button--primary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">
-            Download the latest release
-          </a>
-          <a class="nc-button nc-button--ghost" href="https://github.com/amanthanvi/noctty#getting-started" target="_blank" rel="noopener noreferrer">
-            Read the setup guide
-          </a>
-        </div>
-        <p class="nc-cta__fine">winget install AmanThanvi.noctty &nbsp;·&nbsp; scoop install noctty/noctty</p>
       </div>
     </section>
   </main>
+
 
   <footer class="nc-footer">
     <div class="nc-shell">

@@ -206,6 +206,15 @@ svg {
   background: color-mix(in srgb, var(--peri) 44%, transparent);
 }
 
+/* Controls that only work once the modules load stay hidden without JS,
+   rather than sitting there inert. */
+.nc-no-js .nc-theme-toggle,
+.nc-no-js .nc-install__copy,
+.nc-no-js .nc-install__methods,
+.nc-no-js .nc-window__motion {
+  display: none;
+}
+
 /* --------------------------------------------------------------- shared */
 
 .nc-shell {
@@ -240,14 +249,6 @@ svg {
 
 .nc-skip-link:focus {
   top: var(--space-md);
-}
-
-.nc-eyebrow {
-  font-family: var(--mono);
-  font-size: 12px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--moon-3);
 }
 
 .nc-clipboard-stage {
@@ -292,7 +293,6 @@ svg {
 }
 
 .nc-wordmark__mark {
-  filter: drop-shadow(0 2px 10px var(--glow));
 }
 
 .nc-nav {
@@ -342,7 +342,7 @@ svg {
 
 .nc-hero {
   position: relative;
-  padding-block: clamp(var(--space-2xl), 7vw, var(--space-4xl)) var(--space-3xl);
+  padding-block: clamp(var(--space-2xl), 5vw, var(--space-3xl)) var(--space-2xl);
   overflow: hidden;
   isolation: isolate;
 }
@@ -380,7 +380,7 @@ svg {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
   gap: clamp(var(--space-xl), 4vw, var(--space-3xl));
-  align-items: center;
+  align-items: start;
 }
 
 @media (max-width: 1000px) {
@@ -390,44 +390,10 @@ svg {
   }
 }
 
-.nc-chip {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-xs) var(--space-sm);
-  padding: 6px var(--space-sm);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink-850) 66%, transparent);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--moon-2);
-}
-
-.nc-chip__version {
-  color: var(--moon);
-  font-weight: 600;
-}
-
-.nc-chip__latest {
-  color: var(--aurora);
-}
-
-.nc-chip__sep {
-  width: 1px;
-  height: 11px;
-  background: var(--line);
-}
-
 .nc-hero__title {
   margin-top: var(--space-lg);
   font-size: clamp(2.9rem, 6.4vw, 5.1rem);
   letter-spacing: -0.038em;
-}
-
-.nc-hero__title-dim {
-  display: block;
-  color: var(--moon-3);
 }
 
 .nc-hero__lede {
@@ -440,13 +406,6 @@ svg {
 .nc-hero__lede strong {
   color: var(--moon);
   font-weight: 600;
-}
-
-.nc-hero__formerly {
-  margin-top: var(--space-sm);
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--moon-3);
 }
 
 .nc-hero__actions {
@@ -475,14 +434,12 @@ svg {
 }
 
 .nc-button--primary {
-  background: linear-gradient(180deg, var(--peri) 0%, var(--peri-deep) 100%);
+  background: var(--peri);
   color: var(--on-accent);
-  box-shadow: 0 10px 30px -12px color-mix(in srgb, var(--peri) 70%, transparent);
 }
 
 .nc-button--primary:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 16px 38px -14px color-mix(in srgb, var(--peri) 80%, transparent);
+  background: var(--peri-deep);
   color: var(--on-accent);
 }
 
@@ -501,21 +458,16 @@ svg {
 /* --------------------------------------------------------------- instal */
 
 .nc-install {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--ink-850) 78%, transparent);
-  overflow: hidden;
-}
-
-.nc-install--hero {
   margin-top: var(--space-md);
+  border-top: 1px solid var(--line-soft);
+  padding-top: var(--space-sm);
 }
 
 .nc-install__row {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 9px var(--space-sm) 9px var(--space-md);
+  padding: 0;
 }
 
 .nc-install__sigil {
@@ -579,7 +531,7 @@ svg {
 .nc-install__methods {
   display: flex;
   gap: var(--space-2xs);
-  padding: 0 var(--space-xs) var(--space-xs);
+  padding: var(--space-xs) 0 0;
 }
 
 .nc-method {
@@ -675,7 +627,7 @@ svg {
 
 .nc-terminal__body {
   padding: var(--space-md) var(--space-lg) var(--space-xl);
-  min-height: 244px;
+  min-height: 188px;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.72;
@@ -733,89 +685,21 @@ svg {
 
 /* ------------------------------------------------------------ assurance */
 
-.nc-assurance {
-  border-block: 1px solid var(--line-soft);
-  background: color-mix(in srgb, var(--ink-900) 60%, transparent);
-}
-
-.nc-assurance__list {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.nc-assurance__item {
-  padding: var(--space-lg) var(--space-lg) var(--space-lg) 0;
-  display: flex;
-  gap: var(--space-sm);
-  align-items: flex-start;
-}
-
-.nc-assurance__item + .nc-assurance__item {
-  border-left: 1px solid var(--line-soft);
-  padding-left: var(--space-lg);
-}
-
 @media (max-width: 860px) {
-  .nc-assurance__list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .nc-assurance__item:nth-child(odd) {
-    border-left: 0;
-    padding-left: 0;
-  }
-
-  .nc-assurance__item:nth-child(n + 3) {
-    border-top: 1px solid var(--line-soft);
-  }
 }
 
 @media (max-width: 520px) {
-  .nc-assurance__list {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .nc-assurance__item {
-    border-left: 0 !important;
-    padding-left: 0 !important;
-  }
-
-  .nc-assurance__item + .nc-assurance__item {
-    border-top: 1px solid var(--line-soft);
-  }
-}
-
-.nc-assurance__icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--aurora);
-}
-
-.nc-assurance__title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--moon);
-}
-
-.nc-assurance__note {
-  margin-top: 2px;
-  font-size: 13px;
-  color: var(--moon-3);
-  line-height: 1.5;
 }
 
 /* -------------------------------------------------------------- section */
 
 .nc-section {
-  padding-block: clamp(var(--space-3xl), 8vw, var(--space-4xl));
+  padding-block: clamp(var(--space-2xl), 5vw, var(--space-3xl));
 }
 
-.nc-section__head {
-  max-width: 62ch;
-  margin-bottom: var(--space-2xl);
+.nc-section + .nc-section,
+.nc-facts + .nc-section {
+  border-top: 1px solid var(--line-soft);
 }
 
 .nc-section__title {
@@ -823,83 +707,9 @@ svg {
   font-size: clamp(1.9rem, 3.4vw, 2.9rem);
 }
 
-.nc-section__intro {
-  margin-top: var(--space-md);
-  font-size: 1.05rem;
-  color: var(--moon-2);
-  max-width: 60ch;
-}
-
 /* ------------------------------------------------------------ narrative */
 
-.nc-capability {
-  display: grid;
-  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: clamp(var(--space-xl), 4vw, var(--space-3xl));
-  align-items: center;
-  padding-block: var(--space-3xl);
-  border-top: 1px solid var(--line-soft);
-}
-
-.nc-capability:last-of-type {
-  padding-bottom: 0;
-}
-
-.nc-capability--reverse .nc-capability__copy {
-  order: 2;
-}
-
 @media (max-width: 900px) {
-  .nc-capability {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-xl);
-    padding-block: var(--space-2xl);
-  }
-
-  .nc-capability--reverse .nc-capability__copy {
-    order: 0;
-  }
-}
-
-.nc-capability__name {
-  font-size: clamp(1.45rem, 2.4vw, 1.95rem);
-  letter-spacing: -0.028em;
-}
-
-.nc-capability__body {
-  margin-top: var(--space-md);
-  color: var(--moon-2);
-  max-width: 52ch;
-}
-
-.nc-capability__body + .nc-capability__body {
-  margin-top: var(--space-sm);
-}
-
-.nc-detail {
-  margin: var(--space-lg) 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: var(--space-xs);
-}
-
-.nc-detail li {
-  display: flex;
-  gap: var(--space-sm);
-  align-items: baseline;
-  font-size: 14.5px;
-  color: var(--moon-2);
-}
-
-.nc-detail li::before {
-  content: "";
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--peri);
-  transform: translateY(-2px);
 }
 
 /* Rendered UI specimens (real geometry, not screenshots of nothing). */
@@ -910,75 +720,6 @@ svg {
   background: color-mix(in srgb, var(--ink-900) 88%, transparent);
   box-shadow: 0 30px 70px -44px rgba(0, 0, 0, 0.9);
   overflow: hidden;
-}
-
-.nc-palette__field {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-md) var(--space-lg);
-  border-bottom: 1px solid var(--line-soft);
-  font-family: var(--mono);
-  font-size: 14px;
-  color: var(--moon);
-}
-
-.nc-palette__hint {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--moon-3);
-}
-
-.nc-palette__caret {
-  color: var(--peri);
-}
-
-.nc-palette__ghost {
-  color: var(--moon-3);
-}
-
-.nc-palette__list {
-  margin: 0;
-  padding: var(--space-xs);
-  list-style: none;
-}
-
-.nc-palette__row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 9px var(--space-md);
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-  color: var(--moon-2);
-}
-
-.nc-palette__row--active {
-  background: color-mix(in srgb, var(--peri) 15%, transparent);
-  color: var(--moon);
-}
-
-.nc-palette__row mark {
-  background: transparent;
-  color: var(--peri);
-  font-weight: 600;
-}
-
-.nc-palette__row > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.nc-palette__kbd {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--moon-3);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 6px;
 }
 
 .nc-shot {
@@ -1000,42 +741,15 @@ svg {
 
 /* --------------------------------------------------------------- upstream */
 
-.nc-prose {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: clamp(var(--space-xl), 4vw, var(--space-3xl));
-}
-
 @media (max-width: 860px) {
-  .nc-prose {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-xl);
-  }
-}
-
-.nc-prose p {
-  color: var(--moon-2);
-  max-width: 62ch;
-}
-
-.nc-prose p + p {
-  margin-top: var(--space-md);
-}
-
-.nc-prose h3 {
-  font-size: 1.15rem;
-  letter-spacing: -0.02em;
-  margin-bottom: var(--space-sm);
 }
 
 .nc-note {
   margin-top: var(--space-lg);
-  padding: var(--space-md) var(--space-lg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--ink-850) 60%, transparent);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--line-soft);
   font-size: 14.5px;
-  color: var(--moon-2);
+  color: var(--moon-3);
 }
 
 .nc-note strong {
@@ -1043,41 +757,6 @@ svg {
 }
 
 /* ----------------------------------------------------------------- cta */
-
-.nc-cta {
-  position: relative;
-  padding-block: clamp(var(--space-3xl), 7vw, var(--space-4xl));
-  border-top: 1px solid var(--line-soft);
-  background:
-    radial-gradient(120% 140% at 50% 0%, color-mix(in srgb, var(--peri) 11%, transparent) 0%, transparent 62%),
-    var(--ink-900);
-  text-align: center;
-}
-
-.nc-cta__title {
-  font-size: clamp(2rem, 4vw, 3.1rem);
-}
-
-.nc-cta__sub {
-  margin: var(--space-md) auto 0;
-  max-width: 52ch;
-  color: var(--moon-2);
-}
-
-.nc-cta__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  justify-content: center;
-  margin-top: var(--space-xl);
-}
-
-.nc-cta__fine {
-  margin-top: var(--space-lg);
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--moon-3);
-}
 
 /* -------------------------------------------------------------- footer */
 
@@ -1158,43 +837,145 @@ svg {
 
 /* One authored moment: the page rises out of the dark on first paint. */
 @media (prefers-reduced-motion: no-preference) {
-  .nc-rise {
-    animation: nc-rise 900ms var(--ease-out) both;
-  }
-
-  .nc-rise--2 {
-    animation-delay: 90ms;
-  }
-
-  .nc-rise--3 {
-    animation-delay: 170ms;
-  }
-
-  .nc-rise--4 {
-    animation-delay: 240ms;
-  }
-
   .nc-hero__sky {
     animation: nc-sky 1600ms var(--ease-out) both;
   }
 }
 
-@keyframes nc-rise {
-  from {
-    opacity: 0;
-    transform: translateY(14px);
-    filter: blur(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-    filter: none;
+/* Release facts read as a spec sheet, not a row of icon cards. */
+.nc-facts {
+  border-block: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--ink-900) 55%, transparent);
+}
+
+.nc-facts__list {
+  margin-block: 0;
+  padding-block: var(--space-lg);
+}
+
+.nc-facts__row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: var(--space-lg);
+  padding-block: var(--space-xs);
+  align-items: baseline;
+}
+
+.nc-facts__row dt {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--moon-3);
+}
+
+.nc-facts__row dd {
+  margin: 0;
+  font-size: 15px;
+  color: var(--moon-2);
+}
+
+@media (max-width: 620px) {
+  .nc-facts__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+    padding-block: var(--space-sm);
   }
 }
 
-@keyframes nc-sky {
-  from {
-    opacity: 0;
-    transform: scale(1.06);
+.nc-hero__meta {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--moon-3);
+}
+
+.nc-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2xl) clamp(var(--space-xl), 5vw, var(--space-3xl));
+  margin-top: var(--space-xl);
+}
+
+@media (max-width: 820px) {
+  .nc-columns {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-xl);
   }
+}
+
+.nc-columns h3 {
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-sm);
+}
+
+.nc-columns p {
+  color: var(--moon-2);
+  max-width: 60ch;
+}
+
+.nc-columns p + p {
+  margin-top: var(--space-md);
+}
+
+.nc-columns code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  color: var(--moon);
+}
+
+.nc-keys {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14.5px;
+}
+
+.nc-keys th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--moon-2);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.nc-keys td {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--moon-3);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+
+.nc-close__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: clamp(var(--space-xl), 4vw, var(--space-3xl));
+  align-items: start;
+  margin-top: var(--space-xl);
+}
+
+@media (max-width: 820px) {
+  .nc-close__grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-lg);
+  }
+}
+
+.nc-code {
+  margin: 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.9;
+  color: var(--moon);
+  overflow-x: auto;
+}
+
+.nc-close__note {
+  color: var(--moon-2);
+  max-width: 46ch;
+}
+
+.nc-section__title {
+  font-size: clamp(1.7rem, 3vw, 2.4rem);
 }

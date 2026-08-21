@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en" class="nc-no-js" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,10 +10,11 @@
   <meta name="theme-color" content="#f7f5ed" media="(prefers-color-scheme: light)" />
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/styles.css?v=60821c5f5874272c5c0b0946c6df598e901972519ec6e429d7bcdcc9291e43c1" />
+  <link rel="stylesheet" href="/styles.css?v=f20a9b90c2eece8fabe746b5c1a98e6ed2cb7530cee9288f3f0328857e483bee" />
   <script>
     (function () {
       var root = document.documentElement;
+      root.className = root.className.replace(/nc-no-js/, "nc-js");
       try {
         var stored = localStorage.getItem("nc-theme");
         if (!stored) {
