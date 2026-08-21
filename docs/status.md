@@ -33,8 +33,8 @@ paths, shells, updates, automation, and troubleshooting, see
 - Kitty graphics protocol and inline image display.
 - Shell integration for bash, zsh, fish, elvish, nushell, PowerShell, and
   `cmd.exe` through automatic detection. Command Prompt gets prompt/cwd marks
-  from `PROMPT`; Clink adds command-start/finish marks and exit codes when
-  present.
+  from `PROMPT`; active Clink adds command-start/finish marks and exit codes
+  when the shipped script is loaded.
 - Live config reload via keybind (`Ctrl+Shift+,`).
 - `libghostty-vt` retained for Zig and C consumers.
 
