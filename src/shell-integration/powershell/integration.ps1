@@ -1,7 +1,10 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
 
-if ($env:GHOSTTY_UTF8_CONSOLE -eq '1') {
+$ghosttyUtf8Console = $env:GHOSTTY_UTF8_CONSOLE
+Remove-Item Env:GHOSTTY_UTF8_CONSOLE -ErrorAction SilentlyContinue
+
+if ($ghosttyUtf8Console -eq '1') {
     try {
         if (([Console]::InputEncoding.CodePage -ne 65001) -or
             ([Console]::OutputEncoding.CodePage -ne 65001)) {

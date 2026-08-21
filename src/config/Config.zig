@@ -3176,8 +3176,9 @@ keybind: Keybinds = .{},
 /// hard-fail attachment to make descendant cleanup deterministic.
 @"windows-job-object-kill-on-close": bool = false,
 
-/// Controls the Windows console UTF-8 preamble for interactive Command Prompt
-/// and PowerShell sessions. This has no effect on WSL or Git Bash sessions.
+/// Controls Windows console UTF-8 setup for bare interactive Command Prompt
+/// launches and interactive PowerShell sessions. This has no effect on WSL or
+/// Git Bash sessions.
 ///
 /// The available modes are:
 ///
@@ -3189,11 +3190,12 @@ keybind: Keybinds = .{},
 ///   * `never` - Do not set an environment signal, change Command Prompt
 ///     arguments, or alter PowerShell console encodings.
 ///
-/// Both `auto` and `always` skip the preamble when either code page is already
-/// 65001. For a bare interactive `cmd.exe`, the preamble runs `chcp 65001`
-/// silently before the prompt. For interactive Windows PowerShell 5.1 and
-/// PowerShell 7 (`pwsh`), the existing shell integration sets both
-/// `[Console]::InputEncoding` and `[Console]::OutputEncoding` to UTF-8.
+/// For a bare interactive `cmd.exe`, the preamble runs `chcp 65001` silently
+/// before the prompt and is a no-op when the live console is already UTF-8;
+/// cmd launches with any command tail are left unchanged. For interactive
+/// Windows PowerShell 5.1 and PowerShell 7 (`pwsh`), the existing shell
+/// integration sets both `[Console]::InputEncoding` and
+/// `[Console]::OutputEncoding` to UTF-8 only when their live code pages differ.
 @"utf8-console": Utf8Console = .auto,
 
 /// Retained compatibility settings from the removed GTK runtime.
