@@ -4,7 +4,7 @@ const std = @import("std");
 const schema = @import("win32_session_state.zig");
 const Allocator = std.mem.Allocator;
 
-pub const default_max_state_bytes: usize = 1024 * 1024;
+pub const default_max_state_bytes: usize = schema.default_max_state_bytes;
 
 pub const LoadResult = union(enum) {
     missing,

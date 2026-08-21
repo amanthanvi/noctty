@@ -105,10 +105,12 @@ test "is_safe with safe data" {
     try testing.expect(is_safe(safe.ptr, safe.len));
 }
 
-test "is_safe with newline" {
+test "is_safe with newline and carriage return" {
     const testing = std.testing;
-    const unsafe = "hello\nworld";
-    try testing.expect(!is_safe(unsafe.ptr, unsafe.len));
+    const newline = "hello\nworld";
+    try testing.expect(!is_safe(newline.ptr, newline.len));
+    const carriage_return = "hello\rworld";
+    try testing.expect(!is_safe(carriage_return.ptr, carriage_return.len));
 }
 
 test "is_safe with bracketed paste end" {

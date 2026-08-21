@@ -238,6 +238,32 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(!isSafeAutomationAction(.{ .crash = .main }));
 }
 
+fn fuzzAutomationActionParser(_: void, data: []const u8) !void {
+    if (input.Binding.Action.parse(data)) |action| {
+        const safe = isSafeAutomationAction(action);
+        if (std.mem.eql(u8, data, "new_tab")) try std.testing.expect(safe);
+        if (std.mem.startsWith(u8, data, "text:") or
+            std.mem.startsWith(u8, data, "csi:") or
+            std.mem.startsWith(u8, data, "esc:") or
+            std.mem.eql(u8, data, "paste_from_clipboard"))
+        {
+            try std.testing.expect(!safe);
+        }
+    } else |err| switch (err) {
+        error.InvalidAction, error.InvalidFormat => {},
+    }
+}
+
+test "fuzz automation action parser safety" {
+    try std.testing.fuzz({}, fuzzAutomationActionParser, .{ .corpus = &.{
+        "new_tab",
+        "text:echo unsafe",
+        "csi:0m",
+        "esc:c",
+        "paste_from_clipboard",
+    } });
+}
+
 test "automation-action surface id targets reject app scoped actions" {
     const action = try input.Binding.Action.parse("quit");
     try std.testing.expectEqual(input.Binding.Action.Scope.app, action.scope());
