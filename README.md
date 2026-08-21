@@ -142,8 +142,8 @@ GitHub Issues are reserved for reproducible bugs.
 ## Privacy, updates, and crashes
 
 noctty sends no telemetry and no analytics. The only outbound
-network activity is the GitHub Releases updater, and only when you
-enable `auto-update`. It checks at most once every 24 hours, can stage a
+network activity is the GitHub Releases updater, which runs once per
+launch unless you set `auto-update = off`. It checks at most once every 24 hours, can stage a
 verified installer in `download` mode, and never installs anything
 without you starting it.
 

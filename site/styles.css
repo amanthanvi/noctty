@@ -589,7 +589,8 @@ svg {
 
 .nc-terminal__body {
   padding: var(--space-md) var(--space-lg) var(--space-xl);
-  min-height: 156px;
+  height: clamp(200px, 26vh, 268px);
+  overflow-y: auto;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.72;
@@ -755,12 +756,6 @@ svg {
   padding-block: var(--space-4xl);
 }
 
-.nc-lost__code {
-  font-family: var(--mono);
-  font-size: 13px;
-  color: var(--aurora);
-}
-
 .nc-lost__title {
   font-size: clamp(2.2rem, 5vw, 3.4rem);
 }
@@ -880,54 +875,6 @@ svg {
   font-size: 0.9em;
   color: var(--moon);
   overflow-wrap: anywhere;
-}
-
-/* Keys sit in two pairs per row so the table stays short. */
-.nc-keys {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: var(--space-xl);
-  font-size: 14px;
-}
-
-.nc-keys th {
-  text-align: left;
-  font-weight: 400;
-  color: var(--moon-2);
-  padding: 8px var(--space-md) 8px 0;
-  border-top: 1px solid var(--line-soft);
-  white-space: nowrap;
-}
-
-.nc-keys td {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--moon-3);
-  padding: 8px var(--space-2xl) 8px 0;
-  border-top: 1px solid var(--line-soft);
-  white-space: nowrap;
-}
-
-@media (max-width: 760px) {
-  .nc-keys th,
-  .nc-keys td {
-    padding-right: var(--space-sm);
-  }
-
-  .nc-keys {
-    font-size: 13px;
-  }
-}
-
-/* Windows caption buttons, not macOS traffic lights. */
-.nc-window__controls {
-  display: inline-flex;
-  align-items: center;
-  color: var(--moon-3);
-}
-
-.nc-terminal__body:focus-visible {
-  outline-offset: -3px;
 }
 
 /* Keybindings as term/value pairs: correct semantics and they reflow. */

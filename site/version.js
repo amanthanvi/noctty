@@ -1,4 +1,4 @@
-// Release version chip: shows the compiled default immediately, then
+// Release version text: shows the compiled default immediately, then
 // refreshes from GitHub Releases when the browser is idle. Never downgrades
 // below the compiled version.
 
@@ -46,8 +46,8 @@ function cacheVersion(tag) {
 }
 
 function renderVersion(version) {
-  const chip = document.getElementById('nc-version');
-  if (chip) chip.textContent = `v${version}`;
+  const versionEl = document.getElementById('nc-version');
+  if (versionEl) versionEl.textContent = `v${version}`;
   const summary = document.getElementById('nc-version-summary');
   if (summary) {
     summary.textContent = `Version ${version}, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.`;

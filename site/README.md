@@ -10,12 +10,13 @@ dependency tree:
 - `404.html` - the not-found page
 - `styles.css` - the whole stylesheet, plain CSS with `nc-` prefixed classes
 - `app.js` - theme toggle (shared by both pages)
-- `version.js` - GitHub Releases version fetch for the hero chip
+- `version.js` - GitHub Releases version fetch for the hero version text
 - `install.js` - install-method switcher and clipboard copy
 - `terminal.js` - the scripted terminal demo (also imported by the Node tests)
 - `assets/` - favicon, self-hosted fonts, hero backdrop, app capture,
   and the social-preview image
-- `tests/` - `node --test` unit tests for the terminal module
+- `tests/` - `node --test` units: the terminal module, the asset builder,
+  and the inline theme bootstrap
 - `_headers` - Cloudflare Pages cache and browser security policy
 
 Both pages carry one byte-identical inline theme bootstrap, so the CSP pins
@@ -51,14 +52,14 @@ to Latin, self-hosted, and OFL-licensed; their licenses ship in `assets/fonts/`
 and are part of the deployed payload.
 
 **Structure.** Deliberately not a grid of identical feature cards. The hero
-pairs the claim with a live terminal; an assurance strip carries the release
-facts; three alternating capability blocks each show a real artifact (the app
-capture, a rendered palette, a rendered settings list); then the upstream
-relationship and accessibility status are stated plainly.
+pairs the claim with a live terminal demo; one compact line carries the release
+facts; then a single section leads with the app capture and follows it with
+three prose columns and the default keybindings; then the upstream relationship
+and accessibility status are stated plainly. Sections open on a hairline rule.
 
-**Motion.** One authored moment: the hero rises out of the dark on first paint
-while the sky settles. Everything is inside `prefers-reduced-motion:
-no-preference`, and the terminal demo has a visible Pause control.
+**Motion.** Almost none. The terminal demo types, and its caret blinks; both
+stop under `prefers-reduced-motion: reduce`, when the demo scrolls out of view,
+and when the visible Pause control is used. There is no entrance animation.
 
 **Imagery.** `hero-sky.webp` and the social card were generated with
 GPT-Image-2 and then cropped, darkened, and composited locally.
