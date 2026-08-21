@@ -11,3 +11,9 @@ pub const ProfileKind = enum {
     git_bash,
     cmd,
 };
+
+pub const Utf8Console = enum {
+    auto,
+    always,
+    never,
+};

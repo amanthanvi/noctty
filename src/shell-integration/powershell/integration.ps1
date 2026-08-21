@@ -1,6 +1,20 @@
 # Noctty shell integration for PowerShell 5.1+ / pwsh 7+
 # Emits OSC 133 (command marking) and OSC 7 (current working directory) sequences.
 
+if ($env:GHOSTTY_UTF8_CONSOLE -eq '1') {
+    try {
+        if (([Console]::InputEncoding.CodePage -ne 65001) -or
+            ([Console]::OutputEncoding.CodePage -ne 65001)) {
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            [Console]::InputEncoding = $utf8
+            [Console]::OutputEncoding = $utf8
+        }
+    } catch {
+        # Keep the rest of shell integration available if the host does not
+        # expose mutable console encodings.
+    }
+}
+
 $ESC = [char]27
 $BEL = [char]7
 

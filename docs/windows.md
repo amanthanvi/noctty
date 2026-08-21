@@ -78,6 +78,14 @@ working-directory updates and OSC 133 prompt markers. `cmd.exe` is a
 plain fallback shell today, with no automatic prompt, cwd, or
 command-finish integration.
 
+`utf8-console` controls a UTF-8 preamble for interactive `cmd.exe`, Windows
+PowerShell 5.1, and PowerShell 7 (`pwsh`) sessions. `auto` is the default and
+enables UTF-8 unless the machine ANSI or OEM code page is 932 (Shift-JIS), 936
+(GBK), 949 (EUC-KR), or 950 (Big5); `always` enables it despite that legacy-CJK
+guard, and `never` leaves the shell encoding unchanged. Sessions already using
+code page 65001 are left unchanged. This option does not apply to WSL or Git
+Bash.
+
 WSL shows up in the picker, but it never becomes the default shell
 implicitly, because `wsl.exe --status` can report a healthy installation
 even when launching a session would fail. To make it your default, opt

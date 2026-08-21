@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
+const win32 = @import("../os/windows.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
 const log = std.log.scoped(.windows_shell);
@@ -21,6 +22,39 @@ pub const DefaultShell = enum {
 };
 
 pub const ProfileKind = windows_shell_types.ProfileKind;
+pub const Utf8Console = windows_shell_types.Utf8Console;
+
+const utf8_code_page: u32 = 65001;
+const legacy_cjk_code_pages = [_]u32{ 932, 936, 949, 950 };
+
+pub fn shouldApplyUtf8Console(
+    mode: Utf8Console,
+    ansi_code_page: u32,
+    oem_code_page: u32,
+) bool {
+    if (ansi_code_page == utf8_code_page or oem_code_page == utf8_code_page) {
+        return false;
+    }
+
+    return switch (mode) {
+        .never => false,
+        .always => true,
+        .auto => !isLegacyCjkCodePage(ansi_code_page) and
+            !isLegacyCjkCodePage(oem_code_page),
+    };
+}
+
+pub fn shouldApplyUtf8ConsoleForCurrentSystem(mode: Utf8Console) bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    return shouldApplyUtf8Console(mode, win32.GetACP(), win32.GetOEMCP());
+}
+
+fn isLegacyCjkCodePage(code_page: u32) bool {
+    for (legacy_cjk_code_pages) |legacy| {
+        if (code_page == legacy) return true;
+    }
+    return false;
+}
 
 pub const ShellIntegrationSupport = enum {
     automatic,
@@ -129,20 +163,22 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
     };
 }
 
-/// Prepare a command for Windows spawning. Today this only special-cases WSL
-/// so that inherited or explicit working directories become `wsl.exe --cd ...`
-/// launches without paying a shell trampoline cost.
+/// Prepare a command for Windows spawning. This applies the guarded UTF-8
+/// preamble to bare cmd launches and translates WSL working directories into
+/// `wsl.exe --cd ...` without paying a shell trampoline cost.
 pub fn prepareCommand(
     alloc: Allocator,
     command: Command,
     cwd: ?[]const u8,
     working_directory_home: bool,
+    utf8_console: bool,
 ) !Command {
     return try prepareCommandWithLookup(
         alloc,
         command,
         cwd,
         working_directory_home,
+        utf8_console,
         lookupExecutable,
     );
 }
@@ -259,8 +295,13 @@ fn prepareCommandWithLookup(
     command: Command,
     cwd: ?[]const u8,
     working_directory_home: bool,
+    utf8_console: bool,
     lookup: anytype,
 ) !Command {
+    if (utf8_console and try isBareCmdCommand(alloc, command)) {
+        return try prepareBareCmdUtf8(alloc, command);
+    }
+
     if (!isWslCommand(command)) return try command.clone(alloc);
 
     const target_cwd: ?[]const u8 = cwd_: {
@@ -276,6 +317,38 @@ fn prepareCommandWithLookup(
         // We only auto-rewrite WSL direct launches. A shell command is assumed
         // to be user-authored and remains untouched.
         .shell => try command.clone(alloc),
+    };
+}
+
+fn isBareCmdCommand(alloc: Allocator, command: Command) !bool {
+    return switch (command) {
+        .direct => |argv| argv.len == 1 and
+            (isExecutableName(argv[0], "cmd") or
+                isExecutableName(argv[0], "cmd.exe")),
+        .shell => {
+            var arg_iter = try command.argIterator(alloc);
+            defer arg_iter.deinit();
+
+            const argv0 = arg_iter.next() orelse return false;
+            if (!isExecutableName(argv0, "cmd") and
+                !isExecutableName(argv0, "cmd.exe")) return false;
+            return arg_iter.next() == null;
+        },
+    };
+}
+
+fn prepareBareCmdUtf8(alloc: Allocator, command: Command) !Command {
+    return switch (command) {
+        .direct => |argv| try directCommand(
+            alloc,
+            &.{ argv[0], "/K", "chcp 65001 >nul" },
+        ),
+        .shell => |value| .{ .shell = try std.fmt.allocPrintSentinel(
+            alloc,
+            "chcp 65001 >nul & {s}",
+            .{value},
+            0,
+        ) },
     };
 }
 
@@ -1320,7 +1393,7 @@ test "prepareCommand injects translated cwd for wsl direct command" {
 
     const command = try directCommand(alloc, &.{"wsl.exe"});
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1341,7 +1414,7 @@ test "prepareCommand replaces default wsl home sentinel with explicit cwd" {
 
     const command = try directCommand(alloc, &.{ "wsl.exe", "~" });
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "D:\\work\\noctty", false, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1362,7 +1435,7 @@ test "prepareCommand rewrites wsl home sentinel to explicit --cd" {
 
     const command = try directCommand(alloc, &.{ "wsl.exe", "~" });
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, null, true, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, null, true, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1383,7 +1456,7 @@ test "prepareCommand replaces existing wsl --cd" {
 
     const command = try directCommand(alloc, &.{ "wsl.exe", "--cd", "~", "--", "bash" });
     defer command.deinit(alloc);
-    const prepared = try prepareCommandWithLookup(alloc, command, "/home/aman/src", false, struct {
+    const prepared = try prepareCommandWithLookup(alloc, command, "/home/aman/src", false, false, struct {
         fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
             if (std.mem.eql(u8, exe, "wsl.exe")) return try a.dupe(u8, "C:\\Windows\\System32\\wsl.exe");
             return null;
@@ -1503,4 +1576,78 @@ test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd support" {
         cmd.summary,
     );
     try testing.expect(cmd.next_step != null);
+}
+
+test "utf8-console decision covers modes and guarded code pages" {
+    const testing = std.testing;
+
+    const cases = [_]struct {
+        mode: Utf8Console,
+        western: bool,
+        cjk: bool,
+        utf8: bool,
+    }{
+        .{ .mode = .auto, .western = true, .cjk = false, .utf8 = false },
+        .{ .mode = .always, .western = true, .cjk = true, .utf8 = false },
+        .{ .mode = .never, .western = false, .cjk = false, .utf8 = false },
+    };
+
+    for (cases) |case| {
+        try testing.expectEqual(case.western, shouldApplyUtf8Console(case.mode, 1252, 437));
+        try testing.expectEqual(case.cjk, shouldApplyUtf8Console(case.mode, 932, 932));
+        try testing.expectEqual(case.utf8, shouldApplyUtf8Console(case.mode, 65001, 65001));
+    }
+
+    for ([_]u32{ 932, 936, 949, 950 }) |code_page| {
+        try testing.expect(!shouldApplyUtf8Console(.auto, code_page, 437));
+        try testing.expect(!shouldApplyUtf8Console(.auto, 1252, code_page));
+    }
+
+    try testing.expect(!shouldApplyUtf8Console(.always, 65001, 437));
+    try testing.expect(!shouldApplyUtf8Console(.always, 1252, 65001));
+}
+
+test "utf8-console cmd preamble only changes bare cmd" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const lookup = struct {
+        fn lookup(_: Allocator, _: []const u8) !?[]u8 {
+            return null;
+        }
+    }.lookup;
+
+    const bare = try directCommand(alloc, &.{"cmd.exe"});
+    defer bare.deinit(alloc);
+    const prepared_bare = try prepareCommandWithLookup(alloc, bare, null, false, true, lookup);
+    defer prepared_bare.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 3), prepared_bare.direct.len);
+    try testing.expectEqualStrings("cmd.exe", prepared_bare.direct[0]);
+    try testing.expectEqualStrings("/K", prepared_bare.direct[1]);
+    try testing.expectEqualStrings("chcp 65001 >nul", prepared_bare.direct[2]);
+
+    const with_tail = try directCommand(alloc, &.{ "cmd.exe", "/c", "echo ok" });
+    defer with_tail.deinit(alloc);
+    const prepared_tail = try prepareCommandWithLookup(alloc, with_tail, null, false, true, lookup);
+    defer prepared_tail.deinit(alloc);
+
+    try testing.expectEqual(with_tail.direct.len, prepared_tail.direct.len);
+    for (with_tail.direct, prepared_tail.direct) |expected, actual| {
+        try testing.expectEqualStrings(expected, actual);
+    }
+
+    const shell_bare: Command = .{ .shell = "cmd.exe" };
+    const prepared_shell_bare = try prepareCommandWithLookup(alloc, shell_bare, null, false, true, lookup);
+    defer prepared_shell_bare.deinit(alloc);
+
+    try testing.expect(prepared_shell_bare == .shell);
+    try testing.expectEqualStrings("chcp 65001 >nul & cmd.exe", prepared_shell_bare.shell);
+
+    const trampoline: Command = .{ .shell = "cmd.exe /c echo ok" };
+    const prepared_trampoline = try prepareCommandWithLookup(alloc, trampoline, null, false, true, lookup);
+    defer prepared_trampoline.deinit(alloc);
+
+    try testing.expect(prepared_trampoline == .shell);
+    try testing.expectEqualStrings("cmd.exe /c echo ok", prepared_trampoline.shell);
 }
