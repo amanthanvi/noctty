@@ -26,7 +26,7 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="styles.css?v=f20a9b90c2eece8fabe746b5c1a98e6ed2cb7530cee9288f3f0328857e483bee" />
+  <link rel="stylesheet" href="styles.css?v=a276b918200c9fe58472c528cf40efc14815c1412efc775c3c08bb31e996cd21" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -86,9 +86,8 @@
           <h1 class="nc-hero__title" id="hero-title">A native terminal for Windows.</h1>
 
           <p class="nc-hero__lede">
-            Noctty runs Ghostty's terminal core inside a Win32 app. It has tabs,
-            splits, and a command palette. Close it and open it again and the
-            layout is still there.
+            Noctty runs Ghostty's terminal core inside a Win32 app. Tabs,
+            splits, the whole shebang.
           </p>
 
           <div class="nc-hero__actions">
@@ -133,10 +132,12 @@
           <div class="nc-window__bar">
             <span class="nc-window__title">noctty, PowerShell</span>
             <button type="button" class="nc-window__motion" data-nc-motion>Pause</button>
-            <span class="nc-window__dots" aria-hidden="true">
-              <span class="nc-window__dot"></span>
-              <span class="nc-window__dot"></span>
-              <span class="nc-window__dot"></span>
+            <span class="nc-window__controls" aria-hidden="true">
+              <svg width="34" height="10" viewBox="0 0 34 10" fill="none">
+                <path d="M0 5h8" stroke="currentColor" stroke-width="1" />
+                <rect x="13.5" y="0.5" width="9" height="9" stroke="currentColor" stroke-width="1" />
+                <path d="M28 1l6 8M34 1l-6 8" stroke="currentColor" stroke-width="1" />
+              </svg>
             </span>
           </div>
           <div class="nc-terminal__body" role="log" aria-live="off" tabindex="0" aria-label="Terminal demo output">
@@ -151,28 +152,32 @@
 
     <section class="nc-facts" aria-labelledby="facts-title">
       <h2 class="nc-sr-only" id="facts-title">What ships</h2>
-      <dl class="nc-shell nc-facts__list">
-        <div class="nc-facts__row">
-          <dt>signing</dt>
-          <dd>Authenticode, both architectures. SmartScreen can still warn while reputation builds.</dd>
-        </div>
-        <div class="nc-facts__row">
-          <dt>builds</dt>
-          <dd>x64 and ARM64, each one exercised by CI on every change.</dd>
-        </div>
-        <div class="nc-facts__row">
-          <dt>network</dt>
-          <dd>One update check against GitHub Releases. No telemetry, no analytics.</dd>
-        </div>
-        <div class="nc-facts__row">
-          <dt>license</dt>
-          <dd>MIT. Source, build scripts, and release automation are public.</dd>
-        </div>
-      </dl>
+      <ul class="nc-shell nc-facts__list" role="list">
+        <li class="nc-facts__item">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M10 2.5 16 5v4.6c0 3.7-2.4 6.9-6 7.9-3.6-1-6-4.2-6-7.9V5l6-2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          </svg>
+          Authenticode signed. SmartScreen may still warn.
+        </li>
+        <li class="nc-facts__item">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5" />
+            <path d="M3.2 3.2 16.8 16.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          One update check. No telemetry.
+        </li>
+        <li class="nc-facts__item">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <path d="M4 3.5h8.5L16 7v9.5H4z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+            <path d="M12 3.5V7h4" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          </svg>
+          MIT. Source and release scripts are public.
+        </li>
+      </ul>
     </section>
 
     <section class="nc-shell nc-section" id="capabilities" aria-labelledby="capabilities-title">
-      <h2 class="nc-section__title" id="capabilities-title">Tabs and splits</h2>
+      <h2 class="nc-section__title" id="capabilities-title">Using it</h2>
 
       <figure class="nc-figure">
         <img class="nc-shot nc-specimen" src="assets/app-window.webp" width="1600" height="290" loading="lazy" decoding="async"
@@ -180,15 +185,14 @@
         <figcaption class="nc-figure__caption">Two tabs, one vertical split. Both come back on the next launch.</figcaption>
       </figure>
 
-      <div class="nc-columns">
+      <div class="nc-tri">
         <div>
           <h3>Session restoration</h3>
           <p>
             Close Noctty and open it again to the same windows, tabs, and split
-            layout. Working directories, profiles, and explicit titles come back
-            with them.
-            Each pane can run its own shell: PowerShell, cmd, Git Bash, or WSL
-            if you opt in.
+            layout. Working directories, profiles, and titles come back with
+            them. Panes can each run their own shell: PowerShell, cmd, Git Bash,
+            or WSL if you opt in.
           </p>
         </div>
         <div>
@@ -196,32 +200,32 @@
           <p>
             One shortcut opens a list of everything you can do: actions, tabs,
             panes, profiles, themes, settings. Matching is fuzzy, so a partial
-            name finds the entry. Nothing in the list needs the mouse.
+            name finds the entry, and nothing in the list needs the mouse.
           </p>
         </div>
         <div>
           <h3>Native settings</h3>
           <p>
-            There is a settings window for appearance, shells, keybindings,
-            privacy, and updates. It stages your changes and writes only the
-            lines you touched, so comments and ordering survive. The file is at
-            <code>%LOCALAPPDATA%\noctty\config.ghostty</code>
-            if you would rather edit it directly.
+            A settings window for appearance, shells, keybindings, privacy, and
+            updates. It writes only the lines you touched, so your comments and
+            ordering survive. The file is at
+            <code>%LOCALAPPDATA%\noctty\config.ghostty</code> if you would
+            rather edit it directly.
           </p>
         </div>
-        <div>
-          <h3>Default keys</h3>
-          <table class="nc-keys">
-            <tbody>
-              <tr><th scope="row">Command palette</th><td>Ctrl+Shift+P</td></tr>
-              <tr><th scope="row">New tab</th><td>Ctrl+Shift+T</td></tr>
-              <tr><th scope="row">Split pane right</th><td>Ctrl+Shift+\</td></tr>
-              <tr><th scope="row">Split pane down</th><td>Ctrl+Shift+E</td></tr>
-              <tr><th scope="row">Move between panes</th><td>Alt+Arrow</td></tr>
-            </tbody>
-          </table>
-        </div>
       </div>
+
+      <table class="nc-keys">
+        <caption class="nc-sr-only">Default keybindings</caption>
+        <tbody>
+          <tr><th scope="row">Command palette</th><td>Ctrl+Shift+P</td>
+              <th scope="row">Split pane right</th><td>Ctrl+Shift+\</td></tr>
+          <tr><th scope="row">New tab</th><td>Ctrl+Shift+T</td>
+              <th scope="row">Split pane down</th><td>Ctrl+Shift+E</td></tr>
+          <tr><th scope="row">Move between panes</th><td>Alt+Arrow</td>
+              <th scope="row">Reload config</th><td>Ctrl+Shift+,</td></tr>
+        </tbody>
+      </table>
     </section>
 
     <section class="nc-shell nc-section" id="upstream" aria-labelledby="upstream-title">

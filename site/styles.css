@@ -613,21 +613,9 @@ svg {
   border-color: color-mix(in srgb, var(--peri) 40%, transparent);
 }
 
-.nc-window__dots {
-  display: flex;
-  gap: 6px;
-}
-
-.nc-window__dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--moon-3) 40%, transparent);
-}
-
 .nc-terminal__body {
   padding: var(--space-md) var(--space-lg) var(--space-xl);
-  min-height: 188px;
+  min-height: 156px;
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.72;
@@ -694,7 +682,7 @@ svg {
 /* -------------------------------------------------------------- section */
 
 .nc-section {
-  padding-block: clamp(var(--space-2xl), 5vw, var(--space-3xl));
+  padding-block: clamp(var(--space-xl), 4vw, var(--space-2xl));
 }
 
 .nc-section + .nc-section,
@@ -848,37 +836,7 @@ svg {
   background: color-mix(in srgb, var(--ink-900) 55%, transparent);
 }
 
-.nc-facts__list {
-  margin-block: 0;
-  padding-block: var(--space-lg);
-}
-
-.nc-facts__row {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  gap: var(--space-lg);
-  padding-block: var(--space-xs);
-  align-items: baseline;
-}
-
-.nc-facts__row dt {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--moon-3);
-}
-
-.nc-facts__row dd {
-  margin: 0;
-  font-size: 15px;
-  color: var(--moon-2);
-}
-
 @media (max-width: 620px) {
-  .nc-facts__row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-    padding-block: var(--space-sm);
-  }
 }
 
 .nc-hero__meta {
@@ -922,30 +880,6 @@ svg {
   color: var(--moon);
 }
 
-.nc-keys {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14.5px;
-}
-
-.nc-keys th {
-  text-align: left;
-  font-weight: 400;
-  color: var(--moon-2);
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.nc-keys td {
-  text-align: right;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--moon-3);
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line-soft);
-  white-space: nowrap;
-}
-
 .nc-close__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
@@ -978,4 +912,103 @@ svg {
 
 .nc-section__title {
   font-size: clamp(1.7rem, 3vw, 2.4rem);
+}
+
+/* One compact line of release facts, small monochrome marks, brief text. */
+.nc-facts__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-xl);
+  margin-block: 0;
+  padding: var(--space-md) 0;
+  list-style: none;
+}
+
+.nc-facts__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 13px;
+  color: var(--moon-3);
+}
+
+.nc-facts__item svg {
+  flex: none;
+  color: var(--moon-3);
+}
+
+.nc-tri {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(var(--space-lg), 3vw, var(--space-2xl));
+  margin-top: var(--space-xl);
+}
+
+@media (max-width: 900px) {
+  .nc-tri {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-lg);
+  }
+}
+
+.nc-tri h3 {
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-xs);
+}
+
+.nc-tri p {
+  color: var(--moon-2);
+  font-size: 15px;
+}
+
+.nc-tri code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  color: var(--moon);
+  overflow-wrap: anywhere;
+}
+
+/* Keys sit in two pairs per row so the table stays short. */
+.nc-keys {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--space-xl);
+  font-size: 14px;
+}
+
+.nc-keys th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--moon-2);
+  padding: 8px var(--space-md) 8px 0;
+  border-top: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+
+.nc-keys td {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--moon-3);
+  padding: 8px var(--space-2xl) 8px 0;
+  border-top: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .nc-keys th,
+  .nc-keys td {
+    padding-right: var(--space-sm);
+  }
+
+  .nc-keys {
+    font-size: 13px;
+  }
+}
+
+/* Windows caption buttons, not macOS traffic lights. */
+.nc-window__controls {
+  display: inline-flex;
+  align-items: center;
+  color: var(--moon-3);
 }
