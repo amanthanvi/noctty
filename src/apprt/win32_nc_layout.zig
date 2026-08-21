@@ -236,6 +236,68 @@ fn scaleDim(base: i32, dpi: i32) i32 {
     return @divTrunc(base * dpi + 48, 96);
 }
 
+/// Client-relative top of terminal content below app-painted chrome.
+/// The tab and caption bands are independently sized; overlays begin below
+/// whichever band extends farther into the client area.
+pub fn terminalContentTop(
+    tab_bottom: i32,
+    caption_bottom: i32,
+    overlay_height: i32,
+    inspector_height: i32,
+) i32 {
+    return @max(tab_bottom, caption_bottom) + overlay_height + inspector_height;
+}
+
+/// Bottom of the app-painted tab/caption band. All dimensions are already
+/// scaled for the host's current DPI.
+pub fn captionBandBottom(
+    tab_bottom: i32,
+    titlebar_height: i32,
+    caption_button_height: i32,
+    integrated: bool,
+) i32 {
+    if (!integrated) return tab_bottom;
+    return @max(tab_bottom, @max(titlebar_height, caption_button_height));
+}
+
+pub const ContentBands = struct {
+    overlay_top: i32,
+    inspector_top: i32,
+    content_top: i32,
+};
+
+/// Boundaries for panels stacked between the tab/caption band and terminal.
+pub fn contentBands(
+    tab_bottom: i32,
+    titlebar_height: i32,
+    caption_button_height: i32,
+    integrated: bool,
+    overlay_height: i32,
+    inspector_height: i32,
+) ContentBands {
+    const chrome_bottom = captionBandBottom(
+        tab_bottom,
+        titlebar_height,
+        caption_button_height,
+        integrated,
+    );
+    const inspector_top = chrome_bottom + overlay_height;
+    return .{
+        .overlay_top = chrome_bottom,
+        .inspector_top = inspector_top,
+        .content_top = terminalContentTop(
+            tab_bottom,
+            chrome_bottom,
+            overlay_height,
+            inspector_height,
+        ),
+    };
+}
+
+pub fn contentBottom(content_top: i32, client_bottom: i32, status_height: i32) i32 {
+    return @max(content_top + 1, client_bottom - status_height);
+}
+
 fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
     const in_left = cursor.x < window.left + ew;
     const in_right = cursor.x >= window.right - ew;
@@ -473,4 +535,67 @@ test "max button hit test scales at 150% dpi for snap hover" {
     const max_y = @divTrunc(btns.max.top + btns.max.bottom, 2);
 
     try std.testing.expectEqual(HitTest.maxbutton, hitTest(win, .{ .x = max_x, .y = max_y }, m, .normal));
+}
+
+test "Issue150 terminal content clears independently sized integrated caption" {
+    const dpis = [_]u32{ 96, 144, 192 };
+    const states = [_]WindowState{ .normal, .maximized };
+    const window = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
+
+    // Keep the two metrics deliberately different. The production defaults
+    // are both 40 DIP today, but terminal placement must not depend on that
+    // coincidence when the painted caption is independently sized.
+    const tab_height_dip: i32 = 32;
+
+    for (dpis) |dpi| {
+        const metrics = metricsDefault(@intCast(dpi));
+        for (states) |state| {
+            const client = calcNcClientRect(window, metrics, state);
+            const caption = captionButtonsRect(window, metrics, state);
+            const content_screen_top = client.top + terminalContentTop(
+                scaleDim(tab_height_dip, @intCast(dpi)),
+                metrics.caption_button_h,
+                0,
+                0,
+            );
+            try std.testing.expect(content_screen_top >= caption.close.bottom);
+        }
+    }
+}
+
+test "Issue150 runtime DPI changes recompute integrated content boundary" {
+    const dpi_sequence = [_]i32{ 96, 144, 192, 144, 96 };
+    const window = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
+
+    for (dpi_sequence) |dpi| {
+        const metrics = metricsDefault(@intCast(dpi));
+        const client = calcNcClientRect(window, metrics, .maximized);
+        const caption = captionButtonsRect(window, metrics, .maximized);
+        const content_screen_top = client.top + terminalContentTop(
+            scaleDim(32, dpi),
+            metrics.caption_button_h,
+            0,
+            0,
+        );
+        try std.testing.expect(content_screen_top >= caption.close.bottom);
+    }
+}
+
+test "Issue150 non-integrated content keeps tab and panel offsets" {
+    try std.testing.expectEqual(@as(i32, 132), terminalContentTop(32, 0, 58, 42));
+}
+
+test "Issue150 panels start below an unequal integrated caption band" {
+    const bands = contentBands(32, 48, 40, true, 58, 42);
+    try std.testing.expectEqual(@as(i32, 48), bands.overlay_top);
+    try std.testing.expectEqual(@as(i32, 106), bands.inspector_top);
+    try std.testing.expectEqual(@as(i32, 148), bands.content_top);
+}
+
+test "Issue150 small clients keep content bottom after content top" {
+    const bands = contentBands(32, 48, 40, true, 58, 42);
+    try std.testing.expectEqual(
+        bands.content_top + 1,
+        contentBottom(bands.content_top, 80, 0),
+    );
 }
