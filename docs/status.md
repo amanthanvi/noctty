@@ -80,8 +80,9 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Updater
 
-- Checks `api.github.com/repos/amanthanvi/noctty/releases/latest`, at
-  most once every 24 hours, and never replaces binaries silently.
+- Checks the stable release feed (GitHub Releases by default, overridable with
+  `auto-update-feed-url`) at most once every 24 hours and never replaces
+  binaries silently.
 - `auto-update = download` stages only releases that pass their
   checksum metadata plus Authenticode verification; applying a staged
   update is always user-initiated. Details in

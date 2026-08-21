@@ -2370,6 +2370,7 @@ const UpdateCheckRequest = struct {
     state_path: []u8,
     current_version: std.SemanticVersion,
     current_version_string: []u8,
+    release_feed_url: []u8,
     force: bool,
     manual: bool,
     respect_dismissal: bool,
@@ -2378,6 +2379,7 @@ const UpdateCheckRequest = struct {
     fn deinit(self: *UpdateCheckRequest) void {
         self.alloc.free(self.state_path);
         self.alloc.free(self.current_version_string);
+        self.alloc.free(self.release_feed_url);
         self.* = undefined;
     }
 };
@@ -4017,12 +4019,19 @@ pub const App = struct {
         const request = try self.core_app.alloc.create(UpdateCheckRequest);
         errdefer self.core_app.alloc.destroy(request);
 
+        const release_feed_url = try updatepkg.resolveReleaseFeedUrl(
+            self.core_app.alloc,
+            self.config.@"auto-update-feed-url",
+        );
+        errdefer self.core_app.alloc.free(release_feed_url);
+
         request.* = .{
             .alloc = self.core_app.alloc,
             .ui_thread_id = self.ui_thread_id,
             .state_path = try updatepkg.defaultStatePath(self.core_app.alloc),
             .current_version = build_config.version,
             .current_version_string = try self.core_app.alloc.dupe(u8, build_config.version_string),
+            .release_feed_url = release_feed_url,
             .force = opts.force,
             .manual = opts.manual,
             .respect_dismissal = opts.respect_dismissal,
@@ -7532,6 +7541,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
 
     const result = updatepkg.checkLatestStableRelease(alloc, request.state_path, .{
         .current_version = request.current_version,
+        .release_feed_url = request.release_feed_url,
         .force = request.force,
         .respect_dismissal = request.respect_dismissal,
     }) catch |err| {
