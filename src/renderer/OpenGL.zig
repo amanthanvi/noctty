@@ -40,6 +40,7 @@ const log = std.log.scoped(.opengl);
 const WglSwapIntervalExt = *const fn (interval: c_int) callconv(.winapi) windows.BOOL;
 const wgl_swap_interval_ext_name: [*:0]const u8 = "wglSwapIntervalEXT";
 const enable_gl_debug_output = false;
+const startup_gl_string_max_len = 128;
 
 /// We require at least OpenGL 4.3
 pub const MIN_VERSION_MAJOR = 4;
@@ -160,10 +161,15 @@ fn prepareContext(getProcAddress: anytype) !void {
         (major == MIN_VERSION_MAJOR and minor < MIN_VERSION_MINOR))
     {
         log.warn(
-            "OpenGL version is too old. Ghostty requires OpenGL {d}.{d}",
+            "OpenGL version is too old. noctty requires OpenGL {d}.{d}",
             .{ MIN_VERSION_MAJOR, MIN_VERSION_MINOR },
         );
-        recordWin32OpenGLStartupError(.version_check, error.OpenGLOutdated);
+        recordWin32OpenGLStartupVersionError(
+            major,
+            minor,
+            startupGLString(gl.c.GL_RENDERER),
+            startupGLString(gl.c.GL_VENDOR),
+        );
         return error.OpenGLOutdated;
     }
 
@@ -186,6 +192,29 @@ fn recordWin32OpenGLStartupError(step: apprt.win32.OpenGLStartupStep, err: anyer
     if (apprt.runtime == apprt.win32) {
         apprt.win32.recordOpenGLStartupError(step, err);
     }
+}
+
+fn recordWin32OpenGLStartupVersionError(
+    major: u32,
+    minor: u32,
+    renderer: ?[]const u8,
+    vendor: ?[]const u8,
+) void {
+    if (apprt.runtime == apprt.win32) {
+        apprt.win32.recordOpenGLStartupVersionError(major, minor, renderer, vendor);
+    }
+}
+
+fn startupGLString(name: gl.c.GLenum) ?[]const u8 {
+    const get_string = gl.glad.context.GetString orelse return null;
+    const value = get_string(name);
+    if (value == null) return null;
+
+    // Take the NUL-terminated span before truncating. Slicing to a fixed
+    // length first and scanning for the NUL can read past the end of a short
+    // driver string.
+    const text = std.mem.span(@as([*:0]const u8, @ptrCast(value)));
+    return text[0..@min(text.len, startup_gl_string_max_len)];
 }
 
 /// This is called early right after surface creation.

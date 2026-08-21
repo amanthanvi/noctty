@@ -293,11 +293,38 @@ then reload config.
 Set WSL explicitly with `command = wsl.exe`. If launch still fails,
 verify the distribution starts in a normal PowerShell session first.
 
-### OpenGL driver issues
+### GPU floor and OpenGL driver issues
 
-noctty needs OpenGL 4.3 or newer. If the window fails to render or
-exits early on older hardware, update GPU drivers before filing a
-rendering bug.
+noctty requires OpenGL 4.3 or newer through WGL. This build has no
+software, DirectX, or ANGLE fallback renderer, so noctty cannot start when
+the active Windows OpenGL implementation is below that floor. This commonly
+happens in:
+
+- RDP or other remote sessions that fall back to a software OpenGL stack,
+  often Microsoft GDI Generic at OpenGL 1.1
+- VMs without 3D acceleration, without the guest GPU driver, or with only a
+  software OpenGL implementation
+- older integrated GPUs whose hardware or Windows driver stops before OpenGL
+  4.3
+- drivers that report a robust context but fail partway through OpenGL
+  initialization
+
+When the version floor is not met, noctty stops before presenting its window
+and shows a startup dialog with the required and detected OpenGL versions plus
+the renderer and vendor strings when the driver reports them. Failures later
+in OpenGL initialization use the same dialog to name the failed step and any
+available Win32 or Zig error instead of leaving a blank window or exiting
+silently.
+
+Try, in order:
+
+1. End the Remote Desktop session and launch noctty from a local console
+   session.
+2. In a VM, enable 3D acceleration and install or update the guest graphics
+   driver or integration tools.
+3. Update or reinstall the OEM graphics driver for the active GPU.
+4. On a hybrid-GPU system, force `noctty.exe` to the discrete or integrated GPU
+   in Windows Graphics settings.
 
 If startup fails with `LoadLibrary failed with error 126` or the startup
 dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
@@ -310,9 +337,6 @@ order:
    driver.
 2. Force `noctty.exe` to the discrete or integrated GPU in Windows
    Graphics settings.
-
-noctty currently ships only the OpenGL/WGL renderer on Windows; there
-is no DirectX or ANGLE fallback renderer in this build.
 
 ### Stale installed build
 

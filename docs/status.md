@@ -173,6 +173,9 @@ and lands incrementally.
 
 ## Known caveats
 
+- noctty has a hard OpenGL 4.3-via-WGL GPU floor and no software fallback
+  renderer. It shows a startup diagnostic and does not start on machines or
+  sessions below that floor.
 - Installers and the Windows binaries inside the portable ZIP are
   Authenticode-signed; the ZIP container itself is checksummed, not
   signed. SmartScreen can still warn for a new or low-reputation
