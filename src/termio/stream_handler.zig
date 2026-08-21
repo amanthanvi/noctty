@@ -1934,3 +1934,59 @@ test "security regression OSC 7 pwd rejects percent-decoded Windows controls" {
         StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri),
     );
 }
+
+test "cmd OSC 9;9 URI updates terminal pwd" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var term = try terminal.Terminal.init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+    });
+    defer term.deinit(alloc);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer termio_mailbox.deinit(alloc);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(alloc);
+    defer app_queue.destroy(alloc);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(alloc, .{
+        .alloc = alloc,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .none,
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+    stream.handler.seen_title = true;
+
+    stream.nextSlice("\x1b]9;9;kitty-shell-cwd://localhost/C:\\Users\\test\\project\x1b\\");
+    try std.testing.expectEqualStrings("C:\\Users\\test\\project", term.getPwd().?);
+
+    var message = app_queue.pop().?;
+    message.deinit(alloc);
+    try std.testing.expect(app_queue.pop() == null);
+}

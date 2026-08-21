@@ -218,9 +218,8 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .summary = "Git Bash profile with automatic shell integration",
         },
         .cmd => .{
-            .support = .unavailable,
-            .summary = "Command Prompt profile; shell integration unavailable",
-            .next_step = "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+            .support = .automatic,
+            .summary = "Command Prompt profile with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         },
         .ssh => .{
             .support = .unavailable,
@@ -2091,12 +2090,12 @@ test "shellIntegrationDiagnostic differentiates WSL Git Bash and cmd support" {
     try testing.expectEqual(@as(?[]const u8, null), git_bash.next_step);
 
     const cmd = shellIntegrationDiagnostic(.cmd);
-    try testing.expectEqual(ShellIntegrationSupport.unavailable, cmd.support);
+    try testing.expectEqual(ShellIntegrationSupport.automatic, cmd.support);
     try testing.expectEqualStrings(
-        "Command Prompt profile; shell integration unavailable",
+        "Command Prompt profile with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         cmd.summary,
     );
-    try testing.expect(cmd.next_step != null);
+    try testing.expectEqual(@as(?[]const u8, null), cmd.next_step);
 }
 
 test "utf8-console decision covers modes and guarded code pages" {
