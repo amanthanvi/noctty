@@ -1,8 +1,7 @@
 (function () {
   var root = document.documentElement;
   var toggle = document.getElementById("theme-toggle");
-  var storageKey = "wg-theme";
-  var blinkTimer = null;
+  var storageKey = "nc-theme";
 
   function applyTheme(theme) {
     root.setAttribute("data-theme", theme);
@@ -22,14 +21,6 @@
   toggle.addEventListener("click", function () {
     var nextTheme = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
     applyTheme(nextTheme);
-
-    if (blinkTimer === null) {
-      toggle.classList.add("is-blinking");
-      blinkTimer = setTimeout(function () {
-        toggle.classList.remove("is-blinking");
-        blinkTimer = null;
-      }, 220);
-    }
 
     try {
       localStorage.setItem(storageKey, nextTheme);

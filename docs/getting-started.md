@@ -142,7 +142,8 @@ ones you'll use daily:
 | New tab                  | `Ctrl+Shift+T`                  |
 | Close tab                | `Ctrl+Shift+W`                  |
 | Next / previous tab      | `Ctrl+Tab` / `Ctrl+Shift+Tab`   |
-| Split right / down       | `Ctrl+Shift+\` / `Ctrl+Shift+E` |
+| Split pane right         | `Ctrl+Shift+\`                  |
+| Split pane down          | `Ctrl+Shift+E`                  |
 | Move between panes       | `Alt+Arrow`                     |
 | Command palette          | `Ctrl+Shift+P`                  |
 | Start search             | `Ctrl+Shift+F`                  |

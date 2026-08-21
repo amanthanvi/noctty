@@ -110,20 +110,18 @@ function main() {
     throw new Error("site/index.html and site/404.html inline bootstrap scripts differ; they must be byte-identical.");
   }
 
-  // The font stylesheet's onload handler is the single allowed event handler.
-  const onloadPattern = /onload="([^"]*)"/g;
-  const indexOnload = decodeHtmlEntities(
-    extractSingleMatch(indexHtml, onloadPattern, "site/index.html", "onload attribute"),
-  );
-  const notFoundOnload = decodeHtmlEntities(
-    extractSingleMatch(notFoundHtml, onloadPattern, "site/404.html", "onload attribute"),
-  );
-  if (indexOnload !== notFoundOnload) {
-    throw new Error("site/index.html and site/404.html onload handlers differ; they must be identical.");
+  // Fonts are self-hosted, so no page carries an inline event handler and the
+  // CSP pins script-src-attr 'none'. Any handler reintroduced here is a
+  // regression: fail the build rather than minting a hash for it.
+  const eventAttributePattern = /\son[a-z][a-z0-9_-]*\s*=/gi;
+  for (const [label, html] of [["site/index.html", indexHtml], ["site/404.html", notFoundHtml]]) {
+    const found = [...html.matchAll(eventAttributePattern)];
+    if (found.length > 0) {
+      throw new Error(`${label} must not contain inline event handler attributes (found ${found.length}); the CSP pins script-src-attr 'none'.`);
+    }
   }
 
   const scriptHash = sha256Base64(indexScript);
-  const handlerHash = sha256Base64(indexOnload);
 
   const assetHashes = {};
   for (const asset of ["styles.css", "app.js", "version.js", "install.js", "terminal.js"]) {
@@ -149,9 +147,9 @@ function main() {
   );
   expectedHeaders = expectedHeaders.replace(
     /script-src-attr[^;]*/,
-    `script-src-attr 'unsafe-hashes' 'sha256-${handlerHash}'`,
+    "script-src-attr 'none'",
   );
-  if (!expectedHeaders.includes(scriptHash) || !expectedHeaders.includes(handlerHash)) {
+  if (!expectedHeaders.includes(scriptHash) || !expectedHeaders.includes("script-src-attr 'none'")) {
     throw new Error("site/_headers is missing the script-src or script-src-attr directive to rewrite.");
   }
 

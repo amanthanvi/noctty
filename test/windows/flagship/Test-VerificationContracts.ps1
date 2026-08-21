@@ -8512,12 +8512,12 @@ Assert-TextContract `
     -Context $cloudflarePagesVerifier
 Assert-TextContract `
     -Content $siteIndexText `
-    -Pattern '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.png"' `
+    -Pattern '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.jpg"' `
     -Description 'social previews use a current raster large-image card with explicit dimensions' `
     -Context $siteIndex
 Assert-TextContract `
     -Content $sitePayloadBuilderText `
-    -Pattern "'assets/noctty-social\.png'" `
+    -Pattern "'assets/noctty-social\.jpg'" `
     -Description 'the deterministic Cloudflare payload includes the social preview image' `
     -Context $sitePayloadBuilder
 Assert-TextContract `
@@ -8537,8 +8537,8 @@ Assert-TextContract `
     -Context $siteAssetBuilder
 Assert-TextContract `
     -Content $siteAssetBuilderText `
-    -Pattern '(?ms)const scriptHash = sha256Base64\(indexScript\).*?const handlerHash = sha256Base64\(indexOnload\).*?script-src ''self'' ''sha256-\$\{scriptHash\}''.*?script-src-attr ''unsafe-hashes'' ''sha256-\$\{handlerHash\}''' `
-    -Description 'the asset builder derives both CSP hashes from the live HTML sources' `
+    -Pattern '(?ms)must not contain inline event handler attributes.*?const scriptHash = sha256Base64\(indexScript\).*?script-src ''self'' ''sha256-\$\{scriptHash\}''.*?script-src-attr ''none''' `
+    -Description 'the asset builder derives the CSP script hash from the live HTML and refuses inline event handlers' `
     -Context $siteAssetBuilder
 Assert-TextContract `
     -Content $siteAssetBuilderText `
@@ -8874,13 +8874,13 @@ Assert-WorkflowContractAbsent `
     -Description 'path-specific cache rules cannot overlap the catch-all response policy'
 Assert-TextContract `
     -Content $siteHeadersText `
-    -Pattern "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';" `
-    -Description 'the single shared inline bootstrap and the font load handler each use one narrow CSP hash' `
+    -Pattern "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'none';" `
+    -Description 'the single shared inline bootstrap uses one narrow CSP hash and inline event handlers are forbidden outright' `
     -Context $siteHeaders
 Assert-TextContract `
     -Content $siteHeadersText `
-    -Pattern "style-src 'self' https://fonts\.googleapis\.com;" `
-    -Description 'stylesheet sources are pinned to self plus Google Fonts without inline styles' `
+    -Pattern "style-src 'self'; font-src 'self';" `
+    -Description 'stylesheet and font sources are pinned to self, so no third-party origin can serve either' `
     -Context $siteHeaders
 Assert-WorkflowContractAbsent `
     -Path $siteHeaders `
@@ -8903,8 +8903,8 @@ if ([string]$siteHeaderContractObject.not_found.cache_control -cne 'no-store') {
 }
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?eventHandlers.*?WebUtility\]::HtmlDecode.*?Get-CspSha256Source -Value \$decodedEventHandler.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
-    -Description 'one catch-all contract binds exact complete source sets to both script directives and emits live expectations' `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?no inline event handler attributes.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Description 'one catch-all contract binds exact complete source sets to both script directives, refuses inline handlers, and emits live expectations' `
     -Context $siteHeaderContract
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
@@ -8913,7 +8913,7 @@ Assert-TextContract `
     -Context $siteHeaderContract
 Assert-TextContract `
     -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
-    -Pattern "(?ms)expectedScriptSources.*?'self'.*?expectedScriptAttributeSources.*?'unsafe-hashes'.*?expectedCspDirectives.*?default-src.*?script-src.*?script-src-attr.*?upgrade-insecure-requests.*?declaredDirectiveNames.*?exact expected directive set.*?Assert-ExactCspDirectiveSources.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
+    -Pattern "(?ms)expectedScriptSources.*?'self'.*?expectedScriptAttributeSources.*?'none'.*?expectedCspDirectives.*?default-src.*?script-src.*?script-src-attr.*?upgrade-insecure-requests.*?declaredDirectiveNames.*?exact expected directive set.*?Assert-ExactCspDirectiveSources.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
     -Description 'every CSP directive and source is exact before the global hash allowlist check' `
     -Context $siteHeaderContract
 
@@ -8943,23 +8943,18 @@ try {
         $fixtureHeadersText,
         "script-src 'self' '(?<hash>sha256-[^']+)'"
     ).Groups['hash'].Value
-    $attributeHash = [regex]::Match(
-        $fixtureHeadersText,
-        "script-src-attr 'unsafe-hashes' '(?<hash>sha256-[^']+)'"
-    ).Groups['hash'].Value
-    if ([string]::IsNullOrWhiteSpace($scriptHash) -or
-        [string]::IsNullOrWhiteSpace($attributeHash)) {
-        throw 'Could not identify CSP hashes for the directive-swap regression.'
+    if ([string]::IsNullOrWhiteSpace($scriptHash)) {
+        throw 'Could not identify the CSP script hash for the directive-swap regression.'
     }
+    # script-src-attr is pinned to 'none', so the equivalent of the old
+    # hash-swap is migrating the inline-bootstrap hash out of script-src and
+    # into script-src-attr. Both directives must reject it.
     $swappedHeaders = $fixtureHeadersText.Replace(
-        "'$scriptHash'",
-        "'__NOCTTY_SCRIPT_HASH__'"
+        "script-src 'self' '$scriptHash'",
+        "script-src 'self'"
     ).Replace(
-        "'$attributeHash'",
-        "'$scriptHash'"
-    ).Replace(
-        "'__NOCTTY_SCRIPT_HASH__'",
-        "'$attributeHash'"
+        "script-src-attr 'none'",
+        "script-src-attr 'unsafe-hashes' '$scriptHash'"
     )
     [IO.File]::WriteAllText(
         $fixtureHeadersPath,
@@ -8983,7 +8978,7 @@ try {
 
     $reusedHashHeaders = $fixtureHeadersText.Replace(
         "style-src 'self'",
-        "script-src-elem '$attributeHash'; style-src 'self'"
+        "script-src-elem '$scriptHash'; style-src 'self'"
     )
     [IO.File]::WriteAllText(
         $fixtureHeadersPath,
@@ -9059,42 +9054,56 @@ try {
     )
     $fixtureIndexPath = Join-Path $siteCspFixtureRoot 'index.html'
     $fixtureIndexText = [IO.File]::ReadAllText($fixtureIndexPath)
+    if ($fixtureIndexText -notmatch '(?m)^<body>$') {
+        throw 'CSP handler-injection regression lost its <body> anchor.'
+    }
+    # Fonts are self-hosted and script-src-attr is 'none', so no inline handler
+    # may exist at all. Injecting one must be rejected outright.
     [IO.File]::WriteAllText(
         $fixtureIndexPath,
         $fixtureIndexText.Replace(
-            "onload=`"this.media='all'`"",
-            "onload=`"this.media='screen'`""
+            '<body>',
+            '<body onload="this.dataset.x = 1">'
         ),
         [Text.UTF8Encoding]::new($false)
     )
-    $editedHandlerRejected = $false
+    $injectedHandlerRejected = $false
     try {
         & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
     }
     catch {
         if ($_.Exception.Message -notmatch
-            'script-src-attr sources do not exactly match') {
+            'no inline event handler attributes') {
             throw
         }
-        $editedHandlerRejected = $true
+        $injectedHandlerRejected = $true
     }
-    if (-not $editedHandlerRejected) {
-        throw 'Site CSP contract accepted an untracked event-handler edit.'
+    if (-not $injectedHandlerRejected) {
+        throw 'Site CSP contract accepted an injected inline event handler.'
     }
 
+    # Entity-encoding the handler value must not smuggle it past the detector.
     [IO.File]::WriteAllText(
         $fixtureIndexPath,
         $fixtureIndexText.Replace(
-            "onload=`"this.media='all'`"",
-            'onload="this.media=&#39;all&#39;"'
+            '<body>',
+            '<body onload="this.dataset.x =&#32;1">'
         ),
         [Text.UTF8Encoding]::new($false)
     )
+    $encodedHandlerRejected = $false
     try {
         & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
     }
     catch {
-        throw 'Site CSP contract did not hash the browser-decoded handler text.'
+        if ($_.Exception.Message -notmatch
+            'no inline event handler attributes') {
+            throw
+        }
+        $encodedHandlerRejected = $true
+    }
+    if (-not $encodedHandlerRejected) {
+        throw 'Site CSP contract accepted an entity-encoded inline event handler.'
     }
 
     [IO.File]::WriteAllText(
@@ -9234,11 +9243,22 @@ try {
             throw "Site deploy manifest is missing $requiredPayloadPath."
         }
     }
+    $expectedPayloadAssets = @(
+        'assets/app-window.webp'
+        'assets/favicon.svg'
+        'assets/fonts/OFL-JetBrainsMono.txt'
+        'assets/fonts/OFL-SpaceGrotesk.txt'
+        'assets/fonts/jetbrains-mono.woff2'
+        'assets/fonts/space-grotesk.woff2'
+        'assets/hero-sky.webp'
+        'assets/noctty-social.jpg'
+    )
     $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
-    if ($payloadAssetPaths.Count -ne 2 -or
-        $payloadAssetPaths -cnotcontains 'assets/favicon.svg' -or
-        $payloadAssetPaths -cnotcontains 'assets/noctty-social.png') {
-        throw 'Site deploy manifest assets escaped the favicon and social-preview allowlist.'
+    if ($payloadAssetPaths.Count -ne $expectedPayloadAssets.Count -or
+        @($expectedPayloadAssets | Where-Object {
+            $payloadAssetPaths -cnotcontains $_
+        }).Count -ne 0) {
+        throw 'Site deploy manifest assets escaped the site asset allowlist.'
     }
 }
 finally {
