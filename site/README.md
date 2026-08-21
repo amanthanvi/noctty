@@ -46,7 +46,7 @@ light ("dawn") is a first-class state, not a fallback.
 
 **Type.** Space Grotesk carries the display voice, Segoe UI Variable the body
 (the platform's own voice, which suits a native Windows product), and JetBrains
-Mono every command, key, and terminal line. Both webfonts are variable, subsetted
+Mono every command, key, and terminal line. Both web fonts are variable, subsetted
 to Latin, self-hosted, and OFL-licensed; their licenses ship in `assets/fonts/`
 and are part of the deployed payload.
 
