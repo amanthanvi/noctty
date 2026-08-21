@@ -477,11 +477,17 @@ integration; noctty does not currently add jump-list layout entries.
 auto-update = check
 ```
 
-The updater calls `api.github.com/repos/amanthanvi/noctty/releases/latest`
-at most once every 24 hours and never replaces binaries silently. In `check`
-mode it opens the release page when a newer stable version exists. It is the
-only outbound network call the app makes; there is no telemetry and no
-analytics.
+The updater checks the configured release feed at most once every 24 hours
+and never replaces binaries silently. The feed defaults to noctty's GitHub
+Releases API and can be changed with `auto-update-feed-url`; checksum,
+Authenticode, and pinned-publisher-key verification stay mandatory whatever
+the feed host. In `check` mode it opens the release page when a newer stable
+version exists. It is the only outbound network call the app makes; there is
+no telemetry and no analytics.
+
+Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
+that the `upstream` remote and the release-feed host are still live and
+re-points them if either moves.
 
 `auto-update = download` downloads only stable Windows installer releases
 that ship architecture-specific SHA256 metadata, verifies the installer's
