@@ -380,7 +380,17 @@ are in the [capability matrix notes](windows-capability-matrix.md#notes).
 
 Session restore persists host windows, tabs, split layout, selected
 profiles, working directories, and explicit titles. It does not restore
-terminal contents or child process state.
+child process state. Terminal contents come back only when
+`window-save-state-scrollback` is set to a nonzero line count; the default
+is `0` (off) because terminal output becomes data at rest and can contain
+secrets.
+
+Snapshots are plain text without colors or styles. Each restored pane ends
+with a `--- RESTORED SNAPSHOT END | ...Z ---` separator carrying the capture
+time, and the whole snapshot sits above the live prompt in scrollback so the
+shell's startup repaint cannot destroy it. Engaging `toggle_secure_input`
+once excludes that pane from snapshots for the rest of the session, even if
+the indicator is later turned off.
 
 If the session-state file is unreadable, noctty moves it aside to a sibling
 with a `.corrupt` suffix, logs the failure, and starts with a fresh window.

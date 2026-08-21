@@ -5,7 +5,9 @@ const sys = @import("win32/sys.zig");
 const schema = @import("win32_session_state.zig");
 const Allocator = std.mem.Allocator;
 
-pub const default_max_state_bytes: usize = 1024 * 1024;
+pub const max_layout_state_bytes: usize = 1024 * 1024;
+pub const default_max_state_bytes: usize =
+    max_layout_state_bytes + schema.max_total_scrollback_bytes;
 
 pub const LoadResult = union(enum) {
     missing,
@@ -309,4 +311,36 @@ test "win32 session persistence named layout load owns pane strings after the re
     try std.testing.expectEqualStrings("pwsh.exe", pane.profile.?);
     try std.testing.expectEqualStrings("Build", pane.title_override.?);
     try std.testing.expectEqualStrings("Project", pane.tab_title_override.?);
+}
+
+test "win32 session persistence load owns pane scrollback after the read buffer is freed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const lines = [_][]const u8{"ordinary unescaped snapshot text"};
+    const nodes = [_]schema.Node{.{ .pane = .{ .scrollback = .{
+        .captured_at_unix_ms = 1_777_777_777_123,
+        .lines = &lines,
+    } } }};
+    const tabs = [_]schema.Tab{.{
+        .selected_leaf = 0,
+        .layout = .{ .root = 0, .nodes = &nodes },
+    }};
+    const windows = [_]schema.Window{.{ .selected_tab = 0, .tabs = &tabs }};
+    const encoded = try schema.encodeAlloc(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(encoded);
+    try tmp.dir.writeFile(.{ .sub_path = "session-state.json", .data = encoded });
+
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "session-state.json");
+    defer std.testing.allocator.free(path);
+    var result = loadAlloc(std.testing.allocator, path, default_max_state_bytes);
+    defer result.deinit();
+
+    switch (result) {
+        .loaded => |parsed| {
+            const scrollback = parsed.value.windows[0].tabs[0].layout.nodes[0].pane.scrollback.?;
+            try std.testing.expectEqualStrings(lines[0], scrollback.lines[0]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
