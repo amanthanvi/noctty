@@ -48,8 +48,8 @@ the fallback used by the normal packaged app environment.
 
 Important files and directories:
 
-| Path                                           | Purpose                                                                                        |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Path                                       | Purpose                                                                                        |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | `%LOCALAPPDATA%\noctty\config.ghostty`     | User config written on first launch.                                                           |
 | `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
 | `%LOCALAPPDATA%\noctty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
@@ -117,10 +117,11 @@ noctty uses a native Win32 host window with:
   exact-pane drag-to-split with reversible subtree transfer
 - horizontal and vertical splits
 - per-monitor DPI handling
-- DWM dark title bar integration
+- an integrated title bar on Windows 11 (app-owned caption with native
+  caption actions and Snap Layout hover); the stock caption on older builds
 - high-contrast palette switching
 - IME support
-- drag-and-drop of files into the terminal
+- drag-and-drop of files, plain text, URLs, and HTML into a pane
 - native right-click context menus
 
 The universal palette puts actions, live tabs, panes, Windows profiles,

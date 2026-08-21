@@ -4,7 +4,8 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-21, after a module-by-module audit of `src/apprt/`
+and its `src/config/Config.zig` surfaces.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -42,8 +43,8 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows application runtime (new in this fork)
 
-- Native Win32 windows, tab bar with overflow, and drag: same-window tab
-  reorder and exact-pane drag-to-split.
+- Native Win32 windows, tab bar with overflow, a numeric tab overview,
+  and drag: same-window tab reorder and exact-pane drag-to-split.
 - Horizontal and vertical splits.
 - Structural undo/redo for new splits, single-tab close (restoring the
   exact tab, panes, and layout), and drag-to-split subtree transfers.
@@ -52,13 +53,34 @@ Win32-validated VT protocol coverage is tracked in
 - In-app profile picker for detected shells: PowerShell 7, Windows
   PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
 - Per-monitor DPI scaling.
-- DWM dark title bar that follows the app theme.
+- On Windows 11, an integrated title bar with DWM dark-mode handling,
+  native caption actions, and Snap Layout hover. Older Windows builds use
+  the stock caption.
 - High-contrast mode detection and palette switching.
 - IME for CJK and other composed input.
 - A local sensitive-input indicator for no-echo input
   (`toggle_secure_input` is a visual affordance only; it does not block
   system-wide keyboard hooks the way macOS Secure Keyboard Entry does).
-- Drag-and-drop of files into the terminal.
+- Drag-and-drop of files, plain text, URLs, and HTML into a pane. Shift
+  changes file/text handling, Ctrl suppresses file-path quoting, and Alt
+  has no assigned behavior.
+- A per-pane docked scrollback search bar with regex, case-sensitive, and
+  whole-word modes, result navigation, and match markers on the scrollbar.
+- Per-pane graphical scrollbars. `scrollbar = system` follows Windows'
+  dynamic-scrollbar preference; `never` hides the widget without disabling
+  scrolling.
+- Clipboard paste confirmation for risky content, including dropped
+  payloads, gated by `clipboard-paste-protection`. HTML copy writes both
+  Windows CF_HTML and a plain-text fallback.
+- A configurable quick terminal on the top, bottom, left, right, or center
+  of the selected monitor area. It has no default binding; `global:`
+  keybinds use `RegisterHotKey`. `exclusive` keyboard interactivity falls
+  back to focused input, and virtual-desktop following is not implemented.
+- WinRT Action Center notifications with click-to-focus activation and an
+  in-app banner/log fallback when WinRT cannot show a toast. Packaged Start
+  menu identity is required for reliable cold-start activation.
+- Windows taskbar progress for the active pane in each host window, driven
+  by terminal progress reports when `progress-style` is enabled.
 - Session restore via `window-save-state`: windows, tabs, splits,
   profiles, working directories, and explicit titles come back; terminal
   contents and child processes do not.
@@ -71,6 +93,10 @@ Win32-validated VT protocol coverage is tracked in
 - Universal palette: actions, tabs, panes, profiles, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
+- Opt-in Windows Job Object limits for Windows-local child processes via
+  the retained `linux-cgroup`, `linux-cgroup-memory-limit`,
+  `linux-cgroup-processes-limit`, and `linux-cgroup-hard-fail` settings.
+  They are off by default and do not cover WSL process trees.
 
 ### Renderer
 
@@ -109,11 +135,18 @@ Win32-validated VT protocol coverage is tracked in
 ### Windows UI Automation (accessibility)
 
 UI Automation coverage is partial. Terminal text is exposed read-only
-through TextPattern/TextPattern2 with bounded ranges, visible geometry,
-and an active caret anchor. The host and command palette expose focus
-and selection semantics, while standard settings controls use native
-HWND providers. Still to do: broader per-widget coverage and a full
-Narrator/NVDA release matrix.
+through TextPattern/TextPattern2 with bounded recent history, visible
+geometry, and an active caret anchor. The host, command palette list and
+query, docked-search query, and native Settings controls expose roles,
+values, focus, invoke, or selection semantics where applicable. Arbitrary
+terminal selection mutation and UIA `ScrollIntoView` are not implemented;
+broader per-widget coverage and a full Narrator/NVDA release matrix remain.
+
+### Link previews
+
+`link-previews` is parsed and the shared terminal core emits link-hover
+preview actions, but the Win32 runtime does not render the preview tooltip.
+Link matching, hover highlighting, and opening still work.
 
 ### Win32 runtime extraction
 
