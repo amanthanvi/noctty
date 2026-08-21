@@ -145,15 +145,22 @@ pub fn threadEnter(
 ) !void {
     // Start our subprocess
     const pty_fds = self.subprocess.start(alloc) catch |err| {
-        // If we specifically got this error then we are in the forked
-        // process and our child failed to execute. If we DIDN'T
-        // get this specific error then we're in the parent and
-        // we need to bubble it up.
-        if (err != error.ExecFailedInChild) return err;
+        const StartError = @TypeOf(err) || error{ OpenptyFailed, ExecFailedInChild };
+        switch (@as(StartError, @errorCast(err))) {
+            // We're in the child. Nothing more we can do but abnormal exit.
+            // The Command will output some additional information.
+            error.ExecFailedInChild => posix.exit(1),
 
-        // We're in the child. Nothing more we can do but abnormal exit.
-        // The Command will output some additional information.
-        posix.exit(1);
+            // Keep the tailored pty exhaustion message in Thread.
+            error.OpenptyFailed => return error.OpenptyFailed,
+
+            // Only errors from the subprocess start boundary use the
+            // confirmed no-child wording in Thread.
+            else => {
+                log.warn("failed to start subprocess err={}", .{err});
+                return error.ProcessNotStarted;
+            },
+        }
     };
     errdefer self.subprocess.stop();
 
@@ -648,6 +655,7 @@ const Subprocess = struct {
     cwd: ?[:0]const u8,
     env: ?EnvMap,
     args: []const [:0]const u8,
+    windows_cmd_shell: bool,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
     pty: ?Pty = null,
@@ -896,6 +904,9 @@ const Subprocess = struct {
             // This logs on its own, this is a bad error.
             error.SystemError => return err,
         };
+        const windows_cmd_shell = builtin.os.tag == .windows and
+            launch_command == .shell and
+            args.len == 4;
 
         // We separate the terminal-visible PWD from the Windows host cwd.
         // For WSL launches, the shell may start in `~` or another WSL path
@@ -946,6 +957,7 @@ const Subprocess = struct {
             .env = env,
             .cwd = cwd,
             .args = args,
+            .windows_cmd_shell = windows_cmd_shell,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
@@ -1093,6 +1105,7 @@ const Subprocess = struct {
         var cmd: Command = .{
             .path = self.args[0],
             .args = self.args,
+            .windows_cmd_shell = self.windows_cmd_shell,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
             .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
@@ -1664,6 +1677,7 @@ fn execCommand(
                 });
 
                 try args.append(alloc, cmd);
+                try args.append(alloc, "/S");
                 try args.append(alloc, "/C");
             } else {
                 // We run our shell wrapped in `/bin/sh` so that we don't have
@@ -1689,6 +1703,45 @@ fn execCommand(
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.subprocess.getProcessInfo(info);
+}
+
+test "execCommand windows-cmd-shell-command-line builds raw trampoline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .shell = "cmd.exe /c \"echo a && echo b\"" },
+        internal_os.passwd,
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), result.len);
+    try std.testing.expectEqualStrings("cmd.exe", std.fs.path.basename(result[0]));
+    try std.testing.expectEqualStrings("/S", result[1]);
+    try std.testing.expectEqualStrings("/C", result[2]);
+    try std.testing.expectEqualStrings("cmd.exe /c \"echo a && echo b\"", result[3]);
+}
+
+test "execCommand windows-direct-command-line keeps argv" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .direct = &.{
+            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "--message",
+            "hello world",
+        } },
+        internal_os.passwd,
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("C:\\Program Files\\Noctty Tools\\probe.exe", result[0]);
+    try std.testing.expectEqualStrings("--message", result[1]);
+    try std.testing.expectEqualStrings("hello world", result[2]);
 }
 
 test "execCommand darwin: shell command" {

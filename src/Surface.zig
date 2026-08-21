@@ -1336,21 +1336,24 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
         log.warn("abnormal process exit detected, showing error message", .{});
 
-        // Try and show a GUI message. If it returns true, don't do anything else.
-        if (self.rt_app.performAction(
+        // Keep the native notification, but always put the actionable details
+        // in the terminal too. A transient banner must not suppress the
+        // command, runtime, exit code, and close instructions.
+        _ = self.rt_app.performAction(
             .{ .surface = self },
             .show_child_exited,
             info,
         ) catch |err| gui: {
             log.err("error trying to show native child exited GUI err={}", .{err});
             break :gui false;
-        }) return;
+        };
 
-        // If a native GUI notification was not shown, update our terminal to
-        // note the abnormal exit.
         self.childExitedAbnormally(info) catch |err| {
             log.err("error handling abnormal child exit err={}", .{err});
             return;
+        };
+        self.queueRender() catch |err| {
+            log.warn("failed to notify renderer of abnormal child exit err={}", .{err});
         };
 
         return;
@@ -1376,6 +1379,9 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         // If the native GUI can't be shown, display a text message in the
         // terminal.
         self.renderer_state.mutex.lock();
+        defer self.queueRender() catch |err| {
+            log.warn("failed to notify renderer of child exit err={}", .{err});
+        };
         defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.carriageReturn();

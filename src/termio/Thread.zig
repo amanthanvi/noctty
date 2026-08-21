@@ -144,6 +144,12 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
     self.threadMain_(io) catch |err| {
         log.warn("error in io thread err={}", .{err});
 
+        // Register this before the cleanup defers below so the terminal mutex
+        // is released before the renderer wakes and reads the error surface.
+        defer io.renderer_wakeup.notify() catch |notify_err| {
+            log.warn("failed to render io thread error err={}", .{notify_err});
+        };
+
         // Use an arena to simplify memory management below
         var arena = ArenaAllocator.init(self.alloc);
         defer arena.deinit();
@@ -205,10 +211,19 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                 t.printString(str) catch {};
             },
 
-            else => {
+            error.ProcessNotStarted => {
+                const command = std.mem.join(alloc, " ", switch (io.backend) {
+                    .exec => |*exec| exec.subprocess.args,
+                }) catch "<command unavailable>";
                 const str = std.fmt.allocPrint(
                     alloc,
                     \\error starting IO thread: {}
+                    \\
+                    \\Ghostty failed to launch the requested command:
+                    \\
+                    \\{s}
+                    \\
+                    \\No child process was created, so there is no exit code.
                     \\
                     \\The underlying shell or command was unable to be started.
                     \\This error is usually due to exhausting a system resource.
@@ -216,7 +231,33 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\
                     \\This terminal is non-functional. Please close it and try again.
                 ,
-                    .{err},
+                    .{ err, command },
+                ) catch
+                    \\Out of memory. This terminal is non-functional. Please close it and try again.
+                ;
+
+                t.eraseDisplay(.complete, false);
+                t.printString(str) catch {};
+            },
+
+            else => {
+                const command = std.mem.join(alloc, " ", switch (io.backend) {
+                    .exec => |*exec| exec.subprocess.args,
+                }) catch "<command unavailable>";
+                const str = std.fmt.allocPrint(
+                    alloc,
+                    \\error in IO thread: {}
+                    \\
+                    \\Ghostty encountered an IO-thread failure while running the requested command:
+                    \\
+                    \\{s}
+                    \\
+                    \\The command or its terminal IO could not continue.
+                    \\If this looks like a bug, please report it.
+                    \\
+                    \\This terminal is non-functional. Please close it and try again.
+                ,
+                    .{ err, command },
                 ) catch
                     \\Out of memory. This terminal is non-functional. Please close it and try again.
                 ;

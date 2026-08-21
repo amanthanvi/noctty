@@ -59,6 +59,10 @@ path: [:0]const u8,
 /// be set to equal path.
 args: []const [:0]const u8,
 
+/// On Windows, the final argument is a raw cmd.exe `/S /C` command string.
+/// It must bypass argv quoting because cmd.exe uses its own quote rules.
+windows_cmd_shell: bool = false,
+
 /// Environment variables for the child process. If this is null, inherits
 /// the environment variables from this process. These are the exact
 /// environment variables to set; these are /not/ merged.
@@ -274,7 +278,11 @@ fn startWindows(self: *Command, arena: Allocator) !void {
     const cwd = try safeWindowsCurrentDirectory(arena, self.path, self.cwd);
     const cwd_w = if (cwd) |v| try std.unicode.utf8ToUtf16LeAllocZ(arena, v) else null;
     const command_line_w = if (self.args.len > 0) b: {
-        const command_line = try windowsCreateCommandLine(arena, self.args);
+        const command_line = try windowsCreateCommandLine(
+            arena,
+            self.args,
+            self.windows_cmd_shell,
+        );
         break :b try std.unicode.utf8ToUtf16LeAllocZ(arena, command_line);
     } else null;
     const env_w = if (self.env) |env_map| try createWindowsEnvBlock(arena, env_map) else null;
@@ -678,13 +686,35 @@ fn createWindowsEnvBlock(allocator: mem.Allocator, env_map: *const EnvMap) ![]u1
 }
 
 /// Copied from Zig. This function could be made public in child_process.zig instead.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+fn windowsCreateCommandLine(
+    allocator: mem.Allocator,
+    argv: []const []const u8,
+    cmd_shell: bool,
+) ![:0]u8 {
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const writer = &buf.writer;
 
+    if (cmd_shell) {
+        debug.assert(argv.len == 4);
+        debug.assert(mem.eql(u8, argv[1], "/S"));
+        debug.assert(mem.eql(u8, argv[2], "/C"));
+    }
+
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
+
+        // cmd.exe strips the first and final quote with `/S /C`, leaving
+        // the enclosed command exactly as the user authored it. Applying
+        // MSVCRT quoting here would turn inner quotes into literal `\"`
+        // bytes, which cmd.exe does not treat as escapes.
+        if (cmd_shell and arg_i == 3) {
+            try writer.writeByte('"');
+            try writer.writeAll(arg);
+            try writer.writeByte('"');
+            continue;
+        }
+
         if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
             try writer.writeAll(arg);
             continue;
@@ -711,6 +741,131 @@ fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) 
     }
 
     return buf.toOwnedSliceSentinel(0);
+}
+
+test "Command: windows-cmd-shell-command-line preserves cmd tail" {
+    const allocator = testing.allocator;
+
+    const cases = [_]struct {
+        argv: []const []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/S",
+                "/C",
+                "cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/S",
+                "/C",
+                "cmd.exe /c \"echo a && echo b\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"cmd.exe /c \"echo a && echo b\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/S",
+                "/C",
+                "echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/S",
+                "/C",
+                "echo \"C:\\Program Files\\noctty\\\"",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"echo \"C:\\Program Files\\noctty\\\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows Root\\System32\\cmd.exe",
+                "/S",
+                "/C",
+                "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"",
+            },
+            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /S /C \"\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"\"",
+        },
+    };
+
+    for (cases) |case| {
+        const actual = try windowsCreateCommandLine(allocator, case.argv, true);
+        defer allocator.free(actual);
+        try testing.expectEqualStrings(case.expected, actual);
+    }
+}
+
+test "Command: windows-direct-command-line keeps argv quoting" {
+    const allocator = testing.allocator;
+    const actual = try windowsCreateCommandLine(
+        allocator,
+        &.{
+            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "--message",
+            "say \"hello\"",
+            "C:\\Program Files\\noctty\\",
+        },
+        false,
+    );
+    defer allocator.free(actual);
+
+    try testing.expectEqualStrings(
+        "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"say \\\"hello\\\"\" \"C:\\Program Files\\noctty\\\\\"",
+        actual,
+    );
+}
+
+test "Command: windows-cmd-shell-command-line executes quoted command" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const windir = try std.process.getEnvVarOwned(testing.allocator, "WINDIR");
+    defer testing.allocator.free(windir);
+    const cmd_path = try std.fs.path.joinZ(testing.allocator, &.{
+        windir,
+        "System32",
+        "cmd.exe",
+    });
+    defer testing.allocator.free(cmd_path);
+
+    var td = try TempDir.init();
+    defer td.deinit();
+    var stdout = try createTestStdout(td.dir);
+    defer stdout.close();
+
+    var cmd: Command = .{
+        .path = cmd_path,
+        .args = &.{
+            cmd_path,
+            "/S",
+            "/C",
+            "cmd.exe /d /c \"echo QUOTED_A && echo QUOTED_B\"",
+        },
+        .windows_cmd_shell = true,
+        .stdout = stdout,
+        .os_pre_exec = null,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+    };
+
+    try cmd.testingStart();
+    const exit = try cmd.wait(true);
+    try testing.expectEqual(@as(u32, 0), exit.Exited);
+
+    try stdout.seekTo(0);
+    const contents = try stdout.readToEndAlloc(testing.allocator, 1024);
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("QUOTED_A \r\nQUOTED_B\r\n", contents);
 }
 
 test "createNullDelimitedEnvMap" {
