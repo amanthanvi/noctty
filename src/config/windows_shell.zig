@@ -24,7 +24,6 @@ pub const DefaultShell = enum {
 pub const ProfileKind = windows_shell_types.ProfileKind;
 pub const Utf8Console = windows_shell_types.Utf8Console;
 
-const utf8_code_page: u32 = 65001;
 const legacy_cjk_code_pages = [_]u32{ 932, 936, 949, 950 };
 
 pub fn shouldApplyUtf8Console(
@@ -32,10 +31,6 @@ pub fn shouldApplyUtf8Console(
     ansi_code_page: u32,
     oem_code_page: u32,
 ) bool {
-    if (ansi_code_page == utf8_code_page or oem_code_page == utf8_code_page) {
-        return false;
-    }
-
     return switch (mode) {
         .never => false,
         .always => true,
@@ -339,17 +334,18 @@ fn isBareCmdCommand(alloc: Allocator, command: Command) !bool {
 
 fn prepareBareCmdUtf8(alloc: Allocator, command: Command) !Command {
     return switch (command) {
-        .direct => |argv| try directCommand(
-            alloc,
-            &.{ argv[0], "/K", "chcp 65001 >nul" },
-        ),
-        .shell => |value| .{ .shell = try std.fmt.allocPrintSentinel(
-            alloc,
-            "chcp 65001 >nul & {s}",
-            .{value},
-            0,
-        ) },
+        .direct => |argv| try prepareBareCmdUtf8Argv0(alloc, argv[0]),
+        .shell => shell: {
+            var arg_iter = try command.argIterator(alloc);
+            defer arg_iter.deinit();
+            const argv0 = arg_iter.next() orelse unreachable;
+            break :shell try prepareBareCmdUtf8Argv0(alloc, argv0);
+        },
     };
+}
+
+fn prepareBareCmdUtf8Argv0(alloc: Allocator, argv0: []const u8) !Command {
+    return try directCommand(alloc, &.{ argv0, "/K", "chcp 65001 >nul" });
 }
 
 pub fn isWslCommand(command: Command) bool {
@@ -1587,8 +1583,8 @@ test "utf8-console decision covers modes and guarded code pages" {
         cjk: bool,
         utf8: bool,
     }{
-        .{ .mode = .auto, .western = true, .cjk = false, .utf8 = false },
-        .{ .mode = .always, .western = true, .cjk = true, .utf8 = false },
+        .{ .mode = .auto, .western = true, .cjk = false, .utf8 = true },
+        .{ .mode = .always, .western = true, .cjk = true, .utf8 = true },
         .{ .mode = .never, .western = false, .cjk = false, .utf8 = false },
     };
 
@@ -1603,8 +1599,13 @@ test "utf8-console decision covers modes and guarded code pages" {
         try testing.expect(!shouldApplyUtf8Console(.auto, 1252, code_page));
     }
 
-    try testing.expect(!shouldApplyUtf8Console(.always, 65001, 437));
-    try testing.expect(!shouldApplyUtf8Console(.always, 1252, 65001));
+    for ([_]Utf8Console{ .auto, .always }) |mode| {
+        try testing.expect(shouldApplyUtf8Console(mode, 65001, 437));
+        try testing.expect(shouldApplyUtf8Console(mode, 1252, 65001));
+    }
+
+    try testing.expect(!shouldApplyUtf8Console(.never, 65001, 437));
+    try testing.expect(!shouldApplyUtf8Console(.never, 1252, 65001));
 }
 
 test "utf8-console cmd preamble only changes bare cmd" {
@@ -1627,6 +1628,20 @@ test "utf8-console cmd preamble only changes bare cmd" {
     try testing.expectEqualStrings("/K", prepared_bare.direct[1]);
     try testing.expectEqualStrings("chcp 65001 >nul", prepared_bare.direct[2]);
 
+    const prepared_never = try prepareCommandWithLookup(
+        alloc,
+        bare,
+        null,
+        false,
+        shouldApplyUtf8Console(.never, 1252, 437),
+        lookup,
+    );
+    defer prepared_never.deinit(alloc);
+
+    try testing.expect(prepared_never == .direct);
+    try testing.expectEqual(@as(usize, 1), prepared_never.direct.len);
+    try testing.expectEqualStrings("cmd.exe", prepared_never.direct[0]);
+
     const with_tail = try directCommand(alloc, &.{ "cmd.exe", "/c", "echo ok" });
     defer with_tail.deinit(alloc);
     const prepared_tail = try prepareCommandWithLookup(alloc, with_tail, null, false, true, lookup);
@@ -1637,12 +1652,15 @@ test "utf8-console cmd preamble only changes bare cmd" {
         try testing.expectEqualStrings(expected, actual);
     }
 
-    const shell_bare: Command = .{ .shell = "cmd.exe" };
+    const shell_bare: Command = .{ .shell = "\"C:\\Windows\\System32\\cmd.exe\"" };
     const prepared_shell_bare = try prepareCommandWithLookup(alloc, shell_bare, null, false, true, lookup);
     defer prepared_shell_bare.deinit(alloc);
 
-    try testing.expect(prepared_shell_bare == .shell);
-    try testing.expectEqualStrings("chcp 65001 >nul & cmd.exe", prepared_shell_bare.shell);
+    try testing.expect(prepared_shell_bare == .direct);
+    try testing.expectEqual(@as(usize, 3), prepared_shell_bare.direct.len);
+    try testing.expectEqualStrings("C:\\Windows\\System32\\cmd.exe", prepared_shell_bare.direct[0]);
+    try testing.expectEqualStrings("/K", prepared_shell_bare.direct[1]);
+    try testing.expectEqualStrings("chcp 65001 >nul", prepared_shell_bare.direct[2]);
 
     const trampoline: Command = .{ .shell = "cmd.exe /c echo ok" };
     const prepared_trampoline = try prepareCommandWithLookup(alloc, trampoline, null, false, true, lookup);
