@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const paste_protection = @import("win32_paste_protection.zig");
 
 pub const current_schema_version: u32 = 1;
 pub const max_scrollback_lines: usize = 10_000;
@@ -25,6 +26,7 @@ pub const ValidationError = error{
     InvalidTreeShape,
     InvalidSplitRatio,
     InvalidWindowRect,
+    InvalidPaneText,
     UnreachableNode,
     TooManySessionLayoutNodes,
     TooManyScrollbackLines,
@@ -286,6 +288,7 @@ fn validateLayoutTree(
         switch (layout.nodes[frame.index]) {
             .pane => |pane| {
                 try validatePaneScrollback(pane, scrollback_bytes);
+                try validatePane(pane);
                 visited[frame.index] = 2;
                 leaf_count += 1;
                 stack_len -= 1;
@@ -360,6 +363,20 @@ pub fn scrollbackLineStorageBytes(line: []const u8) ?usize {
         bytes = std.math.add(usize, bytes, encoded) catch return null;
     }
     return bytes;
+}
+
+fn validatePane(pane: Pane) ValidationError!void {
+    for ([_]?[]const u8{
+        pane.cwd,
+        pane.profile,
+        pane.title_override,
+        pane.tab_title_override,
+    }) |value| {
+        if (value) |text| {
+            if (paste_protection.hasControlChars(text) or
+                paste_protection.hasNewline(text)) return error.InvalidPaneText;
+        }
+    }
 }
 
 fn expectSessionStateEqual(expected: SessionState, actual: SessionState) !void {
@@ -817,6 +834,91 @@ test "win32 session state parse keeps current schema strict about unknown fields
         error.UnknownField,
         parseAlloc(std.testing.allocator, raw),
     );
+}
+
+test "security regression win32 session state parse owns restored pane strings" {
+    const allocator = std.testing.allocator;
+    var raw = try allocator.dupe(u8,
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty","profile":"pwsh","title_override":"Build"}}]}}]}]}
+    );
+    const raw_start = @intFromPtr(raw.ptr);
+    const raw_end = raw_start + raw.len;
+    const raw_len = raw.len;
+
+    var parsed = try parseAlloc(allocator, raw);
+    defer parsed.deinit();
+    const pane = parsed.value.windows[0].tabs[0].layout.nodes[0].pane;
+    for ([_][]const u8{ pane.cwd.?, pane.profile.?, pane.title_override.? }) |value| {
+        const value_start = @intFromPtr(value.ptr);
+        try std.testing.expect(value_start < raw_start or value_start >= raw_end);
+    }
+
+    allocator.free(raw);
+    raw = undefined;
+    const scratch = try allocator.alloc(u8, raw_len);
+    defer allocator.free(scratch);
+    @memset(scratch, 0xA5);
+
+    try std.testing.expectEqualStrings("C:\\src\\noctty", pane.cwd.?);
+    try std.testing.expectEqualStrings("pwsh", pane.profile.?);
+    try std.testing.expectEqualStrings("Build", pane.title_override.?);
+}
+
+test "security regression win32 session state rejects NUL cwd" {
+    const nul_cwd =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\safe\\\u0000INJECTED=yes"}}]}}]}]}
+    ;
+    try std.testing.expectError(error.InvalidPaneText, parseAlloc(std.testing.allocator, nul_cwd));
+}
+
+test "security regression win32 session state rejects control titles" {
+    const control_title =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"title_override":"Build\u001b\u0007"}}]}}]}]}
+    ;
+    try std.testing.expectError(error.InvalidPaneText, parseAlloc(std.testing.allocator, control_title));
+}
+
+test "security regression win32 session state rejects carriage return title" {
+    const carriage_return_title =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"title_override":"Build\rsubmitted"}}]}}]}]}
+    ;
+    try std.testing.expectError(
+        error.InvalidPaneText,
+        parseAlloc(std.testing.allocator, carriage_return_title),
+    );
+}
+
+test "win32 session state accepts ordinary Windows paths" {
+    const ordinary_path =
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\Users\\amant\\src\\noctty"}}]}}]}]}
+    ;
+    var parsed = try parseAlloc(std.testing.allocator, ordinary_path);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "C:\\Users\\amant\\src\\noctty",
+        parsed.value.windows[0].tabs[0].layout.nodes[0].pane.cwd.?,
+    );
+}
+
+fn fuzzParseSessionState(_: void, raw: []const u8) !void {
+    // Bound the input the same way the persistence read allowance does; that
+    // constant lives with the reader, not the schema.
+    if (raw.len > @import("win32_session_persistence.zig").default_max_state_bytes) return;
+    var parsed = parseAlloc(std.testing.allocator, raw) catch return;
+    defer parsed.deinit();
+    try validateAlloc(std.testing.allocator, parsed.value);
+}
+
+test "fuzz win32 session state parser" {
+    try std.testing.fuzz({}, fuzzParseSessionState, .{ .corpus = &.{
+        "{}",
+        \\{"schema_version":1,"windows":[]}
+        ,
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+        ,
+        \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\safe\\\u0000BAD=1"}}]}}]}]}
+        ,
+    } });
 }
 
 test "win32 session state encode rejects invalid split child index" {
