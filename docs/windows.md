@@ -136,8 +136,20 @@ unrelated text. The full feature detail for both lives in the
 
 Session restore persists the practical shape of your workspace: host
 windows, tabs, split layout, selected profiles, working directories, and
-explicit titles. It doesn't restore terminal contents or child process
-state.
+explicit titles. Set `window-save-state-scrollback` to a nonzero line count
+to also persist that many lines of each pane's screen and scrollback. The
+default is `0` (off) because terminal output becomes data at rest and can
+contain secrets. The maximum is 10,000 lines per pane; larger values are
+clamped.
+
+Snapshots are stored and restored as plain text, without colors or styles.
+Each restored pane ends with a compact
+`--- RESTORED SNAPSHOT END | ...Z ---` separator containing the capture time.
+PowerShell/ConPTY startup repaint pushes the restored snapshot above the live
+prompt, so the window opens at a clean prompt; scroll up to find the snapshot
+and its separator. Engaging `toggle_secure_input` once excludes that pane from
+snapshots for the rest of the session, even if the indicator is later turned
+off. Child processes are not restored.
 
 If the session-state file is unreadable, noctty moves it aside to a
 sibling named after the original with a `.corrupt` suffix, logs the

@@ -3320,6 +3320,7 @@ pub const App = struct {
         defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
+        var restored_snapshot_panes: usize = 0;
 
         for (window.tabs, 0..) |saved_tab, tab_index| {
             const tab_surface = try self.restoreSessionTab(
@@ -3327,6 +3328,7 @@ pub const App = struct {
                 host,
                 tab_index,
                 &transaction,
+                &restored_snapshot_panes,
             );
             if (host == null) {
                 host = tab_surface.host;
@@ -3346,6 +3348,17 @@ pub const App = struct {
         restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
         const active_tab = &restored_host.tabs.items[restored_host.active_tab];
         const selected = active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
+        if (restored_snapshot_panes > 0) {
+            var message_buf: [96]u8 = undefined;
+            const message = std.fmt.bufPrint(
+                &message_buf,
+                "Restored snapshot content for {d} pane{s}.",
+                .{ restored_snapshot_panes, if (restored_snapshot_panes == 1) "" else "s" },
+            ) catch "Restored pane snapshot content.";
+            restored_host.setBanner(.info, message) catch |err| {
+                log.warn("win32 session restore: snapshot banner failed err={}", .{err});
+            };
+        }
         transaction.commit();
         return selected;
     }
@@ -3356,6 +3369,7 @@ pub const App = struct {
         existing_host: ?*Host,
         tab_index: usize,
         transaction: *SessionRestoreTransaction,
+        restored_snapshot_panes: *usize,
     ) !*Surface {
         var tab_surface: ?*Surface = null;
         var created: usize = 0;
@@ -3376,6 +3390,7 @@ pub const App = struct {
                 tab_index,
                 preferredSplitDirection(saved_tab.layout),
                 transaction,
+                restored_snapshot_panes,
             );
             node_surfaces[node_index] = surface;
             if (tab_surface == null) tab_surface = surface;
@@ -3409,6 +3424,7 @@ pub const App = struct {
         tab_index: usize,
         split_direction: SplitTreeSurface.Split.Direction,
         transaction: *SessionRestoreTransaction,
+        restored_snapshot_panes: *usize,
     ) !*Surface {
         const host = existing_host orelse if (tab_surface) |source| source.host else null;
         const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
@@ -3443,6 +3459,19 @@ pub const App = struct {
         if (pane.title_override) |title| try surface.setTitleOverride(title);
         if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
         if (pane.cwd) |cwd| try surface.setPwd(cwd);
+        const scrollback_lines: usize = self.config.@"window-save-state-scrollback";
+        if (scrollback_lines > 0) {
+            if (pane.scrollback) |snapshot| {
+                const restored = surface.restoreSessionScrollback(
+                    snapshot,
+                    scrollback_lines,
+                ) catch |err| {
+                    log.warn("win32 session restore: pane snapshot omitted or partial err={}", .{err});
+                    return surface;
+                };
+                if (restored) restored_snapshot_panes.* += 1;
+            }
+        }
         return surface;
     }
 
@@ -3487,20 +3516,66 @@ pub const App = struct {
         }
     }
 
+    fn sessionStateSizeAllowed(encoded_len: usize, scrollback_lines: usize) bool {
+        const max_bytes = if (scrollback_lines > 0)
+            win32_session_persistence.default_max_state_bytes
+        else
+            win32_session_persistence.max_layout_state_bytes;
+        return encoded_len <= max_bytes;
+    }
+
     fn saveSessionState(self: *const App) bool {
         if (!self.sessionStateEnabled()) return false;
         const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
 
-        var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
-        defer arena.deinit();
-        const alloc = arena.allocator();
+        const scrollback_lines: usize = self.config.@"window-save-state-scrollback";
+        const primary_encoded: ?[]u8 = primary: {
+            var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+            defer arena.deinit();
 
-        const state = self.buildSessionState(alloc) catch |err| {
-            log.warn("win32 session save: snapshot failed err={}", .{err});
+            const state = self.buildSessionState(arena.allocator(), scrollback_lines) catch |err| {
+                log.warn("win32 session save: snapshot failed err={}", .{err});
+                break :primary null;
+            };
+            if (state.windows.len == 0) {
+                win32_session_persistence.deleteFileIfPresent(path) catch |err| {
+                    log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
+                    return false;
+                };
+                return true;
+            }
+
+            const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
+                log.warn("win32 session save: encode failed err={}", .{err});
+                break :primary null;
+            };
+            if (!sessionStateSizeAllowed(encoded.len, scrollback_lines)) {
+                self.core_app.alloc.free(encoded);
+                log.warn("win32 session save: state exceeds write limit bytes={d}", .{encoded.len});
+                break :primary null;
+            }
+            break :primary encoded;
+        };
+
+        if (primary_encoded) |encoded| {
+            defer self.core_app.alloc.free(encoded);
+            writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
+                log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
+                return false;
+            };
+            return true;
+        }
+        if (scrollback_lines == 0) return false;
+
+        log.warn("win32 session save: retrying without scrollback", .{});
+        var layout_arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+        defer layout_arena.deinit();
+        const layout_state = self.buildSessionState(layout_arena.allocator(), 0) catch |err| {
+            log.warn("win32 session save: layout-only snapshot failed err={}", .{err});
             return false;
         };
-        if (state.windows.len == 0) {
+        if (layout_state.windows.len == 0) {
             win32_session_persistence.deleteFileIfPresent(path) catch |err| {
                 log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
                 return false;
@@ -3508,11 +3583,15 @@ pub const App = struct {
             return true;
         }
 
-        const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
-            log.warn("win32 session save: encode failed err={}", .{err});
+        const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, layout_state) catch |err| {
+            log.warn("win32 session save: layout-only encode failed err={}", .{err});
             return false;
         };
         defer self.core_app.alloc.free(encoded);
+        if (!sessionStateSizeAllowed(encoded.len, 0)) {
+            log.warn("win32 session save: layout state exceeds write limit bytes={d}", .{encoded.len});
+            return false;
+        }
 
         writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
             log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
@@ -3524,6 +3603,7 @@ pub const App = struct {
     fn buildSessionState(
         self: *const App,
         alloc: Allocator,
+        scrollback_lines: usize,
     ) !win32_session_state.SessionState {
         var count: usize = 0;
         for (self.hosts.items) |host| {
@@ -3531,10 +3611,16 @@ pub const App = struct {
         }
 
         const windows_state = try alloc.alloc(win32_session_state.Window, count);
+        var remaining_scrollback_budget = win32_session_state.max_total_scrollback_bytes;
         var built: usize = 0;
         for (self.hosts.items) |host| {
             if (hostSessionTabCount(host) == 0) continue;
-            windows_state[built] = try self.buildSessionWindow(alloc, host);
+            windows_state[built] = try self.buildSessionWindow(
+                alloc,
+                host,
+                scrollback_lines,
+                &remaining_scrollback_budget,
+            );
             built += 1;
         }
 
@@ -3545,6 +3631,8 @@ pub const App = struct {
         self: *const App,
         alloc: Allocator,
         host: *Host,
+        scrollback_lines: usize,
+        remaining_scrollback_budget: *usize,
     ) !win32_session_state.Window {
         const tab_count = hostSessionTabCount(host);
         const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
@@ -3553,7 +3641,12 @@ pub const App = struct {
         for (host.tabs.items, 0..) |*tab, i| {
             if (tabContainsQuickTerminal(tab)) continue;
             if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildSessionTab(alloc, tab);
+            tabs[built] = try buildSessionTab(
+                alloc,
+                tab,
+                scrollback_lines,
+                remaining_scrollback_budget,
+            );
             built += 1;
         }
 
@@ -3577,6 +3670,8 @@ pub const App = struct {
     fn buildSessionTab(
         alloc: Allocator,
         tab: *const Tab,
+        scrollback_lines: usize,
+        remaining_scrollback_budget: *usize,
     ) !win32_session_state.Tab {
         var selected_leaf: usize = 0;
         var leaf_index: usize = 0;
@@ -3591,13 +3686,20 @@ pub const App = struct {
 
         return .{
             .selected_leaf = selected_leaf,
-            .layout = try buildSessionLayout(alloc, tab),
+            .layout = try buildSessionLayout(
+                alloc,
+                tab,
+                scrollback_lines,
+                remaining_scrollback_budget,
+            ),
         };
     }
 
     fn buildSessionLayout(
         alloc: Allocator,
         tab: *const Tab,
+        scrollback_lines: usize,
+        remaining_scrollback_budget: *usize,
     ) !win32_session_state.LayoutTree {
         if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
@@ -3608,6 +3710,15 @@ pub const App = struct {
                     .profile = surface.launch_profile_key,
                     .title_override = surface.title_override,
                     .tab_title_override = surface.tab_title_override,
+                    .scrollback = surface.captureSessionScrollback(
+                        alloc,
+                        scrollback_lines,
+                        remaining_scrollback_budget,
+                    ) catch |err| snapshot: {
+                        remaining_scrollback_budget.* = 0;
+                        log.warn("win32 session save: pane snapshot omitted err={}", .{err});
+                        break :snapshot null;
+                    },
                 } },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {
@@ -16165,6 +16276,180 @@ const RestoredTerminalUndoState = struct {
 
 const undo_snapshot_magic = "WUH1";
 
+fn sessionScrollbackLineAllowed(line: []const u8) bool {
+    const view = std.unicode.Utf8View.init(line) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |codepoint| {
+        if (codepoint == '\t') continue;
+        if (codepoint < 0x20 or
+            codepoint == 0x7f or
+            (codepoint >= 0x80 and codepoint <= 0x9f)) return false;
+    }
+    return true;
+}
+
+fn captureTerminalScrollbackSnapshotAlloc(
+    alloc: Allocator,
+    scratch_alloc: Allocator,
+    terminal_state: *terminal.Terminal,
+    max_lines_requested: usize,
+    remaining_budget: *usize,
+    captured_at_unix_ms: u64,
+) !?win32_session_state.ScrollbackSnapshot {
+    const requested_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
+    if (requested_lines == 0 or remaining_budget.* == 0) return null;
+
+    const all = terminal_state.screens.active.selectAll() orelse return null;
+    var end = all.end();
+    end.x = end.node.data.size.cols - 1;
+
+    const plain_capacity = remaining_budget.* -| win32_session_state.scrollback_snapshot_storage_overhead;
+    if (plain_capacity == 0) {
+        remaining_budget.* = 0;
+        return null;
+    }
+    const row_bytes = @as(usize, @intCast(terminal_state.cols)) + 1;
+    const capacity_lines = @max(plain_capacity / row_bytes, 1);
+    var max_lines = @min(requested_lines, capacity_lines);
+
+    const plain_buf = try scratch_alloc.alloc(u8, plain_capacity);
+    defer scratch_alloc.free(plain_buf);
+    var plain_len: usize = 0;
+    var formatter_retries: usize = 0;
+    while (true) {
+        var start = end.up(max_lines - 1) orelse
+            terminal_state.screens.active.pages.getTopLeft(.screen);
+        start.x = 0;
+
+        var plain_writer: std.Io.Writer = .fixed(plain_buf);
+        var formatter = terminal.formatter.TerminalFormatter.init(terminal_state, .plain);
+        formatter.extra = .none;
+        formatter.content = .{ .selection = .init(start, end, false) };
+        formatter.format(&plain_writer) catch {
+            if (max_lines == 1 or formatter_retries == 4) return null;
+            max_lines = @max(max_lines / 2, 1);
+            formatter_retries += 1;
+            continue;
+        };
+        plain_len = plain_writer.end;
+        break;
+    }
+    const plain = plain_buf[0..plain_len];
+    if (plain.len == 0) return null;
+
+    var snapshot_bytes = win32_session_state.scrollback_snapshot_storage_overhead;
+    var accepted_count: usize = 0;
+    var accepted_start = plain.len;
+    var remaining_plain = plain;
+    while (true) {
+        const separator = std.mem.lastIndexOfScalar(u8, remaining_plain, '\n');
+        const line_start = if (separator) |index| index + 1 else 0;
+        const line = remaining_plain[line_start..];
+        if (line.len > win32_session_state.max_scrollback_line_bytes or
+            !sessionScrollbackLineAllowed(line))
+        {
+            // Invalid lines are omitted without discarding newer safe lines.
+        } else {
+            const line_bytes = win32_session_state.scrollbackLineStorageBytes(line) orelse break;
+            if (line_bytes > remaining_budget.* -| snapshot_bytes) break;
+            snapshot_bytes += line_bytes;
+            accepted_count += 1;
+            accepted_start = line_start;
+        }
+        const separator_index = separator orelse break;
+        remaining_plain = remaining_plain[0..separator_index];
+    }
+    if (accepted_count == 0) return null;
+
+    const lines = try alloc.alloc([]const u8, accepted_count);
+    var built: usize = 0;
+    errdefer {
+        for (lines[0..built]) |line| alloc.free(line);
+        alloc.free(lines);
+    }
+    var split = std.mem.splitScalar(u8, plain[accepted_start..], '\n');
+    while (split.next()) |line| {
+        if (built == accepted_count) break;
+        if (line.len > win32_session_state.max_scrollback_line_bytes or
+            !sessionScrollbackLineAllowed(line)) continue;
+        lines[built] = try alloc.dupe(u8, line);
+        built += 1;
+    }
+
+    remaining_budget.* -= snapshot_bytes;
+    return .{
+        .captured_at_unix_ms = captured_at_unix_ms,
+        .lines = lines,
+    };
+}
+
+fn printSessionSnapshotLine(terminal_state: *terminal.Terminal, line: []const u8) !void {
+    var remaining = line;
+    while (std.mem.indexOfScalar(u8, remaining, '\t')) |tab_index| {
+        try terminal_state.printString(remaining[0..tab_index]);
+        terminal_state.horizontalTab();
+        remaining = remaining[tab_index + 1 ..];
+    }
+    try terminal_state.printString(remaining);
+    terminal_state.carriageReturn();
+    try terminal_state.linefeed();
+}
+
+fn formatSessionSnapshotMarker(
+    buf: []u8,
+    captured_at_unix_ms: u64,
+) std.fmt.BufPrintError![]const u8 {
+    const max_iso8601_unix_ms: u64 = 253_402_300_799_999;
+    if (captured_at_unix_ms > max_iso8601_unix_ms) {
+        return std.fmt.bufPrint(
+            buf,
+            "--- SNAPSHOT END | Unix ms {d} ---",
+            .{captured_at_unix_ms},
+        );
+    }
+
+    const epoch_seconds: std.time.epoch.EpochSeconds = .{
+        .secs = captured_at_unix_ms / std.time.ms_per_s,
+    };
+    const year_day = epoch_seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    return std.fmt.bufPrint(
+        buf,
+        "--- RESTORED SNAPSHOT END | {d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z ---",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
+}
+
+fn restoreTerminalScrollbackSnapshot(
+    terminal_state: *terminal.Terminal,
+    snapshot: win32_session_state.ScrollbackSnapshot,
+    max_lines_requested: usize,
+) !usize {
+    const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
+    const first_line = snapshot.lines.len - @min(snapshot.lines.len, max_lines);
+    var restored_lines: usize = 0;
+    for (snapshot.lines[first_line..]) |line| {
+        if (line.len > win32_session_state.max_scrollback_line_bytes or
+            !sessionScrollbackLineAllowed(line)) continue;
+        try printSessionSnapshotLine(terminal_state, line);
+        restored_lines += 1;
+    }
+    if (restored_lines == 0) return 0;
+
+    var marker_buf: [160]u8 = undefined;
+    const marker = try formatSessionSnapshotMarker(&marker_buf, snapshot.captured_at_unix_ms);
+    try printSessionSnapshotLine(terminal_state, marker);
+    return restored_lines;
+}
+
 fn captureTerminalUndoStateBytes(
     alloc: Allocator,
     terminal_state: *const terminal.Terminal,
@@ -23880,6 +24165,7 @@ pub const Surface = struct {
     },
     readonly: bool = false,
     secure_input: bool = false,
+    secure_input_ever_engaged: bool = false,
     key_sequence_active: bool = false,
     key_table_name: ?[:0]const u8 = null,
     search_active: bool = false,
@@ -24508,6 +24794,51 @@ pub const Surface = struct {
             self.app.core_app.alloc,
             self.core_surface.renderer_state.terminal,
         );
+    }
+
+    fn captureSessionScrollback(
+        self: *Surface,
+        alloc: Allocator,
+        max_lines: usize,
+        remaining_budget: *usize,
+    ) !?win32_session_state.ScrollbackSnapshot {
+        if (max_lines == 0 or self.secure_input_ever_engaged) return null;
+        self.core_surface.renderer_state.mutex.lock();
+        defer self.core_surface.renderer_state.mutex.unlock();
+        return captureTerminalScrollbackSnapshotAlloc(
+            alloc,
+            self.app.core_app.alloc,
+            self.core_surface.renderer_state.terminal,
+            max_lines,
+            remaining_budget,
+            unixMillis(),
+        );
+    }
+
+    fn restoreSessionScrollback(
+        self: *Surface,
+        snapshot: win32_session_state.ScrollbackSnapshot,
+        max_lines: usize,
+    ) !bool {
+        var scrollbar: terminal.Scrollbar = .zero;
+        var restored_lines: usize = 0;
+        {
+            self.core_surface.renderer_state.mutex.lock();
+            defer self.core_surface.renderer_state.mutex.unlock();
+            restored_lines = try restoreTerminalScrollbackSnapshot(
+                self.core_surface.renderer_state.terminal,
+                snapshot,
+                max_lines,
+            );
+            scrollbar = self.core_surface.renderer_state.terminal.screens.active.pages.scrollbar();
+        }
+        self.setScrollbar(scrollbar) catch |err| {
+            log.warn("win32 session restore: snapshot scrollbar sync failed err={}", .{err});
+        };
+        self.requestRepaint() catch |err| {
+            log.warn("win32 session restore: snapshot repaint request failed err={}", .{err});
+        };
+        return restored_lines > 0;
     }
 
     fn restoreUndoSnapshot(self: *Surface, entry: *const win32_undo.Entry) void {
@@ -27437,6 +27768,7 @@ pub const Surface = struct {
             .off => false,
             .toggle => !self.secure_input,
         };
+        if (next) self.secure_input_ever_engaged = true;
         if (self.secure_input == next) return;
         self.secure_input = next;
         self.invalidateStatusBarState();
@@ -33351,6 +33683,416 @@ test "win32 session save deletes stale state file for empty snapshot" {
     try win32_session_persistence.deleteFileIfPresent(path);
 }
 
+test "win32 session state scrollback capture enforces line cap budget and secure redaction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 16,
+        .rows = 3,
+        .max_scrollback = 1024,
+    });
+    defer terminal_state.deinit(std.testing.allocator);
+    var stream = terminal_state.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var budget = win32_session_state.max_total_scrollback_bytes;
+    const snapshot = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        2,
+        &budget,
+        123,
+    )).?;
+    try std.testing.expectEqual(@as(usize, 2), snapshot.lines.len);
+    try std.testing.expectEqualStrings("four", snapshot.lines[0]);
+    try std.testing.expectEqualStrings("five", snapshot.lines[1]);
+
+    var one_line_budget = win32_session_state.max_total_scrollback_bytes;
+    _ = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        1,
+        &one_line_budget,
+        124,
+    )).?;
+    const one_line_cost = win32_session_state.max_total_scrollback_bytes - one_line_budget;
+    var shared_budget = one_line_cost;
+    const first_budget_snapshot = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        2,
+        &shared_budget,
+        125,
+    )).?;
+    try std.testing.expectEqual(@as(usize, 0), shared_budget);
+    const omitted_budget_snapshot = try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        2,
+        &shared_budget,
+        126,
+    );
+    try std.testing.expect(omitted_budget_snapshot == null);
+
+    const budget_nodes = [_]win32_session_state.Node{
+        .{ .split = .{ .axis = .horizontal, .ratio = 0.5, .first = 1, .second = 2 } },
+        .{ .pane = .{ .scrollback = first_budget_snapshot } },
+        .{ .pane = .{ .scrollback = omitted_budget_snapshot } },
+    };
+    const budget_tabs = [_]win32_session_state.Tab{.{
+        .selected_leaf = 0,
+        .layout = .{ .root = 0, .nodes = &budget_nodes },
+    }};
+    const budget_windows = [_]win32_session_state.Window{.{
+        .selected_tab = 0,
+        .tabs = &budget_tabs,
+    }};
+    const budget_encoded = try win32_session_state.encodeAlloc(
+        std.testing.allocator,
+        .{ .windows = &budget_windows },
+    );
+    defer std.testing.allocator.free(budget_encoded);
+    var budget_parsed = try win32_session_state.parseAlloc(std.testing.allocator, budget_encoded);
+    defer budget_parsed.deinit();
+    const persisted_budget_nodes = budget_parsed.value.windows[0].tabs[0].layout.nodes;
+    try std.testing.expectEqual(@as(usize, 3), persisted_budget_nodes.len);
+    try std.testing.expect(persisted_budget_nodes[1].pane.scrollback != null);
+    try std.testing.expect(persisted_budget_nodes[2].pane.scrollback == null);
+
+    var overflow_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 4,
+        .rows = 1,
+        .max_scrollback = 16,
+    });
+    defer overflow_terminal.deinit(std.testing.allocator);
+    var overflow_stream = overflow_terminal.vtStream();
+    defer overflow_stream.deinit();
+    overflow_stream.nextSlice("ééé");
+
+    var expensive_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 4,
+        .rows = 1,
+        .max_scrollback = 16,
+    });
+    defer expensive_terminal.deinit(std.testing.allocator);
+    var expensive_stream = expensive_terminal.vtStream();
+    defer expensive_stream.deinit();
+    expensive_stream.nextSlice("\\\\\\\\");
+
+    var following_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 4,
+        .rows = 1,
+        .max_scrollback = 16,
+    });
+    defer following_terminal.deinit(std.testing.allocator);
+    var following_stream = following_terminal.vtStream();
+    defer following_stream.deinit();
+    following_stream.nextSlice("ok");
+
+    const following_cost = win32_session_state.scrollback_snapshot_storage_overhead +
+        win32_session_state.scrollbackLineStorageBytes("ok").?;
+    var preserved_budget = following_cost;
+    try std.testing.expect((try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &overflow_terminal,
+        1,
+        &preserved_budget,
+        127,
+    )) == null);
+    try std.testing.expectEqual(following_cost, preserved_budget);
+    try std.testing.expect((try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &expensive_terminal,
+        1,
+        &preserved_budget,
+        128,
+    )) == null);
+    try std.testing.expectEqual(following_cost, preserved_budget);
+    const following_snapshot = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &following_terminal,
+        1,
+        &preserved_budget,
+        129,
+    )).?;
+    try std.testing.expectEqual(@as(usize, 1), following_snapshot.lines.len);
+    try std.testing.expectEqualStrings("ok", following_snapshot.lines[0]);
+    try std.testing.expectEqual(@as(usize, 0), preserved_budget);
+
+    var exhausted_budget = win32_session_state.scrollback_snapshot_storage_overhead;
+    try std.testing.expect((try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        2,
+        &exhausted_budget,
+        130,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 0), exhausted_budget);
+    try std.testing.expect((try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &terminal_state,
+        2,
+        &exhausted_budget,
+        131,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 0), exhausted_budget);
+
+    var newest_suffix_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = 16,
+    });
+    defer newest_suffix_terminal.deinit(std.testing.allocator);
+    var newest_suffix_stream = newest_suffix_terminal.vtStream();
+    defer newest_suffix_stream.deinit();
+    newest_suffix_stream.nextSlice("\\\"\\\"\\\"\\\"\r\nok");
+
+    var newest_suffix_budget = win32_session_state.scrollback_snapshot_storage_overhead + 22;
+    const newest_suffix_snapshot = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &newest_suffix_terminal,
+        2,
+        &newest_suffix_budget,
+        132,
+    )).?;
+    try std.testing.expectEqual(@as(usize, 1), newest_suffix_snapshot.lines.len);
+    try std.testing.expectEqualStrings("ok", newest_suffix_snapshot.lines[0]);
+
+    var multibyte_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 10,
+        .rows = 3,
+        .max_scrollback = 32,
+    });
+    defer multibyte_terminal.deinit(std.testing.allocator);
+    var multibyte_stream = multibyte_terminal.vtStream();
+    defer multibyte_stream.deinit();
+    multibyte_stream.nextSlice(
+        "界界界界\r\n界界界界\r\n界界界界\r\n界界界界\r\n" ++
+            "界界界界\r\n界界界界\r\n界界界界\r\n終終終終",
+    );
+
+    var multibyte_budget = win32_session_state.scrollback_snapshot_storage_overhead + 88;
+    const multibyte_snapshot = (try captureTerminalScrollbackSnapshotAlloc(
+        arena.allocator(),
+        std.testing.allocator,
+        &multibyte_terminal,
+        8,
+        &multibyte_budget,
+        133,
+    )).?;
+    try std.testing.expect(multibyte_snapshot.lines.len > 0);
+    try std.testing.expect(multibyte_snapshot.lines.len < 8);
+    try std.testing.expectEqualStrings(
+        "終終終終",
+        multibyte_snapshot.lines[multibyte_snapshot.lines.len - 1],
+    );
+
+    var core_app: CoreApp = undefined;
+    core_app.alloc = std.testing.allocator;
+    var app: App = undefined;
+    app.core_app = &core_app;
+    app.hosts = .empty;
+    defer app.hosts.deinit(std.testing.allocator);
+
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var secure_surface: Surface = .{ .app = &app };
+    secure_surface.core_surface.renderer_state = .{
+        .mutex = &renderer_mutex,
+        .terminal = &terminal_state,
+    };
+    try secure_surface.setSecureInput(.on);
+    try secure_surface.setSecureInput(.off);
+    try std.testing.expect(secure_surface.secure_input_ever_engaged);
+
+    var normal_surface: Surface = .{ .app = &app };
+    normal_surface.core_surface.renderer_state = .{
+        .mutex = &renderer_mutex,
+        .terminal = &terminal_state,
+    };
+    var host: Host = .{ .app = &app, .id = 1 };
+    defer {
+        for (host.tabs.items) |*tab| tab.deinit();
+        host.tabs.deinit(std.testing.allocator);
+    }
+    secure_surface.host = &host;
+    normal_surface.host = &host;
+    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &secure_surface));
+    var inserted = try SplitTreeSurface.init(std.testing.allocator, &normal_surface);
+    defer inserted.deinit();
+    const split_tree = try host.tabs.items[0].tree.split(
+        std.testing.allocator,
+        .root,
+        .right,
+        0.5,
+        &inserted,
+    );
+    host.tabs.items[0].tree.deinit();
+    host.tabs.items[0].tree = split_tree;
+    try app.hosts.append(std.testing.allocator, &host);
+
+    var state_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer state_arena.deinit();
+    const saved_state = try app.buildSessionState(state_arena.allocator(), 2);
+    const saved_nodes = saved_state.windows[0].tabs[0].layout.nodes;
+    try std.testing.expectEqual(@as(usize, 3), saved_nodes.len);
+    try std.testing.expect(saved_nodes[1].pane.scrollback != null);
+    try std.testing.expect(saved_nodes[2].pane.scrollback == null);
+    const redacted_encoded = try win32_session_state.encodeAlloc(std.testing.allocator, saved_state);
+    defer std.testing.allocator.free(redacted_encoded);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, redacted_encoded, "\"scrollback\""));
+}
+
+test "win32 session scrollback restore marks snapshots and rejects control lines" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var marker_buf: [160]u8 = undefined;
+    const marker = try formatSessionSnapshotMarker(&marker_buf, 0);
+    try std.testing.expect(marker.len < 60);
+    try std.testing.expectEqualStrings(
+        "--- RESTORED SNAPSHOT END | 1970-01-01T00:00:00Z ---",
+        marker,
+    );
+    var fallback_marker_buf: [160]u8 = undefined;
+    const fallback_marker = try formatSessionSnapshotMarker(
+        &fallback_marker_buf,
+        253_402_300_800_000,
+    );
+    try std.testing.expect(fallback_marker.len < 60);
+    try std.testing.expectEqualStrings(
+        "--- SNAPSHOT END | Unix ms 253402300800000 ---",
+        fallback_marker,
+    );
+
+    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 65,
+        .rows = 8,
+        .max_scrollback = 1024,
+    });
+    defer terminal_state.deinit(std.testing.allocator);
+    try terminal_state.setTitle("original title");
+
+    const lines = [_][]const u8{
+        "safe snapshot line",
+        "tab\tline",
+        "escape\x1b]2;tampered title\x07payload",
+        "newline\ncontrol payload",
+        "delete\x7fpayload",
+        "c1\xc2\x9bpayload",
+    };
+    const restored_lines = try restoreTerminalScrollbackSnapshot(
+        &terminal_state,
+        .{
+            .captured_at_unix_ms = 0,
+            .lines = &lines,
+        },
+        lines.len,
+    );
+    try std.testing.expectEqual(@as(usize, 2), restored_lines);
+
+    const plain = try terminal_state.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "safe snapshot line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "tab") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "payload") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        plain,
+        "--- RESTORED SNAPSHOT END | 1970-01-01T00:00:00Z ---",
+    ) != null);
+    try std.testing.expectEqualStrings("original title", terminal_state.getTitle().?);
+
+    var rejected_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 100,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer rejected_terminal.deinit(std.testing.allocator);
+    const rejected_lines = [_][]const u8{
+        "escape\x1b]2;tampered title\x07payload",
+        "newline\ncontrol payload",
+        "delete\x7fpayload",
+        "c1\xc2\x9bpayload",
+    };
+    try std.testing.expectEqual(@as(usize, 0), try restoreTerminalScrollbackSnapshot(
+        &rejected_terminal,
+        .{ .captured_at_unix_ms = 0, .lines = &rejected_lines },
+        rejected_lines.len,
+    ));
+    const rejected_plain = try rejected_terminal.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(rejected_plain);
+    try std.testing.expect(std.mem.indexOf(u8, rejected_plain, "SNAPSHOT END") == null);
+
+    var disabled_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 100,
+        .rows = 4,
+        .max_scrollback = 1024,
+    });
+    defer disabled_terminal.deinit(std.testing.allocator);
+    const stale_lines = [_][]const u8{"stale snapshot must stay on disk only"};
+    try std.testing.expectEqual(@as(usize, 0), try restoreTerminalScrollbackSnapshot(
+        &disabled_terminal,
+        .{ .captured_at_unix_ms = 0, .lines = &stale_lines },
+        0,
+    ));
+    const disabled_plain = try disabled_terminal.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(disabled_plain);
+    try std.testing.expect(std.mem.indexOf(u8, disabled_plain, "stale snapshot") == null);
+    try std.testing.expect(std.mem.indexOf(u8, disabled_plain, "SNAPSHOT END") == null);
+
+    var lowered_terminal = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 100,
+        .rows = 6,
+        .max_scrollback = 1024,
+    });
+    defer lowered_terminal.deinit(std.testing.allocator);
+    const lowered_lines = [_][]const u8{ "oldest", "middle", "newest" };
+    try std.testing.expectEqual(@as(usize, 2), try restoreTerminalScrollbackSnapshot(
+        &lowered_terminal,
+        .{ .captured_at_unix_ms = 0, .lines = &lowered_lines },
+        2,
+    ));
+    const lowered_plain = try lowered_terminal.plainString(std.testing.allocator);
+    defer std.testing.allocator.free(lowered_plain);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "oldest") == null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "middle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "newest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "SNAPSHOT END") != null);
+}
+
+test "win32 session save enforces layout and combined size boundaries" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(App.sessionStateSizeAllowed(
+        win32_session_persistence.max_layout_state_bytes,
+        0,
+    ));
+    try std.testing.expect(!App.sessionStateSizeAllowed(
+        win32_session_persistence.max_layout_state_bytes + 1,
+        0,
+    ));
+    try std.testing.expect(App.sessionStateSizeAllowed(
+        win32_session_persistence.default_max_state_bytes,
+        1,
+    ));
+    try std.testing.expect(!App.sessionStateSizeAllowed(
+        win32_session_persistence.default_max_state_bytes + 1,
+        1,
+    ));
+}
+
 test "win32 session save skips quick terminal tabs" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -33372,7 +34114,7 @@ test "win32 session save skips quick terminal tabs" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
     try app.hosts.append(std.testing.allocator, &host);
 
-    const state = try app.buildSessionState(std.testing.allocator);
+    const state = try app.buildSessionState(std.testing.allocator, 0);
     defer std.testing.allocator.free(state.windows);
     try std.testing.expectEqual(@as(usize, 0), state.windows.len);
     try std.testing.expect(App.hostContainsQuickTerminal(&host));
@@ -33386,7 +34128,7 @@ test "win32 session save skips quick terminal tabs" {
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &normal_surface));
     host.active_tab = 1;
 
-    const mixed_state = try app.buildSessionState(std.testing.allocator);
+    const mixed_state = try app.buildSessionState(std.testing.allocator, 0);
     defer {
         for (mixed_state.windows) |window| {
             for (window.tabs) |tab| std.testing.allocator.free(tab.layout.nodes);
