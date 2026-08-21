@@ -20,7 +20,7 @@ dependency tree:
 
 Both pages carry one byte-identical inline theme bootstrap, so the CSP pins
 exactly one inline-script hash. `node scripts/build-site-assets.mjs` (from
-the repo root) recomputes that hash, the font-`onload` handler hash, and the
+the repo root) recomputes that hash and the
 `?v=` SHA-256 cache keys on local assets; `--check` is the CI determinism
 gate. Run it after editing any HTML, CSS, or JS file here.
 
@@ -46,8 +46,9 @@ light ("dawn") is a first-class state, not a fallback.
 
 **Type.** Space Grotesk carries the display voice, Segoe UI Variable the body
 (the platform's own voice, which suits a native Windows product), and JetBrains
-Mono every command, key, and terminal line. Both webfonts are variable, subset
-to latin, self-hosted, and OFL-licensed; their licenses ship in `assets/fonts/`.
+Mono every command, key, and terminal line. Both webfonts are variable, subsetted
+to Latin, self-hosted, and OFL-licensed; their licenses ship in `assets/fonts/`
+and are part of the deployed payload.
 
 **Structure.** Deliberately not a grid of identical feature cards. The hero
 pairs the claim with a live terminal; an assurance strip carries the release
@@ -91,8 +92,8 @@ The checks fail on known bad claims and regressions, including:
 - silent-update wording or stale claims about missing signing
 - parity overclaims
 
-Google Fonts (JetBrains Mono) and the GitHub Releases version fetch are
-intentional for the static Pages payload.
+The GitHub Releases version fetch is the only third-party request the
+static Pages payload makes; fonts are served from this origin.
 
 ## Cloudflare Pages
 
@@ -148,11 +149,11 @@ The Pages custom domain is:
 `site/_headers` keeps every response revalidated, including nested 404
 fallbacks. Cloudflare Pages still serves ETags and handles its edge cache,
 while browsers cannot retain stale routes or non-content-addressed assets
-without validation. Its CSP allowlists the shared inline theme bootstrap and
-the font stylesheet `onload` handler by exact SHA-256 hashes; `style-src`
-carries no `unsafe-inline` because the pages ship no inline styles. Any
-inline-script or handler edit must be followed by
-`node scripts/build-site-assets.mjs`, which rewrites the CSP hashes, and by a
+without validation. Its CSP allowlists the shared inline theme bootstrap by an
+exact SHA-256 hash and pins `script-src-attr 'none'`, so no inline event
+handler may exist; `style-src` and `font-src` are `'self'` only, and neither
+page ships an inline `style` attribute. Any inline-script edit must be followed
+by `node scripts/build-site-assets.mjs`, which rewrites the CSP hash, and by a
 matching flagship contract test update.
 
 To build the deploy payload locally:

@@ -26,7 +26,7 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="styles.css?v=9b877fd20215196da4330f8313fba7a02509afd6b9c8598482249c08334b73a2" />
+  <link rel="stylesheet" href="styles.css?v=be35818ee3fb7daa76d98c7b43ec705d4e7d576edcf362ea5403cf1f462bba79" />
   <script>
     (function () {
       var root = document.documentElement;
@@ -56,7 +56,7 @@
         <a class="nc-nav__link nc-nav__link--optional" href="#capabilities">Features</a>
         <a class="nc-nav__link nc-nav__link--optional" href="#upstream">How it's built</a>
         <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
-        <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
+        <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
           <svg width="16" height="16" viewBox="0 0 32 32" fill="none" aria-hidden="true">
             <path fill-rule="evenodd" clip-rule="evenodd" d="M5.6 14.6a8.6 8.6 0 1 0 17.2 0 8.6 8.6 0 1 0-17.2 0ZM10.1 13.2a6.1 6.1 0 1 0 12.2 0 6.1 6.1 0 1 0-12.2 0Z" fill="currentColor" />
             <path d="M25.2 5.4 26.05 6.95 27.6 7.8 26.05 8.65 25.2 10.2 24.35 8.65 22.8 7.8 24.35 6.95Z" fill="currentColor" opacity="0.7" />
@@ -74,7 +74,7 @@
       <div class="nc-shell nc-hero__grid">
         <div class="nc-hero__copy">
           <p class="nc-chip nc-rise">
-            <span class="nc-sr-only" id="nc-version-summary">Version 1.3.123, the latest release, for Windows 10 and 11 on x64 and ARM64.</span>
+            <span class="nc-sr-only" id="nc-version-summary">Version 1.3.123, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.</span>
             <span aria-hidden="true"><span class="nc-chip__version" id="nc-version">v1.3.123</span></span>
             <span class="nc-chip__latest" aria-hidden="true">latest</span>
             <span class="nc-chip__sep" aria-hidden="true"></span>
@@ -102,7 +102,7 @@
             <a class="nc-button nc-button--ghost" href="#install">Package managers</a>
           </div>
 
-          <div class="nc-install nc-rise nc-rise--4" style="margin-top: var(--space-md);">
+          <div class="nc-install nc-install--hero nc-rise nc-rise--4">
             <div class="nc-install__row">
               <span class="nc-install__sigil" aria-hidden="true">$</span>
               <code class="nc-install__command" id="nc-install-command">winget install AmanThanvi.noctty</code>
@@ -243,8 +243,8 @@
         </div>
         <div class="nc-specimen" aria-hidden="true">
           <div class="nc-palette__field">
-            <span style="color: var(--peri);">›</span>
-            <span>spl<span style="color: var(--moon-3);">it right</span></span>
+            <span class="nc-palette__caret">›</span>
+            <span>spl<span class="nc-palette__ghost">it right</span></span>
             <span class="nc-palette__hint">Ctrl+Shift+P</span>
           </div>
           <ul class="nc-palette__list">

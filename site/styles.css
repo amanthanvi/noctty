@@ -124,7 +124,7 @@ body {
   font-size: 16px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  text-rendering: optimizelegibility;
 }
 
 h1,
@@ -152,7 +152,7 @@ a {
 
 a:hover {
   color: var(--moon);
-  text-decoration-color: currentColor;
+  text-decoration-color: currentcolor;
 }
 
 img,
@@ -499,6 +499,10 @@ svg {
   overflow: hidden;
 }
 
+.nc-install--hero {
+  margin-top: var(--space-md);
+}
+
 .nc-install__row {
   display: flex;
   align-items: center;
@@ -557,6 +561,11 @@ svg {
 
 .nc-install__copy.is-copied .nc-install__copy-icon--copied {
   display: block;
+}
+
+.nc-install__copy.is-failed {
+  color: var(--ember);
+  background: color-mix(in srgb, var(--ember) 16%, transparent);
 }
 
 .nc-install__methods {
@@ -900,6 +909,14 @@ svg {
   color: var(--moon-3);
 }
 
+.nc-palette__caret {
+  color: var(--peri);
+}
+
+.nc-palette__ghost {
+  color: var(--moon-3);
+}
+
 .nc-palette__list {
   margin: 0;
   padding: var(--space-xs);
@@ -1105,6 +1122,10 @@ svg {
 
 .nc-lost__title {
   font-size: clamp(2.2rem, 5vw, 3.4rem);
+}
+
+.nc-lost__action {
+  margin-top: var(--space-md);
 }
 
 .nc-lost__body {

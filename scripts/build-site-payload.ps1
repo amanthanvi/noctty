@@ -54,6 +54,8 @@ $allowlist = [string[]] @(
     'app.js'
     'assets/app-window.webp'
     'assets/favicon.svg'
+    'assets/fonts/OFL-JetBrainsMono.txt'
+    'assets/fonts/OFL-SpaceGrotesk.txt'
     'assets/fonts/jetbrains-mono.woff2'
     'assets/fonts/space-grotesk.woff2'
     'assets/hero-sky.webp'
