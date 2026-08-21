@@ -40,7 +40,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "terminal.js"; Pattern = "%LOCALAPPDATA%\\noctty\\config.ghostty"; Reason = "Landing page should mention the real Windows config path." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty"; Reason = "Landing page should keep a repo link." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "winget install AmanThanvi.noctty"; Reason = "Hero copy should surface the official WinGet install command." },
-    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "formerly WingHostty"; Reason = "Hero should keep the rename note so former WingHostty users recognize the project." },
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "formerly winghostty"; Reason = "Footer should keep the rename note so former winghostty users recognize the project." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "scoop install noctty/noctty"; Reason = "Copied install text should include the official Scoop install command." },
     @{ Path = Join-Path $siteRoot "install.js"; Pattern = "https://github.com/amanthanvi/scoop-noctty"; Reason = "Copied Scoop install text should include the official bucket source." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "Session restoration"; Reason = "Landing page should describe current session restoration." },

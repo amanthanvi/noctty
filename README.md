@@ -6,13 +6,13 @@
 </p>
 
 <p align="center">
-  <strong>Noctty</strong> (formerly WingHostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
+  <strong>Noctty</strong> (formerly winghostty) — <em>Ghostty's terminal core in a fast, native Windows app.</em>
   <br />
   Tabs, splits, and session restore · Native Win32, OpenGL renderer · No telemetry
 </p>
 
 <p align="center">
-  <sub>WingHostty was renamed to Noctty in August 2026 following a
+  <sub>winghostty was renamed to Noctty in August 2026 following a
   <a href="https://github.com/amanthanvi/noctty/issues/119">trademark request from the Ghostty team</a>;
   same project, same maintainer.</sub>
 </p>
