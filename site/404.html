@@ -15,7 +15,16 @@
     (function () {
       var root = document.documentElement;
       try {
-        root.setAttribute("data-theme", localStorage.getItem("nc-theme") || "dark");
+        var stored = localStorage.getItem("nc-theme");
+        if (!stored) {
+          var legacy = localStorage.getItem("wg-theme");
+          if (legacy) {
+            stored = legacy;
+            localStorage.setItem("nc-theme", legacy);
+            localStorage.removeItem("wg-theme");
+          }
+        }
+        root.setAttribute("data-theme", stored || "dark");
       } catch (e) {}
     })();
   </script>

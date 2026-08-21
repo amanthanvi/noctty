@@ -31,7 +31,16 @@
     (function () {
       var root = document.documentElement;
       try {
-        root.setAttribute("data-theme", localStorage.getItem("nc-theme") || "dark");
+        var stored = localStorage.getItem("nc-theme");
+        if (!stored) {
+          var legacy = localStorage.getItem("wg-theme");
+          if (legacy) {
+            stored = legacy;
+            localStorage.setItem("nc-theme", legacy);
+            localStorage.removeItem("wg-theme");
+          }
+        }
+        root.setAttribute("data-theme", stored || "dark");
       } catch (e) {}
     })();
   </script>
@@ -333,7 +342,7 @@
         <h2 class="nc-cta__title" id="install-title">Start tonight</h2>
         <p class="nc-cta__sub">
           Install with WinGet or Scoop, or take the signed installer straight from
-          the latest GitHub release. A portable zip is published with every build.
+          the latest GitHub release. A portable zip ships with every release.
         </p>
         <div class="nc-cta__actions">
           <a class="nc-button nc-button--primary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noopener noreferrer">

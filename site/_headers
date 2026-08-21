@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'sha256-MTAgWiQc8BvkQ3XV5pSLMjFfJ+5BeSacc7uVi2O4OiY='; script-src-attr 'none'; style-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data:; frame-src 'none'; worker-src 'none'; manifest-src 'self'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'sha256-a+56uL8XnC2v5K+nDDzm1DYhrcWPb1tVTZTwk9WoUu0='; script-src-attr 'none'; style-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data:; frame-src 'none'; worker-src 'none'; manifest-src 'self'; upgrade-insecure-requests
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
   Referrer-Policy: strict-origin-when-cross-origin
