@@ -26,11 +26,12 @@
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="assets/favicon.svg" type="image/svg+xml" />
   <link rel="preload" as="font" type="font/woff2" href="assets/fonts/space-grotesk.woff2" crossorigin />
-  <link rel="stylesheet" href="styles.css?v=a276b918200c9fe58472c528cf40efc14815c1412efc775c3c08bb31e996cd21" />
+  <link rel="stylesheet" href="styles.css?v=8ac44028ac0e6d973d631a84ee73ee6077ab2b285ed59b68422c932cdfc711e9" />
   <script>
     (function () {
       var root = document.documentElement;
-      root.className = root.className.replace(/nc-no-js/, "nc-js");
+      root.classList.remove("nc-no-js");
+      root.classList.add("nc-js");
       try {
         var stored = localStorage.getItem("nc-theme");
         if (!stored) {
@@ -157,14 +158,14 @@
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <path d="M10 2.5 16 5v4.6c0 3.7-2.4 6.9-6 7.9-3.6-1-6-4.2-6-7.9V5l6-2.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
-          Authenticode signed. SmartScreen may still warn.
+          Authenticode signed, with a self-signed certificate.
         </li>
         <li class="nc-facts__item">
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
             <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5" />
             <path d="M3.2 3.2 16.8 16.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
           </svg>
-          One update check. No telemetry.
+          Opt-in update check. No telemetry.
         </li>
         <li class="nc-facts__item">
           <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -190,15 +191,16 @@
           <h3>Session restoration</h3>
           <p>
             Close Noctty and open it again to the same windows, tabs, and split
-            layout. Working directories, profiles, and titles come back with
-            them. Panes can each run their own shell: PowerShell, cmd, Git Bash,
+            layout. Working directories, profiles, and the titles you set
+            explicitly come back with them.
+            Panes can each run their own shell: PowerShell, cmd, Git Bash,
             or WSL if you opt in.
           </p>
         </div>
         <div>
           <h3>Universal palette</h3>
           <p>
-            One shortcut opens a list of everything you can do: actions, tabs,
+            One shortcut opens a fuzzy list of actions, tabs,
             panes, profiles, themes, settings. Matching is fuzzy, so a partial
             name finds the entry, and nothing in the list needs the mouse.
           </p>
@@ -215,17 +217,14 @@
         </div>
       </div>
 
-      <table class="nc-keys">
-        <caption class="nc-sr-only">Default keybindings</caption>
-        <tbody>
-          <tr><th scope="row">Command palette</th><td>Ctrl+Shift+P</td>
-              <th scope="row">Split pane right</th><td>Ctrl+Shift+\</td></tr>
-          <tr><th scope="row">New tab</th><td>Ctrl+Shift+T</td>
-              <th scope="row">Split pane down</th><td>Ctrl+Shift+E</td></tr>
-          <tr><th scope="row">Move between panes</th><td>Alt+Arrow</td>
-              <th scope="row">Reload config</th><td>Ctrl+Shift+,</td></tr>
-        </tbody>
-      </table>
+      <dl class="nc-keys">
+        <div><dt>Command palette</dt><dd>Ctrl+Shift+P</dd></div>
+        <div><dt>New tab</dt><dd>Ctrl+Shift+T</dd></div>
+        <div><dt>Split pane right</dt><dd>Ctrl+Shift+\</dd></div>
+        <div><dt>Split pane down</dt><dd>Ctrl+Shift+E</dd></div>
+        <div><dt>Move between panes</dt><dd>Alt+Arrow</dd></div>
+        <div><dt>Reload config</dt><dd>Ctrl+Shift+,</dd></div>
+      </dl>
     </section>
 
     <section class="nc-shell nc-section" id="upstream" aria-labelledby="upstream-title">
@@ -249,7 +248,7 @@
           <p>
             The project moves quickly, so the release notes are worth reading
             before you update. An update is staged only after its signature and
-            checksum verify, and then it waits for you.
+            checksum are verified, and then it waits for you.
           </p>
           <p class="nc-note">
             Accessibility is partial, not complete. Terminal text, focus,
@@ -312,6 +311,6 @@ scoop install noctty/noctty</code></pre>
   <script type="module" src="app.js?v=476aad3f7c16ce298320b6c4b7790e3c41e90c98f91f91ebff2b30fc70411d39"></script>
   <script type="module" src="version.js?v=be1e406ed78dc82e3aee94974e82140965119e62558170d1163ccb262947a553"></script>
   <script type="module" src="install.js?v=289100819a2efa0aaa64b7d5bc0bfd4e5d3a7f4107d1236f06e8d009a363b2a0"></script>
-  <script type="module" src="terminal.js?v=c496019b69406528531694e7cc681c1bcf6c0362631b8257f413782ec5030d0f"></script>
+  <script type="module" src="terminal.js?v=d0cdea91cfe0886024c39102fabbe349ee3446b5804ca167c03d63255d422aa7"></script>
 </body>
 </html>

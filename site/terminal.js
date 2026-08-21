@@ -42,7 +42,7 @@ export function buildScenes(v) {
         { kind: 'cmd', text: '.\\noctty-setup.exe' },
         { kind: 'out', text: '→ installer build: Start menu entry and standard uninstall path' },
         { kind: 'out', text: '→ x64 and ARM64 installers are Authenticode-signed.' },
-        { kind: 'out', text: '→ SmartScreen may still warn while reputation builds.' },
+        { kind: 'out', text: '→ SmartScreen may still warn: the certificate is self-signed.' },
       ],
     },
     {
@@ -51,7 +51,7 @@ export function buildScenes(v) {
         { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
         { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
         { kind: 'cmd', text: `iwr https://github.com/${NC_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-portable.zip -OutFile noctty.zip` },
-        { kind: 'cmd', text: 'Expand-Archive noctty.zip -DestinationPath .\\noctty' },
+        { kind: 'cmd', text: 'Expand-Archive noctty.zip -DestinationPath .' },
         { kind: 'cmd', text: '.\\noctty\\noctty.exe' },
         { kind: 'out', text: '→ same signed Win32 runtime, no install step required' },
       ],

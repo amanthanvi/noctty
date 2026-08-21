@@ -34,7 +34,6 @@
   --ink-900: #090b16;
   --ink-850: #0d1020;
   --ink-800: #131730;
-  --ink-700: #1b2043;
 
   --moon: #f2efe4;
   --moon-2: #c2c8e4;
@@ -48,11 +47,8 @@
 
   --line: color-mix(in srgb, var(--peri) 16%, transparent);
   --line-soft: color-mix(in srgb, var(--peri) 9%, transparent);
-  --glow: color-mix(in srgb, var(--peri) 22%, transparent);
 
   --sky-veil: linear-gradient(180deg, rgba(5, 6, 13, 0) 0%, rgba(5, 6, 13, 0.58) 58%, var(--ink-950) 100%);
-
-  --space-3xs: 2px;
   --space-2xs: 4px;
   --space-xs: 8px;
   --space-sm: 12px;
@@ -78,7 +74,6 @@
   --ink-900: #fffdf7;
   --ink-850: #fffdf7;
   --ink-800: #efece1;
-  --ink-700: #e3dfd1;
 
   --moon: #14162f;
   --moon-2: #3b4066;
@@ -92,7 +87,6 @@
 
   --line: color-mix(in srgb, var(--peri) 22%, transparent);
   --line-soft: color-mix(in srgb, var(--peri) 12%, transparent);
-  --glow: color-mix(in srgb, var(--peri) 14%, transparent);
 
   --sky-veil: linear-gradient(180deg, rgba(247, 245, 237, 0.55) 0%, rgba(247, 245, 237, 0.9) 60%, var(--ink-950) 100%);
 }
@@ -292,9 +286,6 @@ svg {
   letter-spacing: -0.02em;
 }
 
-.nc-wordmark__mark {
-}
-
 .nc-nav {
   display: flex;
   align-items: center;
@@ -403,11 +394,6 @@ svg {
   color: var(--moon-2);
 }
 
-.nc-hero__lede strong {
-  color: var(--moon);
-  font-weight: 600;
-}
-
 .nc-hero__actions {
   display: flex;
   flex-wrap: wrap;
@@ -441,18 +427,6 @@ svg {
 .nc-button--primary:hover {
   background: var(--peri-deep);
   color: var(--on-accent);
-}
-
-.nc-button--ghost {
-  border-color: var(--line);
-  background: color-mix(in srgb, var(--ink-850) 60%, transparent);
-  color: var(--moon);
-}
-
-.nc-button--ghost:hover {
-  border-color: color-mix(in srgb, var(--peri) 44%, transparent);
-  background: var(--ink-800);
-  color: var(--moon);
 }
 
 /* --------------------------------------------------------------- instal */
@@ -673,32 +647,19 @@ svg {
 
 /* ------------------------------------------------------------ assurance */
 
-@media (max-width: 860px) {
-}
-
-@media (max-width: 520px) {
-}
-
 /* -------------------------------------------------------------- section */
 
 .nc-section {
+  scroll-margin-top: 78px;
   padding-block: clamp(var(--space-xl), 4vw, var(--space-2xl));
 }
 
-.nc-section + .nc-section,
-.nc-facts + .nc-section {
+.nc-section + .nc-section {
   border-top: 1px solid var(--line-soft);
 }
 
-.nc-section__title {
-  margin-top: var(--space-sm);
-  font-size: clamp(1.9rem, 3.4vw, 2.9rem);
-}
 
 /* ------------------------------------------------------------ narrative */
-
-@media (max-width: 900px) {
-}
 
 /* Rendered UI specimens (real geometry, not screenshots of nothing). */
 
@@ -729,19 +690,12 @@ svg {
 
 /* --------------------------------------------------------------- upstream */
 
-@media (max-width: 860px) {
-}
-
 .nc-note {
   margin-top: var(--space-lg);
   padding-top: var(--space-md);
   border-top: 1px solid var(--line-soft);
   font-size: 14.5px;
   color: var(--moon-3);
-}
-
-.nc-note strong {
-  color: var(--moon);
 }
 
 /* ----------------------------------------------------------------- cta */
@@ -823,20 +777,10 @@ svg {
 
 /* -------------------------------------------------------------- motion */
 
-/* One authored moment: the page rises out of the dark on first paint. */
-@media (prefers-reduced-motion: no-preference) {
-  .nc-hero__sky {
-    animation: nc-sky 1600ms var(--ease-out) both;
-  }
-}
-
 /* Release facts read as a spec sheet, not a row of icon cards. */
 .nc-facts {
   border-block: 1px solid var(--line-soft);
   background: color-mix(in srgb, var(--ink-900) 55%, transparent);
-}
-
-@media (max-width: 620px) {
 }
 
 .nc-hero__meta {
@@ -845,39 +789,8 @@ svg {
   color: var(--moon-3);
 }
 
-.nc-columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2xl) clamp(var(--space-xl), 5vw, var(--space-3xl));
-  margin-top: var(--space-xl);
-}
-
-@media (max-width: 820px) {
-  .nc-columns {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-xl);
-  }
-}
-
-.nc-columns h3 {
-  font-size: 1.15rem;
-  letter-spacing: -0.02em;
-  margin-bottom: var(--space-sm);
-}
-
-.nc-columns p {
-  color: var(--moon-2);
-  max-width: 60ch;
-}
-
 .nc-columns p + p {
   margin-top: var(--space-md);
-}
-
-.nc-columns code {
-  font-family: var(--mono);
-  font-size: 0.92em;
-  color: var(--moon);
 }
 
 .nc-close__grid {
@@ -1011,4 +924,44 @@ svg {
   display: inline-flex;
   align-items: center;
   color: var(--moon-3);
+}
+
+.nc-terminal__body:focus-visible {
+  outline-offset: -3px;
+}
+
+/* Keybindings as term/value pairs: correct semantics and they reflow. */
+.nc-keys {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 clamp(var(--space-xl), 5vw, var(--space-3xl));
+  margin: var(--space-xl) 0 0;
+}
+
+.nc-keys > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.nc-keys dt {
+  color: var(--moon-2);
+  font-size: 14px;
+}
+
+.nc-keys dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--moon-3);
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .nc-keys {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

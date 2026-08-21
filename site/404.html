@@ -10,11 +10,12 @@
   <meta name="theme-color" content="#f7f5ed" media="(prefers-color-scheme: light)" />
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
   <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/styles.css?v=a276b918200c9fe58472c528cf40efc14815c1412efc775c3c08bb31e996cd21" />
+  <link rel="stylesheet" href="/styles.css?v=8ac44028ac0e6d973d631a84ee73ee6077ab2b285ed59b68422c932cdfc711e9" />
   <script>
     (function () {
       var root = document.documentElement;
-      root.className = root.className.replace(/nc-no-js/, "nc-js");
+      root.classList.remove("nc-no-js");
+      root.classList.add("nc-js");
       try {
         var stored = localStorage.getItem("nc-theme");
         if (!stored) {
@@ -31,6 +32,8 @@
   </script>
 </head>
 <body>
+  <a class="nc-skip-link" href="#main-content">Skip to content</a>
+
   <header class="nc-topbar">
     <div class="nc-shell nc-topbar__inner">
       <a class="nc-wordmark" href="/" aria-label="Noctty home">
@@ -55,7 +58,7 @@
     </div>
   </header>
 
-  <main class="nc-shell nc-lost">
+  <main id="main-content" class="nc-shell nc-lost">
     <p class="nc-lost__code">404 — nothing here after dark</p>
     <h1 class="nc-lost__title">That page slipped past the horizon.</h1>
     <p class="nc-lost__body">
