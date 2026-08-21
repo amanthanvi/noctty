@@ -90,6 +90,19 @@ reports a truthful exit code only while Clink's `cmd.get_errorlevel` setting is
 enabled (the default). Without the loaded Clink script, prompt navigation and
 cwd reporting still work, but there are no command-finish marks or exit codes.
 
+With OSC 133 shell integration active, these command-palette actions and
+Windows defaults are available:
+
+- `jump_to_prompt:-1` / `jump_to_prompt:1` — previous / next prompt,
+  `Ctrl+Shift+PageUp` / `Ctrl+Shift+PageDown`.
+- `copy_last_command_output` — copy the most recent completed command's output,
+  `Ctrl+Shift+Y`. This requires OSC 133;C and OSC 133;D command-output
+  boundaries.
+- `rerun_last_command` — run the most recent recoverable single-line command
+  again, `Ctrl+Shift+R`. This requires shell integration that emits OSC 133;B
+  and OSC 133;C command-input boundaries; noctty does not read or modify the
+  shell's line editor.
+
 `utf8-console` controls UTF-8 setup for bare interactive `cmd.exe` launches,
 Windows PowerShell 5.1, and PowerShell 7 (`pwsh`) sessions. `auto` is the default
 and enables UTF-8 unless the machine ANSI or OEM code page is 932 (Shift-JIS),

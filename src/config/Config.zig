@@ -6184,6 +6184,18 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true, .ctrl = true } },
                 .{ .jump_to_prompt = 1 },
             );
+            if (comptime builtin.target.os.tag == .windows) {
+                try self.set.put(
+                    alloc,
+                    .{ .key = .{ .unicode = 'y' }, .mods = .{ .shift = true, .ctrl = true } },
+                    .{ .copy_last_command_output = {} },
+                );
+                try self.set.put(
+                    alloc,
+                    .{ .key = .{ .unicode = 'r' }, .mods = .{ .shift = true, .ctrl = true } },
+                    .{ .rerun_last_command = {} },
+                );
+            }
 
             // Search
             try self.set.putFlags(
@@ -7317,6 +7329,45 @@ pub const Keybinds = struct {
                 .mods = .{ .ctrl = true, .alt = true },
                 .key = .{ .physical = case.key },
             }) == null);
+        }
+    }
+
+    test "Windows last-command defaults preserve prompt navigation without conflicts" {
+        if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var keybinds: Keybinds = .{};
+        try keybinds.init(arena.allocator());
+
+        const cases = [_]struct {
+            trigger: inputpkg.Binding.Trigger,
+            action: inputpkg.Binding.Action,
+        }{
+            .{
+                .trigger = .{ .key = .{ .physical = .page_up }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .{ .jump_to_prompt = -1 },
+            },
+            .{
+                .trigger = .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .{ .jump_to_prompt = 1 },
+            },
+            .{
+                .trigger = .{ .key = .{ .unicode = 'y' }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .copy_last_command_output,
+            },
+            .{
+                .trigger = .{ .key = .{ .unicode = 'r' }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .rerun_last_command,
+            },
+        };
+
+        for (cases) |case| {
+            const entry = keybinds.set.get(case.trigger).?.value_ptr.*;
+            try testing.expect(entry == .leaf);
+            try testing.expectEqual(case.action, entry.leaf.action);
         }
     }
 

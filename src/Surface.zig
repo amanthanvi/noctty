@@ -5432,6 +5432,78 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             return false;
         },
 
+        .copy_last_command_output => {
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
+
+            const output = try self.io.terminal.screens.active.lastCommandOutputString(
+                self.alloc,
+            ) orelse {
+                log.info(
+                    "copy last command output ignored: no complete OSC 133 C/D region is available",
+                    .{},
+                );
+                return true;
+            };
+            defer self.alloc.free(output);
+
+            self.rt_surface.setClipboard(.standard, &.{.{
+                .mime = "text/plain",
+                .data = output,
+            }}, false) catch |err| {
+                log.err("error copying last command output err={}", .{err});
+                return false;
+            };
+
+            if (self.config.app_notifications.@"clipboard-copy") {
+                try self.showAppNotification("noctty", "Copied last command output to clipboard");
+            }
+            return true;
+        },
+
+        .rerun_last_command => {
+            const command = command: {
+                self.renderer_state.mutex.lock();
+                defer self.renderer_state.mutex.unlock();
+                break :command try self.io.terminal.screens.active.lastCommandString(
+                    self.alloc,
+                );
+            } orelse {
+                log.info(
+                    "rerun last command ignored: no recoverable complete OSC 133 B/C region is available",
+                    .{},
+                );
+                return true;
+            };
+            defer self.alloc.free(command);
+
+            if (!rerunCommandIsSafe(command)) {
+                log.info(
+                    "rerun last command ignored: recovered command is empty, multiline, invalid UTF-8, or contains control characters",
+                    .{},
+                );
+                return true;
+            }
+
+            const write = try self.alloc.alloc(u8, command.len + 1);
+            defer self.alloc.free(write);
+            @memcpy(write[0..command.len], command);
+            write[command.len] = '\r';
+
+            self.queueIo(try termio.Message.writeReq(
+                self.alloc,
+                write,
+            ), .unlocked);
+
+            self.renderer_state.mutex.lock();
+            defer self.renderer_state.mutex.unlock();
+            self.scrollToBottom() catch |err| {
+                log.warn("error scrolling to bottom err={}", .{err});
+            };
+
+            return true;
+        },
+
         .copy_url_to_clipboard => {
             // If the mouse isn't over a link, nothing we can do.
             if (!self.mouse.over_link) return false;
@@ -6492,6 +6564,42 @@ fn completeClipboardPaste(
             vec,
         ), .unlocked);
     };
+}
+
+/// Rerun uses the same unsafe-paste detector as clipboard paste, then applies
+/// the stricter contract required for unattended command execution: one
+/// non-empty UTF-8 line with no control or Unicode line-separator characters.
+fn rerunCommandIsSafe(data: []const u8) bool {
+    if (data.len == 0 or !input.paste.isSafe(data)) return false;
+
+    const view = std.unicode.Utf8View.init(data) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (cp < 0x20 or
+            (cp >= 0x7F and cp <= 0x9F) or
+            cp == 0x2028 or
+            cp == 0x2029)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+test "Surface: last-command rerun safety reuses paste protection and rejects controls" {
+    const testing = std.testing;
+
+    try testing.expect(rerunCommandIsSafe("Write-Output 'safe'"));
+    try testing.expect(!rerunCommandIsSafe(""));
+    try testing.expect(!rerunCommandIsSafe("one\ntwo"));
+    try testing.expect(!rerunCommandIsSafe("one\rtwo"));
+    try testing.expect(!rerunCommandIsSafe("one\ttwo"));
+    try testing.expect(!rerunCommandIsSafe("one\x1b[201~two"));
+    try testing.expect(!rerunCommandIsSafe("one\xC2\x85two"));
+    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA8two"));
+    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA9two"));
+    try testing.expect(!rerunCommandIsSafe("one\xC0two"));
 }
 
 fn completeClipboardReadOSC52(
