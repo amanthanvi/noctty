@@ -53,9 +53,9 @@ Win32-validated VT protocol coverage is tracked in
 - In-app profile picker for detected shells: PowerShell 7, Windows
   PowerShell, `cmd`, Git Bash, and WSL distributions when WSL responds.
 - Per-monitor DPI scaling.
-- On Windows 11, an integrated title bar with DWM dark-mode handling,
-  native caption actions, and Snap Layout hover. Older Windows builds use
-  the stock caption.
+- DWM dark caption that follows the app theme on all supported builds,
+  plus an integrated title bar on Windows 11 with native caption actions
+  and Snap Layout hover. Older builds use the stock caption.
 - High-contrast mode detection and palette switching.
 - IME for CJK and other composed input.
 - A local sensitive-input indicator for no-echo input
@@ -76,9 +76,11 @@ Win32-validated VT protocol coverage is tracked in
   of the selected monitor area. It has no default binding; `global:`
   keybinds use `RegisterHotKey`. `exclusive` keyboard interactivity falls
   back to focused input, and virtual-desktop following is not implemented.
-- WinRT Action Center notifications with click-to-focus activation and an
-  in-app banner/log fallback when WinRT cannot show a toast. Packaged Start
-  menu identity is required for reliable cold-start activation.
+- WinRT Action Center notifications with an in-app banner/log fallback
+  when WinRT cannot show a toast. Command-finish toasts focus the
+  originating surface when clicked; other toasts, including OSC 9 and OSC
+  777 notifications, have no click action. Packaged Start menu identity is
+  required for reliable cold-start activation.
 - Windows taskbar progress for the active pane in each host window, driven
   by terminal progress reports when `progress-style` is enabled.
 - Session restore via `window-save-state`: windows, tabs, splits,
@@ -147,6 +149,12 @@ broader per-widget coverage and a full Narrator/NVDA release matrix remain.
 `link-previews` is parsed and the shared terminal core emits link-hover
 preview actions, but the Win32 runtime does not render the preview tooltip.
 Link matching, hover highlighting, and opening still work.
+
+### Status bar
+
+Not shipping. `Host.statusBarHeight()` returns 0, so no terminal rows are
+reserved and the status paint paths are inert. Transient status is carried by
+host banners and overlays instead.
 
 ### Win32 runtime extraction
 

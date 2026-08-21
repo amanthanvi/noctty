@@ -117,8 +117,9 @@ noctty uses a native Win32 host window with:
   exact-pane drag-to-split with reversible subtree transfer
 - horizontal and vertical splits
 - per-monitor DPI handling
-- an integrated title bar on Windows 11 (app-owned caption with native
-  caption actions and Snap Layout hover); the stock caption on older builds
+- DWM dark caption on all supported builds, plus an integrated title bar on
+  Windows 11 (app-owned caption with native caption actions and Snap Layout
+  hover); older builds keep the stock caption
 - high-contrast palette switching
 - IME support
 - drag-and-drop of files, plain text, URLs, and HTML into a pane

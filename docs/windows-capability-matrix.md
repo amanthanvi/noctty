@@ -59,7 +59,7 @@ Last reviewed: 2026-08-21, against every module under `src/apprt/` and its
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).                                                                |
 | Tab dragging                                                                      | Same-window reorder and exact-pane drag-to-split. See [tab dragging notes](#tab-dragging).                                                                                   |
 | Quick terminal and global hotkeys                                                 | Configurable edge/center terminal toggled by a bindable action; `global:` bindings use `RegisterHotKey`. See [quick-terminal notes](#quick-terminal).                        |
-| Desktop notifications                                                             | WinRT Action Center toasts support click-to-focus activation and fall back locally. See [notification and progress notes](#notification-and-progress).                       |
+| Desktop notifications                                                             | WinRT Action Center toasts with a local fallback; only command-finish toasts have a click action. See [notification and progress notes](#notification-and-progress).         |
 | Taskbar progress                                                                  | Terminal progress reports drive the active pane's taskbar indicator in each host window. See [notification and progress notes](#notification-and-progress).                  |
 | Docked search                                                                     | Each pane has a docked scrollback search UI with regex, case, whole-word, navigation, and scrollbar markers. See [search and scrollbars notes](#search-and-scrollbars).      |
 | Tab overview                                                                      | The bindable `toggle_tab_overview` action opens a numeric tab switcher; it has no default keybind.                                                                           |
@@ -147,9 +147,10 @@ input, and `quick-terminal-space-behavior` has no Windows effect.
 ### Notification and progress
 
 WinRT toasts use noctty's AppUserModelID and fall back to a host banner, then
-the log, when native delivery fails. Toast clicks focus the originating
-surface when its identity is still available; reliable cold-start activation
-depends on the installed Start menu shortcut. `desktop-notifications` gates
+the log, when native delivery fails. Only command-finish toasts carry a launch
+argument, so only those focus the originating surface when clicked; terminal
+notifications from OSC 9 / OSC 777 are display-only. Reliable cold-start
+activation depends on the installed Start menu shortcut. `desktop-notifications` gates
 terminal notifications, while command-finish notifications have their own
 settings.
 
