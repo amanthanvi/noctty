@@ -10723,8 +10723,9 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.activeSurface() != null) return false;
-        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return false;
-        return self.app.core_app.keyEvent(self.app, message.event);
+        const message = keyEventFromWin32Message(msg, wParam, lParam, true) orelse return false;
+        const event = remapWin32KeyEvent(message.event, &self.app.config.@"key-remap");
+        return self.app.core_app.keyEvent(self.app, event);
     }
 
     fn prepareActiveTabVisibility(self: *Host, active_index: usize) void {
@@ -11130,13 +11131,12 @@ const Host = struct {
         lParam: LPARAM,
     ) bool {
         if (self.overlay_mode != .command_palette) return false;
-        const event = (keyEventFromWin32Message(msg, wParam, lParam) orelse return false).event;
-        const entry = self.app.config.keybind.set.getEvent(event) orelse return false;
-        const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
-            .leader => return false,
-            inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
-        };
-        return bindingActionsToggleCommandPalette(actions);
+        const event = (keyEventFromWin32Message(msg, wParam, lParam, true) orelse return false).event;
+        return keyEventTogglesCommandPalette(
+            event,
+            &self.app.config.keybind,
+            &self.app.config.@"key-remap",
+        );
     }
 
     fn reloadProfiles(self: *Host) !bool {
@@ -18971,6 +18971,31 @@ fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) boo
     return false;
 }
 
+fn remapWin32KeyEvent(
+    event_orig: input.KeyEvent,
+    remaps: *const input.KeyRemapSet,
+) input.KeyEvent {
+    var event = event_orig;
+    if (remaps.isRemapped(event_orig.mods)) {
+        event.mods = remaps.apply(event_orig.mods);
+    }
+    return event;
+}
+
+fn keyEventTogglesCommandPalette(
+    event_orig: input.KeyEvent,
+    keybinds: *const configpkg.Keybinds,
+    remaps: *const input.KeyRemapSet,
+) bool {
+    const event = remapWin32KeyEvent(event_orig, remaps);
+    const entry = keybinds.set.getEvent(event) orelse return false;
+    const actions: []const input.Binding.Action = switch (entry.value_ptr.*) {
+        .leader => return false,
+        inline .leaf, .leaf_chained => |leaf| leaf.generic().actionsSlice(),
+    };
+    return bindingActionsToggleCommandPalette(actions);
+}
+
 fn commandPaletteDirectionFromWheelDelta(delta: i16) bool {
     return delta > 0;
 }
@@ -23183,7 +23208,9 @@ fn shouldDeferTextToCharMessage(
     key: input.Key,
     mods: input.Mods,
     translated: KeyText,
+    allow_defer: bool,
 ) bool {
+    if (!allow_defer) return false;
     if (action == .release) return false;
     // Windows reports AltGr as synthetic left Ctrl plus right Alt. The
     // resulting WM_CHAR is layout text, not a Ctrl+Alt terminal chord.
@@ -23205,6 +23232,10 @@ fn shouldDeferTextToCharMessage(
 
 fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
     return effect == .ignored;
+}
+
+fn deferPlainTextToCharMessage(kitty_report_all: bool, ime_composing: bool) bool {
+    return !kitty_report_all or ime_composing;
 }
 
 const DeferredCharState = struct {
@@ -23368,6 +23399,7 @@ fn keyEventFromWin32Message(
     msg: UINT,
     wParam: WPARAM,
     lParam: LPARAM,
+    defer_plain_text: bool,
 ) ?Win32KeyMessage {
     const action: input.Action = switch (msg) {
         WM_KEYUP, WM_SYSKEYUP => .release,
@@ -23400,7 +23432,7 @@ fn keyEventFromWin32Message(
         if (translated.unshifted_codepoint != 0) {
             result.event.unshifted_codepoint = translated.unshifted_codepoint;
         }
-        if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
+        if (shouldDeferTextToCharMessage(action, key, mods, translated, defer_plain_text)) {
             // Keep the physical-key event visible to bindings/modifier state
             // but defer text emission to WM_CHAR so plain typing doesn't rely
             // on ToUnicode/GetKeyboardState timing.
@@ -26983,7 +27015,17 @@ pub const Surface = struct {
     fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
 
-        const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
+        const kitty_report_all = kitty_report_all: {
+            self.core_surface.renderer_state.mutex.lock();
+            defer self.core_surface.renderer_state.mutex.unlock();
+            break :kitty_report_all self.core_surface.io.terminal.screens.active.kitty_keyboard.current().report_all;
+        };
+        const message = keyEventFromWin32Message(
+            msg,
+            wParam,
+            lParam,
+            deferPlainTextToCharMessage(kitty_report_all, self.ime_composing),
+        ) orelse return;
         const event = message.event;
 
         const effect = self.core_surface.keyCallback(event) catch |err| {
@@ -31495,6 +31537,40 @@ test "win32 keyFromVirtualKey maps core keys" {
     try std.testing.expectEqual(input.Key.arrow_left, keyFromVirtualKey(VK_LEFT, 0));
     try std.testing.expectEqual(input.Key.f12, keyFromVirtualKey(VK_F1 + 11, 0));
     try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(VK_OEM_7, 0));
+
+    const release = keyEventFromWin32Message(WM_SYSKEYUP, VK_RMENU, KF_EXTENDED, true).?;
+    try std.testing.expectEqual(input.Action.release, release.event.action);
+    try std.testing.expectEqual(input.Key.alt_right, release.event.key);
+}
+
+test "win32 modifier-state includes locks and sides" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var state: [256]u8 = [_]u8{0} ** 256;
+    state[VK_SHIFT] = 0x80;
+    state[VK_RSHIFT] = 0x80;
+    state[VK_CONTROL] = 0x80;
+    state[VK_LCONTROL] = 0x80;
+    state[VK_MENU] = 0x80;
+    state[VK_RMENU] = 0x80;
+    state[VK_RWIN] = 0x80;
+    state[VK_CAPITAL] = 0x01;
+    state[VK_NUMLOCK] = 0x01;
+
+    try std.testing.expect(std.meta.eql(input.Mods{
+        .shift = true,
+        .ctrl = true,
+        .alt = true,
+        .super = true,
+        .caps_lock = true,
+        .num_lock = true,
+        .sides = .{
+            .shift = .right,
+            .ctrl = .left,
+            .alt = .right,
+            .super = .right,
+        },
+    }, modsFromKeyboardState(&state)));
 }
 
 test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
@@ -31508,36 +31584,42 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .key_a,
         .{},
         .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .repeat,
         .space,
         .{},
         .{ .len = 1, .unshifted_codepoint = ' ', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .quote,
         .{},
         .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .digit_2,
         .{ .ctrl = true, .alt = true },
         .{ .unshifted_codepoint = '2', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(shouldDeferTextToCharMessage(
         .press,
         .equal,
         .{ .ctrl = true, .alt = true, .sides = .{ .alt = .right } },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .equal,
         .{ .alt = true, .sides = .{ .alt = .right } },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
@@ -31548,12 +31630,29 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
             .sides = .{ .ctrl = .right, .alt = .right },
         },
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+        true,
     ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .enter,
         .{},
         .{ .unshifted_codepoint = 0x0D },
+        true,
+    ));
+}
+
+test "win32 kitty-report-all skips WM_CHAR deferral" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(deferPlainTextToCharMessage(false, false));
+    try std.testing.expect(!deferPlainTextToCharMessage(true, false));
+    try std.testing.expect(deferPlainTextToCharMessage(true, true));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .key_a,
+        .{ .shift = true, .caps_lock = true },
+        .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
+        false,
     ));
 }
 
@@ -31564,7 +31663,7 @@ test "win32 deferred char authorization respects key handling effect" {
 }
 
 test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
-    const message = keyEventFromWin32Message(WM_KEYDOWN, VK_PACKET, 0).?;
+    const message = keyEventFromWin32Message(WM_KEYDOWN, VK_PACKET, 0, true).?;
     try std.testing.expectEqual(input.Action.press, message.event.action);
     try std.testing.expectEqual(input.Key.unidentified, message.event.key);
     try std.testing.expectEqualStrings("", message.event.utf8);
@@ -31576,7 +31675,7 @@ test "win32 VK_PACKET key down authorizes one unit without direct text or modifi
 }
 
 test "win32 VK_PACKET key up authorizes no units or text" {
-    const message = keyEventFromWin32Message(WM_KEYUP, VK_PACKET, 0).?;
+    const message = keyEventFromWin32Message(WM_KEYUP, VK_PACKET, 0, true).?;
     try std.testing.expectEqual(input.Action.release, message.event.action);
     try std.testing.expectEqual(input.Key.unidentified, message.event.key);
     try std.testing.expectEqualStrings("", message.event.utf8);
@@ -36206,6 +36305,28 @@ test "win32 command palette toggle binding is recognized inside action chains" {
     const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
     try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
     try std.testing.expect(bindingActionsToggleCommandPalette(&present));
+}
+
+test "win32 key-remap applies to command palette toggle lookup" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var cfg = try configpkg.Config.default(std.testing.allocator);
+    defer cfg.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var remaps: input.KeyRemapSet = .empty;
+    try remaps.parseCLI(arena.allocator(), "alt=ctrl");
+    remaps.finalize();
+
+    const event: input.KeyEvent = .{
+        .key = .key_p,
+        .mods = .{ .shift = true, .alt = true },
+        .unshifted_codepoint = 'p',
+    };
+    var no_remaps: input.KeyRemapSet = .empty;
+    try std.testing.expect(!keyEventTogglesCommandPalette(event, &cfg.keybind, &no_remaps));
+    try std.testing.expect(keyEventTogglesCommandPalette(event, &cfg.keybind, &remaps));
 }
 
 test "win32 buildInspectorBannerText reflects host inspector context" {
