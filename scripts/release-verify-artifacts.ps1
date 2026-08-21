@@ -49,7 +49,7 @@ if ($allowedPins.Count -eq 0) {
 }
 
 foreach ($architecture in (Get-WindowsPackageArchitectures)) {
-    $artifactDirectory = Join-Path $ArtifactRoot "winghostty-$Version-windows-$architecture"
+    $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
     $setup = Join-Path $artifactDirectory (
         New-WindowsPackageArtifactName `
             -Version $Version `
@@ -90,15 +90,15 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         -AllowedPins $allowedPins `
         -TrustSelfSigned $TrustSelfSigned)
 
-    $extractDirectory = Join-Path $ExtractionRoot "winghostty-release-verify-$architecture"
+    $extractDirectory = Join-Path $ExtractionRoot "noctty-release-verify-$architecture"
     if (Test-Path -LiteralPath $extractDirectory) {
         Remove-Item -LiteralPath $extractDirectory -Recurse -Force
     }
     Expand-Archive -LiteralPath $portable -DestinationPath $extractDirectory
     foreach ($relativePath in @(
-        'winghostty/winghostty.com',
-        'winghostty/winghostty.exe',
-        'winghostty/ghostty-vt.dll'
+        'noctty/noctty.com',
+        'noctty/noctty.exe',
+        'noctty/ghostty-vt.dll'
     )) {
         [void](Assert-ReleaseSignature `
             -Path (Join-Path $extractDirectory $relativePath) `

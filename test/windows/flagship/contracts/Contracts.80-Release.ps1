@@ -41,9 +41,9 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '3b5844aeba60eab87f3caa862ac7f4d470cd0bbdbefa1e407a7ee5bb9209f814'
 $releaseWorkflowSha256 =
-    'e63220b5e18787fea830ed45238208f2d838318e5da56a53dbb6cd49b588a88c'
+    '85f96cf4befe59fa3f5988a5d2f85cb3de73ef54fca42bd71111c9b2cdfa33b4'
 $readinessWorkflowSha256 =
-    '6a50b670cedf6296eff1587358e4a2410396440bf57382745ecb766906e8e370'
+    '20975b3b060791476bf94668913371f91e87970ed6875216504f0b07d613a04e'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
 # including triggers, permissions, inherited job metadata, and unprotected steps.
 foreach ($workflow in @(
@@ -1275,28 +1275,28 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseDefenderScanner
         Content = $releaseDefenderScannerText
         ExpectedSha256 =
-            'a4020fbf4a1941caaf0857e81b2ded5a824231db913b40776e84dd74ba9581f5'
+            '5961dd3535abad30e5da2c7fe55b303616a2c58dd1daf0f591f4234c72925718'
         CriticalStatement = '& $scanner -SignatureUpdate'
     }
     [pscustomobject] @{
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            '23fc5139f29e80735dac8c03229b52eec5cdc6600e97fa2622685d3e2c8db93c'
+            'af67a087e056294e81be91ff6a9fe4e7ba83dc355914663adada1b760e3775bc'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            '4ee4a29f7be2d5b55480b34b1158e5c7bd26e4c09bd5bf3cd63d8d92b2399e04'
+            '213862abecda4bb4fab3073b143d11adf23fddbc17fbf3bd379e4890fcbca320'
         CriticalStatement = '    & git push origin HEAD'
     }
     [pscustomobject] @{
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '7193cec016685320908631c1eaaba2f4fd7659445fe501ce84f2352813564c5d'
+            '7c95de37d2ca9cf3eb194bc8e440c9f5eeff19b61f29e7e4f01fa80616e377f3'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1320,7 +1320,7 @@ foreach ($spec in $protectedReleaseScriptSpecs) {
     $statement = $spec.CriticalStatement.Substring($indent.Length)
     $sideEffect = "${indent}Set-Content -LiteralPath " +
         "([IO.Path]::Combine([IO.Path]::GetTempPath(), " +
-        "'winghostty-release-pin-mutant')) -Value 'mutated'"
+        "'noctty-release-pin-mutant')) -Value 'mutated'"
     $mutants = [ordered] @{
         'injected early return' = $canonicalScript.Replace(
             $spec.CriticalStatement,
@@ -1363,7 +1363,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?winghostty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository.*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository.*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }
@@ -1399,7 +1399,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseDefenderScanner
         Content = { $releaseDefenderScannerText }
-        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?winghostty/winghostty\.com.*?winghostty/winghostty\.exe.*?winghostty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?winghostty-release-verify-\$architecture.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Text'
         Description = 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed'
     }

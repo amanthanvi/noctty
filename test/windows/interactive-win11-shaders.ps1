@@ -23,7 +23,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 if ($Rebuild) {
@@ -50,7 +50,7 @@ $layout = $harness.Layout
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
-$commandPath = Join-Path (Split-Path -Parent $exePath) 'winghostty.com'
+$commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
 $shaderPath = Join-Path $PSScriptRoot 'fixtures\solid-magenta-shader.glsl'
 $configPath = Join-Path $layout.Temp 'interactive-win11-shaders.conf'
 $payloadPath = Join-Path $layout.Temp 'interactive-win11-shaders-payload.ps1'
@@ -89,7 +89,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath -ErrorAction 
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-shaders-$($layout.SandboxId)"
+    "--class=noctty-shaders-$($layout.SandboxId)"
     "--config-file=$configPath"
     "--custom-shader=$shaderPath"
     '-e'

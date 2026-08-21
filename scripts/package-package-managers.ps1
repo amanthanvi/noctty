@@ -5,7 +5,7 @@ param(
 
     [string]$Tag,
 
-    [string]$Repo = "amanthanvi/winghostty",
+    [string]$Repo = "amanthanvi/noctty",
 
     [string[]]$Architectures = @("x64"),
 
@@ -17,9 +17,9 @@ param(
 
     [int]$FirstForkPatch = 0,
 
-    [string]$WingetPackageIdentifier = "AmanThanvi.winghostty",
+    [string]$WingetPackageIdentifier = "AmanThanvi.noctty",
 
-    [string]$ScoopPackageName = "winghostty"
+    [string]$ScoopPackageName = "noctty"
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +37,7 @@ $primaryArch = if ($Architectures -contains "x64") { "x64" } else { $Architectur
 $primaryArtifactRootPath = if ($ArtifactRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
 } else {
-    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-$primaryArch"))
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/noctty-$Version-windows-$primaryArch"))
 }
 $outputRootPath = if ($OutputRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
@@ -45,14 +45,14 @@ $outputRootPath = if ($OutputRoot) {
     [System.IO.Path]::GetFullPath((Join-Path $primaryArtifactRootPath "package-managers"))
 }
 
-$iconName = "winghostty-icon.svg"
+$iconName = "noctty-icon.svg"
 $iconPath = Join-Path $primaryArtifactRootPath $iconName
 $releaseBaseUrl = "https://github.com/$Repo/releases/download/$tagValue"
 $projectUrl = "https://github.com/$Repo"
 $releaseUrl = "$projectUrl/releases/tag/$tagValue"
 $iconUrl = "$releaseBaseUrl/$iconName"
 $packageDescription = @"
-winghostty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
+noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
 "@.Trim()
 
 function Reset-Directory {
@@ -124,7 +124,7 @@ foreach ($arch in $Architectures) {
     $artifactRootPath = if ($ArtifactRoot) {
         [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ArtifactRoot))
     } else {
-        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/winghostty-$Version-windows-$arch"))
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist/artifacts/noctty-$Version-windows-$arch"))
     }
 
     $checksumsPath = Join-Path $artifactRootPath (New-WindowsPackageArtifactName -Version $Version -Architecture $arch -Kind checksums)
@@ -183,8 +183,8 @@ $scoopManifest = [ordered]@{
     homepage     = $projectUrl
     license      = "MIT"
     architecture = [ordered]@{}
-    extract_dir  = "winghostty"
-    bin          = "winghostty.exe"
+    extract_dir  = "noctty"
+    bin          = "noctty.exe"
 }
 foreach ($arch in $Architectures) {
     $scoopArch = (Get-WindowsPackageArchitecture -Architecture $arch).ScoopArchitecture
@@ -218,7 +218,7 @@ $metadata = [ordered]@{
     tag         = $tagValue
     repository  = $Repo
     versioning  = [ordered]@{
-        scheme = "major.minor follow the Ghostty upstream line; patch is the winghostty release number on that line"
+        scheme = "major.minor follow the Ghostty upstream line; patch is the noctty release number on that line"
         line   = $versionLine
     }
     release     = [ordered]@{

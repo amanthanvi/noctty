@@ -19,7 +19,7 @@ This will create `zig-out/bin/ghostty-vt.wasm`.
 **Important:** You must serve this via HTTP, not open it as a file directly.
 Browsers block loading WASM files from `file://` URLs.
 
-From the **root of the winghostty repository**, serve with a local HTTP server:
+From the **root of the noctty repository**, serve with a local HTTP server:
 
 ```bash
 # Using Python (recommended)

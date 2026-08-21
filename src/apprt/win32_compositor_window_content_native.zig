@@ -667,7 +667,7 @@ test "native hidden HWND renders and resizes DirectComposition shell content" {
     const hwnd = sys.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
-        std.unicode.utf8ToUtf16LeStringLiteral("winghostty dcomp content smoke"),
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty dcomp content smoke"),
         0x00CF0000,
         0,
         0,
@@ -711,7 +711,7 @@ test "native hidden HWND renders and resizes DirectComposition shell content" {
     try std.testing.expectEqual(@as(u32, 480), window_content.width_px);
     try std.testing.expectEqual(@as(u32, 108), window_content.height_px);
     try window_content.renderText(.{
-        .text = std.unicode.utf8ToUtf16LeStringLiteral("winghostty shell composition"),
+        .text = std.unicode.utf8ToUtf16LeStringLiteral("noctty shell composition"),
     });
     hr = call(DeviceCommitFn, dcomp_device.?, 3)(dcomp_device.?);
     try std.testing.expect(!failed(hr));

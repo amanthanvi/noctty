@@ -1,11 +1,12 @@
 & (Join-Path $root 'Test-WindowsX64Baseline.ps1')
 
 $reviewedArtifactDigests = @{
-    # Reviewed in full when the redirected-text CLI sibling was pinned to the
-    # staged portable executable. This artifact intentionally differs from the
-    # older origin/main snapshot; its exact SHA remains fail-closed tamper evidence.
+    # Reviewed in full after the Noctty rebrand while retaining the cleanup's
+    # redirected-text CLI sibling pinned to the staged portable executable.
+    # This combined artifact intentionally differs from origin/main; its exact
+    # SHA remains fail-closed tamper evidence.
     'test/windows/package-portable-cli.ps1' =
-        'f1aad78377e3ce303e9a2bc9a4d77ca947cf5332741d4c881eb215cacca3162e'
+        '586de5a964938acf85be7729cf043de189fba841292597baa4db5c9dd3a54898'
 }
 foreach ($baselinePath in Get-ChildItem -LiteralPath (Join-Path $root 'baselines') -Filter '*.json') {
     Assert-JsonDocument `

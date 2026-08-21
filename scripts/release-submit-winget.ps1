@@ -22,7 +22,7 @@ if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
     Write-Host 'Skipping WinGet submit: WINGET_PACKAGE_IDENTIFIER is not configured. Initial WinGet bootstrap is still manual.'
     return
 }
-if (-not $PSCmdlet.ShouldProcess($PackageIdentifier, "submit winghostty $Version WinGet manifest")) {
+if (-not $PSCmdlet.ShouldProcess($PackageIdentifier, "submit noctty $Version WinGet manifest")) {
     return
 }
 
@@ -36,7 +36,7 @@ if ([string]::IsNullOrWhiteSpace($TempDirectory)) {
 $ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
 $TempDirectory = [System.IO.Path]::GetFullPath($TempDirectory)
 
-$artifactDirectoryX64 = Join-Path $ArtifactRoot "winghostty-$Version-windows-x64"
+$artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 $packageIdSegments = $PackageIdentifier.Split('.')
@@ -48,7 +48,7 @@ $manifestApiUrl = "https://api.github.com/repos/microsoft/winget-pkgs/contents/$
 try {
     Invoke-WebRequest `
         -Uri $manifestApiUrl `
-        -Headers @{ 'User-Agent' = 'winghostty-release-workflow' } `
+        -Headers @{ 'User-Agent' = 'noctty-release-workflow' } `
         -ErrorAction Stop | Out-Null
 }
 catch {

@@ -32,7 +32,7 @@ function Find-StatefulHost([int] $ProcessId) {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
         [void][InteractiveWin11MessageNativeV2]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
-        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'winghostty.win32.host') {
+        if ($windowProcessId -eq $script:StatefulPid -and (Get-StatefulClassName $hwnd) -eq 'noctty.win32.host') {
             $script:StatefulHost = $hwnd
             return $false
         }
@@ -64,7 +64,7 @@ function Get-StatefulTabCount([IntPtr] $HostHwnd) {
 }
 
 function Get-StatefulSurface([IntPtr] $HostHwnd) {
-    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'winghostty.win32' | Select-Object -First 1
+    return Get-StatefulChildren $HostHwnd | Where-Object Class -eq 'noctty.win32' | Select-Object -First 1
 }
 
 function Get-StatefulWindowRect([IntPtr] $Hwnd) {
@@ -138,7 +138,7 @@ function Start-StatefulApp($Layout, [string] $Exe, [string] $RepoRoot, [string] 
 
 function Wait-StatefulHost($Run, [DateTime] $Deadline) {
     $script:StatefulWaitProcess = $Run.Process
-    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty host window' -Process $Run.Process -Condition {
+    Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty host window' -Process $Run.Process -Condition {
         [IntPtr]::Zero -ne (Find-StatefulHost $script:StatefulWaitProcess.Id)
     }
     return Find-StatefulHost $Run.Process.Id
@@ -192,7 +192,7 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
             -Hwnd $HostHwnd `
             -Message 0x0010 `
             -Deadline $Deadline `
-            -Description 'WM_CLOSE to winghostty' `
+            -Description 'WM_CLOSE to noctty' `
             -Flags $script:InteractiveWin11SmtoBlock `
             -ToleratedErrors @($script:InteractiveWin11ErrorInvalidWindowHandle) `
             -ObservedToleratedError $toleratedCloseError `
@@ -207,10 +207,10 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
         if (-not $Run.Process.HasExited) {
             throw $sendError
         }
-        Write-Warning "WM_CLOSE send raced winghostty exit: $sendError"
+        Write-Warning "WM_CLOSE send raced noctty exit: $sendError"
     }
     try {
-        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'winghostty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
+        Wait-InteractiveWin11Until -Deadline $Deadline -Description 'noctty graceful exit' -Condition { $Run.Process.Refresh(); $Run.Process.HasExited }
     }
     catch {
         if ($null -ne $closeSkipDetail) { throw "$($_.Exception.Message) ($closeSkipDetail)" }
@@ -219,6 +219,6 @@ function Close-StatefulHost([IntPtr] $HostHwnd, $Run, [DateTime] $Deadline) {
     $exitCode = Get-InteractiveWin11ProcessExitCode -Process $Run.Process -ProcessHandle $processHandle
     if ($exitCode -ne 0) {
         $suffix = if ($null -ne $closeSkipDetail) { " ($closeSkipDetail)" } else { '' }
-        throw "winghostty exited with code $exitCode during graceful-close validation$suffix"
+        throw "noctty exited with code $exitCode during graceful-close validation$suffix"
     }
 }

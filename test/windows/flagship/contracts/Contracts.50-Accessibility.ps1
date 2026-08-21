@@ -171,7 +171,7 @@ $openSettingsLoops = @($accessibilityHarnessAst.FindAll({
     $settingsClassReferences = @($node.Body.FindAll({
         param($child)
         $child -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-            $child.Value -eq 'winghostty.win32.settings'
+            $child.Value -eq 'noctty.win32.settings'
     }, $true))
     return $settingsClassReferences.Count -gt 0 -and
         (Get-NamedMemberExpressions `
@@ -382,7 +382,7 @@ public static class FlagshipAccessibilityNativeProbe {
 '@
 }
 $outputMarkerProbeSource = $outputMarkerFunction.Extent.Text.Replace(
-    '[WinghosttyAccessibilityNative]',
+    '[NocttyAccessibilityNative]',
     '[FlagshipAccessibilityNativeProbe]'
 )
 . ([scriptblock]::Create($outputMarkerProbeSource))
@@ -397,7 +397,7 @@ $script:outputMarkerVisible = $false
 function New-AccessibilityTempCmdLauncher {
     param([string[]] $Lines, [string] $Description)
     $path = Join-Path ([IO.Path]::GetTempPath()) (
-        'winghostty-output-marker-' + [Guid]::NewGuid().ToString('N') + '.cmd'
+        'noctty-output-marker-' + [Guid]::NewGuid().ToString('N') + '.cmd'
     )
     [IO.File]::WriteAllText($path, '@echo contract launcher')
     $script:outputMarkerLauncherPaths.Add($path)
@@ -779,12 +779,12 @@ if ($coldFinalReads.Count -ne 1 -or
 }
 
 $coldProbeSource = $coldFirstReadFunctions[0].Extent.Text.Replace(
-    '[WinghosttyAccessibilityNative]',
+    '[NocttyAccessibilityNative]',
     '[FlagshipAccessibilityNativeProbe]'
 )
 . ([scriptblock]::Create($coldProbeSource))
 $coldProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    'winghostty-cold-proof-' + [Guid]::NewGuid().ToString('N')
+    'noctty-cold-proof-' + [Guid]::NewGuid().ToString('N')
 )
 [IO.Directory]::CreateDirectory($coldProbeRoot) | Out-Null
 $script:coldProbeLog = [Collections.Generic.List[string]]::new()
@@ -1415,7 +1415,7 @@ if ($startWithEnvironmentFunctions.Count -ne 1) {
     throw 'Accessibility evidence must define one process-environment isolation helper.'
 }
 . ([scriptblock]::Create($startWithEnvironmentFunctions[0].Extent.Text))
-$environmentProbeName = 'WINGHOSTTY_FLAGSHIP_ENV_' + [Guid]::NewGuid().ToString('N')
+$environmentProbeName = 'NOCTTY_FLAGSHIP_ENV_' + [Guid]::NewGuid().ToString('N')
 $environmentProbeOriginal = 'original'
 [System.Environment]::SetEnvironmentVariable($environmentProbeName, $environmentProbeOriginal, 'Process')
 $script:environmentStartCalls = 0
@@ -1486,7 +1486,7 @@ if ($restoreBaselineFunctions.Count -ne 1) {
     throw "Expected exactly one Restore-AccessibilityConfigBaseline definition; found $($restoreBaselineFunctions.Count)."
 }
 . ([scriptblock]::Create($restoreBaselineFunctions[0].Extent.Text))
-$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winghostty-config-restore-' + [Guid]::NewGuid().ToString('N'))
+$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('noctty-config-restore-' + [Guid]::NewGuid().ToString('N'))
 $restoreProbePath = Join-Path $restoreProbeDirectory 'config.ghostty'
 [System.IO.Directory]::CreateDirectory($restoreProbeDirectory) | Out-Null
 try {
@@ -1818,7 +1818,7 @@ try {
         [FlagshipPostMessageProbe]::LastMessage -ne [uint32]0x0401 -or
         [FlagshipPostMessageProbe]::LastWParam.ToUInt64() -ne [uint64]74 -or
         [FlagshipPostMessageProbe]::LastLParam -ne [IntPtr]100 -or
-        $postExitedMessage -notlike 'Refusing to post contract exited because winghostty already exited*' -or
+        $postExitedMessage -notlike 'Refusing to post contract exited because noctty already exited*' -or
         $postDeadlineMessage -ne 'Timed out waiting for contract deadline.') {
         $postDiagnostic = [ordered]@{
             invocations = $postWrapperInvocations

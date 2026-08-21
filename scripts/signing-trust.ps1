@@ -56,8 +56,8 @@ function Get-CertificateSpkiSha256 {
     }
 }
 
-function Initialize-WinghosttyAuthenticodeVerifier {
-    if ('WinghosttyAuthenticodeVerifier' -as [type]) {
+function Initialize-NocttyAuthenticodeVerifier {
+    if ('NocttyAuthenticodeVerifier' -as [type]) {
         return
     }
 
@@ -75,7 +75,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.Pkcs;
 
-public static class WinghosttyAuthenticodeVerifier
+public static class NocttyAuthenticodeVerifier
 {
     private const uint CertQueryObjectFile = 1;
     private const uint CertQueryContentFlagPkcs7SignedEmbed = 0x00000400;
@@ -273,8 +273,8 @@ function Test-SelfSignedTrustStatus {
         -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $false
     }
-    Initialize-WinghosttyAuthenticodeVerifier
-    return [WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash(
+    Initialize-NocttyAuthenticodeVerifier
+    return [NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash(
         [System.IO.Path]::GetFullPath($Path)
     )
 }

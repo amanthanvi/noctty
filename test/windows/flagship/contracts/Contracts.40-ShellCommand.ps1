@@ -50,14 +50,14 @@ function Format-PowerShellLiteral {
 }
 
 $binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
-$guiExe = Join-Path $binDir 'winghostty.exe'
-$commandExe = Join-Path $binDir 'winghostty.com'
+$guiExe = Join-Path $binDir 'noctty.exe'
+$commandExe = Join-Path $binDir 'noctty.com'
 $cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
 foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
     if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
-        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the noctty binaries are absent."
     }
 }
 
@@ -67,21 +67,21 @@ $shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"
         if ($LASTEXITCODE -ne 0) {
-            throw "cmd could not resolve winghostty from PATH."
+            throw "cmd could not resolve noctty from PATH."
         }
         $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
         if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
+            throw "cmd resolved noctty to the wrong artifact: $resolvedPath"
         }
 
-        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
-            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'noctty' } else { "noctty $cmdArgs" }
             @(
                 '@echo off'
                 "set `"PATH=$envPath`""
@@ -123,24 +123,24 @@ switch ($Shell) {
         $oldPath = $env:PATH
         $env:PATH = $envPath
         try {
-            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command noctty).Source"
             if ($LASTEXITCODE -ne 0) {
-                throw "PowerShell could not resolve winghostty from PATH."
+                throw "PowerShell could not resolve noctty from PATH."
             }
             $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
             if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
+                throw "PowerShell resolved noctty to the wrong artifact: $resolvedPath"
             }
 
-            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
                 $env:PATH = $envPath
                 $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
                 @(
                     '$argsList = @(' + $argLiterals + ')'
-                    '$output = & winghostty @argsList | Out-String'
+                    '$output = & noctty @argsList | Out-String'
                     '$exitCode = $LASTEXITCODE'
                     '[Console]::Out.Write($output)'
                     'exit $exitCode'
@@ -208,6 +208,6 @@ if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without e
 Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Context $cliShellHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
-    '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
-    '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
+    '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
 )

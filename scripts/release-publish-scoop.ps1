@@ -26,7 +26,7 @@ if ([string]::IsNullOrWhiteSpace($BucketRepository)) {
     Write-Host 'Skipping Scoop publish: SCOOP_BUCKET_REPO is not configured.'
     return
 }
-if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish winghostty $Version Scoop manifest")) {
+if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish noctty $Version Scoop manifest")) {
     return
 }
 
@@ -40,16 +40,16 @@ if ([string]::IsNullOrWhiteSpace($RunnerTemp)) {
 $ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
 $RunnerTemp = [System.IO.Path]::GetFullPath($RunnerTemp)
 
-$artifactDirectoryX64 = Join-Path $ArtifactRoot "winghostty-$Version-windows-x64"
+$artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
 $manifestRelativePath = if ($ManifestPath) {
     $ManifestPath
 } else {
-    'bucket/winghostty.json'
+    'bucket/noctty.json'
 }
 
-$bucketDirectory = Join-Path $RunnerTemp 'winghostty-scoop-bucket'
+$bucketDirectory = Join-Path $RunnerTemp 'noctty-scoop-bucket'
 if (Test-Path -LiteralPath $bucketDirectory) {
     Remove-Item -LiteralPath $bucketDirectory -Recurse -Force
 }
@@ -87,7 +87,7 @@ try {
         throw "git diff --cached failed with exit code $LASTEXITCODE"
     }
 
-    & git commit -m "winghostty: update to $Version"
+    & git commit -m "noctty: update to $Version"
     if ($LASTEXITCODE -ne 0) {
         throw "git commit failed with exit code $LASTEXITCODE"
     }

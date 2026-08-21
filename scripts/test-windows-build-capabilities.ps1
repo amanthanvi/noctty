@@ -1,11 +1,11 @@
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
-$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-build-capabilities-$PID"
-$manifestPath = Join-Path $fixtureRoot "winghostty-build-capabilities.json"
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-build-capabilities-$PID"
+$manifestPath = Join-Path $fixtureRoot "noctty-build-capabilities.json"
 $runtimeFiles = @(
-    "winghostty.com",
-    "winghostty.exe",
+    "noctty.com",
+    "noctty.exe",
     "ghostty-vt.dll"
 )
 
@@ -28,7 +28,7 @@ try {
         -Architecture "arm64" `
         -RuntimeFiles $runtimeFiles
 
-    Add-Content -LiteralPath (Join-Path $fixtureRoot "winghostty.exe") -Value "mutated"
+    Add-Content -LiteralPath (Join-Path $fixtureRoot "noctty.exe") -Value "mutated"
     $hashMismatchRejected = $false
     try {
         Assert-WindowsBuildCapabilitiesManifest `

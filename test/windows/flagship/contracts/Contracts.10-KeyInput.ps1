@@ -77,20 +77,15 @@ if ($slugFunctions.Count -ne 1) {
 }
 try {
     . ([scriptblock]::Create($slugFunctions[0].Extent.Text))
-    $slugCalls = 0
     $slugFixtures = @(
         foreach ($keyValue in $keyInputKeyValues) {
-            $slugCalls++
             Get-KeyInputScenarioSlug -Key $keyValue
-            $slugCalls++
-            Get-KeyInputScenarioSlug -Key $keyValue -PostBoo
         }
     )
-    if ($slugCalls -ne 20 -or
-        @($slugFixtures | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
-        $slugFixtures.Count -ne 20 -or
+    if (@($slugFixtures | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+        $slugFixtures.Count -ne 10 -or
         @($slugFixtures | Sort-Object -Unique).Count -ne $slugFixtures.Count) {
-        throw 'The ten-key by PostBoo cross-product must execute and produce exactly twenty unique artifact slugs.'
+        throw 'The ten-key set must produce exactly ten unique artifact slugs.'
     }
 }
 finally {

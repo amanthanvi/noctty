@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://winghostty.dev/schemas/verification/result.v1.json",
-  "title": "winghostty verification result v1",
+  "$id": "https://noctty.com/schemas/verification/result.v1.json",
+  "title": "noctty verification result v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "scenario_id", "status", "started_at", "finished_at", "duration_ms", "environment", "assertions", "artifacts"],
   "properties": {
-    "schema_version": { "const": "winghostty.verification.result.v1" },
+    "schema_version": { "const": "noctty.verification.result.v1" },
     "example": { "type": "boolean" },
     "scenario_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
     "status": { "enum": ["pass", "fail", "skip", "error"] },

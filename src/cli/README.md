@@ -12,4 +12,4 @@ and GitHub Releases.
 Each CLI action is defined in its own file. Documentation for each action is
 defined in the doc comment associated with the `run` function. For example, the
 `run` function in `list_keybinds.zig` contains the help text for
-`winghostty +list-keybinds`.
+`noctty +list-keybinds`.

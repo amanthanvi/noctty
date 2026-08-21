@@ -323,7 +323,7 @@ claim a pass for the broader interactive composite suite.
 - The earlier full-suite pass was reconfirmed by the final-tree run above.
 - Final-tree full accessibility validation with `-ResetState -TimeoutSeconds
   20 -IdleSoakSeconds 60`: PASS. Evidence:
-  `.sandbox/win11/github-winghostty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json`
+  `.sandbox/win11/github-noctty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json`
   (`outcome=pass`, 119.962 seconds). It proves UIA notification/TextPattern
   behavior, inactive-pane silence, and a 60-second idle soak with zero
   TextChanged events or handle/thread/private-byte growth.
@@ -337,7 +337,7 @@ claim a pass for the broader interactive composite suite.
   DWM `1`, and host/Settings backdrop `1`, followed by exact sandbox-config
   restoration.
 - Final cleanup restored High Contrast off and DPI 96 and left zero unexpected
-  winghostty processes.
+  noctty processes.
 - Pending: PR/review/merge/release gates and human Narrator/NVDA acceptance.
 
 ## Residual risks

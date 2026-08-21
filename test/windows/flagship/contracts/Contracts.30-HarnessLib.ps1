@@ -96,7 +96,6 @@ if ($altTapStrategies.Count -ne 1 -or
 
 $windowLibConsumerSources = @(
     [pscustomobject]@{ Path = $accessibilityHarness; Text = $accessibilityHarnessText; DotSource = ". (Join-Path `$repoRoot 'scripts\interactive-win11-window-lib.ps1')" },
-    [pscustomobject]@{ Path = $booMultitabHarness; Text = $booMultitabHarnessText; DotSource = ". (Join-Path `$repoRoot 'scripts\interactive-win11-window-lib.ps1')" },
     [pscustomobject]@{ Path = $imeCandidateHarness; Text = $imeCandidateHarnessText; DotSource = ". (Join-Path `$repoRoot 'scripts\interactive-win11-window-lib.ps1')" },
     [pscustomobject]@{ Path = $keyInputHarness; Text = $keyInputHarnessText; DotSource = ". (Join-Path `$repoRoot 'scripts\interactive-win11-window-lib.ps1')" },
     [pscustomobject]@{ Path = $newTabHarness; Text = $newTabHarnessText; DotSource = ". (Join-Path `$repoRoot 'scripts\interactive-win11-window-lib.ps1')" },
@@ -231,7 +230,7 @@ if ($harnessMainFunctions.Count -ne 1 -or
 # bootstrap gate. Its private statement layout is deliberately not pinned.
 $harnessMainSource = $harnessMainFunctions[0].Extent.Text
 $harnessMainProbeEnvironment =
-    'WINGHOSTTY_HARNESS_MAIN_CONTRACT_' + [Guid]::NewGuid().ToString('N')
+    'NOCTTY_HARNESS_MAIN_CONTRACT_' + [Guid]::NewGuid().ToString('N')
 $harnessMainProbePrevious = [Environment]::GetEnvironmentVariable(
     $harnessMainProbeEnvironment,
     [EnvironmentVariableTarget]::Process
@@ -708,7 +707,7 @@ try {
     )
     if ($script:containmentForwardCalls -ne 1 -or
         ($launchArguments -join '|') -ne
-            '--contract-containment-probe|--single-instance=false|--class=winghostty-interactive-contract-sandbox') {
+            '--contract-containment-probe|--single-instance=false|--class=noctty-interactive-contract-sandbox') {
         throw 'Interactive launch composition did not invoke containment policy once and append isolation arguments.'
     }
 }

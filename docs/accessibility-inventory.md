@@ -1,15 +1,15 @@
 # Windows accessibility contract
 
-winghostty uses native Win32 accessibility for standard button, list, dialog,
+noctty uses native Win32 accessibility for standard button, list, dialog,
 and settings controls. It installs custom UI Automation providers where native
 semantics are incomplete, including terminal/owner-drawn surfaces and the
 palette/search Edit HWNDs that need reliable Text, Text2, and Value patterns.
 
 | Surface | Contract | Provider |
 | --- | --- | --- |
-| Host window and custom caption | Window name, focus, native caption buttons | winghostty root chained to host provider |
-| Terminal pane | Bounded document text/ranges, visible geometry, active caret range, text/caret/focus changes | winghostty TextPattern/TextPattern2 provider |
-| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | winghostty selection/list-item fragments plus custom Text/Text2/Value provider on the native query Edit HWND |
+| Host window and custom caption | Window name, focus, native caption buttons | noctty root chained to host provider |
+| Terminal pane | Bounded document text/ranges, visible geometry, active caret range, text/caret/focus changes | noctty TextPattern/TextPattern2 provider |
+| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | noctty selection/list-item fragments plus custom Text/Text2/Value provider on the native query Edit HWND |
 | Tabs, docked search, settings, confirmation/update/recovery UI | Name, role, value/selection, keyboard focus | native HWND providers; custom Text/Text2/Value provider on the docked-search Edit HWND |
 
 Automated acceptance is `test/windows/interactive-win11-accessibility.ps1`.

@@ -159,8 +159,8 @@ pub fn reportStartupFailure(err: anyerror) void {
     var buf: [4096]u8 = undefined;
     const message = formatStartupFailureMessage(&buf, err);
 
-    const caption = std.unicode.utf8ToUtf16LeStringLiteral("winghostty failed");
-    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("winghostty failed.");
+    const caption = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed");
+    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed.");
 
     const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
         _ = sys.MessageBoxW(null, fallback, caption, c.MB_OK | c.MB_ICONERROR | c.MB_SETFOREGROUND);
@@ -174,14 +174,14 @@ pub fn reportStartupFailure(err: anyerror) void {
 fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
     if (currentOpenGLStartupFailure()) |failure| {
         return formatOpenGLStartupFailureMessage(buf, err, failure) catch
-            "winghostty could not initialize the Windows OpenGL renderer.";
+            "noctty could not initialize the Windows OpenGL renderer.";
     }
 
     return std.fmt.bufPrint(
         buf,
-        "winghostty {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
+        "noctty {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
         .{ build_config.version_string, @errorName(err) },
-    ) catch "winghostty failed.";
+    ) catch "noctty failed.";
 }
 
 fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLStartupFailure) ![]const u8 {
@@ -189,16 +189,16 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
 
     if (failure.win32_error) |win32_error| {
         return std.fmt.bufPrint(buf,
-            \\winghostty {s} could not initialize the Windows OpenGL renderer while {s}.
+            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
             \\
             \\Startup error: {s}
             \\Win32 error: {d}{s}
             \\
-            \\winghostty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
+            \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
             \\
             \\{s}
             \\
-            \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force winghostty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/winghostty/issues/64.
+            \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
         , .{
             build_config.version_string,
             failure.step.label(),
@@ -210,16 +210,16 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
     }
 
     return std.fmt.bufPrint(buf,
-        \\winghostty {s} could not initialize the Windows OpenGL renderer while {s}.
+        \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
         \\
         \\Startup error: {s}
         \\Win32 error: not reported
         \\
-        \\winghostty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
+        \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
         \\
         \\{s}
         \\
-        \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force winghostty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/winghostty/issues/64.
+        \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
     , .{
         build_config.version_string,
         failure.step.label(),
@@ -260,7 +260,7 @@ test "win32-opengl-startup-failure-message-explains-error-126" {
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "AMD+NVIDIA hybrid GPU") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "DirectX or ANGLE fallback") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "https://github.com/amanthanvi/winghostty/issues/64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "https://github.com/amanthanvi/noctty/issues/64") != null);
 }
 
 test "win32-opengl-startup-failure-message-explains-version-floor" {

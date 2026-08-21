@@ -23,7 +23,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_CONFIGURED_SIZE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'configured-size' -ResetState:$ResetState -IncludeResourcesDir
@@ -83,7 +83,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $resultPath -ErrorAction Sile
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-configured-size-$($layout.SandboxId)"
+    "--class=noctty-configured-size-$($layout.SandboxId)"
     "--config-file=$configPath"
     '-e'
     'powershell.exe'
@@ -143,7 +143,7 @@ try {
             if ($null -ne $result) {
                 break
             }
-            throw "winghostty exited before configured-size validation completed (exit code $($process.ExitCode))"
+            throw "noctty exited before configured-size validation completed (exit code $($process.ExitCode))"
         }
 
         Start-Sleep -Milliseconds $script:CONFIGURED_SIZE_POLL_MS

@@ -225,7 +225,7 @@ function Invoke-InteractiveWin11Message {
 
     $Process.Refresh()
     if ($Process.HasExited) {
-        throw "Refusing to send $Description because winghostty already exited (exit code $($Process.ExitCode))."
+        throw "Refusing to send $Description because noctty already exited (exit code $($Process.ExitCode))."
     }
 
     $sendTimeoutMs = Get-InteractiveWin11MessageTimeoutMs -Deadline $Deadline -Description "$Description hwnd=$Hwnd"
@@ -286,7 +286,7 @@ function Invoke-InteractiveWin11PostMessage {
 
     $Process.Refresh()
     if ($Process.HasExited) {
-        throw "Refusing to post $Description because winghostty already exited (exit code $($Process.ExitCode))."
+        throw "Refusing to post $Description because noctty already exited (exit code $($Process.ExitCode))."
     }
 
     [void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb 'post')
@@ -314,7 +314,7 @@ function Get-InteractiveWin11LaunchArguments {
     return @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
-        "--class=winghostty-interactive-$($Layout.SandboxId)"
+        "--class=noctty-interactive-$($Layout.SandboxId)"
     )
 }
 
@@ -456,7 +456,7 @@ function Get-InteractiveWin11ExePath {
         [Parameter(Mandatory)] [string] $RepoRoot
     )
 
-    return Get-InteractiveWin11NormalizedPath -Path (Join-Path $RepoRoot 'zig-out\bin\winghostty.exe')
+    return Get-InteractiveWin11NormalizedPath -Path (Join-Path $RepoRoot 'zig-out\bin\noctty.exe')
 }
 
 function Invoke-InteractiveWin11Build {
@@ -519,7 +519,7 @@ function Assert-InteractiveWin11ExeExists {
     )
 
     if (-not [System.IO.File]::Exists($ExePath)) {
-        throw "Missing winghostty.exe at $ExePath"
+        throw "Missing noctty.exe at $ExePath"
     }
 }
 
@@ -619,7 +619,7 @@ function Wait-InteractiveWin11Until {
     if ($ConditionFirst) {
         while ($true) {
             if ($null -ne $Process -and $Process.HasExited) {
-                throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+                throw "noctty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
             }
 
             if (& $Condition) {
@@ -635,7 +635,7 @@ function Wait-InteractiveWin11Until {
     else {
     while ($true) {
         if ($null -ne $Process -and $Process.HasExited) {
-            throw "winghostty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+            throw "noctty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
         }
 
         if ([DateTime]::UtcNow -ge $Deadline) {
@@ -1052,7 +1052,7 @@ function Get-InteractiveWin11LaunchAction {
     if ([System.IO.File]::Exists($resolvedExePath)) {
         if (Test-InteractiveWin11InputNewerThanBinary -ExePath $resolvedExePath -BuildInputs $BuildInputs) {
             if ($NoBuild) {
-                throw "winghostty.exe at $resolvedExePath is older than the requested build inputs; rerun without -NoBuild or pass -Rebuild."
+                throw "noctty.exe at $resolvedExePath is older than the requested build inputs; rerun without -NoBuild or pass -Rebuild."
             }
             return 'build'
         }
@@ -1060,7 +1060,7 @@ function Get-InteractiveWin11LaunchAction {
     }
 
     if ($NoBuild) {
-        throw "Missing winghostty.exe at $resolvedExePath"
+        throw "Missing noctty.exe at $resolvedExePath"
     }
 
     return 'build'

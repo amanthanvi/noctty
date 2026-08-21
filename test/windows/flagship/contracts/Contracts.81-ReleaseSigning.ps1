@@ -1,7 +1,7 @@
 $releaseArtifactVerifier = Join-Path $repoRoot 'scripts\release-verify-artifacts.ps1'
 $releaseArtifactVerifierText = Get-Content -LiteralPath $releaseArtifactVerifier -Raw
 $releaseArtifactVerifierSha256 =
-    '217d6cb68a534b23262c45e8c2266f5437d83d5143c04df7193d886bee9b940f'
+    '4bdaf3057a4cfa0f8347deb4e2e2bd984ee77f2ccd92ee6947bbdb27698bebe8'
 $canonicalReleaseArtifactVerifier = ConvertTo-CanonicalText `
     -Text $releaseArtifactVerifierText
 if ((Get-CanonicalTextSha256 -Text $canonicalReleaseArtifactVerifier) -cne
@@ -27,7 +27,7 @@ $releaseArtifactVerifierStatement =
 $releaseArtifactVerifierSideEffect =
     "${releaseArtifactVerifierIndent}Set-Content -LiteralPath " +
     "([IO.Path]::Combine([IO.Path]::GetTempPath(), " +
-    "'winghostty-release-pin-mutant')) -Value 'mutated'"
+    "'noctty-release-pin-mutant')) -Value 'mutated'"
 $releaseArtifactVerifierMutants = [ordered] @{
     'injected early return' = $canonicalReleaseArtifactVerifier.Replace(
         $releaseArtifactVerifierCriticalStatement,
@@ -160,7 +160,7 @@ if ($releaseSignatureText -notmatch '\bGet-CertificateSpkiSha256\b' -or
 # evidence are observed by the real signed/tampered-PE policy test below. Local
 # parameter names and implementation ordering add no contract coverage.
 $checksumProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
-    'winghostty-checksum-contract-' + [Guid]::NewGuid().ToString('N')
+    'noctty-checksum-contract-' + [Guid]::NewGuid().ToString('N')
 )
 $checksumValidPath = Join-Path $checksumProbeRoot 'valid.txt'
 $checksumDuplicatePath = Join-Path $checksumProbeRoot 'duplicate.txt'
@@ -276,7 +276,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseArtifactVerifier
         Content = { $releaseArtifactVerifierText }
-        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind checksums.*?Get-ChecksumEntries.*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Expand-Archive.*?winghostty/winghostty\.com.*?winghostty/winghostty\.exe.*?winghostty/ghostty-vt\.dll.*?Assert-ReleaseSignature'
+        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind checksums.*?Get-ChecksumEntries.*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Expand-Archive.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Assert-ReleaseSignature'
         Kind = 'Text'
         Description = 'local release verification checks both architecture checksum sets and all installer and portable PE signatures'
     }
@@ -323,7 +323,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-ReleaseSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
     @{ Pattern = '(?s)\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1.*?one consistent certificate'; Description = 'published verifier requires one consistent signer after shared updater-pin verification' },
-    @{ Pattern = "winghostty/winghostty\.com'.*?winghostty/winghostty\.exe'.*?winghostty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
+    @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' },
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Invoke-ContractTable -Contracts @(

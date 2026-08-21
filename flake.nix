@@ -1,5 +1,5 @@
 {
-  description = "libghostty-vt for winghostty";
+  description = "libghostty-vt for noctty";
 
   inputs = {
     # Keep Zig and glibc versions compatible with the systems consuming the

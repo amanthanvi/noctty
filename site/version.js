@@ -1,0 +1,109 @@
+// Release version chip: shows the compiled default immediately, then
+// refreshes from GitHub Releases when the browser is idle. Never downgrades
+// below the compiled version.
+
+const DEFAULT_WG_VERSION = '1.3.123';
+const WG_REPO = 'amanthanvi/noctty';
+const CACHE_KEY = 'wg-latest-release-v1';
+const CACHE_TTL_MS = 30 * 60 * 1000;
+const RELEASE_FETCH_TIMEOUT_MS = 4000;
+
+function normalizeStableSemver(value) {
+  const match = String(value || '').match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  if (!match) return null;
+  return `${Number(match[1])}.${Number(match[2])}.${Number(match[3])}`;
+}
+
+function compareSemver(a, b) {
+  const leftVersion = normalizeStableSemver(a);
+  const rightVersion = normalizeStableSemver(b);
+  if (!leftVersion || !rightVersion) return null;
+  const left = leftVersion.split('.').map(Number);
+  const right = rightVersion.split('.').map(Number);
+
+  for (let i = 0; i < 3; i += 1) {
+    if (left[i] !== right[i]) return left[i] - right[i];
+  }
+  return 0;
+}
+
+function readCachedVersion() {
+  try {
+    const cached = sessionStorage.getItem(CACHE_KEY);
+    if (!cached) return null;
+    const parsed = JSON.parse(cached);
+    if (!parsed?.tag || Date.now() - parsed.ts > CACHE_TTL_MS) return null;
+    return normalizeStableSemver(parsed.tag);
+  } catch (e) {
+    return null;
+  }
+}
+
+function cacheVersion(tag) {
+  try {
+    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ tag, ts: Date.now() }));
+  } catch (e) {}
+}
+
+function renderVersion(version) {
+  const chip = document.getElementById('wg-version');
+  if (chip) chip.textContent = `v${version}`;
+  const summary = document.getElementById('wg-version-summary');
+  if (summary) {
+    summary.textContent = `Version ${version}, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.`;
+  }
+}
+
+function shouldPublishVersion(tag) {
+  const normalizedTag = normalizeStableSemver(tag);
+  const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
+  const currentBaseline = compareSemver(current, DEFAULT_WG_VERSION) >= 0
+    ? current
+    : DEFAULT_WG_VERSION;
+  return normalizedTag !== null && compareSemver(normalizedTag, currentBaseline) > 0;
+}
+
+function publishVersion(tag) {
+  const normalizedTag = normalizeStableSemver(tag);
+  if (!normalizedTag || !shouldPublishVersion(normalizedTag)) return false;
+  window.WG_VERSION = normalizedTag;
+  renderVersion(normalizedTag);
+  window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: normalizedTag } }));
+  return true;
+}
+
+async function fetchLatestVersion() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), RELEASE_FETCH_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`, {
+      signal: controller.signal,
+    });
+    if (res.status === 429 || res.status === 403) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    const tag = normalizeStableSemver(data.tag_name);
+    if (!tag) return;
+    cacheVersion(tag);
+    publishVersion(tag);
+  } catch (e) {
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function scheduleLatestVersionFetch() {
+  const cached = readCachedVersion();
+  if (cached) {
+    const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
+    const cachedMatchesCurrent = compareSemver(cached, current) === 0;
+    if (publishVersion(cached) || cachedMatchesCurrent) return;
+  }
+
+  const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 1500));
+  idle(fetchLatestVersion, { timeout: RELEASE_FETCH_TIMEOUT_MS });
+}
+
+window.WG_VERSION = window.WG_VERSION || DEFAULT_WG_VERSION;
+scheduleLatestVersionFetch();

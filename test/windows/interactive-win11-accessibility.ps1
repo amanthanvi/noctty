@@ -87,19 +87,19 @@ if ($ColdDiagnosticOnly) { $forwarded += '-ColdDiagnosticOnly' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED' `
     -ArgumentList $forwarded
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-if (-not ('WinghosttyAccessibilityNative' -as [type])) {
+if (-not ('NocttyAccessibilityNative' -as [type])) {
     Add-Type @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-public static class WinghosttyAccessibilityNative {
+public static class NocttyAccessibilityNative {
     private static int lastSendInputRequested;
     private static int lastSendInputReturned;
     public static int LastSendInputRequested { get { return Volatile.Read(ref lastSendInputRequested); } }
@@ -604,7 +604,7 @@ public static class WinghosttyAccessibilityNative {
         EnumProc callback = delegate(IntPtr hwnd, IntPtr data) {
             StringBuilder name = new StringBuilder(128);
             GetClassNameW(hwnd, name, name.Capacity);
-            if (IsWindowVisible(hwnd) && name.ToString() == "winghostty.win32") count++;
+            if (IsWindowVisible(hwnd) && name.ToString() == "noctty.win32") count++;
             return true;
         };
         EnumChildWindows(parent, callback, IntPtr.Zero);
@@ -615,7 +615,7 @@ public static class WinghosttyAccessibilityNative {
         EnumProc callback = delegate(IntPtr hwnd, IntPtr data) {
             StringBuilder name = new StringBuilder(128);
             GetClassNameW(hwnd, name, name.Capacity);
-            if (IsWindowVisible(hwnd) && name.ToString() == "winghostty.win32") children.Add(hwnd);
+            if (IsWindowVisible(hwnd) && name.ToString() == "noctty.win32") children.Add(hwnd);
             return true;
         };
         EnumChildWindows(parent, callback, IntPtr.Zero);
@@ -626,7 +626,7 @@ public static class WinghosttyAccessibilityNative {
         EnumProc callback = delegate(IntPtr hwnd, IntPtr data) {
             StringBuilder name = new StringBuilder(128);
             GetClassNameW(hwnd, name, name.Capacity);
-            if (name.ToString() == "winghostty.win32") children.Add(hwnd);
+            if (name.ToString() == "noctty.win32") children.Add(hwnd);
             return true;
         };
         EnumChildWindows(parent, callback, IntPtr.Zero);
@@ -770,19 +770,19 @@ function Assert-AccessibilityInputOwner(
     do {
         $Process.Refresh()
         if ($Process.HasExited -or $Process.MainWindowHandle -eq [IntPtr]::Zero) {
-            throw "winghostty is unavailable before $Description."
+            throw "noctty is unavailable before $Description."
         }
         $attempts++
-        $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
         $foregroundOwner = 0
         if ($foregroundHwnd -ne [IntPtr]::Zero) {
-            [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
+            [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
         }
 
-        $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+        $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         $focusedOwner = 0
         if ($focusedHwnd -ne [IntPtr]::Zero) {
-            [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedOwner)
+            [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedOwner)
         }
 
         if ($foregroundHwnd -eq $Process.MainWindowHandle -and
@@ -799,15 +799,15 @@ function Assert-AccessibilityInputOwner(
         }
     } while ($attempts -lt $maxAttempts -and [DateTime]::UtcNow -lt $deadline)
 
-    $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+    $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
     $foregroundOwner = 0
     if ($foregroundHwnd -ne [IntPtr]::Zero) {
-        [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
+        [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
     }
-    $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+    $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
     $focusedOwner = 0
     if ($focusedHwnd -ne [IntPtr]::Zero) {
-        [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedOwner)
+        [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedOwner)
     }
     if ($foregroundHwnd -eq $Process.MainWindowHandle -and
         $foregroundOwner -eq [uint32]$Process.Id -and
@@ -817,7 +817,7 @@ function Assert-AccessibilityInputOwner(
         return
     }
 
-    throw "winghostty does not own expected foreground keyboard focus before $Description (attempts=$attempts/$maxAttempts foreground_hwnd=$foregroundHwnd foreground_owner=$foregroundOwner focused_hwnd=$focusedHwnd focused_owner=$focusedOwner expected_process=$($Process.Id) expected_focused_hwnd=$ExpectedFocusedHwnd)."
+    throw "noctty does not own expected foreground keyboard focus before $Description (attempts=$attempts/$maxAttempts foreground_hwnd=$foregroundHwnd foreground_owner=$foregroundOwner focused_hwnd=$focusedHwnd focused_owner=$focusedOwner expected_process=$($Process.Id) expected_focused_hwnd=$ExpectedFocusedHwnd)."
 }
 
 function Send-AccessibilityChord(
@@ -827,7 +827,7 @@ function Send-AccessibilityChord(
     [IntPtr] $ExpectedFocusedHwnd = [IntPtr]::Zero
 ) {
     Assert-AccessibilityInputOwner -Process $Process -Description $Description -ExpectedFocusedHwnd $ExpectedFocusedHwnd
-    if (-not [WinghosttyAccessibilityNative]::SendChord($Keys)) {
+    if (-not [NocttyAccessibilityNative]::SendChord($Keys)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTLE_MS
@@ -848,7 +848,7 @@ function Get-AccessibilityClientPixelGrid {
     for ($y = $MinY; $y -le $MaxY; $y += $Step) {
         for ($x = $MinX; $x -le $MaxX; $x += $Step) {
             [uint32]$color = 0
-            if ([WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+            if ([NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                 $Hwnd,
                 $x,
                 $y,
@@ -870,7 +870,7 @@ function Find-AccessibilityClientPixel {
 
     foreach ($entry in $OriginalGrid.Values) {
         [uint32]$color = 0
-        if ([WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+        if ([NocttyAccessibilityNative]::TrySampleWindowClientPixel(
             $Hwnd,
             [int]$entry.x,
             [int]$entry.y,
@@ -951,11 +951,11 @@ function Send-AccessibilityOutputMarker(
             throw "Output marker command for $Description contains its literal marker."
         }
         Assert-AccessibilityInputOwner -Process $Process -Description "$Description text" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
-        if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
+        if (-not [NocttyAccessibilityNative]::SendUnicodeText($command)) {
             throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
-        $sendInputRequested = [WinghosttyAccessibilityNative]::LastSendInputRequested
-        $sendInputReturned = [WinghosttyAccessibilityNative]::LastSendInputReturned
+        $sendInputRequested = [NocttyAccessibilityNative]::LastSendInputRequested
+        $sendInputReturned = [NocttyAccessibilityNative]::LastSendInputReturned
         $commandEchoEvidence = Wait-AccessibilityTerminalCommandEcho `
             -Process $Process `
             -TextPattern $TextPattern `
@@ -968,9 +968,9 @@ function Send-AccessibilityOutputMarker(
         if ($preEnterText.Contains($Marker)) {
             throw "Terminal exposed output marker for $Description before Enter."
         }
-        $preEnterForegroundBefore = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $preEnterForegroundBefore = [NocttyAccessibilityNative]::GetForegroundWindow()
         $preEnterFocusBefore =
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+            [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         $preEnterRecoveryCount = if (
             $preEnterForegroundBefore -ne $Process.MainWindowHandle -or
             $preEnterFocusBefore -ne $ExpectedFocusedHwnd
@@ -979,9 +979,9 @@ function Send-AccessibilityOutputMarker(
             -Process $Process `
             -Description "$Description pre-Enter" `
             -ExpectedFocusedHwnd $ExpectedFocusedHwnd
-        $preEnterForegroundAfter = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $preEnterForegroundAfter = [NocttyAccessibilityNative]::GetForegroundWindow()
         $preEnterFocusAfter =
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+            [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         Send-AccessibilityChord -Keys @([uint16]0x0D) -Description "$Description Enter" -Process $Process -ExpectedFocusedHwnd $ExpectedFocusedHwnd
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "$Description launcher output" -Condition {
             $script:outputMarkerLauncherText = $TextPattern.DocumentRange.GetText(-1)
@@ -1072,9 +1072,9 @@ function Wait-AccessibilityOwnedOutputNotification(
     }
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description $Description -Condition {
-            $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+            $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             $focusedHwnd =
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
             $state.last_foreground_hwnd = $foregroundHwnd.ToInt64()
             $state.last_focused_hwnd = $focusedHwnd.ToInt64()
             $focusMismatch = $foregroundHwnd -ne $Process.MainWindowHandle -or
@@ -1092,7 +1092,7 @@ function Wait-AccessibilityOwnedOutputNotification(
                 $state.focus_recovery_count++
             }
             $rawHistory = @(
-                [WinghosttyAccessibilityNative]::NotificationHistorySnapshot
+                [NocttyAccessibilityNative]::NotificationHistorySnapshot
             )
             $diagnosticState.Value =
                 Get-AccessibilityOutputNotificationDiagnostic `
@@ -1118,7 +1118,7 @@ function Wait-AccessibilityOwnedOutputNotification(
     }
     catch {
         $rawHistory = @(
-            [WinghosttyAccessibilityNative]::NotificationHistorySnapshot
+            [NocttyAccessibilityNative]::NotificationHistorySnapshot
         )
         $diagnosticState.Value =
             Get-AccessibilityOutputNotificationDiagnostic `
@@ -1191,18 +1191,18 @@ function Invoke-AccessibilityColdFirstReadProof(
         if ($command.Contains($Marker)) {
             throw "Cold output helper command for $Description contains its literal marker."
         }
-        [WinghosttyAccessibilityNative]::ResetNotificationCount()
+        [NocttyAccessibilityNative]::ResetNotificationCount()
         if (-not $NotificationCaptureActive) {
-            [WinghosttyAccessibilityNative]::StartNotificationCapture($ExpectedFocusedHwnd)
+            [NocttyAccessibilityNative]::StartNotificationCapture($ExpectedFocusedHwnd)
             $captureCreated = $true
         }
 
         Assert-AccessibilityInputOwner -Process $Process -Description "$Description text" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
-        if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($command)) {
+        if (-not [NocttyAccessibilityNative]::SendUnicodeText($command)) {
             throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
-        $sendInputRequested = [WinghosttyAccessibilityNative]::LastSendInputRequested
-        $sendInputReturned = [WinghosttyAccessibilityNative]::LastSendInputReturned
+        $sendInputRequested = [NocttyAccessibilityNative]::LastSendInputRequested
+        $sendInputReturned = [NocttyAccessibilityNative]::LastSendInputReturned
         $echoEvidence = Wait-AccessibilityTerminalCommandEcho `
             -Process $Process `
             -TextPattern $TextPattern `
@@ -1222,9 +1222,9 @@ function Invoke-AccessibilityColdFirstReadProof(
         $queryInactivityMilliseconds = 1200
         Start-Sleep -Milliseconds $queryInactivityMilliseconds
         $postExpiryTextPatternReadsBeforeFinal = 0
-        $preTriggerForegroundBefore = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $preTriggerForegroundBefore = [NocttyAccessibilityNative]::GetForegroundWindow()
         $preTriggerFocusBefore =
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+            [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         $preTriggerRecoveryCount = if (
             $preTriggerForegroundBefore -ne $Process.MainWindowHandle -or
             $preTriggerFocusBefore -ne $ExpectedFocusedHwnd
@@ -1233,10 +1233,10 @@ function Invoke-AccessibilityColdFirstReadProof(
             -Process $Process `
             -Description "$Description pre-trigger owner" `
             -ExpectedFocusedHwnd $ExpectedFocusedHwnd
-        $preTriggerForegroundAfter = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $preTriggerForegroundAfter = [NocttyAccessibilityNative]::GetForegroundWindow()
         $preTriggerFocusAfter =
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
-        [WinghosttyAccessibilityNative]::ResetNotificationCount()
+            [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+        [NocttyAccessibilityNative]::ResetNotificationCount()
         [System.IO.File]::WriteAllText($triggerPath, 'trigger')
         $coldNotificationDiagnostic = $null
         try {
@@ -1252,14 +1252,14 @@ function Invoke-AccessibilityColdFirstReadProof(
                 ready_exists = [System.IO.File]::Exists($readyPath)
                 trigger_exists = [System.IO.File]::Exists($triggerPath)
                 ack_exists = [System.IO.File]::Exists($ackPath)
-                notification_count = [WinghosttyAccessibilityNative]::NotificationCount
+                notification_count = [NocttyAccessibilityNative]::NotificationCount
                 raw_notification_history =
                     $coldNotificationDiagnostic.raw_notification_history
                 notification_history =
                     $coldNotificationDiagnostic.notification_history
                 notification_text = $coldNotificationDiagnostic.notification_text
-                foreground_hwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow().ToInt64()
-                focused_hwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor(
+                foreground_hwnd = [NocttyAccessibilityNative]::GetForegroundWindow().ToInt64()
+                focused_hwnd = [NocttyAccessibilityNative]::FocusedWindowFor(
                     $Process.MainWindowHandle
                 ).ToInt64()
                 expected_focused_hwnd = $ExpectedFocusedHwnd.ToInt64()
@@ -1322,7 +1322,7 @@ function Invoke-AccessibilityColdFirstReadProof(
     }
     finally {
         if ($captureCreated) {
-            [WinghosttyAccessibilityNative]::StopNotificationCapture()
+            [NocttyAccessibilityNative]::StopNotificationCapture()
         }
         if ([System.IO.File]::Exists($readyPath) -and
             -not [System.IO.File]::Exists($triggerPath)) {
@@ -1359,10 +1359,10 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             -Process $Process
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'inactive-output tab B creation' -Condition {
             $script:inactiveAllTerminals = @(
-                [WinghosttyAccessibilityNative]::TerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::TerminalChildren($Process.MainWindowHandle)
             )
             $script:inactiveVisibleTerminals = @(
-                [WinghosttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
             )
             return $script:inactiveAllTerminals.Count -eq 2 -and
                 $script:inactiveVisibleTerminals.Count -eq 1 -and
@@ -1419,13 +1419,13 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             -Process $Process `
             -Description 'inactive-output helper command' `
             -ExpectedFocusedHwnd $inactiveTabHwnd
-        if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($inactiveCommand)) {
+        if (-not [NocttyAccessibilityNative]::SendUnicodeText($inactiveCommand)) {
             throw "SendInput failed for inactive-output helper command: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
         $inactiveSendInputRequested =
-            [WinghosttyAccessibilityNative]::LastSendInputRequested
+            [NocttyAccessibilityNative]::LastSendInputRequested
         $inactiveSendInputReturned =
-            [WinghosttyAccessibilityNative]::LastSendInputReturned
+            [NocttyAccessibilityNative]::LastSendInputReturned
         $inactiveEchoEvidence = Wait-AccessibilityTerminalCommandEcho `
             -Process $Process `
             -TextPattern $inactiveTabTextPattern `
@@ -1443,8 +1443,8 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             return [System.IO.File]::Exists($inactiveReadyPath)
         }
 
-        [WinghosttyAccessibilityNative]::ResetNotificationCount()
-        [WinghosttyAccessibilityNative]::StartNotificationCapture($inactiveTabHwnd)
+        [NocttyAccessibilityNative]::ResetNotificationCount()
+        [NocttyAccessibilityNative]::StartNotificationCapture($inactiveTabHwnd)
         $inactiveCaptureStarted = $true
         Send-AccessibilityChord `
             -Keys @([uint16]0x11, [uint16]0x21) `
@@ -1452,14 +1452,14 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             -Process $Process
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'inactive-output tab A focus' -Condition {
             $script:inactiveTabAVisible = @(
-                [WinghosttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
             )
             return $script:inactiveTabAVisible.Count -eq 1 -and
                 $script:inactiveTabAVisible[0] -eq $TabAHwnd -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
+                [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $TabAHwnd
         }
-        [WinghosttyAccessibilityNative]::ResetNotificationCount()
+        [NocttyAccessibilityNative]::ResetNotificationCount()
         $inactivePostSwitchTextPatternReads = 0
         [System.IO.File]::WriteAllText($inactiveTriggerPath, 'trigger')
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'inactive-output external ack' -Condition {
@@ -1476,7 +1476,7 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
         do {
             $Process.Refresh()
             if ($Process.HasExited -or
-                -not [WinghosttyAccessibilityNative]::IsWindowResponsive(
+                -not [NocttyAccessibilityNative]::IsWindowResponsive(
                     $Process.MainWindowHandle,
                     250
                 )) {
@@ -1486,13 +1486,13 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             $inactiveNotificationDiagnostic =
                 Get-AccessibilityOutputNotificationDiagnostic `
                     -RawNotificationHistory @(
-                        [WinghosttyAccessibilityNative]::NotificationHistorySnapshot
+                        [NocttyAccessibilityNative]::NotificationHistorySnapshot
                     ) `
                     -Marker $inactiveTabMarker
             if ($inactiveNotificationDiagnostic.matched) {
                 throw "Inactive tab B emitted a marker speech notification during quiet proof. Diagnostic=$($inactiveNotificationDiagnostic | ConvertTo-Json -Depth 5 -Compress)"
             }
-            if ([WinghosttyAccessibilityNative]::FocusedWindowFor(
+            if ([NocttyAccessibilityNative]::FocusedWindowFor(
                 $Process.MainWindowHandle
             ) -ne $TabAHwnd) {
                 throw 'Inactive-output tab A lost focus during quiet proof.'
@@ -1512,13 +1512,13 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
         $inactiveFinalNotificationDiagnostic =
             Get-AccessibilityOutputNotificationDiagnostic `
                 -RawNotificationHistory @(
-                    [WinghosttyAccessibilityNative]::NotificationHistorySnapshot
+                    [NocttyAccessibilityNative]::NotificationHistorySnapshot
                 ) `
                 -Marker $inactiveTabMarker
         if ($inactiveFinalNotificationDiagnostic.matched) {
             throw "Inactive tab B emitted a marker speech notification at the capture boundary. Diagnostic=$($inactiveFinalNotificationDiagnostic | ConvertTo-Json -Depth 5 -Compress)"
         }
-        [WinghosttyAccessibilityNative]::StopNotificationCapture()
+        [NocttyAccessibilityNative]::StopNotificationCapture()
         $inactiveCaptureStarted = $false
         $inactiveNotificationDiagnostic = $inactiveFinalNotificationDiagnostic
         $inactiveRawNotificationHistory =
@@ -1532,11 +1532,11 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             -Process $Process
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'inactive-output tab B refocus' -Condition {
             $script:inactiveTabBVisible = @(
-                [WinghosttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
             )
             return $script:inactiveTabBVisible.Count -eq 1 -and
                 $script:inactiveTabBVisible[0] -eq $inactiveTabHwnd -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
+                [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $inactiveTabHwnd
         }
         $inactiveFirstReadCount = 1
@@ -1574,21 +1574,21 @@ function Invoke-AccessibilityInactiveTabFirstReadProof(
             -Process $Process
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'inactive-output tab A restoration' -Condition {
             $script:inactiveRestoredAll = @(
-                [WinghosttyAccessibilityNative]::TerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::TerminalChildren($Process.MainWindowHandle)
             )
             $script:inactiveRestoredVisible = @(
-                [WinghosttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::VisibleTerminalChildren($Process.MainWindowHandle)
             )
             return $script:inactiveRestoredAll.Count -eq 1 -and
                 $script:inactiveRestoredVisible.Count -eq 1 -and
                 $script:inactiveRestoredVisible[0] -eq $TabAHwnd -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
+                [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle) -eq
                     $TabAHwnd
         }
     }
     finally {
         if ($inactiveCaptureStarted) {
-            [WinghosttyAccessibilityNative]::StopNotificationCapture()
+            [NocttyAccessibilityNative]::StopNotificationCapture()
         }
         if ([System.IO.File]::Exists($inactiveReadyPath) -and
             -not [System.IO.File]::Exists($inactiveTriggerPath)) {
@@ -1647,8 +1647,8 @@ function Wait-AccessibilityTerminalCommandEcho(
     }
     do {
         $diagnostic.polls++
-        $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
-        $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+        $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
+        $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
         $diagnostic.last_foreground_hwnd = $foregroundHwnd.ToInt64()
         $diagnostic.last_focused_hwnd = $focusedHwnd.ToInt64()
         if ($foregroundHwnd -ne $Process.MainWindowHandle -or
@@ -1662,9 +1662,9 @@ function Wait-AccessibilityTerminalCommandEcho(
             }
             $diagnostic.focus_recovery_count++
             [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
-            $recoveredForegroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+            $recoveredForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             $recoveredFocusedHwnd =
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
+                [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
             if ($recoveredForegroundHwnd -eq $Process.MainWindowHandle -and
                 $recoveredFocusedHwnd -ne $ExpectedFocusedHwnd) {
                 $recoveredDocument =
@@ -1778,9 +1778,9 @@ function Wait-AccessibilitySettingsProbe(
 ) {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "$Description HWND and UIA Window root" -Condition {
-            $script:settingsProbeWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            $script:settingsProbeWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                 [uint32]$Process.Id,
-                'winghostty.win32.settings'
+                'noctty.win32.settings'
             ))
             if ($script:settingsProbeWindows.Count -ne 1) { return $false }
             $script:settingsProbeHwnd = $script:settingsProbeWindows[0]
@@ -1803,7 +1803,7 @@ function Wait-AccessibilitySettingsProbe(
         $probeAlive = if ($null -eq $script:settingsProbeHwnd) {
             $false
         } else {
-            [WinghosttyAccessibilityNative]::IsWindow($script:settingsProbeHwnd)
+            [NocttyAccessibilityNative]::IsWindow($script:settingsProbeHwnd)
         }
         $probeType = if ($null -eq $script:settingsProbeElement) {
             '<none>'
@@ -1836,9 +1836,9 @@ function Open-AccessibilitySettingsProbe {
         if ($Process.HasExited) {
             throw "$Description process exited while opening Settings."
         }
-        $lastWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $lastWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$Process.Id,
-            'winghostty.win32.settings'
+            'noctty.win32.settings'
         ))
         if ($lastWindows.Count -gt 0) {
             $sentForCurrentNoWindowState = $false
@@ -1846,7 +1846,7 @@ function Open-AccessibilitySettingsProbe {
                 $lastHwnd = $lastWindows[0]
                 $element = $null
                 try {
-                    if ([WinghosttyAccessibilityNative]::IsWindow($lastHwnd)) {
+                    if ([NocttyAccessibilityNative]::IsWindow($lastHwnd)) {
                         $element =
                             [System.Windows.Automation.AutomationElement]::FromHandle($lastHwnd)
                     }
@@ -1865,9 +1865,9 @@ function Open-AccessibilitySettingsProbe {
                             })
                             $observedSectionNames = @($sections | ForEach-Object { $_.Current.Name })
                             $lastSectionCount = $sections.Count
-                            $stableWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                            $stableWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                                 [uint32]$Process.Id,
-                                'winghostty.win32.settings'
+                                'noctty.win32.settings'
                             ))
                             if ($sections.Count -eq $sectionNames.Count -and
                                 @($sectionNames | Where-Object {
@@ -1875,7 +1875,7 @@ function Open-AccessibilitySettingsProbe {
                                 }).Count -eq 0 -and
                                 $stableWindows.Count -eq 1 -and
                                 $stableWindows[0] -eq $lastHwnd -and
-                                [WinghosttyAccessibilityNative]::IsWindow($lastHwnd)) {
+                                [NocttyAccessibilityNative]::IsWindow($lastHwnd)) {
                                 return [pscustomobject]@{
                                     Hwnd = $lastHwnd
                                     Element = $element
@@ -1892,7 +1892,7 @@ function Open-AccessibilitySettingsProbe {
                             break
                         }
                     }
-                    if (-not $transient -and [WinghosttyAccessibilityNative]::IsWindow($lastHwnd)) {
+                    if (-not $transient -and [NocttyAccessibilityNative]::IsWindow($lastHwnd)) {
                         throw
                     }
                 }
@@ -1900,10 +1900,10 @@ function Open-AccessibilitySettingsProbe {
         }
         elseif (-not $sentForCurrentNoWindowState) {
             [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
-            $terminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren(
+            $terminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren(
                 $Process.MainWindowHandle
             ))
-            $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor(
+            $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor(
                 $Process.MainWindowHandle
             )
             $terminalHwnd = if ($terminalHwnds -contains $focusedHwnd) {
@@ -1919,12 +1919,12 @@ function Open-AccessibilitySettingsProbe {
                         [System.Windows.Automation.AutomationElement]::FromHandle($terminalHwnd)
                     if ($null -ne $terminalElement) { $terminalElement.SetFocus() }
                 }
-                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -eq
+                if ([NocttyAccessibilityNative]::GetForegroundWindow() -eq
                         $Process.MainWindowHandle -and
-                    [WinghosttyAccessibilityNative]::FocusedWindowFor(
+                    [NocttyAccessibilityNative]::FocusedWindowFor(
                         $Process.MainWindowHandle
                     ) -eq $terminalHwnd) {
-                    if (-not [WinghosttyAccessibilityNative]::SendChord(
+                    if (-not [NocttyAccessibilityNative]::SendChord(
                         @([uint16]0x11, [uint16]0xBC)
                     )) {
                         throw "SendInput failed while opening ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
@@ -1939,7 +1939,7 @@ function Open-AccessibilitySettingsProbe {
     $alive = if ($lastHwnd -eq [IntPtr]::Zero) {
         $false
     } else {
-        [WinghosttyAccessibilityNative]::IsWindow($lastHwnd)
+        [NocttyAccessibilityNative]::IsWindow($lastHwnd)
     }
     throw "Timed out opening $Description with one stable Settings HWND/UIA root/section set. count=$($lastWindows.Count) hwnd=$lastHwnd alive=$alive root_type=$lastRootType sections=$lastSectionCount chord_sent_for_zero_state=$sentForCurrentNoWindowState."
 }
@@ -2033,7 +2033,7 @@ function Get-AccessibilityThemeProbe {
         throw "$Description exposes no Window theme combo and Save button."
     }
     $hwnd = [IntPtr]$combo.Current.NativeWindowHandle
-    $index = [WinghosttyAccessibilityNative]::SendMessageW(
+    $index = [NocttyAccessibilityNative]::SendMessageW(
         $hwnd,
         0x0147,
         [UIntPtr]::Zero,
@@ -2055,20 +2055,20 @@ function Set-AccessibilityThemeIndex {
         [Parameter(Mandatory)][string] $Description
     )
 
-    [void][WinghosttyAccessibilityNative]::SendMessageW(
+    [void][NocttyAccessibilityNative]::SendMessageW(
         $ThemeProbe.Hwnd,
         0x014E,
         [UIntPtr]::new([uint32]$Index),
         [IntPtr]::Zero
     )
-    [void][WinghosttyAccessibilityNative]::SendMessageW(
+    [void][NocttyAccessibilityNative]::SendMessageW(
         $SettingsProbe.Hwnd,
         0x0111,
         [UIntPtr]::new(0x00010195),
         $ThemeProbe.Hwnd
     )
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description $Description -Condition {
-        return [WinghosttyAccessibilityNative]::SendMessageW(
+        return [NocttyAccessibilityNative]::SendMessageW(
             $ThemeProbe.Hwnd,
             0x0147,
             [UIntPtr]::Zero,
@@ -2086,7 +2086,7 @@ function Get-AccessibilityDwmUInt {
 
     [uint32]$value = 0
     [int]$hresult = 0
-    if (-not [WinghosttyAccessibilityNative]::TryGetDwmUInt(
+    if (-not [NocttyAccessibilityNative]::TryGetDwmUInt(
         $Hwnd,
         $Attribute,
         [ref]$value,
@@ -2106,9 +2106,9 @@ function Invoke-AccessibilityHighContrastProof(
     [Parameter(Mandatory)][string] $DiagnosticDirectory
 ) {
     function Get-HighContrastState {
-        $value = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
+        $value = [NocttyAccessibilityNative+HIGHCONTRAST]::new()
         $value.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($value)
-        if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(
+        if (-not [NocttyAccessibilityNative]::SystemParametersInfo(
             0x42,
             $value.cbSize,
             [ref]$value,
@@ -2134,11 +2134,11 @@ function Invoke-AccessibilityHighContrastProof(
                     [string]$State.scheme
                 )
             }
-            $value = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
+            $value = [NocttyAccessibilityNative+HIGHCONTRAST]::new()
             $value.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($value)
             $value.dwFlags = [uint32]$State.flags
             $value.lpszDefaultScheme = $schemePointer
-            if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(
+            if (-not [NocttyAccessibilityNative]::SystemParametersInfo(
                 0x43,
                 $value.cbSize,
                 [ref]$value,
@@ -2157,7 +2157,7 @@ function Invoke-AccessibilityHighContrastProof(
     function Get-DwmProbe {
         param([Parameter(Mandatory)][IntPtr] $Hwnd)
 
-        if (-not [WinghosttyAccessibilityNative]::IsWindow($Hwnd)) {
+        if (-not [NocttyAccessibilityNative]::IsWindow($Hwnd)) {
             throw "DWM probe HWND is no longer alive: $Hwnd."
         }
         $probe = [ordered]@{}
@@ -2170,7 +2170,7 @@ function Invoke-AccessibilityHighContrastProof(
         )) {
             [uint32]$value = 0
             [int]$hresult = 0
-            $supported = [WinghosttyAccessibilityNative]::TryGetDwmUInt(
+            $supported = [NocttyAccessibilityNative]::TryGetDwmUInt(
                 $Hwnd,
                 [uint32]$entry.Attribute,
                 [ref]$value,
@@ -2284,7 +2284,7 @@ function Invoke-AccessibilityHighContrastProof(
         $diagnostic = [ordered]@{
             top_level_count_exact = $false
             original_hwnd_exact = $false
-            hwnd_alive = [WinghosttyAccessibilityNative]::IsWindow($Probe.Hwnd)
+            hwnd_alive = [NocttyAccessibilityNative]::IsWindow($Probe.Hwnd)
             uia_window_root = $false
             section_count_exact = $false
             section_names_exact = $false
@@ -2293,9 +2293,9 @@ function Invoke-AccessibilityHighContrastProof(
             error = $null
         }
         try {
-            $windows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+            $windows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                 [uint32]$Process.Id,
-                'winghostty.win32.settings'
+                'noctty.win32.settings'
             ))
             $diagnostic.top_level_hwnds = @($windows | ForEach-Object { $_.ToInt64() })
             $diagnostic.top_level_count_exact = $windows.Count -eq 1
@@ -2341,7 +2341,7 @@ function Invoke-AccessibilityHighContrastProof(
         catch {
             $diagnostic.error = $_.Exception.Message
             $diagnostic.hwnd_alive =
-                [WinghosttyAccessibilityNative]::IsWindow($Probe.Hwnd)
+                [NocttyAccessibilityNative]::IsWindow($Probe.Hwnd)
             return $diagnostic
         }
     }
@@ -2350,16 +2350,16 @@ function Invoke-AccessibilityHighContrastProof(
         param([Parameter(Mandatory)][IntPtr] $SettingsHwnd)
 
         $targets = @(
-            @($SettingsHwnd) + @([WinghosttyAccessibilityNative]::VisibleChildrenByClass(
+            @($SettingsHwnd) + @([NocttyAccessibilityNative]::VisibleChildrenByClass(
                 $SettingsHwnd,
                 'Static'
             ))
         )
         $snapshots = [System.Collections.Generic.List[object]]::new()
         foreach ($targetHwnd in $targets) {
-            $targetClass = [WinghosttyAccessibilityNative]::WindowClass($targetHwnd)
+            $targetClass = [NocttyAccessibilityNative]::WindowClass($targetHwnd)
             if ($targetClass -ne 'Static' -and $targetHwnd -ne $SettingsHwnd) { continue }
-            $targetRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($targetHwnd)
+            $targetRect = [NocttyAccessibilityNative]::ClientRectOnScreen($targetHwnd)
             $width = $targetRect.right - $targetRect.left
             $height = $targetRect.bottom - $targetRect.top
             if ($width -le 8 -or $height -le 8) { continue }
@@ -2368,7 +2368,7 @@ function Invoke-AccessibilityHighContrastProof(
                 foreach ($xOrdinal in 1..5) {
                     $x = [Math]::Min($width - 5, [Math]::Max(4, [int]($width * $xOrdinal / 6)))
                     [uint32]$color = 0
-                    if (-not [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                    if (-not [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                         $targetHwnd,
                         $x,
                         $y,
@@ -2376,10 +2376,10 @@ function Invoke-AccessibilityHighContrastProof(
                     )) {
                         continue
                     }
-                    $screenPoint = [WinghosttyAccessibilityNative+POINT]::new()
+                    $screenPoint = [NocttyAccessibilityNative+POINT]::new()
                     $screenPoint.x = $targetRect.left + $x
                     $screenPoint.y = $targetRect.top + $y
-                    if ([WinghosttyAccessibilityNative]::WindowFromPoint($screenPoint) -ne
+                    if ([NocttyAccessibilityNative]::WindowFromPoint($screenPoint) -ne
                         $targetHwnd) {
                         continue
                     }
@@ -2406,7 +2406,7 @@ function Invoke-AccessibilityHighContrastProof(
 
         $diagnostic = [ordered]@{
             hwnd = $Pixel.hwnd.ToInt64()
-            hwnd_alive = [WinghosttyAccessibilityNative]::IsWindow($Pixel.hwnd)
+            hwnd_alive = [NocttyAccessibilityNative]::IsWindow($Pixel.hwnd)
             expected_class = $Pixel.class_name
             actual_class = $null
             class_exact = $false
@@ -2430,10 +2430,10 @@ function Invoke-AccessibilityHighContrastProof(
         if (-not $diagnostic.hwnd_alive) { return $diagnostic }
         try {
             $diagnostic.actual_class =
-                [WinghosttyAccessibilityNative]::WindowClass($Pixel.hwnd)
+                [NocttyAccessibilityNative]::WindowClass($Pixel.hwnd)
             $diagnostic.class_exact =
                 $diagnostic.actual_class -ceq $Pixel.class_name
-            $rect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($Pixel.hwnd)
+            $rect = [NocttyAccessibilityNative]::ClientRectOnScreen($Pixel.hwnd)
             $diagnostic.client_rect = [ordered]@{
                 left = $rect.left
                 top = $rect.top
@@ -2445,17 +2445,17 @@ function Invoke-AccessibilityHighContrastProof(
             $diagnostic.client_coordinate_in_bounds =
                 $Pixel.client_x -ge 0 -and $Pixel.client_x -lt $width -and
                 $Pixel.client_y -ge 0 -and $Pixel.client_y -lt $height
-            $point = [WinghosttyAccessibilityNative+POINT]::new()
+            $point = [NocttyAccessibilityNative+POINT]::new()
             $point.x = $rect.left + [int]$Pixel.client_x
             $point.y = $rect.top + [int]$Pixel.client_y
             $diagnostic.current_screen_x = $point.x
             $diagnostic.current_screen_y = $point.y
-            $hitHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($point)
+            $hitHwnd = [NocttyAccessibilityNative]::WindowFromPoint($point)
             $diagnostic.window_from_point_hwnd = $hitHwnd.ToInt64()
             $diagnostic.window_from_point_exact = $hitHwnd -eq $Pixel.hwnd
             [uint32]$color = 0
             $diagnostic.color_sample_valid =
-                [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                     $Pixel.hwnd,
                     [int]$Pixel.client_x,
                     [int]$Pixel.client_y,
@@ -2493,9 +2493,9 @@ function Invoke-AccessibilityHighContrastProof(
         )
     }
 
-    $before = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
+    $before = [NocttyAccessibilityNative+HIGHCONTRAST]::new()
     $before.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($before)
-    if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(
+    if (-not [NocttyAccessibilityNative]::SystemParametersInfo(
         0x42,
         $before.cbSize,
         [ref]$before,
@@ -2512,9 +2512,9 @@ function Invoke-AccessibilityHighContrastProof(
         flags = [uint32]$before.dwFlags
         scheme = $beforeScheme
     }
-    $hostWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+    $hostWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
         [uint32]$Process.Id,
-        'winghostty.win32.host'
+        'noctty.win32.host'
     ))
     if ($hostWindows.Count -ne 1) {
         throw "High Contrast proof requires one native host HWND; found $($hostWindows.Count)."
@@ -2532,7 +2532,7 @@ function Invoke-AccessibilityHighContrastProof(
     }
     $recoveryPath = Join-Path (
         [System.IO.Path]::GetTempPath()
-    ) ("winghostty-high-contrast-recovery-$PID-$([Guid]::NewGuid().ToString('N')).json")
+    ) ("noctty-high-contrast-recovery-$PID-$([Guid]::NewGuid().ToString('N')).json")
     $restoreDiagnosticPath = Join-Path `
         $DiagnosticDirectory `
         'high-contrast-restore-diagnostic.json'
@@ -2559,13 +2559,13 @@ function Invoke-AccessibilityHighContrastProof(
         try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'host High Contrast DWM convergence' -Condition {
                 $Process.Refresh()
-                $currentHostWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                $currentHostWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                     [uint32]$Process.Id,
-                    'winghostty.win32.host'
+                    'noctty.win32.host'
                 ))
                 if ($Process.HasExited -or $currentHostWindows.Count -ne 1 -or
                     $currentHostWindows[0] -ne $hostHwnd -or
-                    -not [WinghosttyAccessibilityNative]::IsWindow($hostHwnd)) {
+                    -not [NocttyAccessibilityNative]::IsWindow($hostHwnd)) {
                     return $false
                 }
                 $script:duringDwm = Get-DwmProbe -Hwnd $hostHwnd
@@ -2589,7 +2589,7 @@ function Invoke-AccessibilityHighContrastProof(
         if (-not $dwmResetDiagnostic.exact) {
             throw ($dwmResetDiagnostic.failures -join ' ')
         }
-        $buttonFace = [WinghosttyAccessibilityNative]::GetSysColor(15)
+        $buttonFace = [NocttyAccessibilityNative]::GetSysColor(15)
         $script:semanticHitCount = 0
         $script:changedSemanticHitCount = 0
         $script:semanticPixel = $null
@@ -2675,15 +2675,15 @@ function Invoke-AccessibilityHighContrastProof(
                         $script:hcRestorePollCount++
                         $Process.Refresh()
                         $currentHostWindows = @(
-                            [WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                            [NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                                 [uint32]$Process.Id,
-                                'winghostty.win32.host'
+                                'noctty.win32.host'
                             )
                         )
                         $hostCountExact = $currentHostWindows.Count -eq 1
                         $hostOriginalExact = $hostCountExact -and
                             $currentHostWindows[0] -eq $hostHwnd
-                        $hostAlive = [WinghosttyAccessibilityNative]::IsWindow($hostHwnd)
+                        $hostAlive = [NocttyAccessibilityNative]::IsWindow($hostHwnd)
                         $hostDwm = $null
                         $hostDwmError = $null
                         $hostDwmExact = $false
@@ -2728,14 +2728,14 @@ function Invoke-AccessibilityHighContrastProof(
                                     [uint32]$semanticPixel.baseline_color
                                 )
                         $foregroundHwnd =
-                            [WinghosttyAccessibilityNative]::GetForegroundWindow()
+                            [NocttyAccessibilityNative]::GetForegroundWindow()
                         $hostFocusedHwnd = if ($hostAlive) {
-                            [WinghosttyAccessibilityNative]::FocusedWindowFor($hostHwnd)
+                            [NocttyAccessibilityNative]::FocusedWindowFor($hostHwnd)
                         } else {
                             [IntPtr]::Zero
                         }
                         $settingsFocusedHwnd = if ($settingsDiagnostic.hwnd_alive) {
-                            [WinghosttyAccessibilityNative]::FocusedWindowFor(
+                            [NocttyAccessibilityNative]::FocusedWindowFor(
                                 $settingsHwnd
                             )
                         } else {
@@ -2844,14 +2844,14 @@ function Invoke-AccessibilityHighContrastProof(
             }
         }
         finally {
-            [void][WinghosttyAccessibilityNative]::PostMessageW(
+            [void][NocttyAccessibilityNative]::PostMessageW(
                 $settingsHwnd,
                 0x0010,
                 [UIntPtr]::Zero,
                 [IntPtr]::Zero
             )
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'same Settings HWND close after High Contrast proof' -Condition {
-                return -not [WinghosttyAccessibilityNative]::IsWindow($settingsHwnd)
+                return -not [NocttyAccessibilityNative]::IsWindow($settingsHwnd)
             }
         }
     }
@@ -2868,7 +2868,7 @@ function Invoke-AccessibilitySettingsCloseAction {
     if (-not [InteractiveWin11WindowNative]::ForceForeground($SettingsProbe.Hwnd, $true, $true)) {
         throw "Unable to foreground $Description before its dirty-close request."
     }
-    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+    if (-not [NocttyAccessibilityNative]::PostMessageW(
         $SettingsProbe.Hwnd,
         0x0010,
         [UIntPtr]::Zero,
@@ -2996,7 +2996,7 @@ function Get-ExactAccessibilityNotification(
     [string] $ExpectedDisplayString
 ) {
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
-    $snapshot = [WinghosttyAccessibilityNative]::NotificationSnapshot
+    $snapshot = [NocttyAccessibilityNative]::NotificationSnapshot
     $count = [int]$snapshot[0]
     $kind = [string]$snapshot[1]
     $displayString = [string]$snapshot[2]
@@ -3015,20 +3015,20 @@ function Start-AccessibilityEditEventCapture([System.Windows.Automation.Automati
     if ($null -eq $script:editTextChangedHandler) {
         $script:editTextChangedHandler = [Delegate]::CreateDelegate(
             [System.Windows.Automation.AutomationEventHandler],
-            [WinghosttyAccessibilityNative].GetMethod('OnEditTextChanged')
+            [NocttyAccessibilityNative].GetMethod('OnEditTextChanged')
         )
         $script:editTextSelectionChangedHandler = [Delegate]::CreateDelegate(
             [System.Windows.Automation.AutomationEventHandler],
-            [WinghosttyAccessibilityNative].GetMethod('OnTextSelectionChanged')
+            [NocttyAccessibilityNative].GetMethod('OnTextSelectionChanged')
         )
         $script:editValueChangedHandler = [Delegate]::CreateDelegate(
             [System.Windows.Automation.AutomationPropertyChangedEventHandler],
-            [WinghosttyAccessibilityNative].GetMethod('OnValueChanged')
+            [NocttyAccessibilityNative].GetMethod('OnValueChanged')
         )
     }
-    [WinghosttyAccessibilityNative]::ResetEditTextChangedCount()
-    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
-    [WinghosttyAccessibilityNative]::ResetValueChangedCount()
+    [NocttyAccessibilityNative]::ResetEditTextChangedCount()
+    [NocttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    [NocttyAccessibilityNative]::ResetValueChangedCount()
     [System.Windows.Automation.Automation]::AddAutomationEventHandler(
         [System.Windows.Automation.TextPattern]::TextChangedEvent,
         $Element,
@@ -3139,7 +3139,7 @@ if ($explorerBefore.Count -ne 1) {
     throw "Expected one Explorer process in interactive session $currentSessionId; found $($explorerBefore.Count)."
 }
 $explorerBeforeIdentity = "{0}/{1:o}" -f $explorerBefore[0].Id, $explorerBefore[0].StartTime.ToUniversalTime()
-$winghosttyBeforeIdentities = @($machineProcesses | Where-Object ProcessName -eq 'winghostty' | ForEach-Object {
+$nocttyBeforeIdentities = @($machineProcesses | Where-Object ProcessName -eq 'noctty' | ForEach-Object {
     try { "{0}/{1:o}" -f $_.Id, $_.StartTime.ToUniversalTime() } catch { "pid=$($_.Id)/unavailable" }
 })
 
@@ -3162,7 +3162,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Unable to establish accessibility worktree pro
 $stdout = Join-Path $layout.Logs 'interactive-win11-accessibility-stdout.log'
 $stderr = Join-Path $layout.Logs 'interactive-win11-accessibility-stderr.log'
 $artifact = Join-Path $layout.Logs 'uia-tree.json'
-$themePreviewConfigPath = Join-Path $layout.LocalAppData 'winghostty\config.ghostty'
+$themePreviewConfigPath = Join-Path $layout.LocalAppData 'noctty\config.ghostty'
 $themePreviewConfigDirectory = Split-Path -Parent $themePreviewConfigPath
 [void][System.IO.Directory]::CreateDirectory($themePreviewConfigDirectory)
 $themePreviewConfigText = if (Test-Path -LiteralPath $themePreviewConfigPath) {
@@ -3206,12 +3206,12 @@ $settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout `
     -SandboxName "accessibility-save-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
 New-InteractiveWin11Sandbox -Layout $settingsPersistenceLayout
 $settingsProbeEnvironment = Get-InteractiveWin11Environment -Layout $settingsPersistenceLayout
-$sandboxConfigPath = Join-Path $settingsPersistenceLayout.LocalAppData 'winghostty\config.ghostty'
+$sandboxConfigPath = Join-Path $settingsPersistenceLayout.LocalAppData 'noctty\config.ghostty'
 $settingsConfigBaselineCaptured = $false
 $settingsConfigBaselineExisted = $false
 [byte[]]$settingsConfigBaselineBytes = @()
 $settingsConfigBaselineRestored = $false
-$marker = "WINGHOSTTY_UIA_$([Guid]::NewGuid().ToString('N'))"
+$marker = "NOCTTY_UIA_$([Guid]::NewGuid().ToString('N'))"
 $terminalText = ''
 $terminalLineText = ''
 $terminalRectCount = 0
@@ -3238,7 +3238,7 @@ $paletteActionAbortedNotificationKind = ''
 $paletteActionAbortedNotificationDisplayString = ''
 $paletteEditEvidence = $null
 $searchEditEvidence = $null
-$paletteUnavailableQuery = "zzzzwinghosttynomatch$([Guid]::NewGuid().ToString('N'))"
+$paletteUnavailableQuery = "zzzznocttynomatch$([Guid]::NewGuid().ToString('N'))"
 $settingsLifecycle = $null
 $settingsOwnerLifecycle = $null
 $sustainedOutputEvidence = $null
@@ -3254,13 +3254,13 @@ try {
     do {
         Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
         $process.Refresh()
-        if ($process.HasExited) { throw "winghostty exited before UIA query (exit $($process.ExitCode))." }
+        if ($process.HasExited) { throw "noctty exited before UIA query (exit $($process.ExitCode))." }
     } while ($process.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
-    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw 'winghostty did not expose a main HWND.' }
+    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw 'noctty did not expose a main HWND.' }
 
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
     if ($null -eq $root) { throw 'UI Automation returned no root element.' }
-    [void][WinghosttyAccessibilityNative]::SetForegroundWindow($process.MainWindowHandle)
+    [void][NocttyAccessibilityNative]::SetForegroundWindow($process.MainWindowHandle)
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTLE_MS
     $elements = @($root) + @($root.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
@@ -3299,14 +3299,14 @@ try {
         [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic terminal focus' -Condition {
-            return [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
+            return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
                 $themeDiagnosticTerminalHwnd
         }
         Assert-AccessibilityInputOwner `
             -Process $process `
             -Description 'theme diagnostic Settings open' `
             -ExpectedFocusedHwnd $themeDiagnosticTerminalHwnd
-        if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+        if (-not [NocttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
             throw "SendInput failed while opening theme diagnostic Settings: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
         $themeDiagnosticProbe = Wait-AccessibilitySettingsProbe `
@@ -3326,7 +3326,7 @@ try {
             return $null -ne $script:themeDiagnosticCombo
         }
         $themeDiagnosticComboHwnd = [IntPtr]$script:themeDiagnosticCombo.Current.NativeWindowHandle
-        $themeDiagnosticInitialIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+        $themeDiagnosticInitialIndex = [NocttyAccessibilityNative]::SendMessageW(
             $themeDiagnosticComboHwnd,
             0x0147,
             [UIntPtr]::Zero,
@@ -3335,8 +3335,8 @@ try {
         if ($themeDiagnosticInitialIndex -ne 1) {
             throw "Theme diagnostic expected seeded System index 1; found $themeDiagnosticInitialIndex."
         }
-        $themeDiagnosticSettingsRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($themeDiagnosticHwnd)
-        $themeDiagnosticHostRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($process.MainWindowHandle)
+        $themeDiagnosticSettingsRect = [NocttyAccessibilityNative]::ClientRectOnScreen($themeDiagnosticHwnd)
+        $themeDiagnosticHostRect = [NocttyAccessibilityNative]::ClientRectOnScreen($process.MainWindowHandle)
         $themeDiagnosticSettingsGrid = Get-AccessibilityClientPixelGrid `
             -Hwnd $themeDiagnosticHwnd -MinX 24 `
             -MaxX ([Math]::Max(24, ($themeDiagnosticSettingsRect.right - $themeDiagnosticSettingsRect.left) - 24)) `
@@ -3349,20 +3349,20 @@ try {
             @{ Index = 3; Name = 'Dark'; Color = [uint32]0x00202020 },
             @{ Index = 2; Name = 'Light'; Color = [uint32]0x00F3F3F3 }
         )) {
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $themeDiagnosticComboHwnd,
                 0x014E,
                 [UIntPtr]::new([uint64]$target.Index),
                 [IntPtr]::Zero
             )
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $themeDiagnosticHwnd,
                 0x0111,
                 [UIntPtr]::new(0x00010195),
                 $themeDiagnosticComboHwnd
             )
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "theme diagnostic $($target.Name) pixels" -Condition {
-                $script:themeDiagnosticIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+                $script:themeDiagnosticIndex = [NocttyAccessibilityNative]::SendMessageW(
                     $themeDiagnosticComboHwnd,
                     0x0147,
                     [UIntPtr]::Zero,
@@ -3379,34 +3379,34 @@ try {
         }
         $themeDiagnosticLightSettingsColor = $script:themeDiagnosticSettingsPixel.color
         $themeDiagnosticLightHostColor = $script:themeDiagnosticHostPixel.color
-        [void][WinghosttyAccessibilityNative]::SendMessageW(
+        [void][NocttyAccessibilityNative]::SendMessageW(
             $themeDiagnosticComboHwnd,
             0x014E,
             [UIntPtr]::new(1),
             [IntPtr]::Zero
         )
-        [void][WinghosttyAccessibilityNative]::SendMessageW(
+        [void][NocttyAccessibilityNative]::SendMessageW(
             $themeDiagnosticHwnd,
             0x0111,
             [UIntPtr]::new(0x00010195),
             $themeDiagnosticComboHwnd
         )
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'theme diagnostic System revert' -Condition {
-            return [WinghosttyAccessibilityNative]::SendMessageW(
+            return [NocttyAccessibilityNative]::SendMessageW(
                 $themeDiagnosticComboHwnd,
                 0x0147,
                 [UIntPtr]::Zero,
                 [IntPtr]::Zero
             ).ToInt64() -eq 1
         }
-        [void][WinghosttyAccessibilityNative]::PostMessageW(
+        [void][NocttyAccessibilityNative]::PostMessageW(
             $themeDiagnosticHwnd,
             0x0010,
             [UIntPtr]::Zero,
             [IntPtr]::Zero
         )
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'theme diagnostic Settings close' -Condition {
-            return -not [WinghosttyAccessibilityNative]::IsWindow($themeDiagnosticHwnd)
+            return -not [NocttyAccessibilityNative]::IsWindow($themeDiagnosticHwnd)
         }
         [byte[]]$themeDiagnosticConfigBytes = [System.IO.File]::ReadAllBytes($themePreviewConfigPath)
         if ([Convert]::ToBase64String($themePreviewConfigBaselineBytes) -ne
@@ -3416,7 +3416,7 @@ try {
         [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic pre-HC terminal focus' -Condition {
-            return [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
+            return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
                 $themeDiagnosticTerminalHwnd
         }
         $themeDiagnosticHighContrast = Invoke-AccessibilityHighContrastProof `
@@ -3428,8 +3428,8 @@ try {
             mode = 'theme-diagnostic'
             system_index = $themeDiagnosticInitialIndex
             final_index = 1
-            settings_hwnd_closed = -not [WinghosttyAccessibilityNative]::IsWindow($themeDiagnosticHwnd)
-            host_hwnd_alive = [WinghosttyAccessibilityNative]::IsWindow($process.MainWindowHandle)
+            settings_hwnd_closed = -not [NocttyAccessibilityNative]::IsWindow($themeDiagnosticHwnd)
+            host_hwnd_alive = [NocttyAccessibilityNative]::IsWindow($process.MainWindowHandle)
             exact_light_settings_color = $themeDiagnosticLightSettingsColor
             exact_light_host_color = $themeDiagnosticLightHostColor
             config_bytes_unchanged = $true
@@ -3468,16 +3468,16 @@ try {
         [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $document.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'cold diagnostic terminal focus' -Condition {
-            return [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
+            return [NocttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
+                [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
                     $coldDiagnosticTerminalHwnd
         }
 
         # Exercise the same continuous native notification subscription as the
         # full flow: prove one warm notification, retain that exact handler and
         # provider, then reset only its local history for the true-cold marker.
-        [WinghosttyAccessibilityNative]::ResetNotificationCount()
-        [WinghosttyAccessibilityNative]::StartNotificationCapture($coldDiagnosticTerminalHwnd)
+        [NocttyAccessibilityNative]::ResetNotificationCount()
+        [NocttyAccessibilityNative]::StartNotificationCapture($coldDiagnosticTerminalHwnd)
         $terminalNotificationCaptureStarted = $true
         $coldDiagnosticWarmMarker = "whw$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
         $coldDiagnosticWarmInput = Send-AccessibilityOutputMarker `
@@ -3503,7 +3503,7 @@ try {
             -ExpectedFocusedHwnd $coldDiagnosticTerminalHwnd `
             -HelperDirectory $layout.Logs `
             -NotificationCaptureActive
-        [WinghosttyAccessibilityNative]::StopNotificationCapture()
+        [NocttyAccessibilityNative]::StopNotificationCapture()
         $terminalNotificationCaptureStarted = $false
         $coldDiagnosticInactiveTabProof =
             Invoke-AccessibilityInactiveTabFirstReadProof `
@@ -3565,10 +3565,10 @@ try {
     [uint32] $lastTargetOwner = 0
     do {
         $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
         $focusedProcessId = 0
         if ($focusedHwnd -ne [IntPtr]::Zero) {
-            [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
+            [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
             if ($focusedProcessId -eq [uint32]$process.Id) { break }
         }
 
@@ -3580,7 +3580,7 @@ try {
         $bounds = $document.Current.BoundingRectangle
         if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
             $noMoveNoSizeShow = [uint32](0x0001 -bor 0x0002 -bor 0x0040)
-            [void][WinghosttyAccessibilityNative]::SetWindowPos(
+            [void][NocttyAccessibilityNative]::SetWindowPos(
                 $process.MainWindowHandle,
                 [IntPtr](-1),
                 0,
@@ -3592,31 +3592,31 @@ try {
             try {
                 $x = [int][Math]::Round($bounds.Left + ($bounds.Width / 2))
                 $y = [int][Math]::Round($bounds.Top + ($bounds.Height / 2))
-                $point = [WinghosttyAccessibilityNative+POINT]::new()
+                $point = [NocttyAccessibilityNative+POINT]::new()
                 $point.x = $x
                 $point.y = $y
-                $lastTargetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($point)
+                $lastTargetHwnd = [NocttyAccessibilityNative]::WindowFromPoint($point)
                 $lastTargetOwner = 0
-                $targetThreadId = [WinghosttyAccessibilityNative]::GetWindowThreadProcessId(
+                $targetThreadId = [NocttyAccessibilityNative]::GetWindowThreadProcessId(
                     $lastTargetHwnd,
                     [ref] $lastTargetOwner
                 )
                 if ($lastTargetHwnd -ne [IntPtr]::Zero -and
                     $targetThreadId -ne 0 -and
                     $lastTargetOwner -eq [uint32]$process.Id) {
-                    if ([WinghosttyAccessibilityNative]::SetCursorPos($x, $y)) {
+                    if ([NocttyAccessibilityNative]::SetCursorPos($x, $y)) {
                         $lastSetCursorPosError = 0
-                        $actualPoint = [WinghosttyAccessibilityNative+POINT]::new()
-                        if ([WinghosttyAccessibilityNative]::GetCursorPos([ref]$actualPoint)) {
+                        $actualPoint = [NocttyAccessibilityNative+POINT]::new()
+                        if ([NocttyAccessibilityNative]::GetCursorPos([ref]$actualPoint)) {
                             $lastGetCursorPosError = 0
                             $lastActualCursorX = $actualPoint.x
                             $lastActualCursorY = $actualPoint.y
                             # SendInput clicks the actual cursor location, so
                             # verify that exact point immediately before input.
                             if ($actualPoint.x -eq $x -and $actualPoint.y -eq $y) {
-                                $verifiedTargetHwnd = [WinghosttyAccessibilityNative]::WindowFromPoint($actualPoint)
+                                $verifiedTargetHwnd = [NocttyAccessibilityNative]::WindowFromPoint($actualPoint)
                                 [uint32] $verifiedTargetOwner = 0
-                                $verifiedTargetThreadId = [WinghosttyAccessibilityNative]::GetWindowThreadProcessId(
+                                $verifiedTargetThreadId = [NocttyAccessibilityNative]::GetWindowThreadProcessId(
                                     $verifiedTargetHwnd,
                                     [ref] $verifiedTargetOwner
                                 )
@@ -3625,7 +3625,7 @@ try {
                                 if ($verifiedTargetHwnd -ne [IntPtr]::Zero -and
                                     $verifiedTargetThreadId -ne 0 -and
                                     $verifiedTargetOwner -eq [uint32]$process.Id) {
-                                    if ([WinghosttyAccessibilityNative]::SendMouseClick()) {
+                                    if ([NocttyAccessibilityNative]::SendMouseClick()) {
                                         $clickedDocument = $true
                                         $lastClickError = 0
                                     } else {
@@ -3642,7 +3642,7 @@ try {
                 }
             }
             finally {
-                [void][WinghosttyAccessibilityNative]::SetWindowPos(
+                [void][NocttyAccessibilityNative]::SetWindowPos(
                     $process.MainWindowHandle,
                     [IntPtr](-2),
                     0,
@@ -3658,10 +3658,10 @@ try {
 
     # The final activation attempt can succeed at the deadline. Re-query
     # before deciding failure so stale pre-attempt HWND state cannot fail it.
-    $focusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+    $focusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
     $focusedProcessId = 0
     if ($focusedHwnd -ne [IntPtr]::Zero) {
-        [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
+        [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($focusedHwnd, [ref]$focusedProcessId)
     }
     if ($focusedHwnd -eq [IntPtr]::Zero -or $focusedProcessId -ne [uint32]$process.Id) {
         $focusedSummary = if ($null -eq $focused) {
@@ -3669,21 +3669,21 @@ try {
         } else {
             "pid=$($focused.Current.ProcessId) name='$($focused.Current.Name)'"
         }
-        $foregroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+        $foregroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
         [uint32] $foregroundOwner = 0
         if ($foregroundHwnd -ne [IntPtr]::Zero) {
-            [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
+            [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($foregroundHwnd, [ref]$foregroundOwner)
         }
-        throw "Keyboard focus did not resolve to a winghostty HWND (attempts=$focusActivationAttempts/$focusActivationMaxAttempts; SetCursorPos Win32 error=$lastSetCursorPosError; GetCursorPos Win32 error=$lastGetCursorPosError actual=($lastActualCursorX,$lastActualCursorY); click Win32 error=$lastClickError; foreground HWND=$foregroundHwnd owner=$foregroundOwner; focused HWND=$focusedHwnd owner=$focusedProcessId; target HWND=$lastTargetHwnd owner=$lastTargetOwner; expected owner=$($process.Id); UIA focused=$focusedSummary; Document.SetFocus error='$documentFocusError'; clicked document=$clickedDocument)."
+        throw "Keyboard focus did not resolve to a noctty HWND (attempts=$focusActivationAttempts/$focusActivationMaxAttempts; SetCursorPos Win32 error=$lastSetCursorPosError; GetCursorPos Win32 error=$lastGetCursorPosError actual=($lastActualCursorX,$lastActualCursorY); click Win32 error=$lastClickError; foreground HWND=$foregroundHwnd owner=$foregroundOwner; focused HWND=$focusedHwnd owner=$focusedProcessId; target HWND=$lastTargetHwnd owner=$lastTargetOwner; expected owner=$($process.Id); UIA focused=$focusedSummary; Document.SetFocus error='$documentFocusError'; clicked document=$clickedDocument)."
     }
 
-    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
-    [WinghosttyAccessibilityNative]::ResetNotificationCount()
-    [WinghosttyAccessibilityNative]::StartNotificationCapture($focusedHwnd)
+    [NocttyAccessibilityNative]::ResetTextChangedCount()
+    [NocttyAccessibilityNative]::ResetNotificationCount()
+    [NocttyAccessibilityNative]::StartNotificationCapture($focusedHwnd)
     $terminalNotificationCaptureStarted = $true
     $textChangedHandler = [Delegate]::CreateDelegate(
         [System.Windows.Automation.AutomationEventHandler],
-        [WinghosttyAccessibilityNative].GetMethod('OnTextChanged')
+        [NocttyAccessibilityNative].GetMethod('OnTextChanged')
     )
     [System.Windows.Automation.Automation]::AddAutomationEventHandler(
         [System.Windows.Automation.TextPattern]::TextChangedEvent,
@@ -3703,14 +3703,14 @@ try {
     }
     catch {
         $probe = if ($null -eq $script:terminalTextProbe) { '<null>' } else { $script:terminalTextProbe.Replace("`r", '\r').Replace("`n", '\n') }
-        throw "$($_.Exception.Message) Last TextPattern text='$probe'; TextChanged events=$([WinghosttyAccessibilityNative]::TextChangedCount)."
+        throw "$($_.Exception.Message) Last TextPattern text='$probe'; TextChanged events=$([NocttyAccessibilityNative]::TextChangedCount)."
     }
     $terminalText = $script:terminalTextProbe
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'terminal TextChanged event' -Condition {
-        return [WinghosttyAccessibilityNative]::TextChangedCount -gt 0
+        return [NocttyAccessibilityNative]::TextChangedCount -gt 0
     }
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_EVENT_SETTLE_MS
-    $textChangedCount = [WinghosttyAccessibilityNative]::TextChangedCount
+    $textChangedCount = [NocttyAccessibilityNative]::TextChangedCount
     $textChangedElapsedSeconds = [Math]::Max(0.2, ([DateTime]::UtcNow - $textChangedObservationStart).TotalSeconds)
     $textChangedLimit = [int][Math]::Ceiling($textChangedElapsedSeconds * 25) + 2
     if ($textChangedCount -gt $textChangedLimit) {
@@ -3744,7 +3744,7 @@ try {
         throw "Terminal output notification metadata mismatch: count=$($terminalOutputNotification[0]) kind='$($terminalOutputNotification[1])' display='$($terminalOutputNotification[2])' processing=$($terminalOutputNotification[3]) activity='$($terminalOutputNotification[4])'."
     }
 
-    $liveSettingValue = [WinghosttyAccessibilityNative]::GetCurrentIntProperty(
+    $liveSettingValue = [NocttyAccessibilityNative]::GetCurrentIntProperty(
         $focusedHwnd,
         30135
     )
@@ -3804,7 +3804,7 @@ try {
         $textChangedHandler
     )
     $textChangedRegistered = $false
-    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
+    [NocttyAccessibilityNative]::ResetTextChangedCount()
     [void](Send-AccessibilityOutputMarker -Process $process -TextPattern $textPattern -Marker $queryOnlyMarker -Description 'query-only TextPattern marker' -ExpectedFocusedHwnd $focusedHwnd)
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'already-acquired query-only TextPattern refresh' -Condition {
@@ -3819,7 +3819,7 @@ try {
     if ($queryOnlyPreviousRange.GetText(-1).Contains($queryOnlyMarker)) {
         throw 'Previously acquired terminal DocumentRange mutated after query-only output.'
     }
-    if ([WinghosttyAccessibilityNative]::TextChangedCount -ne 0) {
+    if ([NocttyAccessibilityNative]::TextChangedCount -ne 0) {
         throw "TextChanged callback ran after listener removal during query-only validation."
     }
     $queryOnlyRangeRefreshed = $true
@@ -3827,7 +3827,7 @@ try {
     # Type and echo-gate the helper while UIA is hot. After its ready file, the
     # proof waits out query activity and uses only direct notification history
     # until one final DocumentRange read.
-    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
+    [NocttyAccessibilityNative]::ResetTextChangedCount()
     $coldQueryProof = Invoke-AccessibilityColdFirstReadProof `
         -Process $process `
         -TextPattern $textPattern `
@@ -3836,9 +3836,9 @@ try {
         -ExpectedFocusedHwnd $focusedHwnd `
         -HelperDirectory $layout.Logs `
         -NotificationCaptureActive
-    [WinghosttyAccessibilityNative]::StopNotificationCapture()
+    [NocttyAccessibilityNative]::StopNotificationCapture()
     $terminalNotificationCaptureStarted = $false
-    if ([WinghosttyAccessibilityNative]::TextChangedCount -ne 0) {
+    if ([NocttyAccessibilityNative]::TextChangedCount -ne 0) {
         throw 'TextChanged callback ran during cold-query validation after listener removal.'
     }
     $coldQueryPostEchoRangeFresh = $true
@@ -3856,23 +3856,23 @@ try {
     )
     $textChangedRegistered = $true
 
-    $splitBaseline = [WinghosttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitBaseline = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
     if ($splitBaseline -ne 1) {
         throw "Split validation requires one clean terminal pane; found $splitBaseline. Rerun with -ResetState."
     }
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0xDC) -Description 'Ctrl+Shift+Backslash split right' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+Backslash visible split' -Condition {
-        return [WinghosttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 1)
+        return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 1)
     }
-    $splitAfterRight = [WinghosttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitAfterRight = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x45) -Description 'Ctrl+Shift+E split down' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+E visible split' -Condition {
-        return [WinghosttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 2)
+        return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 2)
     }
-    $splitAfterDown = [WinghosttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitAfterDown = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
 
-    $paneGeometry = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle) | ForEach-Object {
-        $paneRect = [WinghosttyAccessibilityNative]::WindowRect($_)
+    $paneGeometry = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle) | ForEach-Object {
+        $paneRect = [NocttyAccessibilityNative]::WindowRect($_)
         [pscustomobject]@{
             Hwnd = $_
             CenterX = ($paneRect.left + $paneRect.right) / 2
@@ -3885,7 +3885,7 @@ try {
     if ($rightPanes.Count -ne 2) { throw 'Could not resolve right-side pane geometry.' }
     $rightTopPane = $rightPanes[0]
     $rightBottomPane = $rightPanes[1]
-    $focusBeforePaneMove = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+    $focusBeforePaneMove = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
     if ($focusBeforePaneMove -ne $rightBottomPane.Hwnd) {
         throw "Ctrl+Shift+E did not focus the new lower pane (focused=$focusBeforePaneMove expected=$($rightBottomPane.Hwnd))."
     }
@@ -3900,15 +3900,15 @@ try {
     foreach ($move in $paneMoves) {
         Send-AccessibilityChord -Keys @([uint16]0x12, $move.Key) -Description "$($move.Name) pane navigation" -Process $process
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description "$($move.Name) exact pane focus" -Condition {
-            return [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $move.Expected
+            return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $move.Expected
         }
-        $observedFocus = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $observedFocus = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
         $paneFocusResults[$move.Name] = [ordered]@{
             expected = $move.Expected.ToInt64()
             observed = $observedFocus.ToInt64()
         }
     }
-    $focusAfterPaneMove = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+    $focusAfterPaneMove = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
 
     $paletteDeadline = [DateTime]::UtcNow.AddSeconds(5)
     [void](Invoke-InteractiveWin11Message `
@@ -3957,11 +3957,11 @@ try {
         throw "Command palette SelectionPattern returned $($containerSelection.Count) inconsistent rows."
     }
     $paletteInitialSelectedName = $selectedItems[0].Current.Name
-    [WinghosttyAccessibilityNative]::ResetSelectionItemSelectedCount()
-    [WinghosttyAccessibilityNative]::ResetNotificationCount()
+    [NocttyAccessibilityNative]::ResetSelectionItemSelectedCount()
+    [NocttyAccessibilityNative]::ResetNotificationCount()
     $paletteSelectionHandler = [Delegate]::CreateDelegate(
         [System.Windows.Automation.AutomationEventHandler],
-        [WinghosttyAccessibilityNative].GetMethod('OnSelectionItemSelected')
+        [NocttyAccessibilityNative].GetMethod('OnSelectionItemSelected')
     )
     [System.Windows.Automation.Automation]::AddAutomationEventHandler(
         [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent,
@@ -3973,11 +3973,11 @@ try {
     $paletteNativeHwnd = [IntPtr]$palette.Current.NativeWindowHandle
     [uint32]$paletteNativeHwndOwner = 0
     if ($paletteNativeHwnd -eq [IntPtr]::Zero -or
-        [WinghosttyAccessibilityNative]::GetWindowThreadProcessId($paletteNativeHwnd, [ref]$paletteNativeHwndOwner) -eq 0 -or
+        [NocttyAccessibilityNative]::GetWindowThreadProcessId($paletteNativeHwnd, [ref]$paletteNativeHwndOwner) -eq 0 -or
         $paletteNativeHwndOwner -ne [uint32]$process.Id) {
         throw "Command palette UIA List has invalid native HWND $paletteNativeHwnd (owner=$paletteNativeHwndOwner)."
     }
-    [WinghosttyAccessibilityNative]::StartNotificationCapture($paletteNativeHwnd)
+    [NocttyAccessibilityNative]::StartNotificationCapture($paletteNativeHwnd)
     $paletteNotificationRegistered = $true
 
     Send-AccessibilityChord -Keys @([uint16]0x28) -Description 'command palette selection Down' -Process $process
@@ -3998,7 +3998,7 @@ try {
                 ) -and $candidateSelectionItem.Current.IsSelected
             })
             $script:paletteSelectionEventSender = @(
-                [WinghosttyAccessibilityNative]::SelectionItemSelectedSenders | Where-Object {
+                [NocttyAccessibilityNative]::SelectionItemSelectedSenders | Where-Object {
                     $_ -is [System.Windows.Automation.AutomationElement] -and
                     $script:paletteSelectedAfterMove.Count -eq 1 -and
                     [System.Windows.Automation.Automation]::Compare(
@@ -4014,12 +4014,12 @@ try {
     }
     catch {
         $selectedAfter = @($script:paletteSelectedAfterMove | ForEach-Object { $_.Current.Name }) -join ', '
-        throw "$($_.Exception.Message) Initial='$paletteInitialSelectedName'; selected_after='$selectedAfter'; events=$([WinghosttyAccessibilityNative]::SelectionItemSelectedCount)."
+        throw "$($_.Exception.Message) Initial='$paletteInitialSelectedName'; selected_after='$selectedAfter'; events=$([NocttyAccessibilityNative]::SelectionItemSelectedCount)."
     }
     $selectedItems = $script:paletteSelectedAfterMove
     $paletteItems = $script:paletteItemsAfterMove
     $paletteMovedSelectedName = $selectedItems[0].Current.Name
-    $paletteSelectionEventCount = [WinghosttyAccessibilityNative]::SelectionItemSelectedCount
+    $paletteSelectionEventCount = [NocttyAccessibilityNative]::SelectionItemSelectedCount
     $containerSelection = @($selectionPattern.Current.GetSelection())
     if ($containerSelection.Count -ne 1 -or $containerSelection[0].Current.Name -ne $paletteMovedSelectedName) {
         throw "Command palette container selection did not advance with its SelectionItem event."
@@ -4028,8 +4028,8 @@ try {
         throw 'Command palette list or row fabricates keyboard focus while the query edit owns focus.'
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'command palette query global UIA focus' -Condition {
-        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
-            $paletteNativeFocus = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+            $paletteNativeFocus = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
             $paletteNativeFocusElement = if ($paletteNativeFocus -ne [IntPtr]::Zero) {
                 [System.Windows.Automation.AutomationElement]::FromHandle($paletteNativeFocus)
             } else {
@@ -4052,11 +4052,11 @@ try {
     $paletteFocused = $script:paletteFocused
     if ($null -eq $paletteFocused -or $paletteFocused.Current.ProcessId -ne $process.Id -or
         $paletteFocused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Edit) {
-        $focusedWin32Hwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-        $focusedWin32Class = [WinghosttyAccessibilityNative]::WindowClass($focusedWin32Hwnd)
+        $focusedWin32Hwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $focusedWin32Class = [NocttyAccessibilityNative]::WindowClass($focusedWin32Hwnd)
         $focusedFromHandle = $null
         $focusedFromHandleError = $null
-        if ($focusedWin32Hwnd -ne [IntPtr]::Zero -and [WinghosttyAccessibilityNative]::IsWindow($focusedWin32Hwnd)) {
+        if ($focusedWin32Hwnd -ne [IntPtr]::Zero -and [NocttyAccessibilityNative]::IsWindow($focusedWin32Hwnd)) {
             try {
                 $focusedFromHandle = [System.Windows.Automation.AutomationElement]::FromHandle($focusedWin32Hwnd)
             }
@@ -4150,28 +4150,28 @@ try {
         return $paletteQueryTextPattern.DocumentRange.GetText(-1) -eq 'Accessibility' -and
             $paletteQueryValuePattern.Current.Value -eq 'Accessibility' -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::EditTextChangedSenders) `
                 -Element $paletteFocused) -gt 0 -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::ValueChangedSenders) `
                 -Element $paletteFocused) -gt 0
     }
-    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    [NocttyAccessibilityNative]::ResetTextSelectionChangedCount()
     $paletteQueryTextPattern.DocumentRange.Select()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'command palette TextPattern selection' -Condition {
         $script:paletteQuerySelection = @($paletteQueryTextPattern.GetSelection())
         return $script:paletteQuerySelection.Count -eq 1 -and
             $script:paletteQuerySelection[0].GetText(-1) -eq 'Accessibility' -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::TextSelectionChangedSenders) `
                 -Element $paletteFocused) -gt 0
     }
     $paletteEditTextChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) -Element $paletteFocused
+        -Senders ([NocttyAccessibilityNative]::EditTextChangedSenders) -Element $paletteFocused
     $paletteEditValueChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) -Element $paletteFocused
+        -Senders ([NocttyAccessibilityNative]::ValueChangedSenders) -Element $paletteFocused
     $paletteEditSelectionChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) -Element $paletteFocused
+        -Senders ([NocttyAccessibilityNative]::TextSelectionChangedSenders) -Element $paletteFocused
     $paletteEditEvidence = [ordered]@{
         name = $paletteFocused.Current.Name
         text = $paletteQueryTextPattern.DocumentRange.GetText(-1)
@@ -4181,10 +4181,10 @@ try {
         value_changed_events = $paletteEditValueChangedCount
         selection_changed_events = $paletteEditSelectionChangedCount
     }
-    [WinghosttyAccessibilityNative]::ResetNotificationCount()
+    [NocttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'invoke safe Accessibility help palette row' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Accessibility help UIA notification' -Condition {
-        return [WinghosttyAccessibilityNative]::NotificationCount -gt 0
+        return [NocttyAccessibilityNative]::NotificationCount -gt 0
     }
     $helpNotification = Get-ExactAccessibilityNotification `
         -Description 'Accessibility help notification' `
@@ -4194,17 +4194,17 @@ try {
     $paletteHelpNotificationKind = $helpNotification.Kind
     $paletteHelpNotificationDisplayString = $helpNotification.DisplayString
 
-    [WinghosttyAccessibilityNative]::ResetNotificationCount()
+    [NocttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x41) -Description 'select command palette query for unavailable outcome' -Process $process
-    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($paletteUnavailableQuery)) {
+    if (-not [NocttyAccessibilityNative]::SendUnicodeText($paletteUnavailableQuery)) {
         throw "SendInput failed for command palette unavailable query: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     $script:paletteUnavailableLastTransient = $null
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette unavailable no-match notification' -Condition {
             try {
-                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
-                    $paletteNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+                    $paletteNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
@@ -4237,13 +4237,13 @@ try {
                         } else {
                             "type=$($script:paletteUnavailableFocused.Current.ControlType.ProgrammaticName) name='$($script:paletteUnavailableFocused.Current.Name)' hwnd=$($script:paletteUnavailableFocused.Current.NativeWindowHandle) has_focus=$($script:paletteUnavailableFocused.Current.HasKeyboardFocus)"
                         }
-                        $win32FocusHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                        $win32FocusHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
                         if ($queryStillFocused -and
-                            [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
-                            -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
+                            [NocttyAccessibilityNative]::NotificationCount -gt 0 -and
+                            -not [NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
                             return $true
                         }
-                        $script:paletteUnavailableLastTransient = "list=absent query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([WinghosttyAccessibilityNative]::NotificationCount) native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
+                        $script:paletteUnavailableLastTransient = "list=absent query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([NocttyAccessibilityNative]::NotificationCount) native_visible=$([NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
                         return $false
                     }
                 }
@@ -4265,8 +4265,8 @@ try {
                 } else {
                     "type=$($script:paletteUnavailableFocused.Current.ControlType.ProgrammaticName) name='$($script:paletteUnavailableFocused.Current.Name)' hwnd=$($script:paletteUnavailableFocused.Current.NativeWindowHandle) has_focus=$($script:paletteUnavailableFocused.Current.HasKeyboardFocus)"
                 }
-                $win32FocusHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-                $script:paletteUnavailableLastTransient = "items=$($script:paletteUnavailableItems.Count) query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([WinghosttyAccessibilityNative]::NotificationCount) native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
+                $win32FocusHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                $script:paletteUnavailableLastTransient = "items=$($script:paletteUnavailableItems.Count) query_focused=$queryStillFocused uia_focus=[$uiaFocusSummary] win32_focus=$win32FocusHwnd notification_count=$([NocttyAccessibilityNative]::NotificationCount) native_visible=$([NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd))"
             }
             catch {
                 $hresults = @(Get-AccessibilityExceptionHResults -Exception $_.Exception)
@@ -4290,8 +4290,8 @@ try {
             }
             return $script:paletteUnavailableItems.Count -eq 0 -and
                 $queryStillFocused -and
-                [WinghosttyAccessibilityNative]::NotificationCount -gt 0 -and
-                -not [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)
+                [NocttyAccessibilityNative]::NotificationCount -gt 0 -and
+                -not [NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)
         }
     }
     catch {
@@ -4304,17 +4304,17 @@ try {
     $paletteUnavailableNotificationCount = $unavailableNotification.Count
     $paletteUnavailableNotificationKind = $unavailableNotification.Kind
     $paletteUnavailableNotificationDisplayString = $unavailableNotification.DisplayString
-    if ([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
+    if ([NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) {
         throw 'Zero-result command palette left its native List HWND visible over terminal content.'
     }
 
     # With zero ranked rows, Enter falls back to parsing the query as a
     # binding action. This deliberately invalid identifier is rejected before
     # mutation and deterministically raises the palette's ActionAborted event.
-    [WinghosttyAccessibilityNative]::ResetNotificationCount()
+    [NocttyAccessibilityNative]::ResetNotificationCount()
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'invoke safe unknown command abort outcome' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette ActionAborted notification' -Condition {
-        return [WinghosttyAccessibilityNative]::NotificationCount -gt 0
+        return [NocttyAccessibilityNative]::NotificationCount -gt 0
     }
     $actionAbortedNotification = Get-ExactAccessibilityNotification `
         -Description 'Unknown-command notification' `
@@ -4329,8 +4329,8 @@ try {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'command palette native List recovery after zero matches' -Condition {
             try {
-                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
-                    $paletteNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+                if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+                    $paletteNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Recovered command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
@@ -4359,8 +4359,8 @@ try {
                 else {
                     "$($script:paletteRecoveredFocus.Current.Name):$($script:paletteRecoveredFocus.Current.ControlType.ProgrammaticName):pid=$($script:paletteRecoveredFocus.Current.ProcessId)"
                 }
-                $script:paletteRecoveryLastTransient = "native_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) items=$($script:paletteRecoveredItems.Count) focus=$recoveredFocusSummary"
-                return [WinghosttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd) -and
+                $script:paletteRecoveryLastTransient = "native_visible=$([NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd)) items=$($script:paletteRecoveredItems.Count) focus=$recoveredFocusSummary"
+                return [NocttyAccessibilityNative]::IsWindowVisible($paletteNativeHwnd) -and
                     $script:paletteRecoveredItems.Count -gt 0 -and
                     $null -ne $script:paletteRecoveredFocus -and
                     $script:paletteRecoveredFocus.Current.ProcessId -eq $process.Id -and
@@ -4406,7 +4406,7 @@ try {
         $paletteSelectionHandler
     )
     $paletteSelectionRegistered = $false
-    [WinghosttyAccessibilityNative]::StopNotificationCapture()
+    [NocttyAccessibilityNative]::StopNotificationCapture()
     $paletteNotificationRegistered = $false
     Stop-AccessibilityEditEventCapture
     Send-AccessibilityChord -Keys @([uint16]0x1B) -Description 'Escape dismiss accessibility command palette' -Process $process
@@ -4421,8 +4421,8 @@ try {
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'terminal focus after palette Escape' -Condition {
         $script:paletteDismissFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $script:paletteDismissFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-        $script:paletteDismissTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        $script:paletteDismissFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $script:paletteDismissTerminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
         return $null -ne $script:paletteDismissFocused -and
             $script:paletteDismissFocused.Current.ProcessId -eq $process.Id -and
             $script:paletteDismissFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and
@@ -4451,8 +4451,8 @@ try {
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'terminal focus after palette keyboard toggle close' -Condition {
         $script:paletteToggleFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $script:paletteToggleFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-        $script:paletteToggleTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        $script:paletteToggleFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $script:paletteToggleTerminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
         return $null -ne $script:paletteToggleFocused -and
             $script:paletteToggleFocused.Current.ProcessId -eq $process.Id -and
             $script:paletteToggleFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and
@@ -4476,9 +4476,9 @@ try {
     $searchNativeHwnd = [IntPtr]$searchQueryEdit.Current.NativeWindowHandle
     [uint32]$searchNativeOwner = 0
     if ($searchNativeHwnd -eq [IntPtr]::Zero -or
-        [WinghosttyAccessibilityNative]::GetWindowThreadProcessId($searchNativeHwnd, [ref]$searchNativeOwner) -eq 0 -or
+        [NocttyAccessibilityNative]::GetWindowThreadProcessId($searchNativeHwnd, [ref]$searchNativeOwner) -eq 0 -or
         $searchNativeOwner -ne [uint32]$process.Id -or
-        -not [WinghosttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) {
+        -not [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd)) {
         throw "Docked search query Edit has invalid native HWND $searchNativeHwnd (owner=$searchNativeOwner)."
     }
     $searchBounds = $searchQueryEdit.Current.BoundingRectangle
@@ -4486,8 +4486,8 @@ try {
         throw 'Docked search query Edit is not visible with positive UIA bounds.'
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search query UIA focus' -Condition {
-        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
-            $searchNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
+            $searchNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
             if ($searchNativeFocusBeforeRecovery -ne $searchNativeHwnd) {
                 throw "Docked search query lost native focus before foreground recovery (focused=$searchNativeFocusBeforeRecovery expected=$searchNativeHwnd)."
             }
@@ -4531,28 +4531,28 @@ try {
         return $searchTextPattern.DocumentRange.GetText(-1) -eq 'needle' -and
             $searchValuePattern.Current.Value -eq 'needle' -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::EditTextChangedSenders) `
                 -Element $searchQueryEdit) -gt 0 -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::ValueChangedSenders) `
                 -Element $searchQueryEdit) -gt 0
     }
-    [WinghosttyAccessibilityNative]::ResetTextSelectionChangedCount()
+    [NocttyAccessibilityNative]::ResetTextSelectionChangedCount()
     $searchTextPattern.DocumentRange.Select()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search TextPattern selection' -Condition {
         $script:searchQuerySelection = @($searchTextPattern.GetSelection())
         return $script:searchQuerySelection.Count -eq 1 -and
             $script:searchQuerySelection[0].GetText(-1) -eq 'needle' -and
             (Get-AccessibilityMatchingSenderCount `
-                -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) `
+                -Senders ([NocttyAccessibilityNative]::TextSelectionChangedSenders) `
                 -Element $searchQueryEdit) -gt 0
     }
     $searchEditTextChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::EditTextChangedSenders) -Element $searchQueryEdit
+        -Senders ([NocttyAccessibilityNative]::EditTextChangedSenders) -Element $searchQueryEdit
     $searchEditValueChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::ValueChangedSenders) -Element $searchQueryEdit
+        -Senders ([NocttyAccessibilityNative]::ValueChangedSenders) -Element $searchQueryEdit
     $searchEditSelectionChangedCount = Get-AccessibilityMatchingSenderCount `
-        -Senders ([WinghosttyAccessibilityNative]::TextSelectionChangedSenders) -Element $searchQueryEdit
+        -Senders ([NocttyAccessibilityNative]::TextSelectionChangedSenders) -Element $searchQueryEdit
     $searchEditEvidence = [ordered]@{
         name = $searchQueryEdit.Current.Name
         text = $searchTextPattern.DocumentRange.GetText(-1)
@@ -4566,9 +4566,9 @@ try {
     Send-AccessibilityChord -Keys @([uint16]0x1B) -Description 'Escape close docked search' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'docked search hide and terminal focus restoration' -Condition {
         $script:searchDismissFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        $script:searchDismissFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-        $script:searchDismissTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
-        return -not [WinghosttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd) -and
+        $script:searchDismissFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $script:searchDismissTerminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        return -not [NocttyAccessibilityNative]::IsWindowVisible($searchNativeHwnd) -and
             $null -ne $script:searchDismissFocused -and
             $script:searchDismissFocused.Current.ProcessId -eq $process.Id -and
             $script:searchDismissFocused.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and
@@ -4583,9 +4583,9 @@ try {
 
     $settingsCycles = @()
     $themePreviewEvidence = $null
-    $themeHighContrast = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
+    $themeHighContrast = [NocttyAccessibilityNative+HIGHCONTRAST]::new()
     $themeHighContrast.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($themeHighContrast)
-    if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(
+    if (-not [NocttyAccessibilityNative]::SystemParametersInfo(
         0x42,
         $themeHighContrast.cbSize,
         [ref]$themeHighContrast,
@@ -4597,44 +4597,44 @@ try {
     for ($settingsCycle = 1; $settingsCycle -le 2; $settingsCycle++) {
         $settingsClosedByThemeDiscard = $false
         Assert-AccessibilityInputOwner -Process $process -Description "settings lifecycle open $settingsCycle"
-        $settingsOpenFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-        $settingsOpenTerminalHwnds = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+        $settingsOpenFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+        $settingsOpenTerminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
         if ($settingsOpenTerminalHwnds -notcontains $settingsOpenFocusedHwnd) {
             throw "Settings cycle $settingsCycle did not start from a focused terminal child (focused=$settingsOpenFocusedHwnd visible_terminals=$($settingsOpenTerminalHwnds -join ', '))."
         }
-        if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+        if (-not [NocttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
             throw "SendInput failed while opening settings cycle ${settingsCycle}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
         try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "settings HWND cycle $settingsCycle" -Condition {
-                $script:settingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                $script:settingsWindowsProbe = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                     [uint32]$process.Id,
-                    'winghostty.win32.settings'
+                    'noctty.win32.settings'
                 ))
                 return $script:settingsWindowsProbe.Count -eq 1
             }
         }
         catch {
-            $settingsOpenForegroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
+            $settingsOpenForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             [uint32]$settingsOpenForegroundOwner = 0
             if ($settingsOpenForegroundHwnd -ne [IntPtr]::Zero) {
-                [void][WinghosttyAccessibilityNative]::GetWindowThreadProcessId($settingsOpenForegroundHwnd, [ref]$settingsOpenForegroundOwner)
+                [void][NocttyAccessibilityNative]::GetWindowThreadProcessId($settingsOpenForegroundHwnd, [ref]$settingsOpenForegroundOwner)
             }
-            $settingsOpenFocusedAfterHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
+            $settingsOpenFocusedAfterHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
             throw "Settings cycle $settingsCycle did not create its HWND: initial_focused=$settingsOpenFocusedHwnd; focused_after=$settingsOpenFocusedAfterHwnd; foreground=$settingsOpenForegroundHwnd owner=$settingsOpenForegroundOwner; visible_terminals=$($settingsOpenTerminalHwnds -join ', '). $($_.Exception.Message)"
         }
         $settingsHwnd = $script:settingsWindowsProbe[0]
-        $settingsRect = [WinghosttyAccessibilityNative]::WindowRect($settingsHwnd)
+        $settingsRect = [NocttyAccessibilityNative]::WindowRect($settingsHwnd)
         if ($settingsRect.right -le $settingsRect.left -or $settingsRect.bottom -le $settingsRect.top) {
             throw "Settings cycle $settingsCycle has empty native bounds."
         }
         $settingsElement = Wait-AccessibilityWindowElement `
             -Hwnd $settingsHwnd `
             -Description "Settings cycle $settingsCycle"
-        if ($settingsElement.Current.Name -ne 'winghostty settings') {
-            throw "Settings cycle $settingsCycle root name is '$($settingsElement.Current.Name)'; expected 'winghostty settings'."
+        if ($settingsElement.Current.Name -ne 'noctty settings') {
+            throw "Settings cycle $settingsCycle root name is '$($settingsElement.Current.Name)'; expected 'noctty settings'."
         }
-        $settingsClientRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen($settingsHwnd)
+        $settingsClientRect = [NocttyAccessibilityNative]::ClientRectOnScreen($settingsHwnd)
         $settingsSectionNames = @('Appearance', 'Terminal', 'Shell', 'Privacy', 'Updates', 'Keybindings', 'Advanced')
         $settingsExpectedControls = [ordered]@{
             Appearance = @(
@@ -4712,7 +4712,7 @@ try {
                 }
                 $restoredThemeHwnd = [IntPtr]$restoredWindowTheme.Current.NativeWindowHandle
                 Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Settings theme preview rollback on reopen' -Condition {
-                    $script:restoredIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+                    $script:restoredIndex = [NocttyAccessibilityNative]::SendMessageW(
                         $restoredThemeHwnd,
                         0x0147,
                         [UIntPtr]::Zero,
@@ -4720,13 +4720,13 @@ try {
                     ).ToInt64()
                     [uint32]$restoredSettingsColorProbe = 0
                     [uint32]$restoredHostColorProbe = 0
-                    $restoredSettingsPixelValid = [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                    $restoredSettingsPixelValid = [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                         $settingsHwnd,
                         $themePreviewEvidence.settings_sample_x,
                         $themePreviewEvidence.settings_sample_y,
                         [ref]$restoredSettingsColorProbe
                     )
-                    $restoredHostPixelValid = [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                    $restoredHostPixelValid = [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                         $process.MainWindowHandle,
                         $themePreviewEvidence.host_sample_x,
                         $themePreviewEvidence.host_sample_y,
@@ -4764,7 +4764,7 @@ try {
                 $settingsSectionNames -contains $_.Current.Name
             } | ForEach-Object {
                 $sectionHwnd = [IntPtr]$_.Current.NativeWindowHandle
-                "$($_.Current.Name):$($_.Current.ControlType.ProgrammaticName):class=$([WinghosttyAccessibilityNative]::WindowClass($sectionHwnd)):style=0x$([WinghosttyAccessibilityNative]::WindowStyle($sectionHwnd).ToString('X')):offscreen=$($_.Current.IsOffscreen)"
+                "$($_.Current.Name):$($_.Current.ControlType.ProgrammaticName):class=$([NocttyAccessibilityNative]::WindowClass($sectionHwnd)):style=0x$([NocttyAccessibilityNative]::WindowStyle($sectionHwnd).ToString('X')):offscreen=$($_.Current.IsOffscreen)"
             })
             throw "Settings cycle $settingsCycle section buttons were '$($observedSectionNames -join ', ')'; expected all seven named sections. Matching elements: $($sectionDiagnostics -join '; ')"
         }
@@ -4837,7 +4837,7 @@ try {
                 $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text
             }).Count -lt 1) {
                 $headerRoles = @($settingsSectionHeaders | ForEach-Object {
-                    "$($_.Current.ControlType.ProgrammaticName):class=$([WinghosttyAccessibilityNative]::WindowClass([IntPtr]$_.Current.NativeWindowHandle))"
+                    "$($_.Current.ControlType.ProgrammaticName):class=$([NocttyAccessibilityNative]::WindowClass([IntPtr]$_.Current.NativeWindowHandle))"
                 })
                 throw "Settings section '$sectionName' header roles were '$($headerRoles -join ', ')'; expected a visible UIA Text header."
             }
@@ -4973,7 +4973,7 @@ try {
         }
         try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
-                if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $settingsHwnd) {
+                if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $settingsHwnd) {
                     [void][InteractiveWin11WindowNative]::ForceForeground($settingsHwnd, $true, $true)
                     return $false
                 }
@@ -4998,7 +4998,7 @@ try {
                 })
                 return $null -ne $script:settingsFocusedElement -and
                     [System.Windows.Automation.Automation]::Compare($script:settingsFocusedElement, $focusSection) -and
-                    [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusSectionHwnd -and
+                    [NocttyAccessibilityNative]::FocusedWindowFor($settingsHwnd) -eq $focusSectionHwnd -and
                     $script:settingsSelectedAfterFocus.Count -eq 1 -and
                     $script:settingsSelectedAfterFocus[0] -eq $focusSection.Current.Name -and
                     $script:settingsFocusedSectionHeaders.Count -ge 1
@@ -5011,7 +5011,7 @@ try {
             else {
                 "$($script:settingsFocusedElement.Current.Name):$($script:settingsFocusedElement.Current.ControlType.ProgrammaticName):hwnd=$($script:settingsFocusedElement.Current.NativeWindowHandle)"
             }
-            $nativeFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($settingsHwnd)
+            $nativeFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($settingsHwnd)
             $selectedSummary = @($script:settingsSelectedAfterFocus) -join ', '
             $headerSummary = @($script:settingsFocusedSectionHeaders | ForEach-Object {
                 "$($_.Current.Name):offscreen=$($_.Current.IsOffscreen)"
@@ -5041,7 +5041,7 @@ try {
             }) | Select-Object -First 1
             if ($null -eq $windowTheme) { throw 'Settings exposes no Window theme combo.' }
             $windowThemeHwnd = [IntPtr]$windowTheme.Current.NativeWindowHandle
-            $originalThemeIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+            $originalThemeIndex = [NocttyAccessibilityNative]::SendMessageW(
                 $windowThemeHwnd,
                 0x0147,
                 [UIntPtr]::Zero,
@@ -5052,7 +5052,7 @@ try {
             }
             $settingsClientWidth = $settingsClientRect.right - $settingsClientRect.left
             $settingsClientHeight = $settingsClientRect.bottom - $settingsClientRect.top
-            $hostClientRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen(
+            $hostClientRect = [NocttyAccessibilityNative]::ClientRectOnScreen(
                 $process.MainWindowHandle
             )
             $hostClientWidth = $hostClientRect.right - $hostClientRect.left
@@ -5074,20 +5074,20 @@ try {
             if ($originalSettingsGrid.Count -eq 0 -or $originalHostGrid.Count -eq 0) {
                 throw "Theme preview could not sample initial Settings/host client grids (settings=$($originalSettingsGrid.Count), host=$($originalHostGrid.Count))."
             }
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $windowThemeHwnd,
                 0x014E,
                 [UIntPtr]::new(3),
                 [IntPtr]::Zero
             )
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $settingsHwnd,
                 0x0111,
                 [UIntPtr]::new(0x00010195),
                 $windowThemeHwnd
             )
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Settings and host System-to-Dark preview pixels' -Condition {
-                $script:systemDarkIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+                $script:systemDarkIndex = [NocttyAccessibilityNative]::SendMessageW(
                     $windowThemeHwnd,
                     0x0147,
                     [UIntPtr]::Zero,
@@ -5112,13 +5112,13 @@ try {
                 $systemHostColor -eq [uint32]0x00202020
             )
             $systemToDarkVisualTransition = -not $systemAlreadyResolvedDark
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $windowThemeHwnd,
                 0x014E,
                 [UIntPtr]::new(2),
                 [IntPtr]::Zero
             )
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $settingsHwnd,
                 0x0111,
                 [UIntPtr]::new(0x00010195),
@@ -5139,7 +5139,7 @@ try {
                 }
             }
             catch {
-                $lightDiagnosticIndex = [WinghosttyAccessibilityNative]::SendMessageW(
+                $lightDiagnosticIndex = [NocttyAccessibilityNative]::SendMessageW(
                     $windowThemeHwnd,
                     0x0147,
                     [UIntPtr]::Zero,
@@ -5157,7 +5157,7 @@ try {
                     ForEach-Object { $_.Values } | ForEach-Object { $_.color } |
                     Group-Object | Sort-Object Count -Descending | Select-Object -First 8 |
                     ForEach-Object { "$($_.Name):$($_.Count)" })
-                throw "$($_.Exception.Message) settings_alive=$([WinghosttyAccessibilityNative]::IsWindow($settingsHwnd)) host_alive=$([WinghosttyAccessibilityNative]::IsWindow($process.MainWindowHandle)) combo_index=$lightDiagnosticIndex settings_colors=$($lightSettingsColors -join ',') host_colors=$($lightHostColors -join ',')."
+                throw "$($_.Exception.Message) settings_alive=$([NocttyAccessibilityNative]::IsWindow($settingsHwnd)) host_alive=$([NocttyAccessibilityNative]::IsWindow($process.MainWindowHandle)) combo_index=$lightDiagnosticIndex settings_colors=$($lightSettingsColors -join ',') host_colors=$($lightHostColors -join ',')."
             }
             $settingsSampleX = $script:lightSettingsPixel.x
             $settingsSampleY = $script:lightSettingsPixel.y
@@ -5167,13 +5167,13 @@ try {
             $originalHostColor = $script:lightHostPixel.original_color
             $script:lightSettingsColor = $script:lightSettingsPixel.color
             $script:lightHostColor = $script:lightHostPixel.color
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $windowThemeHwnd,
                 0x014E,
                 [UIntPtr]::new(3),
                 [IntPtr]::Zero
             )
-            [void][WinghosttyAccessibilityNative]::SendMessageW(
+            [void][NocttyAccessibilityNative]::SendMessageW(
                 $settingsHwnd,
                 0x0111,
                 [UIntPtr]::new(0x00010195),
@@ -5182,13 +5182,13 @@ try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Settings and host Light-to-Dark preview pixels' -Condition {
                 [uint32]$darkSettingsColorProbe = 0
                 [uint32]$darkHostColorProbe = 0
-                $darkSettingsPixelValid = [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                $darkSettingsPixelValid = [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                     $settingsHwnd,
                     $settingsSampleX,
                     $settingsSampleY,
                     [ref]$darkSettingsColorProbe
                 )
-                $darkHostPixelValid = [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                $darkHostPixelValid = [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                     $process.MainWindowHandle,
                     $hostSampleX,
                     $hostSampleY,
@@ -5268,11 +5268,11 @@ try {
             }
             $discardInvoke.Invoke()
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Settings Dark preview discard close' -Condition {
-                return -not [WinghosttyAccessibilityNative]::IsWindow($settingsHwnd)
+                return -not [NocttyAccessibilityNative]::IsWindow($settingsHwnd)
             }
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'host pixel restore after Dark preview discard' -Condition {
                 [uint32]$discardHostColorProbe = 0
-                return [WinghosttyAccessibilityNative]::TrySampleWindowClientPixel(
+                return [NocttyAccessibilityNative]::TrySampleWindowClientPixel(
                     $process.MainWindowHandle,
                     $hostSampleX,
                     $hostSampleY,
@@ -5309,9 +5309,9 @@ try {
                 -Process $process `
                 -Description "close settings lifecycle cycle $settingsCycle")
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description "settings destruction cycle $settingsCycle" -Condition {
-                return @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+                return @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
                     [uint32]$process.Id,
-                    'winghostty.win32.settings'
+                    'noctty.win32.settings'
                 )).Count -eq 0
             }
         }
@@ -5324,7 +5324,7 @@ try {
 
     $ownerProbeStdout = Join-Path $layout.Logs 'interactive-win11-accessibility-settings-owner-stdout.log'
     $ownerProbeStderr = Join-Path $layout.Logs 'interactive-win11-accessibility-settings-owner-stderr.log'
-    $ownerProbeClass = "winghostty-accessibility-settings-owner-$([Guid]::NewGuid().ToString('N'))"
+    $ownerProbeClass = "noctty-accessibility-settings-owner-$([Guid]::NewGuid().ToString('N'))"
     $ownerProbeArguments = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
@@ -5339,13 +5339,13 @@ try {
     $ownerProbeHost = $ownerProbeProcess.MainWindowHandle
     $ownerProbeHandle = $ownerProbeProcess.Handle
     Assert-AccessibilityInputOwner -Process $ownerProbeProcess -Description 'settings owner probe open'
-    if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+    if (-not [NocttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
         throw "SendInput failed while opening settings owner probe: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings owner probe HWND' -Condition {
-        $script:ownerSettingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $script:ownerSettingsWindowsProbe = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$ownerProbeProcess.Id,
-            'winghostty.win32.settings'
+            'noctty.win32.settings'
         ))
         return $script:ownerSettingsWindowsProbe.Count -eq 1
     }
@@ -5407,8 +5407,8 @@ try {
     $ownerSaveButton.SetFocus()
     $ownerSaveHwnd = [IntPtr]$ownerSaveButton.Current.NativeWindowHandle
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings Save focus-only ownership' -Condition {
-        if ([WinghosttyAccessibilityNative]::GetForegroundWindow() -ne $ownerSettingsHwnd) {
-            $saveNativeFocusBeforeRecovery = [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)
+        if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $ownerSettingsHwnd) {
+            $saveNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)
             if ($saveNativeFocusBeforeRecovery -ne $ownerSaveHwnd) {
                 throw "Settings Save lost native focus before foreground recovery (focused=$saveNativeFocusBeforeRecovery expected=$ownerSaveHwnd)."
             }
@@ -5418,13 +5418,13 @@ try {
         $script:ownerSaveFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         return $null -ne $script:ownerSaveFocusedElement -and
             [System.Windows.Automation.Automation]::Compare($script:ownerSaveFocusedElement, $ownerSaveButton) -and
-            [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerSaveHwnd
+            [NocttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerSaveHwnd
     }
     if ($scrollbackValuePattern.Current.Value -ne $draftScrollbackText -or -not $ownerSaveButton.Current.IsEnabled) {
         throw 'Focusing the settings Save button unexpectedly committed or discarded the dirty draft.'
     }
 
-    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+    if (-not [NocttyAccessibilityNative]::PostMessageW(
         $ownerProbeHost,
         0x0010,
         [UIntPtr]::Zero,
@@ -5433,23 +5433,23 @@ try {
         throw "PostMessageW failed while closing settings owner host: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTINGS_SETTLE_MS
-    if ([WinghosttyAccessibilityNative]::IsWindow($ownerProbeHost)) {
+    if ([NocttyAccessibilityNative]::IsWindow($ownerProbeHost)) {
         if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerProbeHost, $true, $true) -or
-            -not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
+            -not [NocttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
             throw 'Unable to confirm settings owner host close.'
         }
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'settings survival after owner host close' -Condition {
         $ownerProbeProcess.Refresh()
         if ($ownerProbeProcess.HasExited) { throw 'Settings owner probe process exited with its terminal owner.' }
-        if (-not [WinghosttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)) {
+        if (-not [NocttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)) {
             throw 'Settings HWND was destroyed with its terminal owner.'
         }
-        return -not [WinghosttyAccessibilityNative]::IsWindow($ownerProbeHost)
+        return -not [NocttyAccessibilityNative]::IsWindow($ownerProbeHost)
     }
-    $survivingSettingsWindows = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+    $survivingSettingsWindows = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
         [uint32]$ownerProbeProcess.Id,
-        'winghostty.win32.settings'
+        'noctty.win32.settings'
     ))
     if ($survivingSettingsWindows.Count -ne 1 -or $survivingSettingsWindows[0] -ne $ownerSettingsHwnd) {
         throw 'Settings owner probe did not preserve the same top-level settings HWND.'
@@ -5458,17 +5458,17 @@ try {
         throw 'Settings owner probe lost its dirty Scrollback limit draft after owner close.'
     }
 
-    [WinghosttyAccessibilityNative]::ResetAutomationFocusChangedCount()
+    [NocttyAccessibilityNative]::ResetAutomationFocusChangedCount()
     $settingsFocusHandler = [Delegate]::CreateDelegate(
         [System.Windows.Automation.AutomationFocusChangedEventHandler],
-        [WinghosttyAccessibilityNative].GetMethod('OnAutomationFocusChanged')
+        [NocttyAccessibilityNative].GetMethod('OnAutomationFocusChanged')
     )
     [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($settingsFocusHandler)
     $settingsFocusRegistered = $true
     if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerSettingsHwnd, $true, $true)) {
         throw 'Unable to foreground surviving Settings before its dirty-close request.'
     }
-    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+    if (-not [NocttyAccessibilityNative]::PostMessageW(
         $ownerSettingsHwnd,
         0x0010,
         [UIntPtr]::Zero,
@@ -5477,14 +5477,14 @@ try {
         throw "PostMessageW failed while explicitly closing surviving settings: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings inline dirty-close prompt' -Condition {
-        $modalDialogs = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $modalDialogs = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$ownerProbeProcess.Id,
             '#32770'
         ))
         if ($modalDialogs.Count -ne 0) {
             throw 'Settings dirty close opened a modal #32770 dialog instead of its inline confirmation surface.'
         }
-        if (-not [WinghosttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)) {
+        if (-not [NocttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)) {
             throw 'Settings dirty close destroyed the window before confirmation.'
         }
         $script:ownerClosePromptElements = @($ownerSettingsElement.FindAll(
@@ -5522,12 +5522,12 @@ try {
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings conservative dirty-close focus' -Condition {
             $script:ownerClosePromptFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-            $script:ownerClosePromptFocusEvent = @([WinghosttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object {
+            $script:ownerClosePromptFocusEvent = @([NocttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object {
                 $_ -is [System.Windows.Automation.AutomationElement] -and
                 [System.Windows.Automation.Automation]::Compare($_, $ownerKeepEditingButton)
             }) | Select-Object -First 1
-            return [WinghosttyAccessibilityNative]::GetForegroundWindow() -eq $ownerSettingsHwnd -and
-                [WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerKeepEditingHwnd -and
+            return [NocttyAccessibilityNative]::GetForegroundWindow() -eq $ownerSettingsHwnd -and
+                [NocttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd) -eq $ownerKeepEditingHwnd -and
                 $ownerKeepEditingButton.Current.HasKeyboardFocus -and
                 $null -ne $script:ownerClosePromptFocusEvent
         }
@@ -5536,7 +5536,7 @@ try {
         $focusDiagnostic = [System.Windows.Automation.AutomationElement]::FocusedElement
         $focusDiagnosticName = if ($null -ne $focusDiagnostic) { $focusDiagnostic.Current.Name } else { '<none>' }
         $focusDiagnosticHwnd = if ($null -ne $focusDiagnostic) { $focusDiagnostic.Current.NativeWindowHandle } else { 0 }
-        throw "Settings conservative dirty-close focus mismatch: foreground=$([WinghosttyAccessibilityNative]::GetForegroundWindow()); expected_foreground=$ownerSettingsHwnd; native_focus=$([WinghosttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)); expected_native_focus=$ownerKeepEditingHwnd; target_has_uia_focus=$($ownerKeepEditingButton.Current.HasKeyboardFocus); exact_focus_events=$(@([WinghosttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object { $_ -is [System.Windows.Automation.AutomationElement] -and [System.Windows.Automation.Automation]::Compare($_, $ownerKeepEditingButton) }).Count); global_uia_focus_hwnd=$focusDiagnosticHwnd; global_uia_focus_name='$focusDiagnosticName'. $($_.Exception.Message)"
+        throw "Settings conservative dirty-close focus mismatch: foreground=$([NocttyAccessibilityNative]::GetForegroundWindow()); expected_foreground=$ownerSettingsHwnd; native_focus=$([NocttyAccessibilityNative]::FocusedWindowFor($ownerSettingsHwnd)); expected_native_focus=$ownerKeepEditingHwnd; target_has_uia_focus=$($ownerKeepEditingButton.Current.HasKeyboardFocus); exact_focus_events=$(@([NocttyAccessibilityNative]::AutomationFocusChangedSenders | Where-Object { $_ -is [System.Windows.Automation.AutomationElement] -and [System.Windows.Automation.Automation]::Compare($_, $ownerKeepEditingButton) }).Count); global_uia_focus_hwnd=$focusDiagnosticHwnd; global_uia_focus_name='$focusDiagnosticName'. $($_.Exception.Message)"
     }
     [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($settingsFocusHandler)
     $settingsFocusRegistered = $false
@@ -5561,7 +5561,7 @@ try {
             $scrollbackValuePattern.Current.Value -eq $draftScrollbackText -and
             $ownerSaveButton.Current.IsEnabled
     }
-    if (-not [WinghosttyAccessibilityNative]::PostMessageW(
+    if (-not [NocttyAccessibilityNative]::PostMessageW(
         $ownerSettingsHwnd,
         0x0010,
         [UIntPtr]::Zero,
@@ -5597,15 +5597,15 @@ try {
     }
     catch {
         $ownerProbeProcess.Refresh()
-        $ownerSettingsAfterDiscard = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $ownerSettingsAfterDiscard = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$ownerProbeProcess.Id,
-            'winghostty.win32.settings'
+            'noctty.win32.settings'
         ))
-        $ownerHostsAfterDiscard = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $ownerHostsAfterDiscard = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$ownerProbeProcess.Id,
-            'winghostty.win32.host'
+            'noctty.win32.host'
         ))
-        throw "Settings owner probe did not exit after Discard: exited=$($ownerProbeProcess.HasExited); settings_windows=$($ownerSettingsAfterDiscard -join ', '); host_windows=$($ownerHostsAfterDiscard -join ', '); settings_hwnd_alive=$([WinghosttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)); settings_hwnd_visible=$([WinghosttyAccessibilityNative]::IsWindowVisible($ownerSettingsHwnd).ToString()). $($_.Exception.Message)"
+        throw "Settings owner probe did not exit after Discard: exited=$($ownerProbeProcess.HasExited); settings_windows=$($ownerSettingsAfterDiscard -join ', '); host_windows=$($ownerHostsAfterDiscard -join ', '); settings_hwnd_alive=$([NocttyAccessibilityNative]::IsWindow($ownerSettingsHwnd)); settings_hwnd_visible=$([NocttyAccessibilityNative]::IsWindowVisible($ownerSettingsHwnd).ToString()). $($_.Exception.Message)"
     }
     $ownerProbeExitCode = Get-InteractiveWin11ProcessExitCode -Process $ownerProbeProcess -ProcessHandle $ownerProbeHandle
     if ($ownerProbeExitCode -ne 0) { throw "Settings owner probe exited with code $ownerProbeExitCode." }
@@ -5636,7 +5636,7 @@ try {
         [byte[]]@()
     }
     $settingsConfigBaselineCaptured = $true
-    $saveProbeClass = "winghostty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
+    $saveProbeClass = "noctty-accessibility-settings-save-$([Guid]::NewGuid().ToString('N'))"
     $saveProbeArguments = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
@@ -5687,7 +5687,7 @@ try {
         -Description 'settings save probe Dark selection'
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings save probe dirty draft' -Condition {
         return $saveScrollback.Value.Current.Value -eq $settingsPersistenceDraftText -and
-            [WinghosttyAccessibilityNative]::SendMessageW(
+            [NocttyAccessibilityNative]::SendMessageW(
                 $saveTheme.Hwnd,
                 0x0147,
                 [UIntPtr]::Zero,
@@ -5700,7 +5700,7 @@ try {
         -ActionName 'Save and close' `
         -Description 'settings save probe'
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds($TimeoutSeconds)) -Description 'settings save-and-close completion' -Condition {
-        return -not [WinghosttyAccessibilityNative]::IsWindow($saveProbe.Hwnd)
+        return -not [NocttyAccessibilityNative]::IsWindow($saveProbe.Hwnd)
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings persisted config bytes' -Condition {
         if (-not (Test-Path -LiteralPath $sandboxConfigPath -PathType Leaf)) { return $false }
@@ -5711,7 +5711,7 @@ try {
     Stop-InteractiveWin11Process -Process $saveProbeProcess -Contained
     $saveProbeProcess = $null
 
-    $saveVerifyClass = "winghostty-accessibility-settings-save-verify-$([Guid]::NewGuid().ToString('N'))"
+    $saveVerifyClass = "noctty-accessibility-settings-save-verify-$([Guid]::NewGuid().ToString('N'))"
     $saveVerifyArguments = @(
         Get-InteractiveWin11ContainmentArguments
         '--single-instance=false'
@@ -5738,10 +5738,10 @@ try {
         throw "Saved Dark theme did not survive a same-sandbox process relaunch; expected index 3, actual=$($verifyTheme.Index)."
     }
 
-    $verifySettingsRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen(
+    $verifySettingsRect = [NocttyAccessibilityNative]::ClientRectOnScreen(
         $saveVerifyProbe.Hwnd
     )
-    $verifyHostRect = [WinghosttyAccessibilityNative]::ClientRectOnScreen(
+    $verifyHostRect = [NocttyAccessibilityNative]::ClientRectOnScreen(
         $saveVerifyProcess.MainWindowHandle
     )
     $verifySettingsGrid = Get-AccessibilityClientPixelGrid `
@@ -5838,7 +5838,7 @@ try {
         -Process $saveVerifyProcess `
         -Description 'close restored settings persistence verifier')
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'restored settings verifier destruction' -Condition {
-        return -not [WinghosttyAccessibilityNative]::IsWindow($saveVerifyProbe.Hwnd)
+        return -not [NocttyAccessibilityNative]::IsWindow($saveVerifyProbe.Hwnd)
     }
     Stop-InteractiveWin11Process -Process $saveVerifyProcess -Contained
     $saveVerifyProcess = $null
@@ -5866,7 +5866,7 @@ try {
 
     Send-AccessibilityChord -Keys @([uint16]0x12, [uint16]0x25) -Description 'Alt+Left before sustained output' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'left pane focus before sustained output' -Condition {
-        return [WinghosttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $leftPane.Hwnd
+        return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $leftPane.Hwnd
     }
     $stressLineCount = 150
     $stressPrefix = "whs$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -5877,14 +5877,14 @@ try {
     if ($stressCommand.Contains($stressFirstMarker) -or $stressCommand.Contains($stressFinalMarker)) {
         throw 'Sustained-output command contains a literal boundary marker before execution.'
     }
-    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
+    [NocttyAccessibilityNative]::ResetTextChangedCount()
     $process.Refresh()
     $stressBaselineHandles = $process.HandleCount
     $stressBaselineThreads = $process.Threads.Count
     $stressBaselinePrivateBytes = $process.PrivateMemorySize64
     $stressStartedAt = [DateTime]::UtcNow
     Assert-AccessibilityInputOwner -Process $process -Description 'sustained output command' -ExpectedFocusedHwnd $leftPane.Hwnd
-    if (-not [WinghosttyAccessibilityNative]::SendUnicodeText($stressCommand)) {
+    if (-not [NocttyAccessibilityNative]::SendUnicodeText($stressCommand)) {
         throw "SendInput failed for sustained output command: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Send-AccessibilityChord -Keys @([uint16]0x0D) -Description 'sustained output Enter' -Process $process -ExpectedFocusedHwnd $leftPane.Hwnd
@@ -5923,7 +5923,7 @@ try {
         throw "$($_.Exception.Message) Documents: $($script:stressCandidateDiagnostics -join '; ')."
     }
     $stressDurationMs = [Math]::Round(([DateTime]::UtcNow - $stressStartedAt).TotalMilliseconds)
-    $stressEventCount = [WinghosttyAccessibilityNative]::TextChangedCount
+    $stressEventCount = [NocttyAccessibilityNative]::TextChangedCount
     if ($stressEventCount -lt 1 -or $stressEventCount -gt 300) {
         throw "Sustained output emitted $stressEventCount TextChanged events; expected 1..300 for $stressLineCount lines."
     }
@@ -5941,7 +5941,7 @@ try {
     $stressThreadGrowth = $process.Threads.Count - $stressBaselineThreads
     $stressPrivateGrowth = $process.PrivateMemorySize64 - $stressBaselinePrivateBytes
     if ($stressHandleGrowth -gt 64 -or $stressThreadGrowth -gt 8 -or $stressPrivateGrowth -gt 134217728) {
-        throw "winghostty resource growth exceeded sustained-output limits (handles=+$stressHandleGrowth, threads=+$stressThreadGrowth, private_bytes=+$stressPrivateGrowth)."
+        throw "noctty resource growth exceeded sustained-output limits (handles=+$stressHandleGrowth, threads=+$stressThreadGrowth, private_bytes=+$stressPrivateGrowth)."
     }
     $sustainedOutputEvidence = [ordered]@{
         line_count = $stressLineCount
@@ -5964,16 +5964,16 @@ try {
     # terminal host that must receive the midpoint and close-time focus restore.
     $idleTerminalHostHwnd = $process.MainWindowHandle
     if ($idleTerminalHostHwnd -eq [IntPtr]::Zero -or
-        -not [WinghosttyAccessibilityNative]::IsWindow($idleTerminalHostHwnd)) {
+        -not [NocttyAccessibilityNative]::IsWindow($idleTerminalHostHwnd)) {
         throw 'Terminal host HWND was unavailable before the settings idle soak.'
     }
-    if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
+    if (-not [NocttyAccessibilityNative]::SendChord(@([uint16]0x11, [uint16]0xBC))) {
         throw "SendInput failed while opening settings for idle soak: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings HWND for idle soak' -Condition {
-        $script:idleSettingsWindowsProbe = @([WinghosttyAccessibilityNative]::TopLevelWindowsForProcess(
+        $script:idleSettingsWindowsProbe = @([NocttyAccessibilityNative]::TopLevelWindowsForProcess(
             [uint32]$process.Id,
-            'winghostty.win32.settings'
+            'noctty.win32.settings'
         ))
         return $script:idleSettingsWindowsProbe.Count -eq 1
     }
@@ -5985,7 +5985,7 @@ try {
     $idleSettingsName = $idleSettingsElement.Current.Name
 
     Start-Sleep -Seconds 1
-    [WinghosttyAccessibilityNative]::ResetTextChangedCount()
+    [NocttyAccessibilityNative]::ResetTextChangedCount()
     $process.Refresh()
     $idleBaselineHandles = $process.HandleCount
     $idleBaselineThreads = $process.Threads.Count
@@ -5999,8 +5999,8 @@ try {
         }
         Start-Sleep -Seconds 1
         $process.Refresh()
-        if ($process.HasExited) { throw "winghostty exited during UIA idle soak at ${second}s." }
-        if (-not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)) {
+        if ($process.HasExited) { throw "noctty exited during UIA idle soak at ${second}s." }
+        if (-not [NocttyAccessibilityNative]::IsWindow($idleSettingsHwnd)) {
             throw "Settings window was destroyed during UIA idle soak at ${second}s."
         }
         if ($IdleSoakSeconds -gt 1 -and $second -eq [Math]::Floor($IdleSoakSeconds / 2)) {
@@ -6013,13 +6013,13 @@ try {
         $peakThreads = [Math]::Max($peakThreads, $process.Threads.Count)
         $peakPrivateBytes = [Math]::Max($peakPrivateBytes, $process.PrivateMemorySize64)
     }
-    $idleEventCount = [WinghosttyAccessibilityNative]::TextChangedCount
+    $idleEventCount = [NocttyAccessibilityNative]::TextChangedCount
     if ($idleEventCount -ne 0) { throw "Terminal emitted $idleEventCount TextChanged events after idle stabilization." }
     $idleHandleGrowth = $peakHandles - $idleBaselineHandles
     $idleThreadGrowth = $peakThreads - $idleBaselineThreads
     $idlePrivateGrowth = $peakPrivateBytes - $idleBaselinePrivateBytes
     if ($idleHandleGrowth -gt 64 -or $idleThreadGrowth -gt 8 -or $idlePrivateGrowth -gt 134217728) {
-        throw "winghostty resource growth exceeded idle limits (handles=+$idleHandleGrowth, threads=+$idleThreadGrowth, private_bytes=+$idlePrivateGrowth)."
+        throw "noctty resource growth exceeded idle limits (handles=+$idleHandleGrowth, threads=+$idleThreadGrowth, private_bytes=+$idlePrivateGrowth)."
     }
     if ($idleSettingsElement.Current.Name -ne $idleSettingsName) {
         throw "Settings UIA root changed after idle soak; before='$idleSettingsName', after='$($idleSettingsElement.Current.Name)'."
@@ -6034,16 +6034,16 @@ try {
         -Description 'close settings after idle soak')
     try {
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings destruction and terminal focus restoration after idle soak' -Condition {
-            $script:idleRestoreForegroundHwnd = [WinghosttyAccessibilityNative]::GetForegroundWindow()
-            $script:idleRestoreFocusedHwnd = [WinghosttyAccessibilityNative]::FocusedWindowFor($idleTerminalHostHwnd)
-            return -not [WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
+            $script:idleRestoreForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
+            $script:idleRestoreFocusedHwnd = [NocttyAccessibilityNative]::FocusedWindowFor($idleTerminalHostHwnd)
+            return -not [NocttyAccessibilityNative]::IsWindow($idleSettingsHwnd) -and
                 $script:idleRestoreForegroundHwnd -eq $idleTerminalHostHwnd -and
                 $script:idleRestoreFocusedHwnd -eq $leftPane.Hwnd
         }
     }
     catch {
-        $idleRestoreTerminals = @([WinghosttyAccessibilityNative]::VisibleTerminalChildren($idleTerminalHostHwnd))
-        throw "Idle Settings close focus restoration failed: settings_alive=$([WinghosttyAccessibilityNative]::IsWindow($idleSettingsHwnd)); foreground=$($script:idleRestoreForegroundHwnd); expected_host=$idleTerminalHostHwnd; focused=$($script:idleRestoreFocusedHwnd); expected_pane=$($leftPane.Hwnd); visible_terminals=$($idleRestoreTerminals -join ', '). $($_.Exception.Message)"
+        $idleRestoreTerminals = @([NocttyAccessibilityNative]::VisibleTerminalChildren($idleTerminalHostHwnd))
+        throw "Idle Settings close focus restoration failed: settings_alive=$([NocttyAccessibilityNative]::IsWindow($idleSettingsHwnd)); foreground=$($script:idleRestoreForegroundHwnd); expected_host=$idleTerminalHostHwnd; focused=$($script:idleRestoreFocusedHwnd); expected_pane=$($leftPane.Hwnd); visible_terminals=$($idleRestoreTerminals -join ', '). $($_.Exception.Message)"
     }
 
     $idleMarker = "whi$([Guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -6064,9 +6064,9 @@ try {
         -Process $process `
         -DiagnosticDirectory $layout.Logs
 
-    $hc = [WinghosttyAccessibilityNative+HIGHCONTRAST]::new()
+    $hc = [NocttyAccessibilityNative+HIGHCONTRAST]::new()
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
-    if (-not [WinghosttyAccessibilityNative]::SystemParametersInfo(0x42, $hc.cbSize, [ref]$hc, 0)) {
+    if (-not [NocttyAccessibilityNative]::SystemParametersInfo(0x42, $hc.cbSize, [ref]$hc, 0)) {
         throw "SPI_GETHIGHCONTRAST failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     $evidence = [ordered]@{
@@ -6193,17 +6193,17 @@ try {
     $process.Refresh()
     if (-not $process.HasExited) {
         Assert-AccessibilityInputOwner -Process $process -Description 'confirm graceful accessibility close'
-        if (-not [WinghosttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
+        if (-not [NocttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
             throw "SendInput failed while confirming graceful accessibility close: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
         }
     }
-    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'graceful winghostty exit' -Condition {
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'graceful noctty exit' -Condition {
         $process.Refresh()
         return $process.HasExited
     }
     $gracefulExitCode = Get-InteractiveWin11ProcessExitCode -Process $process -ProcessHandle $processHandle
     if ($gracefulExitCode -ne 0) {
-        throw "winghostty graceful close returned exit code $gracefulExitCode."
+        throw "noctty graceful close returned exit code $gracefulExitCode."
     }
     $evidence['graceful_close'] = [ordered]@{ exited = $true; exit_code = $gracefulExitCode }
 
@@ -6216,7 +6216,7 @@ try {
         return -not $relaunchProcess.HasExited -and $relaunchProcess.MainWindowHandle -ne [IntPtr]::Zero
     }
     $relaunchRoot = [System.Windows.Automation.AutomationElement]::FromHandle($relaunchProcess.MainWindowHandle)
-    if ($null -eq $relaunchRoot) { throw 'UI Automation returned no root for relaunched winghostty.' }
+    if ($null -eq $relaunchRoot) { throw 'UI Automation returned no root for relaunched noctty.' }
     $relaunchDocuments = @()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(8)) -Description 'relaunch terminal Text element' -Condition {
         $script:relaunchDocumentsProbe = @($relaunchRoot.FindAll(
@@ -6280,7 +6280,7 @@ finally {
     }
     if ($paletteNotificationRegistered) {
         try {
-            [WinghosttyAccessibilityNative]::StopNotificationCapture()
+            [NocttyAccessibilityNative]::StopNotificationCapture()
         }
         catch {
             $cleanupFailures.Add("failed to remove palette Notification handler: $($_.Exception.Message)")
@@ -6288,7 +6288,7 @@ finally {
     }
     if ($terminalNotificationCaptureStarted) {
         try {
-            [WinghosttyAccessibilityNative]::StopNotificationCapture()
+            [NocttyAccessibilityNative]::StopNotificationCapture()
             $terminalNotificationCaptureStarted = $false
         }
         catch {
@@ -6353,17 +6353,17 @@ if ($explorerAfter.Count -ne 1 -or $explorerAfterIdentity -ne $explorerBeforeIde
 $machineProcessesAfter = @(Get-Process)
 $machineThreadCountAfter = (@($machineProcessesAfter | ForEach-Object { try { $_.Threads.Count } catch { 0 } }) | Measure-Object -Sum).Sum
 $machineHandleCountAfter = (@($machineProcessesAfter | ForEach-Object { try { $_.HandleCount } catch { 0 } }) | Measure-Object -Sum).Sum
-$winghosttyAfterIdentities = @($machineProcessesAfter | Where-Object ProcessName -eq 'winghostty' | ForEach-Object {
+$nocttyAfterIdentities = @($machineProcessesAfter | Where-Object ProcessName -eq 'noctty' | ForEach-Object {
     try { "{0}/{1:o}" -f $_.Id, $_.StartTime.ToUniversalTime() } catch { "pid=$($_.Id)/unavailable" }
 })
-$unexpectedWinghostty = @($winghosttyAfterIdentities | Where-Object { $_ -notin $winghosttyBeforeIdentities })
+$unexpectedNoctty = @($nocttyAfterIdentities | Where-Object { $_ -notin $nocttyBeforeIdentities })
 $processCountDelta = $machineProcessesAfter.Count - $machineProcesses.Count
 $threadCountDelta = $machineThreadCountAfter - $machineThreadCount
 $handleCountDelta = $machineHandleCountAfter - $machineHandleCount
 $browserSupportCountAfter = @($machineProcessesAfter | Where-Object ProcessName -eq '1Password-BrowserSupport').Count
 $conhostCountAfter = @($machineProcessesAfter | Where-Object ProcessName -eq 'conhost').Count
-if ($unexpectedWinghostty.Count -gt 0) {
-    $cleanupFailures.Add("Accessibility validation leaked winghostty processes: $($unexpectedWinghostty -join ', ').")
+if ($unexpectedNoctty.Count -gt 0) {
+    $cleanupFailures.Add("Accessibility validation leaked noctty processes: $($unexpectedNoctty -join ', ').")
 }
 if ($processCountDelta -gt 100 -or $threadCountDelta -gt 1500 -or $handleCountDelta -gt 50000) {
     $cleanupFailures.Add("Machine resource growth exceeded post-run limits (processes=$processCountDelta, threads=$threadCountDelta, handles=$handleCountDelta).")
@@ -6374,14 +6374,14 @@ if ($machineProcessesAfter.Count -gt 1500 -or $machineThreadCountAfter -gt 30000
 }
 
 $werQuerySucceeded = $false
-$winghosttyWerEvents = @()
+$nocttyWerEvents = @()
 try {
-    $winghosttyWerEvents = @(Get-WinEvent -FilterHashtable @{
+    $nocttyWerEvents = @(Get-WinEvent -FilterHashtable @{
         LogName = 'Application'
         StartTime = $validationStartedAt.AddSeconds(-2)
         Id = 1000, 1001
     } -ErrorAction Stop | Where-Object {
-        try { $_.Message -match '(?i)\bwinghostty(?:\.exe)?\b' } catch { $false }
+        try { $_.Message -match '(?i)\bnoctty(?:\.exe)?\b' } catch { $false }
     } | ForEach-Object {
         [ordered]@{
             id = $_.Id
@@ -6399,8 +6399,8 @@ catch {
         $cleanupFailures.Add("Application Error/WER query failed: $($_.Exception.Message)")
     }
 }
-if ($winghosttyWerEvents.Count -gt 0) {
-    $cleanupFailures.Add("Application Error/WER recorded $($winghosttyWerEvents.Count) winghostty crash event(s).")
+if ($nocttyWerEvents.Count -gt 0) {
+    $cleanupFailures.Add("Application Error/WER recorded $($nocttyWerEvents.Count) noctty crash event(s).")
 }
 
 if ($null -ne $evidence) {
@@ -6408,7 +6408,7 @@ if ($null -ne $evidence) {
         explorer_before = $explorerBeforeIdentity
         explorer_after = $explorerAfterIdentity
         wer_query_succeeded = $werQuerySucceeded
-        winghostty_wer_events = $winghosttyWerEvents
+        noctty_wer_events = $nocttyWerEvents
         process_count_delta = $processCountDelta
         thread_count_delta = $threadCountDelta
         handle_count_delta = $handleCountDelta
@@ -6417,7 +6417,7 @@ if ($null -ne $evidence) {
         final_handle_count = $machineHandleCountAfter
         final_browser_support_count = $browserSupportCountAfter
         final_conhost_count = $conhostCountAfter
-        unexpected_winghostty_processes = $unexpectedWinghostty
+        unexpected_noctty_processes = $unexpectedNoctty
     }
     $evidence['provenance']['validation_completed_utc'] = [DateTime]::UtcNow.ToString('o')
     $evidence['provenance']['duration_ms'] = [Math]::Round(([DateTime]::UtcNow - $validationStartedAt).TotalMilliseconds)

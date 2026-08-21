@@ -16,49 +16,49 @@ pub const Options = struct {
 };
 
 pub const keybinding_discovery_hint =
-    \\  `winghostty +explain-config --keybind=<action>` explains one keybind action.
-    \\  `winghostty +list-actions --docs` lists bindable actions with docs.
-    \\  `winghostty +list-keybinds --default` shows the shipped default bindings.
-    \\  `winghostty +list-keybinds --docs` annotates bindings with action docs.
+    \\  `noctty +explain-config --keybind=<action>` explains one keybind action.
+    \\  `noctty +list-actions --docs` lists bindable actions with docs.
+    \\  `noctty +list-keybinds --default` shows the shipped default bindings.
+    \\  `noctty +list-keybinds --docs` annotates bindings with action docs.
 ;
 
 const help_prelude =
-    \\Usage: winghostty [+action] [options]
+    \\Usage: noctty [+action] [options]
     \\
-    \\Run the Windows-native winghostty terminal or a specific helper action.
+    \\Run the Windows-native noctty terminal or a specific helper action.
     \\
-    \\If no `+action` is specified, run `winghostty.exe`.
+    \\If no `+action` is specified, run `noctty.exe`.
     \\All configuration keys are available as command line options.
     \\To specify a configuration key, use the `--<key>=<value>` syntax
     \\where key and value are the same format you'd put into a configuration
     \\file. For example, `--font-size=12` or `--font-family="Fira Code"`.
     \\
     \\Discover configuration from the CLI:
-    \\  `winghostty +show-config --default --docs` lists every config key and its docs.
-    \\  `winghostty +explain-config <option>` explains one config key.
+    \\  `noctty +show-config --default --docs` lists every config key and its docs.
+    \\  `noctty +explain-config <option>` explains one config key.
     \\
     \\A special command line argument `-e <command>` can be used to run
     \\the specific command inside the terminal emulator. For example,
-    \\`winghostty -e top` will run the `top` command inside the terminal.
+    \\`noctty -e top` will run the `top` command inside the terminal.
     \\
     \\Discover actions and keybindings:
     \\
 ++ keybinding_discovery_hint ++
     \\
     \\Useful Windows actions:
-    \\  `winghostty +new-window` forwards into the running instance when possible.
-    \\  `winghostty +list-windows` prints local automation window IDs as JSON.
-    \\  `winghostty +perform-action new_tab` forwards a safe UI action.
-    \\  `winghostty --safe-mode` uses built-in config and skips session restore.
-    \\  `winghostty +diagnostic-bundle` creates a local redacted support bundle.
-    \\  `winghostty +edit-config` opens the config file in your default editor.
+    \\  `noctty +new-window` forwards into the running instance when possible.
+    \\  `noctty +list-windows` prints local automation window IDs as JSON.
+    \\  `noctty +perform-action new_tab` forwards a safe UI action.
+    \\  `noctty --safe-mode` uses built-in config and skips session restore.
+    \\  `noctty +diagnostic-bundle` creates a local redacted support bundle.
+    \\  `noctty +edit-config` opens the config file in your default editor.
     \\
     \\Available actions:
     \\
     \\
 ;
 
-/// The `help` command shows general help about winghostty. Recognized as either
+/// The `help` command shows general help about noctty. Recognized as either
 /// `-h, `--help`, or like other actions `+help`.
 ///
 /// You can also specify `--help` or `-h` along with any action such as
@@ -94,8 +94,8 @@ pub fn run(alloc: Allocator) !u8 {
 }
 
 test "help prelude is Windows-only" {
-    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Windows-native winghostty terminal") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "winghostty.exe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Windows-native noctty terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_prelude, "noctty.exe") != null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "Ghostty.app") == null);
     try std.testing.expect(std.mem.indexOf(u8, help_prelude, "open -na") == null);
 }

@@ -31,6 +31,17 @@ pub fn legacyGhosttyConfigDotGhosttyPath(alloc: Allocator) ![]const u8 {
     );
 }
 
+/// Pre-rename fork default path for the XDG home configuration file.
+/// The fork shipped as "winghostty" before the Noctty rename, so
+/// existing users still have their config under that directory.
+/// Returned value must be freed by the caller.
+pub fn legacyForkXdgPath(alloc: Allocator) ![]const u8 {
+    return try xdg.config(
+        alloc,
+        .{ .subdir = "winghostty/config.ghostty" },
+    );
+}
+
 /// Preferred default path for the XDG home configuration file.
 /// Returned value must be freed by the caller.
 pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {
@@ -41,8 +52,17 @@ pub fn preferredXdgPath(alloc: Allocator) ![]const u8 {
         return xdg_path;
     } else |_| {}
 
-    // Try the legacy path
+    // Try the pre-rename fork ("winghostty") path.
     errdefer alloc.free(xdg_path);
+    const legacy_fork_path = try legacyForkXdgPath(alloc);
+    if (open(legacy_fork_path)) |f| {
+        f.close();
+        alloc.free(xdg_path);
+        return legacy_fork_path;
+    } else |_| {}
+    alloc.free(legacy_fork_path);
+
+    // Try the legacy path
     const legacy_config_ghostty_path = try legacyGhosttyConfigDotGhosttyPath(alloc);
     if (open(legacy_config_ghostty_path)) |f| {
         f.close();

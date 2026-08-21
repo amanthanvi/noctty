@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="wg-no-js">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Winghostty | Not found</title>
+  <title>Noctty | Not found</title>
   <meta name="robots" content="noindex">
   <meta name="theme-color" content="#15151a" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
@@ -12,27 +12,25 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
   <link
     rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
     media="print"
     onload="this.media='all'"
   >
   <noscript>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
   </noscript>
 
-  <link rel="stylesheet" href="/styles.css?v=3bce8a639e306659d3edc3c73ebdb0ccdf8e23342d09833bf72856243c04c986">
+  <link rel="stylesheet" href="/styles.css?v=494c763203348e4e07a0084bcff86d32ccc0a441a3804e891851fee01d053593">
   <script>
     (function () {
+      var root = document.documentElement;
+      root.className = root.className.replace(/\bwg-no-js\b/, "wg-js");
       try {
-        var theme = localStorage.getItem("wg-theme") || "dark";
-        var root = document.documentElement;
-        root.setAttribute("data-theme", theme);
-        root.style.background = theme === "dark" ? "#0a0a0b" : "#fafaf9";
-        root.style.color = theme === "dark" ? "#e5e5e5" : "#0a0a0a";
-      } catch (error) {}
+        root.setAttribute("data-theme", localStorage.getItem("wg-theme") || "dark");
+      } catch (e) {}
     })();
   </script>
 </head>
@@ -54,19 +52,19 @@
         does not ship<span class="wg-accent-blue">.</span>
       </h1>
 
-      <p class="wg-hero__lede">
-        winghostty.com stays deliberately small so the claims can stay accurate.
+      <p class="wg-hero__caption">
+        noctty.com stays deliberately small so the claims can stay accurate.
         Head back to the landing page, the latest release, or the repo docs.
       </p>
 
       <div class="wg-hero__actions">
         <a class="wg-button wg-button--primary" href="/">Home</a>
-        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/winghostty/releases/latest" target="_blank" rel="noreferrer">Latest release</a>
-        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/winghostty/blob/main/docs/status.md" target="_blank" rel="noreferrer">Status</a>
+        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noreferrer">Latest release</a>
+        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/noctty/blob/main/docs/status.md" target="_blank" rel="noreferrer">Status</a>
       </div>
     </div>
   </main>
 
-  <script src="/app.js?v=f17e5a2b7f458f9d6b1df9f6b5a2a98aec17d67eebc59d9de1a65a44d3518a95"></script>
+  <script src="/app.js?v=113e9150fa49b29393d89fc58a691314977b03da0cf7853199627c62f4d98eae"></script>
 </body>
 </html>

@@ -675,7 +675,7 @@ fn buildWindowTitle(
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(alloc);
 
-    try buf.appendSlice(alloc, base_title orelse "winghostty");
+    try buf.appendSlice(alloc, base_title orelse "noctty");
 
     const appendStatus = struct {
         fn call(
@@ -780,11 +780,11 @@ pub fn buildHostAwareBaseTitle(
     base_title: ?[]const u8,
     host: HostTabStatus,
 ) ![]u8 {
-    if (host.total <= 1) return try alloc.dupe(u8, base_title orelse "winghostty");
+    if (host.total <= 1) return try alloc.dupe(u8, base_title orelse "noctty");
     return try std.fmt.allocPrint(
         alloc,
         "[{d}/{d}] {s}",
-        .{ host.index + 1, host.total, base_title orelse "winghostty" },
+        .{ host.index + 1, host.total, base_title orelse "noctty" },
     );
 }
 
@@ -837,7 +837,7 @@ pub fn buildTabButtonLabel(
     max_len: usize,
     show_pane_count: bool,
 ) ![]u8 {
-    const compact = try compactHostLabel(alloc, base_title orelse "winghostty", max_len);
+    const compact = try compactHostLabel(alloc, base_title orelse "noctty", max_len);
     defer alloc.free(compact);
     if (show_pane_count and pane_count > 1) {
         return try std.fmt.allocPrint(
@@ -874,7 +874,7 @@ fn buildTabOverviewBannerText(
     try buf.appendSlice(alloc, "Tabs: ");
     for (entries, 0..) |entry, i| {
         if (i > 0) try buf.appendSlice(alloc, " | ");
-        const compact = try compactHostLabel(alloc, entry.title orelse "winghostty", 18);
+        const compact = try compactHostLabel(alloc, entry.title orelse "noctty", 18);
         defer alloc.free(compact);
         try buf.writer(alloc).print("{s}{d}:{s}", .{
             if (entry.active) "*" else "",
@@ -2254,7 +2254,7 @@ test "win32 buildWindowTitle uses default title when base is null" {
     const title = try buildWindowTitle(std.testing.allocator, null, .{});
     defer std.testing.allocator.free(title);
 
-    try std.testing.expectEqualStrings("winghostty", title);
+    try std.testing.expectEqualStrings("noctty", title);
 }
 
 test "win32 resolveWindowBaseTitle prefers tab then surface override" {
@@ -3647,9 +3647,9 @@ test "win32 inspectorBannerStateChanged only trips on actual banner deltas" {
 test "win32 windowTitleSyncChanged only trips on actual title deltas" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect(windowTitleSyncChanged(null, "winghostty"));
-    try std.testing.expect(!windowTitleSyncChanged("winghostty", "winghostty"));
-    try std.testing.expect(windowTitleSyncChanged("winghostty", "winghostty - 2"));
+    try std.testing.expect(windowTitleSyncChanged(null, "noctty"));
+    try std.testing.expect(!windowTitleSyncChanged("noctty", "noctty"));
+    try std.testing.expect(windowTitleSyncChanged("noctty", "noctty - 2"));
 }
 
 test "win32 buildInspectorPanelTitleText reflects host inspector context" {

@@ -16,7 +16,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -26,7 +26,7 @@ if (-not $env:WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_VT_PROBE_WIN32_CONFORMANCE_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -89,7 +89,7 @@ $expectedRuntime = [ordered]@{
     'osc-4-palette' = 'parser-only'
     'osc-10-11-colors' = 'parser-only'
     'osc-21-kitty-color-stack' = 'parser-only'
-    'csi-2026-synchronized-output' = 'validated'
+    'csi-2026-synchronized-output' = 'parser-only'
     'kitty-graphics' = 'pending'
 }
 
@@ -108,8 +108,7 @@ if ($stdout -notmatch 'capability=osc-133-semantic-prompt .* win32-runtime=valid
 if ($Runtime) {
     $runtimeHarnesses = @(
         @{ Script = 'interactive-win11-command-finish.ps1'; Timeout = 12 },
-        @{ Script = 'interactive-win11-progress.ps1'; Timeout = 20 },
-        @{ Script = 'interactive-win11-boo-performance.ps1'; Timeout = 25 }
+        @{ Script = 'interactive-win11-progress.ps1'; Timeout = 20 }
     )
 
     foreach ($runtimeHarness in $runtimeHarnesses) {

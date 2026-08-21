@@ -24,7 +24,7 @@ if ($ResetState) { $forwardedArgs += '-ResetState' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
-    -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
     -ArgumentList $forwardedArgs
 
 Add-Type @'
@@ -51,8 +51,8 @@ $SW_RESTORE = 9
 $WM_MOUSEMOVE = 0x0200
 $WM_IME_STARTCOMPOSITION = 0x010D
 $WM_IME_ENDCOMPOSITION = 0x010E
-$surfaceClassName = 'winghostty.win32'
-$hostClassName = 'winghostty.win32.host'
+$surfaceClassName = 'noctty.win32'
+$hostClassName = 'noctty.win32.host'
 $poisonX = 7
 $poisonY = 11
 
@@ -272,7 +272,7 @@ $payloadPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-payload.p
 $readyPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-ready.txt'
 $tracePath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-trace.json'
 $resultPath = Join-Path $layout.Temp 'interactive-win11-ime-candidate-result.json'
-$instanceClass = "winghostty-ime-candidate-$($layout.SandboxId)"
+$instanceClass = "noctty-ime-candidate-$($layout.SandboxId)"
 
 if ($launchAction -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -316,8 +316,8 @@ $launchArgs = @(
     $payloadPath
 )
 
-$previousImeTraceFile = $env:WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE
-$env:WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE = $tracePath
+$previousImeTraceFile = $env:NOCTTY_WIN32_IME_FORM_TRACE_FILE
+$env:NOCTTY_WIN32_IME_FORM_TRACE_FILE = $tracePath
 
 $process = Start-Process `
     -FilePath $exePath `
@@ -462,10 +462,10 @@ finally {
 
     Stop-InteractiveWin11Process -Process $process -Contained
     if ($null -eq $previousImeTraceFile) {
-        Remove-Item Env:WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:NOCTTY_WIN32_IME_FORM_TRACE_FILE -ErrorAction SilentlyContinue
     }
     else {
-        $env:WINGHOSTTY_WIN32_IME_FORM_TRACE_FILE = $previousImeTraceFile
+        $env:NOCTTY_WIN32_IME_FORM_TRACE_FILE = $previousImeTraceFile
     }
 }
 

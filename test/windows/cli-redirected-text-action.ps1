@@ -19,7 +19,7 @@ if ($TimeoutSeconds -le 0) {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
-    $ExePath = Join-Path $repoRoot 'zig-out\bin\winghostty.exe'
+    $ExePath = Join-Path $repoRoot 'zig-out\bin\noctty.exe'
 }
 $scratchDir = Join-Path $repoRoot 'zig-out\cli-redirected'
 $actionSlug = $Action.TrimStart('+')

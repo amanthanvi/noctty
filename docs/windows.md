@@ -1,7 +1,7 @@
 # Windows
 
 This page is the reference for Windows-specific behavior: everywhere
-winghostty differs from upstream Ghostty's macOS and Linux documentation.
+noctty differs from upstream Ghostty's macOS and Linux documentation.
 For a row-by-row mapping against upstream docs, see
 [windows-capability-matrix.md](windows-capability-matrix.md). For VT
 protocol coverage validated on the Win32 runtime, see
@@ -19,9 +19,9 @@ protocol coverage validated on the Win32 runtime, see
 
 Each release publishes signed Windows artifacts for x64 and ARM64:
 
-- `winghostty-<version>-windows-<arch>-setup.exe`: a normal installed app
+- `noctty-<version>-windows-<arch>-setup.exe`: a normal installed app
   with Start menu shortcuts and app identity metadata.
-- `winghostty-<version>-windows-<arch>-portable.zip`: portable use
+- `noctty-<version>-windows-<arch>-portable.zip`: portable use
   without an installer.
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
 
@@ -39,7 +39,7 @@ warning means, see [getting-started.md](getting-started.md).
 By default, runtime state lives under:
 
 ```text
-%LOCALAPPDATA%\winghostty\
+%LOCALAPPDATA%\noctty\
 ```
 
 The shared XDG helpers still honor `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
@@ -50,13 +50,13 @@ Important files and directories:
 
 | Path                                           | Purpose                                                                                        |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `%LOCALAPPDATA%\winghostty\config.ghostty`     | User config written on first launch.                                                           |
-| `%LOCALAPPDATA%\winghostty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
-| `%LOCALAPPDATA%\winghostty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
-| `%LOCALAPPDATA%\winghostty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
+| `%LOCALAPPDATA%\noctty\config.ghostty`     | User config written on first launch.                                                           |
+| `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
+| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
+| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
 
 The portable ZIP carries the bundled resources next to the executable.
-Don't move only `winghostty.exe` out of the extracted tree; it needs the
+Don't move only `noctty.exe` out of the extracted tree; it needs the
 packaged `share` resources for themes, terminfo, shell integration, and
 other data.
 
@@ -89,7 +89,7 @@ command = wsl.exe
 
 ## App identity
 
-Installed builds create Start menu shortcuts with winghostty's
+Installed builds create Start menu shortcuts with noctty's
 AppUserModelID. Windows uses that identity for taskbar grouping and
 Action Center toast activation. Portable builds run without
 installer-created shortcuts, so taskbar and notification identity may be
@@ -111,7 +111,7 @@ in-terminal progress state through Ghostty's shared VT/OSC support.
 
 ## Windows, tabs, and splits
 
-winghostty uses a native Win32 host window with:
+noctty uses a native Win32 host window with:
 
 - a tab bar with overflow handling, same-window drag reorder, and
   exact-pane drag-to-split with reversible subtree transfer
@@ -139,7 +139,7 @@ windows, tabs, split layout, selected profiles, working directories, and
 explicit titles. It doesn't restore terminal contents or child process
 state.
 
-If the session-state file is unreadable, winghostty moves it aside to a
+If the session-state file is unreadable, noctty moves it aside to a
 sibling named after the original with a `.corrupt` suffix, logs the
 failure, and starts with a fresh window. A numeric suffix is added
 (`.corrupt.1`, `.corrupt.2`, and so on) when an earlier quarantine file
@@ -151,7 +151,7 @@ ephemeral safe mode: built-in config, no session restore. You can also
 pick it explicitly for one launch:
 
 ```powershell
-winghostty --safe-mode
+noctty --safe-mode
 ```
 
 Safe mode never overwrites your config or quarantined state.
@@ -165,7 +165,7 @@ auto-update = check
 ```
 
 The updater calls
-`api.github.com/repos/amanthanvi/winghostty/releases/latest` at most once
+`api.github.com/repos/amanthanvi/noctty/releases/latest` at most once
 every 24 hours and never replaces binaries silently. In `check` mode it
 opens the release page when a newer stable version exists.
 
@@ -173,7 +173,7 @@ opens the release page when a newer stable version exists.
 installer releases that ship architecture-specific SHA256 metadata, then
 verifies the installer's SHA-256 against that manifest and requires a
 valid Windows Authenticode signature before staging the installer under
-the local winghostty state directory. The signature check is not generic:
+the local noctty state directory. The signature check is not generic:
 the signer's public key must match a SHA-256 SPKI pin compiled into the
 app, so an installer signed by any other key is rejected even when its
 signature is otherwise valid. Unsigned installers fail that verification
@@ -194,7 +194,7 @@ is no telemetry and no analytics.
 
 The quick terminal uses the same `toggle_quick_terminal` action and
 `quick-terminal-*` configuration family as Ghostty where the settings map
-to Windows. Global keybinds use Win32 `RegisterHotKey` while winghostty
+to Windows. Global keybinds use Win32 `RegisterHotKey` while noctty
 is running. Windows or other applications may reserve hotkeys first;
 check logs when a global binding does not register.
 
@@ -203,16 +203,16 @@ on Windows. Global keyboard capture is intentionally not implemented.
 
 ## Automation
 
-winghostty exposes a local Windows automation surface over the same
+noctty exposes a local Windows automation surface over the same
 single-instance IPC path used by `+new-window`.
 
 List windows, tabs, and panes:
 
 ```powershell
-winghostty +list-windows
+noctty +list-windows
 ```
 
-The JSON schema is `winghostty.windows.v2`. It exposes local window, tab,
+The JSON schema is `noctty.windows.v2`. It exposes local window, tab,
 and pane IDs, focus/active state, and structural counts only. It never
 includes terminal text, shell input, working directories, or file paths.
 
@@ -220,8 +220,8 @@ Invoke a keybinding action on the focused surface, or on a specific pane
 from `+list-windows`:
 
 ```powershell
-winghostty +perform-action new_tab
-winghostty +perform-action --surface-id=<surface_id> toggle_fullscreen
+noctty +perform-action new_tab
+noctty +perform-action --surface-id=<surface_id> toggle_fullscreen
 ```
 
 Actions use the same names as `keybind` values. `--surface-id` is only
@@ -234,20 +234,20 @@ reviewed and allowlisted.
 
 ## Crash reports and diagnostics
 
-winghostty keeps a local crash directory and never uploads anything from
+noctty keeps a local crash directory and never uploads anything from
 it:
 
 ```text
-%LOCALAPPDATA%\winghostty\crash
+%LOCALAPPDATA%\noctty\crash
 ```
 
-On Windows the Sentry initialization path is a no-op. Instead, winghostty
+On Windows the Sentry initialization path is a no-op. Instead, noctty
 installs a local unhandled-exception filter that writes `.dmp` minidumps
 for process-level crash exceptions. Some hard-abort paths may still
 terminate before Windows can produce a dump. Read whatever is there with:
 
 ```powershell
-winghostty +crash-report
+noctty +crash-report
 ```
 
 Dumps can contain sensitive memory from the crashed process. Review them
@@ -256,7 +256,7 @@ before sharing.
 For a local-only, inspectable support bundle:
 
 ```powershell
-winghostty +diagnostic-bundle --output=winghostty-diagnostics
+noctty +diagnostic-bundle --output=noctty-diagnostics
 ```
 
 Terminal content, commands, environment, working directories, and config
@@ -293,7 +293,7 @@ verify the distribution starts in a normal PowerShell session first.
 
 ### OpenGL driver issues
 
-winghostty needs OpenGL 4.3 or newer. If the window fails to render or
+noctty needs OpenGL 4.3 or newer. If the window fails to render or
 exits early on older hardware, update GPU drivers before filing a
 rendering bug.
 
@@ -306,16 +306,16 @@ order:
 
 1. Update or reinstall the OEM AMD graphics driver, then the NVIDIA
    driver.
-2. Force `winghostty.exe` to the discrete or integrated GPU in Windows
+2. Force `noctty.exe` to the discrete or integrated GPU in Windows
    Graphics settings.
 
-winghostty currently ships only the OpenGL/WGL renderer on Windows; there
+noctty currently ships only the OpenGL/WGL renderer on Windows; there
 is no DirectX or ANGLE fallback renderer in this build.
 
 ### Stale installed build
 
-When testing a local build, make sure the `winghostty` you invoke is the
+When testing a local build, make sure the `noctty` you invoke is the
 current `zig-out\bin` binary rather than an older Scoop shim or a
-manually added install directory earlier on `PATH`. On Windows,
-`winghostty.com` may be selected before `winghostty.exe` for CLI
-invocations.
+manually added install directory earlier on `PATH`. On Windows, a
+`noctty.com` executable may be selected before `noctty.exe` for CLI
+invocations, because `.com` ranks before `.exe` in `PATHEXT`.

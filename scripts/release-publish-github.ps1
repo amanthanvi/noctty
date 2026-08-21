@@ -29,7 +29,7 @@ param(
         } elseif (-not [string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
             $env:GITHUB_REPOSITORY
         } else {
-            'amanthanvi/winghostty'
+            'amanthanvi/noctty'
         }
     ),
 
@@ -56,7 +56,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 $architectures = Get-WindowsPackageArchitectures
 $artifactDirectories = @{}
 foreach ($architecture in $architectures) {
-    $artifactDirectories[$architecture] = Join-Path $ArtifactRoot "winghostty-$Version-windows-$architecture"
+    $artifactDirectories[$architecture] = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
 }
 $artifactDirectoryX64 = $artifactDirectories['x64']
 $legacyChecksumsPath = Join-Path $artifactDirectoryX64 (
@@ -86,12 +86,12 @@ foreach ($architecture in $architectures) {
 }
 $assets += @(
     $legacyChecksumsPath,
-    (Join-Path $artifactDirectoryX64 'winghostty-icon.svg')
+    (Join-Path $artifactDirectoryX64 'noctty-icon.svg')
 )
 $notesPrefix = @"
 Compatibility line: Ghostty $VersionLine
 Base upstream release: $UpstreamBaseVersion
-Versioning: major.minor follow the Ghostty upstream line; patch is the winghostty release number on that line.
+Versioning: major.minor follow the Ghostty upstream line; patch is the noctty release number on that line.
 "@
 
 & gh release view $Tag --repo $Repository *> $null

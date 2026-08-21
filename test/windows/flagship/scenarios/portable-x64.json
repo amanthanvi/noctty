@@ -1,5 +1,5 @@
 {
-  "schema_version": "winghostty.verification.scenario.v1",
+  "schema_version": "noctty.verification.scenario.v1",
   "id": "windows.portable-cli.x64",
   "title": "Windows x64 portable package CLI smoke",
   "category": "packaging",
@@ -20,6 +20,6 @@
   "artifacts": [
     { "kind": "result", "path": "result.json" },
     { "kind": "log", "path": "transcript.log" },
-    { "kind": "package", "path": "dist/artifacts/winghostty-0.0.1-windows-x64/winghostty/winghostty.exe" }
+    { "kind": "package", "path": "dist/artifacts/noctty-0.0.1-windows-x64/noctty/noctty.exe" }
   ]
 }

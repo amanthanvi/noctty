@@ -2,7 +2,7 @@
 
 DOXYFILE_ENCODING      = UTF-8
 PROJECT_NAME           = "libghostty"
-PROJECT_LOGO           = images/icons/icon_128.png
+PROJECT_LOGO           = images/noctty-app-icon.svg
 INPUT                  = include/ghostty
 INPUT_ENCODING         = UTF-8
 RECURSIVE              = YES

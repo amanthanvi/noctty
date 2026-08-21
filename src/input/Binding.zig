@@ -38,7 +38,7 @@ pub const Flags = packed struct {
     all: bool = false,
 
     /// True if this binding is global. Global bindings should work system-wide
-    /// and not just while winghostty is focused. This may not work on all platforms.
+    /// and not just while noctty is focused. This may not work on all platforms.
     /// See the keybind config documentation for more information.
     global: bool = false,
 
@@ -303,14 +303,14 @@ pub fn lessThan(_: void, lhs: Binding, rhs: Binding) bool {
 pub const Action = union(enum) {
     /// Ignore this key combination.
     ///
-    /// winghostty will not process this combination nor forward it to the child
+    /// noctty will not process this combination nor forward it to the child
     /// process within the terminal, but it may still be processed by the OS or
     /// other applications.
     ignore,
 
     /// Unbind a previously bound key binding.
     ///
-    /// This cannot unbind bindings that were not bound by winghostty or the user
+    /// This cannot unbind bindings that were not bound by noctty or the user
     /// (e.g. bindings set by the OS or some other application).
     unbind,
 
@@ -566,7 +566,7 @@ pub const Action = union(enum) {
     ///
     /// This is only supported on Linux and when the system's libadwaita
     /// version is 1.4 or newer. The current libadwaita version can be
-    /// found by running `winghostty +version`.
+    /// found by running `noctty +version`.
     toggle_tab_overview,
 
     /// Change the title of the current focused surface via a pop-up prompt.
@@ -651,7 +651,7 @@ pub const Action = union(enum) {
     /// Show the legacy platform inspector.
     ///
     /// In the Windows-only fork this is treated as a compatibility alias for
-    /// showing the native winghostty inspector.
+    /// showing the native noctty inspector.
     show_gtk_inspector,
 
     /// Show the on-screen keyboard if one is present.
@@ -761,7 +761,7 @@ pub const Action = union(enum) {
     ///
     /// In the Windows-only fork, this is implemented by the native Win32 host.
     /// On Linux, this requires libadwaita 1.5 or newer. The current
-    /// libadwaita version can be found by running `winghostty +version`.
+    /// libadwaita version can be found by running `noctty +version`.
     toggle_command_palette,
 
     /// Toggle the quick terminal.
@@ -806,7 +806,7 @@ pub const Action = union(enum) {
     ///
     ///     If you do not have this plugin enabled, open System Settings > Apps
     ///     & Windows > Window Management > Desktop Effects, and enable the
-    ///     plugin in the plugin list. winghostty would then need to be restarted
+    ///     plugin in the plugin list. noctty would then need to be restarted
     ///     fully for this to take effect.
     ///
     ///   - Quick terminal tabs are only supported on Linux and not on macOS.
@@ -821,7 +821,7 @@ pub const Action = union(enum) {
     toggle_quick_terminal,
 
     /// Show or hide all windows. If all windows become shown, we also ensure
-    /// winghostty becomes focused. When hiding all windows, focus is yielded
+    /// noctty becomes focused. When hiding all windows, focus is yielded
     /// to the next application as determined by the OS.
     ///
     /// Note: When the focused surface is fullscreen, this method does nothing.
@@ -848,7 +848,7 @@ pub const Action = union(enum) {
     /// Undo the last undoable action for the focused surface or terminal,
     /// if possible.
     ///
-    /// Not every action in winghostty can be undone or redone. The list
+    /// Not every action in noctty can be undone or redone. The list
     /// of actions that support undo/redo is currently limited to:
     ///
     ///   - `clear_screen`
@@ -916,10 +916,10 @@ pub const Action = union(enum) {
     /// this will report performable as false.
     deactivate_all_key_tables,
 
-    /// Quit winghostty.
+    /// Quit noctty.
     quit,
 
-    /// Crash winghostty in the desired thread for the focused surface.
+    /// Crash noctty in the desired thread for the focused surface.
     ///
     /// WARNING: This is a hard crash (panic) and data can be lost.
     ///
