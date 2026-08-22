@@ -322,7 +322,9 @@ Try, in order:
    session.
 2. In a VM, enable 3D acceleration and install or update the guest graphics
    driver or integration tools.
-3. Update or reinstall the OEM graphics driver for the active GPU.
+3. Update or reinstall the OEM graphics driver for the active GPU. On an
+   AMD+NVIDIA hybrid-GPU system, update or reinstall the OEM AMD driver first,
+   then the NVIDIA driver.
 4. On a hybrid-GPU system, force `noctty.exe` to the discrete or integrated GPU
    in Windows Graphics settings.
 
@@ -330,13 +332,8 @@ If startup fails with `LoadLibrary failed with error 126` or the startup
 dialog reports `Win32 error: 126 (ERROR_MOD_NOT_FOUND)` during OpenGL/WGL
 initialization, Windows could not load a graphics-driver DLL or one of
 its dependencies. This shows up most often on AMD+NVIDIA hybrid-GPU
-laptops while WGL loads the AMD OpenGL ICD from DriverStore. Try, in
-order:
-
-1. Update or reinstall the OEM AMD graphics driver, then the NVIDIA
-   driver.
-2. Force `noctty.exe` to the discrete or integrated GPU in Windows
-   Graphics settings.
+laptops while WGL loads the AMD OpenGL ICD from DriverStore; use the
+AMD-then-NVIDIA driver order in step 3 before retrying.
 
 ### Stale installed build
 

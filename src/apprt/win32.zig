@@ -1459,8 +1459,8 @@ const OpenGLStartupFailure = struct {
     detected: ?DetectedOpenGL = null,
 };
 
-const OpenGLStartupString = struct {
-    const capacity = 128;
+pub const OpenGLStartupString = struct {
+    pub const capacity = 128;
 
     bytes: [capacity]u8 = undefined,
     len: u8 = 0,
@@ -1613,11 +1613,17 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
     const zig_error_name = failure.zig_error_name orelse @errorName(err);
 
     if (failure.detected) |detected| {
+        var win32_error_buf: [64]u8 = undefined;
+        const win32_error_text = if (failure.win32_error) |win32_error|
+            try std.fmt.bufPrint(&win32_error_buf, "{d}{s}", .{ win32_error, win32ErrorSuffix(win32_error) })
+        else
+            "not reported";
+
         return std.fmt.bufPrint(buf,
-            \\noctty {s} could not initialize the Windows OpenGL renderer while checking the OpenGL version.
+            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
             \\
             \\Startup error: {s}
-            \\Win32 error: not reported
+            \\Win32 error: {s}
             \\Required OpenGL version: 4.3 through WGL
             \\Detected OpenGL version: {d}.{d}
             \\Detected renderer: {s}
@@ -1630,7 +1636,9 @@ fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLSt
             \\If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
         , .{
             build_config.version_string,
+            failure.step.label(),
             zig_error_name,
+            win32_error_text,
             detected.major,
             detected.minor,
             if (detected.renderer.len > 0) detected.renderer.value() else "not reported",
@@ -32256,12 +32264,30 @@ test "win32-opengl-startup-failure-message-explains-version-floor" {
         },
     });
 
+    try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Required OpenGL version: 4.3 through WGL") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected OpenGL version: 1.1") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected renderer: GDI Generic") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Detected vendor: Microsoft Corporation") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: not reported") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "noctty cannot start below OpenGL 4.3") != null);
+}
+
+test "win32-opengl-startup-detected-version-message-uses-recorded-diagnostics" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .create_context,
+        .win32_error = ERROR_MOD_NOT_FOUND,
+        .zig_error_name = "OpenGLOutdated",
+        .detected = .{
+            .major = 1,
+            .minor = 1,
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "while creating the WGL context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
 }
 
 test "win32-opengl-startup-failure-bounds-driver-strings" {

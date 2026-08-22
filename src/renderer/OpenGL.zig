@@ -40,7 +40,10 @@ const log = std.log.scoped(.opengl);
 const WglSwapIntervalExt = *const fn (interval: c_int) callconv(.winapi) windows.BOOL;
 const wgl_swap_interval_ext_name: [*:0]const u8 = "wglSwapIntervalEXT";
 const enable_gl_debug_output = false;
-const startup_gl_string_max_len = 128;
+const startup_gl_string_max_len: usize = if (apprt.runtime == apprt.win32)
+    apprt.win32.OpenGLStartupString.capacity
+else
+    std.math.maxInt(usize);
 
 /// We require at least OpenGL 4.3
 pub const MIN_VERSION_MAJOR = 4;
