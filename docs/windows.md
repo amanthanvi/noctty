@@ -89,6 +89,11 @@ command marks and the exit code before the next prompt. `os.geterrorlevel()`
 reports a truthful exit code only while Clink's `cmd.get_errorlevel` setting is
 enabled (the default). Without the loaded Clink script, prompt navigation and
 cwd reporting still work, but there are no command-finish marks or exit codes.
+On a UNC working directory, `$P` produces a network path that the current OSC
+cwd conversion retains with an extra leading `/`, so it is not a valid local
+cwd. `PROMPT` is inherited session-wide, so `echo on` batch execution and
+`cmd /c` children can print the wrapped value for command lines and emit
+spurious OSC 133 marks.
 
 `utf8-console` controls UTF-8 setup for bare interactive `cmd.exe` launches,
 Windows PowerShell 5.1, and PowerShell 7 (`pwsh`) sessions. `auto` is the default
