@@ -96,6 +96,9 @@ state. The Kitty wire modifier mask carries the lock state; left/right modifier
 keys use distinct physical key codes. With Kitty `report_all`, ordinary physical
 keys bypass the `WM_CHAR` text-commit path so press and release metadata stay
 paired. IME commits remain direct UTF-8 text without a physical key identity.
+AltGr and dead-key handling under `report_all` have targeted code coverage, but
+neither those paths nor other non-US layout behavior have been exercised with a
+real non-US keyboard.
 
 `key-remap` changes modifier state before focused or in-app keybind matching and
 terminal input encoding. It does not change physical key identity, so Kitty

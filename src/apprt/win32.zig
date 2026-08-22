@@ -23192,6 +23192,7 @@ const KeyText = struct {
     consumed_mods: input.Mods = .{},
     unshifted_codepoint: u21 = 0,
     deferred_utf16_units: usize = 0,
+    dead_key: bool = false,
 };
 
 fn isControlCodepoint(codepoint: u21) bool {
@@ -23210,12 +23211,12 @@ fn shouldDeferTextToCharMessage(
     translated: KeyText,
     allow_defer: bool,
 ) bool {
-    if (!allow_defer) return false;
     if (action == .release) return false;
     // Windows reports AltGr as synthetic left Ctrl plus right Alt. The
     // resulting WM_CHAR is layout text, not a Ctrl+Alt terminal chord.
     const alt_gr = mods.ctrl and mods.alt and
         mods.sides.ctrl == .left and mods.sides.alt == .right;
+    if (!allow_defer and !alt_gr) return false;
     if (mods.super or ((mods.ctrl or mods.alt) and !alt_gr)) return false;
     if (key.modifier()) return false;
 
@@ -23325,6 +23326,14 @@ fn translateKeyTextToUnicode(
     return ToUnicode(vk, scan_code, state, utf16, utf16.len, TO_UNICODE_NO_STATE_CHANGE);
 }
 
+fn deadKeyText(vk: UINT) KeyText {
+    return .{
+        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+        .deferred_utf16_units = 1,
+        .dead_key = true,
+    };
+}
+
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
@@ -23341,12 +23350,7 @@ fn translateKeyText(
 
     var utf16: [4]u16 = [_]u16{0} ** 4;
     const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
-    if (count < 0) {
-        return .{
-            .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-            .deferred_utf16_units = 1,
-        };
-    }
+    if (count < 0) return deadKeyText(vk);
     if (count == 0) {
         return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
     }
@@ -23395,6 +23399,29 @@ fn packetKeyMessage(action: input.Action) Win32KeyMessage {
     };
 }
 
+fn applyTranslatedKeyText(
+    result: *Win32KeyMessage,
+    translated: KeyText,
+    defer_text: bool,
+) void {
+    result.event.utf8 = translated.utf8[0..translated.len];
+    result.event.consumed_mods = translated.consumed_mods;
+    if (translated.unshifted_codepoint != 0) {
+        result.event.unshifted_codepoint = translated.unshifted_codepoint;
+    }
+    if (defer_text) {
+        // Keep the physical-key event visible to bindings/modifier state
+        // but defer text emission to WM_CHAR so plain typing doesn't rely
+        // on ToUnicode/GetKeyboardState timing.
+        result.event.utf8 = "";
+        result.event.consumed_mods = .{};
+    }
+    if (defer_text or translated.dead_key) {
+        result.event.composing = true;
+        result.deferred_utf16_units = translated.deferred_utf16_units;
+    }
+}
+
 fn keyEventFromWin32Message(
     msg: UINT,
     wParam: WPARAM,
@@ -23427,20 +23454,11 @@ fn keyEventFromWin32Message(
 
     if (action != .release) {
         const translated = translateKeyText(vk, lParam, mods, keyboard_state);
-        result.event.utf8 = translated.utf8[0..translated.len];
-        result.event.consumed_mods = translated.consumed_mods;
-        if (translated.unshifted_codepoint != 0) {
-            result.event.unshifted_codepoint = translated.unshifted_codepoint;
-        }
-        if (shouldDeferTextToCharMessage(action, key, mods, translated, defer_plain_text)) {
-            // Keep the physical-key event visible to bindings/modifier state
-            // but defer text emission to WM_CHAR so plain typing doesn't rely
-            // on ToUnicode/GetKeyboardState timing.
-            result.event.utf8 = "";
-            result.event.consumed_mods = .{};
-            result.event.composing = true;
-            result.deferred_utf16_units = translated.deferred_utf16_units;
-        }
+        applyTranslatedKeyText(
+            &result,
+            translated,
+            shouldDeferTextToCharMessage(action, key, mods, translated, defer_plain_text),
+        );
     }
 
     return result;
@@ -31614,6 +31632,17 @@ test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
         .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
         true,
     ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .key_q,
+        .{
+            .ctrl = true,
+            .alt = true,
+            .sides = .{ .ctrl = .left, .alt = .right },
+        },
+        .{ .len = 1, .unshifted_codepoint = 'q', .deferred_utf16_units = 1 },
+        false,
+    ));
     try std.testing.expect(!shouldDeferTextToCharMessage(
         .press,
         .equal,
@@ -31654,6 +31683,25 @@ test "win32 kitty-report-all skips WM_CHAR deferral" {
         .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
         false,
     ));
+}
+
+test "win32 kitty-report-all dead key remains composing" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var message: Win32KeyMessage = .{ .event = .{
+        .action = .press,
+        .key = .quote,
+        .unshifted_codepoint = '\'',
+    } };
+    applyTranslatedKeyText(
+        &message,
+        deadKeyText(VK_OEM_7),
+        false,
+    );
+
+    try std.testing.expect(message.event.composing);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
 }
 
 test "win32 deferred char authorization respects key handling effect" {
