@@ -168,12 +168,13 @@ The updater checks the configured release feed at most once every 24 hours
 and never replaces binaries silently. The feed defaults to noctty's GitHub
 Releases API and can be changed with `auto-update-feed-url`; checksum,
 Authenticode, and pinned-publisher-key verification remain mandatory
-regardless of the feed host. In `check` mode it opens the release page when a
-newer stable version exists.
+regardless of the feed host. For tests and diagnostics,
+`NOCTTY_UPDATE_FEED_URL` overrides the compiled-in default when no explicit
+`auto-update-feed-url` is set. The precedence is explicit config, then the
+environment variable, then the compiled-in default. In `check` mode it opens
+the release page when a newer stable version exists.
 
-Upstream Ghostty is leaving GitHub, so the maintainer periodically checks that
-the `upstream` git remote and release-feed host remain live and re-points them
-if either moves.
+The feed URL is configurable if the release host ever changes.
 
 `auto-update = download` goes further. It downloads only stable Windows
 installer releases that ship architecture-specific SHA256 metadata, then

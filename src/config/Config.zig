@@ -3237,7 +3237,10 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// The default is noctty's latest GitHub Release API endpoint. Changing the
 /// feed does not weaken checksum, Authenticode, or pinned-publisher-key
-/// verification of downloaded installers.
+/// verification of downloaded installers. For tests and diagnostics,
+/// `NOCTTY_UPDATE_FEED_URL` can override the default when this option is not
+/// set. Precedence is explicit config, then the environment variable, then the
+/// compiled-in default.
 @"auto-update-feed-url": ?[:0]const u8 = null,
 
 /// The release channel to use for auto-updates.
