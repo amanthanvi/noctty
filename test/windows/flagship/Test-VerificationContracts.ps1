@@ -6704,7 +6704,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    '565afdafe708bd0f120214faef017ea3fa8fd77f939f5380ec146bc1d3b28ea6'
+    '4538a35268e112821f9a69c4d99bddc7e5f4b9df968beff660519bc224f30237'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7833,6 +7833,43 @@ Assert-TextContract `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
+    -Content $releaseWorkflowText `
+    -Pattern '(?ms)^permissions:\s+contents: write\s+actions: read\s+id-token: write\s+attestations: write\s+(?:\r?\n|$)' `
+    -Description 'release grants only the existing permissions plus OIDC and attestation writes' `
+    -Context $releaseWorkflow
+$attestationGuardStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Prepare build provenance attestation' `
+    -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $attestationGuardStep `
+    -Pattern '(?ms)id: attestation_guard.*?ATTEST_REPOSITORY: \$\{\{ github\.repository \}\}.*?ATTEST_SERVER_URL: \$\{\{ github\.server_url \}\}.*?amanthanvi/noctty.*?https://github\.com.*?ACTIONS_ID_TOKEN_REQUEST_URL.*?ACTIONS_ID_TOKEN_REQUEST_TOKEN.*?Write-Host "Skipping build provenance attestation:.*?enabled=false.*?New-WindowsPackageArtifactName.*?-Kind checksums.*?New-WindowsPackageArtifactName.*?-Kind legacy-checksums.*?Copy-Item .*?enabled=true' `
+    -Description 'attestation guard skips unsupported contexts visibly and stages the legacy checksum alias before provenance' `
+    -Context "$releaseWorkflow :: Prepare build provenance attestation"
+$attestationStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Attest published release artifacts' `
+    -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $attestationStep `
+    -Pattern "(?ms)if: steps\.attestation_guard\.outputs\.enabled == 'true'.*?uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4\.2\.2.*?subject-path:" `
+    -Description 'release provenance uses the reviewed immutable action only after the context guard' `
+    -Context "$releaseWorkflow :: Attest published release artifacts"
+foreach ($subject in @(
+    'noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe',
+    'noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip',
+    'SHA256SUMS-windows-x64.txt',
+    'noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe',
+    'noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip',
+    'SHA256SUMS-windows-arm64.txt',
+    'SHA256SUMS.txt',
+    'noctty-icon.svg'
+)) {
+    if (@([regex]::Matches($attestationStep, [regex]::Escape($subject))).Count -ne 1) {
+        throw "Release provenance must attest exactly one subject named $subject."
+    }
+}
+Assert-TextContract `
     -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
@@ -7853,11 +7890,15 @@ Assert-TextContract `
     -Context "$releaseWorkflow :: Scan Windows release artifacts with Microsoft Defender"
 $signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
 $defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan Windows release artifacts with Microsoft Defender')
+$attestationGuardStepIndex = $releaseWorkflowText.IndexOf('      - name: Prepare build provenance attestation')
+$attestationStepIndex = $releaseWorkflowText.IndexOf('      - name: Attest published release artifacts')
 $publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
 if ($signedArtifactStepIndex -lt 0 -or
     $defenderScanStepIndex -le $signedArtifactStepIndex -or
-    $publishReleaseStepIndex -le $defenderScanStepIndex) {
-    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+    $attestationGuardStepIndex -le $defenderScanStepIndex -or
+    $attestationStepIndex -le $attestationGuardStepIndex -or
+    $publishReleaseStepIndex -le $attestationStepIndex) {
+    throw 'Signing verification and Defender scanning must precede provenance attestation, which must precede release publication.'
 }
 $signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
@@ -8024,6 +8065,10 @@ foreach ($contract in @(
     @{ Pattern = '\$expectedNames\.Count -ne 8'; Description = 'published verifier requires the exact eight-asset set' },
     @{ Pattern = '(?s)\$missing = .*?\$unexpected = .*?\$missing\.Count -gt 0 -or \$unexpected\.Count -gt 0.*?asset set mismatch'; Description = 'published verifier rejects missing and unexpected assets' },
     @{ Pattern = '(?s)\$digest -notmatch.*?\$actualHash -ne \$digest\.Substring\(7\)\.ToLowerInvariant\(\).*?digest mismatch'; Description = 'published verifier compares downloaded bytes with GitHub SHA-256 digests' },
+    @{ Pattern = "\`$firstAttestedVersion = \[version\]'1\.3\.124'"; Description = 'published verifier preserves the first attested release boundary' },
+    @{ Pattern = '(?s)function Test-GhAttestationAvailable.*?gh attestation verify --help.*?Write-Warning .*?installed GitHub CLI does not provide.*?return \$false'; Description = 'published verifier degrades visibly when the local gh attestation subcommand is unavailable' },
+    @{ Pattern = '(?s)function Assert-PublishedAttestation.*?gh attestation verify \$Path --repo \$Repository.*?\$LASTEXITCODE -ne 0.*?attestation is missing or invalid'; Description = 'published verifier fails closed on missing or invalid provenance' },
+    @{ Pattern = '(?s)foreach \(\$asset in \$assets\).*?\$actualHash -ne \$digest\.Substring.*?if \(\$verifyAttestations\).*?Assert-PublishedAttestation.*?-Repository \$repository'; Description = 'published verifier checks provenance for every downloaded release asset after its GitHub digest' },
     @{ Pattern = 'SequenceEqual'; Description = 'published verifier preserves byte-identical legacy x64 checksum alias' },
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },

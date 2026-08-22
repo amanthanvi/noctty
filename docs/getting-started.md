@@ -35,23 +35,95 @@ both architectures ship every asset:
 
 The legacy `SHA256SUMS.txt` file remains an x64 compatibility alias.
 
-Verify the download before you run it. Grab
-`SHA256SUMS-windows-<arch>.txt` from the same release, then hash the file
-you actually downloaded. For the installer:
+### Verify a release
+
+Verify every manual download before running or extracting it. These checks are
+complementary: the checksum detects changed bytes, Authenticode plus the pinned
+publisher key verifies the Windows signer, and the GitHub build-provenance
+attestation binds the exact release bytes to this repository's release workflow.
+
+First, download the artifact and its matching
+`SHA256SUMS-windows-<arch>.txt`, then run:
 
 ```powershell
-Get-FileHash .\noctty-<version>-windows-<arch>-setup.exe -Algorithm SHA256
+$artifact = (Resolve-Path '.\noctty-<version>-windows-<arch>-setup.exe').Path # or the portable ZIP
+$checksums = (Resolve-Path '.\SHA256SUMS-windows-<arch>.txt').Path
+$name = [IO.Path]::GetFileName($artifact)
+$matches = @(Get-Content -LiteralPath $checksums | Where-Object {
+    $_ -match ('^[0-9a-fA-F]{64} \*' + [regex]::Escape($name) + '$')
+})
+if ($matches.Count -ne 1) { throw "Expected one checksum for $name; found $($matches.Count)." }
+$expected = ($matches[0] -split ' ', 2)[0].ToLowerInvariant()
+$actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch for $name." }
+"SHA-256 verified: $actual"
 ```
 
-For the portable ZIP:
+If it does not match, stop; delete the artifact and download it again.
+
+For v1.3.124 and later, verify GitHub build provenance for both the artifact and
+the checksum file. This covers the portable ZIP container itself, not only the
+binaries inside it. GitHub CLI 2.49.0 or later provides `gh attestation`:
 
 ```powershell
-Get-FileHash .\noctty-<version>-windows-<arch>-portable.zip -Algorithm SHA256
+foreach ($path in @($artifact, $checksums)) {
+    gh attestation verify $path --repo amanthanvi/noctty
+    if ($LASTEXITCODE -ne 0) { throw "Missing or invalid build provenance for $path." }
+}
 ```
 
-Compare the result against the matching line in
-`SHA256SUMS-windows-<arch>.txt`. If it doesn't match, stop. Don't install
-or extract that file; delete it and download it again.
+Finally, verify Authenticode and the updater's publisher-key pin. Run this from
+a noctty source checkout at the same release tag so the reviewed
+`scripts/signing-trust.ps1` helper is available. For the installer, use:
+
+```powershell
+$signedFiles = @($artifact)
+```
+
+For the portable ZIP, use this instead:
+
+```powershell
+$extract = Join-Path ([IO.Path]::GetTempPath()) "noctty-verify-$([guid]::NewGuid().ToString('N'))"
+Expand-Archive -LiteralPath $artifact -DestinationPath $extract
+$signedFiles = @(
+    (Join-Path $extract 'noctty/noctty.com'),
+    (Join-Path $extract 'noctty/noctty.exe'),
+    (Join-Path $extract 'noctty/ghostty-vt.dll')
+)
+```
+
+Then run the signature and pin check:
+
+```powershell
+. .\scripts\signing-trust.ps1
+$expectedPin = '671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a'
+foreach ($file in $signedFiles) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $file
+    if (-not $signature.SignerCertificate) { throw "No Authenticode signer: $file" }
+    $accepted = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+    if (-not $accepted -and
+        $signature.SignerCertificate.Subject -eq $signature.SignerCertificate.Issuer -and
+        (Test-SelfSignedTrustStatus -Signature $signature -Path $file)) {
+        $accepted = $true
+    }
+    if (-not $accepted) { throw "Invalid Authenticode signature: $file ($($signature.Status))" }
+    $actualPin = Get-CertificateSpkiSha256 -Certificate $signature.SignerCertificate
+    if ($actualPin -ne $expectedPin) { throw "Unexpected publisher SPKI: $actualPin" }
+}
+"Authenticode and publisher SPKI verified for $($signedFiles.Count) file(s)."
+```
+
+[ADR 0005](adr/0005-pin-updater-publisher-public-keys.md) is the canonical pin
+and rotation policy:
+
+> The current release track pins the SPKI for the self-signed
+> `CN=winghostty Local Dev Signing` certificate used from v1.3.117 onward:
+> `671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a`.
+
+> Certificate renewal with the same key needs no application change. Key
+> rotation requires an overlap release that trusts both the current and next
+> public keys before release signing moves to the next key; a later release may
+> remove the retired key.
 
 ### Installer
 
@@ -80,15 +152,20 @@ PATH. The `noctty +...` commands below assume you've either added
 the folder containing `noctty.exe` to PATH or are running them from
 that folder.
 
-### About the SmartScreen warning
+### Code signing policy and the SmartScreen warning
 
-Release installers and the Windows binaries inside the portable ZIP are
-Authenticode-signed, but the current signing certificate is self-signed.
-The ZIP container itself is checksummed, not signed.
+Every release on the current release track is Authenticode-signed with the same
+certificate. The certificate is self-signed, so Windows cannot chain it to a
+publicly trusted publisher and SmartScreen warnings are expected. The portable
+ZIP and every other published release asset also carry GitHub build-provenance
+attestations starting with v1.3.124; provenance complements Authenticode but does
+not make a self-signed certificate publicly trusted.
 
-A self-signed certificate carries no third-party publisher identity, so
-it earns no SmartScreen reputation. The warning won't fade with time;
-expect it until releases move to a CA-issued certificate.
+SmartScreen reputation accrues per file hash. Re-signing changes that hash, so
+the re-signed binary starts building file-hash reputation again. Extended
+Validation (EV) certificates no longer receive instant SmartScreen reputation;
+Microsoft removed that behavior in 2024. See Microsoft's factual
+[SmartScreen reputation guidance](https://learn.microsoft.com/windows/apps/package-and-deploy/smartscreen-reputation).
 
 Be precise about what the checksum buys you before you click through. It
 confirms the file arrived intact and matches what the release publishes,
@@ -100,6 +177,31 @@ page is the publisher key pinned in the updater and recorded in
 updates are checked against that pin and refuse an installer signed by
 anything else, and `scripts/verify-published-release.ps1` checks a
 published release the same way.
+
+Moving to a publicly trusted signer is a user decision, not an automated repo
+step. The two supported choices are:
+
+- **SignPath Foundation:** free for qualifying open-source projects under its
+  [published conditions](https://signpath.org/terms.html). If accepted, replace
+  the PFX-based signing stage and `WINDOWS_CODESIGN_PFX_BASE64` secret with the
+  SignPath signing-request action and a `SIGNPATH_API_TOKEN` secret; keep the
+  returned signed files in the existing verification, packaging, Defender, and
+  attestation path.
+- **Purchased OV certificate:** if the provider supplies a CI-usable PFX,
+  replace `WINDOWS_CODESIGN_PFX_BASE64` and
+  `WINDOWS_CODESIGN_PFX_PASSWORD` with the new certificate and password. If the
+  key is held by a hardware or cloud signing service, replace the PFX signing
+  invocation with that provider's authenticated signing step while preserving
+  the same signed-file outputs and downstream checks.
+
+For either choice, follow ADR 0005 in order: first ship the new SPKI as an
+overlap pin in a release signed by the current key; only then switch the signing
+provider/key; remove the retired pin only after the overlap release is broadly
+deployed. Set `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=false`, configure
+`WINDOWS_CODESIGN_TIMESTAMP_URL`, and require timestamping for every CA-issued
+signature before publishing. Certificate acquisition, SignPath application and
+approval, and any provider account setup remain maintainer actions outside this
+repository.
 
 ## 3. First launch
 

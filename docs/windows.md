@@ -29,12 +29,14 @@ Chocolatey installs are available with `choco install noctty`.
 
 The installer and the binaries inside the portable ZIP are
 Authenticode-signed with a self-signed certificate; the ZIP container
-itself is checksummed, not signed.
+and every published release asset carry GitHub build-provenance attestations
+starting with v1.3.124.
 The legacy `SHA256SUMS.txt` file remains an x64 auto-update compatibility
 alias.
 
-For the download-and-install walkthrough, including what the SmartScreen
-warning means, see [getting-started.md](getting-started.md).
+For checksums, Authenticode/SPKI-pin verification, provenance verification,
+and the SmartScreen/signing policy, see
+[Verify a release](getting-started.md#verify-a-release).
 
 ## Paths
 

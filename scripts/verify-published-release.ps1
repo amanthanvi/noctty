@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repository = 'amanthanvi/noctty'
+$firstAttestedVersion = [version]'1.3.124'
 . (Join-Path $PSScriptRoot 'windows-architecture.ps1')
 . (Join-Path $PSScriptRoot 'signing-trust.ps1')
 
@@ -67,6 +68,27 @@ function Get-ChecksumEntries {
     return $entries
 }
 
+function Test-GhAttestationAvailable {
+    & gh attestation verify --help *> $null
+    if ($LASTEXITCODE -eq 0) { return $true }
+
+    Write-Warning 'Skipping build provenance attestation verification: the installed GitHub CLI does not provide the gh attestation verify subcommand. Upgrade gh to verify provenance.'
+    return $false
+}
+
+function Assert-PublishedAttestation {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Label,
+        [Parameter(Mandatory)] [string]$Repository
+    )
+
+    & gh attestation verify $Path --repo $Repository
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Label build provenance attestation is missing or invalid: $Path"
+    }
+}
+
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'GitHub CLI (gh) is required to verify a published release.'
 }
@@ -80,6 +102,13 @@ if ($LASTEXITCODE -ne 0) { throw "Could not load published release $tag from $re
 $release = $releaseJson | ConvertFrom-Json
 if ($release.tagName -ne $tag -or $release.isDraft -or $release.isPrerelease) {
     throw "Published release $tag must exist as a stable, non-draft release."
+}
+$requiresAttestation = ([version]$Version -ge $firstAttestedVersion)
+$verifyAttestations = if ($requiresAttestation) {
+    Test-GhAttestationAvailable
+} else {
+    Write-Host "Skipping build provenance attestation verification: $tag predates the v$firstAttestedVersion attestation requirement."
+    $false
 }
 
 $expectedNames = [System.Collections.Generic.List[string]]::new()
@@ -138,6 +167,12 @@ try {
         }
         if ($actualHash -ne $digest.Substring(7).ToLowerInvariant()) {
             throw "GitHub digest mismatch for asset $($asset.name)."
+        }
+        if ($verifyAttestations) {
+            Assert-PublishedAttestation `
+                -Path $path `
+                -Label ([string]$asset.name) `
+                -Repository $repository
         }
     }
 
@@ -199,7 +234,14 @@ try {
         throw "Published release binaries are not signed by one consistent certificate (thumbprints=$($thumbprints -join ', '); pins=$($pins -join ', '))."
     }
 
-    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $($signatureEvidence.Count) signed PE files, SPKI $($pins[0]))" -ForegroundColor Green
+    $attestationSummary = if ($verifyAttestations) {
+        "$($assets.Count) provenance attestations"
+    } elseif ($requiresAttestation) {
+        'provenance skipped because gh attestation verify is unavailable'
+    } else {
+        "provenance not required before v$firstAttestedVersion"
+    }
+    Write-Host "Published release verification: PASS ($tag, $($assets.Count) assets, $attestationSummary, $($signatureEvidence.Count) signed PE files, SPKI $($pins[0]))" -ForegroundColor Green
 }
 finally {
     if ($createdTempDirectory -and (Test-Path -LiteralPath $DownloadDirectory)) {

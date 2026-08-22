@@ -129,10 +129,11 @@ and lands incrementally.
 ## Known caveats
 
 - Installers and the Windows binaries inside the portable ZIP are
-  Authenticode-signed; the ZIP container itself is checksummed, not
-  signed. SmartScreen can still warn for a new or low-reputation
-  publisher certificate; see
-  [getting-started.md](getting-started.md#about-the-smartscreen-warning).
+  Authenticode-signed. Starting with v1.3.124, the ZIP container and every
+  other published release asset carry a GitHub build-provenance attestation.
+  The Authenticode certificate remains self-signed, so SmartScreen warnings
+  are still expected; see the
+  [code signing policy](getting-started.md#code-signing-policy-and-the-smartscreen-warning).
 - GitHub Issues are for reproducible bugs. For questions, feature
   discussion, and feedback, use
   [Discussions](https://github.com/amanthanvi/noctty/discussions).

@@ -19,6 +19,8 @@ on:
 permissions:
   contents: write
   actions: read
+  id-token: write
+  attestations: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -420,6 +422,44 @@ jobs:
               throw "Microsoft Defender rejected $scanPath with exit code $LASTEXITCODE."
             }
           }
+
+      - name: Prepare build provenance attestation
+        id: attestation_guard
+        shell: pwsh
+        env:
+          ATTEST_REPOSITORY: ${{ github.repository }}
+          ATTEST_SERVER_URL: ${{ github.server_url }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if ($env:ATTEST_REPOSITORY -ne "amanthanvi/noctty" -or
+              $env:ATTEST_SERVER_URL -ne "https://github.com" -or
+              -not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or
+              -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
+            Write-Host "Skipping build provenance attestation: the canonical GitHub repository and OIDC context are required."
+            "enabled=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            return
+          }
+
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$env:RELEASE_VERSION-windows-x64"
+          $checksumsPath = Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $env:RELEASE_VERSION -Architecture x64 -Kind checksums)
+          $legacyChecksumsPath = Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $env:RELEASE_VERSION -Architecture x64 -Kind legacy-checksums)
+          Copy-Item -LiteralPath $checksumsPath -Destination $legacyChecksumsPath -Force
+          "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Attest published release artifacts
+        if: steps.attestation_guard.outputs.enabled == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-setup.exe
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-${{ steps.meta.outputs.version }}-windows-x64-portable.zip
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS-windows-x64.txt
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-setup.exe
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/noctty-${{ steps.meta.outputs.version }}-windows-arm64-portable.zip
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-arm64/SHA256SUMS-windows-arm64.txt
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/SHA256SUMS.txt
+            dist/artifacts/noctty-${{ steps.meta.outputs.version }}-windows-x64/noctty-icon.svg
 
       - name: Generate package manager metadata
         shell: pwsh
