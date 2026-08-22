@@ -70,6 +70,11 @@ or extract that file; delete it and download it again.
 Keep the whole extracted folder together: `noctty.exe` needs the
 `share` folder next to it for themes, terminfo, and shell integration.
 
+To keep config, state, and cache in that folder too, create an empty
+`noctty.portable` file beside `noctty.exe`; extraction alone does not enable
+portable mode. `portable.txt` and an existing `config.ghostty` regular file are
+also recognized markers; directories and a bare file named `config` are not.
+
 Neither the installer nor the portable ZIP adds `noctty` to your
 PATH. The `noctty +...` commands below assume you've either added
 the folder containing `noctty.exe` to PATH or are running them from
