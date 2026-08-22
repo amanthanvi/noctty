@@ -30,7 +30,13 @@ pub fn main() !MainReturn {
         build_config.artifact == .exe and
         build_config.app_runtime == .win32)
     {
+        // Origin capture first: the portable update helper can exit this
+        // process, and the origin is what later diagnostics attribute that
+        // exit to.
         apprt.win32.captureProcessOrigin();
+        if (try apprt.win32.maybeRunPortableUpdateHelper(std.heap.page_allocator)) |exit_code| {
+            posix.exit(exit_code);
+        }
     }
 
     // We first start by initializing our global process state.
@@ -58,6 +64,15 @@ pub fn main() !MainReturn {
     if (state.action) |action| {
         std.log.info("executing noctty CLI action={}", .{action});
         posix.exit(process_shared.runCliAction(action, alloc));
+    }
+
+    // Pure CLI actions above must never be swallowed by a pending portable
+    // GUI update transaction. The helper marker remains the first dispatch.
+    if (comptime builtin.target.os.tag == .windows and
+        build_config.artifact == .exe and
+        build_config.app_runtime == .win32)
+    {
+        if (try apprt.win32.preflightPortableUpdateStartup(std.heap.page_allocator)) return;
     }
 
     // Create our app state

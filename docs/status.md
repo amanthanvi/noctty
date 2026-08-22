@@ -171,8 +171,13 @@ Win32-validated VT protocol coverage is tracked in
   with `auto-update-feed-url`) at most once every 24 hours and never replaces
   binaries silently.
 - `auto-update = download` stages only releases that pass checksum metadata
-  plus Authenticode verification. Applying a staged update is always
-  user-initiated. Details in [windows.md](windows.md#updates).
+  plus Authenticode verification; portable ZIPs additionally require a
+  publisher-signed manifest covering every payload file, and releases without
+  it stay on the release-page path. Installer-managed installs launch the
+  verified installer; portable installs apply a verified ZIP on the next
+  launch and roll back an unconfirmed or failed startup. Applying a staged
+  update is always user-initiated. Details in
+  [windows.md](windows.md#updates).
 
 ### Windows package managers
 
@@ -293,7 +298,6 @@ No formal roadmap. Likely next areas:
 - A keyboard focus-region cycle so window chrome is reachable without a
   mouse.
 - Continuing the `src/apprt/win32.zig` extraction.
-- Portable ZIP updater apply/rollback.
 - Broader local crash metadata and report packaging.
 - ARB-context OpenGL migration paired with atlas rebuild.
 

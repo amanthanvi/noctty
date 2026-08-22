@@ -53,6 +53,14 @@ Keep the folder together: `noctty.exe` needs the `share` folder next to it for
 themes, terminfo, and shell integration. `.\noctty.com +register-shell-menu`
 adds an "Open noctty here" entry to Explorer's right-click menu.
 
+Keep the extracted folder together: `noctty.exe` needs the `share` folder
+beside it for themes, terminfo, and shell integration.
+
+To keep config, state, and cache in that folder too, create an empty
+`noctty.portable` file beside `noctty.exe`; extraction alone does not enable
+portable mode. `portable.txt` and an existing `config.ghostty` regular file
+are also recognized markers; directories are not.
+
 Neither install adds `noctty` to PATH. The `noctty +...` commands below assume
 you added the install folder to PATH or are running from it.
 
