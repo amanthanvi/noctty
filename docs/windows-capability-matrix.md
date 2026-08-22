@@ -45,6 +45,7 @@ Last reviewed: 2026-08-12.
 | Ghostty docs surface                                                              | noctty note                                                                                                            |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. noctty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
+| Elevated windows                                                                  | Separate `runas` windows with integrity-scoped IPC and no elevated session restore. See [Running elevated](windows.md#running-elevated). |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
 | [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\noctty\...`, not the macOS/Linux paths documented upstream.      |
 | Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |

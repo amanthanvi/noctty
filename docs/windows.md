@@ -132,6 +132,51 @@ window stages edits until Save and patches your config without rewriting
 unrelated text. The full feature detail for both lives in the
 [capability matrix notes](windows-capability-matrix.md#notes).
 
+## Running elevated
+
+Use **New Elevated Window** in the command palette, or bind
+`new_window_elevated:`. The empty payload uses the current/default Windows
+shell profile; `new_window_elevated:<profile-key>` selects a detected profile
+by key. Windows shows a UAC prompt before the new process starts. Cancelling
+the prompt leaves the current window unchanged.
+
+An elevated noctty is a separate process and a separate window. Its title is
+prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be
+mixed in one window: Windows isolates the processes with UIPI, and injecting a
+shell across that boundary is not a supported design.
+
+Single-instance IPC is scoped by integrity level. A normal launch and
+`+new-window` forward only to an existing noctty at the caller's integrity
+level. From an elevated shell, `+new-window` therefore opens in the elevated
+group (and starts an elevated noctty when that group is absent), while
+`+list-windows` lists only elevated windows. The same commands from a
+non-elevated shell see only the non-elevated group; neither direction silently
+forwards a window across the integrity boundary.
+
+Elevated processes do not read or write
+`%LOCALAPPDATA%\noctty\session-state.json`. They never restore an earlier
+workspace, never overwrite the non-elevated saved workspace, and are not
+resurrected by session restore. Configuration and other per-user state still
+resolve from the same `%LOCALAPPDATA%\noctty\` profile as the non-elevated
+process.
+
+An elevated noctty loads the same `%LOCALAPPDATA%\noctty\config.ghostty` and
+the same explicit `--config-file` overrides as a non-elevated process. Those
+files remain writable by the ordinary user account, so anything that can
+modify the configuration, including `command`, `shell-integration`, and theme
+paths, runs at high integrity the next time an elevated window opens.
+
+UIPI also prevents files from being dragged from non-elevated Explorer into
+an elevated noctty window. No message-filter exception is installed; use a
+shell command or an elevated file manager when the elevated terminal needs a
+path.
+
+Global bindings remain desktop-wide Win32 `RegisterHotKey` registrations.
+Whichever noctty process registers a chord first owns it, regardless of the
+process integrity level; a later process logs a registration conflict. The
+losing process retries on configuration synchronization or restart, not
+automatically when the winner exits.
+
 ## Session restore and recovery
 
 Session restore persists the practical shape of your workspace: host

@@ -356,6 +356,27 @@ pub fn newWindow(self: *App, rt_app: *apprt.App, msg: Message.NewWindow) !void {
     );
 }
 
+/// Create a new elevated window, preserving the invoking surface as the
+/// source of working-directory and profile context when it is still live.
+pub fn newWindowElevated(
+    self: *App,
+    rt_app: *apprt.App,
+    parent: ?*Surface,
+    profile_key: []const u8,
+) !void {
+    const target: apprt.Target = target: {
+        const surface = parent orelse break :target .app;
+        if (self.hasSurface(surface)) break :target .{ .surface = surface };
+        break :target .app;
+    };
+
+    _ = try rt_app.performAction(
+        target,
+        .new_window_elevated,
+        .{ .profile_key = profile_key },
+    );
+}
+
 /// Handle an app-level focus event. This should be called whenever
 /// the focus state of the entire app containing Ghostty changes.
 /// This is separate from surface focus events. See the `focused`
@@ -496,6 +517,11 @@ pub fn performAction(
         .ignore => {},
         .quit => _ = try rt_app.performAction(.app, .quit, {}),
         .new_window => _ = try self.newWindow(rt_app, .{ .parent = null }),
+        .new_window_elevated => |profile_key| _ = try self.newWindowElevated(
+            rt_app,
+            null,
+            profile_key,
+        ),
         .open_config => _ = try rt_app.performAction(.app, .open_config, {}),
         .reload_config => _ = try rt_app.performAction(.app, .reload_config, .{}),
         .close_all_windows => _ = try rt_app.performAction(.app, .close_all_windows, {}),
