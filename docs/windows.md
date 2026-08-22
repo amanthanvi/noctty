@@ -383,11 +383,18 @@ profiles, working directories, and explicit titles. It does not restore
 child process state. Terminal contents come back only when
 `window-save-state-scrollback` is set to a nonzero line count; the default
 is `0` (off) because terminal output becomes data at rest and can contain
-secrets.
+secrets. The value is a request clamped to 10,000 lines, not a guarantee:
+all panes share a 512 KiB encoded budget, each pane is pre-limited by its
+current width, and any line over 16 KiB is omitted, so wide panes and panes
+captured later can keep fewer lines.
 
-Snapshots are plain text without colors or styles. Each restored pane ends
-with a `--- RESTORED SNAPSHOT END | ...Z ---` separator carrying the capture
-time, and the whole snapshot sits above the live prompt in scrollback so the
+Snapshots are plain text without colors or styles. Soft-wrapped rows become
+separate hard lines, a row containing invalid UTF-8 or control bytes other
+than tab is dropped whole rather than sanitized, and a capture taken while
+the alternate screen is active records the TUI screen instead of the shell
+history. Each restored pane ends with a
+`--- RESTORED SNAPSHOT END | ...Z ---` separator carrying the capture time,
+and the whole snapshot sits above the live prompt in scrollback so the
 shell's startup repaint cannot destroy it. Engaging `toggle_secure_input`
 once excludes that pane from snapshots for the rest of the session, even if
 the indicator is later turned off.
@@ -396,7 +403,9 @@ If the session-state file is unreadable, noctty moves it aside to a sibling
 with a `.corrupt` suffix, logs the failure, and starts with a fresh window.
 When an earlier quarantine file already exists, a numeric suffix is added
 (`.corrupt.1`, `.corrupt.2`, and so on) so nothing is overwritten. If the
-move fails, the original file is left untouched.
+move fails, the original file is left untouched. Older builds parse the
+schema strictly, so downgrading while a saved state contains `scrollback`
+can quarantine that file as `.corrupt`.
 
 Three consecutive pre-ready startup failures select an ephemeral safe mode:
 built-in config, no session restore. `noctty --safe-mode` picks it for one

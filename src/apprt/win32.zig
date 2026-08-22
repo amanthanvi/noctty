@@ -3962,7 +3962,6 @@ pub const App = struct {
         defer transaction.rollback();
         var host: ?*Host = null;
         var window_surface: ?*Surface = null;
-        var restored_snapshot_panes: usize = 0;
 
         for (window.tabs, 0..) |saved_tab, tab_index| {
             const tab_surface = try self.restoreSessionTab(
@@ -3970,7 +3969,6 @@ pub const App = struct {
                 host,
                 tab_index,
                 &transaction,
-                &restored_snapshot_panes,
             );
             if (host == null) {
                 host = tab_surface.host;
@@ -3990,17 +3988,6 @@ pub const App = struct {
         restored_host.active_tab = @min(window.selected_tab, restored_host.tabs.items.len - 1);
         const active_tab = &restored_host.tabs.items[restored_host.active_tab];
         const selected = active_tab.focusedSurface() orelse window_surface orelse return error.EmptyTabs;
-        if (restored_snapshot_panes > 0) {
-            var message_buf: [96]u8 = undefined;
-            const message = std.fmt.bufPrint(
-                &message_buf,
-                "Restored snapshot content for {d} pane{s}.",
-                .{ restored_snapshot_panes, if (restored_snapshot_panes == 1) "" else "s" },
-            ) catch "Restored pane snapshot content.";
-            restored_host.setBanner(.info, message) catch |err| {
-                log.warn("win32 session restore: snapshot banner failed err={}", .{err});
-            };
-        }
         transaction.commit();
         return selected;
     }
@@ -4011,7 +3998,6 @@ pub const App = struct {
         existing_host: ?*Host,
         tab_index: usize,
         transaction: *SessionRestoreTransaction,
-        restored_snapshot_panes: *usize,
     ) !*Surface {
         var tab_surface: ?*Surface = null;
         var created: usize = 0;
@@ -4032,7 +4018,6 @@ pub const App = struct {
                 tab_index,
                 preferredSplitDirection(saved_tab.layout),
                 transaction,
-                restored_snapshot_panes,
             );
             node_surfaces[node_index] = surface;
             if (tab_surface == null) tab_surface = surface;
@@ -4066,7 +4051,6 @@ pub const App = struct {
         tab_index: usize,
         split_direction: SplitTreeSurface.Split.Direction,
         transaction: *SessionRestoreTransaction,
-        restored_snapshot_panes: *usize,
     ) !*Surface {
         const host = existing_host orelse if (tab_surface) |source| source.host else null;
         const open_kind: apprt.surface.NewSurfaceContext = if (host == null)
@@ -4119,14 +4103,13 @@ pub const App = struct {
         const scrollback_lines: usize = self.config.@"window-save-state-scrollback";
         if (scrollback_lines > 0) {
             if (pane.scrollback) |snapshot| {
-                const restored = surface.restoreSessionScrollback(
+                _ = surface.restoreSessionScrollback(
                     snapshot,
                     scrollback_lines,
                 ) catch |err| {
                     log.warn("win32 session restore: pane snapshot omitted or partial err={}", .{err});
                     return surface;
                 };
-                if (restored) restored_snapshot_panes.* += 1;
             }
         }
         return surface;
@@ -4174,27 +4157,24 @@ pub const App = struct {
         }
     }
 
-    fn sessionStateSizeAllowed(encoded_len: usize, scrollback_lines: usize) bool {
-        const max_bytes = if (scrollback_lines > 0)
-            win32_session_persistence.default_max_state_bytes
-        else
-            win32_session_persistence.max_layout_state_bytes;
-        return encoded_len <= max_bytes;
-    }
-
     fn saveSessionState(self: *const App) bool {
         if (!self.sessionStateEnabled()) return false;
         const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
 
         const scrollback_lines: usize = self.config.@"window-save-state-scrollback";
-        const primary_encoded: ?[]u8 = primary: {
+        for ([_]usize{ scrollback_lines, 0 }, 0..) |attempt_lines, attempt_index| {
+            if (attempt_index == 1) {
+                if (scrollback_lines == 0) break;
+                log.warn("win32 session save: retrying without scrollback", .{});
+            }
+
             var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
             defer arena.deinit();
 
-            const state = self.buildSessionState(arena.allocator(), scrollback_lines) catch |err| {
-                log.warn("win32 session save: snapshot failed err={}", .{err});
-                break :primary null;
+            const state = self.buildSessionState(arena.allocator(), attempt_lines) catch |err| {
+                log.warn("win32 session save: snapshot failed scrollback_lines={d} err={}", .{ attempt_lines, err });
+                continue;
             };
             if (state.windows.len == 0) {
                 win32_session_persistence.deleteFileIfPresent(path) catch |err| {
@@ -4205,57 +4185,25 @@ pub const App = struct {
             }
 
             const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, state) catch |err| {
-                log.warn("win32 session save: encode failed err={}", .{err});
-                break :primary null;
+                log.warn("win32 session save: encode failed scrollback_lines={d} err={}", .{ attempt_lines, err });
+                continue;
             };
-            if (!sessionStateSizeAllowed(encoded.len, scrollback_lines)) {
-                self.core_app.alloc.free(encoded);
-                log.warn("win32 session save: state exceeds write limit bytes={d}", .{encoded.len});
-                break :primary null;
-            }
-            break :primary encoded;
-        };
-
-        if (primary_encoded) |encoded| {
             defer self.core_app.alloc.free(encoded);
+            const max_bytes = if (attempt_lines > 0)
+                win32_session_persistence.default_max_state_bytes
+            else
+                win32_session_persistence.max_layout_state_bytes;
+            if (encoded.len > max_bytes) {
+                log.warn("win32 session save: state exceeds write limit bytes={d}", .{encoded.len});
+                continue;
+            }
             writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
                 log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
                 return false;
             };
             return true;
         }
-        if (scrollback_lines == 0) return false;
-
-        log.warn("win32 session save: retrying without scrollback", .{});
-        var layout_arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
-        defer layout_arena.deinit();
-        const layout_state = self.buildSessionState(layout_arena.allocator(), 0) catch |err| {
-            log.warn("win32 session save: layout-only snapshot failed err={}", .{err});
-            return false;
-        };
-        if (layout_state.windows.len == 0) {
-            win32_session_persistence.deleteFileIfPresent(path) catch |err| {
-                log.warn("win32 session save: delete stale state failed path={s} err={}", .{ path, err });
-                return false;
-            };
-            return true;
-        }
-
-        const encoded = win32_session_state.encodeAlloc(self.core_app.alloc, layout_state) catch |err| {
-            log.warn("win32 session save: layout-only encode failed err={}", .{err});
-            return false;
-        };
-        defer self.core_app.alloc.free(encoded);
-        if (!sessionStateSizeAllowed(encoded.len, 0)) {
-            log.warn("win32 session save: layout state exceeds write limit bytes={d}", .{encoded.len});
-            return false;
-        }
-
-        writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
-            log.warn("win32 session save: write failed path={s} err={}", .{ path, err });
-            return false;
-        };
-        return true;
+        return false;
     }
 
     fn buildSessionState(
@@ -4394,7 +4342,6 @@ pub const App = struct {
                             scrollback_lines,
                             remaining_scrollback_budget,
                         ) catch |err| snapshot: {
-                            remaining_scrollback_budget.* = 0;
                             log.warn("win32 session save: pane snapshot omitted err={}", .{err});
                             break :snapshot null;
                         },
@@ -18187,6 +18134,7 @@ fn restoreTerminalScrollbackSnapshot(
     var marker_buf: [160]u8 = undefined;
     const marker = try formatSessionSnapshotMarker(&marker_buf, snapshot.captured_at_unix_ms);
     try printSessionSnapshotLine(terminal_state, marker);
+    try terminal_state.screens.active.scrollClear();
     return restored_lines;
 }
 
@@ -35106,14 +35054,17 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
     );
     try std.testing.expectEqual(@as(usize, 2), restored_lines);
 
-    const plain = try terminal_state.plainString(std.testing.allocator);
-    defer std.testing.allocator.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "safe snapshot line") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "tab") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "payload") == null);
+    const screen = try terminal_state.screens.active.dumpStringAlloc(
+        std.testing.allocator,
+        .{ .screen = .{} },
+    );
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "safe snapshot line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "tab") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "payload") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        plain,
+        screen,
         "--- RESTORED SNAPSHOT END | 1970-01-01T00:00:00Z ---",
     ) != null);
     try std.testing.expectEqualStrings("original title", terminal_state.getTitle().?);
@@ -35168,33 +35119,48 @@ test "win32 session scrollback restore marks snapshots and rejects control lines
         .{ .captured_at_unix_ms = 0, .lines = &lowered_lines },
         2,
     ));
-    const lowered_plain = try lowered_terminal.plainString(std.testing.allocator);
-    defer std.testing.allocator.free(lowered_plain);
-    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "oldest") == null);
-    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "middle") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "newest") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lowered_plain, "SNAPSHOT END") != null);
+    const lowered_screen = try lowered_terminal.screens.active.dumpStringAlloc(
+        std.testing.allocator,
+        .{ .screen = .{} },
+    );
+    defer std.testing.allocator.free(lowered_screen);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_screen, "oldest") == null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_screen, "middle") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_screen, "newest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lowered_screen, "SNAPSHOT END") != null);
 }
 
-test "win32 session save enforces layout and combined size boundaries" {
+test "win32 session scrollback restore survives pwsh ConPTY startup repaint" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect(App.sessionStateSizeAllowed(
-        win32_session_persistence.max_layout_state_bytes,
-        0,
+    var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 8,
+        .max_scrollback = 1024,
+    });
+    defer terminal_state.deinit(std.testing.allocator);
+
+    const lines = [_][]const u8{
+        "L01", "L02", "L03", "L04", "L05", "L06",
+        "L07", "L08", "L09", "L10", "L11", "L12",
+    };
+    try std.testing.expectEqual(@as(usize, lines.len), try restoreTerminalScrollbackSnapshot(
+        &terminal_state,
+        .{ .captured_at_unix_ms = 0, .lines = &lines },
+        lines.len,
     ));
-    try std.testing.expect(!App.sessionStateSizeAllowed(
-        win32_session_persistence.max_layout_state_bytes + 1,
-        0,
-    ));
-    try std.testing.expect(App.sessionStateSizeAllowed(
-        win32_session_persistence.default_max_state_bytes,
-        1,
-    ));
-    try std.testing.expect(!App.sessionStateSizeAllowed(
-        win32_session_persistence.default_max_state_bytes + 1,
-        1,
-    ));
+
+    var stream = terminal_state.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H");
+
+    const screen = try terminal_state.screens.active.dumpStringAlloc(
+        std.testing.allocator,
+        .{ .screen = .{} },
+    );
+    defer std.testing.allocator.free(screen);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "L12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen, "--- RESTORED SNAPSHOT END |") != null);
 }
 
 test "win32 session save skips quick terminal tabs" {

@@ -5,11 +5,10 @@
 //! deliberately excluded.
 
 const std = @import("std");
-const Config = @import("../config/Config.zig");
 const Allocator = std.mem.Allocator;
 
 pub const current_schema_version: u32 = 1;
-pub const max_scrollback_lines: usize = Config.window_save_state_scrollback_max_lines;
+pub const max_scrollback_lines: usize = 10_000;
 pub const max_scrollback_line_bytes: usize = 16 * 1024;
 /// Maximum conservative encoded-JSON storage charged to all pane snapshots.
 pub const max_total_scrollback_bytes: usize = 512 * 1024;
