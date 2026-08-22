@@ -1456,6 +1456,34 @@ const OpenGLStartupFailure = struct {
     step: OpenGLStartupStep,
     win32_error: ?DWORD = null,
     zig_error_name: ?[]const u8 = null,
+    detected: ?DetectedOpenGL = null,
+};
+
+pub const OpenGLStartupString = struct {
+    pub const capacity = 128;
+
+    bytes: [capacity]u8 = undefined,
+    len: u8 = 0,
+
+    fn init(driver_text: ?[]const u8) OpenGLStartupString {
+        var result: OpenGLStartupString = .{};
+        const source = driver_text orelse return result;
+        const len = @min(source.len, capacity);
+        @memcpy(result.bytes[0..len], source[0..len]);
+        result.len = @intCast(len);
+        return result;
+    }
+
+    fn value(self: *const OpenGLStartupString) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+const DetectedOpenGL = struct {
+    major: u32,
+    minor: u32,
+    renderer: OpenGLStartupString = .{},
+    vendor: OpenGLStartupString = .{},
 };
 
 var opengl_startup_diagnostics_mutex: std.Thread.Mutex = .{};
@@ -1527,6 +1555,29 @@ pub fn recordOpenGLStartupError(step: OpenGLStartupStep, err: anyerror) void {
     log.err("Win32 OpenGL startup failed step={s} error={s}", .{ step.label(), @errorName(err) });
 }
 
+pub fn recordOpenGLStartupVersionError(
+    major: u32,
+    minor: u32,
+    renderer: ?[]const u8,
+    vendor: ?[]const u8,
+) void {
+    if (!recordOpenGLStartupFailure(.{
+        .step = .version_check,
+        .zig_error_name = @errorName(error.OpenGLOutdated),
+        .detected = .{
+            .major = major,
+            .minor = minor,
+            .renderer = .init(renderer),
+            .vendor = .init(vendor),
+        },
+    })) return;
+
+    log.err(
+        "Win32 OpenGL startup version check failed required=4.3 detected={d}.{d} renderer={s} vendor={s}",
+        .{ major, minor, renderer orelse "not reported", vendor orelse "not reported" },
+    );
+}
+
 pub fn reportStartupFailure(err: anyerror) void {
     if (comptime builtin.os.tag != .windows) return;
 
@@ -1560,6 +1611,40 @@ fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
 
 fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLStartupFailure) ![]const u8 {
     const zig_error_name = failure.zig_error_name orelse @errorName(err);
+
+    if (failure.detected) |detected| {
+        var win32_error_buf: [64]u8 = undefined;
+        const win32_error_text = if (failure.win32_error) |win32_error|
+            try std.fmt.bufPrint(&win32_error_buf, "{d}{s}", .{ win32_error, win32ErrorSuffix(win32_error) })
+        else
+            "not reported";
+
+        return std.fmt.bufPrint(buf,
+            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
+            \\
+            \\Startup error: {s}
+            \\Win32 error: {s}
+            \\Required OpenGL version: 4.3 through WGL
+            \\Detected OpenGL version: {d}.{d}
+            \\Detected renderer: {s}
+            \\Detected vendor: {s}
+            \\
+            \\This build does not include a software, DirectX, or ANGLE fallback renderer, so noctty cannot start below OpenGL 4.3.
+            \\
+            \\Try ending Remote Desktop and launching noctty in a local console session; enabling 3D acceleration and installing the VM guest graphics driver; or updating or reinstalling your GPU driver. On hybrid-GPU systems, you can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings.
+            \\
+            \\If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
+        , .{
+            build_config.version_string,
+            failure.step.label(),
+            zig_error_name,
+            win32_error_text,
+            detected.major,
+            detected.minor,
+            if (detected.renderer.len > 0) detected.renderer.value() else "not reported",
+            if (detected.vendor.len > 0) detected.vendor.value() else "not reported",
+        });
+    }
 
     if (failure.win32_error) |win32_error| {
         return std.fmt.bufPrint(buf,
@@ -1707,10 +1792,6 @@ fn sizeLimitEquals(a: apprt.action.SizeLimit, b: apprt.action.SizeLimit) bool {
 
 fn shouldShowSurfaceImmediately(host_id: ?u32) bool {
     return host_id == null;
-}
-
-fn shouldActivateSurfaceDuringInit(host_id: ?u32, passive_show: bool) bool {
-    return shouldShowSurfaceImmediately(host_id) and !passive_show;
 }
 
 fn shouldResizeHostForInitialSize(host_surface_count: usize) bool {
@@ -5656,7 +5737,7 @@ pub const App = struct {
         if (mapped_hosts != state.windows.items.len) return error.WindowCountMismatch;
     }
 
-    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface, passive_show: bool) !*Host {
+    fn createHost(self: *App, title: LPCWSTR, clone_state_from: ?*const Surface) !*Host {
         try self.ensureHostWindowClass();
         try self.ensurePaletteListClass();
         try self.ensureScrollbarClass();
@@ -5711,14 +5792,6 @@ pub const App = struct {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
 
-        // Passive first-show for quick-terminal-keyboard-interactivity
-        // = none: `SW_SHOWNOACTIVATE` makes the window visible but
-        // does NOT bring it to the foreground, so the user's current
-        // typing context stays intact. `SW_SHOW` would activate the
-        // new HWND and steal focus.
-        _ = ShowWindow(hwnd, if (passive_show) SW_SHOWNOACTIVATE else SW_SHOW);
-        _ = UpdateWindow(hwnd);
-        self.maybeScheduleAutomaticUpdateCheck();
         return host;
     }
 
@@ -6718,9 +6791,9 @@ pub const App = struct {
         defer config.deinit();
         const surface = try self.createWindowSurface(&config, quick_terminal_title, .{
             .quick_terminal = true,
-            // Passive first-show: `createHost` uses `SW_SHOWNOACTIVATE`
-            // so the new HWND appears without taking focus. Without
-            // this, the very first toggle-on with
+            // Passive first-show: `Surface.init` uses `SW_SHOWNOACTIVATE`
+            // after GL and core initialization, so the new HWND appears
+            // without taking focus. Without this, the very first toggle-on with
             // `keyboard-interactivity = none` would still activate
             // the window even though the later `present()` call is
             // skipped.
@@ -24118,7 +24191,7 @@ pub const Surface = struct {
         defer if (shell_prepared) |*prepared| prepared.deinit();
 
         const host = existing_host orelse
-            try app.createHost(title, opts.clone_state_from, opts.passive_show);
+            try app.createHost(title, opts.clone_state_from);
         const created_host = existing_host == null;
         errdefer if (created_host) app.removeHost(host);
         self.* = .{
@@ -24312,12 +24385,18 @@ pub const Surface = struct {
         if (activate_during_init) {
             try host.refreshChrome();
             try host.layout();
-            // Passive launches were already shown with SW_SHOWNOACTIVATE when the
-            // host HWND was created. Only run the active present/focus path here
-            // for launches that should take foreground focus during init.
-            if (shouldActivateSurfaceDuringInit(opts.host_id, opts.passive_show)) {
+            // Keep the top-level host hidden until GL and core initialization
+            // have succeeded. This ensures startup failures reach the fatal
+            // dialog without first presenting a blank host window.
+            if (opts.passive_show) {
+                if (host.hwnd) |host_hwnd| {
+                    _ = ShowWindow(host_hwnd, SW_SHOWNOACTIVATE);
+                    _ = UpdateWindow(host_hwnd);
+                }
+            } else {
                 self.presentWindow();
             }
+            app.maybeScheduleAutomaticUpdateCheck();
             try self.requestRepaint();
         }
 
@@ -32177,11 +32256,46 @@ test "win32-opengl-startup-failure-message-explains-version-floor" {
     const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
         .step = .version_check,
         .zig_error_name = "OpenGLOutdated",
+        .detected = .{
+            .major = 1,
+            .minor = 1,
+            .renderer = .init("GDI Generic"),
+            .vendor = .init("Microsoft Corporation"),
+        },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, message, "OpenGL 4.3 through WGL") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "required OpenGL 4.3 feature level") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Required OpenGL version: 4.3 through WGL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Detected OpenGL version: 1.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Detected renderer: GDI Generic") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Detected vendor: Microsoft Corporation") != null);
     try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: not reported") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "noctty cannot start below OpenGL 4.3") != null);
+}
+
+test "win32-opengl-startup-detected-version-message-uses-recorded-diagnostics" {
+    var buf: [4096]u8 = undefined;
+    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
+        .step = .create_context,
+        .win32_error = ERROR_MOD_NOT_FOUND,
+        .zig_error_name = "OpenGLOutdated",
+        .detected = .{
+            .major = 1,
+            .minor = 1,
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, message, "while creating the WGL context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "while checking the OpenGL version") == null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
+}
+
+test "win32-opengl-startup-failure-bounds-driver-strings" {
+    const value = "x" ** (OpenGLStartupString.capacity + 1);
+    const captured = OpenGLStartupString.init(value);
+
+    try std.testing.expectEqual(OpenGLStartupString.capacity, captured.value().len);
+    try std.testing.expectEqualStrings(value[0..OpenGLStartupString.capacity], captured.value());
 }
 
 test "win32-opengl-startup-failure-recording-is-startup-scoped" {
@@ -32537,15 +32651,6 @@ test "win32 shouldShowSurfaceImmediately only for new hosts" {
     try std.testing.expect(shouldShowSurfaceImmediately(null));
     try std.testing.expect(!shouldShowSurfaceImmediately(1));
     try std.testing.expect(!shouldShowSurfaceImmediately(99));
-}
-
-test "win32 shouldActivateSurfaceDuringInit skips passive new-host activation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(shouldActivateSurfaceDuringInit(null, false));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(null, true));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, false));
-    try std.testing.expect(!shouldActivateSurfaceDuringInit(7, true));
 }
 
 test "win32 shouldPropagateSharedHostWindowState only for active shared-host surfaces" {
