@@ -33,10 +33,11 @@
 const std = @import("std");
 const windows = std.os.windows;
 const win32_types = @import("win32_types.zig");
+const sys = @import("win32/sys.zig");
 
 const HRESULT = windows.HRESULT;
 const LPCWSTR = win32_types.LPCWSTR;
-const HKEY = *opaque {};
+const HKEY = sys.HKEY;
 const REGSAM = u32;
 const DWORD = win32_types.DWORD;
 
@@ -47,31 +48,6 @@ const REG_SZ: DWORD = 1;
 const REG_DWORD: DWORD = 4;
 const ERROR_SUCCESS: i32 = 0;
 
-extern "shell32" fn SetCurrentProcessExplicitAppUserModelID(AppID: LPCWSTR) callconv(.winapi) HRESULT;
-
-extern "advapi32" fn RegCreateKeyExW(
-    hKey: HKEY,
-    lpSubKey: LPCWSTR,
-    Reserved: DWORD,
-    lpClass: ?LPCWSTR,
-    dwOptions: DWORD,
-    samDesired: REGSAM,
-    lpSecurityAttributes: ?*anyopaque,
-    phkResult: *HKEY,
-    lpdwDisposition: ?*DWORD,
-) callconv(.winapi) i32;
-
-extern "advapi32" fn RegSetValueExW(
-    hKey: HKEY,
-    lpValueName: LPCWSTR,
-    Reserved: DWORD,
-    dwType: DWORD,
-    lpData: [*]const u8,
-    cbData: DWORD,
-) callconv(.winapi) i32;
-
-extern "advapi32" fn RegCloseKey(hKey: HKEY) callconv(.winapi) i32;
-
 const aumid_wide: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("io.github.amanthanvi.noctty");
 pub const aumid_utf8 = "io.github.amanthanvi.noctty";
 
@@ -81,7 +57,7 @@ pub const aumid_utf8 = "io.github.amanthanvi.noctty";
 /// advisory — we log and proceed on failure rather than abort, since
 /// toasts are not essential for the app to function.
 pub fn setProcessAumid() void {
-    const hr = SetCurrentProcessExplicitAppUserModelID(aumid_wide);
+    const hr = sys.SetCurrentProcessExplicitAppUserModelID(aumid_wide);
     if (hr < 0) {
         std.log.warn("AUMID: SetCurrentProcessExplicitAppUserModelID failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
     }
@@ -97,7 +73,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
     );
 
     var hkey: HKEY = undefined;
-    const open_rc = RegCreateKeyExW(
+    const open_rc = sys.RegCreateKeyExW(
         HKEY_CURRENT_USER,
         subkey,
         0,
@@ -112,7 +88,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
         std.log.warn("AUMID: RegCreateKeyExW failed rc={d}", .{open_rc});
         return;
     }
-    defer _ = RegCloseKey(hkey);
+    defer _ = sys.RegCloseKey(hkey);
 
     const display_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty");
     const set_rc = writeRegSz(hkey, std.unicode.utf8ToUtf16LeStringLiteral("DisplayName"), display_name);
@@ -138,7 +114,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
     }
 
     var show_in_settings: u32 = 1;
-    const show_rc = RegSetValueExW(
+    const show_rc = sys.RegSetValueExW(
         hkey,
         std.unicode.utf8ToUtf16LeStringLiteral("ShowInSettings"),
         0,
@@ -152,7 +128,7 @@ pub fn registerAumidDisplayName(alloc: std.mem.Allocator) void {
 }
 
 fn writeRegSz(hkey: HKEY, value_name: LPCWSTR, value: [:0]const u16) i32 {
-    return RegSetValueExW(
+    return sys.RegSetValueExW(
         hkey,
         value_name,
         0,

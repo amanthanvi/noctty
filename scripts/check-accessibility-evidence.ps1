@@ -8,7 +8,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
+$repository = if ([string]::IsNullOrWhiteSpace($env:GITHUB_REPOSITORY)) {
+    'amanthanvi/noctty'
+} else {
+    $env:GITHUB_REPOSITORY
+}
 $evidencePath = Join-Path $repoRoot "docs/accessibility-evidence/v$Version.json"
 $schemaPath = Join-Path $repoRoot 'test/windows/accessibility-evidence.schema.json'
 if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
@@ -71,21 +77,21 @@ $runId = [regex]::Match($evidence.workflow_run_url, '/actions/runs/(?<id>[0-9]+)
 if ([string]::IsNullOrWhiteSpace($runId) -or -not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'Accessibility evidence requires a valid GitHub Actions run URL and the gh CLI.'
 }
-$repo = & gh api 'repos/amanthanvi/noctty' | ConvertFrom-Json
+$repo = & gh api "repos/$repository" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Could not load repository metadata for accessibility evidence validation.' }
 $defaultBranch = $repo.default_branch
-$run = & gh api "repos/amanthanvi/noctty/actions/runs/$runId" | ConvertFrom-Json
+$run = & gh api "repos/$repository/actions/runs/$runId" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow run $runId." }
 if ($run.name -ne 'Test' -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
     $run.head_sha -ne $evidence.tested_commit -or $run.head_branch -ne $defaultBranch -or
     $run.event -notin @('push', 'workflow_dispatch', 'schedule')) {
     throw "Accessibility workflow run $runId is not a successful Test run for $($evidence.tested_commit) on default branch '$defaultBranch'."
 }
-$jobs = & gh api "repos/amanthanvi/noctty/actions/runs/$runId/jobs?per_page=100" | ConvertFrom-Json
+$jobs = & gh api "repos/$repository/actions/runs/$runId/jobs?per_page=100" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow jobs for run $runId." }
 $interactiveJob = @($jobs.jobs | Where-Object { $_.name -eq 'Windows 11 Interactive Composite' -and $_.conclusion -eq 'success' })
 if ($interactiveJob.Count -ne 1) { throw "Workflow run $runId lacks one successful Windows 11 Interactive Composite job." }
-$artifacts = & gh api "repos/amanthanvi/noctty/actions/runs/$runId/artifacts?per_page=100" | ConvertFrom-Json
+$artifacts = & gh api "repos/$repository/actions/runs/$runId/artifacts?per_page=100" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow artifacts for run $runId." }
 $evidenceArtifact = @($artifacts.artifacts | Where-Object {
     $_.name -eq "flagship-interactive-win11-$runId" -and -not $_.expired

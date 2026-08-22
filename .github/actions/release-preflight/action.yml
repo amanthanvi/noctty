@@ -1,0 +1,46 @@
+name: Release preflight
+description: Validate release copy, signing, and package-manager configuration.
+
+inputs:
+  version:
+    description: Release version without a leading v.
+    required: true
+  prerelease:
+    description: Whether stable release-copy validation may be skipped.
+    required: true
+  require-package-managers:
+    description: Whether WinGet and Scoop configuration is required.
+    required: true
+  github-token:
+    description: GitHub token used for release configuration probes.
+    required: true
+  scoop-bucket-token:
+    description: Scoop bucket token whose presence is validated by preflight.
+    required: true
+  wingetcreate-token:
+    description: WinGetCreate token whose presence is validated by preflight.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate release configuration
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SCOOP_BUCKET_TOKEN: ${{ inputs.scoop-bucket-token }}
+        WINGETCREATE_TOKEN: ${{ inputs.wingetcreate-token }}
+        RELEASE_VERSION: ${{ inputs.version }}
+        RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+        REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require-package-managers }}
+      run: |
+        $preflightArgs = @{
+          Version = $env:RELEASE_VERSION
+          RequireSigning = $true
+          RequirePackageManagers = $env:REQUIRE_PACKAGE_MANAGERS -eq 'true'
+        }
+        if ($env:RELEASE_PRERELEASE -ne 'true') {
+          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }
+        ./scripts/release-preflight.ps1 @preflightArgs

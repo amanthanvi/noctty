@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Poll cadence while waiting for command-finish evidence.
+$script:COMMAND_FINISH_POLL_MS = 250
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +17,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_COMMAND_FINISH_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'command-finish' -ResetState:$ResetState -IncludeResourcesDir
 $repoRoot = $harness.RepoRoot
@@ -113,7 +109,7 @@ $minimumRuntimeMs = 5000
 
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds $script:COMMAND_FINISH_POLL_MS
 
         $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
         $notifierDisabledFallback = $stderr -match 'winrt toast show failed err=.*NotifierDisabled; falling back to banner'

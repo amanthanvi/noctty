@@ -1,0 +1,1042 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
+const apprt = @import("../../apprt.zig");
+const CoreSurface = @import("../../Surface.zig");
+const input = @import("../../input.zig");
+
+const sys = @import("sys.zig");
+const c = @import("consts.zig");
+
+const windows = std.os.windows;
+const UINT = sys.UINT;
+const WPARAM = sys.WPARAM;
+const LPARAM = sys.LPARAM;
+
+pub const SystemWheelSettings = struct {
+    lines: u32 = 3,
+    chars: u32 = 3,
+};
+
+const MouseWheelAxis = enum {
+    horizontal,
+    vertical,
+};
+
+pub const WheelNormalizationContext = struct {
+    settings: SystemWheelSettings = .{},
+    cell_size: apprt.action.CellSize = .{ .width = 0, .height = 0 },
+    viewport: apprt.SurfaceSize = .{ .width = 0, .height = 0 },
+};
+
+pub const NormalizedWheelScroll = struct {
+    xoff: f64 = 0,
+    yoff: f64 = 0,
+    mods: input.ScrollMods = .{},
+};
+
+pub const GlobalHotkeySpec = struct {
+    modifiers: UINT,
+    vk: UINT,
+};
+
+pub const RegisteredGlobalHotkey = struct {
+    id: i32,
+    trigger: input.Binding.Trigger,
+    spec: GlobalHotkeySpec,
+    binding: *const input.Binding.Set.Value,
+};
+
+const KeyText = struct {
+    utf8: [8]u8 = [_]u8{0} ** 8,
+    len: usize = 0,
+    consumed_mods: input.Mods = .{},
+    unshifted_codepoint: u21 = 0,
+    deferred_utf16_units: usize = 0,
+};
+
+pub const DeferredCharState = struct {
+    pending_units: usize = 0,
+    high_surrogate: ?u16 = null,
+
+    pub fn authorize(self: *DeferredCharState, expected_units: usize) void {
+        self.pending_units = self.pending_units +| expected_units;
+    }
+
+    pub fn clear(self: *DeferredCharState) void {
+        self.* = .{};
+    }
+
+    pub fn consumeDeadChar(self: *DeferredCharState) void {
+        if (self.pending_units > 0) self.pending_units -= 1;
+        self.high_surrogate = null;
+    }
+
+    pub fn consumeCodeUnit(
+        self: *DeferredCharState,
+        code_unit: u16,
+        ime_composing: bool,
+    ) ?u21 {
+        if (ime_composing) {
+            self.clear();
+            return null;
+        }
+        if (self.pending_units == 0) {
+            self.high_surrogate = null;
+            return null;
+        }
+        self.pending_units -= 1;
+
+        if (self.high_surrogate) |high| {
+            if (!std.unicode.utf16IsLowSurrogate(code_unit)) {
+                self.clear();
+                return null;
+            }
+            const codepoint = std.unicode.utf16DecodeSurrogatePair(
+                &.{ high, code_unit },
+            ) catch {
+                self.clear();
+                return null;
+            };
+            self.high_surrogate = null;
+            return codepoint;
+        }
+
+        if (std.unicode.utf16IsHighSurrogate(code_unit)) {
+            self.high_surrogate = code_unit;
+            return null;
+        }
+        if (std.unicode.utf16IsLowSurrogate(code_unit)) {
+            self.clear();
+            return null;
+        }
+
+        return code_unit;
+    }
+};
+
+const Win32KeyMessage = struct {
+    event: input.KeyEvent,
+    deferred_utf16_units: usize = 0,
+};
+
+pub fn lParamBits(lParam: LPARAM) usize {
+    return @as(usize, @bitCast(lParam));
+}
+
+pub fn highWord(value: usize) u16 {
+    return @truncate((value >> 16) & 0xFFFF);
+}
+
+fn scanCodeFromLParam(lParam: LPARAM) u32 {
+    return @as(u32, highWord(lParamBits(lParam))) & 0xFF;
+}
+
+fn isExtendedKey(lParam: LPARAM) bool {
+    return (lParamBits(lParam) & c.KF_EXTENDED) != 0;
+}
+
+fn isRepeatedKey(lParam: LPARAM) bool {
+    return (lParamBits(lParam) & c.KF_REPEAT) != 0;
+}
+
+pub fn readSystemWheelSetting(action: UINT, fallback: u32) u32 {
+    var value: UINT = fallback;
+    if (sys.SystemParametersInfoW(action, 0, @ptrCast(&value), 0) == 0) {
+        return fallback;
+    }
+    return value;
+}
+
+pub fn wheelDeltaFromWParam(wParam: WPARAM) i16 {
+    const bits = @as(usize, @intCast(wParam));
+    return @bitCast(highWord(bits));
+}
+
+fn wheelSettingForAxis(settings: SystemWheelSettings, axis: MouseWheelAxis) u32 {
+    return switch (axis) {
+        .vertical => settings.lines,
+        .horizontal => settings.chars,
+    };
+}
+
+fn wheelUnitSize(ctx: WheelNormalizationContext, axis: MouseWheelAxis) f64 {
+    const dim: u32 = switch (axis) {
+        .vertical => ctx.cell_size.height,
+        .horizontal => ctx.cell_size.width,
+    };
+    return @floatFromInt(@max(dim, 1));
+}
+
+fn wheelViewportSize(ctx: WheelNormalizationContext, axis: MouseWheelAxis) f64 {
+    const dim: u32 = switch (axis) {
+        .vertical => ctx.viewport.height,
+        .horizontal => ctx.viewport.width,
+    };
+    const viewport: f64 = @floatFromInt(@max(dim, 1));
+    const unit = wheelUnitSize(ctx, axis);
+    return @max(unit, viewport - unit);
+}
+
+pub fn normalizeWheelDelta(
+    ctx: WheelNormalizationContext,
+    axis: MouseWheelAxis,
+    delta: i16,
+) NormalizedWheelScroll {
+    if (delta == 0) return .{};
+
+    const precision = @rem(delta, c.WHEEL_DELTA) != 0;
+    const notch_delta = @as(f64, @floatFromInt(delta)) / c.WHEEL_DELTA;
+    const pixels = if (precision)
+        notch_delta * wheelUnitSize(ctx, axis)
+    else discrete: {
+        const setting = wheelSettingForAxis(ctx.settings, axis);
+        if (setting == 0) return .{};
+
+        break :discrete if (setting == c.WHEEL_PAGESCROLL)
+            notch_delta * wheelViewportSize(ctx, axis)
+        else
+            notch_delta * @as(f64, @floatFromInt(setting)) * wheelUnitSize(ctx, axis);
+    };
+
+    return switch (axis) {
+        .vertical => .{
+            .yoff = pixels,
+            .mods = .{
+                .precision = precision,
+                .pixel_delta = true,
+            },
+        },
+        .horizontal => .{
+            .xoff = pixels,
+            .mods = .{
+                .precision = precision,
+                .pixel_delta = true,
+            },
+        },
+    };
+}
+
+pub fn keyPressed(vk: i32) bool {
+    return sys.GetKeyState(vk) < 0;
+}
+
+fn keyToggled(vk: i32) bool {
+    return (sys.GetKeyState(vk) & 1) != 0;
+}
+
+fn modsFromKeyboardState(state: *const [256]u8) input.Mods {
+    const pressed = struct {
+        fn check(state_: *const [256]u8, vk: usize) bool {
+            return (state_[vk] & 0x80) != 0;
+        }
+    };
+
+    return .{
+        .shift = pressed.check(state, c.VK_SHIFT),
+        .ctrl = pressed.check(state, c.VK_CONTROL),
+        .alt = pressed.check(state, c.VK_MENU),
+        .super = pressed.check(state, c.VK_LWIN) or pressed.check(state, c.VK_RWIN),
+        .caps_lock = (state[c.VK_CAPITAL] & 1) != 0,
+        .num_lock = (state[c.VK_NUMLOCK] & 1) != 0,
+        .sides = .{
+            .shift = if (pressed.check(state, c.VK_RSHIFT)) .right else .left,
+            .ctrl = if (pressed.check(state, c.VK_RCONTROL)) .right else .left,
+            .alt = if (pressed.check(state, c.VK_RMENU)) .right else .left,
+            .super = if (pressed.check(state, c.VK_RWIN)) .right else .left,
+        },
+    };
+}
+
+fn fallbackMods() input.Mods {
+    return .{
+        .shift = keyPressed(c.VK_SHIFT),
+        .ctrl = keyPressed(c.VK_CONTROL),
+        .alt = keyPressed(c.VK_MENU),
+        .super = keyPressed(c.VK_LWIN) or keyPressed(c.VK_RWIN),
+        .caps_lock = keyToggled(c.VK_CAPITAL),
+        .num_lock = keyToggled(c.VK_NUMLOCK),
+        .sides = .{
+            .shift = if (keyPressed(c.VK_RSHIFT)) .right else .left,
+            .ctrl = if (keyPressed(c.VK_RCONTROL)) .right else .left,
+            .alt = if (keyPressed(c.VK_RMENU)) .right else .left,
+            .super = if (keyPressed(c.VK_RWIN)) .right else .left,
+        },
+    };
+}
+
+fn currentKeyboardState(state: *[256]u8) ?*const [256]u8 {
+    if (sys.GetKeyboardState(state) == 0) return null;
+    return state;
+}
+
+fn currentModsFromKeyboardState(state: ?*const [256]u8) input.Mods {
+    return if (state) |keyboard_state| modsFromKeyboardState(keyboard_state) else fallbackMods();
+}
+
+pub fn currentMods() input.Mods {
+    var state: [256]u8 = [_]u8{0} ** 256;
+    return currentModsFromKeyboardState(currentKeyboardState(&state));
+}
+
+fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
+    return switch (vk) {
+        c.VK_BACK => .backspace,
+        c.VK_TAB => .tab,
+        c.VK_RETURN => if (isExtendedKey(lParam)) .numpad_enter else .enter,
+        c.VK_SHIFT => if (scanCodeFromLParam(lParam) == 0x36) .shift_right else .shift_left,
+        c.VK_LSHIFT => .shift_left,
+        c.VK_RSHIFT => .shift_right,
+        c.VK_CONTROL, c.VK_LCONTROL => if (isExtendedKey(lParam) or vk == c.VK_RCONTROL) .control_right else .control_left,
+        c.VK_RCONTROL => .control_right,
+        c.VK_MENU, c.VK_LMENU => if (isExtendedKey(lParam) or vk == c.VK_RMENU) .alt_right else .alt_left,
+        c.VK_RMENU => .alt_right,
+        c.VK_PAUSE => .pause,
+        c.VK_CAPITAL => .caps_lock,
+        c.VK_ESCAPE => .escape,
+        c.VK_SPACE => .space,
+        c.VK_PRIOR => .page_up,
+        c.VK_NEXT => .page_down,
+        c.VK_END => .end,
+        c.VK_HOME => .home,
+        c.VK_LEFT => .arrow_left,
+        c.VK_UP => .arrow_up,
+        c.VK_RIGHT => .arrow_right,
+        c.VK_DOWN => .arrow_down,
+        c.VK_SNAPSHOT => .print_screen,
+        c.VK_INSERT => .insert,
+        c.VK_DELETE => .delete,
+        c.VK_LWIN => .meta_left,
+        c.VK_RWIN => .meta_right,
+        c.VK_APPS => .context_menu,
+        c.VK_MULTIPLY => .numpad_multiply,
+        c.VK_ADD => .numpad_add,
+        c.VK_SEPARATOR => .numpad_separator,
+        c.VK_SUBTRACT => .numpad_subtract,
+        c.VK_DECIMAL => .numpad_decimal,
+        c.VK_DIVIDE => .numpad_divide,
+        c.VK_NUMLOCK => .num_lock,
+        c.VK_SCROLL => .scroll_lock,
+        c.VK_OEM_1 => .semicolon,
+        c.VK_OEM_PLUS => .equal,
+        c.VK_OEM_COMMA => .comma,
+        c.VK_OEM_MINUS => .minus,
+        c.VK_OEM_PERIOD => .period,
+        c.VK_OEM_2 => .slash,
+        c.VK_OEM_3 => .backquote,
+        c.VK_OEM_4 => .bracket_left,
+        c.VK_OEM_5 => .backslash,
+        c.VK_OEM_6 => .bracket_right,
+        c.VK_OEM_7 => .quote,
+        c.VK_0...c.VK_9 => input.Key.fromASCII(@as(u8, @intCast('0' + (vk - c.VK_0)))) orelse .unidentified,
+        c.VK_A...c.VK_Z => input.Key.fromASCII(@as(u8, @intCast('a' + (vk - c.VK_A)))) orelse .unidentified,
+        c.VK_NUMPAD0...c.VK_NUMPAD9 => @enumFromInt(
+            @intFromEnum(input.Key.numpad_0) + @as(c_int, @intCast(vk - c.VK_NUMPAD0)),
+        ),
+        c.VK_F1...c.VK_F24 => @enumFromInt(
+            @intFromEnum(input.Key.f1) + @as(c_int, @intCast(vk - c.VK_F1)),
+        ),
+        else => .unidentified,
+    };
+}
+
+fn unshiftedCodepointForVirtualKey(vk: UINT) u21 {
+    return switch (vk) {
+        c.VK_0...c.VK_9 => @as(u21, @intCast('0' + (vk - c.VK_0))),
+        c.VK_A...c.VK_Z => @as(u21, @intCast('a' + (vk - c.VK_A))),
+        c.VK_SPACE => ' ',
+        c.VK_OEM_1 => ';',
+        c.VK_OEM_PLUS => '=',
+        c.VK_OEM_COMMA => ',',
+        c.VK_OEM_MINUS => '-',
+        c.VK_OEM_PERIOD => '.',
+        c.VK_OEM_2 => '/',
+        c.VK_OEM_3 => '`',
+        c.VK_OEM_4 => '[',
+        c.VK_OEM_5 => '\\',
+        c.VK_OEM_6 => ']',
+        c.VK_OEM_7 => '\'',
+        else => 0,
+    };
+}
+
+fn hotkeyModifiers(mods: input.Mods) UINT {
+    var result: UINT = 0;
+    if (mods.alt) result |= c.MOD_ALT;
+    if (mods.ctrl) result |= c.MOD_CONTROL;
+    if (mods.shift) result |= c.MOD_SHIFT;
+    if (mods.super) result |= c.MOD_WIN;
+    return result;
+}
+
+fn hotkeyPhysicalVirtualKey(key: input.Key) ?UINT {
+    const key_int = @intFromEnum(key);
+    if (key_int >= @intFromEnum(input.Key.key_a) and key_int <= @intFromEnum(input.Key.key_z)) {
+        return c.VK_A + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.key_a)));
+    }
+    if (key_int >= @intFromEnum(input.Key.digit_0) and key_int <= @intFromEnum(input.Key.digit_9)) {
+        return c.VK_0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.digit_0)));
+    }
+    if (key_int >= @intFromEnum(input.Key.numpad_0) and key_int <= @intFromEnum(input.Key.numpad_9)) {
+        return c.VK_NUMPAD0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.numpad_0)));
+    }
+    if (key_int >= @intFromEnum(input.Key.f1) and key_int <= @intFromEnum(input.Key.f24)) {
+        return c.VK_F1 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.f1)));
+    }
+
+    return switch (key) {
+        .backspace => c.VK_BACK,
+        .tab => c.VK_TAB,
+        .enter, .numpad_enter => c.VK_RETURN,
+        .escape => c.VK_ESCAPE,
+        .space => c.VK_SPACE,
+        .page_up, .numpad_page_up => c.VK_PRIOR,
+        .page_down, .numpad_page_down => c.VK_NEXT,
+        .end, .numpad_end => c.VK_END,
+        .home, .numpad_home => c.VK_HOME,
+        .arrow_left, .numpad_left => c.VK_LEFT,
+        .arrow_up, .numpad_up => c.VK_UP,
+        .arrow_right, .numpad_right => c.VK_RIGHT,
+        .arrow_down, .numpad_down => c.VK_DOWN,
+        .print_screen => c.VK_SNAPSHOT,
+        .insert, .numpad_insert => c.VK_INSERT,
+        .delete, .numpad_delete => c.VK_DELETE,
+        .meta_left => c.VK_LWIN,
+        .meta_right => c.VK_RWIN,
+        .context_menu => c.VK_APPS,
+        .numpad_multiply => c.VK_MULTIPLY,
+        .numpad_add => c.VK_ADD,
+        .numpad_separator => c.VK_SEPARATOR,
+        .numpad_subtract => c.VK_SUBTRACT,
+        .numpad_decimal => c.VK_DECIMAL,
+        .numpad_divide => c.VK_DIVIDE,
+        .num_lock => c.VK_NUMLOCK,
+        .scroll_lock => c.VK_SCROLL,
+        .semicolon => c.VK_OEM_1,
+        .equal => c.VK_OEM_PLUS,
+        .comma => c.VK_OEM_COMMA,
+        .minus => c.VK_OEM_MINUS,
+        .period => c.VK_OEM_PERIOD,
+        .slash => c.VK_OEM_2,
+        .backquote => c.VK_OEM_3,
+        .bracket_left => c.VK_OEM_4,
+        .backslash => c.VK_OEM_5,
+        .bracket_right => c.VK_OEM_6,
+        .quote => c.VK_OEM_7,
+        else => null,
+    };
+}
+
+fn hotkeyUnicodeVirtualKey(cp: u21) ?struct { vk: UINT, shift: bool } {
+    return switch (cp) {
+        'a'...'z' => .{ .vk = c.VK_A + @as(UINT, @intCast(cp - 'a')), .shift = false },
+        'A'...'Z' => .{ .vk = c.VK_A + @as(UINT, @intCast(cp - 'A')), .shift = true },
+        '0'...'9' => .{ .vk = c.VK_0 + @as(UINT, @intCast(cp - '0')), .shift = false },
+        ')' => .{ .vk = c.VK_0, .shift = true },
+        '!' => .{ .vk = c.VK_0 + 1, .shift = true },
+        '@' => .{ .vk = c.VK_0 + 2, .shift = true },
+        '#' => .{ .vk = c.VK_0 + 3, .shift = true },
+        '$' => .{ .vk = c.VK_0 + 4, .shift = true },
+        '%' => .{ .vk = c.VK_0 + 5, .shift = true },
+        '^' => .{ .vk = c.VK_0 + 6, .shift = true },
+        '&' => .{ .vk = c.VK_0 + 7, .shift = true },
+        '*' => .{ .vk = c.VK_0 + 8, .shift = true },
+        '(' => .{ .vk = c.VK_0 + 9, .shift = true },
+        ' ' => .{ .vk = c.VK_SPACE, .shift = false },
+        ';' => .{ .vk = c.VK_OEM_1, .shift = false },
+        ':' => .{ .vk = c.VK_OEM_1, .shift = true },
+        '=' => .{ .vk = c.VK_OEM_PLUS, .shift = false },
+        '+' => .{ .vk = c.VK_OEM_PLUS, .shift = true },
+        ',' => .{ .vk = c.VK_OEM_COMMA, .shift = false },
+        '<' => .{ .vk = c.VK_OEM_COMMA, .shift = true },
+        '-' => .{ .vk = c.VK_OEM_MINUS, .shift = false },
+        '_' => .{ .vk = c.VK_OEM_MINUS, .shift = true },
+        '.' => .{ .vk = c.VK_OEM_PERIOD, .shift = false },
+        '>' => .{ .vk = c.VK_OEM_PERIOD, .shift = true },
+        '/' => .{ .vk = c.VK_OEM_2, .shift = false },
+        '?' => .{ .vk = c.VK_OEM_2, .shift = true },
+        '`' => .{ .vk = c.VK_OEM_3, .shift = false },
+        '~' => .{ .vk = c.VK_OEM_3, .shift = true },
+        '[' => .{ .vk = c.VK_OEM_4, .shift = false },
+        '{' => .{ .vk = c.VK_OEM_4, .shift = true },
+        '\\' => .{ .vk = c.VK_OEM_5, .shift = false },
+        '|' => .{ .vk = c.VK_OEM_5, .shift = true },
+        ']' => .{ .vk = c.VK_OEM_6, .shift = false },
+        '}' => .{ .vk = c.VK_OEM_6, .shift = true },
+        '\'' => .{ .vk = c.VK_OEM_7, .shift = false },
+        '"' => .{ .vk = c.VK_OEM_7, .shift = true },
+        else => null,
+    };
+}
+
+pub fn hotkeySpecForTrigger(trigger: input.Binding.Trigger) ?GlobalHotkeySpec {
+    var mods = trigger.mods.binding();
+    const vk = switch (trigger.key) {
+        .catch_all => return null,
+        .physical => |key| hotkeyPhysicalVirtualKey(key) orelse return null,
+        .unicode => |cp| unicode: {
+            const mapped = hotkeyUnicodeVirtualKey(cp) orelse return null;
+            if (mapped.shift) mods.shift = true;
+            break :unicode mapped.vk;
+        },
+    };
+
+    return .{
+        .modifiers = hotkeyModifiers(mods),
+        .vk = vk,
+    };
+}
+
+pub fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
+    return a.modifiers == b.modifiers and a.vk == b.vk;
+}
+
+pub fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
+    return switch (err) {
+        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another noctty instance",
+        .ACCESS_DENIED => "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
+        .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
+        else => "unknown Win32 RegisterHotKey failure",
+    };
+}
+
+fn isControlCodepoint(codepoint: u21) bool {
+    return codepoint < 0x20 or codepoint == 0x7F;
+}
+
+fn utf16CodeUnitCount(codepoint: u21) usize {
+    if (codepoint == 0) return 0;
+    return if (codepoint <= std.math.maxInt(u16)) 1 else 2;
+}
+
+fn shouldDeferTextToCharMessage(
+    action: input.Action,
+    key: input.Key,
+    mods: input.Mods,
+    translated: KeyText,
+) bool {
+    if (action == .release) return false;
+    // Windows reports AltGr as synthetic left Ctrl plus right Alt. The
+    // resulting WM_CHAR is layout text, not a Ctrl+Alt terminal chord.
+    const alt_gr = mods.ctrl and mods.alt and
+        mods.sides.ctrl == .left and mods.sides.alt == .right;
+    if (mods.super or ((mods.ctrl or mods.alt) and !alt_gr)) return false;
+    if (key.modifier()) return false;
+
+    switch (key) {
+        .enter, .backspace, .tab, .escape => return false,
+        else => {},
+    }
+
+    if (translated.deferred_utf16_units == 0) return false;
+    if (translated.len > 0) return true;
+    if (translated.unshifted_codepoint == 0) return true;
+    return !isControlCodepoint(translated.unshifted_codepoint);
+}
+
+pub fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
+    return effect == .ignored;
+}
+
+pub fn charCommitEvent(
+    codepoint: u21,
+    lParam: LPARAM,
+    utf8_buf: *[8]u8,
+) ?input.KeyEvent {
+    const utf8_len = std.unicode.utf8Encode(codepoint, utf8_buf) catch return null;
+    return .{
+        .action = if (isRepeatedKey(lParam)) .repeat else .press,
+        .key = .unidentified,
+        .mods = .{},
+        .unshifted_codepoint = codepoint,
+        .utf8 = utf8_buf[0..utf8_len],
+    };
+}
+
+fn translateKeyTextToUnicode(
+    vk: UINT,
+    scan_code: UINT,
+    state: *const [256]u8,
+    utf16: *[4]u16,
+) i32 {
+    // TranslateMessage owns the stateful dead-key composition path. This
+    // helper only probes text metadata for key events, so it must not consume
+    // or reset the layout's pending dead key.
+    return sys.ToUnicode(vk, scan_code, state, utf16, utf16.len, c.TO_UNICODE_NO_STATE_CHANGE);
+}
+
+fn translateKeyText(
+    vk: UINT,
+    lParam: LPARAM,
+    mods: input.Mods,
+    keyboard_state: ?*const [256]u8,
+) KeyText {
+    const state = keyboard_state orelse {
+        const unshifted = unshiftedCodepointForVirtualKey(vk);
+        return .{
+            .unshifted_codepoint = unshifted,
+            .deferred_utf16_units = utf16CodeUnitCount(unshifted),
+        };
+    };
+
+    var utf16: [4]u16 = [_]u16{0} ** 4;
+    const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
+    if (count < 0) {
+        return .{
+            .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+            .deferred_utf16_units = 1,
+        };
+    }
+    if (count == 0) {
+        return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
+    }
+
+    var result: KeyText = .{
+        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+        .deferred_utf16_units = @intCast(count),
+    };
+
+    const codepoint: u21 = cp: {
+        if (count >= 2 and std.unicode.utf16IsHighSurrogate(utf16[0]) and std.unicode.utf16IsLowSurrogate(utf16[1])) {
+            break :cp std.unicode.utf16DecodeSurrogatePair(&.{ utf16[0], utf16[1] }) catch return result;
+        }
+        if (utf16[0] < 0x20 or utf16[0] == 0x7F) return result;
+        break :cp utf16[0];
+    };
+
+    result.len = std.unicode.utf8Encode(codepoint, &result.utf8) catch 0;
+    if (result.len > 0) {
+        result.consumed_mods = .{
+            .shift = mods.shift,
+        };
+    }
+
+    return result;
+}
+
+fn packetKeyMessage(action: input.Action) Win32KeyMessage {
+    const commit_pending = action != .release;
+    return .{
+        .event = .{
+            .action = action,
+            .key = .unidentified,
+            .mods = .{},
+            .consumed_mods = .{},
+            .unshifted_codepoint = 0,
+            .utf8 = "",
+            .composing = commit_pending,
+        },
+        .deferred_utf16_units = if (commit_pending) 1 else 0,
+    };
+}
+
+pub fn keyEventFromWin32Message(
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+) ?Win32KeyMessage {
+    const action: input.Action = switch (msg) {
+        c.WM_KEYUP, c.WM_SYSKEYUP => .release,
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => if (isRepeatedKey(lParam)) .repeat else .press,
+        else => return null,
+    };
+
+    const vk: UINT = @intCast(wParam & 0xFFFF);
+    // KEYEVENTF_UNICODE arrives as VK_PACKET followed by one WM_CHAR UTF-16
+    // code unit. Authorize that unit explicitly without consulting live
+    // keyboard modifiers or ToUnicode; both belong to physical-key handling.
+    if (vk == c.VK_PACKET) return packetKeyMessage(action);
+
+    const key = keyFromVirtualKey(vk, lParam);
+    var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
+    const keyboard_state = currentKeyboardState(&keyboard_state_storage);
+    const mods = currentModsFromKeyboardState(keyboard_state);
+
+    var result: Win32KeyMessage = .{ .event = .{
+        .action = action,
+        .key = key,
+        .mods = mods,
+        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
+    } };
+
+    if (action != .release) {
+        const translated = translateKeyText(vk, lParam, mods, keyboard_state);
+        result.event.utf8 = translated.utf8[0..translated.len];
+        result.event.consumed_mods = translated.consumed_mods;
+        if (translated.unshifted_codepoint != 0) {
+            result.event.unshifted_codepoint = translated.unshifted_codepoint;
+        }
+        if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
+            // Keep the physical-key event visible to bindings/modifier state
+            // but defer text emission to WM_CHAR so plain typing doesn't rely
+            // on ToUnicode/GetKeyboardState timing.
+            result.event.utf8 = "";
+            result.event.consumed_mods = .{};
+            result.event.composing = true;
+            result.deferred_utf16_units = translated.deferred_utf16_units;
+        }
+    }
+
+    return result;
+}
+
+test "win32 keyFromVirtualKey maps core keys" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(input.Key.key_a, keyFromVirtualKey(c.VK_A, 0));
+    try std.testing.expectEqual(input.Key.enter, keyFromVirtualKey(c.VK_RETURN, 0));
+    try std.testing.expectEqual(input.Key.numpad_enter, keyFromVirtualKey(c.VK_RETURN, c.KF_EXTENDED));
+    try std.testing.expectEqual(input.Key.arrow_left, keyFromVirtualKey(c.VK_LEFT, 0));
+    try std.testing.expectEqual(input.Key.f12, keyFromVirtualKey(c.VK_F1 + 11, 0));
+    try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(c.VK_OEM_7, 0));
+}
+
+test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitCount('a'));
+    try std.testing.expectEqual(@as(usize, 2), utf16CodeUnitCount(0x1F642));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .key_a,
+        .{},
+        .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .repeat,
+        .space,
+        .{},
+        .{ .len = 1, .unshifted_codepoint = ' ', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .quote,
+        .{},
+        .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .digit_2,
+        .{ .ctrl = true, .alt = true },
+        .{ .unshifted_codepoint = '2', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(shouldDeferTextToCharMessage(
+        .press,
+        .equal,
+        .{ .ctrl = true, .alt = true, .sides = .{ .alt = .right } },
+        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .equal,
+        .{ .alt = true, .sides = .{ .alt = .right } },
+        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .equal,
+        .{
+            .ctrl = true,
+            .alt = true,
+            .sides = .{ .ctrl = .right, .alt = .right },
+        },
+        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
+    ));
+    try std.testing.expect(!shouldDeferTextToCharMessage(
+        .press,
+        .enter,
+        .{},
+        .{ .unshifted_codepoint = 0x0D },
+    ));
+}
+
+test "win32 deferred char authorization respects key handling effect" {
+    try std.testing.expect(shouldAuthorizeDeferredCharMessage(.ignored));
+    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.consumed));
+    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.closed));
+}
+
+test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
+    const message = keyEventFromWin32Message(c.WM_KEYDOWN, c.VK_PACKET, 0).?;
+    try std.testing.expectEqual(input.Action.press, message.event.action);
+    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expect(message.event.composing);
+    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
+    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
+}
+
+test "win32 VK_PACKET key up authorizes no units or text" {
+    const message = keyEventFromWin32Message(c.WM_KEYUP, c.VK_PACKET, 0).?;
+    try std.testing.expectEqual(input.Action.release, message.event.action);
+    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
+    try std.testing.expectEqualStrings("", message.event.utf8);
+    try std.testing.expect(!message.event.composing);
+    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
+    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
+    try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
+}
+
+test "win32 authorized char commit preserves packet control characters" {
+    var utf8_buf: [8]u8 = undefined;
+    const fixtures = [_]struct { codepoint: u21, expected: []const u8 }{
+        .{ .codepoint = '\r', .expected = "\r" },
+        .{ .codepoint = '\n', .expected = "\n" },
+        .{ .codepoint = '\t', .expected = "\t" },
+        .{ .codepoint = 0x08, .expected = "\x08" },
+        .{ .codepoint = 0x1B, .expected = "\x1B" },
+    };
+    for (fixtures) |fixture| {
+        const event = charCommitEvent(fixture.codepoint, 0, &utf8_buf).?;
+        try std.testing.expectEqual(input.Key.unidentified, event.key);
+        try std.testing.expectEqual(fixture.codepoint, event.unshifted_codepoint);
+        try std.testing.expectEqualStrings(fixture.expected, event.utf8);
+    }
+}
+
+test "win32 deferred char authorization preserves pending units across non-text events" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    // Release and unrelated non-text key messages authorize zero units.
+    state.authorize(0);
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char dead key and composition consume exact units" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    state.consumeDeadChar();
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, 0x00E9), state.consumeCodeUnit(0x00E9, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char authorization blocks unsolicited and IME text" {
+    var state: DeferredCharState = .{};
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', true));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+}
+
+test "win32 deferred char two surrogate keydowns consume two code units" {
+    var state: DeferredCharState = .{};
+    state.authorize(1);
+    state.authorize(1);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char supplementary expectation authorizes both units" {
+    var state: DeferredCharState = .{};
+    state.authorize(2);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
+    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char commits 256 delayed BMP authorizations" {
+    var state: DeferredCharState = .{};
+    for (0..256) |_| state.authorize(1);
+    try std.testing.expectEqual(@as(usize, 256), state.pending_units);
+
+    for (0..256) |_| {
+        try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+}
+
+test "win32 deferred char malformed surrogate clears authorization state" {
+    var state: DeferredCharState = .{};
+    state.authorize(3);
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
+    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
+    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
+    try std.testing.expectEqual(@as(?u16, null), state.high_surrogate);
+}
+
+test "win32 deferred char authorization saturates only at usize maximum" {
+    var state: DeferredCharState = .{
+        .pending_units = std.math.maxInt(usize) - 1,
+    };
+    state.authorize(2);
+    try std.testing.expectEqual(std.math.maxInt(usize), state.pending_units);
+}
+
+test "win32 hotkeySpecForTrigger maps physical key triggers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const spec = hotkeySpecForTrigger(.{
+        .key = .{ .physical = .key_a },
+        .mods = .{ .ctrl = true, .shift = true },
+    }).?;
+
+    try std.testing.expectEqual(@as(UINT, c.MOD_CONTROL | c.MOD_SHIFT), spec.modifiers);
+    try std.testing.expectEqual(@as(UINT, c.VK_A), spec.vk);
+}
+
+test "win32 hotkeySpecForTrigger maps unicode triggers with implicit shift" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const spec = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '+' },
+        .mods = .{ .alt = true },
+    }).?;
+
+    try std.testing.expectEqual(@as(UINT, c.MOD_ALT | c.MOD_SHIFT), spec.modifiers);
+    try std.testing.expectEqual(@as(UINT, c.VK_OEM_PLUS), spec.vk);
+}
+
+test "win32 hotkeySpecForTrigger rejects unsupported catch-all triggers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expect(hotkeySpecForTrigger(.{
+        .key = .catch_all,
+        .mods = .{ .ctrl = true },
+    }) == null);
+}
+
+test "win32 hotkeySpecEql detects duplicate resolved triggers" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const physical = hotkeySpecForTrigger(.{
+        .key = .{ .physical = .backquote },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const unicode = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '`' },
+        .mods = .{ .ctrl = true },
+    }).?;
+    const shifted = hotkeySpecForTrigger(.{
+        .key = .{ .unicode = '~' },
+        .mods = .{ .ctrl = true },
+    }).?;
+
+    try std.testing.expect(hotkeySpecEql(physical, unicode));
+    try std.testing.expect(!hotkeySpecEql(physical, shifted));
+}
+
+test "win32 hotkeyRegistrationFailureReason names conflicts" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    try std.testing.expectEqualStrings(
+        "already registered by another app or another noctty instance",
+        hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
+    );
+    try std.testing.expectEqualStrings(
+        "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
+        hotkeyRegistrationFailureReason(.ACCESS_DENIED),
+    );
+}
+
+test "win32 XButton wParam decoding maps forward and back buttons" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // XBUTTON1 in HIWORD of wParam
+    const wp1 = (@as(usize, c.XBUTTON1) << 16) | @as(usize, c.MK_XBUTTON1);
+    try std.testing.expectEqual(c.XBUTTON1, highWord(wp1));
+
+    // XBUTTON2 in HIWORD of wParam
+    const wp2 = (@as(usize, c.XBUTTON2) << 16) | @as(usize, c.MK_XBUTTON2);
+    try std.testing.expectEqual(c.XBUTTON2, highWord(wp2));
+}
+
+test "win32 normalizeWheelDelta maps discrete wheel steps to pixel deltas" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = 3, .chars = 5 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .vertical, 120);
+
+    try std.testing.expectApproxEqAbs(48.0, event.yoff, 0.0001);
+    try std.testing.expectEqual(@as(f64, 0), event.xoff);
+    try std.testing.expect(!event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+test "win32 normalizeWheelDelta maps horizontal wheel steps to pixel deltas" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = 3, .chars = 5 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .horizontal, 120);
+
+    try std.testing.expectApproxEqAbs(40.0, event.xoff, 0.0001);
+    try std.testing.expectEqual(@as(f64, 0), event.yoff);
+    try std.testing.expect(!event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+test "win32 normalizeWheelDelta scales high-resolution input proportionally" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = 3, .chars = 3 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .vertical, 40);
+
+    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
+    try std.testing.expect(event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+test "win32 normalizeWheelDelta honors page scroll settings" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = c.WHEEL_PAGESCROLL, .chars = 3 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .vertical, 120);
+
+    try std.testing.expectApproxEqAbs(584.0, event.yoff, 0.0001);
+    try std.testing.expect(!event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+test "win32 normalizeWheelDelta ignores page scroll settings for high-resolution input" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = c.WHEEL_PAGESCROLL, .chars = 3 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .vertical, 40);
+
+    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
+    try std.testing.expect(event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+test "win32 normalizeWheelDelta ignores disabled notch settings for high-resolution input" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const event = normalizeWheelDelta(.{
+        .settings = .{ .lines = 0, .chars = 0 },
+        .cell_size = .{ .width = 8, .height = 16 },
+        .viewport = .{ .width = 800, .height = 600 },
+    }, .vertical, 40);
+
+    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
+    try std.testing.expect(event.mods.precision);
+    try std.testing.expect(event.mods.pixel_delta);
+}
+
+// End of input declarations.

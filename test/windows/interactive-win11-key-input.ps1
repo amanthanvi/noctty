@@ -17,6 +17,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Brief delay before key-input focus verification.
+$script:KEY_INPUT_FOCUS_SETTLE_MS = 100
+# Settling delay around the key-input transport sequence.
+$script:KEY_INPUT_TRANSPORT_SETTLE_MS = 300
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -26,6 +30,7 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
 function Get-KeyInputScenarioSlug {
     param(
@@ -62,20 +67,14 @@ function Get-KeyInputScenarioSlug {
 
 $scenarioSlug = Get-KeyInputScenarioSlug -Key $Key
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED) {
-    $forwardedArgs = @('-Key', $Key, '-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-Key', $Key, '-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_KEY_INPUT_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type -TypeDefinition @'
 using System;
@@ -177,25 +176,6 @@ public static class Win11KeyInputNative {
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint cInputs, INPUT[] pInputs, int cbSize);
-
-    public static bool ForceForeground(IntPtr hWnd) {
-        uint ignored;
-        uint targetThread = GetWindowThreadProcessId(hWnd, out ignored);
-        IntPtr foreground = GetForegroundWindow();
-        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
-        uint currentThread = GetCurrentThreadId();
-        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
-        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
-        try {
-            BringWindowToTop(hWnd);
-            SetForegroundWindow(hWnd);
-            return GetForegroundWindow() == hWnd;
-        }
-        finally {
-            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
-            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
-        }
-    }
 
     public static uint SendUnicodeInput(ushort[] codeUnits) {
         const uint INPUT_KEYBOARD = 1;
@@ -395,10 +375,10 @@ function Send-UnicodeInput {
         [Parameter(Mandatory)] [IntPtr] $Hwnd
     )
 
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds $script:KEY_INPUT_FOCUS_SETTLE_MS
     if (
         [Win11KeyInputNative]::GetForegroundWindow() -ne $Hwnd -and
-        -not [Win11KeyInputNative]::ForceForeground($Hwnd)
+        -not [InteractiveWin11WindowNative]::ForceForeground($Hwnd, $false, $false)
     ) {
         throw "Failed to foreground terminal before Unicode input"
     }
@@ -550,7 +530,7 @@ try {
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
     [void] [Win11KeyInputNative]::ShowWindow($hostHwnd, $SW_RESTORE)
-    [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
+    [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
@@ -563,7 +543,7 @@ try {
     else {
         'message'
     }
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $script:KEY_INPUT_TRANSPORT_SETTLE_MS
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'child input readiness' -Process $process -Condition {
         Test-Path -LiteralPath $inputReadyPath
@@ -572,10 +552,10 @@ try {
     $inputSentAtUtc = [DateTime]::UtcNow
     $inputStopwatch = [Diagnostics.Stopwatch]::StartNew()
     if ($useSequentialRead) {
-        [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
+        [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
         Wait-InteractiveWin11Until -Deadline $deadline -Description 'focused terminal surface' -Process $process -Condition {
             if ([Win11KeyInputNative]::GetForegroundWindow() -ne $hostHwnd) {
-                [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
+                [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
                 return $false
             }
             $info = Get-GuiThreadInfo -Hwnd $hostHwnd
@@ -583,7 +563,7 @@ try {
                 $info.FocusHwnd -ne [IntPtr]::Zero -and
                 (Get-WindowClassName -Hwnd $info.FocusHwnd) -eq 'noctty.win32'
             if (-not $focused) {
-                [void] [Win11KeyInputNative]::ForceForeground($hostHwnd)
+                [void] [InteractiveWin11WindowNative]::ForceForeground($hostHwnd, $false, $false)
             }
             return $focused
         }

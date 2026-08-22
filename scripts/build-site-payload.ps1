@@ -13,6 +13,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
 
 $sourceRoot = [IO.Path]::GetFullPath($SourceDirectory).TrimEnd('\', '/')
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\', '/')
@@ -109,8 +110,7 @@ foreach ($sourceFile in $sourceFiles) {
     $destinationParent = Split-Path -Parent $destinationPath
     [void](New-Item -ItemType Directory -Path $destinationParent -Force)
     [IO.File]::Copy($sourceFile.SourcePath, $destinationPath, $false)
-    $hash = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).
-        Hash.ToLowerInvariant()
+    $hash = Get-FileSha256Lower -Path $destinationPath
     [void]$manifestLines.Add("$hash  $($sourceFile.RelativePath)")
 }
 

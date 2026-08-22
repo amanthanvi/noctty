@@ -58,13 +58,28 @@ const win32_compositor = @import("win32_compositor.zig");
 const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
+const render_trace = @import("win32/render_trace.zig");
+const gl_startup = @import("win32/gl_startup.zig");
+const labels = @import("win32/labels.zig");
+const win32_input = @import("win32/input.zig");
+const chrome_layout = @import("win32/chrome_layout.zig");
+const gdi = @import("win32/gdi.zig");
+const c = @import("win32/consts.zig");
+const sys = @import("win32/sys.zig");
 
-// Re-export types from theme module
+test {
+    _ = @import("win32/render_trace.zig");
+    _ = @import("win32/gl_startup.zig");
+    _ = @import("win32/labels.zig");
+    _ = @import("win32/input.zig");
+    _ = @import("win32/chrome_layout.zig");
+    _ = @import("win32/gdi.zig");
+}
+
 const ThemeColors = win32_theme.ThemeColors;
 const ButtonColors = win32_theme.ButtonColors;
 const HostOverlayMode = win32_theme.HostOverlayMode;
 
-// Re-export functions from theme module
 const darkTheme = win32_theme.darkTheme;
 const lightTheme = win32_theme.lightTheme;
 const adjustColor = win32_theme.adjustColor;
@@ -81,342 +96,105 @@ const quickSlotChipColors = win32_theme.quickSlotChipColors;
 const pinnedChipMarkerColor = win32_theme.pinnedChipMarkerColor;
 const rgb = win32_theme.rgb;
 
+const rectEquals = chrome_layout.rectEquals;
+const childRect = chrome_layout.childRect;
+const layoutRectToWin32 = chrome_layout.layoutRectToWin32;
+const centeredRect = chrome_layout.centeredRect;
+const overlayEditFrameRect = chrome_layout.overlayEditFrameRect;
+const overlayLabelReservation = chrome_layout.overlayLabelReservation;
+const overlayActionLayoutForWidth = chrome_layout.overlayActionLayoutForWidth;
+const overlayEditChildRectFromFrame = chrome_layout.overlayEditChildRectFromFrame;
+const blendColorRGB = gdi.blendColorRGB;
+const fillSolidRect = gdi.fillSolidRect;
+const drawRectBorder = gdi.drawRectBorder;
+const textOutWz = gdi.textOutWz;
+const drawTextWz = gdi.drawTextWz;
+const drawRoundedRect = gdi.drawRoundedRect;
+const paintRectVisible = gdi.paintRectVisible;
+
+const ThemeSurface = enum {
+    tab_accent,
+    caption_cluster_bg,
+    caption_cluster_border,
+    overlay_panel_bg,
+    overlay_panel_border,
+    search_frame_bg,
+    search_frame_border,
+    search_frame_underline,
+    update_open_bg,
+    update_dismiss_bg,
+    launcher_lane_bg,
+    launcher_lane_border,
+};
+
+fn themeSurface(theme: *const ThemeColors, surface: ThemeSurface) u32 {
+    return switch (surface) {
+        .tab_accent => if (theme.is_dark)
+            adjustColor(theme.accent, -12, -12, -12)
+        else
+            adjustColor(theme.accent, 18, 18, 18),
+        .caption_cluster_bg => if (theme.is_dark)
+            adjustColor(theme.chrome_bg, 8, 8, 10)
+        else
+            adjustColor(theme.chrome_bg, 6, 6, 6),
+        .caption_cluster_border => if (theme.is_dark)
+            adjustColor(theme.chrome_border, 10, 10, 12)
+        else
+            adjustColor(theme.chrome_border, -16, -16, -16),
+        .overlay_panel_bg => if (theme.is_dark)
+            adjustColor(theme.overlay_bg, 4, 4, 6)
+        else
+            adjustColor(theme.overlay_bg, -4, -4, -4),
+        .overlay_panel_border => if (theme.is_dark)
+            adjustColor(theme.overlay_border, 10, 10, 12)
+        else
+            adjustColor(theme.overlay_border, -18, -18, -18),
+        .search_frame_bg => if (theme.is_dark)
+            adjustColor(theme.overlay_bg, 3, 3, 5)
+        else
+            adjustColor(theme.overlay_bg, -2, -2, -1),
+        .search_frame_border => if (theme.is_dark)
+            adjustColor(theme.overlay_border, 10, 10, 12)
+        else
+            adjustColor(theme.overlay_border, -14, -14, -14),
+        .search_frame_underline => if (theme.is_dark)
+            adjustColor(theme.overlay_border, -10, -10, -8)
+        else
+            adjustColor(theme.overlay_border, 10, 10, 10),
+        .update_open_bg => if (theme.is_dark)
+            adjustColor(theme.overlay_bg, 10, 10, 12)
+        else
+            adjustColor(theme.overlay_bg, -4, -4, -4),
+        .update_dismiss_bg => if (theme.is_dark)
+            adjustColor(theme.status_bg, 10, 10, 12)
+        else
+            adjustColor(theme.status_bg, -4, -4, -4),
+        .launcher_lane_bg => if (theme.is_dark)
+            adjustColor(theme.status_bg, 8, 8, 10)
+        else
+            adjustColor(theme.status_bg, -6, -6, -6),
+        .launcher_lane_border => if (theme.is_dark)
+            adjustColor(theme.chrome_border, 12, 12, 14)
+        else
+            adjustColor(theme.chrome_border, -18, -18, -18),
+    };
+}
+
 const log = std.log.scoped(.win32);
 const windows = std.os.windows;
 
-var render_trace_file_claimed = std.atomic.Value(bool).init(false);
-
 pub const resourcesDir = internal_os.resourcesDir;
 
-const RenderTrace = struct {
-    const startup_window_ms: u64 = 1000;
-    const startup_paint_gap_ceiling_ms: u64 = 1500;
-    const paint_gap_limit_ms: u64 = 300;
+const RenderTrace = render_trace.RenderTrace;
 
-    const PaintGapTargets = struct {
-        max_gap_ms: *std.atomic.Value(u64),
-        max_gap_ended_at_ms: *std.atomic.Value(u64),
-        over_limit_count: *std.atomic.Value(u64),
-    };
-
-    path: ?[]const u8 = null,
-    start_tick_ms: u64 = 0,
-    renderer_update_frame_count: std.atomic.Value(u64) = .init(0),
-    renderer_draw_request_count: std.atomic.Value(u64) = .init(0),
-    wakeup_callback_count: std.atomic.Value(u64) = .init(0),
-    render_callback_count: std.atomic.Value(u64) = .init(0),
-    renderer_repaint_accept_count: std.atomic.Value(u64) = .init(0),
-    renderer_repaint_coalesced_count: std.atomic.Value(u64) = .init(0),
-    queue_paint_count: std.atomic.Value(u64) = .init(0),
-    queue_paint_update_now_count: std.atomic.Value(u64) = .init(0),
-    force_paint_now_count: std.atomic.Value(u64) = .init(0),
-    paint_draw_count: std.atomic.Value(u64) = .init(0),
-    paint_retry_count: std.atomic.Value(u64) = .init(0),
-    swap_buffers_count: std.atomic.Value(u64) = .init(0),
-    max_renderer_update_gap_ms: std.atomic.Value(u64) = .init(0),
-    max_paint_gap_ms: std.atomic.Value(u64) = .init(0),
-    max_swap_gap_ms: std.atomic.Value(u64) = .init(0),
-    max_renderer_update_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
-    max_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
-    max_swap_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
-    max_sustained_paint_gap_ms: std.atomic.Value(u64) = .init(0),
-    max_sustained_paint_gap_ended_at_ms: std.atomic.Value(u64) = .init(0),
-    paint_gap_over_limit_count: std.atomic.Value(u64) = .init(0),
-    max_paint_draw_duration_ms: std.atomic.Value(u64) = .init(0),
-    max_paint_draw_duration_at_ms: std.atomic.Value(u64) = .init(0),
-    paint_draw_duration_over_20ms_count: std.atomic.Value(u64) = .init(0),
-    paint_draw_duration_over_33ms_count: std.atomic.Value(u64) = .init(0),
-    last_renderer_update_tick_ms: std.atomic.Value(u64) = .init(0),
-    last_paint_tick_ms: std.atomic.Value(u64) = .init(0),
-    last_swap_tick_ms: std.atomic.Value(u64) = .init(0),
-    first_renderer_update_at_ms: std.atomic.Value(u64) = .init(0),
-    first_paint_at_ms: std.atomic.Value(u64) = .init(0),
-    first_swap_at_ms: std.atomic.Value(u64) = .init(0),
-
-    fn init(alloc: Allocator) RenderTrace {
-        const raw = std.process.getEnvVarOwned(
-            alloc,
-            "NOCTTY_RENDER_TRACE_FILE",
-        ) catch return .{};
-        errdefer alloc.free(raw);
-
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0) {
-            alloc.free(raw);
-            return .{};
-        }
-
-        const owned = if (trimmed.len == raw.len)
-            raw
-        else
-            alloc.dupe(u8, trimmed) catch {
-                alloc.free(raw);
-                return .{};
-            };
-        if (trimmed.len != raw.len) alloc.free(raw);
-
-        return initWithClaimedPath(alloc, &render_trace_file_claimed, owned);
-    }
-
-    fn initWithClaimedPath(
-        alloc: Allocator,
-        claimed: *std.atomic.Value(bool),
-        owned: []const u8,
-    ) RenderTrace {
-        // A trace path names one JSON document. The interactive harness waits
-        // for the initial surface before seeding tabs, so the first claimant
-        // is deterministic. Keeping that claim for the process lifetime stops
-        // later tab teardown from overwriting the initial surface's evidence.
-        const trace_path = claimTracePath(alloc, claimed, owned) orelse
-            return .{};
-        return .{
-            .path = trace_path,
-            .start_tick_ms = GetTickCount64(),
-        };
-    }
-
-    fn deinit(self: *RenderTrace, alloc: Allocator) void {
-        defer {
-            if (self.path) |path| alloc.free(path);
-            self.* = .{};
-        }
-
-        if (self.path == null) return;
-        self.writeSnapshot();
-    }
-
-    fn enabled(self: *const RenderTrace) bool {
-        return self.path != null;
-    }
-
-    fn noteRendererUpdateFrame(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        self.noteTimedCounter(
-            &self.renderer_update_frame_count,
-            &self.last_renderer_update_tick_ms,
-            &self.max_renderer_update_gap_ms,
-            &self.max_renderer_update_gap_ended_at_ms,
-            &self.first_renderer_update_at_ms,
-            null,
-        );
-    }
-
-    fn noteRendererDrawRequest(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.renderer_draw_request_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteRendererWakeupCallback(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.wakeup_callback_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteRendererFollowupCallback(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.render_callback_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteRendererRepaintAccepted(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.renderer_repaint_accept_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteRendererRepaintCoalesced(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.renderer_repaint_coalesced_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteQueuePaint(self: *RenderTrace, update_now: bool) void {
-        if (!self.enabled()) return;
-        _ = self.queue_paint_count.fetchAdd(1, .acq_rel);
-        if (update_now) _ = self.queue_paint_update_now_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteForcePaintNow(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.force_paint_now_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn notePaintDraw(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        self.noteTimedCounter(
-            &self.paint_draw_count,
-            &self.last_paint_tick_ms,
-            &self.max_paint_gap_ms,
-            &self.max_paint_gap_ended_at_ms,
-            &self.first_paint_at_ms,
-            .{
-                .max_gap_ms = &self.max_sustained_paint_gap_ms,
-                .max_gap_ended_at_ms = &self.max_sustained_paint_gap_ended_at_ms,
-                .over_limit_count = &self.paint_gap_over_limit_count,
-            },
-        );
-    }
-
-    fn notePaintDrawDuration(self: *RenderTrace, duration_ms: u64) void {
-        if (!self.enabled()) return;
-        updateMaxAtomicWithTimestamp(
-            &self.max_paint_draw_duration_ms,
-            &self.max_paint_draw_duration_at_ms,
-            duration_ms,
-            elapsedTraceMs(self.start_tick_ms, GetTickCount64()),
-        );
-        if (duration_ms > 20) _ = self.paint_draw_duration_over_20ms_count.fetchAdd(1, .acq_rel);
-        if (duration_ms > 33) _ = self.paint_draw_duration_over_33ms_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn notePaintRetry(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        _ = self.paint_retry_count.fetchAdd(1, .acq_rel);
-    }
-
-    fn noteSwapBuffers(self: *RenderTrace) void {
-        if (!self.enabled()) return;
-        self.noteTimedCounter(
-            &self.swap_buffers_count,
-            &self.last_swap_tick_ms,
-            &self.max_swap_gap_ms,
-            &self.max_swap_gap_ended_at_ms,
-            &self.first_swap_at_ms,
-            null,
-        );
-    }
-
-    fn noteTimedCounter(
-        self: *RenderTrace,
-        counter: *std.atomic.Value(u64),
-        last_tick_ms: *std.atomic.Value(u64),
-        max_gap_ms: *std.atomic.Value(u64),
-        max_gap_ended_at_ms: *std.atomic.Value(u64),
-        first_at_ms: *std.atomic.Value(u64),
-        paint_gaps: ?PaintGapTargets,
-    ) void {
-        const now = GetTickCount64();
-        const elapsed_ms = elapsedTraceMs(self.start_tick_ms, now);
-        _ = counter.fetchAdd(1, .acq_rel);
-        _ = first_at_ms.cmpxchgStrong(0, elapsed_ms, .acq_rel, .acquire);
-        const prev = last_tick_ms.swap(now, .acq_rel);
-        if (prev == 0 or now <= prev) return;
-        const gap_ms = now - prev;
-        updateMaxAtomicWithTimestamp(
-            max_gap_ms,
-            max_gap_ended_at_ms,
-            gap_ms,
-            elapsed_ms,
-        );
-        if (paint_gaps) |targets| {
-            if (gapExceedsPaintLimit(gap_ms)) {
-                _ = targets.over_limit_count.fetchAdd(1, .acq_rel);
-            }
-            if (gapIsSustained(elapsed_ms, gap_ms)) {
-                updateMaxAtomicWithTimestamp(
-                    targets.max_gap_ms,
-                    targets.max_gap_ended_at_ms,
-                    gap_ms,
-                    elapsed_ms,
-                );
-            }
-        }
-    }
-
-    fn gapIsSustained(elapsed_ms: u64, gap_ms: u64) bool {
-        return elapsed_ms -| gap_ms >= startup_window_ms;
-    }
-
-    fn gapExceedsPaintLimit(gap_ms: u64) bool {
-        return gap_ms > paint_gap_limit_ms;
-    }
-
-    fn writeSnapshot(self: *const RenderTrace) void {
-        const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
-        defer file.close();
-
-        var buffer: [1024]u8 = undefined;
-        var writer = file.writer(&buffer);
-        const stream = &writer.interface;
-        stream.print("{f}", .{std.json.fmt(.{
-            .runtime_ms = GetTickCount64() - self.start_tick_ms,
-            .startup_window_ms = startup_window_ms,
-            .startup_paint_gap_ceiling_ms = startup_paint_gap_ceiling_ms,
-            .paint_gap_limit_ms = paint_gap_limit_ms,
-            .renderer_update_frame_count = self.renderer_update_frame_count.load(.acquire),
-            .renderer_draw_request_count = self.renderer_draw_request_count.load(.acquire),
-            .wakeup_callback_count = self.wakeup_callback_count.load(.acquire),
-            .render_callback_count = self.render_callback_count.load(.acquire),
-            .renderer_repaint_accept_count = self.renderer_repaint_accept_count.load(.acquire),
-            .renderer_repaint_coalesced_count = self.renderer_repaint_coalesced_count.load(.acquire),
-            .queue_paint_count = self.queue_paint_count.load(.acquire),
-            .queue_paint_update_now_count = self.queue_paint_update_now_count.load(.acquire),
-            .force_paint_now_count = self.force_paint_now_count.load(.acquire),
-            .paint_draw_count = self.paint_draw_count.load(.acquire),
-            .paint_retry_count = self.paint_retry_count.load(.acquire),
-            .swap_buffers_count = self.swap_buffers_count.load(.acquire),
-            .max_renderer_update_gap_ms = self.max_renderer_update_gap_ms.load(.acquire),
-            .max_paint_gap_ms = self.max_paint_gap_ms.load(.acquire),
-            .max_swap_gap_ms = self.max_swap_gap_ms.load(.acquire),
-            .max_renderer_update_gap_ended_at_ms = self.max_renderer_update_gap_ended_at_ms.load(.acquire),
-            .max_paint_gap_ended_at_ms = self.max_paint_gap_ended_at_ms.load(.acquire),
-            .max_swap_gap_ended_at_ms = self.max_swap_gap_ended_at_ms.load(.acquire),
-            .max_sustained_paint_gap_ms = self.max_sustained_paint_gap_ms.load(.acquire),
-            .max_sustained_paint_gap_ended_at_ms = self.max_sustained_paint_gap_ended_at_ms.load(.acquire),
-            .paint_gap_over_limit_count = self.paint_gap_over_limit_count.load(.acquire),
-            .max_paint_draw_duration_ms = self.max_paint_draw_duration_ms.load(.acquire),
-            .max_paint_draw_duration_at_ms = self.max_paint_draw_duration_at_ms.load(.acquire),
-            .paint_draw_duration_over_20ms_count = self.paint_draw_duration_over_20ms_count.load(.acquire),
-            .paint_draw_duration_over_33ms_count = self.paint_draw_duration_over_33ms_count.load(.acquire),
-            .first_renderer_update_at_ms = self.first_renderer_update_at_ms.load(.acquire),
-            .first_paint_at_ms = self.first_paint_at_ms.load(.acquire),
-            .first_swap_at_ms = self.first_swap_at_ms.load(.acquire),
-        }, .{})}) catch return;
-        stream.flush() catch return;
-    }
-};
-
-fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
-    return !claimed.swap(true, .acq_rel);
-}
-
-fn claimTracePath(
-    alloc: Allocator,
-    claimed: *std.atomic.Value(bool),
-    owned: []const u8,
-) ?[]const u8 {
-    if (claimTraceFile(claimed)) return owned;
-    log.debug("render trace path already has a process owner; tracing disabled for this surface", .{});
-    alloc.free(owned);
-    return null;
-}
-
-fn elapsedTraceMs(start_tick_ms: u64, now_tick_ms: u64) u64 {
-    if (now_tick_ms <= start_tick_ms) return 0;
-    return now_tick_ms - start_tick_ms;
-}
-
-fn updateMaxAtomic(value: *std.atomic.Value(u64), candidate: u64) void {
-    var current = value.load(.acquire);
-    while (candidate > current) {
-        current = value.cmpxchgWeak(current, candidate, .acq_rel, .acquire) orelse return;
-    }
-}
-
-fn updateMaxAtomicWithTimestamp(
-    value: *std.atomic.Value(u64),
-    at_ms: *std.atomic.Value(u64),
-    candidate: u64,
-    candidate_at_ms: u64,
-) void {
-    var current = value.load(.acquire);
-    while (candidate > current) {
-        const observed = value.cmpxchgWeak(current, candidate, .acq_rel, .acquire);
-        if (observed) |next| {
-            current = next;
-            continue;
-        }
-        at_ms.store(candidate_at_ms, .release);
-        return;
-    }
-}
+pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
+pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
+pub const OpenGLStartupStep = gl_startup.OpenGLStartupStep;
+const beginOpenGLStartupDiagnostics = gl_startup.beginOpenGLStartupDiagnostics;
+pub const clearOpenGLStartupFailure = gl_startup.clearOpenGLStartupFailure;
+const recordOpenGLStartupWin32Failure = gl_startup.recordOpenGLStartupWin32Failure;
+pub const recordOpenGLStartupError = gl_startup.recordOpenGLStartupError;
+pub const reportStartupFailure = gl_startup.reportStartupFailure;
 
 const ATOM = win32_types.ATOM;
 const LPCWSTR = win32_types.LPCWSTR;
@@ -442,124 +220,8 @@ const HWND = win32_types.HWND;
 const HINSTANCE = win32_types.HINSTANCE;
 const INTRESOURCE = win32_types.INTRESOURCE;
 
-const CS_OWNDC = 0x0020;
-const CW_USEDEFAULT = @as(i32, @bitCast(@as(u32, 0x80000000)));
-const GWLP_USERDATA = -21;
-const GWLP_WNDPROC = -4;
-const GWL_STYLE = -16;
-const GWL_EXSTYLE = -20;
-const IDC_ARROW = @as(INTRESOURCE, @ptrFromInt(32512));
-const ID_ICON_GHOSTTY = 1;
-const IMAGE_ICON = 1;
-const LR_SHARED = 0x00008000;
-const SM_CXICON = 11;
-const SM_CYICON = 12;
-const SM_CXSMICON = 49;
-const SM_CYSMICON = 50;
-const WM_SETICON = 0x0080;
-const ICON_SMALL = 0;
-const ICON_BIG = 1;
-const HTNOWHERE = 0;
-const HTCLIENT = 1;
-const HTCAPTION = 2;
-const HTSYSMENU = 3;
-const HTMINBUTTON = 8;
-const HTMAXBUTTON = 9;
-const HTLEFT = 10;
-const HTRIGHT = 11;
-const HTTOP = 12;
-const HTTOPLEFT = 13;
-const HTTOPRIGHT = 14;
-const HTBOTTOM = 15;
-const HTBOTTOMLEFT = 16;
-const HTBOTTOMRIGHT = 17;
-const HTCLOSE = 20;
 const HWND_TOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 const HWND_NOTOPMOST: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -2))));
-const SW_SHOW = 5;
-const SW_SHOWNOACTIVATE = 4;
-const SW_RESTORE = 9;
-const SW_MAXIMIZE = 3;
-const SW_HIDE = 0;
-const WM_APP = 0x8000;
-const WM_ACTIVATE = 0x0006;
-const WA_INACTIVE = 0;
-const WM_COMMAND = 0x0111;
-const WM_CAPTURECHANGED = 0x0215;
-const WM_CLOSE = 0x0010;
-const WM_DESTROY = 0x0002;
-const WM_DRAWITEM = 0x002B;
-const WM_ERASEBKGND = 0x0014;
-const WM_GETMINMAXINFO = 0x0024;
-const WM_CHAR = 0x0102;
-const WM_DEADCHAR = 0x0103;
-const WM_HOTKEY = 0x0312;
-const WM_IME_SETCONTEXT = 0x0281;
-const WM_IME_STARTCOMPOSITION = 0x010D;
-const WM_IME_ENDCOMPOSITION = 0x010E;
-const WM_IME_COMPOSITION = 0x010F;
-const GCS_COMPSTR: u32 = 0x0008;
-const GCS_RESULTSTR: u32 = 0x0800;
-const CFS_POINT: u32 = 0x0002;
-const CFS_EXCLUDE: u32 = 0x0080;
-const ISC_SHOWUICOMPOSITIONWINDOW: LPARAM = 0x80000000;
-const WM_KILLFOCUS = 0x0008;
-const WM_KEYDOWN = 0x0100;
-const WM_KEYUP = 0x0101;
-const WM_LBUTTONDOWN = 0x0201;
-const WM_LBUTTONUP = 0x0202;
-const WM_LBUTTONDBLCLK = 0x0203;
-const WM_MBUTTONDOWN = 0x0207;
-const WM_MBUTTONUP = 0x0208;
-const WM_MOUSEHWHEEL = 0x020E;
-const WM_MOUSEMOVE = 0x0200;
-const WM_MOUSEWHEEL = 0x020A;
-const WM_MOUSELEAVE = 0x02A3;
-const WM_POINTERHWHEEL = 0x024F;
-const WM_POINTERWHEEL = 0x024E;
-const WM_NCCREATE = 0x0081;
-const WM_NCCALCSIZE = 0x0083;
-const WM_NCHITTEST = 0x0084;
-const WM_NCMOUSEMOVE = 0x00A0;
-const WM_NCLBUTTONDOWN = 0x00A1;
-const WM_NCLBUTTONUP = 0x00A2;
-const WM_NCMOUSELEAVE = 0x02A2;
-const WM_SYSCOMMAND = 0x0112;
-const SC_CLOSE: WPARAM = 0xF060;
-const SC_MINIMIZE: WPARAM = 0xF020;
-const SC_MAXIMIZE: WPARAM = 0xF030;
-const SC_RESTORE: WPARAM = 0xF120;
-const WM_PAINT = 0x000F;
-const WM_QUIT = 0x0012;
-const WM_TIMER = 0x0113;
-const WM_CTLCOLOREDIT = 0x0133;
-const WM_CTLCOLORBTN = 0x0135;
-const WM_CTLCOLORSTATIC = 0x0138;
-const WM_GETOBJECT: UINT = 0x003D;
-const WM_RBUTTONDOWN = 0x0204;
-const WM_XBUTTONDOWN = 0x020B;
-const WM_XBUTTONUP = 0x020C;
-const XBUTTON1: WORD = 0x0001;
-const XBUTTON2: WORD = 0x0002;
-const WM_RBUTTONUP = 0x0205;
-const WM_SETCURSOR = 0x0020;
-const WM_SETFOCUS = 0x0007;
-const WM_SETTINGCHANGE = 0x001A;
-const WM_SIZE = 0x0005;
-const WM_ENTERSIZEMOVE = 0x0231;
-const WM_EXITSIZEMOVE = 0x0232;
-const SIZE_MAXIMIZED: u32 = 2;
-const SIZE_MINIMIZED: u32 = 1;
-const SIZE_RESTORED: u32 = 0;
-const WM_SYSKEYDOWN = 0x0104;
-const WM_SYSKEYUP = 0x0105;
-const WM_SYSDEADCHAR = 0x0107;
-const WM_WINHOSTTY_WAKE = WM_APP + 1;
-const WM_WINHOSTTY_UPDATE = WM_APP + 2;
-const WM_WINHOSTTY_TOAST_ACTIVATION = WM_APP + 3;
-const WM_WINHOSTTY_HOST_NEW_TAB = WM_APP + 4;
-const WM_WINHOSTTY_UIA_DISCONNECT = WM_APP + 5;
-const WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP + 6;
 
 const DeferredUiaDisconnect = struct {
     ctx: *anyopaque,
@@ -567,99 +229,14 @@ const DeferredUiaDisconnect = struct {
     release: *const fn (*anyopaque) void,
     retries: u8 = 0,
 };
-const PM_NOREMOVE: UINT = 0x0000;
-const PM_REMOVE: UINT = 0x0001;
-const WS_OVERLAPPED = 0x00000000;
-const WS_CHILD = 0x40000000;
-const WS_CLIPCHILDREN = 0x02000000;
-const WS_CLIPSIBLINGS = 0x04000000;
-const WS_CAPTION = 0x00C00000;
-const WS_SYSMENU = 0x00080000;
-const WS_THICKFRAME = 0x00040000;
-const WS_MINIMIZEBOX = 0x00020000;
-const WS_MAXIMIZEBOX = 0x00010000;
-const WS_VISIBLE = 0x10000000;
-const WS_TABSTOP = 0x00010000;
-const WS_OVERLAPPEDWINDOW = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-const WS_POPUP = 0x80000000;
-const WS_EX_LAYERED = 0x00080000;
-const WS_EX_TRANSPARENT = 0x00000020;
-const MOD_ALT = 0x0001;
-const MOD_CONTROL = 0x0002;
-const MOD_SHIFT = 0x0004;
-const MOD_WIN = 0x0008;
-const TO_UNICODE_NO_STATE_CHANGE: UINT = 0x0004;
-const SWP_NOSIZE = 0x0001;
-const SWP_NOMOVE = 0x0002;
-const SWP_NOZORDER = 0x0004;
-const SWP_NOACTIVATE = 0x0010;
-const SWP_FRAMECHANGED = 0x0020;
-const RDW_INVALIDATE: UINT = 0x0001;
-const RDW_INTERNALPAINT: UINT = 0x0002;
-const RDW_ERASE: UINT = 0x0004;
-const RDW_NOCHILDREN: UINT = 0x0040;
-const RDW_ALLCHILDREN: UINT = 0x0080;
-const RDW_UPDATENOW: UINT = 0x0100;
-const RDW_FRAME: UINT = 0x0400;
-const MONITOR_DEFAULTTONEAREST = 0x00000002;
-const MONITOR_DEFAULTTOPRIMARY = 0x00000001;
-const MONITORINFOF_PRIMARY = 0x00000001;
-const COLOR_WINDOW = 5;
-const CF_UNICODETEXT = 13;
+const WS_OVERLAPPEDWINDOW = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_THICKFRAME | c.WS_MINIMIZEBOX | c.WS_MAXIMIZEBOX;
 /// CF_HTML: registered clipboard format name is the literal string
 /// "HTML Format". The ID is process-local — we cache it on App.
 const CF_HTML_NAME = std.unicode.utf8ToUtf16LeStringLiteral("HTML Format");
-extern "user32" fn RegisterClipboardFormatW(lpszFormat: [*:0]const u16) callconv(.winapi) UINT;
-const GMEM_MOVEABLE = 0x0002;
-const GMEM_ZEROINIT = 0x0040;
-const LWA_COLORKEY = 0x00000001;
-const LWA_ALPHA = 0x00000002;
-const TRANSPARENT = 1;
-const OPAQUE = 2;
-const MB_OK = 0x00000000;
-const MB_ICONERROR = 0x00000010;
-const MB_ICONINFORMATION = 0x00000040;
-const MB_SETFOREGROUND = 0x00010000;
-const MK_CONTROL = 0x0008;
-const MK_LBUTTON = 0x0001;
-const MK_MBUTTON = 0x0010;
-const MK_RBUTTON = 0x0002;
 
 fn hostCompositionRedrawFlags() UINT {
-    return RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_NOCHILDREN | RDW_UPDATENOW;
+    return c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_FRAME | c.RDW_NOCHILDREN | c.RDW_UPDATENOW;
 }
-const MK_SHIFT = 0x0004;
-const MK_XBUTTON1 = 0x0020;
-const MK_XBUTTON2 = 0x0040;
-const EN_CHANGE = 0x0300;
-const BS_OWNERDRAW = 0x0000000B;
-const SS_RIGHT = 0x00000002;
-const SS_CENTERIMAGE = 0x00000200;
-const SS_OWNERDRAW = 0x0000000D;
-const ES_AUTOHSCROLL = 0x0080;
-const BN_CLICKED = 0;
-const BN_SETFOCUS = 6;
-const BN_KILLFOCUS = 7;
-const EM_SETSEL = 0x00B1;
-const EM_GETSEL = 0x00B0;
-const EM_CHARFROMPOS = 0x00D7;
-const EM_SETMARGINS = 0x00D3;
-const EM_SETCUEBANNER = 0x1501;
-const EC_LEFTMARGIN: usize = 0x0001;
-const EC_RIGHTMARGIN: usize = 0x0002;
-const ODT_BUTTON = 4;
-const ODT_STATIC = 5;
-const ODS_SELECTED = 0x0001;
-const ODS_DISABLED = 0x0004;
-const ODS_FOCUS = 0x0010;
-const TME_LEAVE = 0x00000002;
-const TME_NONCLIENT = 0x00000010;
-const DT_CENTER = 0x00000001;
-const DT_VCENTER = 0x00000004;
-const DT_SINGLELINE = 0x00000020;
-const DT_NOPREFIX = 0x00000800;
-const DT_END_ELLIPSIS = 0x00008000;
-const DT_LEFT = 0x00000000;
 // ── Chrome metric constants ─────────────────────────────────────────────
 //
 // These pull from `win32_theme.ThemeMetrics` defaults so there is a single
@@ -682,8 +259,6 @@ const host_overlay_cancel_width: i32 = default_metrics.overlay_cancel_width;
 const host_tab_small_button_width: i32 = default_metrics.tab_small_button_width;
 const host_tab_overflow_button_width: i32 = default_metrics.tab_overflow_button_width;
 const host_titlebar_action_button_size: i32 = 32;
-const host_tab_label_max_len: usize = default_metrics.tab_label_max_len;
-const host_tab_min_button_width: i32 = default_metrics.tab_min_width;
 /// Non-owning view over the palette's command lists. Points into
 /// config arena storage — lifetime matches `app.config`. Re-exported
 /// from `win32_palette.zig` so it can be shared with the bench harness.
@@ -700,12 +275,7 @@ const palette_catalog_capacity: usize = 768;
 const palette_action_capacity: usize = 384;
 const palette_catalog_label_capacity: usize = 768;
 const palette_catalog_label_bytes: usize = 128;
-const PalettePresentation = struct {
-    match_count: usize = 0,
-    title: ?[]const u8 = null,
-    subtitle: ?[]const u8 = null,
-    available: bool = false,
-};
+const PalettePresentation = labels.PalettePresentation;
 const PaletteListTransition = struct {
     relayout: bool,
     exposes_content: bool,
@@ -729,454 +299,58 @@ const PaletteCatalogConfigSource = enum {
     /// Catalog strings borrow `palette_catalog_retained_config`.
     retained,
 };
-const PaletteCompletion = struct {
-    text: []const u8,
-    id: PaletteStableId,
-};
+const PaletteCompletion = labels.PaletteCompletion;
 const tokenizePaletteQuery = win32_palette.tokenizeQuery;
 const rankPaletteEntry = win32_palette.rankEntry;
 const rankedIndicesForQuery = win32_palette.rankedForQuery;
 const releases_url = updatepkg.releases_url;
-const WM_THEMECHANGED = 0x031A;
-const WM_SYSCOLORCHANGE = 0x0015;
-const WM_DWMCOLORIZATIONCOLORCHANGED: UINT = 0x0320;
-const WM_DPICHANGED: UINT = 0x02E0;
-const DWMSBT_NONE: u32 = 1;
-/// Mica-tabbed backdrop for main windows with visible tab strips.
-/// Win11 22H2+ (build >= 22621).
-const DWMSBT_TABBEDWINDOW: u32 = 4;
-const OS_BUILD_WIN10_22H2: u32 = 19045;
-const OS_BUILD_WIN11_21H2: u32 = 22000;
-const OS_BUILD_WIN11_22H2: u32 = 22621;
-const DC_BRUSH: i32 = 18;
-const DC_PEN: i32 = 19;
-const PS_SOLID: i32 = 0;
 const host_tab_max_button_width: i32 = default_metrics.tab_max_width;
 const host_tab_close_zone_width: i32 = default_metrics.tab_close_zone; // per-tab close button hit zone width
-const SPI_GETHIGHCONTRAST: UINT = 0x0042;
-const SPI_GETNONCLIENTMETRICS: UINT = 0x0029;
-const SPI_GETCLIENTAREAANIMATION: UINT = 0x1042;
-
-/// See src/apprt/win32_tween.zig for the scheduler contract.
-const TWEEN_TIMER_ID: UINT_PTR = 0x77684701; // "whgT1" in 32-bit hex
-const TWEEN_TIMER_INTERVAL_MS: UINT = 16;
-const SEARCH_TIMER_ID: UINT_PTR = 0x77684702; // "whgT2" in 32-bit hex
-const SEARCH_TIMER_INTERVAL_MS: UINT = 20;
-const SCROLLBAR_TIMER_ID: UINT_PTR = 0x77684703; // "whgT3" in 32-bit hex
-const SCROLLBAR_TIMER_INTERVAL_MS: UINT = 16;
-const RESIZE_SETTLE_TIMER_ID: UINT_PTR = 0x77684704; // "whgT4" in 32-bit hex
-const RESIZE_SETTLE_TIMER_INTERVAL_MS: UINT = 16;
-const TERMINAL_UIA_TIMER_ID: UINT_PTR = 0x77684705; // "whgT5" in 32-bit hex
-const RESIZE_SETTLE_REPAINT_TICKS: u8 = 12;
-const FW_NORMAL: i32 = 400;
-const DEFAULT_CHARSET: u8 = 1;
-const OUT_DEFAULT_PRECIS: u8 = 0;
-const CLIP_DEFAULT_PRECIS: u8 = 0;
-const CLEARTYPE_QUALITY: u8 = 5;
-const DEFAULT_PITCH: u8 = 0;
-const FF_DONTCARE: u8 = 0;
-const LF_FACESIZE = 32;
-const HCF_HIGHCONTRASTON: DWORD = 0x00000001;
-const COLOR_WINDOWTEXT = 8;
-const COLOR_WINDOWFRAME = 6;
-const COLOR_BTNFACE = 15;
-const COLOR_BTNTEXT = 18;
-const COLOR_GRAYTEXT = 17;
-const COLOR_HIGHLIGHT = 13;
-const COLOR_HIGHLIGHTTEXT = 14;
-const HKEY_CURRENT_USER: usize = 0x80000001;
-const KEY_READ: DWORD = 0x20019;
-const REG_DWORD: DWORD = 4;
-const ERROR_SUCCESS: i32 = 0;
-const ERROR_MOD_NOT_FOUND: DWORD = 126;
-const PFD_DRAW_TO_WINDOW = 0x00000004;
-const PFD_SUPPORT_OPENGL = 0x00000020;
-const PFD_DOUBLEBUFFER = 0x00000001;
-const PFD_TYPE_RGBA = 0;
-const PFD_MAIN_PLANE = 0;
-const SEM_FAILCRITICALERRORS: DWORD = 0x0001;
-const SEM_NOOPENFILEERRORBOX: DWORD = 0x8000;
 
 // Context menu constants
-const MF_STRING: UINT = 0x00000000;
-const MF_SEPARATOR: UINT = 0x00000800;
-const MF_GRAYED: UINT = 0x00000001;
-const TPM_LEFTALIGN: UINT = 0x0000;
-const TPM_TOPALIGN: UINT = 0x0000;
-const TPM_RETURNCMD: UINT = 0x0100;
-const TPM_RIGHTBUTTON: UINT = 0x0002;
-const WM_NULL: UINT = 0x0000;
-const WM_SETFONT: UINT = 0x0030;
-const CTX_COPY: usize = 4001;
-const CTX_PASTE: usize = 4002;
-const CTX_SELECT_ALL: usize = 4003;
-const CTX_FIND: usize = 4004;
-const CTX_COMMAND_PALETTE: usize = 4005;
-const CTX_NEW_TAB: usize = 4006;
-const CTX_SPLIT_RIGHT: usize = 4007;
-const CTX_NEW_WINDOW: usize = 4008;
-const CTX_INSPECTOR: usize = 4009;
-const CTX_SPLIT_DOWN: usize = 4010;
-const CTX_SPLIT_LEFT: usize = 4011;
-const CTX_SPLIT_UP: usize = 4012;
-const CTX_TAB_RENAME: usize = 4020;
-const CTX_TAB_CLOSE: usize = 4021;
-const CTX_TAB_CLOSE_OTHERS: usize = 4022;
-const CTX_TAB_MOVE_LEFT: usize = 4023;
-const CTX_TAB_MOVE_RIGHT: usize = 4024;
-const CTX_PROFILE_BASE: usize = 4100; // profile dropdown items: CTX_PROFILE_BASE + index
-const SEARCH_BG_ID: usize = 2100;
-const SEARCH_EDIT_ID: usize = 2101;
-const SEARCH_PREV_ID: usize = 2102;
-const SEARCH_NEXT_ID: usize = 2103;
-const SEARCH_REGEX_ID: usize = 2104;
-const SEARCH_CASE_ID: usize = 2105;
-const SEARCH_WORD_ID: usize = 2106;
-const SEARCH_RESULTS_ID: usize = 2107;
-const SEARCH_CLOSE_ID: usize = 2108;
-const MF_POPUP: UINT = 0x00000010;
-const MF_CHECKED: UINT = 0x00000008;
 
 const WNDPROC = win32_types.WNDPROC;
 const SHORT = i16;
 
-const VK_BACK = 0x08;
-const VK_TAB = 0x09;
-const VK_RETURN = 0x0D;
-const VK_SHIFT = 0x10;
-const VK_CONTROL = 0x11;
-const VK_MENU = 0x12;
-const VK_PAUSE = 0x13;
-const VK_CAPITAL = 0x14;
-const VK_ESCAPE = 0x1B;
-const VK_SPACE = 0x20;
-const VK_PRIOR = 0x21;
-const VK_NEXT = 0x22;
-const VK_END = 0x23;
-const VK_HOME = 0x24;
-const VK_LEFT = 0x25;
-const VK_UP = 0x26;
-const VK_RIGHT = 0x27;
-const VK_DOWN = 0x28;
-const VK_SNAPSHOT = 0x2C;
-const VK_INSERT = 0x2D;
-const VK_DELETE = 0x2E;
-const VK_0 = 0x30;
-const VK_9 = 0x39;
-const VK_A = 0x41;
-const VK_Z = 0x5A;
-const VK_LWIN = 0x5B;
-const VK_RWIN = 0x5C;
-const VK_APPS = 0x5D;
-const VK_NUMPAD0 = 0x60;
-const VK_NUMPAD9 = 0x69;
-const VK_MULTIPLY = 0x6A;
-const VK_ADD = 0x6B;
-const VK_SEPARATOR = 0x6C;
-const VK_SUBTRACT = 0x6D;
-const VK_DECIMAL = 0x6E;
-const VK_DIVIDE = 0x6F;
-const VK_F1 = 0x70;
-const VK_F3 = 0x72;
-const VK_F2 = 0x71;
-const VK_F24 = 0x87;
-const VK_NUMLOCK = 0x90;
-const VK_SCROLL = 0x91;
-const VK_LSHIFT = 0xA0;
-const VK_RSHIFT = 0xA1;
-const VK_LCONTROL = 0xA2;
-const VK_RCONTROL = 0xA3;
-const VK_LMENU = 0xA4;
-const VK_RMENU = 0xA5;
-const VK_OEM_1 = 0xBA;
-const VK_OEM_PLUS = 0xBB;
-const VK_OEM_COMMA = 0xBC;
-const VK_OEM_MINUS = 0xBD;
-const VK_OEM_PERIOD = 0xBE;
-const VK_OEM_2 = 0xBF;
-const VK_OEM_3 = 0xC0;
-const VK_OEM_4 = 0xDB;
-const VK_OEM_5 = 0xDC;
-const VK_OEM_6 = 0xDD;
-const VK_OEM_7 = 0xDE;
-const VK_PACKET = 0xE7;
-
-const KF_EXTENDED = 1 << 24;
-const KF_REPEAT = 1 << 30;
-const SPI_GETWHEELSCROLLLINES = 0x0068;
-const SPI_GETWHEELSCROLLCHARS = 0x006C;
-const WHEEL_DELTA = 120;
-const WHEEL_PAGESCROLL = 0xFFFF_FFFF;
-const ERROR_FILE_NOT_FOUND = 2;
-const PIPE_READMODE_BYTE = 0x00000000;
-const PIPE_WAIT = 0x00000000;
-const PIPE_ACCESS_DUPLEX = 0x00000003;
-const PIPE_UNLIMITED_INSTANCES = 255;
 const ipc_poll_interval_ns: u64 = 5 * std.time.ns_per_ms;
 const ipc_pipe_prefix = "\\\\.\\pipe\\noctty.";
 
-const POINT = win32_types.POINT;
-const RECT = win32_types.RECT;
-const PIXELFORMATDESCRIPTOR = extern struct {
-    nSize: WORD,
-    nVersion: WORD,
-    dwFlags: u32,
-    iPixelType: BYTE,
-    cColorBits: BYTE,
-    cRedBits: BYTE,
-    cRedShift: BYTE,
-    cGreenBits: BYTE,
-    cGreenShift: BYTE,
-    cBlueBits: BYTE,
-    cBlueShift: BYTE,
-    cAlphaBits: BYTE,
-    cAlphaShift: BYTE,
-    cAccumBits: BYTE,
-    cAccumRedBits: BYTE,
-    cAccumGreenBits: BYTE,
-    cAccumBlueBits: BYTE,
-    cAccumAlphaBits: BYTE,
-    cDepthBits: BYTE,
-    cStencilBits: BYTE,
-    cAuxBuffers: BYTE,
-    iLayerType: BYTE,
-    bReserved: BYTE,
-    dwLayerMask: u32,
-    dwVisibleMask: u32,
-    dwDamageMask: u32,
-};
+const POINT = sys.POINT;
+const RECT = sys.RECT;
+const PIXELFORMATDESCRIPTOR = sys.PIXELFORMATDESCRIPTOR;
+const MSG = sys.MSG;
+const PAINTSTRUCT = sys.PAINTSTRUCT;
+const DRAWITEMSTRUCT = sys.DRAWITEMSTRUCT;
+const TRACKMOUSEEVENT = sys.TRACKMOUSEEVENT;
+const WINDOWPOS = sys.WINDOWPOS;
+const WINDOWPLACEMENT = sys.WINDOWPLACEMENT;
+const NCCALCSIZE_PARAMS = sys.NCCALCSIZE_PARAMS;
+const WNDCLASSEXW = sys.WNDCLASSEXW;
+const CREATESTRUCTW = sys.CREATESTRUCTW;
+const MONITORINFO = sys.MONITORINFO;
+const MINMAXINFO = sys.MINMAXINFO;
+const LOGFONTW = sys.LOGFONTW;
+const NONCLIENTMETRICSW = sys.NONCLIENTMETRICSW;
 
-const MSG = extern struct {
-    hwnd: HWND,
-    message: UINT,
-    wParam: WPARAM,
-    lParam: LPARAM,
-    time: u32,
-    pt: POINT,
-    lPrivate: u32,
-};
+fn lastError() std.posix.UnexpectedError {
+    return windows.unexpectedError(windows.kernel32.GetLastError());
+}
 
-const PAINTSTRUCT = win32_types.PAINTSTRUCT;
+fn setWindowData(hwnd: HWND, ptr: ?*anyopaque) void {
+    const raw: LONG_PTR = if (ptr) |value|
+        @intCast(@intFromPtr(value))
+    else
+        0;
+    _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, raw);
+}
 
-const DRAWITEMSTRUCT = extern struct {
-    CtlType: UINT,
-    CtlID: UINT,
-    itemID: UINT,
-    itemAction: UINT,
-    itemState: UINT,
-    hwndItem: HWND,
-    hDC: HDC,
-    rcItem: RECT,
-    itemData: usize,
-};
+fn windowData(comptime T: type, hwnd: HWND) ?*T {
+    const raw = sys.GetWindowLongPtrW(hwnd, c.GWLP_USERDATA);
+    if (raw == 0) return null;
+    return @ptrFromInt(@as(usize, @intCast(raw)));
+}
 
-const TRACKMOUSEEVENT = extern struct {
-    cbSize: DWORD,
-    dwFlags: DWORD,
-    hwndTrack: HWND,
-    dwHoverTime: DWORD,
-};
-
-const WINDOWPOS = extern struct {
-    hwnd: HWND,
-    hwndInsertAfter: ?HWND,
-    x: i32,
-    y: i32,
-    cx: i32,
-    cy: i32,
-    flags: UINT,
-};
-
-const WINDOWPLACEMENT = extern struct {
-    length: UINT,
-    flags: UINT,
-    showCmd: UINT,
-    ptMinPosition: POINT,
-    ptMaxPosition: POINT,
-    rcNormalPosition: RECT,
-};
-
-const NCCALCSIZE_PARAMS = extern struct {
-    rgrc: [3]RECT,
-    lppos: *WINDOWPOS,
-};
-
-const WNDCLASSEXW = win32_types.WNDCLASSEXW;
-const CREATESTRUCTW = win32_types.CREATESTRUCTW;
-
-const MONITORINFO = extern struct {
-    cbSize: u32,
-    rcMonitor: RECT,
-    rcWork: RECT,
-    dwFlags: u32,
-};
-
-const MINMAXINFO = extern struct {
-    ptReserved: POINT,
-    ptMaxSize: POINT,
-    ptMaxPosition: POINT,
-    ptMinTrackSize: POINT,
-    ptMaxTrackSize: POINT,
-};
-
-const LOGFONTW = extern struct {
-    lfHeight: i32 = 0,
-    lfWidth: i32 = 0,
-    lfEscapement: i32 = 0,
-    lfOrientation: i32 = 0,
-    lfWeight: i32 = FW_NORMAL,
-    lfItalic: u8 = 0,
-    lfUnderline: u8 = 0,
-    lfStrikeOut: u8 = 0,
-    lfCharSet: u8 = DEFAULT_CHARSET,
-    lfOutPrecision: u8 = OUT_DEFAULT_PRECIS,
-    lfClipPrecision: u8 = CLIP_DEFAULT_PRECIS,
-    lfQuality: u8 = CLEARTYPE_QUALITY,
-    lfPitchAndFamily: u8 = DEFAULT_PITCH | FF_DONTCARE,
-    lfFaceName: [LF_FACESIZE]u16 = [_]u16{0} ** LF_FACESIZE,
-};
-
-const NONCLIENTMETRICSW = extern struct {
-    cbSize: UINT,
-    iBorderWidth: i32,
-    iScrollWidth: i32,
-    iScrollHeight: i32,
-    iCaptionWidth: i32,
-    iCaptionHeight: i32,
-    lfCaptionFont: LOGFONTW,
-    iSmCaptionWidth: i32,
-    iSmCaptionHeight: i32,
-    lfSmCaptionFont: LOGFONTW,
-    iMenuWidth: i32,
-    iMenuHeight: i32,
-    lfMenuFont: LOGFONTW,
-    lfStatusFont: LOGFONTW,
-    lfMessageFont: LOGFONTW,
-    iPaddedBorderWidth: i32,
-};
-
-extern "user32" fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) callconv(.winapi) ATOM;
-extern "user32" fn CreateWindowExW(
-    dwExStyle: u32,
-    lpClassName: LPCWSTR,
-    lpWindowName: LPCWSTR,
-    dwStyle: u32,
-    X: i32,
-    Y: i32,
-    nWidth: i32,
-    nHeight: i32,
-    hWndParent: ?HWND,
-    hMenu: HMENU,
-    hInstance: HINSTANCE,
-    lpParam: ?*anyopaque,
-) callconv(.winapi) ?HWND;
-extern "user32" fn CallWindowProcW(lpPrevWndFunc: ?*const anyopaque, hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn DefWindowProcW(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn DrawTextW(hDC: HDC, lpchText: [*:0]const u16, cchText: i32, lprc: *RECT, format: UINT) callconv(.winapi) i32;
-extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) LRESULT;
-extern "user32" fn GetFocus() callconv(.winapi) ?HWND;
-extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: ?HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT) callconv(.winapi) i32;
-extern "user32" fn MessageBoxW(hwnd: ?HWND, text: LPCWSTR, caption: LPCWSTR, flags: UINT) callconv(.winapi) c_int;
-extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) SHORT;
-extern "user32" fn GetKeyboardState(lpKeyState: *[256]u8) callconv(.winapi) BOOL;
-extern "user32" fn GetMonitorInfoW(hMonitor: ?*anyopaque, lpmi: *MONITORINFO) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowPlacement(hWnd: HWND, lpwndpl: *WINDOWPLACEMENT) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowTextLengthW(hWnd: HWND) callconv(.winapi) i32;
-extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: [*]u16, nMaxCount: i32) callconv(.winapi) i32;
-extern "user32" fn IsWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsWindowVisible(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsIconic(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsZoomed(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn MonitorFromWindow(hwnd: HWND, dwFlags: u32) callconv(.winapi) ?*anyopaque;
-extern "user32" fn EnumDisplayMonitors(hdc: HDC, lprcClip: ?*const RECT, lpfnEnum: *const fn (?*anyopaque, HDC, *RECT, LPARAM) callconv(.winapi) BOOL, dwData: LPARAM) callconv(.winapi) BOOL;
-extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
-extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
-extern "user32" fn TrackMouseEvent(lpEventTrack: *TRACKMOUSEEVENT) callconv(.winapi) BOOL;
-extern "user32" fn BeginPaint(hWnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.winapi) HDC;
-extern "user32" fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) callconv(.winapi) BOOL;
-extern "user32" fn GetDC(hWnd: HWND) callconv(.winapi) HDC;
-extern "gdi32" fn RectVisible(hdc: HDC, lprc: *const RECT) callconv(.winapi) BOOL;
-extern "user32" fn OpenClipboard(hWndNewOwner: ?HWND) callconv(.winapi) BOOL;
-extern "user32" fn CloseClipboard() callconv(.winapi) BOOL;
-extern "user32" fn EmptyClipboard() callconv(.winapi) BOOL;
-extern "user32" fn GetClipboardData(uFormat: UINT) callconv(.winapi) ?*anyopaque;
-extern "user32" fn SetClipboardData(uFormat: UINT, hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-extern "user32" fn IsClipboardFormatAvailable(format: UINT) callconv(.winapi) BOOL;
-extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: INTRESOURCE) callconv(.winapi) HCURSOR;
-extern "user32" fn LoadImageW(hInst: HINSTANCE, name: INTRESOURCE, @"type": UINT, cx: i32, cy: i32, fuLoad: UINT) callconv(.winapi) ?*anyopaque;
-extern "user32" fn GetSystemMetrics(nIndex: i32) callconv(.winapi) i32;
-extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) BOOL;
-extern "user32" fn InvalidateRect(hWnd: HWND, lpRect: ?*const RECT, bErase: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn MoveWindow(hWnd: HWND, X: i32, Y: i32, nWidth: i32, nHeight: i32, bRepaint: BOOL) callconv(.winapi) BOOL;
-extern "user32" fn PeekMessageW(lpMsg: *MSG, hWnd: ?HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT, wRemoveMsg: UINT) callconv(.winapi) BOOL;
-extern "user32" fn PostMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) BOOL;
-extern "user32" fn PostThreadMessageW(idThread: DWORD, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) BOOL;
-extern "user32" fn PostQuitMessage(nExitCode: i32) callconv(.winapi) void;
-extern "user32" fn ReleaseDC(hWnd: HWND, hDC: HDC) callconv(.winapi) i32;
-extern "user32" fn RegisterHotKey(hWnd: ?HWND, id: i32, fsModifiers: UINT, vk: UINT) callconv(.winapi) BOOL;
-extern "user32" fn RedrawWindow(hWnd: HWND, lprcUpdate: ?*const RECT, hrgnUpdate: ?*anyopaque, flags: UINT) callconv(.winapi) BOOL;
-extern "user32" fn SetTimer(hWnd: ?HWND, nIDEvent: UINT_PTR, uElapse: UINT, lpTimerFunc: ?*const anyopaque) callconv(.winapi) UINT_PTR;
-extern "user32" fn SetCursor(hCursor: HCURSOR) callconv(.winapi) HCURSOR;
-extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
-extern "user32" fn SetForegroundWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) BOOL;
-extern "user32" fn GetCaretPos(lpPoint: *POINT) callconv(.winapi) BOOL;
-extern "user32" fn MonitorFromPoint(pt: POINT, dwFlags: u32) callconv(.winapi) ?*anyopaque;
-extern "user32" fn SetLayeredWindowAttributes(hwnd: HWND, crKey: u32, bAlpha: BYTE, dwFlags: u32) callconv(.winapi) BOOL;
-extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: i32, dwNewLong: LONG_PTR) callconv(.winapi) LONG_PTR;
-extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?*anyopaque, X: i32, Y: i32, cx: i32, cy: i32, uFlags: UINT) callconv(.winapi) BOOL;
-extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
-extern "user32" fn SendMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
-extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: LPCWSTR) callconv(.winapi) BOOL;
-extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: i32) callconv(.winapi) LONG_PTR;
-extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) BOOL;
-extern "user32" fn SystemParametersInfoW(uiAction: UINT, uiParam: UINT, pvParam: ?*anyopaque, fWinIni: UINT) callconv(.winapi) BOOL;
-extern "user32" fn GetSysColor(nIndex: i32) callconv(.winapi) u32;
-extern "user32" fn GetDpiForWindow(hwnd: HWND) callconv(.winapi) UINT;
-extern "user32" fn CreatePopupMenu() callconv(.winapi) HMENU;
-extern "user32" fn AppendMenuW(hMenu: HMENU, uFlags: UINT, uIDNewItem: usize, lpNewItem: ?LPCWSTR) callconv(.winapi) BOOL;
-extern "user32" fn TrackPopupMenu(hMenu: HMENU, uFlags: UINT, x: i32, y: i32, nReserved: i32, hWnd: HWND, prcRect: ?*const RECT) callconv(.winapi) BOOL;
-extern "user32" fn DestroyMenu(hMenu: HMENU) callconv(.winapi) BOOL;
-extern "user32" fn ClientToScreen(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
-extern "user32" fn ToUnicode(
-    wVirtKey: UINT,
-    wScanCode: UINT,
-    lpKeyState: *const [256]u8,
-    pwszBuff: [*]u16,
-    cchBuff: i32,
-    wFlags: UINT,
-) callconv(.winapi) i32;
-extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) BOOL;
-extern "user32" fn IsDialogMessageW(hDlg: HWND, lpMsg: *MSG) callconv(.winapi) BOOL;
-extern "user32" fn UnregisterHotKey(hWnd: ?HWND, id: i32) callconv(.winapi) BOOL;
-extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn KillTimer(hWnd: ?HWND, uIDEvent: UINT_PTR) callconv(.winapi) BOOL;
-extern "kernel32" fn GetModuleHandleW(lpModuleName: ?LPCWSTR) callconv(.winapi) HINSTANCE;
-/// Main-thread COM apartment for in-process STA clients (settings path
-/// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means
-/// the desired STA already exists. `RPC_E_CHANGED_MODE` means the thread
-/// is already in a different apartment and is not safe for STA-only work.
-const COINIT_APARTMENTTHREADED: u32 = 0x2;
-const RPC_E_CHANGED_MODE: i32 = @bitCast(@as(u32, 0x80010106));
-extern "ole32" fn CoInitializeEx(pvReserved: ?*anyopaque, dwCoInit: u32) callconv(.winapi) i32;
-extern "ole32" fn CoUninitialize() callconv(.winapi) void;
-
-/// RTL_OSVERSIONINFOW for `RtlGetVersion`. `GetVersionExW` shims are
-/// manifest-gated and lie about build numbers on anything newer than
-/// Win8.1 unless the exe carries a Win10 application-manifest GUID.
-/// `RtlGetVersion` is unshimmed and returns the real kernel build.
-const RTL_OSVERSIONINFOW = extern struct {
-    dwOSVersionInfoSize: u32,
-    dwMajorVersion: u32,
-    dwMinorVersion: u32,
-    dwBuildNumber: u32,
-    dwPlatformId: u32,
-    szCSDVersion: [128]u16,
-};
-extern "ntdll" fn RtlGetVersion(lpVersionInformation: *RTL_OSVERSIONINFOW) callconv(.winapi) i32;
+const RTL_OSVERSIONINFOW = sys.RTL_OSVERSIONINFOW;
 
 /// Probe the Windows build number once; cache on `App.os_build`. Build
 /// 22000+ is Win11 (integrated titlebar / Snap Layouts); 22621+ supports
@@ -1191,7 +365,7 @@ fn probeWindowsBuild() u32 {
         .dwPlatformId = 0,
         .szCSDVersion = .{0} ** 128,
     };
-    const rc = RtlGetVersion(&info);
+    const rc = sys.RtlGetVersion(&info);
     if (rc < 0) return 0;
     return info.dwBuildNumber;
 }
@@ -1200,7 +374,7 @@ fn shouldUseIntegratedTitlebar(
     os_build: u32,
     show_tab_bar: configpkg.Config.WindowShowTabBar,
 ) bool {
-    return os_build >= OS_BUILD_WIN11_21H2 and show_tab_bar != .never;
+    return os_build >= c.OS_BUILD_WIN11_21H2 and show_tab_bar != .never;
 }
 
 fn dispatchDwmNcMessage(
@@ -1213,137 +387,18 @@ fn dispatchDwmNcMessage(
     // first so native caption-button affordances keep working where
     // the compositor can still own them.
     var result: LRESULT = 0;
-    return if (DwmDefWindowProc(hwnd, msg, wParam, lParam, &result) != 0)
+    return if (sys.DwmDefWindowProc(hwnd, msg, wParam, lParam, &result) != 0)
         result
     else
         null;
 }
 
-/// Atomic replace of an existing file. Used by the settings save path
-/// so a crash between write + rename can't corrupt `ghostty.conf`.
-/// Returns non-zero on success. `dwReplaceFlags = 0` gives the default
-/// (non-write-through) behaviour, which is fine for a user config file.
-extern "kernel32" fn ReplaceFileW(
-    lpReplacedFileName: LPCWSTR,
-    lpReplacementFileName: LPCWSTR,
-    lpBackupFileName: ?LPCWSTR,
-    dwReplaceFlags: DWORD,
-    lpExclude: ?*anyopaque,
-    lpReserved: ?*anyopaque,
-) callconv(.winapi) BOOL;
-/// Fallback when the target doesn't yet exist (first-time save). Unlike
-/// `ReplaceFileW`, `MoveFileExW` works on a missing target.
-const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-extern "kernel32" fn MoveFileExW(
-    lpExistingFileName: LPCWSTR,
-    lpNewFileName: ?LPCWSTR,
-    dwFlags: u32,
-) callconv(.winapi) BOOL;
-extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) DWORD;
-extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
-extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
-extern "kernel32" fn SetThreadErrorMode(dwNewMode: DWORD, lpOldMode: ?*DWORD) callconv(.winapi) BOOL;
-extern "kernel32" fn CreateNamedPipeW(
-    lpName: LPCWSTR,
-    dwOpenMode: DWORD,
-    dwPipeMode: DWORD,
-    nMaxInstances: DWORD,
-    nOutBufferSize: DWORD,
-    nInBufferSize: DWORD,
-    nDefaultTimeOut: DWORD,
-    lpSecurityAttributes: ?*windows.SECURITY_ATTRIBUTES,
-) callconv(.winapi) windows.HANDLE;
-extern "kernel32" fn ConnectNamedPipe(
-    hNamedPipe: windows.HANDLE,
-    lpOverlapped: ?*anyopaque,
-) callconv(.winapi) BOOL;
-extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;
-extern "kernel32" fn SetCurrentDirectoryW(lpPathName: LPCWSTR) callconv(.winapi) BOOL;
-extern "kernel32" fn WaitNamedPipeW(lpNamedPipeName: LPCWSTR, nTimeOut: DWORD) callconv(.winapi) BOOL;
-extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GlobalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GlobalLock(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-extern "kernel32" fn GlobalUnlock(hMem: ?*anyopaque) callconv(.winapi) BOOL;
-extern "gdi32" fn ChoosePixelFormat(hdc: HDC, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
-extern "gdi32" fn CreateSolidBrush(color: u32) callconv(.winapi) HBRUSH;
-extern "gdi32" fn DeleteObject(ho: ?*anyopaque) callconv(.winapi) BOOL;
-extern "gdi32" fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
-extern "gdi32" fn SetBkColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.winapi) i32;
-extern "gdi32" fn SetPixelFormat(hdc: HDC, format: i32, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) BOOL;
-extern "gdi32" fn SetTextColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn SwapBuffers(hdc: HDC) callconv(.winapi) BOOL;
-extern "gdi32" fn TextOutW(hdc: HDC, x: i32, y: i32, lpString: LPCWSTR, c: i32) callconv(.winapi) BOOL;
-extern "gdi32" fn CreateFontIndirectW(lplf: *const LOGFONTW) callconv(.winapi) ?*anyopaque;
-extern "gdi32" fn SelectObject(hdc: HDC, h: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-extern "gdi32" fn GetStockObject(i: i32) callconv(.winapi) HGDIOBJ;
-extern "gdi32" fn SetDCBrushColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn SetDCPenColor(hdc: HDC, color: u32) callconv(.winapi) u32;
-extern "gdi32" fn RoundRect(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32, width: i32, height: i32) callconv(.winapi) BOOL;
-extern "advapi32" fn RegOpenKeyExW(hKey: usize, lpSubKey: LPCWSTR, ulOptions: DWORD, samDesired: DWORD, phkResult: *usize) callconv(.winapi) i32;
-extern "advapi32" fn RegQueryValueExW(hKey: usize, lpValueName: LPCWSTR, lpReserved: ?*DWORD, lpType: ?*DWORD, lpData: ?*u8, lpcbData: ?*DWORD) callconv(.winapi) i32;
-extern "advapi32" fn RegCloseKey(hKey: usize) callconv(.winapi) i32;
-extern "opengl32" fn wglCreateContext(hdc: HDC) callconv(.winapi) HGLRC;
-extern "opengl32" fn wglDeleteContext(hglrc: HGLRC) callconv(.winapi) BOOL;
-extern "opengl32" fn wglGetCurrentContext() callconv(.winapi) HGLRC;
-extern "opengl32" fn wglGetCurrentDC() callconv(.winapi) HDC;
-extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "opengl32" fn wglMakeCurrent(hdc: HDC, hglrc: HGLRC) callconv(.winapi) BOOL;
-extern "dwmapi" fn DwmDefWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM, plResult: *LRESULT) callconv(.winapi) BOOL;
-extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?*anyopaque;
-extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: ?*anyopaque) callconv(.winapi) BOOL;
-extern "imm32" fn ImmGetCompositionStringW(hIMC: *anyopaque, dwIndex: u32, lpBuf: ?[*]u16, dwBufLen: u32) callconv(.winapi) i32;
-extern "imm32" fn ImmSetCompositionWindow(hIMC: *anyopaque, lpCompForm: *const COMPOSITIONFORM) callconv(.winapi) BOOL;
-extern "imm32" fn ImmSetCandidateWindow(hIMC: *anyopaque, lpCandidate: *const CANDIDATEFORM) callconv(.winapi) BOOL;
+const COMPOSITIONFORM = sys.COMPOSITIONFORM;
+const CANDIDATEFORM = sys.CANDIDATEFORM;
 
-const COMPOSITIONFORM = extern struct {
-    dwStyle: u32,
-    ptCurrentPos: POINT,
-    rcArea: RECT,
-};
-
-const CANDIDATEFORM = extern struct {
-    dwIndex: u32,
-    dwStyle: u32,
-    ptCurrentPos: POINT,
-    rcArea: RECT,
-};
-
-const SystemWheelSettings = struct {
-    lines: u32 = 3,
-    chars: u32 = 3,
-};
-
-const MouseWheelAxis = enum {
-    horizontal,
-    vertical,
-};
-
-const WheelNormalizationContext = struct {
-    settings: SystemWheelSettings = .{},
-    cell_size: apprt.action.CellSize = .{ .width = 0, .height = 0 },
-    viewport: apprt.SurfaceSize = .{ .width = 0, .height = 0 },
-};
-
-const NormalizedWheelScroll = struct {
-    xoff: f64 = 0,
-    yoff: f64 = 0,
-    mods: input.ScrollMods = .{},
-};
-extern "shell32" fn ShellExecuteW(
-    hwnd: ?HWND,
-    lpOperation: ?LPCWSTR,
-    lpFile: LPCWSTR,
-    lpParameters: ?LPCWSTR,
-    lpDirectory: ?LPCWSTR,
-    nShowCmd: i32,
-) callconv(.winapi) ?*anyopaque;
-extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.winapi) void;
-extern "shell32" fn DragQueryFileW(hDrop: *anyopaque, iFile: UINT, lpszFile: ?[*]u16, cch: UINT) callconv(.winapi) UINT;
-extern "shell32" fn DragFinish(hDrop: *anyopaque) callconv(.winapi) void;
-
-const WM_DROPFILES: UINT = 0x0233;
+const SystemWheelSettings = win32_input.SystemWheelSettings;
+const WheelNormalizationContext = win32_input.WheelNormalizationContext;
+const NormalizedWheelScroll = win32_input.NormalizedWheelScroll;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
@@ -1361,12 +416,6 @@ const prompt_edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
 const prompt_button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
 const prompt_ok_label = std.unicode.utf8ToUtf16LeStringLiteral("OK");
 const prompt_cancel_label = std.unicode.utf8ToUtf16LeStringLiteral("Cancel");
-const search_prev_label = std.unicode.utf8ToUtf16LeStringLiteral("Prev match");
-const search_next_label = std.unicode.utf8ToUtf16LeStringLiteral("Next match");
-const search_regex_label = std.unicode.utf8ToUtf16LeStringLiteral("Regex");
-const search_case_label = std.unicode.utf8ToUtf16LeStringLiteral("Case sensitive");
-const search_word_label = std.unicode.utf8ToUtf16LeStringLiteral("Whole word");
-const search_close_label = std.unicode.utf8ToUtf16LeStringLiteral("Close search");
 const search_edit_cue = std.unicode.utf8ToUtf16LeStringLiteral("Find in scrollback");
 const scrollbar_transparent_key = rgb(0xFF, 0x00, 0xFF);
 const host_overlay_command_palette_label_utf8 = "Command:";
@@ -1384,244 +433,10 @@ const titlebar_glyph_restore = std.unicode.utf8ToUtf16LeStringLiteral("\u{E923}"
 const titlebar_glyph_close = std.unicode.utf8ToUtf16LeStringLiteral("\u{E8BB}");
 const titlebar_glyph_new_tab = std.unicode.utf8ToUtf16LeStringLiteral("\u{E710}");
 const titlebar_glyph_dropdown = std.unicode.utf8ToUtf16LeStringLiteral("\u{E70D}");
-const host_banner_inspector_inactive = "Inspector hidden. Terminal view is active.";
-const search_results_idle = "Type to search";
-const search_results_pending = "Searching";
-const search_results_none = "No matches";
+const host_banner_inspector_inactive = labels.host_banner_inspector_inactive;
 const opengl32_name: [*:0]const u8 = "opengl32.dll";
 const shell_open: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("open");
 const shell_runas: LPCWSTR = std.unicode.utf8ToUtf16LeStringLiteral("runas");
-
-var opengl32_module: HMODULE = null;
-
-pub const StartupLoaderErrorDialogSuppression = struct {
-    previous_mode: DWORD = 0,
-    active: bool = false,
-
-    pub fn restore(self: *StartupLoaderErrorDialogSuppression) void {
-        if (!self.active) return;
-        if (SetThreadErrorMode(self.previous_mode, null) == 0) {
-            log.warn(
-                "failed to restore startup loader thread error mode win32_error={d}",
-                .{@intFromEnum(windows.kernel32.GetLastError())},
-            );
-        }
-        self.active = false;
-    }
-};
-
-pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
-    // Let WinMain report renderer startup failures with app-specific guidance
-    // instead of letting LoadLibrary/WGL surface generic Windows dialogs first.
-    var previous_mode: DWORD = 0;
-    if (SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_mode) == 0) {
-        log.warn(
-            "failed to suppress startup loader error dialogs win32_error={d}",
-            .{@intFromEnum(windows.kernel32.GetLastError())},
-        );
-        return .{};
-    }
-    return .{ .previous_mode = previous_mode, .active = true };
-}
-
-pub const OpenGLStartupStep = enum {
-    get_dc,
-    choose_pixel_format,
-    set_pixel_format,
-    create_context,
-    initial_make_current,
-    load_opengl32,
-    make_current,
-    load_functions,
-    version_check,
-    framebuffer_srgb,
-
-    fn label(self: OpenGLStartupStep) []const u8 {
-        return switch (self) {
-            .get_dc => "acquiring the window device context",
-            .choose_pixel_format => "choosing a WGL pixel format",
-            .set_pixel_format => "setting the WGL pixel format",
-            .create_context => "creating the WGL context",
-            .initial_make_current => "making the initial WGL context current",
-            .load_opengl32 => "loading opengl32.dll",
-            .make_current => "making the WGL context current",
-            .load_functions => "loading OpenGL functions",
-            .version_check => "checking the OpenGL version",
-            .framebuffer_srgb => "enabling OpenGL sRGB framebuffer support",
-        };
-    }
-};
-
-const OpenGLStartupFailure = struct {
-    step: OpenGLStartupStep,
-    win32_error: ?DWORD = null,
-    zig_error_name: ?[]const u8 = null,
-};
-
-var opengl_startup_diagnostics_mutex: std.Thread.Mutex = .{};
-var opengl_startup_diagnostics_active = false;
-var last_opengl_startup_failure: ?OpenGLStartupFailure = null;
-
-fn beginOpenGLStartupDiagnostics() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
-
-    opengl_startup_diagnostics_active = true;
-    last_opengl_startup_failure = null;
-}
-
-pub fn clearOpenGLStartupFailure() void {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
-
-    opengl_startup_diagnostics_active = false;
-    last_opengl_startup_failure = null;
-}
-
-fn recordOpenGLStartupFailure(failure: OpenGLStartupFailure) bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
-
-    if (!opengl_startup_diagnostics_active) return false;
-    if (last_opengl_startup_failure) |previous| {
-        if (previous.win32_error != null and failure.win32_error == null) return false;
-    }
-
-    last_opengl_startup_failure = failure;
-    return true;
-}
-
-fn openGLStartupDiagnosticsActive() bool {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
-
-    return opengl_startup_diagnostics_active;
-}
-
-fn currentOpenGLStartupFailure() ?OpenGLStartupFailure {
-    opengl_startup_diagnostics_mutex.lock();
-    defer opengl_startup_diagnostics_mutex.unlock();
-
-    return last_opengl_startup_failure;
-}
-
-fn recordOpenGLStartupWin32Failure(step: OpenGLStartupStep, win32_error: windows.Win32Error) void {
-    const code: DWORD = @intFromEnum(win32_error);
-    if (!recordOpenGLStartupFailure(.{
-        .step = step,
-        .win32_error = code,
-    })) return;
-
-    log.err(
-        "Win32 OpenGL startup failed step={s} win32_error={d}",
-        .{ step.label(), code },
-    );
-}
-
-pub fn recordOpenGLStartupError(step: OpenGLStartupStep, err: anyerror) void {
-    if (!recordOpenGLStartupFailure(.{
-        .step = step,
-        .zig_error_name = @errorName(err),
-    })) return;
-
-    log.err("Win32 OpenGL startup failed step={s} error={s}", .{ step.label(), @errorName(err) });
-}
-
-pub fn reportStartupFailure(err: anyerror) void {
-    if (comptime builtin.os.tag != .windows) return;
-
-    var buf: [4096]u8 = undefined;
-    const message = formatStartupFailureMessage(&buf, err);
-
-    const caption = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed");
-    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty failed.");
-
-    const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
-        _ = MessageBoxW(null, fallback, caption, MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-        return;
-    };
-    defer std.heap.page_allocator.free(message_w);
-
-    _ = MessageBoxW(null, message_w, caption, MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
-}
-
-fn formatStartupFailureMessage(buf: []u8, err: anyerror) []const u8 {
-    if (currentOpenGLStartupFailure()) |failure| {
-        return formatOpenGLStartupFailureMessage(buf, err, failure) catch
-            "noctty could not initialize the Windows OpenGL renderer.";
-    }
-
-    return std.fmt.bufPrint(
-        buf,
-        "noctty {s} failed: {s}\n\nOpen an issue with the full log if this keeps happening.",
-        .{ build_config.version_string, @errorName(err) },
-    ) catch "noctty failed.";
-}
-
-fn formatOpenGLStartupFailureMessage(buf: []u8, err: anyerror, failure: OpenGLStartupFailure) ![]const u8 {
-    const zig_error_name = failure.zig_error_name orelse @errorName(err);
-
-    if (failure.win32_error) |win32_error| {
-        return std.fmt.bufPrint(buf,
-            \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
-            \\
-            \\Startup error: {s}
-            \\Win32 error: {d}{s}
-            \\
-            \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
-            \\
-            \\{s}
-            \\
-            \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
-        , .{
-            build_config.version_string,
-            failure.step.label(),
-            zig_error_name,
-            win32_error,
-            win32ErrorSuffix(win32_error),
-            openglStartupFailureHint(failure),
-        });
-    }
-
-    return std.fmt.bufPrint(buf,
-        \\noctty {s} could not initialize the Windows OpenGL renderer while {s}.
-        \\
-        \\Startup error: {s}
-        \\Win32 error: not reported
-        \\
-        \\noctty currently uses OpenGL 4.3 through WGL on Windows. This build does not include a DirectX or ANGLE fallback renderer.
-        \\
-        \\{s}
-        \\
-        \\Try updating or reinstalling the OEM AMD graphics driver, then the NVIDIA driver. You can also force noctty.exe to the discrete or integrated GPU in Windows Graphics settings. If it still fails, attach this text and the log to https://github.com/amanthanvi/noctty/issues/64.
-    , .{
-        build_config.version_string,
-        failure.step.label(),
-        zig_error_name,
-        openglStartupFailureHint(failure),
-    });
-}
-
-fn win32ErrorSuffix(code: DWORD) []const u8 {
-    return switch (code) {
-        ERROR_MOD_NOT_FOUND => " (ERROR_MOD_NOT_FOUND)",
-        else => "",
-    };
-}
-
-fn openglStartupFailureHint(failure: OpenGLStartupFailure) []const u8 {
-    if (failure.win32_error) |code| {
-        if (code == ERROR_MOD_NOT_FOUND) {
-            return "Win32 error 126 means Windows could not load a graphics-driver DLL or one of its dependent DLLs. On AMD+NVIDIA hybrid GPU laptops, this can happen while WGL loads the AMD OpenGL ICD from DriverStore.";
-        }
-    }
-
-    if (failure.step == .version_check) {
-        return "The active GPU driver did not expose the required OpenGL 4.3 feature level.";
-    }
-
-    return "This is usually caused by an unavailable or incompatible OpenGL driver, a stale GPU driver installation, or missing OpenGL 4.3 support.";
-}
 
 const ForwardedArgIterator = struct {
     args: []const [:0]const u8,
@@ -1634,17 +449,8 @@ const ForwardedArgIterator = struct {
     }
 };
 
-const GlobalHotkeySpec = struct {
-    modifiers: UINT,
-    vk: UINT,
-};
-
-const RegisteredGlobalHotkey = struct {
-    id: i32,
-    trigger: input.Binding.Trigger,
-    spec: GlobalHotkeySpec,
-    binding: *const input.Binding.Set.Value,
-};
+const GlobalHotkeySpec = win32_input.GlobalHotkeySpec;
+const RegisteredGlobalHotkey = win32_input.RegisteredGlobalHotkey;
 
 fn decorationsVisibleForConfig(value: configpkg.Config.WindowDecoration) bool {
     return value != .none;
@@ -1660,13 +466,13 @@ fn decorationVisibilityForChromeValue(active_surface_visible: ?bool, cached_visi
 }
 
 fn startupHostWindowStyle(decorations_visible: bool, fullscreen: bool) u32 {
-    return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, WS_VISIBLE);
+    return effectiveHostWindowStyle(decorations_visible, fullscreen, true) & ~@as(u32, c.WS_VISIBLE);
 }
 
 fn surfaceWindowStyle() u32 {
     // Keep the terminal child surface hidden until GL + core init complete,
     // then show it explicitly from Surface.init.
-    return WS_CHILD | WS_CLIPSIBLINGS;
+    return c.WS_CHILD | c.WS_CLIPSIBLINGS;
 }
 
 fn effectiveHostWindowStyle(
@@ -1676,22 +482,22 @@ fn effectiveHostWindowStyle(
 ) u32 {
     if (fullscreen) {
         return if (hosted)
-            WS_VISIBLE | WS_POPUP | WS_CLIPCHILDREN
+            c.WS_VISIBLE | c.WS_POPUP | c.WS_CLIPCHILDREN
         else
-            WS_VISIBLE | WS_POPUP;
+            c.WS_VISIBLE | c.WS_POPUP;
     }
 
     if (decorations_visible) {
         return if (hosted)
-            WS_VISIBLE | WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
+            c.WS_VISIBLE | WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN
         else
-            WS_VISIBLE | WS_OVERLAPPEDWINDOW;
+            c.WS_VISIBLE | WS_OVERLAPPEDWINDOW;
     }
 
     return if (hosted)
-        WS_VISIBLE | WS_OVERLAPPED | WS_CLIPCHILDREN
+        c.WS_VISIBLE | c.WS_OVERLAPPED | c.WS_CLIPCHILDREN
     else
-        WS_VISIBLE | WS_OVERLAPPED;
+        c.WS_VISIBLE | c.WS_OVERLAPPED;
 }
 
 fn sharesHostWindowState(dst_host_id: ?u32, src_host_id: ?u32) bool {
@@ -1765,9 +571,9 @@ fn hostPresentShowCommand(
     is_iconic: bool,
     is_zoomed: bool,
 ) ?i32 {
-    if (is_iconic) return SW_RESTORE;
+    if (is_iconic) return c.SW_RESTORE;
     if (is_visible) return null;
-    return if (is_zoomed) SW_MAXIMIZE else SW_SHOW;
+    return if (is_zoomed) c.SW_MAXIMIZE else c.SW_SHOW;
 }
 
 fn intResource(id: usize) INTRESOURCE {
@@ -1775,28 +581,28 @@ fn intResource(id: usize) INTRESOURCE {
 }
 
 fn appIconResource() INTRESOURCE {
-    return intResource(ID_ICON_GHOSTTY);
+    return intResource(c.ID_ICON_GHOSTTY);
 }
 
 fn loadAppIcon(hinstance: HINSTANCE, small: bool) HICON {
-    const cx = if (small) GetSystemMetrics(SM_CXSMICON) else GetSystemMetrics(SM_CXICON);
-    const cy = if (small) GetSystemMetrics(SM_CYSMICON) else GetSystemMetrics(SM_CYICON);
-    return LoadImageW(
+    const cx = if (small) sys.GetSystemMetrics(c.SM_CXSMICON) else sys.GetSystemMetrics(c.SM_CXICON);
+    const cy = if (small) sys.GetSystemMetrics(c.SM_CYSMICON) else sys.GetSystemMetrics(c.SM_CYICON);
+    return sys.LoadImageW(
         hinstance,
         appIconResource(),
-        IMAGE_ICON,
+        c.IMAGE_ICON,
         if (cx > 0) cx else if (small) 16 else 32,
         if (cy > 0) cy else if (small) 16 else 32,
-        LR_SHARED,
+        c.LR_SHARED,
     );
 }
 
 fn setWindowIcon(hwnd: HWND, hinstance: HINSTANCE) void {
     if (loadAppIcon(hinstance, false)) |icon| {
-        _ = SendMessageW(hwnd, WM_SETICON, ICON_BIG, @as(LPARAM, @bitCast(@intFromPtr(icon))));
+        _ = sys.SendMessageW(hwnd, c.WM_SETICON, c.ICON_BIG, @as(LPARAM, @bitCast(@intFromPtr(icon))));
     }
     if (loadAppIcon(hinstance, true)) |icon| {
-        _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL, @as(LPARAM, @bitCast(@intFromPtr(icon))));
+        _ = sys.SendMessageW(hwnd, c.WM_SETICON, c.ICON_SMALL, @as(LPARAM, @bitCast(@intFromPtr(icon))));
     }
 }
 
@@ -1916,9 +722,9 @@ fn sanitizeIpcNamespace(alloc: Allocator, raw: ?[]const u8) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(alloc);
 
-    for (source) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_') {
-            try buf.append(alloc, c);
+    for (source) |char| {
+        if (std.ascii.isAlphanumeric(char) or char == '.' or char == '-' or char == '_') {
+            try buf.append(alloc, char);
         } else {
             try buf.append(alloc, '_');
         }
@@ -1969,7 +775,7 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
         switch (err) {
             .FILE_NOT_FOUND => return error.FileNotFound,
             .PIPE_BUSY => {
-                if (retries == 0 and WaitNamedPipeW(pipe_name.ptr, 1000) != 0) {
+                if (retries == 0 and sys.WaitNamedPipeW(pipe_name.ptr, 1000) != 0) {
                     retries += 1;
                     continue;
                 }
@@ -2133,11 +939,11 @@ fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
     server: while (!app.ipc_stop_requested.load(.acquire)) {
-        const pipe = CreateNamedPipeW(
+        const pipe = sys.CreateNamedPipeW(
             pipe_name.ptr,
-            PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
-            PIPE_UNLIMITED_INSTANCES,
+            c.PIPE_ACCESS_DUPLEX,
+            windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+            c.PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
             16 * 1024,
             0,
@@ -2151,7 +957,7 @@ fn ipcServerMain(app: *App) void {
         }
 
         connect: while (!app.ipc_stop_requested.load(.acquire)) {
-            const connected = ConnectNamedPipe(pipe, null);
+            const connected = sys.ConnectNamedPipe(pipe, null);
             if (connected != 0) break :connect;
             const err = windows.kernel32.GetLastError();
             switch (err) {
@@ -2305,29 +1111,29 @@ fn requestAutomationAction(
 }
 
 fn waitForAutomationCompletion(app: *const App, completed: *const std.atomic.Value(bool)) !void {
-    const deadline_ms = GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
+    const deadline_ms = sys.GetTickCount64() +| win32_ipc.automation_response_timeout_ms;
     while (!completed.load(.acquire)) {
         if (app.ipc_stop_requested.load(.acquire)) return error.IPCFailed;
-        if (GetTickCount64() >= deadline_ms) return error.IpcTimeout;
+        if (sys.GetTickCount64() >= deadline_ms) return error.IpcTimeout;
         std.Thread.sleep(std.time.ns_per_ms);
     }
 }
 
 pub fn getProcAddress(name: [*:0]const u8) callconv(.c) ?*const anyopaque {
-    if (wglGetProcAddress(name)) |ptr| {
+    if (sys.wglGetProcAddress(name)) |ptr| {
         const raw = @intFromPtr(ptr);
         if (raw > 3 and raw != std.math.maxInt(usize)) return ptr;
     }
 
-    if (opengl32_module == null) {
-        opengl32_module = LoadLibraryA(opengl32_name);
-        if (opengl32_module == null) {
+    if (gl_startup.opengl32_module == null) {
+        gl_startup.opengl32_module = sys.LoadLibraryA(opengl32_name);
+        if (gl_startup.opengl32_module == null) {
             recordOpenGLStartupWin32Failure(.load_opengl32, windows.kernel32.GetLastError());
         }
     }
 
-    const module = opengl32_module orelse return null;
-    return GetProcAddress(module, name);
+    const module = gl_startup.opengl32_module orelse return null;
+    return sys.GetProcAddress(module, name);
 }
 
 const UpdateNotice = struct {
@@ -2462,32 +1268,6 @@ fn settingsEditedValueMasked(
     return pending.changed(reloaded, comptime key);
 }
 
-test "win32 render trace classifies gaps by start time" {
-    try std.testing.expect(!RenderTrace.gapIsSustained(1250, 578));
-    try std.testing.expect(!RenderTrace.gapIsSustained(1299, 300));
-    try std.testing.expect(RenderTrace.gapIsSustained(1300, 300));
-    try std.testing.expect(!RenderTrace.gapIsSustained(500, 600));
-}
-
-test "win32 render trace classifies visible paint gaps" {
-    try std.testing.expect(RenderTrace.startup_paint_gap_ceiling_ms >= RenderTrace.startup_window_ms);
-    try std.testing.expect(!RenderTrace.gapExceedsPaintLimit(300));
-    try std.testing.expect(RenderTrace.gapExceedsPaintLimit(301));
-}
-
-test "win32 render trace init rejects and frees a second process owner" {
-    var claimed = std.atomic.Value(bool).init(false);
-    const first = try std.testing.allocator.dupe(u8, "first.json");
-    const first_trace = RenderTrace.initWithClaimedPath(std.testing.allocator, &claimed, first);
-    defer if (first_trace.path) |path| std.testing.allocator.free(path);
-    try std.testing.expect(first_trace.path != null);
-
-    const second = try std.testing.allocator.dupe(u8, "second.json");
-    const second_trace = RenderTrace.initWithClaimedPath(std.testing.allocator, &claimed, second);
-    defer if (second_trace.path) |path| std.testing.allocator.free(path);
-    try std.testing.expect(second_trace.path == null);
-}
-
 test "win32 bounded UTF-8 prefix never splits a codepoint" {
     const value = "123\u{1f680}tail";
     try std.testing.expectEqual(@as(usize, 3), utf8PrefixLen(value, 4));
@@ -2572,10 +1352,51 @@ fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8
     const temporary_path = try std.fmt.allocPrint(
         alloc,
         "{s}.tmp-{x}-{x}",
-        .{ path, GetCurrentProcessId(), unixMillis() },
+        .{ path, sys.GetCurrentProcessId(), unixMillis() },
     );
     defer alloc.free(temporary_path);
     try win32_session_persistence.writeFileAtomic(path, temporary_path, data);
+}
+
+fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
+    return !safe_mode and policy != .never;
+}
+
+const SessionRestoreTransaction = struct {
+    app: ?*App = null,
+    host: ?*Host = null,
+    committed: bool = false,
+
+    fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
+        if (self.host == null) {
+            self.app = surface.app;
+            self.host = surface.host;
+        }
+    }
+
+    fn commit(self: *SessionRestoreTransaction) void {
+        self.committed = true;
+    }
+
+    fn rollback(self: *SessionRestoreTransaction) void {
+        if (self.committed) return;
+        const app = self.app orelse return;
+        const host = self.host orelse return;
+        app.rollbackSessionRestoreHost(host);
+    }
+};
+
+fn sessionRestorePolicyAllows(
+    safe_mode: bool,
+    policy: configpkg.Config.WindowSaveState,
+    initial_window: bool,
+    has_initial_command: bool,
+    startup_profile_picker: bool,
+) bool {
+    return sessionStatePolicyAllows(safe_mode, policy) and
+        initial_window and
+        !has_initial_command and
+        !startup_profile_picker;
 }
 
 pub const App = struct {
@@ -2742,7 +1563,7 @@ pub const App = struct {
             } else try configpkg.Config.load(core_app.alloc),
             .safe_mode = safe_mode,
             .recovery_startup = recovery_startup,
-            .hinstance = GetModuleHandleW(null),
+            .hinstance = sys.GetModuleHandleW(null),
             .launcher_profile_hint = detectDefaultProfileHint(core_app.alloc),
             .launcher_profile_order_hint = windows_shell.profileOrderHint(core_app.alloc),
             .launcher_profile_target = detectDefaultProfileTarget(core_app.alloc),
@@ -2870,10 +1691,10 @@ pub const App = struct {
     /// `RPC_E_CHANGED_MODE` means "already initialised in a different
     /// mode" and leaves STA-only consumers disabled.
     fn initComApartment(self: *App) void {
-        const hr = CoInitializeEx(null, COINIT_APARTMENTTHREADED);
+        const hr = sys.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED);
         switch (hr) {
             0, 1 => self.com_initialized = true, // S_OK, S_FALSE
-            RPC_E_CHANGED_MODE => {
+            c.RPC_E_CHANGED_MODE => {
                 std.log.warn("COM apartment: already MTA on this thread; STA consumers may fail", .{});
             },
             else => {
@@ -2901,9 +1722,9 @@ pub const App = struct {
         }
 
         self.running = true;
-        const ui_thread_id = GetCurrentThreadId();
+        const ui_thread_id = sys.GetCurrentThreadId();
         @atomicStore(DWORD, &self.ui_thread_id, ui_thread_id, .release);
-        self.ensureMessageQueue();
+        ensureMessageQueue();
         defer {
             self.stopUndoPruneTimer();
             self.stopQuitTimer();
@@ -2941,11 +1762,11 @@ pub const App = struct {
 
         var msg: MSG = undefined;
         while (true) {
-            const result = GetMessageW(&msg, null, 0, 0);
-            if (result == -1) return windows.unexpectedError(windows.kernel32.GetLastError());
+            const result = sys.GetMessageW(&msg, null, 0, 0);
+            if (result == -1) return lastError();
             if (result == 0) break;
 
-            if (msg.message == WM_WINHOSTTY_WAKE) {
+            if (msg.message == c.WM_WINHOSTTY_WAKE) {
                 if (self.global_hotkeys_dirty) {
                     self.global_hotkeys_dirty = false;
                     self.syncGlobalHotkeys() catch |err| {
@@ -2957,7 +1778,7 @@ pub const App = struct {
                 continue;
             }
 
-            if (msg.message == WM_WINHOSTTY_UPDATE) {
+            if (msg.message == c.WM_WINHOSTTY_UPDATE) {
                 const completion: *UpdateCheckCompletion = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
                 defer {
                     completion.deinit();
@@ -2969,7 +1790,7 @@ pub const App = struct {
                 continue;
             }
 
-            if (msg.message == WM_WINHOSTTY_TOAST_ACTIVATION) {
+            if (msg.message == c.WM_WINHOSTTY_TOAST_ACTIVATION) {
                 const activation: *win32_toast_activation.ActivationTarget = @ptrFromInt(@as(usize, @bitCast(msg.lParam)));
                 defer std.heap.page_allocator.destroy(activation);
                 defer self.toast_activation_post_pending.store(false, .release);
@@ -2981,7 +1802,7 @@ pub const App = struct {
                 continue;
             }
 
-            if (msg.message == WM_WINHOSTTY_UIA_DISCONNECT) {
+            if (msg.message == c.WM_WINHOSTTY_UIA_DISCONNECT) {
                 if (msg.lParam == 0) {
                     log.warn("win32 UIA deferred disconnect message had no context", .{});
                     continue;
@@ -2991,13 +1812,13 @@ pub const App = struct {
                 continue;
             }
 
-            if (msg.message == WM_TIMER) {
+            if (msg.message == c.WM_TIMER) {
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopQuitTimer();
                         if (self.running and !self.hasLiveUiWindows() and self.config.@"quit-after-last-window-closed") {
                             self.running = false;
-                            PostQuitMessage(0);
+                            sys.PostQuitMessage(0);
                         }
                         continue;
                     }
@@ -3011,7 +1832,7 @@ pub const App = struct {
                 }
             }
 
-            if (msg.message == WM_HOTKEY) {
+            if (msg.message == c.WM_HOTKEY) {
                 self.handleGlobalHotkey(@intCast(msg.wParam));
                 continue;
             }
@@ -3021,14 +1842,14 @@ pub const App = struct {
             // Shift+Tab, arrow-key radio navigation, and default buttons use
             // standard Win32 accessibility semantics.
             if (self.settings_window.hwnd) |settings_hwnd| {
-                if (IsDialogMessageW(settings_hwnd, &msg) != 0) {
+                if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
                     try self.core_app.tick(self);
                     continue;
                 }
             }
 
-            _ = TranslateMessage(&msg);
-            _ = DispatchMessageW(&msg);
+            _ = sys.TranslateMessage(&msg);
+            _ = sys.DispatchMessageW(&msg);
 
             if (self.global_hotkeys_dirty) {
                 self.global_hotkeys_dirty = false;
@@ -3103,7 +1924,7 @@ pub const App = struct {
         deinitImeWindowFormsTracePath(self.core_app.alloc);
         self.config.deinit();
         if (self.com_initialized) {
-            CoUninitialize();
+            sys.CoUninitialize();
             self.com_initialized = false;
         }
     }
@@ -3331,7 +2152,7 @@ pub const App = struct {
             if (host == null) {
                 host = tab_surface.host;
                 if (host) |created_host| {
-                    self.applyRestoredWindowPlacement(created_host, window) catch |err| {
+                    applyRestoredWindowPlacement(created_host, window) catch |err| {
                         log.warn("win32 session restore: window placement failed err={}", .{err});
                     };
                 }
@@ -3465,25 +2286,23 @@ pub const App = struct {
     }
 
     fn applyRestoredWindowPlacement(
-        self: *App,
         host: *Host,
         window: win32_session_state.Window,
     ) !void {
-        _ = self;
         const hwnd = host.hwnd orelse return;
         if (try sessionStateWindowRect(window)) |rect| {
-            if (SetWindowPos(
+            if (sys.SetWindowPos(
                 hwnd,
                 null,
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+                c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+            ) == 0) return lastError();
         }
         if ((window.state orelse .normal) == .maximized) {
-            _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
         }
     }
 
@@ -3534,7 +2353,7 @@ pub const App = struct {
         var built: usize = 0;
         for (self.hosts.items) |host| {
             if (hostSessionTabCount(host) == 0) continue;
-            windows_state[built] = try self.buildSessionWindow(alloc, host);
+            windows_state[built] = try buildSessionWindow(alloc, host);
             built += 1;
         }
 
@@ -3542,7 +2361,6 @@ pub const App = struct {
     }
 
     fn buildSessionWindow(
-        self: *const App,
         alloc: Allocator,
         host: *Host,
     ) !win32_session_state.Window {
@@ -3568,9 +2386,8 @@ pub const App = struct {
             window.height = rect.bottom - rect.top;
         }
         if (host.hwnd) |hwnd| {
-            window.state = if (IsZoomed(hwnd) != 0) .maximized else .normal;
+            window.state = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         }
-        _ = self;
         return window;
     }
 
@@ -3762,7 +2579,7 @@ pub const App = struct {
     fn sessionWindowRect(host: *Host) ?RECT {
         const hwnd = host.hwnd orelse return null;
         var rect: RECT = undefined;
-        if (IsZoomed(hwnd) != 0 or IsIconic(hwnd) != 0) {
+        if (sys.IsZoomed(hwnd) != 0 or sys.IsIconic(hwnd) != 0) {
             var placement: WINDOWPLACEMENT = .{
                 .length = @sizeOf(WINDOWPLACEMENT),
                 .flags = 0,
@@ -3771,12 +2588,12 @@ pub const App = struct {
                 .ptMaxPosition = .{ .x = 0, .y = 0 },
                 .rcNormalPosition = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
             };
-            if (GetWindowPlacement(hwnd, &placement) != 0) {
+            if (sys.GetWindowPlacement(hwnd, &placement) != 0) {
                 rect = placement.rcNormalPosition;
-            } else if (GetWindowRect(hwnd, &rect) == 0) {
+            } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
                 return null;
             }
-        } else if (GetWindowRect(hwnd, &rect) == 0) {
+        } else if (sys.GetWindowRect(hwnd, &rect) == 0) {
             return null;
         }
 
@@ -3888,7 +2705,7 @@ pub const App = struct {
 
     fn unregisterGlobalHotkeys(self: *App) void {
         for (self.global_hotkeys.items) |hotkey| {
-            _ = UnregisterHotKey(null, hotkey.id);
+            _ = sys.UnregisterHotKey(null, hotkey.id);
         }
         self.global_hotkeys.clearRetainingCapacity();
     }
@@ -3921,7 +2738,7 @@ pub const App = struct {
                 continue;
             }
 
-            if (RegisterHotKey(null, next_id, spec.modifiers, spec.vk) == 0) {
+            if (sys.RegisterHotKey(null, next_id, spec.modifiers, spec.vk) == 0) {
                 const err = windows.kernel32.GetLastError();
                 log.warn("failed to register win32 global hotkey trigger={f} id={} mods=0x{x} vk=0x{x} err={} reason={s}", .{
                     entry.key_ptr.*,
@@ -3972,12 +2789,12 @@ pub const App = struct {
     pub fn wakeup(self: *App) void {
         if (self.windows.items.len > 0) {
             const hwnd = self.windows.items[0].hwnd orelse return;
-            _ = PostMessageW(hwnd, WM_WINHOSTTY_WAKE, 0, 0);
+            _ = sys.PostMessageW(hwnd, c.WM_WINHOSTTY_WAKE, 0, 0);
             return;
         }
 
         if (self.ui_thread_id != 0) {
-            _ = PostThreadMessageW(self.ui_thread_id, WM_WINHOSTTY_WAKE, 0, 0);
+            _ = sys.PostThreadMessageW(self.ui_thread_id, c.WM_WINHOSTTY_WAKE, 0, 0);
         }
     }
 
@@ -4164,13 +2981,13 @@ pub const App = struct {
         const stage_dir_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, stage_dir);
         defer self.core_app.alloc.free(stage_dir_w);
 
-        const result = ShellExecuteW(
+        const result = sys.ShellExecuteW(
             null,
             shell_runas,
             installer_w.ptr,
             params_w.ptr,
             stage_dir_w.ptr,
-            SW_SHOW,
+            c.SW_SHOW,
         );
         if (@intFromPtr(result) <= 32) {
             self.showUpdateInfo(updateApplyFailureMessage(error.UpdateApplyLaunchFailed)) catch |banner_err| {
@@ -4186,7 +3003,7 @@ pub const App = struct {
         self.stopQuitTimer();
         self.running = false;
         self.destroyAllWindows();
-        if (self.windows.items.len == 0) PostQuitMessage(0);
+        if (self.windows.items.len == 0) sys.PostQuitMessage(0);
     }
 
     fn canApplyStagedUpdate(self: *App) bool {
@@ -4202,7 +3019,7 @@ pub const App = struct {
                 return;
             }
         }
-        try self.showInfoMessage(.app, "noctty", message);
+        try showInfoMessage(.app, "noctty", message);
     }
 
     /// True when any user-facing top-level UI window is still alive —
@@ -4231,13 +3048,13 @@ pub const App = struct {
         const delay = self.config.@"quit-after-last-window-closed-delay" orelse {
             self.stopQuitTimer();
             self.running = false;
-            PostQuitMessage(0);
+            sys.PostQuitMessage(0);
             return;
         };
 
         self.stopQuitTimer();
         const delay_ms = quitTimerDelayMs(delay);
-        const timer_id = SetTimer(null, 0, delay_ms, null);
+        const timer_id = sys.SetTimer(null, 0, delay_ms, null);
         if (timer_id == 0) {
             log.err("failed to start win32 quit timer delay_ms={} err={}", .{
                 delay_ms,
@@ -4250,14 +3067,14 @@ pub const App = struct {
 
     fn stopQuitTimer(self: *App) void {
         if (self.quit_timer_id) |timer_id| {
-            _ = KillTimer(null, timer_id);
+            _ = sys.KillTimer(null, timer_id);
             self.quit_timer_id = null;
         }
     }
 
     fn stopUndoPruneTimer(self: *App) void {
         if (self.undo_prune_timer_id) |timer_id| {
-            _ = KillTimer(null, timer_id);
+            _ = sys.KillTimer(null, timer_id);
             self.undo_prune_timer_id = null;
         }
     }
@@ -4301,10 +3118,10 @@ pub const App = struct {
         self.stopUndoPruneTimer();
 
         const oldest = self.oldestUndoTimestamp() orelse return;
-        const now = GetTickCount64();
+        const now = sys.GetTickCount64();
         const expires_at = oldest +| self.undoTimeoutMs() +| 1;
         const delay_ms = @max(minimum_delay_ms, if (expires_at <= now) 1 else expires_at - now);
-        const timer_id = SetTimer(
+        const timer_id = sys.SetTimer(
             null,
             0,
             @intCast(@min(delay_ms, std.math.maxInt(UINT))),
@@ -4331,7 +3148,7 @@ pub const App = struct {
             if (!host.pruneStructuralHistoryBefore(min_timestamp_ms)) complete = false;
             if (host.destroy_after_structural_dispose and host.tabs.items.len == 0 and !host.hasStructuralHistory()) {
                 if (host.hwnd) |hwnd| {
-                    _ = DestroyWindow(hwnd);
+                    _ = sys.DestroyWindow(hwnd);
                     self.removeHost(host);
                     continue;
                 }
@@ -4353,15 +3170,9 @@ pub const App = struct {
         if (self.running and !self.hasLiveUiWindows()) self.startQuitTimer();
     }
 
-    fn ensureMessageQueue(self: *App) void {
-        _ = self;
+    fn ensureMessageQueue() void {
         var msg: MSG = undefined;
-        _ = PeekMessageW(&msg, null, 0, 0, PM_NOREMOVE);
-    }
-
-    pub fn keyboardLayout(self: *const App) input.KeyboardLayout {
-        _ = self;
-        return .unknown;
+        _ = sys.PeekMessageW(&msg, null, 0, 0, c.PM_NOREMOVE);
     }
 
     pub fn performAction(
@@ -4375,7 +3186,7 @@ pub const App = struct {
                 self.stopQuitTimer();
                 self.running = false;
                 self.destroyAllWindows();
-                if (self.windows.items.len == 0) PostQuitMessage(0);
+                if (self.windows.items.len == 0) sys.PostQuitMessage(0);
                 return true;
             },
 
@@ -4442,7 +3253,7 @@ pub const App = struct {
                 defer config.deinit();
                 const source = self.findSurfaceForTarget(target) orelse return false;
                 const tab_info = self.findTabForSurface(source) orelse return false;
-                const inherited_profile_key = try self.applySplitProfileConfigFromSource(&config, source);
+                const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
                 _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
                 const split_direction = splitDirectionFromAction(value);
                 const surface = try self.createWindowSurface(&config, default_title, .{
@@ -4457,7 +3268,7 @@ pub const App = struct {
                 tab_info.tab.clearRedoHistory();
                 if (tab_info.host.pushStructuralUndo(.{
                     .kind = .split_create,
-                    .timestamp_ms = GetTickCount64(),
+                    .timestamp_ms = sys.GetTickCount64(),
                     .sequence_id = self.nextUndoSequence(),
                     .payload = .{ .split_create = .{
                         .source_surface = source,
@@ -4480,7 +3291,7 @@ pub const App = struct {
                 self.stopQuitTimer();
                 self.running = false;
                 self.destroyAllWindows();
-                if (self.windows.items.len == 0) PostQuitMessage(0);
+                if (self.windows.items.len == 0) sys.PostQuitMessage(0);
                 return true;
             },
 
@@ -5279,22 +4090,22 @@ pub const App = struct {
 
         var wc: WNDCLASSEXW = .{
             .cbSize = @sizeOf(WNDCLASSEXW),
-            .style = CS_OWNDC,
+            .style = c.CS_OWNDC,
             .lpfnWndProc = &windowProc,
             .cbClsExtra = 0,
             .cbWndExtra = 0,
             .hInstance = self.hinstance,
             .hIcon = loadAppIcon(self.hinstance, false),
-            .hCursor = LoadCursorW(null, IDC_ARROW),
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = class_name,
             .hIconSm = loadAppIcon(self.hinstance, true),
         };
 
-        self.class_atom = RegisterClassExW(&wc);
+        self.class_atom = sys.RegisterClassExW(&wc);
         if (self.class_atom == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -5309,16 +4120,16 @@ pub const App = struct {
             .cbWndExtra = 0,
             .hInstance = self.hinstance,
             .hIcon = loadAppIcon(self.hinstance, false),
-            .hCursor = LoadCursorW(null, IDC_ARROW),
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = host_class_name,
             .hIconSm = loadAppIcon(self.hinstance, true),
         };
 
-        self.host_class_atom = RegisterClassExW(&wc);
+        self.host_class_atom = sys.RegisterClassExW(&wc);
         if (self.host_class_atom == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -5333,16 +4144,16 @@ pub const App = struct {
             .cbWndExtra = 0,
             .hInstance = self.hinstance,
             .hIcon = null,
-            .hCursor = LoadCursorW(null, IDC_ARROW),
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = palette_list_class_name,
             .hIconSm = null,
         };
 
-        self.palette_list_class_atom = RegisterClassExW(&wc);
+        self.palette_list_class_atom = sys.RegisterClassExW(&wc);
         if (self.palette_list_class_atom == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -5357,16 +4168,16 @@ pub const App = struct {
             .cbWndExtra = 0,
             .hInstance = self.hinstance,
             .hIcon = null,
-            .hCursor = LoadCursorW(null, IDC_ARROW),
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
             .hbrBackground = null,
             .lpszMenuName = null,
             .lpszClassName = scrollbar_class_name,
             .hIconSm = null,
         };
 
-        self.scrollbar_class_atom = RegisterClassExW(&wc);
+        self.scrollbar_class_atom = sys.RegisterClassExW(&wc);
         if (self.scrollbar_class_atom == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -5388,11 +4199,9 @@ pub const App = struct {
     }
 
     fn applySplitProfileConfigFromSource(
-        self: *App,
         config: *configpkg.Config,
         source: *Surface,
     ) !?[]const u8 {
-        _ = self;
         const key = source.launch_profile_key orelse return null;
         const host = source.host orelse return null;
         const profile = (try host.profileForKey(key)) orelse return null;
@@ -5449,8 +4258,8 @@ pub const App = struct {
 
     fn refreshSystemWheelSettings(self: *App) void {
         self.wheel_settings = .{
-            .lines = readSystemWheelSetting(SPI_GETWHEELSCROLLLINES, self.wheel_settings.lines),
-            .chars = readSystemWheelSetting(SPI_GETWHEELSCROLLCHARS, self.wheel_settings.chars),
+            .lines = readSystemWheelSetting(c.SPI_GETWHEELSCROLLLINES, self.wheel_settings.lines),
+            .chars = readSystemWheelSetting(c.SPI_GETWHEELSCROLLCHARS, self.wheel_settings.chars),
         };
     }
 
@@ -5485,27 +4294,27 @@ pub const App = struct {
             if (host.hwnd) |hwnd| {
                 applyDwmThemeWithBuild(hwnd, &self.resolved_theme, &self.config, self.os_build);
                 if (frame_mode_changed) {
-                    _ = SetWindowPos(
+                    _ = sys.SetWindowPos(
                         hwnd,
                         null,
                         0,
                         0,
                         0,
                         0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                        c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                     );
-                    host.layout() catch {};
+                    runUiActionOrLog("theme update layout failed", host.layout());
                 }
                 // Theme resource replacement always invalidates the full host
                 // chrome plus native child controls. A System->Dark swap does
                 // not necessarily change frame mode, but every retained pixel
                 // still belongs to the previous palette.
                 host.invalidateChrome();
-                _ = RedrawWindow(
+                _ = sys.RedrawWindow(
                     hwnd,
                     null,
                     null,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+                    c.RDW_INVALIDATE | c.RDW_ERASE | c.RDW_FRAME | c.RDW_ALLCHILDREN,
                 );
             }
         }
@@ -5544,7 +4353,10 @@ pub const App = struct {
                     if (self.launcher_quick_slot_keys[index]) |dupe| self.core_app.alloc.free(dupe);
                     self.launcher_quick_slot_keys[index] = try self.core_app.alloc.dupeZ(u8, current);
                 } else {
-                    appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], null) catch {};
+                    runUiActionOrLog(
+                        "quick slot deduplication failed",
+                        appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[index], null),
+                    );
                 }
             }
         }
@@ -5552,7 +4364,7 @@ pub const App = struct {
         try appendOwnedString(self.core_app.alloc, &self.launcher_quick_slot_keys[slot_ordinal], key);
 
         for (self.hosts.items) |host| {
-            host.reapplyLauncherProfilePreferences() catch {};
+            runUiActionOrLog("quick slot profile refresh failed", host.reapplyLauncherProfilePreferences());
             host.refreshProfileChrome();
         }
     }
@@ -5560,7 +4372,7 @@ pub const App = struct {
     fn clearLauncherQuickSlotPreferences(self: *App) void {
         if (launcherQuickSlotPinsAlreadyClear(self.launcher_quick_slot_keys)) return;
         for (&self.launcher_quick_slot_keys) |*value| {
-            appendOwnedString(self.core_app.alloc, value, null) catch {};
+            runUiActionOrLog("quick slot clear failed", appendOwnedString(self.core_app.alloc, value, null));
         }
 
         for (self.hosts.items) |host| {
@@ -5681,28 +4493,28 @@ pub const App = struct {
         host.cached_decorations_visible = startup_decorations_visible;
         const startup_fullscreen = if (clone_state_from) |source| source.fullscreen else false;
 
-        const hwnd = CreateWindowExW(
+        const hwnd = sys.CreateWindowExW(
             0,
             host_class_name,
             title,
             startupHostWindowStyle(startup_decorations_visible, startup_fullscreen),
-            if (position) |v| v.x else CW_USEDEFAULT,
-            if (position) |v| v.y else CW_USEDEFAULT,
+            if (position) |v| v.x else c.CW_USEDEFAULT,
+            if (position) |v| v.y else c.CW_USEDEFAULT,
             1280,
             800,
             null,
             null,
             self.hinstance,
             host,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
         host.hwnd = hwnd;
         setWindowIcon(hwnd, self.hinstance);
         applyDwmThemeWithBuild(hwnd, &self.resolved_theme, &self.config, self.os_build);
-        host.current_dpi = GetDpiForWindow(hwnd);
+        host.current_dpi = sys.GetDpiForWindow(hwnd);
         if (host.current_dpi == 0) host.current_dpi = 96;
         host.chrome_font = host.createChromeFont();
         host.recreateTitlebarIconFonts();
-        errdefer _ = DestroyWindow(hwnd);
+        errdefer _ = sys.DestroyWindow(hwnd);
 
         self.attachShellCompositorWindow(hwnd);
 
@@ -5716,8 +4528,8 @@ pub const App = struct {
         // does NOT bring it to the foreground, so the user's current
         // typing context stays intact. `SW_SHOW` would activate the
         // new HWND and steal focus.
-        _ = ShowWindow(hwnd, if (passive_show) SW_SHOWNOACTIVATE else SW_SHOW);
-        _ = UpdateWindow(hwnd);
+        _ = sys.ShowWindow(hwnd, if (passive_show) c.SW_SHOWNOACTIVATE else c.SW_SHOW);
+        _ = sys.UpdateWindow(hwnd);
         self.maybeScheduleAutomaticUpdateCheck();
         return host;
     }
@@ -5869,15 +4681,14 @@ pub const App = struct {
         return null;
     }
 
-    fn activeTab(self: *App, host: *Host) ?*Tab {
-        _ = self;
+    fn activeTab(host: *Host) ?*Tab {
         if (host.tabs.items.len == 0 or host.active_tab >= host.tabs.items.len) return null;
         return &host.tabs.items[host.active_tab];
     }
 
     fn activeSurfaceForHost(self: *App, host_id: u32) ?*Surface {
         const host = self.findHostById(host_id) orelse return null;
-        const tab = self.activeTab(host) orelse return null;
+        const tab = activeTab(host) orelse return null;
         return tab.focusedSurface();
     }
 
@@ -5899,19 +4710,19 @@ pub const App = struct {
         const dst_hwnd = destination.hwnd orelse return;
         const src_hwnd = source.hwnd orelse return;
         var rect: RECT = undefined;
-        if (GetWindowRect(src_hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetWindowRect(src_hwnd, &rect) == 0) {
+            return lastError();
         }
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             dst_hwnd,
             null,
             rect.left,
             rect.top,
             rect.right - rect.left,
             rect.bottom - rect.top,
-            SWP_NOACTIVATE,
+            c.SWP_NOACTIVATE,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -6011,7 +4822,7 @@ pub const App = struct {
     }
 
     fn undoCutoffTimestampMs(self: *const App) u64 {
-        return GetTickCount64() -| self.undoTimeoutMs();
+        return sys.GetTickCount64() -| self.undoTimeoutMs();
     }
 
     fn findSurfaceByCore(self: *App, core_surface: *CoreSurface) ?*Surface {
@@ -6102,8 +4913,8 @@ pub const App = struct {
         host.prepareActiveTabVisibility(tab_info.index);
         var active_it = tab_info.tab.tree.iterator();
         while (active_it.next()) |entry| entry.view.setVisible(true);
-        host.layout() catch {};
-        host.refreshChrome() catch {};
+        runUiActionOrLog("tab activation layout failed", host.layout());
+        runUiActionOrLog("tab activation chrome refresh failed", host.refreshChrome());
         if (focus) {
             surface.presentWindow();
         } else {
@@ -6117,7 +4928,7 @@ pub const App = struct {
         if (self.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
-                IsWindowVisible(hwnd) != 0
+                sys.IsWindowVisible(hwnd) != 0
             else
                 false;
             const needs_host_sync = surfaceFocusedActivationNeedsHostSync(
@@ -6198,7 +5009,7 @@ pub const App = struct {
                         return surface;
                     }
                 }
-                if (self.activeTab(host)) |tab| {
+                if (activeTab(host)) |tab| {
                     if (tab.focusedSurface()) |surface| {
                         return surface;
                     }
@@ -6232,7 +5043,7 @@ pub const App = struct {
         if (self.findTabForSurface(surface)) |found| {
             const handle = found.tab.findHandle(surface) orelse found.tab.focused;
             const host_window_visible = if (found.host.hwnd) |hwnd|
-                IsWindowVisible(hwnd) != 0
+                sys.IsWindowVisible(hwnd) != 0
             else
                 false;
             const needs_host_sync = surfaceActivationNeedsHostSync(
@@ -6373,16 +5184,16 @@ pub const App = struct {
                     host.destroy_after_structural_dispose = true;
                     shell_mapping_stable = false;
                 } else {
-                    if (host.hwnd) |hwnd| _ = DestroyWindow(hwnd);
+                    if (host.hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
                     self.removeHost(host);
                 }
             } else if (self.running) {
-                if (self.activeTab(host)) |tab| if (tab.focusedSurface()) |replacement| self.activateSurface(replacement);
+                if (activeTab(host)) |tab| if (tab.focusedSurface()) |replacement| self.activateSurface(replacement);
                 // Relayout after tab removal because the chrome
                 // reservation may have changed. In this fork,
                 // `.auto` still shows the row since it carries the
                 // essential host controls (+, overflow).
-                host.layout() catch {};
+                runUiActionOrLog("surface close layout failed", host.layout());
             }
             if (shell_mapping_changed and shell_mapping_stable) {
                 self.auditShellNativeMapping("surface-close");
@@ -6506,7 +5317,7 @@ pub const App = struct {
                 const stored_entry = host.pushStructuralUndo(entry) catch |err| {
                     log.warn("close_tab undo snapshot failed err={}", .{err});
                     var failed = entry;
-                    errdefer failed.dispose(host, .normal) catch {};
+                    errdefer runUiActionOrLog("close tab rollback dispose failed", failed.dispose(host, .normal));
                     _ = try host.restoreClosedTabEntryNative(&failed.payload.close_tab);
                     if (host.activeSurface()) |restored| self.activateSurface(restored);
                     return err;
@@ -6539,9 +5350,12 @@ pub const App = struct {
                     self.activateSurface(replacement);
                 } else {
                     host.refocusHostWindow();
-                    host.layout() catch {};
-                    host.refreshChrome() catch {};
-                    host.setBanner(.info, "Tab closed. Use undo to restore it.") catch {};
+                    runUiActionOrLog("tab close layout failed", host.layout());
+                    runUiActionOrLog("tab close chrome refresh failed", host.refreshChrome());
+                    runUiActionOrLog(
+                        "tab close banner failed",
+                        host.setBanner(.info, "Tab closed. Use undo to restore it."),
+                    );
                 }
                 return true;
             },
@@ -6644,12 +5458,11 @@ pub const App = struct {
         return null;
     }
 
-    fn hideQuickTerminalSurface(self: *App, surface: *Surface) void {
-        _ = self;
+    fn hideQuickTerminalSurface(surface: *Surface) void {
         const top_level = surface.windowHwnd() orelse return;
         if (surface.host) |host| host.cancelQuickTerminalAnimation();
         surface.setVisible(false);
-        _ = ShowWindow(top_level, SW_HIDE);
+        _ = sys.ShowWindow(top_level, c.SW_HIDE);
     }
 
     fn quickTerminalFocusPolicy(self: *App) win32_quick_terminal.FocusPolicy {
@@ -6689,17 +5502,17 @@ pub const App = struct {
             // when hidden, and would run `MonitorFromWindow` /
             // `SetWindowPos` against the wrong target when showing.
             const top_level = surface.windowHwnd() orelse return;
-            const visible = IsWindowVisible(top_level) != 0;
+            const visible = sys.IsWindowVisible(top_level) != 0;
             if (visible) {
-                self.hideQuickTerminalSurface(surface);
+                hideQuickTerminalSurface(surface);
             } else {
                 self.windows_hidden = false;
                 self.applyQuickTerminalGeometry(top_level, true) catch |err| {
                     std.log.warn("QT geometry failed err={}", .{err});
                 };
-                _ = ShowWindow(
+                _ = sys.ShowWindow(
                     top_level,
-                    if (want_focus) SW_SHOW else SW_SHOWNOACTIVATE,
+                    if (want_focus) c.SW_SHOW else c.SW_SHOWNOACTIVATE,
                 );
                 // Mirror the hide-side invariant: tell the surface
                 // it's visible so the renderer wakes and the
@@ -6782,12 +5595,12 @@ pub const App = struct {
         const mi = switch (qt_cfg.screen) {
             .focused => blk: {
                 var pt: POINT = .{ .x = 0, .y = 0 };
-                if (GetCursorPos(&pt) == 0) {
-                    const monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
+                if (sys.GetCursorPos(&pt) == 0) {
+                    const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse
                         return error.MonitorLookupFailed;
                     break :blk monitorInfo(monitor) orelse return error.MonitorInfoFailed;
                 }
-                const monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) orelse
+                const monitor = sys.MonitorFromPoint(pt, c.MONITOR_DEFAULTTONEAREST) orelse
                     return error.MonitorLookupFailed;
                 break :blk monitorInfo(monitor) orelse return error.MonitorInfoFailed;
             },
@@ -6812,10 +5625,10 @@ pub const App = struct {
         const end = win32_quick_terminal.computeEndRect(qt_cfg, mi);
         const start = win32_quick_terminal.computeStartRect(qt_cfg, mi);
         const duration_ms = win32_quick_terminal.animationDurationMs(qt_cfg.animation_duration_s);
-        const flags = SWP_NOACTIVATE;
+        const flags = c.SWP_NOACTIVATE;
         if (!animate or duration_ms == 0 or rectEqual(start, end)) {
             if (getHost(hwnd)) |host| host.cancelQuickTerminalAnimation();
-            _ = SetWindowPos(
+            _ = sys.SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
                 end.left,
@@ -6828,7 +5641,7 @@ pub const App = struct {
         }
 
         const host = getHost(hwnd) orelse {
-            _ = SetWindowPos(
+            _ = sys.SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
                 end.left,
@@ -6843,7 +5656,7 @@ pub const App = struct {
         const effective_duration_ms = host.effectiveTweenDuration(duration_ms);
         if (effective_duration_ms == 0) {
             host.cancelQuickTerminalAnimation();
-            _ = SetWindowPos(
+            _ = sys.SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
                 end.left,
@@ -6856,7 +5669,7 @@ pub const App = struct {
         }
 
         host.cancelQuickTerminalAnimation();
-        _ = SetWindowPos(
+        _ = sys.SetWindowPos(
             hwnd,
             HWND_TOPMOST,
             start.left,
@@ -6878,7 +5691,7 @@ pub const App = struct {
             };
         } else {
             host.cancelQuickTerminalAnimation();
-            _ = SetWindowPos(
+            _ = sys.SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
                 end.left,
@@ -6893,7 +5706,7 @@ pub const App = struct {
     fn showOnScreenKeyboard(self: *App) !void {
         const osk_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, "osk.exe");
         defer self.core_app.alloc.free(osk_w);
-        const result = ShellExecuteW(null, shell_open, osk_w.ptr, null, null, SW_SHOW);
+        const result = sys.ShellExecuteW(null, shell_open, osk_w.ptr, null, null, c.SW_SHOW);
         if (@intFromPtr(result) <= 32) return error.OpenUrlFailed;
     }
 
@@ -6907,7 +5720,7 @@ pub const App = struct {
                 continue;
             };
             host.clearStructuralHistory(.normal);
-            _ = DestroyWindow(hwnd);
+            _ = sys.DestroyWindow(hwnd);
         }
     }
 
@@ -6919,9 +5732,9 @@ pub const App = struct {
         defer self.session_restore_rollback_host = null;
         host.clearStructuralHistory(.normal);
         if (host.hwnd) |hwnd| {
-            if (DestroyWindow(hwnd) == 0) {
+            if (sys.DestroyWindow(hwnd) == 0) {
                 const destroy_err = windows.kernel32.GetLastError();
-                if (IsWindow(hwnd) != 0) {
+                if (sys.IsWindow(hwnd) != 0) {
                     log.err("failed to destroy partially restored host; retaining ownership err={}", .{
                         destroy_err,
                     });
@@ -6954,8 +5767,8 @@ pub const App = struct {
         const profile_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, profile);
         defer self.core_app.alloc.free(profile_w);
 
-        if (SetCurrentDirectoryW(profile_w.ptr) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.SetCurrentDirectoryW(profile_w.ptr) == 0) {
+            return lastError();
         }
 
         log.debug("win32 current directory reset cwd={s}", .{profile});
@@ -6964,8 +5777,8 @@ pub const App = struct {
     fn clientSize(self: *App, hwnd: HWND) !apprt.SurfaceSize {
         _ = self;
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &rect) == 0) {
+            return lastError();
         }
 
         return .{
@@ -6988,8 +5801,8 @@ pub const App = struct {
         return .{
             .nSize = @sizeOf(PIXELFORMATDESCRIPTOR),
             .nVersion = 1,
-            .dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
-            .iPixelType = PFD_TYPE_RGBA,
+            .dwFlags = c.PFD_DRAW_TO_WINDOW | c.PFD_SUPPORT_OPENGL | c.PFD_DOUBLEBUFFER,
+            .iPixelType = c.PFD_TYPE_RGBA,
             .cColorBits = 32,
             .cRedBits = 0,
             .cRedShift = 0,
@@ -7007,7 +5820,7 @@ pub const App = struct {
             .cDepthBits = 24,
             .cStencilBits = 8,
             .cAuxBuffers = 0,
-            .iLayerType = PFD_MAIN_PLANE,
+            .iLayerType = c.PFD_MAIN_PLANE,
             .bReserved = 0,
             .dwLayerMask = 0,
             .dwVisibleMask = 0,
@@ -7018,34 +5831,34 @@ pub const App = struct {
     fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
         if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
-        const hdc = GetDC(hwnd) orelse {
+        const hdc = sys.GetDC(hwnd) orelse {
             recordOpenGLStartupWin32Failure(.get_dc, windows.kernel32.GetLastError());
             return error.GetDCFailed;
         };
-        errdefer _ = ReleaseDC(hwnd, hdc);
+        errdefer _ = sys.ReleaseDC(hwnd, hdc);
 
         const pfd = defaultPixelFormatDescriptor();
-        const pixel_format = ChoosePixelFormat(hdc, &pfd);
+        const pixel_format = sys.ChoosePixelFormat(hdc, &pfd);
         if (pixel_format == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.choose_pixel_format, err);
             return windows.unexpectedError(err);
         }
 
-        if (SetPixelFormat(hdc, pixel_format, &pfd) == 0) {
+        if (sys.SetPixelFormat(hdc, pixel_format, &pfd) == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.set_pixel_format, err);
             return windows.unexpectedError(err);
         }
 
-        const hglrc = wglCreateContext(hdc) orelse {
+        const hglrc = sys.wglCreateContext(hdc) orelse {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.create_context, err);
             return windows.unexpectedError(err);
         };
-        errdefer _ = wglDeleteContext(hglrc);
+        errdefer _ = sys.wglDeleteContext(hglrc);
 
-        if (wglMakeCurrent(hdc, hglrc) == 0) {
+        if (sys.wglMakeCurrent(hdc, hglrc) == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.initial_make_current, err);
             return windows.unexpectedError(err);
@@ -7058,7 +5871,7 @@ pub const App = struct {
         const url_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, url);
         defer self.core_app.alloc.free(url_w);
 
-        const result = ShellExecuteW(null, shell_open, url_w.ptr, null, null, SW_SHOW);
+        const result = sys.ShellExecuteW(null, shell_open, url_w.ptr, null, null, c.SW_SHOW);
         if (@intFromPtr(result) <= 32) return error.OpenUrlFailed;
     }
 
@@ -7113,7 +5926,7 @@ pub const App = struct {
         const tmp_path = try std.fmt.allocPrint(
             alloc,
             "{s}.tmp-{x}-{x}",
-            .{ target_path, GetCurrentProcessId(), unixMillis() },
+            .{ target_path, sys.GetCurrentProcessId(), unixMillis() },
         );
         defer alloc.free(tmp_path);
 
@@ -7198,7 +6011,7 @@ pub const App = struct {
         // block so the file is closed BEFORE ReplaceFileW — Windows
         // blocks the replace while the temp handle is open.
         var temp_pending = false;
-        defer if (temp_pending) std.fs.cwd().deleteFile(tmp_path) catch {};
+        defer if (temp_pending) std.fs.cwd().deleteFile(tmp_path) catch {}; // Best-effort temp cleanup.
         {
             const tmp = std.fs.cwd().createFile(tmp_path, .{}) catch return error.TempCreateFailed;
             temp_pending = true;
@@ -7215,11 +6028,11 @@ pub const App = struct {
         const tmp_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, tmp_path) catch return error.OutOfMemory;
         defer alloc.free(tmp_w);
 
-        if (ReplaceFileW(target_w, tmp_w, null, 0, null, null) == 0) {
+        if (sys.ReplaceFileW(target_w, tmp_w, null, 0, null, null) == 0) {
             // Likely ERROR_FILE_NOT_FOUND if the user didn't have a
             // config file yet. Fall back to MoveFileExW.
-            if (MoveFileExW(tmp_w, target_w, MOVEFILE_REPLACE_EXISTING) == 0) {
-                std.fs.cwd().deleteFile(tmp_path) catch {};
+            if (sys.MoveFileExW(tmp_w, target_w, c.MOVEFILE_REPLACE_EXISTING) == 0) {
+                std.fs.cwd().deleteFile(tmp_path) catch {}; // Preserve the primary replace failure.
                 return error.ReplaceFailed;
             }
         }
@@ -7340,7 +6153,7 @@ pub const App = struct {
     fn ringBell(self: *App, target: apprt.Target) void {
         _ = self;
         _ = target;
-        _ = MessageBeep(MB_ICONINFORMATION);
+        _ = sys.MessageBeep(c.MB_ICONINFORMATION);
     }
 
     fn showDesktopNotificationWithLaunch(
@@ -7380,7 +6193,7 @@ pub const App = struct {
         // notifications with an empty `body` (e.g. settings-save
         // success, where title alone carries the signal) still render
         // something readable.
-        try self.showInfoMessage(target, caption, message);
+        try showInfoMessage(target, caption, message);
     }
 
     fn showDesktopNotification(
@@ -7405,7 +6218,7 @@ pub const App = struct {
         );
         defer self.core_app.alloc.free(message);
         if (try self.showHostBanner(target, .info, message)) return;
-        try self.showInfoMessage(target, "noctty", message);
+        try showInfoMessage(target, "noctty", message);
     }
 
     const CommandFinishPlan = struct {
@@ -7488,12 +6301,10 @@ pub const App = struct {
     }
 
     fn showInfoMessage(
-        self: *App,
         target: apprt.Target,
         title: []const u8,
         message: []const u8,
     ) !void {
-        _ = self;
         _ = target;
         // Final fallback for notification paths that cannot surface a
         // host banner. Keep failures observable without blocking the UI
@@ -7708,17 +6519,17 @@ fn appendInnoQuotedArg(
 ) !void {
     try buf.appendSlice(alloc, prefix);
     try buf.append(alloc, '"');
-    for (value) |c| {
-        if (c == '"') try buf.append(alloc, '"');
-        try buf.append(alloc, c);
+    for (value) |char| {
+        if (char == '"') try buf.append(alloc, '"');
+        try buf.append(alloc, char);
     }
     try buf.append(alloc, '"');
 }
 
 fn postUpdateCheckCompletion(ui_thread_id: DWORD, completion: *UpdateCheckCompletion) void {
-    if (PostThreadMessageW(
+    if (sys.PostThreadMessageW(
         ui_thread_id,
-        WM_WINHOSTTY_UPDATE,
+        c.WM_WINHOSTTY_UPDATE,
         0,
         @as(LPARAM, @bitCast(@as(usize, @intFromPtr(completion)))),
     ) == 0) {
@@ -7752,9 +6563,9 @@ fn winrtToastActivationCallback(ctx: *anyopaque, launch: []const u8) void {
     };
     activation.* = parsed;
 
-    if (PostThreadMessageW(
+    if (sys.PostThreadMessageW(
         ui_thread_id,
-        WM_WINHOSTTY_TOAST_ACTIVATION,
+        c.WM_WINHOSTTY_TOAST_ACTIVATION,
         0,
         @as(LPARAM, @bitCast(@as(usize, @intFromPtr(activation)))),
     ) == 0) {
@@ -7766,12 +6577,7 @@ fn winrtToastActivationCallback(ctx: *anyopaque, launch: []const u8) void {
     }
 }
 
-const SearchStatus = struct {
-    active: bool = false,
-    needle: ?[]const u8 = null,
-    total: ?usize = null,
-    selected: ?usize = null,
-};
+const SearchStatus = labels.SearchStatus;
 
 /// Which caption button (integrated titlebar) the cursor is hovering.
 const CaptionButton = enum { none, minimize, maximize, close };
@@ -7874,17 +6680,17 @@ fn titlebarRoleFromCaption(button: CaptionButton) TitlebarButtonRole {
 
 fn titlebarCaptionFromHitTest(ht: i32) CaptionButton {
     return switch (ht) {
-        HTMINBUTTON => .minimize,
-        HTMAXBUTTON => .maximize,
-        HTCLOSE => .close,
+        c.HTMINBUTTON => .minimize,
+        c.HTMAXBUTTON => .maximize,
+        c.HTCLOSE => .close,
         else => .none,
     };
 }
 
 fn captionButtonSysCommand(ht: i32, is_zoomed: bool) ?WPARAM {
     return switch (ht) {
-        HTMINBUTTON => SC_MINIMIZE,
-        HTMAXBUTTON => if (is_zoomed) SC_RESTORE else SC_MAXIMIZE,
+        c.HTMINBUTTON => c.SC_MINIMIZE,
+        c.HTMAXBUTTON => if (is_zoomed) c.SC_RESTORE else c.SC_MAXIMIZE,
         else => null,
     };
 }
@@ -7965,9 +6771,9 @@ const PendingClipboardOp = union(enum) {
         switch (self.*) {
             .paste => |*p| alloc.free(p.data),
             .write => |*w| {
-                for (w.contents) |*c| {
-                    alloc.free(c.mime);
-                    alloc.free(c.data);
+                for (w.contents) |*content| {
+                    alloc.free(content.mime);
+                    alloc.free(content.data);
                 }
                 alloc.free(w.contents);
             },
@@ -7975,21 +6781,8 @@ const PendingClipboardOp = union(enum) {
     }
 };
 
-const SurfaceStatus = struct {
-    pwd: ?[]const u8 = null,
-    scrollbar: terminal.Scrollbar = .zero,
-    readonly: bool = false,
-    secure_input: bool = false,
-    key_sequence_active: bool = false,
-    key_table_name: ?[]const u8 = null,
-    search: SearchStatus = .{},
-    progress: ?[]const u8 = null,
-};
-
-const HostTabStatus = struct {
-    index: usize = 0,
-    total: usize = 1,
-};
+const SurfaceStatus = labels.SurfaceStatus;
+const HostTabStatus = labels.HostTabStatus;
 
 /// Payload for a non-modal confirm overlay. The callbacks receive the
 /// `userdata` pointer passed at construction time so the issuer can
@@ -8027,17 +6820,6 @@ const ScrollbarPolicy = enum {
     never,
     dynamic,
     always,
-};
-
-const VisibleTabRange = struct {
-    start: usize,
-    count: usize,
-};
-
-const TabOverviewEntry = struct {
-    title: ?[]const u8 = null,
-    pane_count: usize = 1,
-    active: bool = false,
 };
 
 const SplitTreeSurface = SplitTree(Surface);
@@ -8745,7 +7527,7 @@ const Host = struct {
 
         return .{
             .kind = .close_tab,
-            .timestamp_ms = GetTickCount64(),
+            .timestamp_ms = sys.GetTickCount64(),
             .sequence_id = self.app.nextUndoSequence(),
             .payload = .{ .close_tab = .{
                 .tab = removed,
@@ -9059,8 +7841,8 @@ const Host = struct {
                     self.app.activateSurface(surface);
                 } else {
                     self.refocusHostWindow();
-                    self.layout() catch {};
-                    self.refreshChrome() catch {};
+                    runUiActionOrLog("redo close layout failed", self.layout());
+                    runUiActionOrLog("redo close chrome refresh failed", self.refreshChrome());
                 }
                 return "Tab closed again.";
             },
@@ -9090,8 +7872,8 @@ const Host = struct {
 
     fn clientAnimationsEnabled() bool {
         var enabled: BOOL = 1;
-        if (SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION,
+        if (sys.SystemParametersInfoW(
+            c.SPI_GETCLIENTAREAANIMATION,
             0,
             @ptrCast(&enabled),
             0,
@@ -9128,7 +7910,7 @@ const Host = struct {
         duration_ms: u16,
         easing: [4]f32,
     ) ?win32_tween.TweenId {
-        const now = GetTickCount64();
+        const now = sys.GetTickCount64();
         const effective_duration = self.effectiveTweenDuration(duration_ms);
 
         const id = self.tween_sched.add(now, .{
@@ -9145,7 +7927,7 @@ const Host = struct {
     fn ensureTweenTimer(self: *Host) void {
         if (self.tween_timer_active) return;
         const hwnd = self.hwnd orelse return;
-        const prev = SetTimer(hwnd, TWEEN_TIMER_ID, TWEEN_TIMER_INTERVAL_MS, null);
+        const prev = sys.SetTimer(hwnd, c.TWEEN_TIMER_ID, c.TWEEN_TIMER_INTERVAL_MS, null);
         if (prev == 0) {
             std.log.warn("tween: SetTimer failed; animations will be static this tick", .{});
             return;
@@ -9159,25 +7941,25 @@ const Host = struct {
             self.tween_timer_active = false;
             return;
         };
-        _ = KillTimer(hwnd, TWEEN_TIMER_ID);
+        _ = sys.KillTimer(hwnd, c.TWEEN_TIMER_ID);
         self.tween_timer_active = false;
     }
 
     fn tickTweens(self: *Host) void {
-        const now = GetTickCount64();
+        const now = sys.GetTickCount64();
         var quick_terminal_finished = false;
         if (self.quick_terminal_animation) |anim| {
             if (self.tween_sched.value(anim.id, now)) |value| {
                 const rect = win32_quick_terminal.lerpRect(anim.start, anim.end, value);
                 if (self.hwnd) |hwnd| {
-                    _ = SetWindowPos(
+                    _ = sys.SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
                         rect.left,
                         rect.top,
                         rect.right - rect.left,
                         rect.bottom - rect.top,
-                        SWP_NOACTIVATE,
+                        c.SWP_NOACTIVATE,
                     );
                 }
                 quick_terminal_finished = value >= 1.0;
@@ -9189,14 +7971,14 @@ const Host = struct {
         if (quick_terminal_finished) {
             if (self.quick_terminal_animation) |anim| {
                 if (self.hwnd) |hwnd| {
-                    _ = SetWindowPos(
+                    _ = sys.SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
                         anim.end.left,
                         anim.end.top,
                         anim.end.right - anim.end.left,
                         anim.end.bottom - anim.end.top,
-                        SWP_NOACTIVATE,
+                        c.SWP_NOACTIVATE,
                     );
                 }
                 self.quick_terminal_animation = null;
@@ -9213,14 +7995,14 @@ const Host = struct {
         // frame. When both slots converge, we stop forcing repaints.
         if (self.tab_close_hover_hwnd) |tab_hwnd| {
             if (self.tab_close_hover.animating(now)) {
-                _ = InvalidateRect(tab_hwnd, null, 0);
+                _ = sys.InvalidateRect(tab_hwnd, null, 0);
             } else {
                 self.tab_close_hover_hwnd = null;
             }
         }
         if (self.tab_close_prev_hwnd) |prev_hwnd| {
             if (self.tab_close_prev.animating(now)) {
-                _ = InvalidateRect(prev_hwnd, null, 0);
+                _ = sys.InvalidateRect(prev_hwnd, null, 0);
             } else {
                 self.tab_close_prev_hwnd = null;
             }
@@ -9240,7 +8022,7 @@ const Host = struct {
     fn ensureResizeSettleTimer(self: *Host) void {
         if (self.resize_settle_timer_active) return;
         const hwnd = self.hwnd orelse return;
-        const prev = SetTimer(hwnd, RESIZE_SETTLE_TIMER_ID, RESIZE_SETTLE_TIMER_INTERVAL_MS, null);
+        const prev = sys.SetTimer(hwnd, c.RESIZE_SETTLE_TIMER_ID, c.RESIZE_SETTLE_TIMER_INTERVAL_MS, null);
         if (prev == 0) {
             std.log.warn("resize-settle: SetTimer failed; final pane repaint may wait for input", .{});
             return;
@@ -9254,12 +8036,12 @@ const Host = struct {
             self.resize_settle_timer_active = false;
             return;
         };
-        _ = KillTimer(hwnd, RESIZE_SETTLE_TIMER_ID);
+        _ = sys.KillTimer(hwnd, c.RESIZE_SETTLE_TIMER_ID);
         self.resize_settle_timer_active = false;
     }
 
     fn startResizeSettleRepaints(self: *Host) void {
-        self.resize_settle_repaint_ticks = RESIZE_SETTLE_REPAINT_TICKS;
+        self.resize_settle_repaint_ticks = c.RESIZE_SETTLE_REPAINT_TICKS;
         self.ensureResizeSettleTimer();
     }
 
@@ -9302,7 +8084,7 @@ const Host = struct {
             return;
         }
 
-        const now = GetTickCount64();
+        const now = sys.GetTickCount64();
         self.tab_underline.retargetTo(new_left, new_width, now);
         // Keep the 16 ms heartbeat alive for the slide duration so
         // `paintChrome` re-runs every frame and reads the interpolated
@@ -9332,14 +8114,14 @@ const Host = struct {
         const params: *NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(lParam)));
         const original = params.rgrc[0];
         // Let DWP compute the default side/bottom frame…
-        _ = DefWindowProcW(hwnd, WM_NCCALCSIZE, wParam, lParam);
+        _ = sys.DefWindowProcW(hwnd, c.WM_NCCALCSIZE, wParam, lParam);
         // …then compute the top edge through the shared NC-layout
         // math. Side / bottom stay DWP-owned so the stock frame
         // widths survive, while the integrated-caption policy
         // (caption row inside client + maximized invisible-margin
         // compensation) stays centralized in `win32_nc_layout`.
         const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
-        const state: win32_nc_layout.WindowState = if (IsZoomed(hwnd) != 0) .maximized else .normal;
+        const state: win32_nc_layout.WindowState = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const adjusted = win32_nc_layout.calcNcClientRect(.{
             .left = params.rgrc[0].left,
             .top = original.top,
@@ -9360,7 +8142,7 @@ const Host = struct {
         const cy: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits >> 16))));
 
         var win_rect: RECT = undefined;
-        if (GetWindowRect(hwnd, &win_rect) == 0) return null;
+        if (sys.GetWindowRect(hwnd, &win_rect) == 0) return null;
 
         const window_rect: win32_nc_layout.Rect = .{
             .left = win_rect.left,
@@ -9371,24 +8153,24 @@ const Host = struct {
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
         const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
         const state: win32_nc_layout.WindowState =
-            if (IsZoomed(hwnd) != 0) .maximized else .normal;
+            if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, cursor, metrics, state);
         return switch (ht) {
-            .nowhere => HTNOWHERE,
-            .client => HTCLIENT,
-            .caption => HTCAPTION,
-            .sysmenu => HTSYSMENU,
-            .minbutton => HTMINBUTTON,
-            .maxbutton => HTMAXBUTTON,
-            .left => HTLEFT,
-            .right => HTRIGHT,
-            .top => HTTOP,
-            .topleft => HTTOPLEFT,
-            .topright => HTTOPRIGHT,
-            .bottom => HTBOTTOM,
-            .bottomleft => HTBOTTOMLEFT,
-            .bottomright => HTBOTTOMRIGHT,
-            .close => HTCLOSE,
+            .nowhere => c.HTNOWHERE,
+            .client => c.HTCLIENT,
+            .caption => c.HTCAPTION,
+            .sysmenu => c.HTSYSMENU,
+            .minbutton => c.HTMINBUTTON,
+            .maxbutton => c.HTMAXBUTTON,
+            .left => c.HTLEFT,
+            .right => c.HTRIGHT,
+            .top => c.HTTOP,
+            .topleft => c.HTTOPLEFT,
+            .topright => c.HTTOPRIGHT,
+            .bottom => c.HTBOTTOM,
+            .bottomleft => c.HTBOTTOMLEFT,
+            .bottomright => c.HTBOTTOMRIGHT,
+            .close => c.HTCLOSE,
         };
     }
 
@@ -9405,11 +8187,11 @@ const Host = struct {
         if (!self.caption_track_armed) {
             var track: TRACKMOUSEEVENT = .{
                 .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                .dwFlags = TME_LEAVE | TME_NONCLIENT,
+                .dwFlags = c.TME_LEAVE | c.TME_NONCLIENT,
                 .hwndTrack = hwnd,
                 .dwHoverTime = 0,
             };
-            if (TrackMouseEvent(&track) != 0) {
+            if (sys.TrackMouseEvent(&track) != 0) {
                 self.caption_track_armed = true;
             }
         }
@@ -9500,7 +8282,7 @@ const Host = struct {
     fn paletteListRowCapacity(self: *Host) usize {
         const hwnd = self.hwnd orelse return 0;
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) return 0;
+        if (sys.GetClientRect(hwnd, &rect) == 0) return 0;
         const list_top = self.tabBarHeight() + self.scaled(host_overlay_height);
         return paletteVisibleRowCapacity(
             rect.bottom - list_top - self.scaled(8),
@@ -9669,7 +8451,11 @@ const Host = struct {
             }
         }
 
-        if (self.ensureProfiles() catch false) {
+        const profiles_ready = self.ensureProfiles() catch |err| blk: {
+            logUiActionError("palette profile load failed", err);
+            break :blk false;
+        };
+        if (profiles_ready) {
             for (self.profiles.?) |profile| {
                 _ = self.appendPaletteDescriptor(.{
                     .item = .{
@@ -9736,7 +8522,7 @@ const Host = struct {
                 win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
                 structure_announced_before_layout = true;
             }
-            const list_visible = if (self.palette_list_hwnd) |hwnd| IsWindowVisible(hwnd) != 0 else false;
+            const list_visible = if (self.palette_list_hwnd) |hwnd| sys.IsWindowVisible(hwnd) != 0 else false;
             if (paletteNoMatchNotificationTarget(
                 self.palette_list_uia_provider != null,
                 list_visible,
@@ -9767,7 +8553,7 @@ const Host = struct {
             .{self.palette_list_ranked_count},
         );
 
-        if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         if (self.palette_list_uia_provider) |provider| {
             if (!structure_announced_before_layout) {
                 win32_uia.events.raiseStructureChanged(&provider.base, .children_invalidated, null);
@@ -9790,7 +8576,7 @@ const Host = struct {
         } else if (next >= self.palette_list_scroll + visible_rows) {
             self.palette_list_scroll = next - visible_rows + 1;
         }
-        if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         if (changed) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
@@ -9947,7 +8733,7 @@ const Host = struct {
     }
 
     fn abortPaletteAction(self: *Host, message: []const u8) void {
-        self.setBanner(.err, message) catch {};
+        runUiActionOrLog("palette abort banner failed", self.setBanner(.err, message));
         self.announcePaletteOutcome(.action_aborted, message);
     }
 
@@ -10226,7 +9012,10 @@ const Host = struct {
         self.previewPaletteTheme(name) catch |err| {
             log.warn("palette theme preview failed theme={s} err={}", .{ name, err });
             self.revertPaletteThemePreview();
-            self.setBanner(.err, "Theme preview failed; selection was not applied.") catch {};
+            runUiActionOrLog(
+                "palette theme preview banner failed",
+                self.setBanner(.err, "Theme preview failed; selection was not applied."),
+            );
         };
     }
 
@@ -10339,7 +9128,10 @@ const Host = struct {
         self.hideOverlay();
         if (saved_but_masked) {
             log.warn("palette theme saved but masked by a later config layer theme={s}", .{theme_name});
-            self.setBanner(.info, "Theme saved, but a later config layer masks it.") catch {};
+            runUiActionOrLog(
+                "palette masked theme banner failed",
+                self.setBanner(.info, "Theme saved, but a later config layer masks it."),
+            );
         }
         self.layout() catch |err| {
             log.warn("palette theme post-save layout failed err={}", .{err});
@@ -10437,7 +9229,7 @@ const Host = struct {
             @intCast(surface.core().id)
         else
             0;
-        if (PostMessageW(hwnd, WM_WINHOSTTY_HOST_NEW_TAB, source_surface_id, 0) == 0) {
+        if (sys.PostMessageW(hwnd, c.WM_WINHOSTTY_HOST_NEW_TAB, source_surface_id, 0) == 0) {
             if (source_surface) |surface| {
                 runUiActionOrLog("deferred new tab fallback failed", self.app.performAction(.{ .surface = surface.core() }, .new_tab, {}));
             }
@@ -10483,7 +9275,7 @@ const Host = struct {
         } else if (self.palette_list_selected >= visible_end) {
             self.palette_list_selected = visible_end - 1;
         }
-        if (self.palette_list_hwnd) |h| _ = InvalidateRect(h, null, 0);
+        if (self.palette_list_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         if (self.palette_list_selected != previous_selection) {
             self.announcePaletteSelection();
             self.previewSelectedPaletteTheme();
@@ -10497,11 +9289,11 @@ const Host = struct {
     fn paintPaletteList(self: *Host) void {
         const hwnd = self.palette_list_hwnd orelse return;
         var ps: PAINTSTRUCT = undefined;
-        const hdc = BeginPaint(hwnd, &ps);
-        defer _ = EndPaint(hwnd, &ps);
+        const hdc = sys.BeginPaint(hwnd, &ps);
+        defer _ = sys.EndPaint(hwnd, &ps);
 
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) return;
+        if (sys.GetClientRect(hwnd, &rect) == 0) return;
 
         const theme = &self.app.resolved_theme;
         fillSolidRect(hdc, rect, theme.overlay_bg);
@@ -10513,10 +9305,10 @@ const Host = struct {
         const row_h = self.scaled(palette_row_height);
         const padding = self.scaled(12);
 
-        _ = SetBkMode(hdc, TRANSPARENT);
-        const old_font: ?HGDIOBJ = if (self.chrome_font) |f| SelectObject(hdc, f) else null;
+        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+        const old_font: ?HGDIOBJ = if (self.chrome_font) |f| sys.SelectObject(hdc, f) else null;
         defer {
-            if (old_font) |f| _ = SelectObject(hdc, f);
+            if (old_font) |f| _ = sys.SelectObject(hdc, f);
         }
 
         const visible_end = @min(
@@ -10590,19 +9382,19 @@ const Host = struct {
         // scheduler — leaving a SetTimer bound to a destroyed HWND
         // would panic the next time it fired.
         if (self.tween_timer_active) {
-            if (self.hwnd) |h| _ = KillTimer(h, TWEEN_TIMER_ID);
+            if (self.hwnd) |h| _ = sys.KillTimer(h, c.TWEEN_TIMER_ID);
             self.tween_timer_active = false;
         }
         if (self.search_timer_active) {
-            if (self.hwnd) |h| _ = KillTimer(h, SEARCH_TIMER_ID);
+            if (self.hwnd) |h| _ = sys.KillTimer(h, c.SEARCH_TIMER_ID);
             self.search_timer_active = false;
         }
         if (self.scrollbar_timer_active) {
-            if (self.hwnd) |h| _ = KillTimer(h, SCROLLBAR_TIMER_ID);
+            if (self.hwnd) |h| _ = sys.KillTimer(h, c.SCROLLBAR_TIMER_ID);
             self.scrollbar_timer_active = false;
         }
         if (self.resize_settle_timer_active) {
-            if (self.hwnd) |h| _ = KillTimer(h, RESIZE_SETTLE_TIMER_ID);
+            if (self.hwnd) |h| _ = sys.KillTimer(h, c.RESIZE_SETTLE_TIMER_ID);
             self.resize_settle_timer_active = false;
         }
         self.tween_sched.deinit();
@@ -10625,12 +9417,12 @@ const Host = struct {
         if (self.selected_profile_key) |value| self.app.core_app.alloc.free(value);
         if (self.cached_window_title) |value| self.app.core_app.alloc.free(value);
         self.freeCachedChromeStrings();
-        if (self.chrome_brush) |brush| _ = DeleteObject(brush);
-        if (self.overlay_brush) |brush| _ = DeleteObject(brush);
-        if (self.edit_brush) |brush| _ = DeleteObject(brush);
-        if (self.chrome_font) |font| _ = DeleteObject(font);
-        if (self.titlebar_caption_icon_font) |font| _ = DeleteObject(font);
-        if (self.titlebar_action_icon_font) |font| _ = DeleteObject(font);
+        if (self.chrome_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.overlay_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.edit_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.chrome_font) |font| _ = sys.DeleteObject(font);
+        if (self.titlebar_caption_icon_font) |font| _ = sys.DeleteObject(font);
+        if (self.titlebar_action_icon_font) |font| _ = sys.DeleteObject(font);
         self.clearStructuralHistory(.host_destroy);
         self.structural_undo_entries.deinit(self.app.core_app.alloc);
         self.structural_redo_entries.deinit(self.app.core_app.alloc);
@@ -10641,8 +9433,8 @@ const Host = struct {
 
     fn destroyChildControls(self: *Host) void {
         if (self.hwnd) |hwnd| {
-            if (IsWindow(hwnd) != 0) {
-                _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            if (sys.IsWindow(hwnd) != 0) {
+                setWindowData(hwnd, null);
             }
         }
 
@@ -10712,7 +9504,7 @@ const Host = struct {
 
     fn refocusHostWindow(self: *Host) void {
         if (self.hwnd) |hwnd| {
-            _ = SetFocus(hwnd);
+            _ = sys.SetFocus(hwnd);
         }
     }
 
@@ -10757,8 +9549,8 @@ const Host = struct {
         const hwnd = self.hwnd orelse return null;
 
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) return null;
-        const sb_h = self.statusBarHeight();
+        if (sys.GetClientRect(hwnd, &rect) == 0) return null;
+        const sb_h = statusBarHeight();
         if (sb_h == 0) return null;
         const status_y = @max(self.scaled(host_tab_height) + self.scaled(2), rect.bottom - sb_h + self.scaled(4));
         var status_x: i32 = self.scaled(16);
@@ -10809,7 +9601,7 @@ const Host = struct {
         for (self.tabs.items, 0..) |tab, i| {
             const btn = tab.button_hwnd orelse continue;
             var rect: RECT = undefined;
-            if (GetWindowRect(btn, &rect) == 0) continue;
+            if (sys.GetWindowRect(btn, &rect) == 0) continue;
             // Check if screen_x falls within the button's horizontal midpoint region
             if (screen_x >= rect.left and screen_x < rect.right) return i;
         }
@@ -10854,13 +9646,13 @@ const Host = struct {
         self.tabs.items[a].clearRedoHistory();
         self.tabs.items[b].clearRedoHistory();
         self.app.auditShellNativeMapping("tab-drag-reorder");
-        self.layout() catch {};
+        runUiActionOrLog("tab drag reorder layout failed", self.layout());
     }
 
     fn hideTabDropPreview(self: *Host) void {
         self.tab_drop_operation = .none;
         self.tab_drop_target_surface = null;
-        if (self.tab_drop_preview_hwnd) |preview| _ = ShowWindow(preview, SW_HIDE);
+        if (self.tab_drop_preview_hwnd) |preview| _ = sys.ShowWindow(preview, c.SW_HIDE);
     }
 
     fn updateTabDropPreview(self: *Host, source_index: usize, screen_point: POINT) void {
@@ -10872,7 +9664,7 @@ const Host = struct {
         }
         const hwnd = self.hwnd orelse return self.hideTabDropPreview();
         var client_point = screen_point;
-        if (ScreenToClient(hwnd, &client_point) == 0) return self.hideTabDropPreview();
+        if (sys.ScreenToClient(hwnd, &client_point) == 0) return self.hideTabDropPreview();
         const target_surface = target: {
             const tab = self.activeTab() orelse return self.hideTabDropPreview();
             var it = tab.tree.iterator();
@@ -10899,11 +9691,11 @@ const Host = struct {
         }
         const preview_rect = target.preview_rect orelse return self.hideTabDropPreview();
         if (self.tab_drop_preview_hwnd == null) {
-            self.tab_drop_preview_hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            self.tab_drop_preview_hwnd = sys.CreateWindowExW(
+                c.WS_EX_LAYERED | c.WS_EX_TRANSPARENT,
                 prompt_label_class,
                 std.unicode.utf8ToUtf16LeStringLiteral(""),
-                WS_CHILD,
+                c.WS_CHILD,
                 preview_rect.left,
                 preview_rect.top,
                 preview_rect.right - preview_rect.left,
@@ -10914,7 +9706,7 @@ const Host = struct {
                 null,
             );
             if (self.tab_drop_preview_hwnd) |preview| {
-                _ = SetLayeredWindowAttributes(preview, 0, 72, LWA_ALPHA);
+                _ = sys.SetLayeredWindowAttributes(preview, 0, 72, c.LWA_ALPHA);
             }
         }
         const preview = self.tab_drop_preview_hwnd orelse return;
@@ -10927,18 +9719,18 @@ const Host = struct {
             .split_down => std.unicode.utf8ToUtf16LeStringLiteral("Split below"),
             .none, .new_tab => unreachable,
         };
-        _ = SetWindowTextW(preview, operation_label);
-        _ = SetWindowPos(
+        _ = sys.SetWindowTextW(preview, operation_label);
+        _ = sys.SetWindowPos(
             preview,
             null,
             preview_rect.left,
             preview_rect.top,
             preview_rect.right - preview_rect.left,
             preview_rect.bottom - preview_rect.top,
-            SWP_NOACTIVATE,
+            c.SWP_NOACTIVATE,
         );
-        _ = ShowWindow(preview, SW_SHOWNOACTIVATE);
-        _ = InvalidateRect(preview, null, 1);
+        _ = sys.ShowWindow(preview, c.SW_SHOWNOACTIVATE);
+        _ = sys.InvalidateRect(preview, null, 1);
     }
 
     fn commitTabDropSplit(self: *Host, source_index: usize) bool {
@@ -11009,7 +9801,7 @@ const Host = struct {
         self.active_tab = target_index;
         _ = self.appendStructuralUndoAssumeCapacity(.{
             .kind = .tab_subtree_transfer,
-            .timestamp_ms = GetTickCount64(),
+            .timestamp_ms = sys.GetTickCount64(),
             .sequence_id = self.app.nextUndoSequence(),
             .payload = .{ .tab_subtree_transfer = .{
                 .source_tab = removed,
@@ -11050,7 +9842,7 @@ const Host = struct {
         }
         source_surface.host_active = true;
         source_surface.setVisible(true);
-        self.layout() catch {};
+        runUiActionOrLog("tab subtree transfer layout failed", self.layout());
         self.app.activateSurface(source_surface);
         self.app.auditShellNativeMapping("tab-subtree-transfer");
         return true;
@@ -11070,7 +9862,7 @@ const Host = struct {
         // with precomputed coords. Invoking layout after the index
         // change ensures the slide kicks off immediately on activation
         // instead of waiting for the next incidental layout tick.
-        self.layout() catch {};
+        runUiActionOrLog("tab activation layout failed", self.layout());
         if (self.tabs.items[index].focusedSurface()) |surface| {
             self.app.activateSurface(surface);
             self.forceHostCompositionPaint();
@@ -11086,13 +9878,6 @@ const Host = struct {
         return self.activateTabIndex(index);
     }
 
-    fn navigateActiveSearch(self: *Host, dir: input.Binding.Action.NavigateSearch) bool {
-        const surface = self.activeSurface() orelse return false;
-        if (!surface.search_active and !surface.search_bar.visible) return false;
-        _ = surface.navigateDockedSearch(dir) catch return false;
-        return true;
-    }
-
     fn dismissActiveSearch(self: *Host) bool {
         const surface = self.activeSurface() orelse return false;
         if (!surface.search_active and !surface.search_bar.visible and self.overlay_mode != .search) return false;
@@ -11106,18 +9891,10 @@ const Host = struct {
         return true;
     }
 
-    fn completeCommandPaletteFromButton(self: *Host, reverse: bool) bool {
-        if (self.overlay_mode != .command_palette) {
-            return self.toggleCommandPaletteFromButton();
-        }
-        _ = self.completeCommandPalette(reverse) catch return false;
-        return true;
-    }
-
     fn dismissCommandPalette(self: *Host) bool {
         if (self.overlay_mode != .command_palette) return false;
         self.hideOverlay();
-        self.layout() catch {};
+        runUiActionOrLog("command palette dismiss layout failed", self.layout());
         self.forceHostCompositionPaint();
         refocusActiveSurface(self);
         return true;
@@ -11239,7 +10016,7 @@ const Host = struct {
     }
 
     fn refreshProfileChrome(self: *Host) void {
-        const status_h = self.statusBarHeight();
+        const status_h = statusBarHeight();
         if (!profileChromeVisible(self.overlay_mode, status_h)) return;
         if (self.overlay_mode == .profile) {
             _ = self.syncOverlayLabel() catch false;
@@ -11260,12 +10037,15 @@ const Host = struct {
 
     fn toggleProfileOverlay(self: *Host) bool {
         if (!(self.reloadProfiles() catch false)) {
-            self.setBanner(.err, "No supported Windows profiles detected.") catch {};
+            runUiActionOrLog(
+                "profile availability banner failed",
+                self.setBanner(.err, "No supported Windows profiles detected."),
+            );
             return false;
         }
         if (self.overlay_mode == .profile) {
             self.hideOverlay();
-            self.layout() catch {};
+            runUiActionOrLog("profile overlay dismiss layout failed", self.layout());
             self.forceHostCompositionPaint();
             return true;
         }
@@ -11273,16 +10053,6 @@ const Host = struct {
         defer if (initial) |value| self.app.core_app.alloc.free(value);
         self.hideOverlay();
         self.showOverlay(.profile, initial) catch return false;
-        return true;
-    }
-
-    fn cycleSelectedProfile(self: *Host, reverse: bool) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
-        const profiles = self.profiles.?;
-        const next = nextTabOverviewSelection(self.selected_profile + 1, profiles.len, reverse) - 1;
-        if (self.setSelectedProfileIndex(next) catch return false) {
-            self.refreshProfileChrome();
-        }
         return true;
     }
 
@@ -11300,26 +10070,34 @@ const Host = struct {
         const next = nextTabOverviewSelection(current_index + 1, profiles.len, reverse) - 1;
         const selection_changed = try self.setSelectedProfileIndex(next);
         _ = try self.setOverlayEditText(profiles[next].key);
-        _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
+        _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         if (selection_changed) self.refreshProfileChrome();
         return true;
     }
 
     fn openSelectedProfile(self: *Host, open_target: ProfileOpenTarget) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
+        const profiles_ready = self.ensureProfiles() catch |err| {
+            logUiActionError("selected profile load failed", err);
+            return false;
+        };
+        if (!profiles_ready) return false;
         const profile = self.selectedProfile() orelse return false;
         const source = self.activeSurface() orelse return false;
         const surface = self.app.createProfileSurface(.{ .surface = source.core() }, profile, open_target) catch return false;
         if (self.overlay_mode == .profile) {
             self.hideOverlay();
-            self.layout() catch {};
+            runUiActionOrLog("profile launch layout failed", self.layout());
         }
         self.app.activateSurface(surface);
         return true;
     }
 
     fn quickOpenProfileIndex(self: *Host, index: usize, open_target: ProfileOpenTarget) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
+        const profiles_ready = self.ensureProfiles() catch |err| {
+            logUiActionError("quick profile load failed", err);
+            return false;
+        };
+        if (!profiles_ready) return false;
         const profiles = self.profiles.?;
         if (index >= profiles.len) return false;
         if (self.setSelectedProfileIndex(index) catch return false) {
@@ -11420,10 +10198,10 @@ const Host = struct {
         switch (role) {
             .minimize, .maximize, .close => self.repaintTopChrome(),
             .new_tab => {
-                if (self.new_tab_hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+                if (self.new_tab_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
             },
             .dropdown => {
-                if (self.overflow_hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+                if (self.overflow_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
             },
             .none => {},
         }
@@ -11439,7 +10217,7 @@ const Host = struct {
             return;
         }
 
-        self.titlebar_hover_fade.start(GetTickCount64(), duration);
+        self.titlebar_hover_fade.start(sys.GetTickCount64(), duration);
         self.titlebar_hover_fade_role = role;
         self.invalidateTitlebarButtonRole(role);
         _ = self.addTween(0.0, 1.0, duration, .{ 0.0, 0.0, 1.0, 1.0 });
@@ -11471,8 +10249,8 @@ const Host = struct {
         if (self.hovered_button_hwnd == child) return;
         const previous = self.hovered_button_hwnd;
         self.hovered_button_hwnd = child;
-        if (previous) |hwnd| _ = InvalidateRect(hwnd, null, 0);
-        if (child) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (previous) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
+        if (child) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
 
         const previous_titlebar_role = if (previous) |h| self.titlebarActionButtonRole(h) else .none;
         if (previous_titlebar_role != .none) self.startTitlebarHoverFade(previous_titlebar_role);
@@ -11485,7 +10263,7 @@ const Host = struct {
         const prev_was_tab = if (previous) |h| self.isTabButton(h) else false;
         const new_is_tab = if (child) |h| self.isTabButton(h) else false;
         if (prev_was_tab or new_is_tab) {
-            const now = GetTickCount64();
+            const now = sys.GetTickCount64();
 
             if (prev_was_tab and new_is_tab) {
                 // Adjacent tab transition: move the previous target
@@ -11530,39 +10308,12 @@ const Host = struct {
         self.repaintStatusBar();
     }
 
-    fn focusQuickSlotEdge(self: *Host, toward_start: bool) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
-        const next = nextQuickSlotFocus(
-            self.profiles.?.len,
-            self.selectedProfileIndex(),
-            null,
-            !toward_start,
-            3,
-        ) orelse return false;
-        self.setFocusedQuickSlot(next);
-        return true;
-    }
-
-    fn cycleFocusedQuickSlot(self: *Host, reverse: bool) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
-        const next = nextQuickSlotFocus(
-            self.profiles.?.len,
-            self.selectedProfileIndex(),
-            self.focused_quick_slot,
-            reverse,
-            3,
-        ) orelse return false;
-        self.setFocusedQuickSlot(next);
-        return true;
-    }
-
-    fn openFocusedQuickSlot(self: *Host, open_target: ProfileOpenTarget) bool {
-        const profile_index = self.focused_quick_slot orelse return false;
-        return self.quickOpenProfileIndex(profile_index, open_target);
-    }
-
     fn assignSelectedProfileToQuickSlot(self: *Host, slot_ordinal: usize) bool {
-        if (!(self.ensureProfiles() catch false)) return false;
+        const profiles_ready = self.ensureProfiles() catch |err| {
+            logUiActionError("quick slot profile load failed", err);
+            return false;
+        };
+        if (!profiles_ready) return false;
         const profile = self.selectedProfile() orelse return false;
         self.app.setLauncherQuickSlotPreference(slot_ordinal, profile.key) catch return false;
         const message = std.fmt.allocPrint(
@@ -11571,14 +10322,14 @@ const Host = struct {
             .{ profile.label, slot_ordinal + 1 },
         ) catch return false;
         defer self.app.core_app.alloc.free(message);
-        self.setBanner(.info, message) catch {};
+        runUiActionOrLog("quick slot pin banner failed", self.setBanner(.info, message));
         return true;
     }
 
     fn clearQuickSlotPins(self: *Host) bool {
         self.app.clearLauncherQuickSlotPreferences();
         self.setFocusedQuickSlot(null);
-        self.setBanner(.info, "Cleared quick slot pins.") catch {};
+        runUiActionOrLog("quick slot clear banner failed", self.setBanner(.info, "Cleared quick slot pins."));
         return true;
     }
 
@@ -11588,14 +10339,10 @@ const Host = struct {
         proc: WNDPROC,
         prev_slot: *?*const anyopaque,
     ) void {
-        _ = SetWindowLongPtrW(
+        setWindowData(button_hwnd, self);
+        const previous = sys.SetWindowLongPtrW(
             button_hwnd,
-            GWLP_USERDATA,
-            @as(LONG_PTR, @intCast(@intFromPtr(self))),
-        );
-        const previous = SetWindowLongPtrW(
-            button_hwnd,
-            GWLP_WNDPROC,
+            c.GWLP_WNDPROC,
             @as(LONG_PTR, @intCast(@intFromPtr(proc))),
         );
         prev_slot.* = if (previous == 0)
@@ -11612,20 +10359,20 @@ const Host = struct {
                 while (it.next()) |entry| entry.view.setVisible(false);
             }
         }
-        _ = ShowWindow(hwnd, if (visible) SW_SHOW else SW_HIDE);
+        _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
     }
 
     fn present(self: *Host) void {
         const hwnd = self.hwnd orelse return;
         if (hostPresentShowCommand(
-            IsWindowVisible(hwnd) != 0,
-            IsIconic(hwnd) != 0,
-            IsZoomed(hwnd) != 0,
+            sys.IsWindowVisible(hwnd) != 0,
+            sys.IsIconic(hwnd) != 0,
+            sys.IsZoomed(hwnd) != 0,
         )) |show_cmd| {
-            _ = ShowWindow(hwnd, show_cmd);
+            _ = sys.ShowWindow(hwnd, show_cmd);
         }
-        _ = SetForegroundWindow(hwnd);
-        _ = SetFocus(hwnd);
+        _ = sys.SetForegroundWindow(hwnd);
+        _ = sys.SetFocus(hwnd);
     }
 
     fn setBanner(self: *Host, kind: HostBannerKind, text: ?[]const u8) !void {
@@ -11675,11 +10422,11 @@ const Host = struct {
         const hwnd = self.hwnd orelse return;
         if (self.overlay_edit_hwnd != null) return;
 
-        self.overlay_label_hwnd = CreateWindowExW(
+        self.overlay_label_hwnd = sys.CreateWindowExW(
             0,
             prompt_label_class,
             host_overlay_command_palette_label,
-            WS_CHILD,
+            c.WS_CHILD,
             0,
             0,
             80,
@@ -11688,13 +10435,13 @@ const Host = struct {
             @ptrFromInt(2001),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
-        self.overlay_edit_hwnd = CreateWindowExW(
+        self.overlay_edit_hwnd = sys.CreateWindowExW(
             0,
             prompt_edit_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            c.WS_CHILD | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
             0,
             0,
             100,
@@ -11703,17 +10450,13 @@ const Host = struct {
             @ptrFromInt(2002),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
         const edit_hwnd = self.overlay_edit_hwnd.?;
-        _ = SetWindowLongPtrW(
+        setWindowData(edit_hwnd, self);
+        const previous = sys.SetWindowLongPtrW(
             edit_hwnd,
-            GWLP_USERDATA,
-            @as(LONG_PTR, @intCast(@intFromPtr(self))),
-        );
-        const previous = SetWindowLongPtrW(
-            edit_hwnd,
-            GWLP_WNDPROC,
+            c.GWLP_WNDPROC,
             @as(LONG_PTR, @intCast(@intFromPtr(&overlayEditProc))),
         );
         self.overlay_edit_prev_proc = if (previous == 0)
@@ -11722,10 +10465,10 @@ const Host = struct {
             @ptrFromInt(@as(usize, @intCast(previous)));
         const edit_margin = @as(u16, @intCast(@max(self.scaled(10), 6)));
         const packed_margins: isize = @intCast(@as(usize, edit_margin) | (@as(usize, edit_margin) << 16));
-        _ = SendMessageW(
+        _ = sys.SendMessageW(
             edit_hwnd,
-            EM_SETMARGINS,
-            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            c.EM_SETMARGINS,
+            c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN,
             packed_margins,
         );
         self.overlay_edit_uia_provider = if (self.app.com_initialized)
@@ -11738,15 +10481,15 @@ const Host = struct {
                 break :blk null;
             }
         else blk: {
-            log.warn("overlay edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            log.debug("overlay edit UIA provider disabled: UI thread is not a confirmed STA", .{});
             break :blk null;
         };
 
-        self.overlay_hint_hwnd = CreateWindowExW(
+        self.overlay_hint_hwnd = sys.CreateWindowExW(
             0,
             prompt_label_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD,
+            c.WS_CHILD,
             0,
             0,
             100,
@@ -11755,13 +10498,13 @@ const Host = struct {
             @ptrFromInt(2005),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
-        self.overlay_accept_hwnd = CreateWindowExW(
+        self.overlay_accept_hwnd = sys.CreateWindowExW(
             0,
             prompt_button_class,
             prompt_ok_label,
-            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            c.WS_CHILD | c.WS_TABSTOP | c.BS_OWNERDRAW,
             0,
             0,
             70,
@@ -11770,14 +10513,14 @@ const Host = struct {
             @ptrFromInt(2003),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
         self.subclassButton(self.overlay_accept_hwnd.?, &hostButtonProc, &self.overlay_button_prev_proc);
 
-        self.overlay_cancel_hwnd = CreateWindowExW(
+        self.overlay_cancel_hwnd = sys.CreateWindowExW(
             0,
             prompt_button_class,
             prompt_cancel_label,
-            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            c.WS_CHILD | c.WS_TABSTOP | c.BS_OWNERDRAW,
             0,
             0,
             80,
@@ -11786,17 +10529,17 @@ const Host = struct {
             @ptrFromInt(2004),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
         self.subclassButton(self.overlay_cancel_hwnd.?, &hostButtonProc, &self.overlay_button_prev_proc);
 
         // Palette list — shown only when overlay_mode == .command_palette.
         // Stamped with a pointer to the Host via GWLP_USERDATA so the
         // wndproc can dispatch clicks back to `host.invokePaletteRow`.
-        self.palette_list_hwnd = CreateWindowExW(
+        self.palette_list_hwnd = sys.CreateWindowExW(
             0,
             palette_list_class_name,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD,
+            c.WS_CHILD,
             0,
             0,
             320,
@@ -11805,12 +10548,8 @@ const Host = struct {
             @ptrFromInt(2006),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
-        _ = SetWindowLongPtrW(
-            self.palette_list_hwnd.?,
-            GWLP_USERDATA,
-            @as(LONG_PTR, @intCast(@intFromPtr(self))),
-        );
+        ) orelse return lastError();
+        setWindowData(self.palette_list_hwnd.?, self);
         self.palette_list_uia_provider = if (self.app.com_initialized)
             win32_uia.PaletteListProvider.create(
                 std.heap.page_allocator,
@@ -11821,7 +10560,7 @@ const Host = struct {
                 break :blk null;
             }
         else blk: {
-            log.warn("palette UIA provider disabled: UI thread is not a confirmed STA", .{});
+            log.debug("palette UIA provider disabled: UI thread is not a confirmed STA", .{});
             break :blk null;
         };
 
@@ -11832,11 +10571,11 @@ const Host = struct {
         const hwnd = self.hwnd orelse return;
 
         if (self.new_tab_hwnd == null) {
-            self.new_tab_hwnd = CreateWindowExW(
+            self.new_tab_hwnd = sys.CreateWindowExW(
                 0,
                 prompt_button_class,
                 host_tab_new_button_label,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_OWNERDRAW,
                 0,
                 0,
                 host_tab_small_button_width,
@@ -11845,16 +10584,16 @@ const Host = struct {
                 @ptrFromInt(1904),
                 self.app.hinstance,
                 null,
-            ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+            ) orelse return lastError();
             self.subclassButton(self.new_tab_hwnd.?, &hostButtonProc, &self.chrome_button_prev_proc);
         }
 
         if (self.overflow_hwnd == null) {
-            self.overflow_hwnd = CreateWindowExW(
+            self.overflow_hwnd = sys.CreateWindowExW(
                 0,
                 prompt_button_class,
                 host_tab_dropdown_button_label,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_OWNERDRAW,
                 0,
                 0,
                 host_tab_overflow_button_width,
@@ -11863,7 +10602,7 @@ const Host = struct {
                 @ptrFromInt(1911),
                 self.app.hinstance,
                 null,
-            ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+            ) orelse return lastError();
             self.subclassButton(self.overflow_hwnd.?, &hostButtonProc, &self.chrome_button_prev_proc);
         }
     }
@@ -11928,16 +10667,16 @@ const Host = struct {
             // Show body as hint label. Prefer the visible Accept button,
             // then the visible Cancel button, as the keyboard-focus target.
             // The destructive action remains one explicit click/Enter away.
-            const initial_target = if (IsWindowVisible(accept_hwnd) != 0)
+            const initial_target = if (sys.IsWindowVisible(accept_hwnd) != 0)
                 accept_hwnd
-            else if (IsWindowVisible(cancel_hwnd) != 0)
+            else if (sys.IsWindowVisible(cancel_hwnd) != 0)
                 cancel_hwnd
             else
                 return;
-            _ = SetFocus(initial_target);
+            _ = sys.SetFocus(initial_target);
         } else {
-            _ = SetFocus(edit_hwnd);
-            _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
+            _ = sys.SetFocus(edit_hwnd);
+            _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         }
         self.forceOverlayTransitionPaint();
     }
@@ -11946,7 +10685,7 @@ const Host = struct {
         const was_confirm = self.overlay_mode == .confirm;
         const was_palette = self.overlay_mode == .command_palette;
         const restore_terminal_focus = shouldRefocusAfterOverlayHide(
-            GetFocus(),
+            sys.GetFocus(),
             self.overlay_edit_hwnd,
             self.overlay_accept_hwnd,
             self.overlay_cancel_hwnd,
@@ -11955,7 +10694,7 @@ const Host = struct {
         self.revertPaletteThemePreview();
         self.overlay_mode = .none;
         self.clearOverlayCompletion();
-        self.setBanner(.none, null) catch {};
+        runUiActionOrLog("overlay banner clear failed", self.setBanner(.none, null));
         // Drop any active confirm payload. Both accept and cancel
         // paths route through hideOverlay, so this is the one place
         // the owned byte slices get freed. Accept/cancel callbacks
@@ -11980,7 +10719,7 @@ const Host = struct {
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
         if (was_confirm or was_palette) {
-            self.layout() catch {};
+            runUiActionOrLog("overlay hide layout failed", self.layout());
             self.forceVisibleSurfaceRepaintsNow();
         }
         if (restore_terminal_focus) {
@@ -12408,49 +11147,49 @@ const Host = struct {
     fn ensureThemeBrushes(self: *Host) !void {
         const theme = &self.app.resolved_theme;
         if (self.chrome_brush == null) {
-            self.chrome_brush = CreateSolidBrush(theme.chrome_bg) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+            self.chrome_brush = sys.CreateSolidBrush(theme.chrome_bg) orelse return lastError();
         }
         if (self.overlay_brush == null) {
-            self.overlay_brush = CreateSolidBrush(theme.overlay_bg) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+            self.overlay_brush = sys.CreateSolidBrush(theme.overlay_bg) orelse return lastError();
         }
         if (self.edit_brush == null) {
-            self.edit_brush = CreateSolidBrush(theme.edit_bg) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+            self.edit_brush = sys.CreateSolidBrush(theme.edit_bg) orelse return lastError();
         }
     }
 
     fn rebuildThemeBrushes(self: *Host) void {
-        if (self.chrome_brush) |brush| _ = DeleteObject(brush);
-        if (self.overlay_brush) |brush| _ = DeleteObject(brush);
-        if (self.edit_brush) |brush| _ = DeleteObject(brush);
+        if (self.chrome_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.overlay_brush) |brush| _ = sys.DeleteObject(brush);
+        if (self.edit_brush) |brush| _ = sys.DeleteObject(brush);
         self.chrome_brush = null;
         self.overlay_brush = null;
         self.edit_brush = null;
-        self.ensureThemeBrushes() catch {};
+        runUiActionOrLog("theme brush recreation failed", self.ensureThemeBrushes());
     }
 
     fn createChromeFont(self: *Host) ?*anyopaque {
         var lf: LOGFONTW = .{};
         lf.lfHeight = -self.scaled(14);
-        lf.lfWeight = FW_NORMAL;
+        lf.lfWeight = c.FW_NORMAL;
 
         // Try config font family first
         if (self.app.config.@"window-title-font-family") |family| {
             const name_w = std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, family) catch return null;
             defer self.app.core_app.alloc.free(name_w);
-            const copy_len = @min(name_w.len, LF_FACESIZE - 1);
+            const copy_len = @min(name_w.len, c.LF_FACESIZE - 1);
             @memcpy(lf.lfFaceName[0..copy_len], name_w[0..copy_len]);
         } else {
             // Fallback: system UI font via NONCLIENTMETRICS
             var ncm: NONCLIENTMETRICSW = undefined;
             ncm.cbSize = @sizeOf(NONCLIENTMETRICSW);
-            if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, @sizeOf(NONCLIENTMETRICSW), @ptrCast(&ncm), 0) != 0) {
+            if (sys.SystemParametersInfoW(c.SPI_GETNONCLIENTMETRICS, @sizeOf(NONCLIENTMETRICSW), @ptrCast(&ncm), 0) != 0) {
                 lf = ncm.lfMessageFont;
                 lf.lfHeight = -self.scaled(14);
-                lf.lfQuality = CLEARTYPE_QUALITY;
+                lf.lfQuality = c.CLEARTYPE_QUALITY;
             }
         }
 
-        return CreateFontIndirectW(&lf);
+        return sys.CreateFontIndirectW(&lf);
     }
 
     fn createTitlebarIconFont(self: *Host, logical_px: i32) ?*anyopaque {
@@ -12465,30 +11204,30 @@ const Host = struct {
     ) ?*anyopaque {
         var lf: LOGFONTW = .{};
         lf.lfHeight = -self.scaled(logical_px);
-        lf.lfWeight = FW_NORMAL;
-        lf.lfQuality = CLEARTYPE_QUALITY;
+        lf.lfWeight = c.FW_NORMAL;
+        lf.lfQuality = c.CLEARTYPE_QUALITY;
         const name = std.mem.span(face);
-        const copy_len = @min(name.len, LF_FACESIZE - 1);
+        const copy_len = @min(name.len, c.LF_FACESIZE - 1);
         @memcpy(lf.lfFaceName[0..copy_len], name[0..copy_len]);
-        return CreateFontIndirectW(&lf);
+        return sys.CreateFontIndirectW(&lf);
     }
 
     fn recreateTitlebarIconFonts(self: *Host) void {
-        if (self.titlebar_caption_icon_font) |old| _ = DeleteObject(old);
-        if (self.titlebar_action_icon_font) |old| _ = DeleteObject(old);
+        if (self.titlebar_caption_icon_font) |old| _ = sys.DeleteObject(old);
+        if (self.titlebar_action_icon_font) |old| _ = sys.DeleteObject(old);
         self.titlebar_caption_icon_font = self.createTitlebarIconFont(10);
         self.titlebar_action_icon_font = self.createTitlebarIconFont(12);
     }
 
     fn recreateChromeFont(self: *Host) void {
-        if (self.chrome_font) |old| _ = DeleteObject(old);
+        if (self.chrome_font) |old| _ = sys.DeleteObject(old);
         self.chrome_font = self.createChromeFont();
         self.recreateTitlebarIconFonts();
         // Send WM_SETFONT to child controls
         if (self.chrome_font) |font| {
-            if (self.overlay_edit_hwnd) |edit| _ = SendMessageW(edit, WM_SETFONT, @intFromPtr(font), 1);
-            if (self.overlay_label_hwnd) |label| _ = SendMessageW(label, WM_SETFONT, @intFromPtr(font), 1);
-            if (self.overlay_hint_hwnd) |hint| _ = SendMessageW(hint, WM_SETFONT, @intFromPtr(font), 1);
+            if (self.overlay_edit_hwnd) |edit| _ = sys.SendMessageW(edit, c.WM_SETFONT, @intFromPtr(font), 1);
+            if (self.overlay_label_hwnd) |label| _ = sys.SendMessageW(label, c.WM_SETFONT, @intFromPtr(font), 1);
+            if (self.overlay_hint_hwnd) |hint| _ = sys.SendMessageW(hint, c.WM_SETFONT, @intFromPtr(font), 1);
             for (self.app.windows.items) |surface| {
                 if (surface.host != self) continue;
                 surface.applySearchBarFont(font);
@@ -12499,13 +11238,13 @@ const Host = struct {
     fn ensureSearchTimer(self: *Host) void {
         if (self.search_timer_active) return;
         const hwnd = self.hwnd orelse return;
-        _ = SetTimer(hwnd, SEARCH_TIMER_ID, SEARCH_TIMER_INTERVAL_MS, null);
+        _ = sys.SetTimer(hwnd, c.SEARCH_TIMER_ID, c.SEARCH_TIMER_INTERVAL_MS, null);
         self.search_timer_active = true;
     }
 
     fn killSearchTimer(self: *Host) void {
         if (!self.search_timer_active) return;
-        if (self.hwnd) |hwnd| _ = KillTimer(hwnd, SEARCH_TIMER_ID);
+        if (self.hwnd) |hwnd| _ = sys.KillTimer(hwnd, c.SEARCH_TIMER_ID);
         self.search_timer_active = false;
     }
 
@@ -12530,7 +11269,7 @@ const Host = struct {
     }
 
     fn tickSearchBars(self: *Host) void {
-        const now_ms: i64 = @intCast(GetTickCount64());
+        const now_ms: i64 = @intCast(sys.GetTickCount64());
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
@@ -12548,13 +11287,13 @@ const Host = struct {
     fn ensureScrollbarTimer(self: *Host) void {
         if (self.scrollbar_timer_active) return;
         const hwnd = self.hwnd orelse return;
-        _ = SetTimer(hwnd, SCROLLBAR_TIMER_ID, SCROLLBAR_TIMER_INTERVAL_MS, null);
+        _ = sys.SetTimer(hwnd, c.SCROLLBAR_TIMER_ID, c.SCROLLBAR_TIMER_INTERVAL_MS, null);
         self.scrollbar_timer_active = true;
     }
 
     fn killScrollbarTimer(self: *Host) void {
         if (!self.scrollbar_timer_active) return;
-        if (self.hwnd) |hwnd| _ = KillTimer(hwnd, SCROLLBAR_TIMER_ID);
+        if (self.hwnd) |hwnd| _ = sys.KillTimer(hwnd, c.SCROLLBAR_TIMER_ID);
         self.scrollbar_timer_active = false;
     }
 
@@ -12577,7 +11316,7 @@ const Host = struct {
     }
 
     fn tickScrollbars(self: *Host) void {
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         if (self.activeTab()) |tab| {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
@@ -12589,8 +11328,8 @@ const Host = struct {
 
     fn showContextMenu(self: *Host, screen_x: i32, screen_y: i32) void {
         const hwnd = self.hwnd orelse return;
-        const menu = CreatePopupMenu() orelse return;
-        defer _ = DestroyMenu(menu);
+        const menu = sys.CreatePopupMenu() orelse return;
+        defer _ = sys.DestroyMenu(menu);
 
         // Check if active surface has a selection
         const has_selection = if (self.activeSurface()) |s| blk: {
@@ -12598,29 +11337,29 @@ const Host = struct {
             break :blk s.core_surface.hasSelection();
         } else false;
 
-        _ = AppendMenuW(menu, if (has_selection) MF_STRING else MF_GRAYED, CTX_COPY, std.unicode.utf8ToUtf16LeStringLiteral("Copy\tCtrl+Shift+C"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_PASTE, std.unicode.utf8ToUtf16LeStringLiteral("Paste\tCtrl+Shift+V"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_SELECT_ALL, std.unicode.utf8ToUtf16LeStringLiteral("Select All"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-        _ = AppendMenuW(menu, MF_STRING, CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-        _ = AppendMenuW(menu, MF_STRING, CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("New Tab"));
+        _ = sys.AppendMenuW(menu, if (has_selection) c.MF_STRING else c.MF_GRAYED, c.CTX_COPY, std.unicode.utf8ToUtf16LeStringLiteral("Copy\tCtrl+Shift+C"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_PASTE, std.unicode.utf8ToUtf16LeStringLiteral("Paste\tCtrl+Shift+V"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_SELECT_ALL, std.unicode.utf8ToUtf16LeStringLiteral("Select All"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("New Tab"));
 
         // Split submenu with all four directions
-        const split_menu = CreatePopupMenu() orelse return;
-        _ = AppendMenuW(split_menu, MF_STRING, CTX_SPLIT_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Split Right"));
-        _ = AppendMenuW(split_menu, MF_STRING, CTX_SPLIT_DOWN, std.unicode.utf8ToUtf16LeStringLiteral("Split Down"));
-        _ = AppendMenuW(split_menu, MF_STRING, CTX_SPLIT_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Split Left"));
-        _ = AppendMenuW(split_menu, MF_STRING, CTX_SPLIT_UP, std.unicode.utf8ToUtf16LeStringLiteral("Split Up"));
-        _ = AppendMenuW(menu, MF_POPUP, @intFromPtr(split_menu), std.unicode.utf8ToUtf16LeStringLiteral("Split"));
+        const split_menu = sys.CreatePopupMenu() orelse return;
+        _ = sys.AppendMenuW(split_menu, c.MF_STRING, c.CTX_SPLIT_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Split Right"));
+        _ = sys.AppendMenuW(split_menu, c.MF_STRING, c.CTX_SPLIT_DOWN, std.unicode.utf8ToUtf16LeStringLiteral("Split Down"));
+        _ = sys.AppendMenuW(split_menu, c.MF_STRING, c.CTX_SPLIT_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Split Left"));
+        _ = sys.AppendMenuW(split_menu, c.MF_STRING, c.CTX_SPLIT_UP, std.unicode.utf8ToUtf16LeStringLiteral("Split Up"));
+        _ = sys.AppendMenuW(menu, c.MF_POPUP, @intFromPtr(split_menu), std.unicode.utf8ToUtf16LeStringLiteral("Split"));
 
-        _ = AppendMenuW(menu, MF_STRING, CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
 
         // Menu must be owned by top-level host HWND to avoid dismiss bugs
-        _ = SetForegroundWindow(hwnd);
-        const cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, screen_x, screen_y, 0, hwnd, null);
-        _ = PostMessageW(hwnd, WM_NULL, 0, 0);
+        _ = sys.SetForegroundWindow(hwnd);
+        const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, screen_x, screen_y, 0, hwnd, null);
+        _ = sys.PostMessageW(hwnd, c.WM_NULL, 0, 0);
 
         // Dispatch command (cmd is 0 on cancel)
         self.handleContextMenuCommand(cmd);
@@ -12632,37 +11371,37 @@ const Host = struct {
         if (!surface.core_initialized) return;
 
         switch (@as(usize, @intCast(cmd))) {
-            CTX_COPY => {
+            c.CTX_COPY => {
                 runUiActionOrLog("context menu copy failed", surface.core_surface.performBindingAction(.{ .copy_to_clipboard = .mixed }));
             },
-            CTX_PASTE => {
+            c.CTX_PASTE => {
                 runUiActionOrLog("context menu paste failed", surface.core_surface.performBindingAction(.{ .paste_from_clipboard = {} }));
             },
-            CTX_SELECT_ALL => {
+            c.CTX_SELECT_ALL => {
                 runUiActionOrLog("context menu select all failed", surface.core_surface.performBindingAction(.{ .select_all = {} }));
             },
-            CTX_FIND => {
+            c.CTX_FIND => {
                 runUiActionOrLog("context menu find failed", surface.showSearchOverlay(""));
             },
-            CTX_COMMAND_PALETTE => {
+            c.CTX_COMMAND_PALETTE => {
                 runUiActionOrLog("context menu command palette failed", surface.toggleCommandPalette());
             },
-            CTX_NEW_TAB => {
+            c.CTX_NEW_TAB => {
                 self.postDeferredNewTab();
             },
-            CTX_SPLIT_RIGHT => {
+            c.CTX_SPLIT_RIGHT => {
                 runUiActionOrLog("context menu split right failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .right));
             },
-            CTX_SPLIT_DOWN => {
+            c.CTX_SPLIT_DOWN => {
                 runUiActionOrLog("context menu split down failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .down));
             },
-            CTX_SPLIT_LEFT => {
+            c.CTX_SPLIT_LEFT => {
                 runUiActionOrLog("context menu split left failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .left));
             },
-            CTX_SPLIT_UP => {
+            c.CTX_SPLIT_UP => {
                 runUiActionOrLog("context menu split up failed", self.app.performAction(.{ .surface = surface.core() }, .new_split, .up));
             },
-            CTX_NEW_WINDOW => {
+            c.CTX_NEW_WINDOW => {
                 runUiActionOrLog("context menu new window failed", self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}));
             },
             else => {}, // 0 = cancel, ignore
@@ -12671,50 +11410,50 @@ const Host = struct {
 
     fn showTabContextMenu(self: *Host, button_hwnd: HWND, tab_index: usize) void {
         const hwnd = self.hwnd orelse return;
-        const menu = CreatePopupMenu() orelse return;
-        defer _ = DestroyMenu(menu);
+        const menu = sys.CreatePopupMenu() orelse return;
+        defer _ = sys.DestroyMenu(menu);
 
-        _ = AppendMenuW(menu, MF_STRING, CTX_TAB_RENAME, std.unicode.utf8ToUtf16LeStringLiteral("Rename Tab"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-        _ = AppendMenuW(menu, MF_STRING, CTX_TAB_MOVE_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Left"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_TAB_MOVE_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Right"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_RENAME, std.unicode.utf8ToUtf16LeStringLiteral("Rename Tab"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_LEFT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Left"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_TAB_MOVE_RIGHT, std.unicode.utf8ToUtf16LeStringLiteral("Move Tab Right"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
 
         // Only allow closing if there's more than one tab
-        const close_flag: UINT = if (self.tabs.items.len > 1) MF_STRING else MF_GRAYED;
-        _ = AppendMenuW(menu, close_flag, CTX_TAB_CLOSE, std.unicode.utf8ToUtf16LeStringLiteral("Close Tab"));
-        _ = AppendMenuW(menu, if (self.tabs.items.len > 1) MF_STRING else MF_GRAYED, CTX_TAB_CLOSE_OTHERS, std.unicode.utf8ToUtf16LeStringLiteral("Close Other Tabs"));
+        const close_flag: UINT = if (self.tabs.items.len > 1) c.MF_STRING else c.MF_GRAYED;
+        _ = sys.AppendMenuW(menu, close_flag, c.CTX_TAB_CLOSE, std.unicode.utf8ToUtf16LeStringLiteral("Close Tab"));
+        _ = sys.AppendMenuW(menu, if (self.tabs.items.len > 1) c.MF_STRING else c.MF_GRAYED, c.CTX_TAB_CLOSE_OTHERS, std.unicode.utf8ToUtf16LeStringLiteral("Close Other Tabs"));
 
         // Position below the tab button
         var rect: RECT = undefined;
-        if (GetWindowRect(button_hwnd, &rect) == 0) return;
+        if (sys.GetWindowRect(button_hwnd, &rect) == 0) return;
 
-        _ = SetForegroundWindow(hwnd);
-        const cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
-        _ = PostMessageW(hwnd, WM_NULL, 0, 0);
+        _ = sys.SetForegroundWindow(hwnd);
+        const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
+        _ = sys.PostMessageW(hwnd, c.WM_NULL, 0, 0);
 
         if (cmd <= 0) return;
         const surface = self.activeSurface() orelse return;
         if (!surface.core_initialized) return;
 
         switch (@as(usize, @intCast(cmd))) {
-            CTX_TAB_RENAME => {
+            c.CTX_TAB_RENAME => {
                 runUiActionOrLog("tab context rename failed", surface.promptTitle(.tab));
             },
-            CTX_TAB_CLOSE => {
+            c.CTX_TAB_CLOSE => {
                 _ = self.app.closeTab(.{ .surface = surface.core() }, .this) catch |err| {
                     log.warn("close_tab action failed err={}", .{err});
                 };
             },
-            CTX_TAB_CLOSE_OTHERS => {
+            c.CTX_TAB_CLOSE_OTHERS => {
                 _ = self.app.closeTab(.{ .surface = surface.core() }, .other) catch |err| {
                     log.warn("close_tab other action failed err={}", .{err});
                 };
             },
-            CTX_TAB_MOVE_LEFT => {
+            c.CTX_TAB_MOVE_LEFT => {
                 runUiActionOrLog("tab context move left failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = -1 }));
             },
-            CTX_TAB_MOVE_RIGHT => {
+            c.CTX_TAB_MOVE_RIGHT => {
                 runUiActionOrLog("tab context move right failed", self.app.moveTab(.{ .surface = surface.core() }, .{ .amount = 1 }));
             },
             else => {},
@@ -12728,14 +11467,14 @@ const Host = struct {
         const button = self.overflow_hwnd orelse return;
 
         // Ensure profiles are loaded before building the menu
-        _ = self.ensureProfiles() catch {};
+        runUiActionOrLog("overflow profile load failed", self.ensureProfiles());
 
         // Position menu below the dropdown chevron button
         var rect: RECT = undefined;
-        if (GetWindowRect(button, &rect) == 0) return;
+        if (sys.GetWindowRect(button, &rect) == 0) return;
 
-        const menu = CreatePopupMenu() orelse return;
-        defer _ = DestroyMenu(menu);
+        const menu = sys.CreatePopupMenu() orelse return;
+        defer _ = sys.DestroyMenu(menu);
 
         // Profile list — each profile gets a numbered shortcut hint
         const selected_idx = self.selectedProfileIndex();
@@ -12746,24 +11485,24 @@ const Host = struct {
                 const label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, label_utf8) catch continue;
                 defer alloc.free(label_w);
                 const is_selected = selected_idx != null and selected_idx.? == i;
-                const flags: UINT = if (is_selected) MF_STRING | MF_CHECKED else MF_STRING;
-                _ = AppendMenuW(menu, flags, CTX_PROFILE_BASE + i, label_w.ptr);
+                const flags: UINT = if (is_selected) c.MF_STRING | c.MF_CHECKED else c.MF_STRING;
+                _ = sys.AppendMenuW(menu, flags, c.CTX_PROFILE_BASE + i, label_w.ptr);
             }
-            if (profiles.len > 0) _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
+            if (profiles.len > 0) _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
         }
 
         // Utility items
-        _ = AppendMenuW(menu, MF_STRING, CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("Open a new tab"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-        _ = AppendMenuW(menu, MF_STRING, CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
-        _ = AppendMenuW(menu, MF_STRING, CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
-        _ = AppendMenuW(menu, MF_SEPARATOR, 0, null);
-        _ = AppendMenuW(menu, MF_STRING, CTX_INSPECTOR, std.unicode.utf8ToUtf16LeStringLiteral("Toggle Inspector"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_TAB, std.unicode.utf8ToUtf16LeStringLiteral("Open a new tab"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_NEW_WINDOW, std.unicode.utf8ToUtf16LeStringLiteral("New Window"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_COMMAND_PALETTE, std.unicode.utf8ToUtf16LeStringLiteral("Command Palette\tCtrl+Shift+P"));
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_FIND, std.unicode.utf8ToUtf16LeStringLiteral("Find...\tCtrl+Shift+F"));
+        _ = sys.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
+        _ = sys.AppendMenuW(menu, c.MF_STRING, c.CTX_INSPECTOR, std.unicode.utf8ToUtf16LeStringLiteral("Toggle Inspector"));
 
-        _ = SetForegroundWindow(hwnd);
-        const cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
-        _ = PostMessageW(hwnd, WM_NULL, 0, 0);
+        _ = sys.SetForegroundWindow(hwnd);
+        const cmd = sys.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_RIGHTBUTTON | c.TPM_LEFTALIGN | c.TPM_TOPALIGN, rect.left, rect.bottom, 0, hwnd, null);
+        _ = sys.PostMessageW(hwnd, c.WM_NULL, 0, 0);
 
         // Guard: host may have been destroyed during the modal menu loop
         if (self.hwnd == null) return;
@@ -12775,8 +11514,8 @@ const Host = struct {
         const cmd_id = @as(usize, @intCast(cmd));
 
         // Profile item dispatch — open the selected profile in a new tab
-        if (cmd_id >= CTX_PROFILE_BASE and cmd_id < CTX_PROFILE_BASE + 100) {
-            const profile_index = cmd_id - CTX_PROFILE_BASE;
+        if (cmd_id >= c.CTX_PROFILE_BASE and cmd_id < c.CTX_PROFILE_BASE + 100) {
+            const profile_index = cmd_id - c.CTX_PROFILE_BASE;
             // Validate index against current profiles (may have changed during modal menu)
             if (self.profiles) |profiles| {
                 if (profile_index < profiles.len) {
@@ -12790,19 +11529,19 @@ const Host = struct {
         if (!surface.core_initialized) return;
 
         switch (cmd_id) {
-            CTX_COMMAND_PALETTE => {
+            c.CTX_COMMAND_PALETTE => {
                 runUiActionOrLog("overflow command palette failed", surface.toggleCommandPalette());
             },
-            CTX_FIND => {
+            c.CTX_FIND => {
                 runUiActionOrLog("overflow find failed", surface.showSearchOverlay(""));
             },
-            CTX_NEW_TAB => {
+            c.CTX_NEW_TAB => {
                 self.postDeferredNewTab();
             },
-            CTX_NEW_WINDOW => {
+            c.CTX_NEW_WINDOW => {
                 runUiActionOrLog("overflow new window failed", self.app.performAction(.{ .surface = surface.core() }, .new_window, .{}));
             },
-            CTX_INSPECTOR => {
+            c.CTX_INSPECTOR => {
                 runUiActionOrLog("overflow inspector toggle failed", self.app.toggleInspectorForSurface(surface));
             },
             else => {},
@@ -12827,17 +11566,17 @@ const Host = struct {
             self.overlay_mode,
             current_slot,
             reverse,
-            self.overlay_edit_hwnd != null and IsWindowVisible(self.overlay_edit_hwnd.?) != 0,
-            self.overlay_accept_hwnd != null and IsWindowVisible(self.overlay_accept_hwnd.?) != 0,
-            self.overlay_cancel_hwnd != null and IsWindowVisible(self.overlay_cancel_hwnd.?) != 0,
+            self.overlay_edit_hwnd != null and sys.IsWindowVisible(self.overlay_edit_hwnd.?) != 0,
+            self.overlay_accept_hwnd != null and sys.IsWindowVisible(self.overlay_accept_hwnd.?) != 0,
+            self.overlay_cancel_hwnd != null and sys.IsWindowVisible(self.overlay_cancel_hwnd.?) != 0,
         ) orelse return false;
         const target = switch (target_slot) {
             .edit => self.overlay_edit_hwnd,
             .accept => self.overlay_accept_hwnd,
             .cancel => self.overlay_cancel_hwnd,
         } orelse return false;
-        _ = SetFocus(target);
-        return GetFocus() == target;
+        _ = sys.SetFocus(target);
+        return sys.GetFocus() == target;
     }
 
     fn searchControlSurface(self: *const Host, child: HWND) ?*Surface {
@@ -12950,7 +11689,7 @@ const Host = struct {
     }
 
     fn drawSearchBarBackground(self: *Host, draw: *const DRAWITEMSTRUCT) bool {
-        if (draw.CtlType != ODT_STATIC) return false;
+        if (draw.CtlType != c.ODT_STATIC) return false;
         const surface = self.searchBarBackgroundSurface(draw.hwndItem) orelse return false;
 
         const theme = &self.app.resolved_theme;
@@ -13035,7 +11774,7 @@ const Host = struct {
         if (surface.search_bar_edit_placement.rect_known) {
             const edit_rect = rectOffset(surface.search_bar_edit_placement.rect, -origin_x, -origin_y);
             const edit_focused = if (surface.search_bar_edit_hwnd) |edit_hwnd|
-                GetFocus() == edit_hwnd
+                sys.GetFocus() == edit_hwnd
             else
                 false;
             const edit_frame_rect = RECT{
@@ -13095,12 +11834,12 @@ const Host = struct {
         }
 
         const content_rect = rectInset(bg_rect, self.scaled(7), self.scaled(5));
-        _ = SetBkMode(draw.hDC, TRANSPARENT);
-        _ = SetTextColor(draw.hDC, colors.fg);
+        _ = sys.SetBkMode(draw.hDC, c.TRANSPARENT);
+        _ = sys.SetTextColor(draw.hDC, colors.fg);
 
         if (show_label) {
             var text_buf: [160]u16 = undefined;
-            const text_len = GetWindowTextW(draw.hwndItem, &text_buf, text_buf.len);
+            const text_len = sys.GetWindowTextW(draw.hwndItem, &text_buf, text_buf.len);
             const icon_box_w = @min(content_rect.bottom - content_rect.top, self.scaled(18));
             const icon_rect = RECT{
                 .left = content_rect.left,
@@ -13117,12 +11856,12 @@ const Host = struct {
 
             var label_rect = content_rect;
             label_rect.left = icon_rect.right + self.scaled(5);
-            _ = DrawTextW(
+            _ = sys.DrawTextW(
                 draw.hDC,
                 @ptrCast(&text_buf),
                 text_len,
                 &label_rect,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
             );
             return;
         }
@@ -13173,7 +11912,7 @@ const Host = struct {
             theme,
             role,
             parent_bg,
-            self.titlebarHoverAlpha(role, hovered, GetTickCount64()),
+            self.titlebarHoverAlpha(role, hovered, sys.GetTickCount64()),
             pressed,
             is_hc,
         );
@@ -13203,13 +11942,13 @@ const Host = struct {
     }
 
     fn drawButton(self: *Host, draw: *const DRAWITEMSTRUCT) void {
-        if (draw.CtlType != ODT_BUTTON) return;
+        if (draw.CtlType != c.ODT_BUTTON) return;
         self.ensureThemeBrushes() catch return;
-        if (self.chrome_font) |font| _ = SelectObject(draw.hDC, font);
+        if (self.chrome_font) |font| _ = sys.SelectObject(draw.hDC, font);
 
-        const disabled = (draw.itemState & ODS_DISABLED) != 0;
-        const pressed = (draw.itemState & ODS_SELECTED) != 0;
-        const focused = (draw.itemState & ODS_FOCUS) != 0 or GetFocus() == draw.hwndItem;
+        const disabled = (draw.itemState & c.ODS_DISABLED) != 0;
+        const pressed = (draw.itemState & c.ODS_SELECTED) != 0;
+        const focused = (draw.itemState & c.ODS_FOCUS) != 0 or sys.GetFocus() == draw.hwndItem;
         const active = self.isActiveChromeButton(draw.hwndItem);
         const overlay = self.isOverlayStyledButton(draw.hwndItem);
         const hovered = self.isHoveredButton(draw.hwndItem);
@@ -13364,9 +12103,9 @@ const Host = struct {
         const close_zone_width = if (can_close_tab) self.scaled(host_tab_close_zone_width) else 0;
 
         var text_buf: [160]u16 = undefined;
-        const text_len = GetWindowTextW(draw.hwndItem, &text_buf, text_buf.len);
-        _ = SetBkMode(draw.hDC, TRANSPARENT);
-        _ = SetTextColor(draw.hDC, fg);
+        const text_len = sys.GetWindowTextW(draw.hwndItem, &text_buf, text_buf.len);
+        _ = sys.SetBkMode(draw.hDC, c.TRANSPARENT);
+        _ = sys.SetTextColor(draw.hDC, fg);
         var text_rect = draw.rcItem;
         if (!overlay) {
             text_rect.left += self.scaled(6);
@@ -13391,12 +12130,12 @@ const Host = struct {
                 isHighContrastActive(),
             );
         } else {
-            _ = DrawTextW(
+            _ = sys.DrawTextW(
                 draw.hDC,
                 @ptrCast(&text_buf),
                 text_len,
                 &text_rect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
             );
         }
 
@@ -13407,7 +12146,7 @@ const Host = struct {
         // hover treatment. On non-hovered + non-active tabs the alpha
         // drops to 0 so the X vanishes entirely.
         if (can_close_tab) {
-            const now = GetTickCount64();
+            const now = sys.GetTickCount64();
             // Two animation slots: the incoming hover target
             // (`tab_close_hover_*` fades 0 → 1) and the departing tab
             // on adjacent transitions (`tab_close_prev_*` fades
@@ -13434,19 +12173,19 @@ const Host = struct {
                 // GDI's DrawTextW has no alpha channel, so we
                 // pre-composite.
                 const blended = blendColorRGB(bg, close_fg_full, alpha);
-                _ = SetTextColor(draw.hDC, blended);
+                _ = sys.SetTextColor(draw.hDC, blended);
                 var close_rect = RECT{
                     .left = draw.rcItem.right - close_zone_width,
                     .top = draw.rcItem.top,
                     .right = draw.rcItem.right - self.scaled(2),
                     .bottom = draw.rcItem.bottom,
                 };
-                _ = DrawTextW(
+                _ = sys.DrawTextW(
                     draw.hDC,
                     close_glyph,
                     1,
                     &close_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
                 );
             }
         }
@@ -13530,7 +12269,7 @@ const Host = struct {
         // `candidate` borrows from the current rich catalog. Preserve the
         // completion state before `syncCommandPaletteBanner` rebuilds it.
         _ = try self.setOverlayEditText(candidate.text);
-        _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
+        _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         if (!ownedStringEquals(self.overlay_completion_seed, seed_owned)) {
             try appendOwnedString(alloc, &self.overlay_completion_seed, seed_owned);
         }
@@ -13598,7 +12337,7 @@ const Host = struct {
         const next_text = try std.fmt.allocPrint(self.app.core_app.alloc, "{d}", .{next});
         defer self.app.core_app.alloc.free(next_text);
         _ = try self.setOverlayEditText(next_text);
-        _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
+        _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         _ = try self.syncOverlayLabel();
         _ = try self.syncOverlayHint();
         _ = try self.syncOverlayButtons();
@@ -13682,7 +12421,7 @@ const Host = struct {
                     std.log.warn("palette MRU push failed err={}", .{err});
                 };
                 self.hideOverlay();
-                self.layout() catch {};
+                runUiActionOrLog("palette action layout failed", self.layout());
                 if (action == .new_tab) {
                     self.postDeferredNewTab();
                     return true;
@@ -13808,20 +12547,9 @@ const Host = struct {
         return win32_chrome_state.scaled(base, dpi);
     }
 
-    fn hasVisibleStatus(self: *const Host) bool {
-        // Status bar shows: profile chips, status text, banner info
-        if (self.cached_status_w != null) return true;
-        if (self.cached_detail_w != null) return true;
-        if (self.banner_text != null) return true;
-        if (self.profiles != null) return true;
-        if (self.overlay_mode != .none) return true;
-        return false;
-    }
-
-    fn statusBarHeight(self: *Host) i32 {
+    fn statusBarHeight() i32 {
         // Status bar is disabled; banners and overlays carry transient
         // status feedback without reserving terminal rows.
-        _ = self;
         return 0;
     }
 
@@ -13863,8 +12591,8 @@ const Host = struct {
     fn contentRect(self: *Host) !RECT {
         const hwnd = self.hwnd orelse return error.InvalidHost;
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &rect) == 0) {
+            return lastError();
         }
         const tab_offset: i32 = self.tabBarHeight();
         const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
@@ -13873,7 +12601,7 @@ const Host = struct {
             .left = 0,
             .top = tab_offset + overlay_offset + inspector_offset,
             .right = rect.right,
-            .bottom = @max(tab_offset + 1, rect.bottom - self.statusBarHeight()),
+            .bottom = @max(tab_offset + 1, rect.bottom - statusBarHeight()),
         };
     }
 
@@ -13897,7 +12625,7 @@ const Host = struct {
 
         if (surfaces.items.len == 0) {
             self.clearStructuralHistory(.normal);
-            if (fallback_hwnd) |hwnd| _ = DestroyWindow(hwnd);
+            if (fallback_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
             self.app.removeHost(self);
             return;
         }
@@ -14054,7 +12782,7 @@ const Host = struct {
             _ = try self.syncOverlayButtons();
         }
         if (invalidate) {
-            if (chromeTextNeedsFullInvalidation(self.statusBarHeight())) {
+            if (chromeTextNeedsFullInvalidation(statusBarHeight())) {
                 self.invalidateChromeText();
             } else {
                 self.invalidateTopChromeText();
@@ -14079,7 +12807,7 @@ const Host = struct {
     fn invalidateChromeMask(self: *Host, hwnd: HWND, mask: ChromeRepaintMask) void {
         if (mask.isEmpty()) return;
         var client_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) return;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
         const content_rect = self.contentRect() catch return;
 
         if (mask.top) {
@@ -14090,20 +12818,20 @@ const Host = struct {
                 .bottom = @max(client_rect.top, content_rect.top),
             };
             if (top_rect.bottom > top_rect.top) {
-                _ = InvalidateRect(hwnd, &top_rect, 0);
+                _ = sys.InvalidateRect(hwnd, &top_rect, 0);
             }
         }
 
         if (mask.content) {
             if (content_rect.bottom > content_rect.top) {
-                _ = InvalidateRect(hwnd, &content_rect, 0);
+                _ = sys.InvalidateRect(hwnd, &content_rect, 0);
             }
         } else if (mask.search_frames) {
             if (self.activeTab()) |tab| {
                 var it = tab.tree.iterator();
                 while (it.next()) |entry| {
                     if (!entry.view.search_bar_frame_visible) continue;
-                    _ = InvalidateRect(hwnd, &entry.view.search_bar_frame_rect, 0);
+                    _ = sys.InvalidateRect(hwnd, &entry.view.search_bar_frame_rect, 0);
                 }
             }
         }
@@ -14116,7 +12844,7 @@ const Host = struct {
                 .bottom = client_rect.bottom,
             };
             if (bottom_rect.bottom > bottom_rect.top) {
-                _ = InvalidateRect(hwnd, &bottom_rect, 0);
+                _ = sys.InvalidateRect(hwnd, &bottom_rect, 0);
             }
         }
     }
@@ -14139,13 +12867,13 @@ const Host = struct {
     }
 
     fn repaintStatusBar(self: *Host) void {
-        const status_h = self.statusBarHeight();
+        const status_h = statusBarHeight();
         if (status_h <= 0) return;
         self.queueChromeRepaint(.{ .status = true });
     }
 
     fn invalidateStatusBarText(self: *Host) void {
-        if (self.statusBarHeight() <= 0) return;
+        if (statusBarHeight() <= 0) return;
         self.chrome_text_dirty.status = true;
         self.repaintStatusBar();
     }
@@ -14214,11 +12942,11 @@ const Host = struct {
             self.palette_list_hwnd,
         };
         for (controls) |maybe_hwnd| {
-            if (maybe_hwnd) |h| _ = InvalidateRect(h, null, 0);
+            if (maybe_hwnd) |h| _ = sys.InvalidateRect(h, null, 0);
         }
         for (self.tabs.items) |*t| {
             if (t.button_hwnd) |h| {
-                _ = InvalidateRect(h, null, 0);
+                _ = sys.InvalidateRect(h, null, 0);
             }
         }
     }
@@ -14236,12 +12964,12 @@ const Host = struct {
         };
         for (controls) |maybe_hwnd| {
             if (maybe_hwnd) |h| {
-                if (IsWindowVisible(h) != 0) _ = UpdateWindow(h);
+                if (sys.IsWindowVisible(h) != 0) _ = sys.UpdateWindow(h);
             }
         }
         for (self.tabs.items) |*t| {
             if (t.button_hwnd) |h| {
-                if (IsWindowVisible(h) != 0) _ = UpdateWindow(h);
+                if (sys.IsWindowVisible(h) != 0) _ = sys.UpdateWindow(h);
             }
         }
     }
@@ -14249,8 +12977,8 @@ const Host = struct {
     fn redrawHostWindowNow(self: *Host) void {
         const hwnd = self.hwnd orelse return;
         const flags = hostCompositionRedrawFlags();
-        if (RedrawWindow(hwnd, null, null, flags) == 0) {
-            _ = UpdateWindow(hwnd);
+        if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
+            _ = sys.UpdateWindow(hwnd);
         }
     }
 
@@ -14352,7 +13080,7 @@ const Host = struct {
         const surface = self.activeSurface() orelse {
             if (!windowTitleSyncChanged(self.cached_window_title, "noctty")) return false;
             try appendOwnedString(alloc, &self.cached_window_title, "noctty");
-            _ = SetWindowTextW(hwnd, default_title);
+            _ = sys.SetWindowTextW(hwnd, default_title);
             return true;
         };
         const host_base_title = try buildHostAwareBaseTitle(
@@ -14365,7 +13093,7 @@ const Host = struct {
         try appendOwnedString(alloc, &self.cached_window_title, host_base_title);
         const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, host_base_title);
         defer alloc.free(title_w);
-        _ = SetWindowTextW(hwnd, title_w.ptr);
+        _ = sys.SetWindowTextW(hwnd, title_w.ptr);
         return true;
     }
 
@@ -14373,8 +13101,8 @@ const Host = struct {
         const hwnd = self.hwnd orelse return false;
         try self.ensureChromeButtons();
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &rect) == 0) {
+            return lastError();
         }
         const width = @max(0, rect.right - rect.left);
         const right_buttons_width = self.rightButtonsWidth();
@@ -14417,11 +13145,11 @@ const Host = struct {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
-                tab.button_hwnd = CreateWindowExW(
+                tab.button_hwnd = sys.CreateWindowExW(
                     0,
                     prompt_button_class,
                     label_w.ptr,
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                    c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_OWNERDRAW,
                     0,
                     0,
                     100,
@@ -14430,13 +13158,13 @@ const Host = struct {
                     @ptrFromInt(1000 + i),
                     self.app.hinstance,
                     null,
-                ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+                ) orelse return lastError();
                 self.subclassButton(tab.button_hwnd.?, &tabButtonProc, &tab.button_prev_proc);
             } else if (!ownedStringEquals(tab.cached_button_label, label)) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
                 const label_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, label);
                 defer self.app.core_app.alloc.free(label_w);
-                _ = SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
+                _ = sys.SetWindowTextW(tab.button_hwnd.?, label_w.ptr);
             }
             try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_title, title);
             tab.cached_button_index = i;
@@ -14701,8 +13429,8 @@ const Host = struct {
     fn layout(self: *Host) !void {
         const hwnd = self.hwnd orelse return;
         var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &rect) == 0) {
+            return lastError();
         }
         var chrome_layout_changed = false;
         if (!self.layoutChromeForRect(rect, &chrome_layout_changed)) return;
@@ -14870,16 +13598,16 @@ const Host = struct {
         var glyph_rect = centeredRect(rect, glyph_size, glyph_size);
 
         if (font) |font_handle| {
-            if (SelectObject(hdc, font_handle)) |old_font| {
-                defer _ = SelectObject(hdc, old_font);
-                _ = SetBkMode(hdc, TRANSPARENT);
-                _ = SetTextColor(hdc, color);
-                if (DrawTextW(
+            if (sys.SelectObject(hdc, font_handle)) |old_font| {
+                defer _ = sys.SelectObject(hdc, old_font);
+                _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+                _ = sys.SetTextColor(hdc, color);
+                if (sys.DrawTextW(
                     hdc,
                     titlebarGlyphText(kind),
                     1,
                     &glyph_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
                 ) != 0) {
                     return;
                 }
@@ -14938,7 +13666,7 @@ const Host = struct {
         const cb_h = self.scaled(host_caption_button_h);
         if (cb_w <= 0 or cb_h <= 0) return;
 
-        const maximized = if (self.hwnd) |h| IsZoomed(h) != 0 else false;
+        const maximized = if (self.hwnd) |h| sys.IsZoomed(h) != 0 else false;
         const right = client_rect.right;
 
         const close_rect: RECT = .{
@@ -14961,7 +13689,7 @@ const Host = struct {
         };
 
         const is_hc = isHighContrastActive();
-        const now = GetTickCount64();
+        const now = sys.GetTickCount64();
         self.paintCaptionButton(hdc, min_rect, .minimize, .minimize, now, is_hc, theme);
         self.paintCaptionButton(
             hdc,
@@ -14975,52 +13703,14 @@ const Host = struct {
         self.paintCaptionButton(hdc, close_rect, .close, .close, now, is_hc, theme);
     }
 
-    fn paintChrome(self: *Host) void {
-        const hwnd = self.hwnd orelse return;
-        var ps: PAINTSTRUCT = undefined;
-        const hdc = BeginPaint(hwnd, &ps) orelse return;
-        defer _ = EndPaint(hwnd, &ps);
-
-        const alloc = self.app.core_app.alloc;
-        const theme = &self.app.resolved_theme;
-
-        // Select chrome font, save previous for restore
-        const prev_font = if (self.chrome_font) |font| SelectObject(hdc, font) else null;
-        defer if (prev_font) |pf| {
-            _ = SelectObject(hdc, pf);
-        };
-
-        var client_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) return;
-        const tab_h = self.tabBarHeight();
-        // Note: tab_h is already scaled via tabBarHeight()
-        const overlay_offset: i32 = if (self.overlay_mode != .none) self.scaled(host_overlay_height) else 0;
-        const inspector_panel_visible = self.inspectorPanelVisible();
-        const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
-        const status_h = self.statusBarHeight();
-        const content_rect = RECT{
-            .left = 0,
-            .top = tab_h + overlay_offset + inspector_offset,
-            .right = client_rect.right,
-            .bottom = @max(tab_h + 1, client_rect.bottom - status_h),
-        };
-        const top_rect = RECT{
-            .left = client_rect.left,
-            .top = client_rect.top,
-            .right = client_rect.right,
-            .bottom = @max(client_rect.top, content_rect.top),
-        };
-        const status_rect = RECT{
-            .left = client_rect.left,
-            .top = @min(client_rect.bottom, content_rect.bottom),
-            .right = client_rect.right,
-            .bottom = client_rect.bottom,
-        };
-        const paint_top = paintRectVisible(hdc, ps.rcPaint, top_rect);
-        const paint_content = paintRectVisible(hdc, ps.rcPaint, content_rect);
-        const paint_status = paintRectVisible(hdc, ps.rcPaint, status_rect);
-        const banner_y: i32 = tab_h + overlay_offset + inspector_offset + self.scaled(2);
-
+    fn paintChromeTabBar(
+        self: *Host,
+        hdc: HDC,
+        client_rect: RECT,
+        tab_h: i32,
+        paint_top: bool,
+        theme: *const ThemeColors,
+    ) void {
         // Tab bar (only when visible)
         if (paint_top and tab_h > 0) {
             const tab_rect = RECT{
@@ -15041,7 +13731,7 @@ const Host = struct {
             // match Windows Terminal's tab indicator treatment
             // (wt-chrome-reference.md §1).
             {
-                const now_ms = GetTickCount64();
+                const now_ms = sys.GetTickCount64();
                 const cur = self.tab_underline.currentRect(now_ms);
                 const underline_left = @as(i32, @intFromFloat(@round(cur.left))) + self.scaled(3);
                 const underline_right = @as(i32, @intFromFloat(@round(cur.left + cur.width))) - self.scaled(3);
@@ -15063,10 +13753,7 @@ const Host = struct {
                     .right = client_rect.right,
                     .bottom = @max(1, self.scaled(2)),
                 },
-                if (theme.is_dark)
-                    adjustColor(theme.accent, -12, -12, -12)
-                else
-                    adjustColor(theme.accent, 18, 18, 18),
+                themeSurface(theme, .tab_accent),
             );
             if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
@@ -15080,14 +13767,8 @@ const Host = struct {
                     drawRoundedRect(
                         hdc,
                         cluster_rect,
-                        if (theme.is_dark)
-                            adjustColor(theme.chrome_bg, 8, 8, 10)
-                        else
-                            adjustColor(theme.chrome_bg, 6, 6, 6),
-                        if (theme.is_dark)
-                            adjustColor(theme.chrome_border, 10, 10, 12)
-                        else
-                            adjustColor(theme.chrome_border, -16, -16, -16),
+                        themeSurface(theme, .caption_cluster_bg),
+                        themeSurface(theme, .caption_cluster_border),
                         self.scaled(6),
                     );
                     if (cluster_left > self.scaled(14)) {
@@ -15120,7 +13801,17 @@ const Host = struct {
                 theme.chrome_border,
             );
         } // end tab bar painting
+    }
 
+    fn paintChromeOverlay(
+        self: *Host,
+        hdc: HDC,
+        alloc: Allocator,
+        client_rect: RECT,
+        tab_h: i32,
+        paint_top: bool,
+        theme: *const ThemeColors,
+    ) bool {
         if (paint_top and self.overlay_mode != .none) {
             const overlay_rect = RECT{
                 .left = 0,
@@ -15139,14 +13830,8 @@ const Host = struct {
                 drawRoundedRect(
                     hdc,
                     overlay_panel,
-                    if (theme.is_dark)
-                        adjustColor(theme.overlay_bg, 4, 4, 6)
-                    else
-                        adjustColor(theme.overlay_bg, -4, -4, -4),
-                    if (theme.is_dark)
-                        adjustColor(theme.overlay_border, 10, 10, 12)
-                    else
-                        adjustColor(theme.overlay_border, -18, -18, -18),
+                    themeSurface(theme, .overlay_panel_bg),
+                    themeSurface(theme, .overlay_panel_border),
                     self.scaled(7),
                 );
                 fillSolidRect(hdc, .{
@@ -15185,7 +13870,7 @@ const Host = struct {
                         self.profiles orelse &.{},
                         overlay_text,
                         self.selectedProfileIndex() orelse 0,
-                    ) catch return
+                    ) catch return false
                 else
                     buildOverlayPaintLabelText(
                         alloc,
@@ -15195,17 +13880,17 @@ const Host = struct {
                         if (surface) |value| value.search_selected else null,
                         overlay_status,
                         self.palettePresentation(),
-                    ) catch return;
+                    ) catch return false;
                 defer alloc.free(overlay_label);
                 if (self.cached_overlay_paint_label_w) |old| alloc.free(old);
-                self.cached_overlay_paint_label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_label) catch return;
+                self.cached_overlay_paint_label_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_label) catch return false;
 
                 const overlay_feedback = if (self.overlay_mode == .profile)
                     if (self.banner_text) |value|
                         switch (self.banner_kind) {
-                            .err => std.fmt.allocPrint(alloc, "Error: {s}", .{value}) catch return,
-                            .info => std.fmt.allocPrint(alloc, "Info: {s}", .{value}) catch return,
-                            .none => alloc.dupe(u8, value) catch return,
+                            .err => std.fmt.allocPrint(alloc, "Error: {s}", .{value}) catch return false,
+                            .info => std.fmt.allocPrint(alloc, "Info: {s}", .{value}) catch return false,
+                            .none => alloc.dupe(u8, value) catch return false,
                         }
                     else
                         buildProfileHintText(
@@ -15215,7 +13900,7 @@ const Host = struct {
                             self.selectedProfileIndex() orelse 0,
                             self.app.launcher_profile_target,
                             self.app.launcher_quick_slot_keys,
-                        ) catch return
+                        ) catch return false
                 else feedback: {
                     var mru_buf: [5][]const u8 = undefined;
                     const mru = self.app.paletteMruSlice(&mru_buf);
@@ -15233,18 +13918,18 @@ const Host = struct {
                         self.paletteSnapshot(),
                         mru,
                         self.palettePresentation(),
-                    ) catch return;
+                    ) catch return false;
                 };
                 defer alloc.free(overlay_feedback);
                 if (self.cached_overlay_paint_feedback_w) |old| alloc.free(old);
-                self.cached_overlay_paint_feedback_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_feedback) catch return;
+                self.cached_overlay_paint_feedback_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, overlay_feedback) catch return false;
 
                 if (self.overlay_mode == .profile) {
                     if (self.selectedProfile()) |profile| {
-                        const badge = buildProfileChromeBadgeText(alloc, profile.kind) catch return;
+                        const badge = buildProfileChromeBadgeText(alloc, profile.kind) catch return false;
                         defer alloc.free(badge);
                         if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
-                        self.cached_overlay_paint_badge_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, badge) catch return;
+                        self.cached_overlay_paint_badge_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, badge) catch return false;
                     } else {
                         if (self.cached_overlay_paint_badge_w) |old| alloc.free(old);
                         self.cached_overlay_paint_badge_w = null;
@@ -15255,7 +13940,7 @@ const Host = struct {
                 }
                 self.chrome_text_dirty.overlay = false;
             }
-            _ = SetBkMode(hdc, TRANSPARENT);
+            _ = sys.SetBkMode(hdc, c.TRANSPARENT);
             const overlay_padding = self.scaled(host_overlay_padding);
             const overlay_accept_button_w = self.scaled(host_overlay_accept_width);
             const overlay_cancel_button_w = self.scaled(host_overlay_cancel_width);
@@ -15279,7 +13964,7 @@ const Host = struct {
             var overlay_label_color: u32 = theme.overlay_label_fg;
             if (overlay_label_reservation > 0 and self.overlay_mode == .profile) {
                 if (self.selectedProfile()) |profile| {
-                    const badge_w = self.cached_overlay_paint_badge_w orelse return;
+                    const badge_w = self.cached_overlay_paint_badge_w orelse return false;
                     const badge_width = self.scaled(16) + @as(i32, @intCast(badge_w.len * @as(usize, @intCast(self.scaled(7)))));
                     const badge_rect = RECT{
                         .left = self.scaled(host_overlay_padding) + self.scaled(10),
@@ -15289,7 +13974,7 @@ const Host = struct {
                     };
                     const accent = profileChromeAccent(profile.kind, theme.is_dark);
                     drawRoundedRect(hdc, badge_rect, accent.idle_bg, accent.idle_border, self.scaled(3));
-                    _ = SetTextColor(hdc, profileKindLabelColor(profile.kind, theme.is_dark));
+                    _ = sys.SetTextColor(hdc, profileKindLabelColor(profile.kind, theme.is_dark));
                     var badge_text_rect = badge_rect;
                     badge_text_rect.left += self.scaled(6);
                     badge_text_rect.right -= self.scaled(6);
@@ -15297,13 +13982,13 @@ const Host = struct {
                         hdc,
                         badge_w,
                         &badge_text_rect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
                     );
                     overlay_label_x = badge_rect.right + self.scaled(10);
                     overlay_label_color = profileKindLabelColor(profile.kind, theme.is_dark);
                 }
             }
-            _ = SetTextColor(hdc, overlay_label_color);
+            _ = sys.SetTextColor(hdc, overlay_label_color);
             if (overlay_label_reservation > 0) if (self.cached_overlay_paint_label_w) |overlay_label_w| {
                 textOutWz(hdc, overlay_label_x, overlay_rect.top + self.scaled(7), overlay_label_w);
             };
@@ -15320,13 +14005,13 @@ const Host = struct {
                     self.current_dpi,
                 );
                 const overlay_edit_focused = if (self.overlay_edit_hwnd) |edit_hwnd|
-                    GetFocus() == edit_hwnd
+                    sys.GetFocus() == edit_hwnd
                 else
                     false;
                 drawRoundedRect(hdc, edit_frame, theme.edit_frame_bg, overlayEditBorderColor(self.overlay_mode, overlay_edit_focused, theme.is_dark), self.scaled(4));
             }
 
-            _ = SetTextColor(hdc, if (self.overlay_mode == .profile and self.banner_text == null)
+            _ = sys.SetTextColor(hdc, if (self.overlay_mode == .profile and self.banner_text == null)
                 if (self.selectedProfile()) |profile|
                     profileKindHintColor(profile.kind, theme.is_dark)
                 else
@@ -15350,11 +14035,21 @@ const Host = struct {
                     hdc,
                     overlay_feedback_w,
                     &feedback_rect,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                    c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
                 );
             }
         }
 
+        return true;
+    }
+
+    fn paintChromeContentLane(
+        self: *Host,
+        hdc: HDC,
+        content_rect: RECT,
+        paint_content: bool,
+        theme: *const ThemeColors,
+    ) void {
         if (paint_content) {
             // Content-lane paints can arrive after search-frame or pane
             // geometry shrinks/moves. Clear the exposed parent-painted
@@ -15375,14 +14070,8 @@ const Host = struct {
                     drawRoundedRect(
                         hdc,
                         frame_rect,
-                        if (theme.is_dark)
-                            adjustColor(theme.overlay_bg, 3, 3, 5)
-                        else
-                            adjustColor(theme.overlay_bg, -2, -2, -1),
-                        if (theme.is_dark)
-                            adjustColor(theme.overlay_border, 10, 10, 12)
-                        else
-                            adjustColor(theme.overlay_border, -14, -14, -14),
+                        themeSurface(theme, .search_frame_bg),
+                        themeSurface(theme, .search_frame_border),
                         self.scaled(8),
                     );
                     fillSolidRect(hdc, .{
@@ -15390,10 +14079,7 @@ const Host = struct {
                         .top = frame_rect.bottom,
                         .right = frame_rect.right - self.scaled(8),
                         .bottom = frame_rect.bottom + 1,
-                    }, if (theme.is_dark)
-                        adjustColor(theme.overlay_border, -10, -10, -8)
-                    else
-                        adjustColor(theme.overlay_border, 10, 10, 10));
+                    }, themeSurface(theme, .search_frame_underline));
 
                     if (searchBarGroupRect(&[_]ChildPlacement{
                         entry.view.search_bar_results_placement,
@@ -15453,7 +14139,7 @@ const Host = struct {
                     if (entry.view.search_bar_edit_placement.rect_known) {
                         const edit_rect = entry.view.search_bar_edit_placement.rect;
                         const edit_focused = if (entry.view.search_bar_edit_hwnd) |edit_hwnd|
-                            GetFocus() == edit_hwnd
+                            sys.GetFocus() == edit_hwnd
                         else
                             false;
                         const edit_frame_rect = RECT{
@@ -15481,7 +14167,19 @@ const Host = struct {
                 }
             }
         }
+    }
 
+    fn paintChromeInspectorPanel(
+        self: *Host,
+        hdc: HDC,
+        alloc: Allocator,
+        client_rect: RECT,
+        tab_h: i32,
+        overlay_offset: i32,
+        inspector_panel_visible: bool,
+        paint_top: bool,
+        theme: *const ThemeColors,
+    ) void {
         if (paint_top and inspector_panel_visible) {
             const panel_rect = RECT{
                 .left = 0,
@@ -15523,18 +14221,27 @@ const Host = struct {
                     self.chrome_text_dirty.inspector = false;
                 }
 
-                _ = SetBkMode(hdc, TRANSPARENT);
+                _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                 if (self.cached_inspector_title_w) |title_w| {
-                    _ = SetTextColor(hdc, theme.overlay_label_fg);
+                    _ = sys.SetTextColor(hdc, theme.overlay_label_fg);
                     textOutWz(hdc, self.scaled(16), panel_rect.top + self.scaled(6), title_w);
                 }
                 if (self.cached_inspector_hint_w) |hint_w| {
-                    _ = SetTextColor(hdc, theme.text_secondary);
+                    _ = sys.SetTextColor(hdc, theme.text_secondary);
                     textOutWz(hdc, self.scaled(16), panel_rect.top + self.scaled(22), hint_w);
                 }
             }
         }
+    }
 
+    fn paintChromePaneDividers(
+        self: *Host,
+        hwnd: HWND,
+        hdc: HDC,
+        content_rect: RECT,
+        paint_content: bool,
+        theme: *const ThemeColors,
+    ) void {
         // Paint pane divider gaps between split panes
         if (paint_content) {
             if (self.activeTab()) |active_tab| {
@@ -15549,11 +14256,11 @@ const Host = struct {
                     if (focused_surface) |surface| {
                         if (surface.hwnd) |surface_hwnd| {
                             var sr: RECT = undefined;
-                            if (GetWindowRect(surface_hwnd, &sr) != 0) {
+                            if (sys.GetWindowRect(surface_hwnd, &sr) != 0) {
                                 var tl = POINT{ .x = sr.left, .y = sr.top };
                                 var br = POINT{ .x = sr.right, .y = sr.bottom };
-                                _ = ScreenToClient(hwnd, &tl);
-                                _ = ScreenToClient(hwnd, &br);
+                                _ = sys.ScreenToClient(hwnd, &tl);
+                                _ = sys.ScreenToClient(hwnd, &br);
                                 // Only draw focus border if pane is within content area
                                 if (tl.x >= c_rect.left and br.x <= c_rect.right and
                                     tl.y >= c_rect.top and br.y <= c_rect.bottom)
@@ -15576,7 +14283,17 @@ const Host = struct {
                 }
             }
         }
+    }
 
+    fn paintChromeStatusBackground(
+        hdc: HDC,
+        client_rect: RECT,
+        tab_h: i32,
+        overlay_offset: i32,
+        status_h: i32,
+        paint_status: bool,
+        theme: *const ThemeColors,
+    ) void {
         const status_top = @max(tab_h + overlay_offset, client_rect.bottom - @max(1, status_h));
         if (paint_status and status_h > 0) {
             const status_bg_rect = RECT{
@@ -15597,9 +14314,21 @@ const Host = struct {
                 theme.chrome_border,
             );
         }
-        _ = SetBkMode(hdc, TRANSPARENT);
-        _ = SetTextColor(hdc, theme.text_primary);
+        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+        _ = sys.SetTextColor(hdc, theme.text_primary);
+    }
 
+    fn paintChromeBanner(
+        self: *Host,
+        hwnd: HWND,
+        hdc: HDC,
+        alloc: Allocator,
+        client_rect: RECT,
+        banner_y: i32,
+        inspector_panel_visible: bool,
+        paint_top: bool,
+        theme: *const ThemeColors,
+    ) bool {
         const explicit_banner_text: ?[]const u8 = if (self.overlay_mode == .none)
             self.banner_text
         else
@@ -15629,13 +14358,13 @@ const Host = struct {
             if (paint_update_notice) {
                 if (self.app.update_notice) |notice| {
                     if (notice.message_text) |message| {
-                        self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, message) catch return;
+                        self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, message) catch return false;
                     }
                 }
             } else if (explicit_banner_text) |value| {
-                const full = buildHostBannerText(alloc, banner_kind, value) catch return;
+                const full = buildHostBannerText(alloc, banner_kind, value) catch return false;
                 defer alloc.free(full);
-                self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, full) catch return;
+                self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, full) catch return false;
             } else if (paint_inspector_banner) {
                 if (self.activeSurface()) |surface| {
                     const host_status = self.app.hostTabStatus(surface);
@@ -15645,11 +14374,11 @@ const Host = struct {
                         host_status,
                         pane_count,
                         if (self.activeTab()) |tab| tab.tree.zoomed != null else false,
-                    ) catch return;
+                    ) catch return false;
                     defer alloc.free(value);
-                    const full = buildHostBannerText(alloc, banner_kind, value) catch return;
+                    const full = buildHostBannerText(alloc, banner_kind, value) catch return false;
                     defer alloc.free(full);
-                    self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, full) catch return;
+                    self.cached_banner_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, full) catch return false;
                 }
             }
             self.chrome_text_dirty.banner = false;
@@ -15709,60 +14438,54 @@ const Host = struct {
                     .bottom = banner_y + button_height,
                 };
 
-                _ = SetTextColor(hdc, theme.info_fg);
+                _ = sys.SetTextColor(hdc, theme.info_fg);
                 if (self.cached_banner_w) |banner_w| {
                     drawTextWz(
                         hdc,
                         banner_w,
                         &text_rect,
-                        DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                        c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
                     );
                 }
 
                 drawRoundedRect(
                     hdc,
                     open_rect,
-                    if (theme.is_dark)
-                        adjustColor(theme.overlay_bg, 10, 10, 12)
-                    else
-                        adjustColor(theme.overlay_bg, -4, -4, -4),
+                    themeSurface(theme, .update_open_bg),
                     theme.info_fg,
                     self.scaled(5),
                 );
                 drawRoundedRect(
                     hdc,
                     dismiss_rect,
-                    if (theme.is_dark)
-                        adjustColor(theme.status_bg, 10, 10, 12)
-                    else
-                        adjustColor(theme.status_bg, -4, -4, -4),
+                    themeSurface(theme, .update_dismiss_bg),
                     theme.chrome_border,
                     self.scaled(5),
                 );
 
-                _ = SetTextColor(hdc, theme.text_primary);
+                _ = sys.SetTextColor(hdc, theme.text_primary);
                 var open_text_rect = open_rect;
                 open_text_rect.left += self.scaled(6);
                 open_text_rect.right -= self.scaled(6);
                 var dismiss_text_rect = dismiss_rect;
                 dismiss_text_rect.left += self.scaled(6);
                 dismiss_text_rect.right -= self.scaled(6);
-                _ = DrawTextW(
+                _ = sys.DrawTextW(
                     hdc,
                     open_label,
                     @intCast(std.mem.sliceTo(open_label, 0).len),
                     &open_text_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
                 );
-                _ = DrawTextW(
+                _ = sys.DrawTextW(
                     hdc,
                     dismiss_label,
                     @intCast(std.mem.sliceTo(dismiss_label, 0).len),
                     &dismiss_text_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
                 );
             } else if (paint_inspector_banner) {
-                _ = SetTextColor(hdc, switch (banner_kind) {
+                _ = sys.SetTextColor(hdc, switch (banner_kind) {
                     .none => theme.text_primary,
                     .info => theme.info_fg,
                     .err => theme.error_fg,
@@ -15772,7 +14495,7 @@ const Host = struct {
                 }
             }
         } else if (explicit_banner_text != null and !dwrite_banner_painted) {
-            _ = SetTextColor(hdc, switch (banner_kind) {
+            _ = sys.SetTextColor(hdc, switch (banner_kind) {
                 .none => theme.text_primary,
                 .info => theme.info_fg,
                 .err => theme.error_fg,
@@ -15781,13 +14504,21 @@ const Host = struct {
                 textOutWz(hdc, self.scaled(16), banner_y, banner_w);
             }
         }
-        _ = SetTextColor(hdc, theme.text_primary);
-        if (status_h <= 0) {
-            self.chrome_repaint_dirty = false;
-            return;
-        }
+        _ = sys.SetTextColor(hdc, theme.text_primary);
+        return true;
+    }
 
-        const status_y = @max(self.scaled(host_tab_height) + self.scaled(2), ps.rcPaint.bottom - @max(1, status_h) + self.scaled(4));
+    fn paintChromeStatusBar(
+        self: *Host,
+        hdc: HDC,
+        alloc: Allocator,
+        client_rect: RECT,
+        paint_rect: RECT,
+        status_h: i32,
+        paint_status: bool,
+        theme: *const ThemeColors,
+    ) bool {
+        const status_y = @max(self.scaled(host_tab_height) + self.scaled(2), paint_rect.bottom - @max(1, status_h) + self.scaled(4));
         var status_x: i32 = self.scaled(16);
         const launcher_lane_right: ?i32 = blk: {
             if (!(status_h > 0 and self.overlay_mode == .none and self.selectedProfile() != null)) break :blk null;
@@ -15807,14 +14538,8 @@ const Host = struct {
                 drawRoundedRect(
                     hdc,
                     lane_rect,
-                    if (theme.is_dark)
-                        adjustColor(theme.status_bg, 8, 8, 10)
-                    else
-                        adjustColor(theme.status_bg, -6, -6, -6),
-                    if (theme.is_dark)
-                        adjustColor(theme.chrome_border, 12, 12, 14)
-                    else
-                        adjustColor(theme.chrome_border, -18, -18, -18),
+                    themeSurface(theme, .launcher_lane_bg),
+                    themeSurface(theme, .launcher_lane_border),
                     self.scaled(6),
                 );
                 if (self.selectedProfile()) |profile| {
@@ -15843,9 +14568,9 @@ const Host = struct {
                         profile,
                         selected_profile_index,
                         self.app.launcherQuickSlotOrdinal(profile.key),
-                    ) catch return;
+                    ) catch return false;
                     defer alloc.free(chip);
-                    self.cached_launcher_selected_chip_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, chip) catch return;
+                    self.cached_launcher_selected_chip_w = std.unicode.utf8ToUtf16LeAllocZ(alloc, chip) catch return false;
                 }
 
                 if (self.profiles) |profiles| {
@@ -15858,9 +14583,9 @@ const Host = struct {
                             profile,
                             index,
                             self.app.launcherQuickSlotOrdinal(profile.key),
-                        ) catch return;
+                        ) catch return false;
                         defer alloc.free(chip);
-                        self.cached_launcher_quick_slot_chip_w[cached_slot] = std.unicode.utf8ToUtf16LeAllocZ(alloc, chip) catch return;
+                        self.cached_launcher_quick_slot_chip_w[cached_slot] = std.unicode.utf8ToUtf16LeAllocZ(alloc, chip) catch return false;
                         cached_slot += 1;
                     }
                 }
@@ -15869,7 +14594,7 @@ const Host = struct {
             if (self.selectedProfile()) |profile| {
                 const pinned_slot_ordinal = self.app.launcherQuickSlotOrdinal(profile.key);
                 const pinned_slot_digit = pinnedSlotBadgeDigit(pinned_slot_ordinal);
-                const chip_w = self.cached_launcher_selected_chip_w orelse return;
+                const chip_w = self.cached_launcher_selected_chip_w orelse return false;
                 const accent = profileChromeAccent(profile.kind, theme.is_dark);
                 const chip_width = self.scaled(16) + @as(i32, @intCast(profileStatusBadgeTextLen(
                     profile,
@@ -15903,7 +14628,7 @@ const Host = struct {
                     profileOpenTargetMarkerColor(self.app.launcher_profile_target),
                     self.current_dpi,
                 );
-                _ = SetTextColor(hdc, profileKindLabelColor(profile.kind, theme.is_dark));
+                _ = sys.SetTextColor(hdc, profileKindLabelColor(profile.kind, theme.is_dark));
                 var chip_text_rect = chip_rect;
                 chip_text_rect.left += self.scaled(6);
                 chip_text_rect.right -= launcherChipRightInset(pinned_slot_digit != null, true);
@@ -15911,7 +14636,7 @@ const Host = struct {
                     hdc,
                     chip_w,
                     &chip_text_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                    c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
                 );
                 status_x = chip_rect.right + self.scaled(10);
             }
@@ -15921,7 +14646,7 @@ const Host = struct {
                     if (drawn >= 3) break;
                     if (selected_profile_index != null and index == selected_profile_index.?) continue;
                     const pinned_slot_ordinal = self.app.launcherQuickSlotOrdinal(profile.key);
-                    const chip_w = self.cached_launcher_quick_slot_chip_w[drawn] orelse return;
+                    const chip_w = self.cached_launcher_quick_slot_chip_w[drawn] orelse return false;
                     const focused = self.focused_quick_slot != null and self.focused_quick_slot.? == index;
                     const hovered = self.hovered_quick_slot != null and self.hovered_quick_slot.? == index;
                     const target_marker = shouldPaintQuickSlotTargetMarker(hovered, focused);
@@ -15984,7 +14709,7 @@ const Host = struct {
                             .bottom = chip_rect.bottom - self.scaled(2),
                         }, focus_ring);
                     }
-                    _ = SetTextColor(hdc, colors.fg);
+                    _ = sys.SetTextColor(hdc, colors.fg);
                     var chip_text_rect = chip_rect;
                     chip_text_rect.left += self.scaled(5);
                     chip_text_rect.right -= launcherChipRightInset(false, target_marker);
@@ -15992,7 +14717,7 @@ const Host = struct {
                         hdc,
                         chip_w,
                         &chip_text_rect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX | c.DT_END_ELLIPSIS,
                     );
                     status_x = chip_rect.right + self.scaled(6);
                     drawn += 1;
@@ -16035,10 +14760,104 @@ const Host = struct {
         }
         if (paint_status) {
             if (self.cached_detail_w) |detail_w| {
-                _ = SetTextColor(hdc, theme.text_secondary);
+                _ = sys.SetTextColor(hdc, theme.text_secondary);
                 textOutWz(hdc, status_x, status_y + self.scaled(18), detail_w);
             }
         }
+        return true;
+    }
+
+    fn paintChrome(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        var ps: PAINTSTRUCT = undefined;
+        const hdc = sys.BeginPaint(hwnd, &ps) orelse return;
+        defer _ = sys.EndPaint(hwnd, &ps);
+
+        const alloc = self.app.core_app.alloc;
+        const theme = &self.app.resolved_theme;
+
+        const prev_font = if (self.chrome_font) |font| sys.SelectObject(hdc, font) else null;
+        defer if (prev_font) |pf| {
+            _ = sys.SelectObject(hdc, pf);
+        };
+
+        var client_rect: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
+        const tab_h = self.tabBarHeight();
+        const overlay_offset: i32 = if (self.overlay_mode != .none) self.scaled(host_overlay_height) else 0;
+        const inspector_panel_visible = self.inspectorPanelVisible();
+        const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
+        const status_h = statusBarHeight();
+        const content_rect = RECT{
+            .left = 0,
+            .top = tab_h + overlay_offset + inspector_offset,
+            .right = client_rect.right,
+            .bottom = @max(tab_h + 1, client_rect.bottom - status_h),
+        };
+        const top_rect = RECT{
+            .left = client_rect.left,
+            .top = client_rect.top,
+            .right = client_rect.right,
+            .bottom = @max(client_rect.top, content_rect.top),
+        };
+        const status_rect = RECT{
+            .left = client_rect.left,
+            .top = @min(client_rect.bottom, content_rect.bottom),
+            .right = client_rect.right,
+            .bottom = client_rect.bottom,
+        };
+        const paint_top = paintRectVisible(hdc, ps.rcPaint, top_rect);
+        const paint_content = paintRectVisible(hdc, ps.rcPaint, content_rect);
+        const paint_status = paintRectVisible(hdc, ps.rcPaint, status_rect);
+        const banner_y: i32 = tab_h + overlay_offset + inspector_offset + self.scaled(2);
+
+        self.paintChromeTabBar(hdc, client_rect, tab_h, paint_top, theme);
+        if (!self.paintChromeOverlay(hdc, alloc, client_rect, tab_h, paint_top, theme)) return;
+        self.paintChromeContentLane(hdc, content_rect, paint_content, theme);
+        self.paintChromeInspectorPanel(
+            hdc,
+            alloc,
+            client_rect,
+            tab_h,
+            overlay_offset,
+            inspector_panel_visible,
+            paint_top,
+            theme,
+        );
+        self.paintChromePaneDividers(hwnd, hdc, content_rect, paint_content, theme);
+        paintChromeStatusBackground(
+            hdc,
+            client_rect,
+            tab_h,
+            overlay_offset,
+            status_h,
+            paint_status,
+            theme,
+        );
+        if (!self.paintChromeBanner(
+            hwnd,
+            hdc,
+            alloc,
+            client_rect,
+            banner_y,
+            inspector_panel_visible,
+            paint_top,
+            theme,
+        )) return;
+        if (status_h <= 0) {
+            self.chrome_repaint_dirty = false;
+            return;
+        }
+
+        if (!self.paintChromeStatusBar(
+            hdc,
+            alloc,
+            client_rect,
+            ps.rcPaint,
+            status_h,
+            paint_status,
+            theme,
+        )) return;
         self.chrome_repaint_dirty = false;
     }
 };
@@ -16047,10 +14866,10 @@ fn destroyChildWindow(hwnd_slot: *?HWND) void {
     const hwnd = hwnd_slot.* orelse return;
 
     hwnd_slot.* = null;
-    if (IsWindow(hwnd) == 0) return;
+    if (sys.IsWindow(hwnd) == 0) return;
 
-    _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    _ = DestroyWindow(hwnd);
+    setWindowData(hwnd, null);
+    _ = sys.DestroyWindow(hwnd);
 }
 
 fn destroySubclassedWindowWithPrev(
@@ -16064,17 +14883,17 @@ fn destroySubclassedWindowWithPrev(
     // WM_NCDESTROY, so leaving the HWND discoverable via host tabs/buttons
     // risks callbacks touching half-torn state.
     hwnd_slot.* = null;
-    if (IsWindow(hwnd) == 0) return;
+    if (sys.IsWindow(hwnd) == 0) return;
 
-    _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    setWindowData(hwnd, null);
     if (prev_proc) |proc| {
-        _ = SetWindowLongPtrW(
+        _ = sys.SetWindowLongPtrW(
             hwnd,
-            GWLP_WNDPROC,
+            c.GWLP_WNDPROC,
             @as(LONG_PTR, @intCast(@intFromPtr(proc))),
         );
     }
-    _ = DestroyWindow(hwnd);
+    _ = sys.DestroyWindow(hwnd);
 }
 
 fn destroySubclassedWindow(
@@ -16239,75 +15058,9 @@ fn restoreTerminalUndoState(
     };
 }
 
-const HostBannerKind = enum {
-    none,
-    info,
-    err,
-};
-
-const TabButtonKeyAction = enum {
-    previous,
-    next,
-    first,
-    last,
-    move_previous,
-    move_next,
-    move_first,
-    move_last,
-    rename,
-    close,
-    overview,
-};
-
-const SearchButtonKeyAction = enum {
-    next,
-    previous,
-    dismiss,
-};
-
-const TabsButtonKeyAction = enum {
-    previous,
-    next,
-    rename,
-    overview,
-};
-
-const CommandButtonKeyAction = enum {
-    toggle,
-    previous,
-    next,
-    dismiss,
-};
-
-const ProfilesButtonKeyAction = enum {
-    open,
-    toggle,
-    previous,
-    next,
-    first,
-    last,
-};
-
-const QuickSlotFocusKeyAction = enum {
-    previous,
-    next,
-    first,
-    last,
-    open,
-};
-
-const LaunchTargetButtonKeyAction = enum {
-    previous,
-    next,
-    first,
-    last,
-};
-
-const ProfileOpenTarget = enum {
-    tab,
-    window,
-    split,
-};
+const HostBannerKind = labels.HostBannerKind;
+const LaunchTargetButtonKeyAction = labels.LaunchTargetButtonKeyAction;
+const ProfileOpenTarget = labels.ProfileOpenTarget;
 
 fn parseProfileOpenTarget(raw: []const u8) ?ProfileOpenTarget {
     if (std.ascii.eqlIgnoreCase(raw, "tab")) return .tab;
@@ -16332,10 +15085,10 @@ fn cycleProfileOpenTarget(current: ProfileOpenTarget, reverse: bool) ProfileOpen
 
 fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
     return switch (vk) {
-        VK_LEFT, VK_UP => .previous,
-        VK_RIGHT, VK_DOWN, VK_RETURN, VK_SPACE => .next,
-        VK_HOME => .first,
-        VK_END => .last,
+        c.VK_LEFT, c.VK_UP => .previous,
+        c.VK_RIGHT, c.VK_DOWN, c.VK_RETURN, c.VK_SPACE => .next,
+        c.VK_HOME => .first,
+        c.VK_END => .last,
         else => null,
     };
 }
@@ -16363,12 +15116,7 @@ fn appendOwnedString(
     target.* = next;
 }
 
-fn ownedStringEquals(current: ?[:0]const u8, value: []const u8) bool {
-    return if (current) |existing|
-        std.mem.eql(u8, existing, value)
-    else
-        false;
-}
+const ownedStringEquals = labels.ownedStringEquals;
 
 fn ownedBytesEquals(current: ?[]const u8, value: []const u8) bool {
     return if (current) |existing|
@@ -16394,7 +15142,7 @@ fn syncWindowTextUtf8Cached(
     try appendOwnedString(alloc, cached, value);
     const value_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
     defer alloc.free(value_w);
-    _ = SetWindowTextW(hwnd, value_w.ptr);
+    _ = sys.SetWindowTextW(hwnd, value_w.ptr);
     return true;
 }
 
@@ -16407,7 +15155,7 @@ fn syncWindowTextUtf8CachedAfterSet(
     if (ownedStringEquals(cached.*, value)) return false;
     const value_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
     defer alloc.free(value_w);
-    _ = SetWindowTextW(hwnd, value_w.ptr);
+    _ = sys.SetWindowTextW(hwnd, value_w.ptr);
     try appendOwnedString(alloc, cached, value);
     return true;
 }
@@ -16422,186 +15170,6 @@ fn overlayEditText(self: *Host) ![]const u8 {
     return self.cached_overlay_edit orelse "";
 }
 
-fn rectEquals(a: RECT, b: RECT) bool {
-    return a.left == b.left and
-        a.top == b.top and
-        a.right == b.right and
-        a.bottom == b.bottom;
-}
-
-fn childRect(x: i32, y: i32, width: i32, height: i32) RECT {
-    return .{
-        .left = x,
-        .top = y,
-        .right = x + width,
-        .bottom = y + height,
-    };
-}
-
-fn layoutRectFromWin32(rect: RECT) win32_layout.Rect {
-    return .{
-        .left = rect.left,
-        .top = rect.top,
-        .right = rect.right,
-        .bottom = rect.bottom,
-    };
-}
-
-fn layoutRectToWin32(rect: win32_layout.Rect) RECT {
-    return .{
-        .left = rect.left,
-        .top = rect.top,
-        .right = rect.right,
-        .bottom = rect.bottom,
-    };
-}
-
-fn centeredRect(rect: RECT, width: i32, height: i32) RECT {
-    const outer_w = rect.right - rect.left;
-    const outer_h = rect.bottom - rect.top;
-    const left = rect.left + @divTrunc(outer_w - width, 2);
-    const top = rect.top + @divTrunc(outer_h - height, 2);
-    return childRect(left, top, width, height);
-}
-
-fn overlayEditFrameRect(
-    width: i32,
-    overlay_y: i32,
-    padding: i32,
-    label_w: i32,
-    cancel_w: i32,
-    accept_reservation_w: i32,
-    row_h: i32,
-    dpi: u32,
-) RECT {
-    const top_offset = Host.scaledBy(4, dpi);
-    const right_gap = Host.scaledBy(6, dpi);
-    const min_edit_width = Host.scaledBy(24, dpi);
-    const effective_label_w = overlayLabelReservation(
-        width,
-        padding,
-        label_w,
-        cancel_w,
-        accept_reservation_w,
-        dpi,
-    );
-    const bounded_width = @max(0, width);
-    const raw_right = width - cancel_w - accept_reservation_w - (padding * 2) - right_gap;
-    const right = @min(bounded_width, @max(@min(bounded_width, min_edit_width), raw_right));
-    const left = @min(
-        @max(0, padding + effective_label_w),
-        @max(0, right - min_edit_width),
-    );
-    return .{
-        .left = left,
-        .top = overlay_y + top_offset,
-        .right = right,
-        .bottom = overlay_y + top_offset + row_h,
-    };
-}
-
-fn overlayLabelReservation(
-    width: i32,
-    padding: i32,
-    desired_label_w: i32,
-    cancel_w: i32,
-    accept_reservation_w: i32,
-    dpi: u32,
-) i32 {
-    const right_gap = Host.scaledBy(6, dpi);
-    const min_edit_width = Host.scaledBy(24, dpi);
-    const desired = @max(0, desired_label_w);
-    const available_before_actions = width - @max(0, cancel_w) - @max(0, accept_reservation_w) -
-        2 * @max(0, padding) - right_gap;
-    return if (available_before_actions - @max(0, padding) >= desired + min_edit_width) desired else 0;
-}
-
-const OverlayActionVisibility = struct {
-    accept: bool,
-    cancel: bool,
-};
-
-fn overlayActionVisibilityForWidth(
-    width: i32,
-    padding: i32,
-    cancel_w: i32,
-    accept_w: i32,
-    accept_requested: bool,
-    dpi: u32,
-) OverlayActionVisibility {
-    const bounded_padding = @max(0, padding);
-    const right_gap = Host.scaledBy(6, dpi);
-    const min_edit_width = Host.scaledBy(24, dpi);
-    const cancel = width >= @max(0, cancel_w) + 3 * bounded_padding + right_gap + min_edit_width;
-    const accept = cancel and accept_requested and
-        width >= @max(0, cancel_w) + @max(0, accept_w) + 4 * bounded_padding + right_gap + min_edit_width;
-    return .{ .accept = accept, .cancel = cancel };
-}
-
-const OverlayActionLayout = struct {
-    accept_visible: bool,
-    cancel_visible: bool,
-    compact_cancel: bool,
-    accept_x: i32,
-    cancel_x: i32,
-    accept_width: i32,
-    cancel_width: i32,
-    accept_reservation_width: i32,
-};
-
-fn overlayActionLayoutForWidth(
-    mode: HostOverlayMode,
-    width: i32,
-    padding: i32,
-    cancel_button_w: i32,
-    accept_button_w: i32,
-    dpi: u32,
-) OverlayActionLayout {
-    const bounded_padding = @max(0, padding);
-    const visibility = overlayActionVisibilityForWidth(
-        width,
-        bounded_padding,
-        cancel_button_w,
-        accept_button_w,
-        overlayAcceptButtonVisible(mode),
-        dpi,
-    );
-    const compact_cancel = mode == .confirm and !visibility.cancel and width > 0;
-    const compact_inset = if (compact_cancel)
-        @min(bounded_padding, @divTrunc(width - 1, 2))
-    else
-        bounded_padding;
-    const cancel_visible = visibility.cancel or compact_cancel;
-    const accept_width = if (visibility.accept) @max(0, accept_button_w) else 0;
-    const cancel_width = if (compact_cancel)
-        width - 2 * compact_inset
-    else if (cancel_visible)
-        @max(0, cancel_button_w)
-    else
-        0;
-    return .{
-        .accept_visible = visibility.accept,
-        .cancel_visible = cancel_visible,
-        .compact_cancel = compact_cancel,
-        .accept_x = @max(0, width - cancel_width - accept_width - 2 * bounded_padding),
-        .cancel_x = if (compact_cancel) compact_inset else width - cancel_width - bounded_padding,
-        .accept_width = accept_width,
-        .cancel_width = cancel_width,
-        .accept_reservation_width = if (visibility.accept) accept_width + bounded_padding else 0,
-    };
-}
-
-fn overlayEditChildRectFromFrame(frame: RECT, inset_x: i32, inset_y: i32) RECT {
-    const left = @min(frame.right, frame.left + @max(0, inset_x));
-    const top = @min(frame.bottom, frame.top + @max(0, inset_y));
-    return .{
-        .left = left,
-        .top = top,
-        .right = @max(left, frame.right - @max(0, inset_x)),
-        .bottom = @max(top, frame.bottom - @max(0, inset_y)),
-    };
-}
-
 fn syncChildPlacementTarget(placement: *ChildPlacement, hwnd: HWND) void {
     if (placement.hwnd == null or placement.hwnd.? != hwnd) {
         placement.* = .{ .hwnd = hwnd };
@@ -16611,7 +15179,7 @@ fn syncChildPlacementTarget(placement: *ChildPlacement, hwnd: HWND) void {
 fn applyChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
     syncChildPlacementTarget(placement, hwnd);
     if (placement.rect_known and rectEquals(placement.rect, rect)) return false;
-    _ = MoveWindow(
+    _ = sys.MoveWindow(
         hwnd,
         rect.left,
         rect.top,
@@ -16627,7 +15195,7 @@ fn applyChildRect(hwnd: HWND, placement: *ChildPlacement, rect: RECT) bool {
 fn applyChildVisibility(hwnd: HWND, placement: *ChildPlacement, visible: bool) bool {
     syncChildPlacementTarget(placement, hwnd);
     if (placement.visible_known and placement.visible == visible) return false;
-    _ = ShowWindow(hwnd, if (visible) SW_SHOW else SW_HIDE);
+    _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
     placement.visible = visible;
     placement.visible_known = true;
     return true;
@@ -16922,14 +15490,14 @@ fn scrollbarPaintKeyChanged(previous: ?ScrollbarPaintKey, next: ScrollbarPaintKe
 }
 
 fn highContrastThemeFromSysColors() ThemeColors {
-    const win_bg = GetSysColor(COLOR_WINDOW);
-    const win_fg = GetSysColor(COLOR_WINDOWTEXT);
-    const win_frame = GetSysColor(COLOR_WINDOWFRAME);
-    const btn_bg = GetSysColor(COLOR_BTNFACE);
-    const btn_fg = GetSysColor(COLOR_BTNTEXT);
-    const hi_bg = GetSysColor(COLOR_HIGHLIGHT);
-    const hi_fg = GetSysColor(COLOR_HIGHLIGHTTEXT);
-    const gray = GetSysColor(COLOR_GRAYTEXT);
+    const win_bg = sys.GetSysColor(c.COLOR_WINDOW);
+    const win_fg = sys.GetSysColor(c.COLOR_WINDOWTEXT);
+    const win_frame = sys.GetSysColor(c.COLOR_WINDOWFRAME);
+    const btn_bg = sys.GetSysColor(c.COLOR_BTNFACE);
+    const btn_fg = sys.GetSysColor(c.COLOR_BTNTEXT);
+    const hi_bg = sys.GetSysColor(c.COLOR_HIGHLIGHT);
+    const hi_fg = sys.GetSysColor(c.COLOR_HIGHLIGHTTEXT);
+    const gray = sys.GetSysColor(c.COLOR_GRAYTEXT);
 
     return .{
         .chrome_bg = win_bg,
@@ -17001,8 +15569,8 @@ fn isHighContrastActive() bool {
         .dwFlags = 0,
         .lpszDefaultScheme = null,
     };
-    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, @sizeOf(HIGHCONTRASTW), @ptrCast(&hc), 0) != 0) {
-        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    if (sys.SystemParametersInfoW(c.SPI_GETHIGHCONTRAST, @sizeOf(HIGHCONTRASTW), @ptrCast(&hc), 0) != 0) {
+        return (hc.dwFlags & c.HCF_HIGHCONTRASTON) != 0;
     }
     return false;
 }
@@ -17010,15 +15578,15 @@ fn isHighContrastActive() bool {
 fn isSystemDarkMode() bool {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("AppsUseLightTheme");
-    var hkey: usize = 0;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &hkey) != ERROR_SUCCESS) return true;
-    defer _ = RegCloseKey(hkey);
+    var hkey: sys.HKEY = undefined;
+    if (sys.RegOpenKeyExW(@ptrFromInt(c.HKEY_CURRENT_USER), subkey, 0, c.KEY_READ, &hkey) != c.ERROR_SUCCESS) return true;
+    defer _ = sys.RegCloseKey(hkey);
 
     var data: u32 = 1;
     var data_size: DWORD = @sizeOf(u32);
     var reg_type: DWORD = 0;
-    if (RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != ERROR_SUCCESS) return true;
-    if (reg_type != REG_DWORD or data_size != @sizeOf(u32)) return true;
+    if (sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != c.ERROR_SUCCESS) return true;
+    if (reg_type != c.REG_DWORD or data_size != @sizeOf(u32)) return true;
 
     return data == 0; // 0 = dark mode, 1 = light mode
 }
@@ -17026,19 +15594,19 @@ fn isSystemDarkMode() bool {
 fn readDynamicScrollbars(default_value: bool) bool {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Control Panel\\Accessibility");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("DynamicScrollbars");
-    var hkey: usize = 0;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &hkey) != ERROR_SUCCESS) {
+    var hkey: sys.HKEY = undefined;
+    if (sys.RegOpenKeyExW(@ptrFromInt(c.HKEY_CURRENT_USER), subkey, 0, c.KEY_READ, &hkey) != c.ERROR_SUCCESS) {
         return default_value;
     }
-    defer _ = RegCloseKey(hkey);
+    defer _ = sys.RegCloseKey(hkey);
 
     var data: u32 = if (default_value) 1 else 0;
     var data_size: DWORD = @sizeOf(u32);
     var reg_type: DWORD = 0;
-    if (RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != ERROR_SUCCESS) {
+    if (sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != c.ERROR_SUCCESS) {
         return default_value;
     }
-    if (reg_type != REG_DWORD or data_size != @sizeOf(u32)) return default_value;
+    if (reg_type != c.REG_DWORD or data_size != @sizeOf(u32)) return default_value;
 
     return data != 0;
 }
@@ -17053,15 +15621,15 @@ fn readDynamicScrollbars(default_value: bool) bool {
 fn resolveSystemAccentColor() ?u32 {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Software\\Microsoft\\Windows\\DWM");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("AccentColor");
-    var hkey: usize = 0;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &hkey) != ERROR_SUCCESS) return null;
-    defer _ = RegCloseKey(hkey);
+    var hkey: sys.HKEY = undefined;
+    if (sys.RegOpenKeyExW(@ptrFromInt(c.HKEY_CURRENT_USER), subkey, 0, c.KEY_READ, &hkey) != c.ERROR_SUCCESS) return null;
+    defer _ = sys.RegCloseKey(hkey);
 
     var data: u32 = 0;
     var data_size: DWORD = @sizeOf(u32);
     var reg_type: DWORD = 0;
-    if (RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != ERROR_SUCCESS) return null;
-    if (reg_type != REG_DWORD or data_size != @sizeOf(u32)) return null;
+    if (sys.RegQueryValueExW(hkey, value_name, null, &reg_type, @ptrCast(&data), &data_size) != c.ERROR_SUCCESS) return null;
+    if (reg_type != c.REG_DWORD or data_size != @sizeOf(u32)) return null;
 
     // Drop alpha; keep 0x00BBGGRR.
     return data & 0x00FFFFFF;
@@ -17084,13 +15652,13 @@ fn shouldUseSystemBackdrop(config: *const configpkg.Config) bool {
 }
 
 fn supportsDwmSystemBackdropAttribute(os_build: u32) bool {
-    return os_build >= OS_BUILD_WIN11_22H2;
+    return os_build >= c.OS_BUILD_WIN11_22H2;
 }
 
 fn systemBackdropTypeForBuild(config: *const configpkg.Config, os_build: u32) u32 {
-    if (!shouldUseSystemBackdrop(config)) return DWMSBT_NONE;
-    if (!supportsDwmSystemBackdropAttribute(os_build)) return DWMSBT_NONE;
-    return DWMSBT_TABBEDWINDOW;
+    if (!shouldUseSystemBackdrop(config)) return c.DWMSBT_NONE;
+    if (!supportsDwmSystemBackdropAttribute(os_build)) return c.DWMSBT_NONE;
+    return c.DWMSBT_TABBEDWINDOW;
 }
 
 fn configuredHostWindowPosition(config: *const configpkg.Config) ?struct { x: i32, y: i32 } {
@@ -17136,59 +15704,6 @@ fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const 
     );
 }
 
-/// Linear-interpolate two `COLORREF`-shaped values (`0x00BBGGRR` on
-/// Windows GDI) by `alpha` ∈ [0, 1]. `alpha = 0` returns `a`,
-/// `alpha = 1` returns `b`. Used for pre-composited alpha on paths
-/// where GDI can't render RGBA directly — specifically, `DrawTextW`
-/// has no alpha channel, so the text colour must be pre-blended
-/// against the surface background for fade effects to look right.
-fn blendColorRGB(a: u32, b: u32, alpha: f32) u32 {
-    const t: f32 = std.math.clamp(alpha, 0.0, 1.0);
-    const inv: f32 = 1.0 - t;
-    const ar: u32 = a & 0xFF;
-    const ag: u32 = (a >> 8) & 0xFF;
-    const ab: u32 = (a >> 16) & 0xFF;
-    const br: u32 = b & 0xFF;
-    const bg: u32 = (b >> 8) & 0xFF;
-    const bb: u32 = (b >> 16) & 0xFF;
-    const rr: u32 = @intFromFloat(@as(f32, @floatFromInt(ar)) * inv + @as(f32, @floatFromInt(br)) * t);
-    const gg: u32 = @intFromFloat(@as(f32, @floatFromInt(ag)) * inv + @as(f32, @floatFromInt(bg)) * t);
-    const bb2: u32 = @intFromFloat(@as(f32, @floatFromInt(ab)) * inv + @as(f32, @floatFromInt(bb)) * t);
-    return (bb2 << 16) | (gg << 8) | rr;
-}
-
-fn fillSolidRect(hdc: HDC, rect: RECT, color: u32) void {
-    const brush = GetStockObject(DC_BRUSH) orelse return;
-    _ = SetDCBrushColor(hdc, color);
-    _ = FillRect(hdc, &rect, brush);
-}
-
-fn drawRectBorder(hdc: HDC, rect: RECT, color: u32, thickness: i32) void {
-    if (rect.right <= rect.left or rect.bottom <= rect.top or thickness <= 0) return;
-    const stroke = @min(thickness, @min(rect.right - rect.left, rect.bottom - rect.top));
-    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.top + stroke }, color);
-    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.bottom - stroke, .right = rect.right, .bottom = rect.bottom }, color);
-    fillSolidRect(hdc, .{ .left = rect.left, .top = rect.top + stroke, .right = rect.left + stroke, .bottom = rect.bottom - stroke }, color);
-    fillSolidRect(hdc, .{ .left = rect.right - stroke, .top = rect.top + stroke, .right = rect.right, .bottom = rect.bottom - stroke }, color);
-}
-
-fn utf16GdiTextLen(text: [:0]const u16) i32 {
-    const max_len: usize = @intCast(std.math.maxInt(i32));
-    return @intCast(@min(text.len, max_len));
-}
-
-fn textOutWz(hdc: HDC, x: i32, y: i32, text: [:0]const u16) void {
-    const len = utf16GdiTextLen(text);
-    if (len == 0) return;
-    _ = TextOutW(hdc, x, y, text.ptr, len);
-}
-
-fn drawTextWz(hdc: HDC, text: [:0]const u16, rect: *RECT, format: UINT) void {
-    const len = utf16GdiTextLen(text);
-    if (len == 0) return;
-    _ = DrawTextW(hdc, text.ptr, len, rect, format);
-}
-
 /// Draw a single-line, left-aligned, vertically-centred, ellipsized
 /// string into the rect. Used by the palette list row painter.
 fn drawPaletteRowText(hdc: HDC, text: []const u8, rect: RECT, color: u32) void {
@@ -17201,21 +15716,19 @@ fn drawPaletteRowText(hdc: HDC, text: []const u8, rect: RECT, color: u32) void {
     const n: usize = @min(copied, buf.len - 1);
     buf[n] = 0;
 
-    _ = SetTextColor(hdc, color);
+    _ = sys.SetTextColor(hdc, color);
     var r = rect;
-    _ = DrawTextW(
+    _ = sys.DrawTextW(
         hdc,
         @ptrCast(&buf),
         @intCast(n),
         &r,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        c.DT_LEFT | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
     );
 }
 
 fn getPaletteListHost(hwnd: HWND) ?*Host {
-    const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (raw == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(raw)));
+    return windowData(Host, hwnd);
 }
 
 fn utf16CodeUnitOffsetToUtf8ByteOffset(text: []const u8, target_units: usize) usize {
@@ -17279,9 +15792,9 @@ test "Win32 edit caret chooses the active selection endpoint" {
 fn nativeEditSelection(hwnd: HWND) [2]u32 {
     var start: u32 = 0;
     var end: u32 = 0;
-    _ = SendMessageW(
+    _ = sys.SendMessageW(
         hwnd,
-        EM_GETSEL,
+        c.EM_GETSEL,
         @intFromPtr(&start),
         @bitCast(@intFromPtr(&end)),
     );
@@ -17303,13 +15816,13 @@ fn editSelectionCaretEndpoint(selection: [2]u32, native_caret: u32) u32 {
 
 fn nativeEditCaret(hwnd: HWND, selection: [2]u32) u32 {
     if (selection[0] == selection[1]) return selection[0];
-    if (GetFocus() != hwnd) return selection[1];
+    if (sys.GetFocus() != hwnd) return selection[1];
     var point: POINT = undefined;
-    if (GetCaretPos(&point) == 0) return selection[1];
+    if (sys.GetCaretPos(&point) == 0) return selection[1];
     const x: u16 = @bitCast(@as(i16, @truncate(point.x)));
     const y: u16 = @bitCast(@as(i16, @truncate(point.y)));
     const packed_point: LPARAM = @bitCast(@as(usize, x) | (@as(usize, y) << 16));
-    const result = SendMessageW(hwnd, EM_CHARFROMPOS, 0, packed_point);
+    const result = sys.SendMessageW(hwnd, c.EM_CHARFROMPOS, 0, packed_point);
     const native_caret: u32 = @intCast(@as(usize, @bitCast(result)) & 0xFFFF);
     return editSelectionCaretEndpoint(selection, native_caret);
 }
@@ -17342,8 +15855,8 @@ fn selectNativeEditRange(
 ) void {
     const start = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.start);
     const end = utf8ByteOffsetToUtf16CodeUnitOffset(snapshot_text, range.end);
-    _ = SendMessageW(hwnd, EM_SETSEL, start, @intCast(end));
-    _ = SetFocus(hwnd);
+    _ = sys.SendMessageW(hwnd, c.EM_SETSEL, start, @intCast(end));
+    _ = sys.SetFocus(hwnd);
 }
 
 fn overlayEditNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
@@ -17376,7 +15889,7 @@ fn overlayEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.Termin
 fn overlayEditFocusedThunk(ctx: *anyopaque) bool {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     const hwnd = host.overlay_edit_hwnd orelse return false;
-    return GetFocus() == hwnd;
+    return sys.GetFocus() == hwnd;
 }
 
 fn overlayEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
@@ -17384,7 +15897,7 @@ fn overlayEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
     const hwnd = host.overlay_edit_hwnd orelse return error.ElementNotAvailable;
     const value_w = try std.unicode.utf8ToUtf16LeAllocZ(host.app.core_app.alloc, value);
     defer host.app.core_app.alloc.free(value_w);
-    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (sys.SetWindowTextW(hwnd, value_w.ptr) == 0) return lastError();
 }
 
 fn overlayEditSelectRangeThunk(
@@ -17419,7 +15932,7 @@ fn searchEditSnapshotThunk(ctx: *anyopaque, alloc: Allocator) !win32_uia.Termina
 fn searchEditFocusedThunk(ctx: *anyopaque) bool {
     const surface: *const Surface = @ptrCast(@alignCast(ctx));
     const hwnd = surface.search_bar_edit_hwnd orelse return false;
-    return GetFocus() == hwnd;
+    return sys.GetFocus() == hwnd;
 }
 
 fn searchEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
@@ -17427,7 +15940,7 @@ fn searchEditSetValueThunk(ctx: *anyopaque, value: []const u8) !void {
     const hwnd = surface.search_bar_edit_hwnd orelse return error.ElementNotAvailable;
     const value_w = try std.unicode.utf8ToUtf16LeAllocZ(surface.app.core_app.alloc, value);
     defer surface.app.core_app.alloc.free(value_w);
-    if (SetWindowTextW(hwnd, value_w.ptr) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    if (sys.SetWindowTextW(hwnd, value_w.ptr) == 0) return lastError();
 }
 
 fn searchEditSelectRangeThunk(
@@ -17488,7 +16001,7 @@ fn paletteListGeometryThunk(ctx: *anyopaque) ?win32_uia.PaletteListGeometry {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     const hwnd = host.palette_list_hwnd orelse return null;
     var rect: RECT = undefined;
-    if (GetWindowRect(hwnd, &rect) == 0) return null;
+    if (sys.GetWindowRect(hwnd, &rect) == 0) return null;
     const row_height = host.scaled(palette_row_height);
     if (row_height <= 0 or rect.right <= rect.left or rect.bottom <= rect.top) return null;
     const remaining = host.palette_list_ranked_count -| host.palette_list_scroll;
@@ -17771,20 +16284,20 @@ fn surfaceConfirmWriteAccept(userdata: ?*anyopaque) void {
     const alloc = surface.app.core_app.alloc;
     surface.pending_clipboard_op = null;
     defer {
-        for (pending.contents) |*c| {
-            alloc.free(c.mime);
-            alloc.free(c.data);
+        for (pending.contents) |*content| {
+            alloc.free(content.mime);
+            alloc.free(content.data);
         }
         alloc.free(pending.contents);
     }
     if (pending.clipboard != .standard) return;
     var html_content: ?[]const u8 = null;
     var plain_content: ?[]const u8 = null;
-    for (pending.contents) |c| {
-        if (std.mem.eql(u8, c.mime, "text/html")) {
-            html_content = c.data;
-        } else if (std.mem.eql(u8, c.mime, "text/plain")) {
-            plain_content = c.data;
+    for (pending.contents) |content| {
+        if (std.mem.eql(u8, content.mime, "text/html")) {
+            html_content = content.data;
+        } else if (std.mem.eql(u8, content.mime, "text/plain")) {
+            plain_content = content.data;
         }
     }
     if (html_content) |html| {
@@ -17915,14 +16428,14 @@ fn rectEqual(a: RECT, b: RECT) bool {
         a.bottom == b.bottom;
 }
 
-fn monitorInfo(monitor: ?*anyopaque) ?win32_quick_terminal.MonitorInfo {
+fn monitorInfo(monitor: sys.HMONITOR) ?win32_quick_terminal.MonitorInfo {
     var info: MONITORINFO = .{
         .cbSize = @sizeOf(MONITORINFO),
         .rcMonitor = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
         .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
         .dwFlags = 0,
     };
-    if (GetMonitorInfoW(monitor, &info) == 0) return null;
+    if (sys.GetMonitorInfoW(monitor, &info) == 0) return null;
 
     return .{
         .work_area = .{
@@ -17941,11 +16454,11 @@ fn monitorInfo(monitor: ?*anyopaque) ?win32_quick_terminal.MonitorInfo {
 }
 
 const PrimaryMonitorSearch = struct {
-    found: ?*anyopaque = null,
+    found: ?sys.HMONITOR = null,
 };
 
 fn primaryMonitorEnumProc(
-    monitor: ?*anyopaque,
+    monitor: sys.HMONITOR,
     _: HDC,
     _: *RECT,
     data: LPARAM,
@@ -17957,21 +16470,21 @@ fn primaryMonitorEnumProc(
         .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
         .dwFlags = 0,
     };
-    if (GetMonitorInfoW(monitor, &info) == 0) return 1;
-    if ((info.dwFlags & MONITORINFOF_PRIMARY) == 0) return 1;
+    if (sys.GetMonitorInfoW(monitor, &info) == 0) return 1;
+    if ((info.dwFlags & c.MONITORINFOF_PRIMARY) == 0) return 1;
     search.found = monitor;
     return 0;
 }
 
-fn primaryMonitor() ?*anyopaque {
+fn primaryMonitor() ?sys.HMONITOR {
     var search: PrimaryMonitorSearch = .{};
-    _ = EnumDisplayMonitors(
+    _ = sys.EnumDisplayMonitors(
         null,
         null,
         primaryMonitorEnumProc,
         @as(LPARAM, @bitCast(@intFromPtr(&search))),
     );
-    return search.found orelse MonitorFromPoint(.{ .x = 0, .y = 0 }, MONITOR_DEFAULTTOPRIMARY);
+    return search.found orelse sys.MonitorFromPoint(.{ .x = 0, .y = 0 }, c.MONITOR_DEFAULTTOPRIMARY);
 }
 
 const AllMonitorsSearch = struct {
@@ -17986,7 +16499,7 @@ fn isVisibleMonitorInfo(info: win32_quick_terminal.MonitorInfo) bool {
 }
 
 fn allMonitorsEnumProc(
-    monitor: ?*anyopaque,
+    monitor: sys.HMONITOR,
     _: HDC,
     _: *RECT,
     data: LPARAM,
@@ -18010,7 +16523,7 @@ fn allMonitorsEnumProc(
 
 fn allMonitorsInfo() ?win32_quick_terminal.MonitorInfo {
     var search: AllMonitorsSearch = .{};
-    if (EnumDisplayMonitors(
+    if (sys.EnumDisplayMonitors(
         null,
         null,
         allMonitorsEnumProc,
@@ -18457,8 +16970,8 @@ fn stripHtmlTags(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     try buf.ensureTotalCapacity(alloc, html.len);
     var i: usize = 0;
     while (i < html.len) {
-        const c = html[i];
-        if (c == '<') {
+        const char = html[i];
+        if (char == '<') {
             if (std.mem.indexOfScalarPos(u8, html, i, '>')) |end| {
                 i = end + 1;
                 continue;
@@ -18466,7 +16979,7 @@ fn stripHtmlTags(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
             try buf.appendSlice(alloc, html[i..]);
             break;
         }
-        try buf.append(alloc, c);
+        try buf.append(alloc, char);
         i += 1;
     }
     return buf.toOwnedSlice(alloc);
@@ -18555,30 +17068,6 @@ test "win32 appendOwnedString leaves target untouched on OOM" {
     try testing.expectEqualStrings("warm-up", target.?);
 }
 
-fn rectIntersects(a: RECT, b: RECT) bool {
-    return a.left < b.right and
-        a.right > b.left and
-        a.top < b.bottom and
-        a.bottom > b.top;
-}
-
-test "win32 rectIntersects only trips on positive overlap" {
-    const testing = std.testing;
-
-    try testing.expect(rectIntersects(
-        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
-        .{ .left = 5, .top = 5, .right = 15, .bottom = 15 },
-    ));
-    try testing.expect(!rectIntersects(
-        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
-        .{ .left = 10, .top = 0, .right = 20, .bottom = 10 },
-    ));
-    try testing.expect(!rectIntersects(
-        .{ .left = 0, .top = 0, .right = 10, .bottom = 10 },
-        .{ .left = 0, .top = 10, .right = 10, .bottom = 20 },
-    ));
-}
-
 test "win32 palette EN_CHANGE re-entry guard: suppress_edit_events gates sync cascade" {
     // Sentinel test — the Host struct MUST carry the
     // `suppress_edit_events: bool = false` flag. The palette edit
@@ -18598,13 +17087,13 @@ fn paletteListProc(
     lParam: LPARAM,
 ) callconv(.winapi) LRESULT {
     switch (msg) {
-        WM_ERASEBKGND => return 1,
-        WM_PAINT => {
+        c.WM_ERASEBKGND => return 1,
+        c.WM_PAINT => {
             if (getPaletteListHost(hwnd)) |host| host.paintPaletteList();
             return 0;
         },
-        WM_LBUTTONDOWN => {
-            const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+        c.WM_LBUTTONDOWN => {
+            const host = getPaletteListHost(hwnd) orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
             const y: i32 = signedHighWord(lParamBits(lParam));
             const row = host.paletteRowAtY(y);
             if (row) |r| host.invokePaletteRow(r) catch |err| {
@@ -18612,14 +17101,14 @@ fn paletteListProc(
             };
             return 0;
         },
-        WM_MOUSEWHEEL => {
-            const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
+        c.WM_MOUSEWHEEL => {
+            const host = getPaletteListHost(hwnd) orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
             host.scrollPaletteList(wheelDeltaFromWParam(wParam));
             return 0;
         },
-        WM_GETOBJECT => {
-            const host = getPaletteListHost(hwnd) orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (!host.app.com_initialized) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        c.WM_GETOBJECT => {
+            const host = getPaletteListHost(hwnd) orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!host.app.com_initialized) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
             if (host.palette_list_uia_provider) |provider| {
                 if (win32_uia.returnPaletteListProvider(
                     hwnd,
@@ -18627,7 +17116,7 @@ fn paletteListProc(
                     lParam,
                     provider,
                 )) |lr| return lr;
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
             }
             const state = host.paletteListUiaState();
             if (win32_uia.handlePaletteListGetObject(
@@ -18637,9 +17126,9 @@ fn paletteListProc(
                 lParam,
                 state,
             )) |lr| return lr;
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        else => return DefWindowProcW(hwnd, msg, wParam, lParam),
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
 }
 
@@ -18651,449 +17140,110 @@ fn scrollbarProc(
 ) callconv(.winapi) LRESULT {
     const surface = getSurface(hwnd);
     switch (msg) {
-        WM_ERASEBKGND => return 1,
-        WM_PAINT => {
+        c.WM_ERASEBKGND => return 1,
+        c.WM_PAINT => {
             if (surface) |value| value.paintScrollbar();
             return 0;
         },
-        WM_MOUSEMOVE => {
+        c.WM_MOUSEMOVE => {
             if (surface) |value| value.handleScrollbarMouseMove(hwnd, lParam);
             return 0;
         },
-        WM_MOUSELEAVE => {
+        c.WM_MOUSELEAVE => {
             if (surface) |value| value.handleScrollbarMouseLeave();
             return 0;
         },
-        WM_LBUTTONDOWN => {
+        c.WM_LBUTTONDOWN => {
             if (surface) |value| value.handleScrollbarLeftButtonDown(hwnd, lParam);
             return 0;
         },
-        WM_LBUTTONUP => {
+        c.WM_LBUTTONUP => {
             if (surface) |value| value.handleScrollbarLeftButtonUp(lParam);
             return 0;
         },
-        WM_CAPTURECHANGED => {
+        c.WM_CAPTURECHANGED => {
             if (surface) |value| value.handleScrollbarCaptureChanged();
             return 0;
         },
-        WM_SETCURSOR => {
-            _ = SetCursor(LoadCursorW(null, IDC_ARROW));
+        c.WM_SETCURSOR => {
+            _ = sys.SetCursor(sys.LoadCursorW(null, c.IDC_ARROW));
             return 1;
         },
-        else => return DefWindowProcW(hwnd, msg, wParam, lParam),
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
 }
 
-fn drawRoundedRect(hdc: HDC, rect: RECT, bg: u32, border: u32, radius: i32) void {
-    const stock_brush = GetStockObject(DC_BRUSH) orelse return;
-    const stock_pen = GetStockObject(DC_PEN) orelse return;
-    _ = SetDCBrushColor(hdc, bg);
-    _ = SetDCPenColor(hdc, border);
-    const old_brush = SelectObject(hdc, stock_brush);
-    const old_pen = SelectObject(hdc, stock_pen);
-    // Inset by 1px — GDI strokes are centered, prevents clipping at edges
-    _ = RoundRect(hdc, rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1, radius, radius);
-    _ = SelectObject(hdc, old_pen);
-    _ = SelectObject(hdc, old_brush);
-    // Stock objects — never delete
-}
+const tabButtonKeyAction = labels.tabButtonKeyAction;
 
-fn paintRectVisible(hdc: HDC, paint_rect: RECT, rect: RECT) bool {
-    if (rect.right <= rect.left or rect.bottom <= rect.top) return false;
-    if (!rectIntersects(paint_rect, rect)) return false;
-    return RectVisible(hdc, &rect) != 0;
-}
+const moveTabAmountToEdge = labels.moveTabAmountToEdge;
 
-fn tabButtonKeyAction(vk: WPARAM, ctrl_pressed: bool) ?TabButtonKeyAction {
-    return switch (vk) {
-        VK_LEFT => if (ctrl_pressed) .move_previous else .previous,
-        VK_RIGHT => if (ctrl_pressed) .move_next else .next,
-        VK_HOME => if (ctrl_pressed) .move_first else .first,
-        VK_END => if (ctrl_pressed) .move_last else .last,
-        VK_F2 => .rename,
-        VK_DELETE => .close,
-        VK_APPS => .overview,
-        else => null,
-    };
-}
+const searchButtonKeyAction = labels.searchButtonKeyAction;
 
-fn moveTabAmountToEdge(total: usize, current: usize, toward_start: bool) isize {
-    if (total <= 1 or current >= total) return 0;
-    if (toward_start) return -@as(isize, @intCast(current));
-    return @as(isize, @intCast((total - 1) - current));
-}
+const dockedSearchCoreDirectionFromKeyAction = labels.dockedSearchCoreDirectionFromKeyAction;
 
-fn searchButtonKeyAction(vk: WPARAM, shift_pressed: bool) ?SearchButtonKeyAction {
-    return switch (vk) {
-        VK_F3 => if (shift_pressed) .previous else .next,
-        VK_ESCAPE => .dismiss,
-        else => null,
-    };
-}
+const dockedSearchButtonDirection = labels.dockedSearchButtonDirection;
 
-fn dockedSearchCoreDirectionFromKeyAction(action: SearchButtonKeyAction) ?input.Binding.Action.NavigateSearch {
-    return switch (action) {
-        .previous => .previous,
-        .next => .next,
-        .dismiss => null,
-    };
-}
+const dockedSearchEnterDirection = labels.dockedSearchEnterDirection;
 
-fn dockedSearchButtonDirection(command_id: usize) ?input.Binding.Action.NavigateSearch {
-    // Core scrollback search indexes matches newest-first
-    // (`.previous` => newer/down, `.next` => older/up). The docked
-    // search bar is laid out as visible up/down navigation, so the
-    // button IDs map to the opposite core enum.
-    return switch (command_id) {
-        SEARCH_PREV_ID => .next,
-        SEARCH_NEXT_ID => .previous,
-        else => null,
-    };
-}
+const dockedSearchArrowDirection = labels.dockedSearchArrowDirection;
 
-fn dockedSearchEnterDirection(shift_pressed: bool) input.Binding.Action.NavigateSearch {
-    return dockedSearchArrowDirection(if (shift_pressed) VK_UP else VK_DOWN).?;
-}
+const searchSelectedRawFromCoreDisplay = labels.searchSelectedRawFromCoreDisplay;
 
-fn dockedSearchArrowDirection(vk: WPARAM) ?input.Binding.Action.NavigateSearch {
-    return switch (vk) {
-        VK_UP => dockedSearchButtonDirection(SEARCH_PREV_ID),
-        VK_DOWN => dockedSearchButtonDirection(SEARCH_NEXT_ID),
-        else => null,
-    };
-}
+const searchSelectedDisplayFromRaw = labels.searchSelectedDisplayFromRaw;
 
-fn searchDirectionFromWheelDelta(delta: i16) input.Binding.Action.NavigateSearch {
-    return if (delta > 0)
-        .next
-    else
-        .previous;
-}
+const advanceSearchSelectedRaw = labels.advanceSearchSelectedRaw;
 
-fn searchSelectedRawFromCoreDisplay(selected: ?usize) ?usize {
-    const value = selected orelse return null;
-    if (value == 0) return null;
-    return value - 1;
-}
+const searchBarSearchedStateForTotal = labels.searchBarSearchedStateForTotal;
 
-fn searchSelectedDisplayFromRaw(raw: ?usize, total: ?usize) ?usize {
-    const idx = raw orelse return null;
-    const count = total orelse return null;
-    if (count == 0 or idx >= count) return null;
-    return idx + 1;
-}
+const searchBarSearchedStateForSelected = labels.searchBarSearchedStateForSelected;
 
-fn advanceSearchSelectedRaw(
-    raw: ?usize,
-    total: ?usize,
-    dir: input.Binding.Action.NavigateSearch,
-    wrap: bool,
-) ?usize {
-    const idx = raw orelse return null;
-    const count = total orelse return null;
-    if (count == 0 or idx >= count) return null;
-    const last = count - 1;
-    return switch (dir) {
-        .next => if (idx >= last) if (wrap) 0 else idx else idx + 1,
-        .previous => if (idx == 0) if (wrap) last else 0 else idx - 1,
-    };
-}
+const searchBarDisplayStateChanged = labels.searchBarDisplayStateChanged;
 
-fn searchBarSearchedStateForTotal(total: ?usize) bool {
-    return total != null;
-}
+const profileChromeVisible = labels.profileChromeVisible;
 
-fn searchBarSearchedStateForSelected(selected: ?usize, total: ?usize) bool {
-    return selected != null or total != null;
-}
+const profileChromeNeedsFullTextInvalidation = labels.profileChromeNeedsFullTextInvalidation;
 
-fn searchBarDisplayStateChanged(
-    search_bar: *const win32_search_bar.SearchBar,
-    searched: bool,
-    total: ?usize,
-    selected: ?usize,
-) bool {
-    return search_bar.searched != searched or
-        search_bar.total != total or
-        search_bar.selected != selected;
-}
+const chromeTextNeedsFullInvalidation = labels.chromeTextNeedsFullInvalidation;
 
-fn profileChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return win32_chrome_state.profileVisible(overlay_mode, status_bar_height);
-}
+const inspectorVisibilityChangeNeedsHostRelayout = labels.inspectorVisibilityChangeNeedsHostRelayout;
 
-fn profileChromeNeedsFullTextInvalidation(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return win32_chrome_state.profileNeedsFullTextInvalidation(overlay_mode, status_bar_height);
-}
+const inspectorPanelVisibleForState = labels.inspectorPanelVisibleForState;
 
-fn chromeTextNeedsFullInvalidation(status_bar_height: i32) bool {
-    return win32_chrome_state.textNeedsFullInvalidation(status_bar_height);
-}
+const layoutChildPaintPlan = labels.layoutChildPaintPlan;
 
-fn inspectorVisibilityChangeNeedsHostRelayout(changed: bool) bool {
-    return changed;
-}
+const overlayAcceptButtonVisible = labels.overlayAcceptButtonVisible;
 
-fn inspectorPanelVisibleForState(overlay_mode: HostOverlayMode, active_tab_has_inspector: bool) bool {
-    return overlay_mode == .none and active_tab_has_inspector;
-}
+const overlayEditFrameVisible = labels.overlayEditFrameVisible;
 
-fn layoutChildPaintPlan(chrome_changed: bool, content_changed: bool) LayoutChildPaintPlan {
-    return win32_chrome_state.layoutChildPaintPlan(chrome_changed, content_changed);
-}
+const OverlayFocusSlot = labels.OverlayFocusSlot;
 
-fn overlayAcceptButtonVisible(mode: HostOverlayMode) bool {
-    return mode != .command_palette;
-}
+const nextVisibleOverlayFocusSlot = labels.nextVisibleOverlayFocusSlot;
 
-fn overlayEditFrameVisible(mode: HostOverlayMode) bool {
-    return mode != .confirm;
-}
+const inspectorChromeVisible = labels.inspectorChromeVisible;
 
-const OverlayFocusSlot = enum { edit, accept, cancel };
+const inspectorBannerStateChanged = labels.inspectorBannerStateChanged;
 
-fn nextOverlayFocusSlot(mode: HostOverlayMode, current: OverlayFocusSlot, reverse: bool) OverlayFocusSlot {
-    if (mode == .confirm) return if (current == .accept) .cancel else .accept;
-    if (!overlayAcceptButtonVisible(mode)) return if (current == .edit) .cancel else .edit;
-    return if (reverse)
-        switch (current) {
-            .edit => .cancel,
-            .accept => .edit,
-            .cancel => .accept,
-        }
-    else switch (current) {
-        .edit => .accept,
-        .accept => .cancel,
-        .cancel => .edit,
-    };
-}
+const windowTitleSyncChanged = labels.windowTitleSyncChanged;
 
-fn overlayFocusSlotVisible(
-    slot: OverlayFocusSlot,
-    edit_visible: bool,
-    accept_visible: bool,
-    cancel_visible: bool,
-) bool {
-    return switch (slot) {
-        .edit => edit_visible,
-        .accept => accept_visible,
-        .cancel => cancel_visible,
-    };
-}
+const scrollStatusTextChanged = labels.scrollStatusTextChanged;
 
-fn nextVisibleOverlayFocusSlot(
-    mode: HostOverlayMode,
-    current: OverlayFocusSlot,
-    reverse: bool,
-    edit_visible: bool,
-    accept_visible: bool,
-    cancel_visible: bool,
-) ?OverlayFocusSlot {
-    var candidate = current;
-    for (0..3) |_| {
-        candidate = nextOverlayFocusSlot(mode, candidate, reverse);
-        if (candidate != current and overlayFocusSlotVisible(
-            candidate,
-            edit_visible,
-            accept_visible,
-            cancel_visible,
-        )) return candidate;
-    }
-    return null;
-}
+const bindingActionsToggleCommandPalette = labels.bindingActionsToggleCommandPalette;
 
-fn inspectorChromeVisible(overlay_mode: HostOverlayMode, status_bar_height: i32) bool {
-    return win32_chrome_state.inspectorVisible(overlay_mode, status_bar_height);
-}
+const profileShortcutIndexFromKey = labels.profileShortcutIndexFromKey;
 
-fn inspectorBannerStateChanged(
-    overlay_mode: HostOverlayMode,
-    banner_kind: HostBannerKind,
-    banner_text: ?[:0]const u8,
-    visible: bool,
-) bool {
-    if (overlay_mode != .none) return false;
-    if (visible) return banner_kind != .none or banner_text != null;
-    return banner_kind != .info or !ownedStringEquals(banner_text, host_banner_inspector_inactive);
-}
+const quickSlotShortcutProfileIndex = labels.quickSlotShortcutProfileIndex;
 
-fn windowTitleSyncChanged(current: ?[:0]const u8, next: []const u8) bool {
-    return !ownedStringEquals(current, next);
-}
+const quickSlotPinOrdinalFromKey = labels.quickSlotPinOrdinalFromKey;
 
-const ScrollStatusKey = struct {
-    visible: bool,
-    percent: usize,
-};
+const clearQuickSlotPinsRequested = labels.clearQuickSlotPinsRequested;
 
-fn scrollStatusKey(scrollbar: terminal.Scrollbar) ScrollStatusKey {
-    const visible = scrollbar.total > scrollbar.len and
-        scrollbar.offset + scrollbar.len < scrollbar.total;
-    const percent = if (visible and scrollbar.total > 0)
-        (scrollbar.offset * 100) / scrollbar.total
-    else
-        0;
-    return .{
-        .visible = visible,
-        .percent = percent,
-    };
-}
+const ProfileSelection = labels.ProfileSelection;
 
-fn scrollStatusTextChanged(previous: terminal.Scrollbar, next: terminal.Scrollbar) bool {
-    return !std.meta.eql(scrollStatusKey(previous), scrollStatusKey(next));
-}
+const startsWithIgnoreCase = labels.startsWithIgnoreCase;
 
-fn tabsButtonKeyAction(vk: WPARAM) ?TabsButtonKeyAction {
-    return switch (vk) {
-        VK_LEFT, VK_UP => .previous,
-        VK_RIGHT, VK_DOWN => .next,
-        VK_F2 => .rename,
-        VK_APPS => .overview,
-        else => null,
-    };
-}
+const resolveProfileSelection = labels.resolveProfileSelection;
 
-fn commandButtonKeyAction(vk: WPARAM) ?CommandButtonKeyAction {
-    return switch (vk) {
-        VK_RETURN, VK_SPACE => .toggle,
-        VK_UP => .previous,
-        VK_DOWN => .next,
-        VK_ESCAPE => .dismiss,
-        else => null,
-    };
-}
-
-fn bindingActionsToggleCommandPalette(actions: []const input.Binding.Action) bool {
-    for (actions) |action| switch (action) {
-        .toggle_command_palette => return true,
-        else => {},
-    };
-    return false;
-}
-
-fn commandPaletteDirectionFromWheelDelta(delta: i16) bool {
-    return delta > 0;
-}
-
-fn profileDirectionFromWheelDelta(delta: i16) bool {
-    return delta > 0;
-}
-
-fn profileShortcutIndexFromKey(vk: WPARAM) ?usize {
-    if (vk >= @as(WPARAM, '1') and vk <= @as(WPARAM, '9')) {
-        return @as(usize, @intCast(vk - @as(WPARAM, '1')));
-    }
-    if (vk >= 0x61 and vk <= 0x69) {
-        return @as(usize, @intCast(vk - 0x61));
-    }
-    return null;
-}
-
-fn quickSlotShortcutProfileIndex(
-    profiles_len: usize,
-    selected_index: ?usize,
-    vk: WPARAM,
-    alt_pressed: bool,
-) ?usize {
-    if (!alt_pressed) return null;
-    const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
-    if (slot_ordinal >= 3) return null;
-    return quickSlotProfileIndex(profiles_len, selected_index, slot_ordinal, 3);
-}
-
-fn quickSlotPinOrdinalFromKey(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) ?usize {
-    if (!alt_pressed or !shift_pressed) return null;
-    const slot_ordinal = profileShortcutIndexFromKey(vk) orelse return null;
-    if (slot_ordinal >= 3) return null;
-    return slot_ordinal;
-}
-
-fn clearQuickSlotPinsRequested(vk: WPARAM, alt_pressed: bool, shift_pressed: bool) bool {
-    if (!alt_pressed or !shift_pressed) return false;
-    return vk == VK_0 or vk == VK_NUMPAD0;
-}
-
-fn quickSlotFocusKeyAction(vk: WPARAM) ?QuickSlotFocusKeyAction {
-    return switch (vk) {
-        VK_LEFT, VK_UP => .previous,
-        VK_RIGHT, VK_DOWN => .next,
-        VK_HOME => .first,
-        VK_END => .last,
-        VK_RETURN => .open,
-        else => null,
-    };
-}
-
-fn profilesButtonKeyAction(vk: WPARAM) ?ProfilesButtonKeyAction {
-    return switch (vk) {
-        VK_RETURN => .open,
-        VK_SPACE, VK_APPS => .toggle,
-        VK_LEFT, VK_UP => .previous,
-        VK_RIGHT, VK_DOWN => .next,
-        VK_HOME => .first,
-        VK_END => .last,
-        else => null,
-    };
-}
-
-const ProfileSelection = union(enum) {
-    exact: usize,
-    ambiguous: usize,
-    invalid,
-};
-
-fn startsWithIgnoreCase(haystack: []const u8, prefix: []const u8) bool {
-    if (prefix.len > haystack.len) return false;
-    for (haystack[0..prefix.len], prefix) |a, b| {
-        if (std.ascii.toLower(a) != std.ascii.toLower(b)) return false;
-    }
-    return true;
-}
-
-fn resolveProfileSelection(
-    profiles: []const windows_shell.Profile,
-    input_text: []const u8,
-    fallback_index: usize,
-) ProfileSelection {
-    if (profiles.len == 0) return .invalid;
-    const fallback = @min(fallback_index, profiles.len - 1);
-    if (input_text.len == 0) return .{ .exact = fallback };
-
-    const requested = std.fmt.parseUnsigned(usize, input_text, 10) catch null;
-    if (requested) |value| {
-        if (value == 0 or value > profiles.len) return .invalid;
-        return .{ .exact = value - 1 };
-    }
-
-    var exact_match: ?usize = null;
-    var unique_match: ?usize = null;
-    var match_count: usize = 0;
-    for (profiles, 0..) |profile, index| {
-        if (std.ascii.eqlIgnoreCase(profile.key, input_text) or
-            std.ascii.eqlIgnoreCase(profile.label, input_text))
-        {
-            exact_match = index;
-            break;
-        }
-        if (startsWithIgnoreCase(profile.key, input_text) or
-            startsWithIgnoreCase(profile.label, input_text))
-        {
-            unique_match = index;
-            match_count += 1;
-        }
-    }
-    if (exact_match) |index| return .{ .exact = index };
-    if (match_count == 1) return .{ .exact = unique_match.? };
-    if (match_count > 1) return .{ .ambiguous = match_count };
-    return .invalid;
-}
-
-fn profileIndexByKey(profiles: []const windows_shell.Profile, key: []const u8) ?usize {
-    for (profiles, 0..) |profile, index| {
-        if (std.ascii.eqlIgnoreCase(profile.key, key)) return index;
-    }
-    return null;
-}
+const profileIndexByKey = labels.profileIndexByKey;
 
 fn applyProfileConfigByKey(
     config: *configpkg.Config,
@@ -19104,146 +17254,19 @@ fn applyProfileConfigByKey(
     try applyProfileSurfaceConfig(config, &profiles[index]);
 }
 
-fn preferredProfileIndex(
-    profiles: []const windows_shell.Profile,
-    selected_key: ?[]const u8,
-    app_key: ?[]const u8,
-    hint: ?[]const u8,
-    fallback_index: usize,
-) ?usize {
-    if (profiles.len == 0) return null;
+const preferredProfileIndex = labels.preferredProfileIndex;
 
-    const preferred_key = if (selected_key) |key|
-        key
-    else if (app_key) |key|
-        key
-    else
-        null;
-    if (preferred_key) |key| {
-        for (profiles, 0..) |profile, index| {
-            if (std.ascii.eqlIgnoreCase(profile.key, key)) return index;
-        }
-    }
+const formatProgressStatus = labels.formatProgressStatus;
 
-    if (hint) |value| {
-        return switch (resolveProfileSelection(profiles, value, fallback_index)) {
-            .exact => |index| index,
-            .ambiguous, .invalid => null,
-        };
-    }
+const resolveWindowBaseTitle = labels.resolveWindowBaseTitle;
 
-    return null;
-}
+const normalizedBackgroundOpacity = labels.normalizedBackgroundOpacity;
 
-fn formatProgressStatus(
-    alloc: Allocator,
-    value: win32_taskbar_progress.ProgressReport,
-) !?[]u8 {
-    const progress = win32_taskbar_progress.clampPercent(value.progress);
-    return switch (value.state) {
-        .remove => null,
-        .set => if (progress) |value_|
-            try std.fmt.allocPrint(alloc, "progress:{d}%", .{value_})
-        else
-            try alloc.dupe(u8, "progress"),
-        .@"error" => if (progress) |value_|
-            try std.fmt.allocPrint(alloc, "progress error:{d}%", .{value_})
-        else
-            try alloc.dupe(u8, "progress error"),
-        .indeterminate => try alloc.dupe(u8, "progress:busy"),
-        .pause => if (progress) |value_|
-            try std.fmt.allocPrint(alloc, "progress paused:{d}%", .{value_})
-        else
-            try alloc.dupe(u8, "progress paused"),
-    };
-}
+const effectiveBackgroundOpacity = labels.effectiveBackgroundOpacity;
 
-fn buildWindowTitle(
-    alloc: Allocator,
-    base_title: ?[]const u8,
-    status: SurfaceStatus,
-) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(alloc);
+const alphaByteForOpacity = labels.alphaByteForOpacity;
 
-    try buf.appendSlice(alloc, base_title orelse "noctty");
-
-    const appendStatus = struct {
-        fn call(
-            list: *std.ArrayListUnmanaged(u8),
-            alloc_: Allocator,
-            comptime fmt: []const u8,
-            args: anytype,
-        ) !void {
-            try list.appendSlice(alloc_, " | ");
-            try list.writer(alloc_).print(fmt, args);
-        }
-    }.call;
-
-    if (status.readonly) try appendStatus(&buf, alloc, "readonly", .{});
-    if (status.secure_input) try appendStatus(&buf, alloc, "sensitive", .{});
-    if (status.key_sequence_active) try appendStatus(&buf, alloc, "keys", .{});
-    if (status.key_table_name) |name| try appendStatus(&buf, alloc, "table:{s}", .{name});
-    if (status.pwd) |pwd| try appendStatus(&buf, alloc, "cwd:{s}", .{pwd});
-    if (status.search.active) {
-        if (status.search.needle) |needle| {
-            if (status.search.selected) |selected| {
-                if (status.search.total) |total| {
-                    try appendStatus(&buf, alloc, "find:{s} ({d}/{d})", .{ needle, selected, total });
-                } else {
-                    try appendStatus(&buf, alloc, "find:{s} ({d})", .{ needle, selected });
-                }
-            } else if (status.search.total) |total| {
-                try appendStatus(&buf, alloc, "find:{s} ({d})", .{ needle, total });
-            } else {
-                try appendStatus(&buf, alloc, "find:{s}", .{needle});
-            }
-        } else {
-            try appendStatus(&buf, alloc, "find", .{});
-        }
-    }
-    if (status.progress) |progress| try appendStatus(&buf, alloc, "{s}", .{progress});
-
-    return buf.toOwnedSlice(alloc);
-}
-
-fn resolveWindowBaseTitle(
-    terminal_title: ?[:0]const u8,
-    surface_override: ?[:0]const u8,
-    tab_override: ?[:0]const u8,
-) ?[:0]const u8 {
-    return tab_override orelse surface_override orelse terminal_title;
-}
-
-fn normalizedBackgroundOpacity(value: f64) f64 {
-    return std.math.clamp(value, 0.0, 1.0);
-}
-
-fn effectiveBackgroundOpacity(configured: f64, force_opaque: bool) f64 {
-    return if (force_opaque) 1.0 else configured;
-}
-
-fn alphaByteForOpacity(value: f64) u8 {
-    return @intFromFloat(@round(normalizedBackgroundOpacity(value) * 255.0));
-}
-
-fn hiddenScrollbarAlphaByte() u8 {
-    // Keep the layered child hit-testable while visually hidden.
-    // Windows won't deliver real hover input to an alpha-0 layered
-    // child, so a true zero here strands the dynamic scrollbar in the
-    // hidden state until some non-mouse activity wakes it up.
-    return 1;
-}
-
-const ResizeSplitFallbackDelta = struct {
-    width: i32 = 0,
-    height: i32 = 0,
-};
-
-const SurfaceOrderEntry = struct {
-    host_id: u32,
-    host_active: bool,
-};
+const hiddenScrollbarAlphaByte = labels.hiddenScrollbarAlphaByte;
 
 fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) bool {
     if (a.zoomed != b.zoomed) return false;
@@ -19270,15 +17293,7 @@ fn splitTreeEquivalent(a: *const SplitTreeSurface, b: *const SplitTreeSurface) b
     return true;
 }
 
-fn resizeSplitFallbackDelta(value: apprt.action.ResizeSplit) ResizeSplitFallbackDelta {
-    const amount: i32 = @intCast(value.amount);
-    return switch (value.direction) {
-        .left => .{ .width = -amount },
-        .right => .{ .width = amount },
-        .up => .{ .height = -amount },
-        .down => .{ .height = amount },
-    };
-}
+const resizeSplitFallbackDelta = labels.resizeSplitFallbackDelta;
 
 fn splitDirectionFromAction(value: apprt.action.SplitDirection) SplitTreeSurface.Split.Direction {
     return switch (value) {
@@ -19289,176 +17304,24 @@ fn splitDirectionFromAction(value: apprt.action.SplitDirection) SplitTreeSurface
     };
 }
 
-fn nextInspectorVisible(current: bool, mode: apprt.action.Inspector) bool {
-    return switch (mode) {
-        .toggle => !current,
-        .show => true,
-        .hide => false,
-    };
-}
+const nextTabInspectorVisible = labels.nextTabInspectorVisible;
 
-fn nextTabInspectorVisible(active_tab_has_inspector: bool, mode: apprt.action.Inspector) bool {
-    return nextInspectorVisible(active_tab_has_inspector, mode);
-}
+const buildHostAwareBaseTitle = labels.buildHostAwareBaseTitle;
 
-fn primarySurfaceIndex(entries: []const SurfaceOrderEntry) ?usize {
-    if (entries.len == 0) return null;
-    const first_host_id = entries[0].host_id;
-    for (entries, 0..) |entry, i| {
-        if (entry.host_id == first_host_id and entry.host_active) return i;
-    }
-    return 0;
-}
+const hostTabLabelMaxLen = labels.hostTabLabelMaxLen;
 
-fn buildHostAwareBaseTitle(
-    alloc: Allocator,
-    base_title: ?[]const u8,
-    host: HostTabStatus,
-) ![]u8 {
-    if (host.total <= 1) return try alloc.dupe(u8, base_title orelse "noctty");
-    return try std.fmt.allocPrint(
-        alloc,
-        "[{d}/{d}] {s}",
-        .{ host.index + 1, host.total, base_title orelse "noctty" },
-    );
-}
+const shouldShowPaneCount = labels.shouldShowPaneCount;
 
-fn compactHostLabel(
-    alloc: Allocator,
-    value: []const u8,
-    max_len: usize,
-) ![]u8 {
-    if (value.len <= max_len) return try alloc.dupe(u8, value);
-    if (max_len <= 3) return try alloc.dupe(u8, "...");
-    return try std.fmt.allocPrint(alloc, "{s}...", .{value[0 .. max_len - 3]});
-}
+const visibleTabRange = labels.visibleTabRange;
 
-fn compactHostLabelLen(value: []const u8, max_len: usize) usize {
-    if (value.len <= max_len) return value.len;
-    return if (max_len <= 3) 3 else max_len;
-}
+const buildTabButtonLabel = labels.buildTabButtonLabel;
 
-fn hostTabLabelMaxLen(button_width: i32) usize {
-    const estimated = @as(usize, @intCast(@max(6, @divTrunc(button_width - 26, 8))));
-    return std.math.clamp(estimated, @as(usize, 6), @as(usize, host_tab_label_max_len));
-}
+const buildSearchOverlayLabel = labels.buildSearchOverlayLabel;
 
-fn shouldShowPaneCount(button_width: i32, pane_count: usize) bool {
-    return pane_count > 1 and button_width >= 140;
-}
+const buildSearchBarResultsText = labels.buildSearchBarResultsText;
 
-fn visibleTabRange(tab_count: usize, active_index: usize, tab_area_width: i32) VisibleTabRange {
-    if (tab_count == 0) return .{ .start = 0, .count = 0 };
-    const max_visible = std.math.clamp(
-        @as(usize, @intCast(@max(1, @divTrunc(tab_area_width, host_tab_min_button_width)))),
-        @as(usize, 1),
-        tab_count,
-    );
-    if (tab_count <= max_visible) return .{ .start = 0, .count = tab_count };
-
-    const clamped_active = @min(active_index, tab_count - 1);
-    var start = clamped_active;
-    if (max_visible > 1) start = clamped_active -| @divTrunc(max_visible - 1, 2);
-    if (start + max_visible > tab_count) start = tab_count - max_visible;
-    return .{ .start = start, .count = max_visible };
-}
-
-fn buildTabButtonLabel(
-    alloc: Allocator,
-    base_title: ?[]const u8,
-    index: usize,
-    active: bool,
-    pane_count: usize,
-    max_len: usize,
-    show_pane_count: bool,
-) ![]u8 {
-    const compact = try compactHostLabel(alloc, base_title orelse "noctty", max_len);
-    defer alloc.free(compact);
-    if (show_pane_count and pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "{s}{d}: {s} ({d})",
-            .{
-                if (active) "* " else "",
-                index + 1,
-                compact,
-                pane_count,
-            },
-        );
-    }
-
-    return try std.fmt.allocPrint(
-        alloc,
-        "{s}{d}: {s}",
-        .{
-            if (active) "* " else "",
-            index + 1,
-            compact,
-        },
-    );
-}
-
-fn buildTabOverviewBannerText(
-    alloc: Allocator,
-    entries: []const TabOverviewEntry,
-) ![]u8 {
-    if (entries.len == 0) return try alloc.dupe(u8, "Tabs: none");
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(alloc);
-    try buf.appendSlice(alloc, "Tabs: ");
-    for (entries, 0..) |entry, i| {
-        if (i > 0) try buf.appendSlice(alloc, " | ");
-        const compact = try compactHostLabel(alloc, entry.title orelse "noctty", 18);
-        defer alloc.free(compact);
-        try buf.writer(alloc).print("{s}{d}:{s}", .{
-            if (entry.active) "*" else "",
-            i + 1,
-            compact,
-        });
-        if (entry.pane_count > 1) {
-            try buf.writer(alloc).print(" ({d})", .{entry.pane_count});
-        }
-    }
-    return try buf.toOwnedSlice(alloc);
-}
-
-fn buildSearchOverlayLabel(
-    alloc: Allocator,
-    total: ?usize,
-    selected: ?usize,
-) ![]u8 {
-    if (selected) |current| {
-        if (total) |count| return try std.fmt.allocPrint(alloc, "Find {d}/{d}", .{ current, count });
-    }
-    if (total) |count| return try std.fmt.allocPrint(alloc, "Find {d}", .{count});
-    return try alloc.dupe(u8, "Find");
-}
-
-fn buildSearchBarResultsText(
-    alloc: Allocator,
-    bar: *const win32_search_bar.SearchBar,
-) ![]u8 {
-    if (bar.query.len == 0) return try alloc.dupe(u8, search_results_idle);
-    if (!bar.searched or bar.total == null) return try alloc.dupe(u8, search_results_pending);
-
-    const total = bar.total.?;
-    if (total == 0) return try alloc.dupe(u8, search_results_none);
-    if (bar.selected) |selected| return try std.fmt.allocPrint(alloc, "{d}/{d}", .{ selected, total });
-    return try std.fmt.allocPrint(alloc, "{d}", .{total});
-}
-
-const SearchBarResultsVisual = struct {
-    bg: u32,
-    border: u32,
-    fg: u32,
-};
-
-const SearchBarToolbarVisual = struct {
-    bg: u32,
-    border: u32,
-    separator: u32,
-};
+const SearchBarResultsVisual = labels.SearchBarResultsVisual;
+const SearchBarToolbarVisual = labels.SearchBarToolbarVisual;
 
 const SearchBarChromeLayout = struct {
     pad_x: i32,
@@ -19474,14 +17337,7 @@ const SearchBarChromeLayout = struct {
     control_h: i32,
 };
 
-const SearchBarButtonRole = enum {
-    prev,
-    next,
-    regex,
-    case_sensitive,
-    whole_word,
-    close,
-};
+const SearchBarButtonRole = labels.SearchBarButtonRole;
 
 const search_bar_button_roles = [_]SearchBarButtonRole{
     .prev,
@@ -19492,49 +17348,15 @@ const search_bar_button_roles = [_]SearchBarButtonRole{
     .close,
 };
 
-fn searchBarButtonCommandId(role: SearchBarButtonRole) usize {
-    return switch (role) {
-        .prev => SEARCH_PREV_ID,
-        .next => SEARCH_NEXT_ID,
-        .regex => SEARCH_REGEX_ID,
-        .case_sensitive => SEARCH_CASE_ID,
-        .whole_word => SEARCH_WORD_ID,
-        .close => SEARCH_CLOSE_ID,
-    };
-}
+const searchBarButtonCommandId = labels.searchBarButtonCommandId;
 
-fn searchBarButtonLabel(role: SearchBarButtonRole) LPCWSTR {
-    return switch (role) {
-        .prev => search_prev_label,
-        .next => search_next_label,
-        .regex => search_regex_label,
-        .case_sensitive => search_case_label,
-        .whole_word => search_word_label,
-        .close => search_close_label,
-    };
-}
+const searchBarButtonLabel = labels.searchBarButtonLabel;
 
-fn showSearchBarResults(bar: *const win32_search_bar.SearchBar) bool {
-    return bar.query.len > 0;
-}
+const showSearchBarResults = labels.showSearchBarResults;
+const searchBarNeedsRelayoutForQueryChange = labels.searchBarNeedsRelayoutForQueryChange;
+const searchBarShouldInvalidateCoreSearchOnEdit = labels.searchBarShouldInvalidateCoreSearchOnEdit;
 
-/// Docked-search geometry only changes when the fixed-width results slot
-/// appears or disappears. Query text updates within the non-empty state
-/// repaint child HWNDs but do not move controls.
-fn searchBarNeedsRelayoutForQueryChange(previous_query_len: usize, next_query_len: usize) bool {
-    return (previous_query_len == 0) != (next_query_len == 0);
-}
-
-/// Once a query has reached core search, any edit must invalidate it until the
-/// debounced replacement query runs.
-fn searchBarShouldInvalidateCoreSearchOnEdit(previous_query_len: usize, next_query_len: usize) bool {
-    _ = next_query_len;
-    return previous_query_len > 0;
-}
-
-fn shouldAcceptCoreSearchUpdates(bar: *const win32_search_bar.SearchBar) bool {
-    return bar.query.len == 0 or bar.searched;
-}
+const shouldAcceptCoreSearchUpdates = labels.shouldAcceptCoreSearchUpdates;
 
 fn searchBarChromeLayout(host: *const Host, frame_rect: RECT) SearchBarChromeLayout {
     _ = frame_rect;
@@ -19553,38 +17375,13 @@ fn searchBarChromeLayout(host: *const Host, frame_rect: RECT) SearchBarChromeLay
     };
 }
 
-fn searchBarButtonShowsLabel(role: SearchBarButtonRole, button_width: i32) bool {
-    _ = role;
-    _ = button_width;
-    return false;
-}
+const searchBarButtonShowsLabel = labels.searchBarButtonShowsLabel;
 
-fn rectInset(rect: RECT, inset_x: i32, inset_y: i32) RECT {
-    return .{
-        .left = rect.left + inset_x,
-        .top = rect.top + inset_y,
-        .right = rect.right - inset_x,
-        .bottom = rect.bottom - inset_y,
-    };
-}
+const rectInset = labels.rectInset;
 
-fn rectUnion(a: RECT, b: RECT) RECT {
-    return .{
-        .left = @min(a.left, b.left),
-        .top = @min(a.top, b.top),
-        .right = @max(a.right, b.right),
-        .bottom = @max(a.bottom, b.bottom),
-    };
-}
+const rectUnion = labels.rectUnion;
 
-fn rectOffset(rect: RECT, dx: i32, dy: i32) RECT {
-    return .{
-        .left = rect.left + dx,
-        .top = rect.top + dy,
-        .right = rect.right + dx,
-        .bottom = rect.bottom + dy,
-    };
-}
+const rectOffset = labels.rectOffset;
 
 fn searchBarGroupRect(placements: []const ChildPlacement, expand_x: i32, expand_y: i32) ?RECT {
     var out: ?RECT = null;
@@ -19601,87 +17398,17 @@ fn searchBarGroupRect(placements: []const ChildPlacement, expand_x: i32, expand_
     return out;
 }
 
-fn searchBarResultsVisual(
-    theme: *const ThemeColors,
-    bar: *const win32_search_bar.SearchBar,
-) SearchBarResultsVisual {
-    const accent = overlayAccentColor(.search, theme.is_dark);
-    if (!bar.searched or bar.total == null) {
-        return .{
-            .bg = if (theme.is_dark)
-                adjustColor(theme.overlay_bg, 8, 10, 10)
-            else
-                adjustColor(theme.overlay_bg, -6, -4, -2),
-            .border = accent,
-            .fg = theme.overlay_label_fg,
-        };
-    }
+const searchBarResultsVisual = labels.searchBarResultsVisual;
 
-    if (bar.total.? == 0) {
-        return .{
-            .bg = if (theme.is_dark)
-                rgb(48, 28, 30)
-            else
-                rgb(252, 236, 236),
-            .border = theme.error_fg,
-            .fg = theme.error_fg,
-        };
-    }
+const searchBarToolbarVisual = labels.searchBarToolbarVisual;
 
-    return .{
-        .bg = if (theme.is_dark)
-            adjustColor(theme.edit_frame_bg, 10, 14, 10)
-        else
-            adjustColor(theme.edit_frame_bg, -6, -2, -4),
-        .border = accent,
-        .fg = theme.overlay_label_fg,
-    };
-}
+const searchBarFrameBg = labels.searchBarFrameBg;
 
-fn searchBarToolbarVisual(theme: *const ThemeColors) SearchBarToolbarVisual {
-    return .{
-        .bg = if (theme.is_dark)
-            adjustColor(theme.edit_frame_bg, 6, 8, 10)
-        else
-            adjustColor(theme.edit_frame_bg, -4, -2, -2),
-        .border = if (theme.is_dark)
-            adjustColor(theme.overlay_border, 18, 18, 20)
-        else
-            adjustColor(theme.overlay_border, -18, -18, -18),
-        .separator = if (theme.is_dark)
-            adjustColor(theme.overlay_border, 30, 30, 34)
-        else
-            adjustColor(theme.overlay_border, -26, -26, -26),
-    };
-}
+const searchBarFrameBorder = labels.searchBarFrameBorder;
 
-fn searchBarFrameBg(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_bg, 3, 3, 5)
-    else
-        adjustColor(theme.overlay_bg, -2, -2, -1);
-}
+const searchBarBottomLine = labels.searchBarBottomLine;
 
-fn searchBarFrameBorder(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_border, 10, 10, 12)
-    else
-        adjustColor(theme.overlay_border, -14, -14, -14);
-}
-
-fn searchBarBottomLine(theme: *const ThemeColors) u32 {
-    return if (theme.is_dark)
-        adjustColor(theme.overlay_border, -10, -10, -8)
-    else
-        adjustColor(theme.overlay_border, 10, 10, 10);
-}
-
-fn searchBarButtonParentBg(theme: *const ThemeColors, role: SearchBarButtonRole) u32 {
-    return switch (role) {
-        .close => theme.overlay_bg,
-        else => searchBarToolbarVisual(theme).bg,
-    };
-}
+const searchBarButtonParentBg = labels.searchBarButtonParentBg;
 
 fn searchBarSeparatorX(left: ChildPlacement, right: ChildPlacement) ?i32 {
     if (!left.rect_known or !left.visible or !right.rect_known or !right.visible) return null;
@@ -19690,597 +17417,49 @@ fn searchBarSeparatorX(left: ChildPlacement, right: ChildPlacement) ?i32 {
     return left.rect.right + @divTrunc(gap, 2);
 }
 
-fn buildTabOverviewOverlayLabel(
-    alloc: Allocator,
-    current_index: usize,
-    total: usize,
-) ![]u8 {
-    if (total <= 1) return try alloc.dupe(u8, "Tab");
-    return try std.fmt.allocPrint(alloc, "Tab {d}/{d}", .{ current_index + 1, total });
-}
+const buildTabOverviewOverlayLabel = labels.buildTabOverviewOverlayLabel;
 
-fn buildOverlayPaintLabelText(
-    alloc: Allocator,
-    mode: HostOverlayMode,
-    input_text: []const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
-    host_status: HostTabStatus,
-    palette_presentation: PalettePresentation,
-) ![]u8 {
-    return switch (mode) {
-        .none => try alloc.dupe(u8, ""),
-        .surface_title => try alloc.dupe(u8, "Window title"),
-        .tab_title => try alloc.dupe(u8, "Tab title"),
-        .command_palette => try buildCommandPaletteOverlayLabel(
-            alloc,
-            input_text,
-            palette_presentation,
-        ),
-        .profile => try alloc.dupe(u8, "Profile"),
-        .search => try buildSearchOverlayLabel(alloc, search_total, search_selected),
-        .tab_overview => try buildTabOverviewOverlayLabel(alloc, host_status.index, host_status.total),
-        // Confirm overlays source their prompt title from the payload
-        // at paint time; this default only appears when the payload
-        // has already been dropped (mid-teardown).
-        .confirm => try alloc.dupe(u8, "Confirm"),
-    };
-}
+const buildOverlayPaintLabelText = labels.buildOverlayPaintLabelText;
 
-fn buildOverlayFeedbackText(
-    alloc: Allocator,
-    banner_kind: HostBannerKind,
-    banner_text: ?[]const u8,
-    mode: HostOverlayMode,
-    input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
-    host_status: HostTabStatus,
-    pane_count: usize,
-    palette: PaletteSnapshot,
-    mru: []const []const u8,
-    palette_presentation: PalettePresentation,
-) ![]u8 {
-    if (banner_text) |value| {
-        return switch (banner_kind) {
-            .err => try std.fmt.allocPrint(alloc, "Error: {s}", .{value}),
-            .info => try std.fmt.allocPrint(alloc, "Info: {s}", .{value}),
-            .none => try alloc.dupe(u8, value),
-        };
-    }
-    if (mode == .command_palette) {
-        return try buildCommandPaletteFeedbackText(
-            alloc,
-            input_text,
-            mru,
-            palette_presentation,
-        );
-    }
-    return try buildOverlayHintText(
-        alloc,
-        mode,
-        input_text,
-        active_search_needle,
-        search_total,
-        search_selected,
-        host_status,
-        pane_count,
-        palette,
-        mru,
-    );
-}
+const buildOverlayFeedbackText = labels.buildOverlayFeedbackText;
 
-fn buildOverlayAcceptLabel(
-    alloc: Allocator,
-    mode: HostOverlayMode,
-    input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
-    palette_presentation: PalettePresentation,
-) ![]u8 {
-    return switch (mode) {
-        .none => try alloc.dupe(u8, "OK"),
-        .command_palette => blk: {
-            if (input_text.len == 0) break :blk try alloc.dupe(u8, "Close");
-            if (palette_presentation.match_count > 0 and !palette_presentation.available) {
-                break :blk try alloc.dupe(u8, "Resize");
-            }
-            if (palette_presentation.match_count > 0) break :blk try alloc.dupe(u8, "Activate");
-            break :blk try alloc.dupe(u8, "Check");
-        },
-        .profile => try alloc.dupe(u8, "Open"),
-        .search => blk: {
-            if (input_text.len == 0) break :blk try alloc.dupe(u8, "Close");
-            if (active_search_needle) |needle| {
-                if (std.mem.eql(u8, needle, input_text) and search_selected != null and search_total != null) {
-                    break :blk try alloc.dupe(u8, "Next");
-                }
-            }
-            if (search_total != null) break :blk try alloc.dupe(u8, "Find");
-            break :blk try alloc.dupe(u8, "Find");
-        },
-        .surface_title, .tab_title => if (input_text.len == 0)
-            try alloc.dupe(u8, "Close")
-        else
-            try alloc.dupe(u8, "Apply"),
-        .tab_overview => if (input_text.len == 0)
-            try alloc.dupe(u8, "Close")
-        else
-            try alloc.dupe(u8, "Go"),
-        // Confirm overlays source accept/cancel labels from the
-        // payload. This default is never visible because
-        // `syncOverlayButtons` has a special-case branch for the
-        // `.confirm` mode that reads the payload directly; the
-        // switch just needs coverage to compile.
-        .confirm => try alloc.dupe(u8, "OK"),
-    };
-}
+const buildOverlayAcceptLabel = labels.buildOverlayAcceptLabel;
 
-fn buildOverlayHintText(
-    alloc: Allocator,
-    mode: HostOverlayMode,
-    input_text: []const u8,
-    active_search_needle: ?[]const u8,
-    search_total: ?usize,
-    search_selected: ?usize,
-    host_status: HostTabStatus,
-    pane_count: usize,
-    palette: PaletteSnapshot,
-    mru: []const []const u8,
-) ![]u8 {
-    return switch (mode) {
-        .none => try alloc.dupe(u8, ""),
-        .command_palette => blk: {
-            if (try commandPaletteBannerText(alloc, palette, input_text, mru)) |text| break :blk text;
-            break :blk try alloc.dupe(u8, "No matching action. Try: new_tab, start_search, reload_config");
-        },
-        .profile => try alloc.dupe(u8, "Choose a profile by number or name. Enter opens a new tab."),
-        .search => blk: {
-            if (input_text.len == 0) break :blk try alloc.dupe(u8, "Type to search live. Enter repeats the current match. Escape closes.");
-            if (search_selected) |selected| {
-                if (search_total) |total| {
-                    if (active_search_needle) |needle| {
-                        if (std.mem.eql(u8, needle, input_text)) {
-                            break :blk try std.fmt.allocPrint(
-                                alloc,
-                                "Live matches {d}/{d}. Enter jumps to the next match. Escape closes.",
-                                .{ selected, total },
-                            );
-                        }
-                    }
-                    break :blk try std.fmt.allocPrint(
-                        alloc,
-                        "Live matches {d}/{d}. Enter keeps this needle active.",
-                        .{ selected, total },
-                    );
-                }
-            }
-            if (search_total) |total| {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Live matches {d}. Enter keeps this needle active.",
-                    .{total},
-                );
-            }
-            break :blk try alloc.dupe(u8, "No matches yet. Keep typing to search live.");
-        },
-        .surface_title => try alloc.dupe(u8, "Apply a window title override for this host. Submit empty text to clear it."),
-        .tab_title => blk: {
-            if (pane_count > 1) {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Rename tab {d}/{d}. This tab currently has {d} panes. Submit empty text to clear the override.",
-                    .{ host_status.index + 1, host_status.total, pane_count },
-                );
-            }
-            break :blk try std.fmt.allocPrint(
-                alloc,
-                "Rename tab {d}/{d}. Submit empty text to clear the override.",
-                .{ host_status.index + 1, host_status.total },
-            );
-        },
-        .tab_overview => blk: {
-            if (host_status.total <= 1) break :blk try alloc.dupe(u8, "Only one tab is open in this window.");
-            if (input_text.len == 0) {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Jump directly to a tab number. Current tab: {d}/{d}.",
-                    .{ host_status.index + 1, host_status.total },
-                );
-            }
-            const requested = std.fmt.parseUnsigned(usize, input_text, 10) catch {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Enter a tab number from 1 to {d}. Current tab: {d}/{d}.",
-                    .{ host_status.total, host_status.index + 1, host_status.total },
-                );
-            };
-            if (requested == 0 or requested > host_status.total) {
-                break :blk try std.fmt.allocPrint(
-                    alloc,
-                    "Tab {d} is out of range. Valid range: 1 to {d}.",
-                    .{ requested, host_status.total },
-                );
-            }
-            break :blk try std.fmt.allocPrint(
-                alloc,
-                "Jump to tab {d} of {d}.",
-                .{ requested, host_status.total },
-            );
-        },
-        // Confirm overlays source their hint text from the payload
-        // body at paint time (the hint HWND is re-used as the body
-        // line). This helper produces a default so the promptTitle
-        // call doesn't need a special case; the real text lives on
-        // the payload.
-        .confirm => try alloc.dupe(u8, ""),
-    };
-}
+const buildOverlayHintText = labels.buildOverlayHintText;
 
-fn overlayCancelLabel(mode: HostOverlayMode) []const u8 {
-    return switch (mode) {
-        .none => "Cancel",
-        .command_palette, .profile, .search, .tab_overview => "Close",
-        .surface_title, .tab_title => "Cancel",
-        // Confirm overlays override this via the payload.
-        .confirm => "Cancel",
-    };
-}
+const overlayCancelLabel = labels.overlayCancelLabel;
 
-fn buildHostBannerText(
-    alloc: Allocator,
-    banner_kind: HostBannerKind,
-    value: []const u8,
-) ![]u8 {
-    return switch (banner_kind) {
-        .none => try alloc.dupe(u8, value),
-        .info => try std.fmt.allocPrint(alloc, "Info: {s}", .{value}),
-        .err => try std.fmt.allocPrint(alloc, "Error: {s}", .{value}),
-    };
-}
+const buildHostBannerText = labels.buildHostBannerText;
 
-fn overlayPaintCacheDirty(
-    overlay_text_dirty: bool,
-    overlay_mode: HostOverlayMode,
-    cached_label_w: ?[:0]const u16,
-    cached_feedback_w: ?[:0]const u16,
-    cached_badge_w: ?[:0]const u16,
-) bool {
-    return win32_chrome_state.overlayPaintCacheDirty(
-        overlay_text_dirty,
-        overlay_mode,
-        cached_label_w != null,
-        cached_feedback_w != null,
-        cached_badge_w != null,
-    );
-}
+const overlayPaintCacheDirty = labels.overlayPaintCacheDirty;
 
-fn buildInspectorBannerText(
-    alloc: Allocator,
-    host: HostTabStatus,
-    pane_count: usize,
-    zoomed: bool,
-) ![]u8 {
-    if (zoomed and pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector active | tab {d}/{d} | panes {d} | zoomed | toggle Inspect to return",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    if (pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector active | tab {d}/{d} | panes {d} | toggle Inspect to return",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    return try std.fmt.allocPrint(
-        alloc,
-        "Inspector active | tab {d}/{d} | toggle Inspect to return",
-        .{ host.index + 1, host.total },
-    );
-}
+const buildInspectorBannerText = labels.buildInspectorBannerText;
 
-fn buildInspectorPanelTitleText(
-    alloc: Allocator,
-    host: HostTabStatus,
-    pane_count: usize,
-    zoomed: bool,
-) ![]u8 {
-    if (zoomed and pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector  •  tab {d}/{d}  •  {d} panes  •  zoomed",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    if (pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector  •  tab {d}/{d}  •  {d} panes",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    if (zoomed) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector  •  tab {d}/{d}  •  zoomed",
-            .{ host.index + 1, host.total },
-        );
-    }
-    return try std.fmt.allocPrint(
-        alloc,
-        "Inspector  •  tab {d}/{d}",
-        .{ host.index + 1, host.total },
-    );
-}
+const buildInspectorPanelTitleText = labels.buildInspectorPanelTitleText;
 
-fn buildInspectorPanelHintText(
-    alloc: Allocator,
-    pane_count: usize,
-    zoomed: bool,
-) ![]u8 {
-    if (zoomed) {
-        return try alloc.dupe(
-            u8,
-            "Core inspector is live for the zoomed pane. Toggle Inspect to return to terminal-only view.",
-        );
-    }
-    if (pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Core inspector is live across {d} panes in this tab. Toggle Inspect to return to terminal-only view.",
-            .{pane_count},
-        );
-    }
-    return try alloc.dupe(u8, "Core inspector is live for this tab. Toggle Inspect to return to terminal-only view.");
-}
+const buildInspectorPanelHintText = labels.buildInspectorPanelHintText;
 
-fn buildInspectorDetailText(
-    alloc: Allocator,
-    host: HostTabStatus,
-    pane_count: usize,
-    zoomed: bool,
-) ![]u8 {
-    if (zoomed and pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector is attached to tab {d}/{d}. This tab has {d} panes and split zoom is active.",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    if (pane_count > 1) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "Inspector is attached to tab {d}/{d}. This tab currently has {d} panes.",
-            .{ host.index + 1, host.total, pane_count },
-        );
-    }
-    return try std.fmt.allocPrint(
-        alloc,
-        "Inspector is attached to tab {d}/{d}. Toggle Inspect to return to the normal terminal view.",
-        .{ host.index + 1, host.total },
-    );
-}
+const buildInspectorDetailText = labels.buildInspectorDetailText;
 
-fn buildSearchDetailText(
-    alloc: Allocator,
-    needle: ?[]const u8,
-    total: ?usize,
-    selected: ?usize,
-) ![]u8 {
-    if (needle) |value| {
-        if (selected) |current| {
-            if (total) |count| {
-                return try std.fmt.allocPrint(
-                    alloc,
-                    "Live search for \"{s}\" is active. Match {d} of {d}. Enter moves to the next match.",
-                    .{ value, current, count },
-                );
-            }
-        }
-        if (total) |count| {
-            return try std.fmt.allocPrint(
-                alloc,
-                "Live search for \"{s}\" is active. {d} matches currently visible.",
-                .{ value, count },
-            );
-        }
-        return try std.fmt.allocPrint(
-            alloc,
-            "Live search for \"{s}\" is active. Keep typing to refine the current needle.",
-            .{value},
-        );
-    }
-    return try alloc.dupe(u8, "Live search is active. Keep typing to refine the current needle.");
-}
+const buildSearchDetailText = labels.buildSearchDetailText;
 
-fn buildCommandButtonLabel(
-    alloc: Allocator,
-    active: bool,
-    input_text: ?[]const u8,
-) ![]u8 {
-    if (active) {
-        if (input_text) |value| {
-            if (value.len > 0) {
-                const compact = try compactHostLabel(alloc, value, 9);
-                defer alloc.free(compact);
-                return try std.fmt.allocPrint(alloc, "Cmd {s}", .{compact});
-            }
-        }
-        return try alloc.dupe(u8, "[Cmd]");
-    }
-    return try alloc.dupe(u8, "Cmd");
-}
+const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
 
-fn buildProfilesButtonLabel(
-    alloc: Allocator,
-    active: bool,
-    profiles_opt: ?[]const windows_shell.Profile,
-    selected_index: ?usize,
-    pinned_slot_ordinal: ?usize,
-) ![]u8 {
-    _ = pinned_slot_ordinal;
-    const profiles = profiles_opt orelse return try alloc.dupe(u8, if (active) "Pick shell" else "Launch");
-    if (profiles.len == 0) return try alloc.dupe(u8, if (active) "Pick shell" else "Launch");
-    const index = selected_index orelse 0;
-    const profile = profiles[@min(index, profiles.len - 1)];
-    const compact = try compactHostLabel(alloc, profile.label, 8);
-    defer alloc.free(compact);
-    if (active) return try std.fmt.allocPrint(alloc, "Pick {s}", .{compact});
-    return try std.fmt.allocPrint(alloc, "Launch {s}", .{compact});
-}
+const buildProfileStatusBadgeText = labels.buildProfileStatusBadgeText;
 
-fn launchTargetButtonLabel(
-    alloc: Allocator,
-    target: ProfileOpenTarget,
-    selected_index: ?usize,
-    pinned_slot_ordinal: ?usize,
-) ![]u8 {
-    const base = switch (target) {
-        .tab => "Tab",
-        .window => "Win",
-        .split => "Pane",
-    };
-    if (selected_index) |index| {
-        if (index < 9) {
-            if (pinned_slot_ordinal != null and pinned_slot_ordinal.? == index) {
-                return try std.fmt.allocPrint(alloc, "*{d} {s}", .{ index + 1, base });
-            }
-            return try std.fmt.allocPrint(alloc, "{d} {s}", .{ index + 1, base });
-        }
-    }
-    return try alloc.dupe(u8, base);
-}
-
-fn profileKindBadge(kind: windows_shell.ProfileKind) []const u8 {
-    return switch (kind) {
-        .wsl_default, .wsl_distro => "WSL",
-        .pwsh => "PWSH",
-        .powershell => "PS",
-        .git_bash => "GIT",
-        .cmd => "CMD",
-    };
-}
-
-fn profileKindGlyph(kind: windows_shell.ProfileKind) []const u8 {
-    return switch (kind) {
-        .wsl_default, .wsl_distro => "<>",
-        .pwsh => ">>",
-        .powershell => ">_",
-        .git_bash => "$>",
-        .cmd => "C>",
-    };
-}
-
-fn buildProfileChromeBadgeText(alloc: Allocator, kind: windows_shell.ProfileKind) ![]u8 {
-    return try std.fmt.allocPrint(alloc, "{s} {s}", .{
-        profileKindBadge(kind),
-        profileKindGlyph(kind),
-    });
-}
-
-fn profileKindDetail(kind: windows_shell.ProfileKind) windows_shell.ShellIntegrationDiagnostic {
-    return windows_shell.shellIntegrationDiagnostic(kind);
-}
-
-fn profileOpenTargetActionText(target: ProfileOpenTarget) []const u8 {
-    return switch (target) {
-        .tab => "new tab",
-        .window => "new window",
-        .split => "split",
-    };
-}
-
-fn buildProfileStatusBadgeText(
-    alloc: Allocator,
-    profile: *const windows_shell.Profile,
-    selected_index: ?usize,
-    pinned_slot_ordinal: ?usize,
-) ![]u8 {
-    _ = selected_index;
-    _ = pinned_slot_ordinal;
-    const compact = try compactHostLabel(alloc, profile.label, 12);
-    defer alloc.free(compact);
-    return try alloc.dupe(u8, compact);
-}
-
-fn profileStatusBadgeTextLen(
-    profile: *const windows_shell.Profile,
-    selected_index: ?usize,
-    pinned_slot_ordinal: ?usize,
-) usize {
-    _ = selected_index;
-    _ = pinned_slot_ordinal;
-    return compactHostLabelLen(profile.label, 12);
-}
-
+const profileStatusBadgeTextLen = labels.profileStatusBadgeTextLen;
 /// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
-fn buildDropdownProfileLabel(
-    alloc: Allocator,
-    profile: *const windows_shell.Profile,
-    index: usize,
-) ![]u8 {
-    if (index < 9) {
-        return try std.fmt.allocPrint(alloc, "{s}\tCtrl+Shift+{d}", .{ profile.label, index + 1 });
-    }
-    return try alloc.dupe(u8, profile.label);
-}
+const buildDropdownProfileLabel = labels.buildDropdownProfileLabel;
 
-fn buildProfileQuickSlotChipText(
-    alloc: Allocator,
-    profile: *const windows_shell.Profile,
-    slot_index: usize,
-    pinned_slot_ordinal: ?usize,
-) ![]u8 {
-    if (slot_index < 9) {
-        if (pinned_slot_ordinal != null and pinned_slot_ordinal.? == slot_index) {
-            return try std.fmt.allocPrint(alloc, "*{d} {s}", .{
-                slot_index + 1,
-                profileKindBadge(profile.kind),
-            });
-        }
-        return try std.fmt.allocPrint(alloc, "{d} {s}", .{
-            slot_index + 1,
-            profileKindBadge(profile.kind),
-        });
-    }
-    return try alloc.dupe(u8, profileKindBadge(profile.kind));
-}
+const buildProfileQuickSlotChipText = labels.buildProfileQuickSlotChipText;
 
-fn profileQuickSlotChipTextLen(
-    profile: *const windows_shell.Profile,
-    slot_index: usize,
-    pinned_slot_ordinal: ?usize,
-) usize {
-    const badge_len = profileKindBadge(profile.kind).len;
-    if (slot_index < 9) {
-        return badge_len + 2 + if (pinned_slot_ordinal != null and pinned_slot_ordinal.? == slot_index) @as(usize, 1) else 0;
-    }
-    return badge_len;
-}
+const profileQuickSlotChipTextLen = labels.profileQuickSlotChipTextLen;
 
-fn launcherChipRightInset(has_slot_badge: bool, has_target_marker: bool) i32 {
-    if (has_slot_badge) return 16;
-    if (has_target_marker) return 12;
-    return 5;
-}
+const launcherChipRightInset = labels.launcherChipRightInset;
 
-fn targetButtonLabelRightInset(target: ?ProfileOpenTarget) i32 {
-    return if (target != null) 12 else 0;
-}
+const buttonLabelRightInset = labels.buttonLabelRightInset;
 
-fn buttonLabelRightInset(pinned_slot_ordinal: ?usize, target: ?ProfileOpenTarget) i32 {
-    const slot_inset: i32 = if (pinnedSlotBadgeDigit(pinned_slot_ordinal) != null) 16 else 0;
-    return @max(targetButtonLabelRightInset(target), slot_inset);
-}
-
-fn shouldPaintQuickSlotTargetMarker(hovered: bool, focused: bool) bool {
-    return hovered or focused;
-}
+const shouldPaintQuickSlotTargetMarker = labels.shouldPaintQuickSlotTargetMarker;
 
 fn paintPinnedChipMarker(hdc: HDC, chip_rect: RECT, color: u32, dpi: u32) void {
     const s = Host.scaledBy;
@@ -20298,11 +17477,7 @@ fn paintPinnedChipMarker(hdc: HDC, chip_rect: RECT, color: u32, dpi: u32) void {
     }, color);
 }
 
-fn pinnedSlotBadgeDigit(pinned_slot_ordinal: ?usize) ?u8 {
-    const ordinal = pinned_slot_ordinal orelse return null;
-    if (ordinal >= 9) return null;
-    return @as(u8, @intCast('1' + ordinal));
-}
+const pinnedSlotBadgeDigit = labels.pinnedSlotBadgeDigit;
 
 fn paintPinnedSlotBadge(hdc: HDC, rect: RECT, digit: u8, border: u32, bg: u32, fg: u32, dpi: u32) void {
     const s = Host.scaledBy;
@@ -20314,33 +17489,21 @@ fn paintPinnedSlotBadge(hdc: HDC, rect: RECT, digit: u8, border: u32, bg: u32, f
     };
     drawRoundedRect(hdc, badge_rect, bg, border, s(3, dpi));
     var text_buf = [_]u16{ digit, 0 };
-    _ = SetBkMode(hdc, TRANSPARENT);
-    _ = SetTextColor(hdc, fg);
+    _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+    _ = sys.SetTextColor(hdc, fg);
     var text_rect = badge_rect;
-    _ = DrawTextW(
+    _ = sys.DrawTextW(
         hdc,
         @ptrCast(&text_buf),
         1,
         &text_rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
     );
 }
 
-fn profileOpenTargetMarkerColor(target: ProfileOpenTarget) u32 {
-    return switch (target) {
-        .tab => rgb(132, 172, 238),
-        .window => rgb(236, 182, 118),
-        .split => rgb(126, 204, 148),
-    };
-}
+const profileOpenTargetMarkerColor = labels.profileOpenTargetMarkerColor;
 
-fn profileOpenTargetBadgeGlyph(target: ProfileOpenTarget) u8 {
-    return switch (target) {
-        .tab => 'T',
-        .window => 'W',
-        .split => 'S',
-    };
-}
+const profileOpenTargetBadgeGlyph = labels.profileOpenTargetBadgeGlyph;
 
 fn paintTargetButtonBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: u32, fg: u32, dpi: u32) void {
     const s = Host.scaledBy;
@@ -20352,15 +17515,15 @@ fn paintTargetButtonBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: u32,
     };
     drawRoundedRect(hdc, badge_rect, bg, border, s(3, dpi));
     var text_buf = [_]u16{ glyph, 0 };
-    _ = SetBkMode(hdc, TRANSPARENT);
-    _ = SetTextColor(hdc, fg);
+    _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+    _ = sys.SetTextColor(hdc, fg);
     var text_rect = badge_rect;
-    _ = DrawTextW(
+    _ = sys.DrawTextW(
         hdc,
         @ptrCast(&text_buf),
         1,
         &text_rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
     );
 }
 
@@ -20374,546 +17537,42 @@ fn paintTargetChipBadge(hdc: HDC, rect: RECT, glyph: u8, border: u32, bg: u32, f
     };
     drawRoundedRect(hdc, badge_rect, bg, border, s(3, dpi));
     var text_buf = [_]u16{ glyph, 0 };
-    _ = SetBkMode(hdc, TRANSPARENT);
-    _ = SetTextColor(hdc, fg);
+    _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+    _ = sys.SetTextColor(hdc, fg);
     var text_rect = badge_rect;
-    _ = DrawTextW(
+    _ = sys.DrawTextW(
         hdc,
         @ptrCast(&text_buf),
         1,
         &text_rect,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
     );
 }
 
-fn buildProfileCommandPreviewText(
-    alloc: Allocator,
-    profile: *const windows_shell.Profile,
-    max_len: usize,
-) ![]u8 {
-    const command = try profile.command.string(alloc);
-    defer alloc.free(command);
-    return try compactHostLabel(alloc, command, max_len);
-}
+const buildProfileOverlayLabel = labels.buildProfileOverlayLabel;
 
-fn buildProfileOrderSummaryText(
-    alloc: Allocator,
-    order_hint_opt: ?[]const u8,
-    max_items: usize,
-) !?[]u8 {
-    const order_hint = order_hint_opt orelse return null;
-    var parts: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer parts.deinit(alloc);
+const buildProfileAcceptLabel = labels.buildProfileAcceptLabel;
 
-    var count: usize = 0;
-    var more = false;
-    var it = std.mem.splitAny(u8, order_hint, ",;");
-    while (it.next()) |raw_token| {
-        const token = std.mem.trim(u8, raw_token, " \t\r\n");
-        if (token.len == 0) continue;
-        if (count >= max_items) {
-            more = true;
-            break;
-        }
-        const compact = try compactHostLabel(alloc, token, 12);
-        defer alloc.free(compact);
-        if (parts.items.len > 0) try parts.appendSlice(alloc, " > ");
-        try parts.appendSlice(alloc, compact);
-        count += 1;
-    }
+const buildProfileHintText = labels.buildProfileHintText;
 
-    if (count == 0) return null;
-    if (more) try parts.appendSlice(alloc, " > ...");
-    return try parts.toOwnedSlice(alloc);
-}
-
-fn buildProfileQuickPickText(
-    alloc: Allocator,
-    profiles: []const windows_shell.Profile,
-    max_items: usize,
-    max_label_len: usize,
-) !?[]u8 {
-    if (profiles.len == 0 or max_items == 0) return null;
-
-    var parts: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer parts.deinit(alloc);
-
-    const limit = @min(@min(max_items, profiles.len), 9);
-    var index: usize = 0;
-    while (index < limit) : (index += 1) {
-        const badge = try buildProfileChromeBadgeText(alloc, profiles[index].kind);
-        defer alloc.free(badge);
-        const label = try compactHostLabel(alloc, profiles[index].label, max_label_len);
-        defer alloc.free(label);
-
-        if (parts.items.len > 0) try parts.appendSlice(alloc, " | ");
-        const item = try std.fmt.allocPrint(alloc, "{d} {s} {s}", .{
-            index + 1,
-            badge,
-            label,
-        });
-        defer alloc.free(item);
-        try parts.appendSlice(alloc, item);
-    }
-
-    if (limit < profiles.len) try parts.appendSlice(alloc, " | ...");
-    return try parts.toOwnedSlice(alloc);
-}
-
-fn buildSearchButtonLabel(
-    alloc: Allocator,
-    active: bool,
-    total: ?usize,
-    selected: ?usize,
-) ![]u8 {
-    if (selected) |current| {
-        if (total) |count| {
-            return try std.fmt.allocPrint(alloc, "{s}{d}/{d}", .{
-                if (active) "[F] " else "Find ",
-                current,
-                count,
-            });
-        }
-    }
-    if (total) |count| {
-        return try std.fmt.allocPrint(alloc, "{s}{d}", .{
-            if (active) "[F] " else "Find ",
-            count,
-        });
-    }
-    return try alloc.dupe(u8, if (active) "[Find]" else "Find");
-}
-
-fn buildProfileOverlayLabel(
-    alloc: Allocator,
-    profiles: []const windows_shell.Profile,
-    input_text: []const u8,
-    selected_index: usize,
-) ![]u8 {
-    if (profiles.len == 0) return try alloc.dupe(u8, "Profile");
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
-        .exact => |index| blk: {
-            const badge = try buildProfileChromeBadgeText(alloc, profiles[index].kind);
-            defer alloc.free(badge);
-            break :blk try std.fmt.allocPrint(
-                alloc,
-                "Profile {d}/{d} {s}",
-                .{ index + 1, profiles.len, badge },
-            );
-        },
-        .ambiguous => |count| try std.fmt.allocPrint(alloc, "Profile {d}", .{count}),
-        .invalid => try alloc.dupe(u8, "Profile ?"),
-    };
-}
-
-fn buildProfileAcceptLabel(
-    alloc: Allocator,
-    profiles_opt: ?[]const windows_shell.Profile,
-    input_text: []const u8,
-    selected_index: usize,
-    default_target: ProfileOpenTarget,
-) ![]u8 {
-    const profiles = profiles_opt orelse return try alloc.dupe(u8, "Check");
-    if (profiles.len == 0) return try alloc.dupe(u8, "Check");
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
-        .exact => switch (default_target) {
-            .tab => try alloc.dupe(u8, "Open Tab"),
-            .window => try alloc.dupe(u8, "Open Win"),
-            .split => try alloc.dupe(u8, "Split"),
-        },
-        .ambiguous => try alloc.dupe(u8, "Pick"),
-        .invalid => try alloc.dupe(u8, "Check"),
-    };
-}
-
-fn buildProfileHintText(
-    alloc: Allocator,
-    profiles_opt: ?[]const windows_shell.Profile,
-    input_text: []const u8,
-    selected_index: usize,
-    default_target: ProfileOpenTarget,
-    pinned_slot_keys: [3]?[:0]const u8,
-) ![]u8 {
-    const profiles = profiles_opt orelse return try alloc.dupe(u8, "No supported Windows profiles detected.");
-    if (profiles.len == 0) return try alloc.dupe(u8, "No supported Windows profiles detected.");
-    const quick_picks = try buildProfileQuickPickText(alloc, profiles, 4, 10);
-    defer if (quick_picks) |value| alloc.free(value);
-    const quick_suffix = if (quick_picks) |value|
-        try std.fmt.allocPrint(alloc, " Quick picks: {s}.", .{value})
-    else
-        try alloc.dupe(u8, "");
-    defer alloc.free(quick_suffix);
-    return switch (resolveProfileSelection(profiles, input_text, selected_index)) {
-        .exact => |index| blk: {
-            const preview = try buildProfileCommandPreviewText(alloc, &profiles[index], 36);
-            defer alloc.free(preview);
-            const badge = try buildProfileChromeBadgeText(alloc, profiles[index].kind);
-            defer alloc.free(badge);
-            const pinned_slot = try buildPinnedProfileSlotText(
-                alloc,
-                findLauncherQuickSlotOrdinal(pinned_slot_keys, profiles[index].key),
-            );
-            defer alloc.free(pinned_slot);
-            break :blk try std.fmt.allocPrint(
-                alloc,
-                "{s} {s} | key {s} | run {s}.{s} Enter opens a {s}. Ctrl+Enter splits here. Shift+Enter opens a new window. Ctrl+1-9 launches directly. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
-                .{
-                    badge,
-                    profiles[index].label,
-                    profiles[index].key,
-                    preview,
-                    pinned_slot,
-                    profileOpenTargetActionText(default_target),
-                    quick_suffix,
-                },
-            );
-        },
-        .ambiguous => |count| try std.fmt.allocPrint(
-            alloc,
-            "{d} profiles match. Keep typing a name or use Up/Down to cycle the current selection. Ctrl+1-9 launches directly. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
-            .{ count, quick_suffix },
-        ),
-        .invalid => try std.fmt.allocPrint(
-            alloc,
-            "No matching profile. Try 1-{d} or a profile name like pwsh, ubuntu, git, or cmd. Ctrl+1-9 launches directly. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning. Space keeps the picker open.{s}",
-            .{ profiles.len, quick_suffix },
-        ),
-    };
-}
-
-fn buildProfileDetailText(
-    alloc: Allocator,
-    profile: *const windows_shell.Profile,
-    profiles_opt: ?[]const windows_shell.Profile,
-    overlay_open: bool,
-    default_target: ProfileOpenTarget,
-    order_hint: ?[]const u8,
-    pinned_slot_keys: [3]?[:0]const u8,
-) ![]u8 {
-    const preview = try buildProfileCommandPreviewText(alloc, profile, 32);
-    defer alloc.free(preview);
-    const badge = try buildProfileChromeBadgeText(alloc, profile.kind);
-    defer alloc.free(badge);
-    const pinned_slot = try buildPinnedProfileSlotText(
-        alloc,
-        findLauncherQuickSlotOrdinal(pinned_slot_keys, profile.key),
-    );
-    defer alloc.free(pinned_slot);
-    const quick_picks = if (overlay_open)
-        try buildProfileQuickPickText(alloc, profiles_opt orelse &.{}, 4, 10)
-    else
-        try buildProfileQuickPickText(alloc, profiles_opt orelse &.{}, 3, 9);
-    defer if (quick_picks) |value| alloc.free(value);
-    const quick_suffix = if (overlay_open)
-        if (quick_picks) |value|
-            try std.fmt.allocPrint(alloc, " Quick picks: {s}.", .{value})
-        else
-            try alloc.dupe(u8, "")
-    else if (quick_picks) |value|
-        try std.fmt.allocPrint(alloc, " Top slots: {s}.", .{value})
-    else
-        try alloc.dupe(u8, "");
-    defer alloc.free(quick_suffix);
-    const order_summary = try buildProfileOrderSummaryText(alloc, order_hint, 4);
-    defer if (order_summary) |value| alloc.free(value);
-    const order_suffix = if (order_summary) |value|
-        try std.fmt.allocPrint(alloc, " Order: {s}.", .{value})
-    else
-        try alloc.dupe(u8, "");
-    defer alloc.free(order_suffix);
-    const overlay_suffix = try std.fmt.allocPrint(alloc, "{s}{s}", .{ quick_suffix, order_suffix });
-    defer alloc.free(overlay_suffix);
-    const idle_suffix = try std.fmt.allocPrint(alloc, "{s}{s}", .{ quick_suffix, order_suffix });
-    defer alloc.free(idle_suffix);
-    const detail = profileKindDetail(profile.kind);
-    return if (overlay_open)
-        std.fmt.allocPrint(
-            alloc,
-            "Selected profile: {s} {s}. Run {s}.{s} Enter opens a {s}, Ctrl+Enter splits here, and Shift+Enter opens a new window. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
-            .{
-                badge,
-                profile.label,
-                preview,
-                pinned_slot,
-                profileOpenTargetActionText(default_target),
-                overlay_suffix,
-            },
-        )
-    else
-        std.fmt.allocPrint(
-            alloc,
-            "Default profile: {s} {s}. Run {s}.{s} New hosts inherit this {s}.{s}{s} + opens a {s}, middle-click + splits here, and right-click + opens a new window. Alt+1-3 launches visible slots. Alt+Shift+1-3 pins the current profile. Alt+Shift+0 clears pinning.{s}",
-            .{
-                badge,
-                profile.label,
-                preview,
-                pinned_slot,
-                detail.summary,
-                if (detail.next_step != null) " " else "",
-                detail.next_step orelse "",
-                profileOpenTargetActionText(default_target),
-                idle_suffix,
-            },
-        );
-}
-
-fn buildPinnedProfileSlotText(alloc: Allocator, pinned_slot_ordinal: ?usize) ![]u8 {
-    if (pinned_slot_ordinal) |ordinal| {
-        return try std.fmt.allocPrint(alloc, " Pinned slot {d}.", .{ordinal + 1});
-    }
-    return try alloc.dupe(u8, "");
-}
-
-fn buildInspectorButtonLabel(
-    alloc: Allocator,
-    visible: bool,
-    pane_count: usize,
-) ![]u8 {
-    if (visible and pane_count > 1) {
-        return try std.fmt.allocPrint(alloc, "[Inspect {d}]", .{pane_count});
-    }
-    if (visible) return try alloc.dupe(u8, "[Inspect]");
-    if (pane_count > 1) return try std.fmt.allocPrint(alloc, "Inspect {d}", .{pane_count});
-    return try alloc.dupe(u8, "Inspect");
-}
-
-fn commandPaletteMatchCount(snap: PaletteSnapshot, input_text: []const u8) usize {
-    return win32_palette.matchCount(snap, input_text);
-}
+const buildProfileDetailText = labels.buildProfileDetailText;
 
 /// Returns the top-ranked match used for Enter-to-run, or null if no entry
 /// matches.
-fn commandPaletteUniqueMatch(snap: PaletteSnapshot, input_text: []const u8) ?[]const u8 {
-    if (input_text.len == 0) return null;
-    var buf: [palette_max_tokens][]const u8 = undefined;
-    const tokens = tokenizePaletteQuery(input_text, &buf);
-    if (tokens.len == 0) return null;
+const nextTabOverviewSelection = labels.nextTabOverviewSelection;
 
-    var best_rank: f64 = std.math.inf(f64);
-    var best_index: ?usize = null;
-    for (snap.commands, snap.cvals, 0..) |cmd, c, i| {
-        const r = rankPaletteEntry(cmd, c, tokens) orelse continue;
-        if (r < best_rank) {
-            best_rank = r;
-            best_index = i;
-        }
-    }
-    return if (best_index) |i| std.mem.span(snap.cvals[i].action) else null;
-}
+const tabDirectionFromWheelDelta = labels.tabDirectionFromWheelDelta;
 
-fn commandPaletteCompletionCandidate(
-    snap: PaletteSnapshot,
-    seed: []const u8,
-    current_text: []const u8,
-    reverse: bool,
-) ?[]const u8 {
-    var ranked_buf: [palette_max_ranked]RankedIndex = undefined;
-    const ranked = rankedIndicesForQuery(snap, seed, &ranked_buf);
-    if (ranked.len == 0) return null;
-    if (ranked.len == 1) return std.mem.span(snap.cvals[ranked[0].index].action);
+const buildCommandPaletteOverlayLabel = labels.buildCommandPaletteOverlayLabel;
 
-    var current_rank_index: ?usize = null;
-    for (ranked, 0..) |r, i| {
-        const action = std.mem.span(snap.cvals[r.index].action);
-        if (std.mem.eql(u8, action, current_text)) {
-            current_rank_index = i;
-            break;
-        }
-    }
+const buildCommandPaletteFeedbackText = labels.buildCommandPaletteFeedbackText;
 
-    const target = if (current_rank_index) |value|
-        if (reverse)
-            (value + ranked.len - 1) % ranked.len
-        else
-            (value + 1) % ranked.len
-    else if (reverse)
-        ranked.len - 1
-    else
-        0;
-    return std.mem.span(snap.cvals[ranked[target].index].action);
-}
+const paletteCompletionText = labels.paletteCompletionText;
 
-/// Look up the Command.description for a given formatted action string.
-/// Returns null if no entry matches or the description is empty.
-fn commandPaletteDescriptionFor(snap: PaletteSnapshot, action_text: []const u8) ?[]const u8 {
-    for (snap.commands, snap.cvals) |cmd, c| {
-        const action = std.mem.span(c.action);
-        if (!std.mem.eql(u8, action, action_text)) continue;
-        const desc: []const u8 = cmd.description;
-        return if (desc.len == 0) null else desc;
-    }
-    return null;
-}
-
-fn nextTabOverviewSelection(current: usize, total: usize, reverse: bool) usize {
-    if (total == 0) return 0;
-    const clamped = std.math.clamp(current, @as(usize, 1), total);
-    if (reverse) {
-        return if (clamped <= 1) total else clamped - 1;
-    }
-    return if (clamped >= total) 1 else clamped + 1;
-}
-
-fn tabDirectionFromWheelDelta(delta: i16) apprt.action.GotoTab {
-    return if (delta > 0) .previous else .next;
-}
-
-fn buildCommandPaletteOverlayLabel(
-    alloc: Allocator,
-    input_text: []const u8,
-    presentation: PalettePresentation,
-) ![]u8 {
-    if (input_text.len == 0) return try alloc.dupe(u8, "Command");
-    if (presentation.match_count > 0) {
-        return try std.fmt.allocPrint(alloc, "Command {d}", .{presentation.match_count});
-    }
-    return try alloc.dupe(u8, "Command ?");
-}
-
-fn buildCommandPaletteFeedbackText(
-    alloc: Allocator,
-    input_text: []const u8,
-    mru: []const []const u8,
-    presentation: PalettePresentation,
-) ![]u8 {
-    if (input_text.len == 0) {
-        if (mru.len > 0) {
-            return try std.fmt.allocPrint(
-                alloc,
-                "Recent: {s}. Type to search actions, themes, tabs, panes, settings, and help.",
-                .{mru[0]},
-            );
-        }
-        return try alloc.dupe(
-            u8,
-            "Type to search actions, themes, tabs, panes, settings, and help.",
-        );
-    }
-    if (presentation.match_count == 0) {
-        return try alloc.dupe(
-            u8,
-            "No matching command. Try > actions, % themes, @ tabs, / panes, : settings, or ? help.",
-        );
-    }
-    if (!presentation.available) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "{d} matches. Make the window larger to show and activate results.",
-            .{presentation.match_count},
-        );
-    }
-
-    const title = presentation.title orelse "Selected result";
-    const subtitle = presentation.subtitle orelse "";
-    if (presentation.match_count == 1) {
-        if (subtitle.len > 0) {
-            return try std.fmt.allocPrint(
-                alloc,
-                "{s} — {s}. Enter activates; Escape closes.",
-                .{ title, subtitle },
-            );
-        }
-        return try std.fmt.allocPrint(
-            alloc,
-            "{s}. Enter activates; Escape closes.",
-            .{title},
-        );
-    }
-    if (subtitle.len > 0) {
-        return try std.fmt.allocPrint(
-            alloc,
-            "{d} matches. Selected: {s} — {s}. Up/Down selects; Enter activates.",
-            .{ presentation.match_count, title, subtitle },
-        );
-    }
-    return try std.fmt.allocPrint(
-        alloc,
-        "{d} matches. Selected: {s}. Up/Down selects; Enter activates.",
-        .{ presentation.match_count, title },
-    );
-}
-
-fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []const u8 {
-    return switch (descriptor.payload) {
-        .action => |payload| payload.action,
-        .recent_command => |payload| payload.action,
-        .profile => |key| key,
-        .setting => |key| key,
-        .theme => |name| name,
-        .tab, .pane, .help => descriptor.item.title,
-    };
-}
-
-fn commandPaletteBannerText(
-    alloc: Allocator,
-    snap: PaletteSnapshot,
-    input_text: []const u8,
-    mru: []const []const u8,
-) !?[]u8 {
-    if (input_text.len == 0) {
-        if (mru.len == 0) {
-            return try alloc.dupe(u8, "Try: new_tab (new tab), start_search (find), toggle_tab_overview (tab list)");
-        }
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer buf.deinit(alloc);
-        try buf.appendSlice(alloc, "Recent: ");
-        const visible = @min(mru.len, 5);
-        for (mru[0..visible], 0..) |action, i| {
-            if (i > 0) try buf.appendSlice(alloc, ", ");
-            try buf.appendSlice(alloc, action);
-        }
-        return try buf.toOwnedSlice(alloc);
-    }
-
-    if (input.Binding.Action.parse(input_text)) |_| {
-        if (commandPaletteDescriptionFor(snap, input_text)) |summary| {
-            return try std.fmt.allocPrint(alloc, "Ready: {s} - {s}", .{ input_text, summary });
-        }
-        return try std.fmt.allocPrint(alloc, "Ready to run: {s}", .{input_text});
-    } else |_| {}
-
-    // Cap visible matches to keep the banner readable. With ~90
-    // entries a bare query like "t" can rank dozens of matches;
-    // showing all of them produces a wall of text.
-    const max_visible: usize = 5;
-    var ranked_buf: [palette_max_ranked]RankedIndex = undefined;
-    const ranked = rankedIndicesForQuery(snap, input_text, &ranked_buf);
-    if (ranked.len == 0) return null;
-
-    // Single match → "Ready: {action} - {description}" so Enter
-    // telegraphs what it'll run. Multi-match falls through to the
-    // "Matches: …" list so the user sees the candidate set.
-    if (ranked.len == 1) {
-        const action = std.mem.span(snap.cvals[ranked[0].index].action);
-        if (commandPaletteDescriptionFor(snap, action)) |summary| {
-            return try std.fmt.allocPrint(alloc, "Ready: {s} - {s}", .{ action, summary });
-        }
-        return try std.fmt.allocPrint(alloc, "Ready to run: {s}", .{action});
-    }
-
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(alloc);
-    try buf.appendSlice(alloc, "Matches: ");
-    const visible_len = @min(ranked.len, max_visible);
-    for (ranked[0..visible_len], 0..) |r, i| {
-        const action = std.mem.span(snap.cvals[r.index].action);
-        if (i > 0) try buf.appendSlice(alloc, ", ");
-        try buf.appendSlice(alloc, action);
-        if (commandPaletteDescriptionFor(snap, action)) |summary| {
-            try buf.appendSlice(alloc, " (");
-            try buf.appendSlice(alloc, summary);
-            try buf.appendSlice(alloc, ")");
-        }
-    }
-    if (ranked.len > visible_len) {
-        const rest = ranked.len - visible_len;
-        try std.fmt.format(buf.writer(alloc), " + {d} more", .{rest});
-    }
-    return try buf.toOwnedSlice(alloc);
-}
+const commandPaletteBannerText = labels.commandPaletteBannerText;
 
 fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
-    const len_w = GetWindowTextLengthW(hwnd);
+    const len_w = sys.GetWindowTextLengthW(hwnd);
     if (len_w <= 0) return try alloc.dupeZ(u8, "");
 
     const needed: usize = @intCast(len_w + 1);
@@ -20921,8 +17580,8 @@ fn readWindowTextUtf8Alloc(alloc: Allocator, hwnd: HWND) ![:0]u8 {
     defer alloc.free(buf_w);
     buf_w[needed - 1] = 0;
 
-    const copied = GetWindowTextW(hwnd, buf_w.ptr, @intCast(needed));
-    if (copied < 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    const copied = sys.GetWindowTextW(hwnd, buf_w.ptr, @intCast(needed));
+    if (copied < 0) return lastError();
 
     return try std.unicode.utf16LeToUtf8AllocZ(alloc, buf_w[0..@intCast(copied)]);
 }
@@ -20933,18 +17592,16 @@ fn wmCommandChildHwnd(lParam: LPARAM) ?HWND {
 }
 
 fn expectedButtonClick(notify: u16, child: ?HWND, expected: ?HWND) bool {
-    return notify == BN_CLICKED and child != null and expected != null and child.? == expected.?;
+    return notify == c.BN_CLICKED and child != null and expected != null and child.? == expected.?;
 }
 
 fn getHost(hwnd: HWND) ?*Host {
-    const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (raw == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(raw)));
+    return windowData(Host, hwnd);
 }
 
 fn refocusActiveSurface(host: *Host) void {
     if (host.activeSurface()) |surface| {
-        if (surface.hwnd) |surface_hwnd| _ = SetFocus(surface_hwnd);
+        if (surface.hwnd) |surface_hwnd| _ = sys.SetFocus(surface_hwnd);
     }
 }
 
@@ -20977,15 +17634,15 @@ fn refocusHostAfterActivation(host: *Host) void {
         host.overlay_cancel_hwnd,
         surface_hwnd,
     )) |target| {
-        _ = SetFocus(target);
+        _ = sys.SetFocus(target);
     }
 }
 
 fn postDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnect) bool {
     if (thread_id == 0) return false;
-    return PostThreadMessageW(
+    return sys.PostThreadMessageW(
         thread_id,
-        WM_WINHOSTTY_UIA_DISCONNECT,
+        c.WM_WINHOSTTY_UIA_DISCONNECT,
         0,
         @as(LPARAM, @bitCast(@as(usize, @intFromPtr(pending)))),
     ) != 0;
@@ -21009,17 +17666,17 @@ fn processDeferredUiaDisconnect(thread_id: DWORD, pending: *DeferredUiaDisconnec
 
 fn drainDeferredUiaDisconnects(thread_id: DWORD) void {
     var msg: MSG = undefined;
-    while (PeekMessageW(
+    while (sys.PeekMessageW(
         &msg,
         null,
-        WM_WINHOSTTY_UIA_DISCONNECT,
-        WM_WINHOSTTY_UIA_DISCONNECT,
-        PM_REMOVE,
+        c.WM_WINHOSTTY_UIA_DISCONNECT,
+        c.WM_WINHOSTTY_UIA_DISCONNECT,
+        c.PM_REMOVE,
     ) != 0) {
         // PeekMessage always returns WM_QUIT regardless of the filter.
         // Consume it during shutdown, but never interpret its lParam as a
         // deferred-disconnect pointer.
-        if (msg.message != WM_WINHOSTTY_UIA_DISCONNECT) continue;
+        if (msg.message != c.WM_WINHOSTTY_UIA_DISCONNECT) continue;
         if (msg.lParam == 0) {
             log.warn("win32 UIA deferred disconnect message had no context", .{});
             continue;
@@ -21074,15 +17731,15 @@ test "win32 deferred UIA disconnect drain retries and releases once" {
 
     var fake: Fake = .{};
     var queue_probe: MSG = undefined;
-    _ = PeekMessageW(&queue_probe, null, 0, 0, PM_NOREMOVE);
+    _ = sys.PeekMessageW(&queue_probe, null, 0, 0, c.PM_NOREMOVE);
     const pending = try std.heap.page_allocator.create(DeferredUiaDisconnect);
     pending.* = .{
         .ctx = @ptrCast(&fake),
         .disconnect = &Fake.disconnect,
         .release = &Fake.release,
     };
-    const thread_id = GetCurrentThreadId();
-    PostQuitMessage(0);
+    const thread_id = sys.GetCurrentThreadId();
+    sys.PostQuitMessage(0);
     try std.testing.expect(postDeferredUiaDisconnect(thread_id, pending));
     drainDeferredUiaDisconnects(thread_id);
     try std.testing.expectEqual(@as(usize, 2), fake.disconnects);
@@ -21155,9 +17812,9 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // (hidden) EDIT has focus. Tab/Shift+Tab cycle between the
         // two buttons; arrow keys also cycle for screen-reader
         // users who navigate via arrows.
-        if (msg == WM_KEYDOWN and v.isOverlayButton(hwnd)) {
+        if (msg == c.WM_KEYDOWN and v.isOverlayButton(hwnd)) {
             switch (wParam) {
-                VK_ESCAPE => {
+                c.VK_ESCAPE => {
                     if (v.overlay_mode == .confirm) {
                         v.invokeConfirmCancel();
                     } else {
@@ -21165,12 +17822,12 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                     return 0;
                 },
-                VK_TAB, VK_LEFT, VK_RIGHT => {
-                    const reverse = if (wParam == VK_TAB) keyPressed(VK_SHIFT) else wParam == VK_LEFT;
+                c.VK_TAB, c.VK_LEFT, c.VK_RIGHT => {
+                    const reverse = if (wParam == c.VK_TAB) keyPressed(c.VK_SHIFT) else wParam == c.VK_LEFT;
                     _ = v.focusRelativeOverlayControl(hwnd, reverse);
                     return 0;
                 },
-                VK_RETURN, VK_SPACE => {
+                c.VK_RETURN, c.VK_SPACE => {
                     if (v.overlay_mode == .confirm) {
                         if (hwnd == v.overlay_accept_hwnd) {
                             v.invokeConfirmAccept();
@@ -21183,9 +17840,9 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 else => {},
             }
         }
-        if (msg == WM_KEYDOWN and v.isSearchBarButton(hwnd)) {
+        if (msg == c.WM_KEYDOWN and v.isSearchBarButton(hwnd)) {
             if (v.searchControlSurface(hwnd)) |surface| {
-                if (searchButtonKeyAction(wParam, keyPressed(VK_SHIFT))) |action| {
+                if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
                     if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
                         _ = surface.navigateDockedSearch(dir) catch |err| {
                             logUiActionError("docked search button navigation failed", err);
@@ -21203,33 +17860,33 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
         }
         switch (msg) {
-            WM_SETFOCUS => {
+            c.WM_SETFOCUS => {
                 if (v.searchControlSurface(hwnd)) |surface| {
                     v.app.activateSurfaceNoFocus(surface);
                 }
             },
-            WM_KILLFOCUS => {
+            c.WM_KILLFOCUS => {
                 v.setFocusedQuickSlot(null);
             },
-            WM_MOUSEMOVE => {
+            c.WM_MOUSEMOVE => {
                 var track: TRACKMOUSEEVENT = .{
                     .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                    .dwFlags = TME_LEAVE,
+                    .dwFlags = c.TME_LEAVE,
                     .hwndTrack = hwnd,
                     .dwHoverTime = 0,
                 };
-                _ = TrackMouseEvent(&track);
+                _ = sys.TrackMouseEvent(&track);
                 v.setHoveredButton(hwnd);
             },
-            WM_MOUSELEAVE => {
+            c.WM_MOUSELEAVE => {
                 if (v.isHoveredButton(hwnd)) v.setHoveredButton(null);
             },
-            WM_RBUTTONUP => {
+            c.WM_RBUTTONUP => {
                 if (v.new_tab_hwnd != null and hwnd == v.new_tab_hwnd.?) {
                     if (v.openSelectedProfileOrFallback(.window)) return 0;
                 }
             },
-            WM_MBUTTONUP => {
+            c.WM_MBUTTONUP => {
                 if (v.new_tab_hwnd != null and hwnd == v.new_tab_hwnd.?) {
                     if (v.openSelectedProfileOrFallback(.split)) return 0;
                 }
@@ -21244,10 +17901,10 @@ fn hostButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         else
             v.chrome_button_prev_proc;
         if (prev) |proc| {
-            return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -21255,32 +17912,32 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
     if (host) |v| {
         if (v.tabIndexForButton(hwnd)) |index| {
             switch (msg) {
-                WM_LBUTTONDOWN => {
+                c.WM_LBUTTONDOWN => {
                     const down_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
-                    _ = GetClientRect(hwnd, &btn_rect);
+                    _ = sys.GetClientRect(hwnd, &btn_rect);
                     const close_left = btn_rect.right - v.scaled(host_tab_close_zone_width);
                     if (down_x >= close_left and v.tabs.items.len > 1) {
                         // Click in close zone — capture for mouseup but don't start drag
-                        _ = SetCapture(hwnd);
+                        _ = sys.SetCapture(hwnd);
                     } else {
                         // Start potential drag: record origin
                         v.tab_drag_index = index;
                         v.tab_drag_start_x = down_x;
                         v.tab_drag_start_y = signedHighWord(lParamBits(lParam));
                         v.tab_drag_active = false;
-                        _ = SetCapture(hwnd);
+                        _ = sys.SetCapture(hwnd);
                     }
                     return 0;
                 },
-                WM_LBUTTONUP => {
+                c.WM_LBUTTONUP => {
                     const drag_index = v.tab_drag_index;
                     const was_drag = v.tab_drag_active;
                     const drop_operation = v.tab_drop_operation;
                     const drop_target_surface = v.tab_drop_target_surface;
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
-                    _ = ReleaseCapture();
+                    _ = sys.ReleaseCapture();
                     if (was_drag) {
                         if (drag_index) |source_index| {
                             v.tab_drop_operation = drop_operation;
@@ -21293,7 +17950,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     v.hideTabDropPreview();
                     const click_x = signedLowWord(lParamBits(lParam));
                     var btn_rect: RECT = undefined;
-                    _ = GetClientRect(hwnd, &btn_rect);
+                    _ = sys.GetClientRect(hwnd, &btn_rect);
                     const close_left = btn_rect.right - v.scaled(host_tab_close_zone_width);
                     switch (tabButtonMouseUpAction(
                         drag_index,
@@ -21318,19 +17975,19 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                     }
                     return 0;
                 },
-                WM_CAPTURECHANGED => {
+                c.WM_CAPTURECHANGED => {
                     v.tab_drag_index = null;
                     v.tab_drag_active = false;
                     v.hideTabDropPreview();
                 },
-                WM_MOUSEMOVE => {
+                c.WM_MOUSEMOVE => {
                     var track: TRACKMOUSEEVENT = .{
                         .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                        .dwFlags = TME_LEAVE,
+                        .dwFlags = c.TME_LEAVE,
                         .hwndTrack = hwnd,
                         .dwHoverTime = 0,
                     };
-                    _ = TrackMouseEvent(&track);
+                    _ = sys.TrackMouseEvent(&track);
                     v.setHoveredButton(hwnd);
 
                     // Handle tab drag reorder
@@ -21356,7 +18013,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                             // labeled split operation. Staying in the tab row
                             // keeps the established ordered-reorder gesture.
                             var pt: POINT = .{ .x = mouse_x, .y = mouse_y };
-                            _ = ClientToScreen(hwnd, &pt);
+                            _ = sys.ClientToScreen(hwnd, &pt);
                             v.updateTabDropPreview(drag_idx, pt);
                             if (v.tab_drop_operation == .none) {
                                 if (v.tabIndexAtScreenX(pt.x)) |target_idx| {
@@ -21371,11 +18028,11 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         }
                     }
                 },
-                WM_MOUSELEAVE => {
+                c.WM_MOUSELEAVE => {
                     if (v.isHoveredButton(hwnd)) v.setHoveredButton(null);
                 },
-                WM_KEYDOWN => {
-                    if (tabButtonKeyAction(wParam, keyPressed(VK_CONTROL))) |action| {
+                c.WM_KEYDOWN => {
+                    if (tabButtonKeyAction(wParam, keyPressed(c.VK_CONTROL))) |action| {
                         switch (action) {
                             .previous => {
                                 _ = v.activateTabByDirection(.previous);
@@ -21460,7 +18117,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         }
                     }
                 },
-                WM_MBUTTONUP => {
+                c.WM_MBUTTONUP => {
                     if (v.tabs.items.len > 1 and v.activateTabIndex(index)) {
                         if (v.activeSurface()) |surface| {
                             _ = v.app.closeTab(.{ .surface = surface.core() }, .this) catch |err| {
@@ -21470,7 +18127,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         }
                     }
                 },
-                WM_LBUTTONDBLCLK => {
+                c.WM_LBUTTONDBLCLK => {
                     if (v.activateTabIndex(index)) {
                         if (v.activeSurface()) |surface| {
                             runUiActionOrLog("tab double-click rename failed", surface.promptTitle(.tab));
@@ -21478,7 +18135,7 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
                         }
                     }
                 },
-                WM_RBUTTONUP => {
+                c.WM_RBUTTONUP => {
                     if (v.activateTabIndex(index)) {
                         v.showTabContextMenu(hwnd, index);
                         return 0;
@@ -21488,16 +18145,16 @@ fn tabButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv
             }
 
             if (v.tabs.items[index].button_prev_proc) |proc| {
-                return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                return sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
             }
         }
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
-    if (msg == WM_GETOBJECT) {
+    if (msg == c.WM_GETOBJECT) {
         if (host) |v| {
             if (v.searchControlSurface(hwnd)) |surface| {
                 if (surface.search_bar_edit_uia_provider) |provider| {
@@ -21508,19 +18165,19 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
     }
     if (host) |v| {
         if (v.searchControlSurface(hwnd)) |surface| switch (msg) {
-            WM_SETFOCUS => {
+            c.WM_SETFOCUS => {
                 v.app.activateSurfaceNoFocus(surface);
                 surface.invalidateSearchBarChildPaint();
             },
-            WM_KILLFOCUS => {
+            c.WM_KILLFOCUS => {
                 surface.invalidateSearchBarChildPaint();
             },
-            WM_CHAR => {
-                if (wParam == VK_RETURN or wParam == VK_ESCAPE) return 0;
+            c.WM_CHAR => {
+                if (wParam == c.VK_RETURN or wParam == c.VK_ESCAPE) return 0;
             },
-            WM_KEYDOWN, WM_SYSKEYDOWN => {
-                if (wParam == VK_RETURN) {
-                    _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(VK_SHIFT))) catch |err| {
+            c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+                if (wParam == c.VK_RETURN) {
+                    _ = surface.navigateDockedSearch(dockedSearchEnterDirection(keyPressed(c.VK_SHIFT))) catch |err| {
                         logUiActionError("docked search enter navigation failed", err);
                     };
                     return 0;
@@ -21531,7 +18188,7 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     };
                     return 0;
                 }
-                if (searchButtonKeyAction(wParam, keyPressed(VK_SHIFT))) |action| {
+                if (searchButtonKeyAction(wParam, keyPressed(c.VK_SHIFT))) |action| {
                     if (dockedSearchCoreDirectionFromKeyAction(action)) |dir| {
                         _ = surface.navigateDockedSearch(dir) catch |err| {
                             logUiActionError("docked search key navigation failed", err);
@@ -21556,16 +18213,16 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
     const result = if (host) |v| blk: {
         if (v.searchControlSurface(hwnd)) |surface| {
             if (surface.search_bar_edit_prev_proc) |proc| {
-                break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                break :blk sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
             }
         }
-        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
-    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+        break :blk sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     if (host) |v| {
         if (v.searchControlSurface(hwnd)) |surface| {
             if (surface.search_bar_edit_uia_provider) |provider| switch (msg) {
-                WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
-                WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => surface.raiseSearchEditSelectionChangedIfNeeded(),
+                c.WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+                c.WM_KEYUP, c.WM_LBUTTONUP, c.EM_SETSEL => surface.raiseSearchEditSelectionChangedIfNeeded(),
                 else => {},
             };
         }
@@ -21575,7 +18232,7 @@ fn searchEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
 
 fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const host = getHost(hwnd);
-    if (msg == WM_GETOBJECT) {
+    if (msg == c.WM_GETOBJECT) {
         if (host) |v| {
             if (v.overlay_edit_uia_provider) |provider| {
                 if (win32_uia.returnTerminalProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
@@ -21583,79 +18240,86 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
         }
     }
     if (host) |v| switch (msg) {
-        WM_CHAR => {
-            if (wParam == VK_ESCAPE) return 0;
-            if (wParam == VK_RETURN) {
+        c.WM_CHAR => {
+            if (wParam == c.VK_ESCAPE) return 0;
+            if (wParam == c.VK_RETURN) {
                 if (v.overlay_mode != .profile) {
-                    _ = v.submitOverlay() catch {};
+                    runUiActionOrLog("overlay submit failed", v.submitOverlay());
                 }
                 return 0;
             }
         },
 
-        WM_KEYDOWN, WM_SYSKEYDOWN => {
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
             if (v.commandPaletteToggleKeyMessage(msg, wParam, lParam)) {
                 _ = v.dismissCommandPalette();
                 return 0;
             }
             if (v.overlay_mode == .command_palette) {
-                if (wParam == VK_UP or wParam == VK_DOWN) {
+                if (wParam == c.VK_UP or wParam == c.VK_DOWN) {
                     // Up/Down move through the live result list instead of
                     // editing the query text.
-                    if (v.moveListSelection(wParam == VK_UP)) return 0;
+                    if (v.moveListSelection(wParam == c.VK_UP)) return 0;
                 }
-                if (wParam == VK_TAB) {
-                    const reverse = keyPressed(VK_SHIFT);
+                if (wParam == c.VK_TAB) {
+                    const reverse = keyPressed(c.VK_SHIFT);
                     if ((v.completeCommandPalette(reverse) catch false)) return 0;
                 }
             }
-            if (wParam == VK_TAB and v.focusRelativeOverlayControl(hwnd, keyPressed(VK_SHIFT))) return 0;
+            if (wParam == c.VK_TAB and v.focusRelativeOverlayControl(hwnd, keyPressed(c.VK_SHIFT))) return 0;
             if (v.overlay_mode == .tab_overview) {
-                if (wParam == VK_UP or wParam == VK_DOWN) {
-                    if ((v.stepTabOverviewSelection(wParam == VK_UP) catch false)) return 0;
+                if (wParam == c.VK_UP or wParam == c.VK_DOWN) {
+                    if ((v.stepTabOverviewSelection(wParam == c.VK_UP) catch false)) return 0;
                 }
             }
             if (v.overlay_mode == .profile) {
-                if ((v.ensureProfiles() catch false)) {
-                    if (clearQuickSlotPinsRequested(wParam, keyPressed(VK_MENU), keyPressed(VK_SHIFT))) {
+                const profiles_ready = v.ensureProfiles() catch |err| blk: {
+                    logUiActionError("profile keyboard load failed", err);
+                    break :blk false;
+                };
+                if (profiles_ready) {
+                    if (clearQuickSlotPinsRequested(wParam, keyPressed(c.VK_MENU), keyPressed(c.VK_SHIFT))) {
                         if (v.clearQuickSlotPins()) return 0;
                     }
-                    if (quickSlotPinOrdinalFromKey(wParam, keyPressed(VK_MENU), keyPressed(VK_SHIFT))) |slot_ordinal| {
+                    if (quickSlotPinOrdinalFromKey(wParam, keyPressed(c.VK_MENU), keyPressed(c.VK_SHIFT))) |slot_ordinal| {
                         if (v.assignSelectedProfileToQuickSlot(slot_ordinal)) return 0;
                     }
-                    if (quickSlotShortcutProfileIndex(v.profiles.?.len, v.selectedProfileIndex(), wParam, keyPressed(VK_MENU))) |index| {
+                    if (quickSlotShortcutProfileIndex(v.profiles.?.len, v.selectedProfileIndex(), wParam, keyPressed(c.VK_MENU))) |index| {
                         if (v.quickOpenProfileIndex(index, v.app.launcher_profile_target)) return 0;
                     }
                 }
-                if (keyPressed(VK_CONTROL)) {
+                if (keyPressed(c.VK_CONTROL)) {
                     if (profileShortcutIndexFromKey(wParam)) |index| {
                         if (v.quickOpenProfileIndex(index, v.app.launcher_profile_target)) return 0;
                     }
                 }
-                if (wParam == VK_RETURN) {
-                    _ = v.submitProfileOverlay(resolveProfileOpenTarget(
-                        v.app.launcher_profile_target,
-                        keyPressed(VK_SHIFT),
-                        keyPressed(VK_CONTROL),
-                    )) catch {};
+                if (wParam == c.VK_RETURN) {
+                    runUiActionOrLog(
+                        "profile overlay submit failed",
+                        v.submitProfileOverlay(resolveProfileOpenTarget(
+                            v.app.launcher_profile_target,
+                            keyPressed(c.VK_SHIFT),
+                            keyPressed(c.VK_CONTROL),
+                        )),
+                    );
                     return 0;
                 }
-                if (wParam == VK_UP or wParam == VK_DOWN) {
-                    if ((v.stepProfileSelection(wParam == VK_UP) catch false)) return 0;
+                if (wParam == c.VK_UP or wParam == c.VK_DOWN) {
+                    if ((v.stepProfileSelection(wParam == c.VK_UP) catch false)) return 0;
                 }
             }
             if (v.overlay_mode == .search) {
-                if (wParam == VK_UP) {
+                if (wParam == c.VK_UP) {
                     if ((v.navigateSearchOverlay(.previous) catch false)) return 0;
                 }
-                if (wParam == VK_DOWN) {
+                if (wParam == c.VK_DOWN) {
                     if ((v.navigateSearchOverlay(.next) catch false)) return 0;
                 }
-                if (wParam == VK_RETURN and keyPressed(VK_SHIFT)) {
+                if (wParam == c.VK_RETURN and keyPressed(c.VK_SHIFT)) {
                     if ((v.navigateSearchOverlay(.previous) catch false)) return 0;
                 }
             }
-            if (wParam == VK_ESCAPE) {
+            if (wParam == c.VK_ESCAPE) {
                 if (v.overlay_mode == .confirm) {
                     // Same no-access-after-dispatch discipline as
                     // the mouse-click confirm paths — cancel
@@ -21668,7 +18332,7 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
                     return 0;
                 }
                 v.hideOverlay();
-                v.layout() catch {};
+                runUiActionOrLog("overlay escape layout failed", v.layout());
                 refocusActiveSurface(v);
                 return 0;
             }
@@ -21679,14 +18343,14 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
 
     const result = if (host) |v| blk: {
         if (v.overlay_edit_prev_proc) |proc| {
-            break :blk CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+            break :blk sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
-        break :blk DefWindowProcW(hwnd, msg, wParam, lParam);
-    } else DefWindowProcW(hwnd, msg, wParam, lParam);
+        break :blk sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+    } else sys.DefWindowProcW(hwnd, msg, wParam, lParam);
     if (host) |v| {
         if (v.overlay_edit_uia_provider) |provider| switch (msg) {
-            WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
-            WM_KEYUP, WM_LBUTTONUP, EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
+            c.WM_SETFOCUS => win32_uia.events.raiseFocusChanged(&provider.base),
+            c.WM_KEYUP, c.WM_LBUTTONUP, c.EM_SETSEL => v.raiseOverlayEditSelectionChangedIfNeeded(),
             else => {},
         };
     }
@@ -21694,96 +18358,96 @@ fn overlayEditProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callco
 }
 
 fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-    if (msg == WM_NCCREATE) {
+    if (msg == c.WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
-            _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @as(LONG_PTR, @intCast(@intFromPtr(ptr))));
+            setWindowData(hwnd, ptr);
         }
     }
 
     const host = getHost(hwnd);
     switch (msg) {
-        WM_WINHOSTTY_HOST_NEW_TAB => {
+        c.WM_WINHOSTTY_HOST_NEW_TAB => {
             if (host) |v| v.dispatchDeferredNewTab(if (wParam == 0) null else @as(u64, @intCast(wParam)));
             return 0;
         },
-        WM_ACTIVATE => {
-            if ((wParam & 0xFFFF) == WA_INACTIVE) {
+        c.WM_ACTIVATE => {
+            if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
                     if (v.app.config.@"quick-terminal-autohide") {
                         if (v.app.quickTerminalSurfaceForHost(v)) |surface| {
                             if (surface.window_visible) {
-                                const top_level = surface.windowHwnd() orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
-                                if (IsWindowVisible(top_level) != 0) {
-                                    v.app.hideQuickTerminalSurface(surface);
+                                const top_level = surface.windowHwnd() orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+                                if (sys.IsWindowVisible(top_level) != 0) {
+                                    App.hideQuickTerminalSurface(surface);
                                 }
                             }
                         }
                     }
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Per-host tween heartbeat. Runs at ~16 ms while any chrome
         // animation is active; stops as soon as the scheduler empties.
         // Separate from the App-level quit timer, which uses
         // `SetTimer(null, …)` on the thread queue.
-        WM_TIMER => {
-            if (wParam == TWEEN_TIMER_ID) {
+        c.WM_TIMER => {
+            if (wParam == c.TWEEN_TIMER_ID) {
                 if (host) |v| v.tickTweens();
                 return 0;
             }
-            if (wParam == SEARCH_TIMER_ID) {
+            if (wParam == c.SEARCH_TIMER_ID) {
                 if (host) |v| v.tickSearchBars();
                 return 0;
             }
-            if (wParam == SCROLLBAR_TIMER_ID) {
+            if (wParam == c.SCROLLBAR_TIMER_ID) {
                 if (host) |v| v.tickScrollbars();
                 return 0;
             }
-            if (wParam == RESIZE_SETTLE_TIMER_ID) {
+            if (wParam == c.RESIZE_SETTLE_TIMER_ID) {
                 if (host) |v| v.tickResizeSettleRepaint();
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_DRAWITEM => {
+        c.WM_DRAWITEM => {
             if (host) |v| {
                 const draw: *const DRAWITEMSTRUCT = @ptrFromInt(@as(usize, @bitCast(lParam)));
                 if (v.drawSearchBarBackground(draw)) return 1;
                 v.drawButton(draw);
                 return 1;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_ERASEBKGND => return 1,
+        c.WM_ERASEBKGND => return 1,
         // Integrated-titlebar non-client handlers. All gated on the
         // host actively using the integrated titlebar (Win11 build /
         // config gate + visible tab/caption row); otherwise they fall
         // through to DefWindowProcW and the system paints its default
         // caption.
-        WM_NCCALCSIZE => {
+        c.WM_NCCALCSIZE => {
             if (host) |v| {
                 if (v.handleNcCalcSize(hwnd, wParam, lParam)) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_NCHITTEST => {
+        c.WM_NCHITTEST => {
             if (host) |v| {
                 if (v.usingIntegratedTitlebar()) {
                     if (dispatchDwmNcMessage(hwnd, msg, wParam, lParam)) |lr| return lr;
                 }
                 if (v.handleNcHitTest(hwnd, lParam)) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_NCMOUSEMOVE => {
+        c.WM_NCMOUSEMOVE => {
             if (host) |v| {
                 if (v.handleNcMouseMove(hwnd, wParam)) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_NCMOUSELEAVE => {
+        c.WM_NCMOUSELEAVE => {
             if (host) |v| {
                 const dwm_result = if (v.usingIntegratedTitlebar())
                     dispatchDwmNcMessage(hwnd, msg, wParam, lParam)
@@ -21792,55 +18456,55 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.handleNcMouseLeave();
                 if (dwm_result) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Integrated-titlebar caption-button click dispatch. The
         // custom NC frame still returns HTMINBUTTON / HTMAXBUTTON for
         // shell affordances such as Snap Layout hover, but it cannot
         // rely on DefWindowProc owning the full caption-button mouse
         // loop once WM_NCCALCSIZE has removed the top NC margin.
-        WM_NCLBUTTONDOWN => {
+        c.WM_NCLBUTTONDOWN => {
             if (host) |v| {
                 if (v.usingIntegratedTitlebar()) {
                     const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
                     v.caption_pressed = titlebarCaptionFromHitTest(ht);
                     if (v.caption_pressed != .none) v.repaintTopChrome();
-                    if (captionButtonSysCommand(ht, IsZoomed(hwnd) != 0)) |cmd| {
+                    if (captionButtonSysCommand(ht, sys.IsZoomed(hwnd) != 0)) |cmd| {
                         v.clearCaptionPressed();
-                        _ = SendMessageW(hwnd, WM_SYSCOMMAND, cmd, lParam);
+                        _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, cmd, lParam);
                         return 0;
                     }
-                    if (ht == HTCLOSE) return 0;
+                    if (ht == c.HTCLOSE) return 0;
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_NCLBUTTONUP => {
+        c.WM_NCLBUTTONUP => {
             if (host) |v| {
                 if (v.usingIntegratedTitlebar()) {
                     if (dispatchDwmNcMessage(hwnd, msg, wParam, lParam)) |lr| return lr;
                     const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
-                    if (captionButtonSysCommand(ht, IsZoomed(hwnd) != 0) != null) {
+                    if (captionButtonSysCommand(ht, sys.IsZoomed(hwnd) != 0) != null) {
                         v.clearCaptionPressed();
                         return 0;
                     }
                     switch (ht) {
-                        HTCLOSE => {
+                        c.HTCLOSE => {
                             v.clearCaptionPressed();
-                            _ = SendMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, lParam);
+                            _ = sys.SendMessageW(hwnd, c.WM_SYSCOMMAND, c.SC_CLOSE, lParam);
                             return 0;
                         },
                         else => v.clearCaptionPressed(),
                     }
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // UIA root object request. Screen readers (Narrator, NVDA) call
         // `AccessibleObjectFromWindow` which turns into WM_GETOBJECT on
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
-        WM_GETOBJECT => {
+        c.WM_GETOBJECT => {
             if (host) |v| {
                 const provider = v.root_uia_provider orelse provider: {
                     const created = win32_uia.RootProvider.create(
@@ -21848,46 +18512,46 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         hwnd,
                     ) catch |err| {
                         log.warn("uia: root provider init failed err={}", .{err});
-                        return DefWindowProcW(hwnd, msg, wParam, lParam);
+                        return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                     };
                     v.root_uia_provider = created;
                     break :provider created;
                 };
                 if (win32_uia.returnRootProvider(hwnd, wParam, lParam, provider)) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_SETTINGCHANGE => {
+        c.WM_SETTINGCHANGE => {
             if (host) |v| {
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();
                 v.app.reconfigureTheme();
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_THEMECHANGED, WM_SYSCOLORCHANGE => {
+        c.WM_THEMECHANGED, c.WM_SYSCOLORCHANGE => {
             if (host) |v| {
                 v.app.reconfigureTheme();
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // Fired by DWM when the user's accent color changes. Re-resolve
         // the theme so any accent-derived tokens pick up the new value
         // without requiring a config reload.
-        WM_DWMCOLORIZATIONCOLORCHANGED => {
+        c.WM_DWMCOLORIZATIONCOLORCHANGED => {
             if (host) |v| {
                 v.app.reconfigureTheme();
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_DPICHANGED => {
+        c.WM_DPICHANGED => {
             if (host) |v| {
-                const new_dpi = GetDpiForWindow(hwnd);
+                const new_dpi = sys.GetDpiForWindow(hwnd);
                 if (new_dpi > 0) v.current_dpi = new_dpi;
 
                 // Resize window to the suggested rectangle from lParam
                 const suggested: *const RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                _ = SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                _ = sys.SetWindowPos(hwnd, null, suggested.left, suggested.top, suggested.right - suggested.left, suggested.bottom - suggested.top, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
 
                 // Update content_scale on active tab surfaces
                 const scale_val: f32 = @as(f32, @floatFromInt(v.current_dpi)) / 96.0;
@@ -21905,9 +18569,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.recreateChromeFont();
 
                 // Relayout and repaint
-                v.layout() catch {};
+                runUiActionOrLog("DPI update layout failed", v.layout());
                 v.app.resizeShellCompositorWindow(hwnd);
-                if (chromeTextNeedsFullInvalidation(v.statusBarHeight())) {
+                if (chromeTextNeedsFullInvalidation(Host.statusBarHeight())) {
                     v.invalidateChromeText();
                 } else {
                     v.invalidateTopChromeText();
@@ -21915,21 +18579,21 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             }
             return 0;
         },
-        WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CTLCOLORBTN => {
+        c.WM_CTLCOLOREDIT, c.WM_CTLCOLORSTATIC, c.WM_CTLCOLORBTN => {
             if (host) |v| {
-                v.ensureThemeBrushes() catch return DefWindowProcW(hwnd, msg, wParam, lParam);
+                v.ensureThemeBrushes() catch return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                 const hdc: HDC = @ptrFromInt(@as(usize, @intCast(wParam)));
                 const child: HWND = @ptrFromInt(@as(usize, @intCast(lParam)));
                 switch (msg) {
-                    WM_CTLCOLOREDIT => {
-                        _ = SetBkMode(hdc, OPAQUE);
-                        _ = SetBkColor(hdc, v.app.resolved_theme.edit_bg);
-                        _ = SetTextColor(hdc, v.app.resolved_theme.edit_fg);
+                    c.WM_CTLCOLOREDIT => {
+                        _ = sys.SetBkMode(hdc, c.OPAQUE);
+                        _ = sys.SetBkColor(hdc, v.app.resolved_theme.edit_bg);
+                        _ = sys.SetTextColor(hdc, v.app.resolved_theme.edit_fg);
                         return @as(LRESULT, @bitCast(@as(usize, @intFromPtr(v.edit_brush.?))));
                     },
-                    WM_CTLCOLORSTATIC => {
-                        _ = SetBkMode(hdc, TRANSPARENT);
-                        _ = SetTextColor(hdc, if (v.isSearchBarResultsLabel(child))
+                    c.WM_CTLCOLORSTATIC => {
+                        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+                        _ = sys.SetTextColor(hdc, if (v.isSearchBarResultsLabel(child))
                             if (v.searchControlSurface(child)) |surface|
                                 searchBarResultsVisual(&v.app.resolved_theme, &surface.search_bar).fg
                             else
@@ -21940,13 +18604,13 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             v.app.resolved_theme.text_primary);
                         return @as(LRESULT, @bitCast(@as(usize, @intFromPtr(v.overlay_brush.?))));
                     },
-                    WM_CTLCOLORBTN => {
-                        _ = SetBkMode(hdc, TRANSPARENT);
+                    c.WM_CTLCOLORBTN => {
+                        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
                         if (v.isOverlayStyledButton(child)) {
-                            _ = SetTextColor(hdc, v.app.resolved_theme.button_overlay_fg);
+                            _ = sys.SetTextColor(hdc, v.app.resolved_theme.button_overlay_fg);
                             return @as(LRESULT, @bitCast(@as(usize, @intFromPtr(v.overlay_brush.?))));
                         }
-                        _ = SetTextColor(hdc, if (v.isActiveChromeButton(child))
+                        _ = sys.SetTextColor(hdc, if (v.isActiveChromeButton(child))
                             v.app.resolved_theme.button_active_fg
                         else
                             v.app.resolved_theme.button_chrome_fg);
@@ -21955,16 +18619,16 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     else => {},
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
-        WM_COMMAND => {
+        c.WM_COMMAND => {
             if (host) |v| {
                 const command_id = lowWord(wParam);
                 const notify_code = highWord(wParam);
                 const child_hwnd = wmCommandChildHwnd(lParam);
                 switch (command_id) {
                     2002 => {
-                        if (notify_code == EN_CHANGE) {
+                        if (notify_code == c.EN_CHANGE) {
                             // Skip re-entry from our own programmatic
                             // `SetWindowTextW` on the edit HWND. The
                             // caller already wraps the write in
@@ -21975,17 +18639,20 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             // racing borrows across the sync cascade
                             // caused palette edit re-entry crashes.
                             if (v.suppress_edit_events) return 0;
-                            appendOwnedString(v.app.core_app.alloc, &v.cached_overlay_edit, null) catch {};
+                            runUiActionOrLog(
+                                "overlay edit cache clear failed",
+                                appendOwnedString(v.app.core_app.alloc, &v.cached_overlay_edit, null),
+                            );
                             if (v.overlay_edit_uia_provider) |provider| {
                                 provider.raiseTextChanged();
                                 provider.raiseValueChanged();
                             }
                             v.raiseOverlayEditSelectionChangedIfNeeded();
                             if (v.overlay_mode == .search) {
-                                _ = v.syncSearchOverlay() catch {};
+                                runUiActionOrLog("search overlay sync failed", v.syncSearchOverlay());
                             } else if (v.overlay_mode == .command_palette) {
-                                v.syncOverlayCompletionState() catch {};
-                                _ = v.syncCommandPaletteBanner() catch {};
+                                runUiActionOrLog("overlay completion sync failed", v.syncOverlayCompletionState());
+                                runUiActionOrLog("command palette banner sync failed", v.syncCommandPaletteBanner());
                             } else {
                                 _ = v.syncOverlayLabel() catch false;
                                 _ = v.syncOverlayHint() catch false;
@@ -21994,8 +18661,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             return 0;
                         }
                     },
-                    SEARCH_EDIT_ID => {
-                        if (notify_code == EN_CHANGE) {
+                    c.SEARCH_EDIT_ID => {
+                        if (notify_code == c.EN_CHANGE) {
                             if (v.suppress_edit_events) return 0;
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
@@ -22026,8 +18693,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         if (v.overlay_mode == .profile) {
                             runUiActionOrLog("profile overlay submit failed", v.submitProfileOverlay(resolveProfileOpenTarget(
                                 v.app.launcher_profile_target,
-                                keyPressed(VK_SHIFT),
-                                keyPressed(VK_CONTROL),
+                                keyPressed(c.VK_SHIFT),
+                                keyPressed(c.VK_CONTROL),
                             )));
                         } else {
                             runUiActionOrLog("overlay submit failed", v.submitOverlay());
@@ -22051,8 +18718,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         refocusActiveSurface(v);
                         return 0;
                     },
-                    SEARCH_PREV_ID => {
-                        if (notify_code == BN_CLICKED) {
+                    c.SEARCH_PREV_ID => {
+                        if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     if (dockedSearchButtonDirection(command_id)) |dir| {
@@ -22065,8 +18732,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             }
                         }
                     },
-                    SEARCH_NEXT_ID => {
-                        if (notify_code == BN_CLICKED) {
+                    c.SEARCH_NEXT_ID => {
+                        if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     if (dockedSearchButtonDirection(command_id)) |dir| {
@@ -22079,8 +18746,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             }
                         }
                     },
-                    SEARCH_REGEX_ID, SEARCH_CASE_ID, SEARCH_WORD_ID => {
-                        if (notify_code == BN_CLICKED) {
+                    c.SEARCH_REGEX_ID, c.SEARCH_CASE_ID, c.SEARCH_WORD_ID => {
+                        if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     _ = surface.handleSearchToggleClick(command_id) catch |err| {
@@ -22091,8 +18758,8 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                             }
                         }
                     },
-                    SEARCH_CLOSE_ID => {
-                        if (notify_code == BN_CLICKED) {
+                    c.SEARCH_CLOSE_ID => {
+                        if (notify_code == c.BN_CLICKED) {
                             if (child_hwnd) |child| {
                                 if (v.searchControlSurface(child)) |surface| {
                                     surface.closeDockedSearchBar(true, true) catch |err| {
@@ -22161,34 +18828,34 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     }
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_SETFOCUS => {
+        c.WM_SETFOCUS => {
             if (host) |v| {
                 refocusHostAfterActivation(v);
             }
             return 0;
         },
 
-        WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP => {
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_SYSKEYUP => {
             if (host) |v| {
                 if (v.handleEmptyHostKeyMessage(msg, wParam, lParam)) return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_GETMINMAXINFO => {
+        c.WM_GETMINMAXINFO => {
             if (host) |v| {
                 if (v.activeSurface()) |surface| {
                     surface.updateMinMaxInfo(lParam);
                     return 0;
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_SIZE => {
+        c.WM_SIZE => {
             if (host) |v| {
                 // Defensive: maximize / minimize jumps don't always
                 // route through WM_ENTERSIZEMOVE → WM_EXITSIZEMOVE, so
@@ -22197,7 +18864,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 // Clear it here so the renderer doesn't stay in
                 // coarse-mode after the user clicks maximize.
                 const size_kind: u32 = @truncate(wParam);
-                if (size_kind == SIZE_MAXIMIZED or size_kind == SIZE_MINIMIZED) {
+                if (size_kind == c.SIZE_MAXIMIZED or size_kind == c.SIZE_MINIMIZED) {
                     v.is_live_resize.store(false, .release);
                     // Win32 silently cancels NC mouse tracking when
                     // the window minimises or its maximised state
@@ -22212,122 +18879,122 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         v.repaintTopChrome();
                     }
                 }
-                v.layout() catch {};
+                runUiActionOrLog("window resize layout failed", v.layout());
                 v.app.resizeShellCompositorWindow(hwnd);
-                if (size_kind == SIZE_MAXIMIZED or
-                    (size_kind == SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
+                if (size_kind == c.SIZE_MAXIMIZED or
+                    (size_kind == c.SIZE_RESTORED and !v.is_live_resize.load(.acquire)))
                 {
                     v.startResizeSettleRepaints();
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_ENTERSIZEMOVE => {
+        c.WM_ENTERSIZEMOVE => {
             // User started a drag-resize or drag-move. We don't know
             // which yet, but setting the flag on both is harmless —
             // pure move generates no WM_SIZE so the throttle has
             // nothing to coalesce. WM_EXITSIZEMOVE clears it either
             // way.
             if (host) |v| v.is_live_resize.store(true, .release);
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_EXITSIZEMOVE => {
+        c.WM_EXITSIZEMOVE => {
             if (host) |v| {
                 v.is_live_resize.store(false, .release);
                 v.defer_surface_repaints_until_flush = true;
-                v.layout() catch {};
+                runUiActionOrLog("resize completion layout failed", v.layout());
                 v.defer_surface_repaints_until_flush = false;
                 v.flushDeferredVisibleSurfaceRepaints();
                 v.startResizeSettleRepaints();
                 v.forceVisibleSurfaceRepaintsNow();
                 v.forceHostCompositionPaint();
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_MOUSEMOVE => {
+        c.WM_MOUSEMOVE => {
             if (host) |v| {
                 var track: TRACKMOUSEEVENT = .{
                     .cbSize = @sizeOf(TRACKMOUSEEVENT),
-                    .dwFlags = TME_LEAVE,
+                    .dwFlags = c.TME_LEAVE,
                     .hwndTrack = hwnd,
                     .dwHoverTime = 0,
                 };
-                _ = TrackMouseEvent(&track);
+                _ = sys.TrackMouseEvent(&track);
                 const point = POINT{
                     .x = signedLowWord(lParamBits(lParam)),
                     .y = signedHighWord(lParamBits(lParam)),
                 };
                 v.setHoveredQuickSlot(v.quickSlotProfileIndexAtPoint(point));
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_MOUSELEAVE => {
+        c.WM_MOUSELEAVE => {
             if (host) |v| v.setHoveredQuickSlot(null);
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_MOUSEWHEEL, WM_MOUSEHWHEEL, WM_POINTERWHEEL, WM_POINTERHWHEEL => {
+        c.WM_MOUSEWHEEL, c.WM_MOUSEHWHEEL, c.WM_POINTERWHEEL, c.WM_POINTERHWHEEL => {
             if (host) |v| {
                 var point = POINT{
                     .x = signedLowWord(lParamBits(lParam)),
                     .y = signedHighWord(lParamBits(lParam)),
                 };
-                if (ScreenToClient(hwnd, &point) != 0 and point.y >= 0 and point.y < v.tabBarHeight()) {
+                if (sys.ScreenToClient(hwnd, &point) != 0 and point.y >= 0 and point.y < v.tabBarHeight()) {
                     _ = v.activateTabByDirection(tabDirectionFromWheelDelta(signedHighWord(wParam)));
                     return 0;
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_LBUTTONUP, WM_MBUTTONUP, WM_RBUTTONUP => {
+        c.WM_LBUTTONUP, c.WM_MBUTTONUP, c.WM_RBUTTONUP => {
             if (host) |v| {
                 const point = POINT{
                     .x = signedLowWord(lParamBits(lParam)),
                     .y = signedHighWord(lParamBits(lParam)),
                 };
-                if (msg == WM_LBUTTONUP and v.handleUpdateNoticeClick(point)) {
+                if (msg == c.WM_LBUTTONUP and v.handleUpdateNoticeClick(point)) {
                     return 0;
                 }
                 if (v.quickSlotProfileIndexAtPoint(point)) |profile_index| {
                     _ = v.setSelectedProfileIndex(profile_index) catch return 0;
                     const open_target = switch (msg) {
-                        WM_MBUTTONUP => ProfileOpenTarget.split,
-                        WM_RBUTTONUP => ProfileOpenTarget.window,
+                        c.WM_MBUTTONUP => ProfileOpenTarget.split,
+                        c.WM_RBUTTONUP => ProfileOpenTarget.window,
                         else => v.app.launcher_profile_target,
                     };
                     if (v.openSelectedProfile(open_target)) return 0;
                     return 0;
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_PAINT => {
+        c.WM_PAINT => {
             if (host) |v| {
                 v.chrome_paint_pending = false;
                 v.chrome_paint_mask = .{};
                 v.paintChrome();
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_CLOSE => {
+        c.WM_CLOSE => {
             if (host) |v| {
                 v.close();
                 return 0;
             }
-            _ = DestroyWindow(hwnd);
+            _ = sys.DestroyWindow(hwnd);
             return 0;
         },
 
-        WM_DESTROY => {
+        c.WM_DESTROY => {
             if (host) |v| {
                 v.app.detachShellCompositorWindow(hwnd);
                 v.hwnd = null;
@@ -22335,7 +19002,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 0;
         },
 
-        else => return DefWindowProcW(hwnd, msg, wParam, lParam),
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
 }
 
@@ -22390,23 +19057,7 @@ fn movedIndexAfterReorder(active: usize, from: usize, to: usize) usize {
     return active;
 }
 
-fn quickSlotProfileIndex(
-    profiles_len: usize,
-    selected_index: ?usize,
-    slot_ordinal: usize,
-    max_slots: usize,
-) ?usize {
-    if (profiles_len == 0 or slot_ordinal >= max_slots) return null;
-    var drawn: usize = 0;
-    var index: usize = 0;
-    while (index < profiles_len) : (index += 1) {
-        if (selected_index != null and index == selected_index.?) continue;
-        if (drawn == slot_ordinal) return index;
-        drawn += 1;
-        if (drawn >= max_slots) break;
-    }
-    return null;
-}
+const quickSlotProfileIndex = labels.quickSlotProfileIndex;
 
 fn nextQuickSlotFocus(
     profiles_len: usize,
@@ -22481,14 +19132,7 @@ fn applyQuickSlotPreferenceOrder(
     }
 }
 
-fn findLauncherQuickSlotOrdinal(slot_keys: [3]?[:0]const u8, key: []const u8) ?usize {
-    for (slot_keys, 0..) |slot_key, index| {
-        if (slot_key) |value| {
-            if (std.ascii.eqlIgnoreCase(value, key)) return index;
-        }
-    }
-    return null;
-}
+const findLauncherQuickSlotOrdinal = labels.findLauncherQuickSlotOrdinal;
 
 fn launcherQuickSlotAssignmentNeedsChange(
     slot_keys: [3]?[:0]const u8,
@@ -22570,17 +19214,13 @@ fn pointInRect(point: POINT, rect: RECT) bool {
         point.y < rect.bottom;
 }
 
-fn lParamBits(lParam: LPARAM) usize {
-    return @as(usize, @bitCast(lParam));
-}
+const lParamBits = win32_input.lParamBits;
 
 fn lowWord(value: usize) u16 {
     return @truncate(value & 0xFFFF);
 }
 
-fn highWord(value: usize) u16 {
-    return @truncate((value >> 16) & 0xFFFF);
-}
+const highWord = win32_input.highWord;
 
 fn signedLowWord(value: usize) i16 {
     return @bitCast(lowWord(value));
@@ -22588,18 +19228,6 @@ fn signedLowWord(value: usize) i16 {
 
 fn signedHighWord(value: usize) i16 {
     return @bitCast(highWord(value));
-}
-
-fn scanCodeFromLParam(lParam: LPARAM) u32 {
-    return @as(u32, highWord(lParamBits(lParam))) & 0xFF;
-}
-
-fn isExtendedKey(lParam: LPARAM) bool {
-    return (lParamBits(lParam) & KF_EXTENDED) != 0;
-}
-
-fn isRepeatedKey(lParam: LPARAM) bool {
-    return (lParamBits(lParam) & KF_REPEAT) != 0;
 }
 
 fn cursorPosFromLParam(lParam: LPARAM) apprt.CursorPos {
@@ -22632,13 +19260,13 @@ fn imeWindowForms(ime_pos: apprt.IMEPos, content_scale: apprt.ContentScale) ImeW
 
     return .{
         .composition = .{
-            .dwStyle = CFS_POINT,
+            .dwStyle = c.CFS_POINT,
             .ptCurrentPos = point,
             .rcArea = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
         },
         .candidate = .{
             .dwIndex = 0,
-            .dwStyle = CFS_EXCLUDE,
+            .dwStyle = c.CFS_EXCLUDE,
             .ptCurrentPos = point,
             .rcArea = .{
                 .left = point.x,
@@ -22733,365 +19361,21 @@ fn writeImeWindowFormsTrace(
     };
 }
 
-fn readSystemWheelSetting(action: UINT, fallback: u32) u32 {
-    var value: UINT = fallback;
-    if (SystemParametersInfoW(action, 0, @ptrCast(&value), 0) == 0) {
-        return fallback;
-    }
-    return value;
-}
+const readSystemWheelSetting = win32_input.readSystemWheelSetting;
 
-fn wheelDeltaFromWParam(wParam: WPARAM) i16 {
-    const bits = @as(usize, @intCast(wParam));
-    return @bitCast(highWord(bits));
-}
+const wheelDeltaFromWParam = win32_input.wheelDeltaFromWParam;
 
-fn wheelSettingForAxis(settings: SystemWheelSettings, axis: MouseWheelAxis) u32 {
-    return switch (axis) {
-        .vertical => settings.lines,
-        .horizontal => settings.chars,
-    };
-}
+const normalizeWheelDelta = win32_input.normalizeWheelDelta;
 
-fn wheelUnitSize(ctx: WheelNormalizationContext, axis: MouseWheelAxis) f64 {
-    const dim: u32 = switch (axis) {
-        .vertical => ctx.cell_size.height,
-        .horizontal => ctx.cell_size.width,
-    };
-    return @floatFromInt(@max(dim, 1));
-}
+const keyPressed = win32_input.keyPressed;
 
-fn wheelViewportSize(ctx: WheelNormalizationContext, axis: MouseWheelAxis) f64 {
-    const dim: u32 = switch (axis) {
-        .vertical => ctx.viewport.height,
-        .horizontal => ctx.viewport.width,
-    };
-    const viewport: f64 = @floatFromInt(@max(dim, 1));
-    const unit = wheelUnitSize(ctx, axis);
-    return @max(unit, viewport - unit);
-}
+const currentMods = win32_input.currentMods;
 
-fn normalizeWheelDelta(
-    ctx: WheelNormalizationContext,
-    axis: MouseWheelAxis,
-    delta: i16,
-) NormalizedWheelScroll {
-    if (delta == 0) return .{};
+const hotkeySpecForTrigger = win32_input.hotkeySpecForTrigger;
 
-    const precision = @rem(delta, WHEEL_DELTA) != 0;
-    const notch_delta = @as(f64, @floatFromInt(delta)) / WHEEL_DELTA;
-    const pixels = if (precision)
-        notch_delta * wheelUnitSize(ctx, axis)
-    else discrete: {
-        const setting = wheelSettingForAxis(ctx.settings, axis);
-        if (setting == 0) return .{};
+const hotkeySpecEql = win32_input.hotkeySpecEql;
 
-        break :discrete if (setting == WHEEL_PAGESCROLL)
-            notch_delta * wheelViewportSize(ctx, axis)
-        else
-            notch_delta * @as(f64, @floatFromInt(setting)) * wheelUnitSize(ctx, axis);
-    };
-
-    return switch (axis) {
-        .vertical => .{
-            .yoff = pixels,
-            .mods = .{
-                .precision = precision,
-                .pixel_delta = true,
-            },
-        },
-        .horizontal => .{
-            .xoff = pixels,
-            .mods = .{
-                .precision = precision,
-                .pixel_delta = true,
-            },
-        },
-    };
-}
-
-fn keyPressed(vk: i32) bool {
-    return GetKeyState(vk) < 0;
-}
-
-fn keyToggled(vk: i32) bool {
-    return (GetKeyState(vk) & 1) != 0;
-}
-
-fn modsFromKeyboardState(state: *const [256]u8) input.Mods {
-    const pressed = struct {
-        fn check(state_: *const [256]u8, vk: usize) bool {
-            return (state_[vk] & 0x80) != 0;
-        }
-    };
-
-    return .{
-        .shift = pressed.check(state, VK_SHIFT),
-        .ctrl = pressed.check(state, VK_CONTROL),
-        .alt = pressed.check(state, VK_MENU),
-        .super = pressed.check(state, VK_LWIN) or pressed.check(state, VK_RWIN),
-        .caps_lock = (state[VK_CAPITAL] & 1) != 0,
-        .num_lock = (state[VK_NUMLOCK] & 1) != 0,
-        .sides = .{
-            .shift = if (pressed.check(state, VK_RSHIFT)) .right else .left,
-            .ctrl = if (pressed.check(state, VK_RCONTROL)) .right else .left,
-            .alt = if (pressed.check(state, VK_RMENU)) .right else .left,
-            .super = if (pressed.check(state, VK_RWIN)) .right else .left,
-        },
-    };
-}
-
-fn fallbackMods() input.Mods {
-    return .{
-        .shift = keyPressed(VK_SHIFT),
-        .ctrl = keyPressed(VK_CONTROL),
-        .alt = keyPressed(VK_MENU),
-        .super = keyPressed(VK_LWIN) or keyPressed(VK_RWIN),
-        .caps_lock = keyToggled(VK_CAPITAL),
-        .num_lock = keyToggled(VK_NUMLOCK),
-        .sides = .{
-            .shift = if (keyPressed(VK_RSHIFT)) .right else .left,
-            .ctrl = if (keyPressed(VK_RCONTROL)) .right else .left,
-            .alt = if (keyPressed(VK_RMENU)) .right else .left,
-            .super = if (keyPressed(VK_RWIN)) .right else .left,
-        },
-    };
-}
-
-fn currentKeyboardState(state: *[256]u8) ?*const [256]u8 {
-    if (GetKeyboardState(state) == 0) return null;
-    return state;
-}
-
-fn currentModsFromKeyboardState(state: ?*const [256]u8) input.Mods {
-    return if (state) |keyboard_state| modsFromKeyboardState(keyboard_state) else fallbackMods();
-}
-
-fn currentMods() input.Mods {
-    var state: [256]u8 = [_]u8{0} ** 256;
-    return currentModsFromKeyboardState(currentKeyboardState(&state));
-}
-
-fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
-    return switch (vk) {
-        VK_BACK => .backspace,
-        VK_TAB => .tab,
-        VK_RETURN => if (isExtendedKey(lParam)) .numpad_enter else .enter,
-        VK_SHIFT => if (scanCodeFromLParam(lParam) == 0x36) .shift_right else .shift_left,
-        VK_LSHIFT => .shift_left,
-        VK_RSHIFT => .shift_right,
-        VK_CONTROL, VK_LCONTROL => if (isExtendedKey(lParam) or vk == VK_RCONTROL) .control_right else .control_left,
-        VK_RCONTROL => .control_right,
-        VK_MENU, VK_LMENU => if (isExtendedKey(lParam) or vk == VK_RMENU) .alt_right else .alt_left,
-        VK_RMENU => .alt_right,
-        VK_PAUSE => .pause,
-        VK_CAPITAL => .caps_lock,
-        VK_ESCAPE => .escape,
-        VK_SPACE => .space,
-        VK_PRIOR => .page_up,
-        VK_NEXT => .page_down,
-        VK_END => .end,
-        VK_HOME => .home,
-        VK_LEFT => .arrow_left,
-        VK_UP => .arrow_up,
-        VK_RIGHT => .arrow_right,
-        VK_DOWN => .arrow_down,
-        VK_SNAPSHOT => .print_screen,
-        VK_INSERT => .insert,
-        VK_DELETE => .delete,
-        VK_LWIN => .meta_left,
-        VK_RWIN => .meta_right,
-        VK_APPS => .context_menu,
-        VK_MULTIPLY => .numpad_multiply,
-        VK_ADD => .numpad_add,
-        VK_SEPARATOR => .numpad_separator,
-        VK_SUBTRACT => .numpad_subtract,
-        VK_DECIMAL => .numpad_decimal,
-        VK_DIVIDE => .numpad_divide,
-        VK_NUMLOCK => .num_lock,
-        VK_SCROLL => .scroll_lock,
-        VK_OEM_1 => .semicolon,
-        VK_OEM_PLUS => .equal,
-        VK_OEM_COMMA => .comma,
-        VK_OEM_MINUS => .minus,
-        VK_OEM_PERIOD => .period,
-        VK_OEM_2 => .slash,
-        VK_OEM_3 => .backquote,
-        VK_OEM_4 => .bracket_left,
-        VK_OEM_5 => .backslash,
-        VK_OEM_6 => .bracket_right,
-        VK_OEM_7 => .quote,
-        VK_0...VK_9 => input.Key.fromASCII(@as(u8, @intCast('0' + (vk - VK_0)))) orelse .unidentified,
-        VK_A...VK_Z => input.Key.fromASCII(@as(u8, @intCast('a' + (vk - VK_A)))) orelse .unidentified,
-        VK_NUMPAD0...VK_NUMPAD9 => @enumFromInt(
-            @intFromEnum(input.Key.numpad_0) + @as(c_int, @intCast(vk - VK_NUMPAD0)),
-        ),
-        VK_F1...VK_F24 => @enumFromInt(
-            @intFromEnum(input.Key.f1) + @as(c_int, @intCast(vk - VK_F1)),
-        ),
-        else => .unidentified,
-    };
-}
-
-fn unshiftedCodepointForVirtualKey(vk: UINT) u21 {
-    return switch (vk) {
-        VK_0...VK_9 => @as(u21, @intCast('0' + (vk - VK_0))),
-        VK_A...VK_Z => @as(u21, @intCast('a' + (vk - VK_A))),
-        VK_SPACE => ' ',
-        VK_OEM_1 => ';',
-        VK_OEM_PLUS => '=',
-        VK_OEM_COMMA => ',',
-        VK_OEM_MINUS => '-',
-        VK_OEM_PERIOD => '.',
-        VK_OEM_2 => '/',
-        VK_OEM_3 => '`',
-        VK_OEM_4 => '[',
-        VK_OEM_5 => '\\',
-        VK_OEM_6 => ']',
-        VK_OEM_7 => '\'',
-        else => 0,
-    };
-}
-
-fn hotkeyModifiers(mods: input.Mods) UINT {
-    var result: UINT = 0;
-    if (mods.alt) result |= MOD_ALT;
-    if (mods.ctrl) result |= MOD_CONTROL;
-    if (mods.shift) result |= MOD_SHIFT;
-    if (mods.super) result |= MOD_WIN;
-    return result;
-}
-
-fn hotkeyPhysicalVirtualKey(key: input.Key) ?UINT {
-    const key_int = @intFromEnum(key);
-    if (key_int >= @intFromEnum(input.Key.key_a) and key_int <= @intFromEnum(input.Key.key_z)) {
-        return VK_A + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.key_a)));
-    }
-    if (key_int >= @intFromEnum(input.Key.digit_0) and key_int <= @intFromEnum(input.Key.digit_9)) {
-        return VK_0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.digit_0)));
-    }
-    if (key_int >= @intFromEnum(input.Key.numpad_0) and key_int <= @intFromEnum(input.Key.numpad_9)) {
-        return VK_NUMPAD0 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.numpad_0)));
-    }
-    if (key_int >= @intFromEnum(input.Key.f1) and key_int <= @intFromEnum(input.Key.f24)) {
-        return VK_F1 + @as(UINT, @intCast(key_int - @intFromEnum(input.Key.f1)));
-    }
-
-    return switch (key) {
-        .backspace => VK_BACK,
-        .tab => VK_TAB,
-        .enter, .numpad_enter => VK_RETURN,
-        .escape => VK_ESCAPE,
-        .space => VK_SPACE,
-        .page_up, .numpad_page_up => VK_PRIOR,
-        .page_down, .numpad_page_down => VK_NEXT,
-        .end, .numpad_end => VK_END,
-        .home, .numpad_home => VK_HOME,
-        .arrow_left, .numpad_left => VK_LEFT,
-        .arrow_up, .numpad_up => VK_UP,
-        .arrow_right, .numpad_right => VK_RIGHT,
-        .arrow_down, .numpad_down => VK_DOWN,
-        .print_screen => VK_SNAPSHOT,
-        .insert, .numpad_insert => VK_INSERT,
-        .delete, .numpad_delete => VK_DELETE,
-        .meta_left => VK_LWIN,
-        .meta_right => VK_RWIN,
-        .context_menu => VK_APPS,
-        .numpad_multiply => VK_MULTIPLY,
-        .numpad_add => VK_ADD,
-        .numpad_separator => VK_SEPARATOR,
-        .numpad_subtract => VK_SUBTRACT,
-        .numpad_decimal => VK_DECIMAL,
-        .numpad_divide => VK_DIVIDE,
-        .num_lock => VK_NUMLOCK,
-        .scroll_lock => VK_SCROLL,
-        .semicolon => VK_OEM_1,
-        .equal => VK_OEM_PLUS,
-        .comma => VK_OEM_COMMA,
-        .minus => VK_OEM_MINUS,
-        .period => VK_OEM_PERIOD,
-        .slash => VK_OEM_2,
-        .backquote => VK_OEM_3,
-        .bracket_left => VK_OEM_4,
-        .backslash => VK_OEM_5,
-        .bracket_right => VK_OEM_6,
-        .quote => VK_OEM_7,
-        else => null,
-    };
-}
-
-fn hotkeyUnicodeVirtualKey(cp: u21) ?struct { vk: UINT, shift: bool } {
-    return switch (cp) {
-        'a'...'z' => .{ .vk = VK_A + @as(UINT, @intCast(cp - 'a')), .shift = false },
-        'A'...'Z' => .{ .vk = VK_A + @as(UINT, @intCast(cp - 'A')), .shift = true },
-        '0'...'9' => .{ .vk = VK_0 + @as(UINT, @intCast(cp - '0')), .shift = false },
-        ')' => .{ .vk = VK_0, .shift = true },
-        '!' => .{ .vk = VK_0 + 1, .shift = true },
-        '@' => .{ .vk = VK_0 + 2, .shift = true },
-        '#' => .{ .vk = VK_0 + 3, .shift = true },
-        '$' => .{ .vk = VK_0 + 4, .shift = true },
-        '%' => .{ .vk = VK_0 + 5, .shift = true },
-        '^' => .{ .vk = VK_0 + 6, .shift = true },
-        '&' => .{ .vk = VK_0 + 7, .shift = true },
-        '*' => .{ .vk = VK_0 + 8, .shift = true },
-        '(' => .{ .vk = VK_0 + 9, .shift = true },
-        ' ' => .{ .vk = VK_SPACE, .shift = false },
-        ';' => .{ .vk = VK_OEM_1, .shift = false },
-        ':' => .{ .vk = VK_OEM_1, .shift = true },
-        '=' => .{ .vk = VK_OEM_PLUS, .shift = false },
-        '+' => .{ .vk = VK_OEM_PLUS, .shift = true },
-        ',' => .{ .vk = VK_OEM_COMMA, .shift = false },
-        '<' => .{ .vk = VK_OEM_COMMA, .shift = true },
-        '-' => .{ .vk = VK_OEM_MINUS, .shift = false },
-        '_' => .{ .vk = VK_OEM_MINUS, .shift = true },
-        '.' => .{ .vk = VK_OEM_PERIOD, .shift = false },
-        '>' => .{ .vk = VK_OEM_PERIOD, .shift = true },
-        '/' => .{ .vk = VK_OEM_2, .shift = false },
-        '?' => .{ .vk = VK_OEM_2, .shift = true },
-        '`' => .{ .vk = VK_OEM_3, .shift = false },
-        '~' => .{ .vk = VK_OEM_3, .shift = true },
-        '[' => .{ .vk = VK_OEM_4, .shift = false },
-        '{' => .{ .vk = VK_OEM_4, .shift = true },
-        '\\' => .{ .vk = VK_OEM_5, .shift = false },
-        '|' => .{ .vk = VK_OEM_5, .shift = true },
-        ']' => .{ .vk = VK_OEM_6, .shift = false },
-        '}' => .{ .vk = VK_OEM_6, .shift = true },
-        '\'' => .{ .vk = VK_OEM_7, .shift = false },
-        '"' => .{ .vk = VK_OEM_7, .shift = true },
-        else => null,
-    };
-}
-
-fn hotkeySpecForTrigger(trigger: input.Binding.Trigger) ?GlobalHotkeySpec {
-    var mods = trigger.mods.binding();
-    const vk = switch (trigger.key) {
-        .catch_all => return null,
-        .physical => |key| hotkeyPhysicalVirtualKey(key) orelse return null,
-        .unicode => |cp| unicode: {
-            const mapped = hotkeyUnicodeVirtualKey(cp) orelse return null;
-            if (mapped.shift) mods.shift = true;
-            break :unicode mapped.vk;
-        },
-    };
-
-    return .{
-        .modifiers = hotkeyModifiers(mods),
-        .vk = vk,
-    };
-}
-
-fn hotkeySpecEql(a: GlobalHotkeySpec, b: GlobalHotkeySpec) bool {
-    return a.modifiers == b.modifiers and a.vk == b.vk;
-}
-
-fn hotkeyRegistrationFailureReason(err: windows.Win32Error) []const u8 {
-    return switch (err) {
-        .HOTKEY_ALREADY_REGISTERED => "already registered by another app or another noctty instance",
-        .ACCESS_DENIED => "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
-        .INVALID_PARAMETER => "invalid modifier or virtual-key combination",
-        else => "unknown Win32 RegisterHotKey failure",
-    };
-}
+const hotkeyRegistrationFailureReason = win32_input.hotkeyRegistrationFailureReason;
 
 fn quitTimerDelayMs(delay: configpkg.Config.Duration) UINT {
     const clamped_ns = @max(delay.duration, std.time.ns_per_s);
@@ -23101,17 +19385,17 @@ fn quitTimerDelayMs(delay: configpkg.Config.Duration) UINT {
 
 fn mouseButtonFromMessage(msg: UINT) ?input.MouseButton {
     return switch (msg) {
-        WM_LBUTTONDOWN, WM_LBUTTONUP => .left,
-        WM_RBUTTONDOWN, WM_RBUTTONUP => .right,
-        WM_MBUTTONDOWN, WM_MBUTTONUP => .middle,
+        c.WM_LBUTTONDOWN, c.WM_LBUTTONUP => .left,
+        c.WM_RBUTTONDOWN, c.WM_RBUTTONUP => .right,
+        c.WM_MBUTTONDOWN, c.WM_MBUTTONUP => .middle,
         else => null,
     };
 }
 
 fn mouseButtonStateFromMessage(msg: UINT) ?input.MouseButtonState {
     return switch (msg) {
-        WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN => .press,
-        WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP => .release,
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => .press,
+        c.WM_LBUTTONUP, c.WM_RBUTTONUP, c.WM_MBUTTONUP => .release,
         else => null,
     };
 }
@@ -23119,9 +19403,9 @@ fn mouseButtonStateFromMessage(msg: UINT) ?input.MouseButtonState {
 fn mouseModsFromWParam(wParam: WPARAM) input.Mods {
     const bits = @as(usize, @intCast(wParam));
     var mods = currentMods();
-    if ((bits & MK_SHIFT) != 0) mods.shift = true;
-    if ((bits & MK_CONTROL) != 0) mods.ctrl = true;
-    _ = bits & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON);
+    if ((bits & c.MK_SHIFT) != 0) mods.shift = true;
+    if ((bits & c.MK_CONTROL) != 0) mods.ctrl = true;
+    _ = bits & (c.MK_LBUTTON | c.MK_RBUTTON | c.MK_MBUTTON);
     return mods;
 }
 
@@ -23161,273 +19445,28 @@ fn scrollbarProxyPointFromSurfaceCursor(
     );
 }
 
-const KeyText = struct {
-    utf8: [8]u8 = [_]u8{0} ** 8,
-    len: usize = 0,
-    consumed_mods: input.Mods = .{},
-    unshifted_codepoint: u21 = 0,
-    deferred_utf16_units: usize = 0,
-};
+const shouldAuthorizeDeferredCharMessage = win32_input.shouldAuthorizeDeferredCharMessage;
 
-fn isControlCodepoint(codepoint: u21) bool {
-    return codepoint < 0x20 or codepoint == 0x7F;
-}
+const DeferredCharState = win32_input.DeferredCharState;
 
-fn utf16CodeUnitCount(codepoint: u21) usize {
-    if (codepoint == 0) return 0;
-    return if (codepoint <= std.math.maxInt(u16)) 1 else 2;
-}
+const charCommitEvent = win32_input.charCommitEvent;
 
-fn shouldDeferTextToCharMessage(
-    action: input.Action,
-    key: input.Key,
-    mods: input.Mods,
-    translated: KeyText,
-) bool {
-    if (action == .release) return false;
-    // Windows reports AltGr as synthetic left Ctrl plus right Alt. The
-    // resulting WM_CHAR is layout text, not a Ctrl+Alt terminal chord.
-    const alt_gr = mods.ctrl and mods.alt and
-        mods.sides.ctrl == .left and mods.sides.alt == .right;
-    if (mods.super or ((mods.ctrl or mods.alt) and !alt_gr)) return false;
-    if (key.modifier()) return false;
-
-    switch (key) {
-        .enter, .backspace, .tab, .escape => return false,
-        else => {},
-    }
-
-    if (translated.deferred_utf16_units == 0) return false;
-    if (translated.len > 0) return true;
-    if (translated.unshifted_codepoint == 0) return true;
-    return !isControlCodepoint(translated.unshifted_codepoint);
-}
-
-fn shouldAuthorizeDeferredCharMessage(effect: CoreSurface.InputEffect) bool {
-    return effect == .ignored;
-}
-
-const DeferredCharState = struct {
-    pending_units: usize = 0,
-    high_surrogate: ?u16 = null,
-
-    fn authorize(self: *DeferredCharState, expected_units: usize) void {
-        self.pending_units = self.pending_units +| expected_units;
-    }
-
-    fn clear(self: *DeferredCharState) void {
-        self.* = .{};
-    }
-
-    fn consumeDeadChar(self: *DeferredCharState) void {
-        if (self.pending_units > 0) self.pending_units -= 1;
-        self.high_surrogate = null;
-    }
-
-    fn consumeCodeUnit(
-        self: *DeferredCharState,
-        code_unit: u16,
-        ime_composing: bool,
-    ) ?u21 {
-        if (ime_composing) {
-            self.clear();
-            return null;
-        }
-        if (self.pending_units == 0) {
-            self.high_surrogate = null;
-            return null;
-        }
-        self.pending_units -= 1;
-
-        if (self.high_surrogate) |high| {
-            if (!std.unicode.utf16IsLowSurrogate(code_unit)) {
-                self.clear();
-                return null;
-            }
-            const codepoint = std.unicode.utf16DecodeSurrogatePair(
-                &.{ high, code_unit },
-            ) catch {
-                self.clear();
-                return null;
-            };
-            self.high_surrogate = null;
-            return codepoint;
-        }
-
-        if (std.unicode.utf16IsHighSurrogate(code_unit)) {
-            self.high_surrogate = code_unit;
-            return null;
-        }
-        if (std.unicode.utf16IsLowSurrogate(code_unit)) {
-            self.clear();
-            return null;
-        }
-
-        return code_unit;
-    }
-};
-
-fn charCommitEvent(
-    codepoint: u21,
-    lParam: LPARAM,
-    utf8_buf: *[8]u8,
-) ?input.KeyEvent {
-    const utf8_len = std.unicode.utf8Encode(codepoint, utf8_buf) catch return null;
-    return .{
-        .action = if (isRepeatedKey(lParam)) .repeat else .press,
-        .key = .unidentified,
-        .mods = .{},
-        .unshifted_codepoint = codepoint,
-        .utf8 = utf8_buf[0..utf8_len],
-    };
-}
-
-fn translateKeyTextToUnicode(
-    vk: UINT,
-    scan_code: UINT,
-    state: *const [256]u8,
-    utf16: *[4]u16,
-) i32 {
-    // TranslateMessage owns the stateful dead-key composition path. This
-    // helper only probes text metadata for key events, so it must not consume
-    // or reset the layout's pending dead key.
-    return ToUnicode(vk, scan_code, state, utf16, utf16.len, TO_UNICODE_NO_STATE_CHANGE);
-}
-
-fn translateKeyText(
-    vk: UINT,
-    lParam: LPARAM,
-    mods: input.Mods,
-    keyboard_state: ?*const [256]u8,
-) KeyText {
-    const state = keyboard_state orelse {
-        const unshifted = unshiftedCodepointForVirtualKey(vk);
-        return .{
-            .unshifted_codepoint = unshifted,
-            .deferred_utf16_units = utf16CodeUnitCount(unshifted),
-        };
-    };
-
-    var utf16: [4]u16 = [_]u16{0} ** 4;
-    const count = translateKeyTextToUnicode(vk, scanCodeFromLParam(lParam), state, &utf16);
-    if (count < 0) {
-        return .{
-            .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-            .deferred_utf16_units = 1,
-        };
-    }
-    if (count == 0) {
-        return .{ .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk) };
-    }
-
-    var result: KeyText = .{
-        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-        .deferred_utf16_units = @intCast(count),
-    };
-
-    const codepoint: u21 = cp: {
-        if (count >= 2 and std.unicode.utf16IsHighSurrogate(utf16[0]) and std.unicode.utf16IsLowSurrogate(utf16[1])) {
-            break :cp std.unicode.utf16DecodeSurrogatePair(&.{ utf16[0], utf16[1] }) catch return result;
-        }
-        if (utf16[0] < 0x20 or utf16[0] == 0x7F) return result;
-        break :cp utf16[0];
-    };
-
-    result.len = std.unicode.utf8Encode(codepoint, &result.utf8) catch 0;
-    if (result.len > 0) {
-        result.consumed_mods = .{
-            .shift = mods.shift,
-        };
-    }
-
-    return result;
-}
-
-const Win32KeyMessage = struct {
-    event: input.KeyEvent,
-    deferred_utf16_units: usize = 0,
-};
-
-fn packetKeyMessage(action: input.Action) Win32KeyMessage {
-    const commit_pending = action != .release;
-    return .{
-        .event = .{
-            .action = action,
-            .key = .unidentified,
-            .mods = .{},
-            .consumed_mods = .{},
-            .unshifted_codepoint = 0,
-            .utf8 = "",
-            .composing = commit_pending,
-        },
-        .deferred_utf16_units = if (commit_pending) 1 else 0,
-    };
-}
-
-fn keyEventFromWin32Message(
-    msg: UINT,
-    wParam: WPARAM,
-    lParam: LPARAM,
-) ?Win32KeyMessage {
-    const action: input.Action = switch (msg) {
-        WM_KEYUP, WM_SYSKEYUP => .release,
-        WM_KEYDOWN, WM_SYSKEYDOWN => if (isRepeatedKey(lParam)) .repeat else .press,
-        else => return null,
-    };
-
-    const vk: UINT = @intCast(wParam & 0xFFFF);
-    // KEYEVENTF_UNICODE arrives as VK_PACKET followed by one WM_CHAR UTF-16
-    // code unit. Authorize that unit explicitly without consulting live
-    // keyboard modifiers or ToUnicode; both belong to physical-key handling.
-    if (vk == VK_PACKET) return packetKeyMessage(action);
-
-    const key = keyFromVirtualKey(vk, lParam);
-    var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
-    const keyboard_state = currentKeyboardState(&keyboard_state_storage);
-    const mods = currentModsFromKeyboardState(keyboard_state);
-
-    var result: Win32KeyMessage = .{ .event = .{
-        .action = action,
-        .key = key,
-        .mods = mods,
-        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-    } };
-
-    if (action != .release) {
-        const translated = translateKeyText(vk, lParam, mods, keyboard_state);
-        result.event.utf8 = translated.utf8[0..translated.len];
-        result.event.consumed_mods = translated.consumed_mods;
-        if (translated.unshifted_codepoint != 0) {
-            result.event.unshifted_codepoint = translated.unshifted_codepoint;
-        }
-        if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
-            // Keep the physical-key event visible to bindings/modifier state
-            // but defer text emission to WM_CHAR so plain typing doesn't rely
-            // on ToUnicode/GetKeyboardState timing.
-            result.event.utf8 = "";
-            result.event.consumed_mods = .{};
-            result.event.composing = true;
-            result.deferred_utf16_units = translated.deferred_utf16_units;
-        }
-    }
-
-    return result;
-}
+const keyEventFromWin32Message = win32_input.keyEventFromWin32Message;
 
 fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
-    if (msg == WM_NCCREATE) {
+    if (msg == c.WM_NCCREATE) {
         const cs: *const CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lParam)));
         if (cs.lpCreateParams) |ptr| {
-            _ = SetWindowLongPtrW(hwnd, GWLP_USERDATA, @as(LONG_PTR, @intCast(@intFromPtr(ptr))));
+            setWindowData(hwnd, ptr);
         }
     }
 
     const surface = getSurface(hwnd);
 
     switch (msg) {
-        WM_WINHOSTTY_WAKE => return 0,
+        c.WM_WINHOSTTY_WAKE => return 0,
 
-        WM_WINHOSTTY_UIA_QUERY_REFRESH => {
+        c.WM_WINHOSTTY_UIA_QUERY_REFRESH => {
             if (surface) |v| {
                 v.drainTerminalAccessibilityOutput();
                 if (v.terminal_accessibility) |session| session.handleQueryRefresh(wParam != 0);
@@ -23435,12 +19474,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        WM_SETFOCUS => {
+        c.WM_SETFOCUS => {
             if (surface) |v| v.focusChanged(true);
             return 0;
         },
 
-        WM_KILLFOCUS => {
+        c.WM_KILLFOCUS => {
             if (surface) |v| {
                 v.deferred_char.clear();
                 v.focusChanged(false);
@@ -23448,32 +19487,32 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        WM_SIZE => {
+        c.WM_SIZE => {
             if (surface) |v| v.windowSizeChanged();
             return 0;
         },
 
-        WM_TIMER => {
-            if (wParam == TERMINAL_UIA_TIMER_ID) {
+        c.WM_TIMER => {
+            if (wParam == c.TERMINAL_UIA_TIMER_ID) {
                 if (surface) |v| {
                     v.drainTerminalAccessibilityOutput();
                     if (v.terminal_accessibility) |session| session.handleTimer();
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_GETOBJECT => {
+        c.WM_GETOBJECT => {
             if (surface) |v| {
                 // UIA may query the child HWND reentrantly while DestroyWindow
                 // is unwinding. Surface.destroy clears this flag before it
                 // releases the owner context, so never recreate that context
                 // once teardown has begun (or before core init completes).
-                if (!v.destroy_on_wm_destroy) return DefWindowProcW(hwnd, msg, wParam, lParam);
+                if (!v.destroy_on_wm_destroy) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                 const provider = v.terminalUiaProvider() catch |err| {
                     log.warn("uia: terminal provider init failed err={}", .{err});
-                    return DefWindowProcW(hwnd, msg, wParam, lParam);
+                    return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
                 };
                 if (win32_uia.returnTerminalProvider(
                     hwnd,
@@ -23482,32 +19521,32 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     provider,
                 )) |lr| return lr;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_GETMINMAXINFO => {
+        c.WM_GETMINMAXINFO => {
             if (surface) |v| {
                 v.updateMinMaxInfo(lParam);
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP => {
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_SYSKEYUP => {
             if (surface) |v| {
                 // VK_APPS (Menu key) -> show context menu when not mouse reporting
                 const vk: UINT = @intCast(wParam & 0xFFFF);
-                if (vk == VK_APPS and (msg == WM_KEYDOWN or msg == WM_SYSKEYDOWN)) {
+                if (vk == c.VK_APPS and (msg == c.WM_KEYDOWN or msg == c.WM_SYSKEYDOWN)) {
                     if (!v.core_initialized or v.core_surface.io.terminal.flags.mouse_event == .none) {
                         if (v.host) |h| {
                             // Keyboard invoke: use center of surface
                             var rect: RECT = undefined;
-                            if (GetClientRect(hwnd, &rect) != 0) {
+                            if (sys.GetClientRect(hwnd, &rect) != 0) {
                                 var pt: POINT = .{
                                     .x = @divTrunc(rect.right, 2),
                                     .y = @divTrunc(rect.bottom, 2),
                                 };
-                                _ = ClientToScreen(hwnd, &pt);
+                                _ = sys.ClientToScreen(hwnd, &pt);
                                 h.showContextMenu(pt.x, pt.y);
                             }
                         }
@@ -23517,10 +19556,10 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 v.handleKeyMessage(msg, wParam, lParam);
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_IME_STARTCOMPOSITION => {
+        c.WM_IME_STARTCOMPOSITION => {
             if (surface) |v| {
                 v.deferred_char.clear();
                 v.ime_composing = true;
@@ -23529,23 +19568,21 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        WM_IME_COMPOSITION => {
+        c.WM_IME_COMPOSITION => {
             if (surface) |v| {
                 v.deferred_char.clear();
-                // Handle finalized (committed) text first
-                if ((@as(u32, @intCast(lParam)) & GCS_RESULTSTR) != 0) {
+                if ((@as(u32, @intCast(lParam)) & c.GCS_RESULTSTR) != 0) {
                     v.handleImeResult();
                 }
-                // Then handle in-progress composition text
-                if ((@as(u32, @intCast(lParam)) & GCS_COMPSTR) != 0) {
+                if ((@as(u32, @intCast(lParam)) & c.GCS_COMPSTR) != 0) {
                     v.handleImeComposition();
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_IME_ENDCOMPOSITION => {
+        c.WM_IME_ENDCOMPOSITION => {
             if (surface) |v| {
                 v.deferred_char.clear();
                 v.ime_composing = false;
@@ -23554,42 +19591,42 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        WM_IME_SETCONTEXT => {
-            // Mask out the default composition window; we handle preedit via the core renderer
-            const masked_lParam = lParam & ~ISC_SHOWUICOMPOSITIONWINDOW;
-            return DefWindowProcW(hwnd, msg, wParam, masked_lParam);
+        c.WM_IME_SETCONTEXT => {
+            // We handle preedit via the core renderer.
+            const masked_lParam = lParam & ~c.ISC_SHOWUICOMPOSITIONWINDOW;
+            return sys.DefWindowProcW(hwnd, msg, wParam, masked_lParam);
         },
 
-        WM_CHAR => {
+        c.WM_CHAR => {
             if (surface) |v| {
                 v.handleCharMessage(wParam, lParam);
             }
             return 0;
         },
 
-        WM_DEADCHAR, WM_SYSDEADCHAR => {
+        c.WM_DEADCHAR, c.WM_SYSDEADCHAR => {
             if (surface) |v| v.deferred_char.consumeDeadChar();
             return 0;
         },
 
-        WM_MOUSEMOVE => {
+        c.WM_MOUSEMOVE => {
             if (surface) |v| {
                 if (v.handleScrollbarProxyMouseMove(hwnd, lParam)) return 0;
                 v.handleMouseMove(lParam, mouseModsFromWParam(wParam));
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_MOUSELEAVE => {
+        c.WM_MOUSELEAVE => {
             if (surface) |v| {
                 v.handleScrollbarMouseLeave();
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_RBUTTONUP => {
+        c.WM_RBUTTONUP => {
             if (surface) |v| {
                 // If terminal has mouse reporting active and Shift is not held,
                 // pass through as a mouse event. Shift+Right-Click always opens
@@ -23600,38 +19637,38 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     return 0;
                 }
                 // Otherwise show context menu
-                _ = ReleaseCapture();
+                _ = sys.ReleaseCapture();
                 if (v.host) |h| {
                     var pt: POINT = .{
                         .x = signedLowWord(lParamBits(lParam)),
                         .y = signedHighWord(lParamBits(lParam)),
                     };
-                    _ = ClientToScreen(hwnd, &pt);
+                    _ = sys.ClientToScreen(hwnd, &pt);
                     h.showContextMenu(pt.x, pt.y);
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_LBUTTONDOWN, WM_LBUTTONUP => {
+        c.WM_LBUTTONDOWN, c.WM_LBUTTONUP => {
             if (surface) |v| {
                 if (v.handleScrollbarProxyButton(hwnd, msg, lParam)) return 0;
                 v.handleMouseButton(msg, wParam, lParam);
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_MBUTTONUP => {
+        c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN, c.WM_MBUTTONUP => {
             if (surface) |v| {
                 v.handleMouseButton(msg, wParam, lParam);
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_XBUTTONDOWN, WM_XBUTTONUP => {
+        c.WM_XBUTTONDOWN, c.WM_XBUTTONUP => {
             if (surface) |v| {
                 v.handleXMouseButton(msg, wParam, lParam);
             }
@@ -23639,14 +19676,14 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 1;
         },
 
-        WM_DROPFILES => {
+        c.WM_DROPFILES => {
             if (surface) |v| {
                 v.handleDropFiles(wParam);
             }
             return 0;
         },
 
-        WM_MOUSEWHEEL, WM_POINTERWHEEL => {
+        c.WM_MOUSEWHEEL, c.WM_POINTERWHEEL => {
             if (surface) |v| {
                 v.handleMouseWheel(normalizeWheelDelta(
                     v.wheelNormalizationContext(),
@@ -23655,10 +19692,10 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 ));
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_MOUSEHWHEEL, WM_POINTERHWHEEL => {
+        c.WM_MOUSEHWHEEL, c.WM_POINTERHWHEEL => {
             if (surface) |v| {
                 v.handleMouseWheel(normalizeWheelDelta(
                     v.wheelNormalizationContext(),
@@ -23667,20 +19704,20 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 ));
                 return 0;
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_ERASEBKGND => return 1,
+        c.WM_ERASEBKGND => return 1,
 
-        WM_SETTINGCHANGE => {
+        c.WM_SETTINGCHANGE => {
             if (surface) |v| v.app.refreshSystemWheelSettings();
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_SETCURSOR => {
+        c.WM_SETCURSOR => {
             if (surface) |v| {
-                if (lowWord(@as(usize, @intCast(lParam))) == HTCLIENT) {
-                    const now_ms = GetTickCount64();
+                if (lowWord(@as(usize, @intCast(lParam))) == c.HTCLIENT) {
+                    const now_ms = sys.GetTickCount64();
                     const was_hovered = v.scrollbar_state.hovered;
                     const was_visibility = v.scrollbar_state.visibility;
                     const over_scrollbar = v.updateScrollbarHoverFromScreenCursor(hwnd, now_ms);
@@ -23693,7 +19730,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                         };
                     }
                     if (over_scrollbar or v.scrollbar_state.dragging) {
-                        _ = SetCursor(LoadCursorW(null, IDC_ARROW));
+                        _ = sys.SetCursor(sys.LoadCursorW(null, c.IDC_ARROW));
                         return 1;
                     }
                     if (v.applyCursor()) {
@@ -23701,28 +19738,28 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                     }
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_CAPTURECHANGED => {
+        c.WM_CAPTURECHANGED => {
             if (surface) |v| v.handleScrollbarCaptureChanged();
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
-        WM_PAINT => {
+        c.WM_PAINT => {
             var ps: PAINTSTRUCT = undefined;
-            _ = BeginPaint(hwnd, &ps) orelse return 0;
-            defer _ = EndPaint(hwnd, &ps);
+            _ = sys.BeginPaint(hwnd, &ps) orelse return 0;
+            defer _ = sys.EndPaint(hwnd, &ps);
 
             if (surface) |v| {
                 const draw_content = v.shouldDrawRendererPaintContent();
                 v.paint_pending = false;
                 if (draw_content) {
-                    const paint_start_ms = if (v.render_trace.enabled()) GetTickCount64() else 0;
+                    const paint_start_ms = if (v.render_trace.enabled()) sys.GetTickCount64() else 0;
                     v.render_trace.notePaintDraw();
                     defer v.finishRendererRepaintRequest();
                     defer if (paint_start_ms != 0) {
-                        const paint_end_ms = GetTickCount64();
+                        const paint_end_ms = sys.GetTickCount64();
                         if (paint_end_ms > paint_start_ms) {
                             v.render_trace.notePaintDrawDuration(paint_end_ms - paint_start_ms);
                         }
@@ -23739,12 +19776,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        WM_CLOSE => {
+        c.WM_CLOSE => {
             if (surface) |v| _ = v.requestClose();
             return 0;
         },
 
-        WM_DESTROY => {
+        c.WM_DESTROY => {
             if (surface) |v| {
                 if (v.destroy_on_wm_destroy) {
                     v.destroy();
@@ -23755,14 +19792,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
             return 0;
         },
 
-        else => return DefWindowProcW(hwnd, msg, wParam, lParam),
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
     }
 }
 
 fn getSurface(hwnd: HWND) ?*Surface {
-    const raw = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    if (raw == 0) return null;
-    return @ptrFromInt(@as(usize, @intCast(raw)));
+    return windowData(Surface, hwnd);
 }
 
 fn terminalAccessibilityHwnd(ctx: *anyopaque) ?HWND {
@@ -24097,7 +20132,7 @@ pub const Surface = struct {
         self.drop_target.surface_ctx = @ptrCast(self);
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
 
-        const hwnd = CreateWindowExW(
+        const hwnd = sys.CreateWindowExW(
             0,
             class_name,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
@@ -24110,8 +20145,8 @@ pub const Surface = struct {
             null,
             app.hinstance,
             self,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
-        errdefer _ = DestroyWindow(hwnd);
+        ) orelse return lastError();
+        errdefer _ = sys.DestroyWindow(hwnd);
         self.hwnd = hwnd;
 
         // Register the OLE drop target so Explorer / browser drops
@@ -24249,9 +20284,9 @@ pub const Surface = struct {
         // rendering before activation ordering runs.
         const activate_during_init = shouldShowSurfaceImmediately(opts.host_id);
         self.setVisible(activate_during_init);
-        DragAcceptFiles(hwnd, 1);
+        sys.DragAcceptFiles(hwnd, 1);
 
-        if (GetFocus() == hwnd) {
+        if (sys.GetFocus() == hwnd) {
             self.window_focused = true;
         }
 
@@ -24369,7 +20404,7 @@ pub const Surface = struct {
             // Detached structural-history objects are deliberately outside
             // active ShellState and can be destroyed during history disposal.
             if (self.host) |host| if (host.structural_history_disposing) {
-                return DestroyWindow(hwnd) != 0;
+                return sys.DestroyWindow(hwnd) != 0;
             };
             log.err("refusing unpreflighted surface close: native tab mapping missing", .{});
             return false;
@@ -24413,7 +20448,7 @@ pub const Surface = struct {
         next_tree = null;
         self.pending_shell_close = shell_close;
         shell_close = null;
-        if (DestroyWindow(hwnd) != 0) return true;
+        if (sys.DestroyWindow(hwnd) != 0) return true;
 
         if (self.pending_close_tree) |*tree| tree.deinit();
         self.pending_close_tree = null;
@@ -24494,7 +20529,7 @@ pub const Surface = struct {
                 .clear_screen => .{ .clear_screen = .{ .state_bytes = state_bytes } },
                 .reset => .{ .reset = .{ .state_bytes = state_bytes } },
             },
-            .timestamp_ms = GetTickCount64(),
+            .timestamp_ms = sys.GetTickCount64(),
             .sequence_id = self.app.nextUndoSequence(),
         };
         errdefer entry.deinit(self.app.core_app.alloc);
@@ -24659,13 +20694,13 @@ pub const Surface = struct {
     fn presentWindow(self: *Surface) void {
         if (self.host) |host| {
             host.present();
-            if (self.hwnd) |hwnd| _ = SetFocus(hwnd);
+            if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
             return;
         }
         const hwnd = self.hwnd orelse return;
-        _ = ShowWindow(hwnd, SW_SHOW);
-        _ = SetForegroundWindow(hwnd);
-        _ = SetFocus(hwnd);
+        _ = sys.ShowWindow(hwnd, c.SW_SHOW);
+        _ = sys.SetForegroundWindow(hwnd);
+        _ = sys.SetFocus(hwnd);
     }
 
     fn windowHwnd(self: *const Surface) ?HWND {
@@ -24689,8 +20724,8 @@ pub const Surface = struct {
                     .capture = terminalAccessibilityCapture,
                     .defer_provider_release = terminalAccessibilityDeferProviderRelease,
                 },
-                WM_WINHOSTTY_UIA_QUERY_REFRESH,
-                TERMINAL_UIA_TIMER_ID,
+                c.WM_WINHOSTTY_UIA_QUERY_REFRESH,
+                c.TERMINAL_UIA_TIMER_ID,
             );
         }
         const provider = try self.terminal_accessibility.?.acquireProvider();
@@ -24942,19 +20977,19 @@ pub const Surface = struct {
         self.paint_pending = true;
         errdefer self.paint_pending = false;
 
-        if (InvalidateRect(hwnd, null, 0) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.InvalidateRect(hwnd, null, 0) == 0) {
+            return lastError();
         }
-        if (update_now) _ = UpdateWindow(hwnd);
+        if (update_now) _ = sys.UpdateWindow(hwnd);
     }
 
     fn forcePaintRequestNow(self: *Surface) !void {
         const hwnd = self.hwnd orelse return error.NoWindow;
         self.render_trace.noteForcePaintNow();
         self.paint_pending = false;
-        const flags: UINT = RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_UPDATENOW;
-        if (RedrawWindow(hwnd, null, null, flags) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        const flags: UINT = c.RDW_INVALIDATE | c.RDW_INTERNALPAINT | c.RDW_UPDATENOW;
+        if (sys.RedrawWindow(hwnd, null, null, flags) == 0) {
+            return lastError();
         }
     }
 
@@ -25017,7 +21052,7 @@ pub const Surface = struct {
     pub fn redraw(self: *Surface) !void {
         if (!self.core_initialized) return;
         const hwnd = self.hwnd orelse return;
-        if (IsWindowVisible(hwnd) == 0) return;
+        if (sys.IsWindowVisible(hwnd) == 0) return;
         if (self.size.width == 0 or self.size.height == 0) return;
         if (self.hdc == null or self.hglrc == null) return;
         if (self.draw_in_progress) return;
@@ -25053,11 +21088,11 @@ pub const Surface = struct {
             return error.NoOpenGLContext;
         };
 
-        if (wglGetCurrentContext() == hglrc and wglGetCurrentDC() == hdc) {
+        if (sys.wglGetCurrentContext() == hglrc and sys.wglGetCurrentDC() == hdc) {
             return;
         }
 
-        if (wglMakeCurrent(hdc, hglrc) == 0) {
+        if (sys.wglMakeCurrent(hdc, hglrc) == 0) {
             const err = windows.kernel32.GetLastError();
             recordOpenGLStartupWin32Failure(.make_current, err);
             return windows.unexpectedError(err);
@@ -25068,18 +21103,18 @@ pub const Surface = struct {
         const hdc = self.hdc orelse return;
         const hglrc = self.hglrc orelse return;
 
-        if (wglGetCurrentContext() != hglrc or wglGetCurrentDC() != hdc) {
+        if (sys.wglGetCurrentContext() != hglrc or sys.wglGetCurrentDC() != hdc) {
             return;
         }
 
-        _ = wglMakeCurrent(null, null);
+        _ = sys.wglMakeCurrent(null, null);
     }
 
     pub fn swapGLBuffers(self: *Surface) !void {
         const hdc = self.hdc orelse return error.NoDeviceContext;
         _ = self.hglrc orelse return error.NoOpenGLContext;
 
-        if (SwapBuffers(hdc) == 0) {
+        if (sys.SwapBuffers(hdc) == 0) {
             const err = windows.kernel32.GetLastError();
             return windows.unexpectedError(err);
         }
@@ -25174,8 +21209,7 @@ pub const Surface = struct {
         return self.scrollbar.total > self.scrollbar.len and self.scrollbar.len > 0;
     }
 
-    fn scrollbarAnimationsEnabled(self: *const Surface) bool {
-        _ = self;
+    fn scrollbarAnimationsEnabled() bool {
         return Host.clientAnimationsEnabled() and !isHighContrastActive();
     }
 
@@ -25288,11 +21322,11 @@ pub const Surface = struct {
 
         const host = self.host orelse return;
         const hwnd = host.hwnd orelse return;
-        self.scrollbar_hwnd = CreateWindowExW(
-            WS_EX_LAYERED,
+        self.scrollbar_hwnd = sys.CreateWindowExW(
+            c.WS_EX_LAYERED,
             scrollbar_class_name,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD,
+            c.WS_CHILD,
             0,
             0,
             self.scrollbarHoverWidthPx(),
@@ -25301,28 +21335,24 @@ pub const Surface = struct {
             null,
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
         const scrollbar_hwnd = self.scrollbar_hwnd.?;
-        _ = SetWindowLongPtrW(
-            scrollbar_hwnd,
-            GWLP_USERDATA,
-            @as(LONG_PTR, @intCast(@intFromPtr(self))),
-        );
-        if (SetLayeredWindowAttributes(
+        setWindowData(scrollbar_hwnd, self);
+        if (sys.SetLayeredWindowAttributes(
             scrollbar_hwnd,
             scrollbar_transparent_key,
             0,
-            LWA_ALPHA | LWA_COLORKEY,
+            c.LWA_ALPHA | c.LWA_COLORKEY,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
     fn destroyScrollbarWindow(self: *Surface) void {
-        if (self.scrollbar_state.dragging) _ = ReleaseCapture();
+        if (self.scrollbar_state.dragging) _ = sys.ReleaseCapture();
         self.clearScrollbarMarkers();
-        if (self.scrollbar_hwnd) |hwnd| _ = DestroyWindow(hwnd);
+        if (self.scrollbar_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
         self.scrollbar_hwnd = null;
         self.scrollbar_placement = .{};
         self.scrollbar_leave_armed = false;
@@ -25334,11 +21364,11 @@ pub const Surface = struct {
     }
 
     fn invalidateScrollbarWindow(self: *Surface) void {
-        if (self.scrollbar_hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+        if (self.scrollbar_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
     }
 
     fn settleReducedScrollbarState(self: *Surface, now_ms: u64) void {
-        if (self.scrollbarAnimationsEnabled()) return;
+        if (scrollbarAnimationsEnabled()) return;
         switch (self.scrollbar_state.visibility) {
             .fading_in, .fading_out => _ = self.scrollbar_state.tick(
                 now_ms + win32_scrollbar_geometry.auto_hide_fade_ms,
@@ -25357,11 +21387,11 @@ pub const Surface = struct {
         if (self.scrollbar_leave_armed and self.scrollbar_leave_hwnd == hwnd) return;
         var track: TRACKMOUSEEVENT = .{
             .cbSize = @sizeOf(TRACKMOUSEEVENT),
-            .dwFlags = TME_LEAVE,
+            .dwFlags = c.TME_LEAVE,
             .hwndTrack = hwnd,
             .dwHoverTime = 0,
         };
-        _ = TrackMouseEvent(&track);
+        _ = sys.TrackMouseEvent(&track);
         self.scrollbar_leave_armed = true;
         self.scrollbar_leave_hwnd = hwnd;
     }
@@ -25393,7 +21423,7 @@ pub const Surface = struct {
     }
 
     fn handleScrollbarMouseMoveLocal(self: *Surface, tracking_hwnd: HWND, x: f32, y: f32) void {
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         _ = self.updateScrollbarFromLocalCursor(tracking_hwnd, x, y, now_ms);
         self.syncScrollbarWindowNow(now_ms) catch |err| {
             log.warn("win32 scrollbar move failed err={}", .{err});
@@ -25402,7 +21432,7 @@ pub const Surface = struct {
 
     fn handleScrollbarLeftButtonDownLocal(self: *Surface, hwnd: HWND, x: f32, y: f32) void {
         const layout = self.scrollbarLocalLayout() orelse return;
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         const thumb = win32_scrollbar_geometry.thumbRect(layout);
         self.setScrollbarHovered(true, now_ms);
         self.setScrollbarDragging(true, now_ms);
@@ -25411,7 +21441,7 @@ pub const Surface = struct {
             std.math.clamp(y - thumb.top, 0.0, thumb.bottom - thumb.top)
         else
             @max(0.0, (thumb.bottom - thumb.top) / 2.0);
-        _ = SetCapture(hwnd);
+        _ = sys.SetCapture(hwnd);
         self.scrollbarScrollToRow(win32_scrollbar_geometry.rowFromCursor(
             layout,
             y,
@@ -25425,9 +21455,9 @@ pub const Surface = struct {
     }
 
     fn handleScrollbarLeftButtonUpLocal(self: *Surface, x: f32, y: f32) void {
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         const layout = self.scrollbarLocalLayout();
-        _ = ReleaseCapture();
+        _ = sys.ReleaseCapture();
         self.setScrollbarDragging(false, now_ms);
         if (layout) |value| {
             self.setScrollbarHovered(
@@ -25462,7 +21492,7 @@ pub const Surface = struct {
             self.placement.rect_known and self.placement.visible;
 
         if (!should_exist or policy == .never) {
-            if (self.scrollbar_state.dragging) _ = ReleaseCapture();
+            if (self.scrollbar_state.dragging) _ = sys.ReleaseCapture();
             self.setScrollbarHovered(false, now_ms);
             self.setScrollbarDragging(false, now_ms);
             self.scrollbar_state.visibility = .hidden;
@@ -25501,7 +21531,7 @@ pub const Surface = struct {
         const alpha: BYTE = switch (policy) {
             .never => 0,
             .always => 255,
-            .dynamic => alphaByteForOpacity(if (self.scrollbarAnimationsEnabled())
+            .dynamic => alphaByteForOpacity(if (scrollbarAnimationsEnabled())
                 @as(f64, @floatCast(self.scrollbar_state.alpha(now_ms)))
             else if (self.scrollbar_state.visibility == .hidden)
                 @as(f64, @floatFromInt(hiddenScrollbarAlphaByte())) / 255.0
@@ -25511,13 +21541,13 @@ pub const Surface = struct {
         const paint_key = self.scrollbarPaintKey(child_rect);
         const paint_changed = scrollbarPaintKeyChanged(self.scrollbar_paint_cache, paint_key);
         if (alpha != self.scrollbar_alpha_cache) {
-            if (SetLayeredWindowAttributes(
+            if (sys.SetLayeredWindowAttributes(
                 scrollbar_hwnd,
                 scrollbar_transparent_key,
                 alpha,
-                LWA_ALPHA | LWA_COLORKEY,
+                c.LWA_ALPHA | c.LWA_COLORKEY,
             ) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+                return lastError();
             }
             self.scrollbar_alpha_cache = alpha;
         }
@@ -25532,7 +21562,7 @@ pub const Surface = struct {
     }
 
     fn refreshScrollbarWindow(self: *Surface) !void {
-        try self.syncScrollbarWindowNow(GetTickCount64());
+        try self.syncScrollbarWindowNow(sys.GetTickCount64());
     }
 
     fn scrollbarNeedsHeartbeat(self: *const Surface) bool {
@@ -25585,7 +21615,7 @@ pub const Surface = struct {
         self.scrollbar_leave_armed = false;
         self.scrollbar_leave_hwnd = null;
         if (self.scrollbar_state.dragging) return;
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         self.setScrollbarHovered(false, now_ms);
         self.syncScrollbarWindowNow(now_ms) catch |err| {
             log.warn("win32 scrollbar leave failed err={}", .{err});
@@ -25609,8 +21639,8 @@ pub const Surface = struct {
         if (self.scrollbarPolicy() == .never or !self.placement.rect_known) return null;
 
         var point: POINT = .{ .x = 0, .y = 0 };
-        if (GetCursorPos(&point) == 0) return null;
-        if (ScreenToClient(hwnd, &point) == 0) return null;
+        if (sys.GetCursorPos(&point) == 0) return null;
+        if (sys.ScreenToClient(hwnd, &point) == 0) return null;
 
         return scrollbarProxyPointFromSurfaceCoords(
             self.placement.rect,
@@ -25658,7 +21688,7 @@ pub const Surface = struct {
         }
 
         if (self.scrollbar_state.hovered) {
-            const now_ms = GetTickCount64();
+            const now_ms = sys.GetTickCount64();
             self.setScrollbarHovered(false, now_ms);
             self.syncScrollbarWindowNow(now_ms) catch |err| {
                 log.warn("win32 scrollbar proxy leave failed err={}", .{err});
@@ -25677,12 +21707,12 @@ pub const Surface = struct {
             lParam,
         );
         return switch (msg) {
-            WM_LBUTTONDOWN => blk: {
+            c.WM_LBUTTONDOWN => blk: {
                 if (!proxy.over_band) break :blk false;
                 self.handleScrollbarLeftButtonDownLocal(hwnd, proxy.local_x, proxy.local_y);
                 break :blk true;
             },
-            WM_LBUTTONUP => blk: {
+            c.WM_LBUTTONUP => blk: {
                 if (!self.scrollbar_state.dragging and !proxy.over_band) break :blk false;
                 self.handleScrollbarLeftButtonUpLocal(proxy.local_x, proxy.local_y);
                 break :blk true;
@@ -25693,7 +21723,7 @@ pub const Surface = struct {
 
     fn handleScrollbarCaptureChanged(self: *Surface) void {
         if (!self.scrollbar_state.dragging) return;
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         self.setScrollbarDragging(false, now_ms);
         self.syncScrollbarWindowNow(now_ms) catch |err| {
             log.warn("win32 scrollbar capture reset failed err={}", .{err});
@@ -25703,11 +21733,11 @@ pub const Surface = struct {
     fn paintScrollbar(self: *Surface) void {
         const hwnd = self.scrollbar_hwnd orelse return;
         var ps: PAINTSTRUCT = undefined;
-        const hdc = BeginPaint(hwnd, &ps) orelse return;
-        defer _ = EndPaint(hwnd, &ps);
+        const hdc = sys.BeginPaint(hwnd, &ps) orelse return;
+        defer _ = sys.EndPaint(hwnd, &ps);
 
         var client_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) return;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
         fillSolidRect(hdc, client_rect, scrollbar_transparent_key);
         if (!self.scrollbarScrollable()) return;
 
@@ -25778,16 +21808,16 @@ pub const Surface = struct {
 
     fn applySearchBarFont(self: *Surface, font: ?*anyopaque) void {
         const value = if (font) |f| @intFromPtr(f) else 0;
-        if (self.search_bar_edit_hwnd) |hwnd| _ = SendMessageW(hwnd, WM_SETFONT, value, 1);
+        if (self.search_bar_edit_hwnd) |hwnd| _ = sys.SendMessageW(hwnd, c.WM_SETFONT, value, 1);
         for (search_bar_button_roles) |role| {
-            if (self.searchBarButtonHwnd(role)) |hwnd| _ = SendMessageW(hwnd, WM_SETFONT, value, 1);
+            if (self.searchBarButtonHwnd(role)) |hwnd| _ = sys.SendMessageW(hwnd, c.WM_SETFONT, value, 1);
         }
-        if (self.search_bar_results_hwnd) |hwnd| _ = SendMessageW(hwnd, WM_SETFONT, value, 1);
+        if (self.search_bar_results_hwnd) |hwnd| _ = sys.SendMessageW(hwnd, c.WM_SETFONT, value, 1);
     }
 
     fn invalidateSearchButtons(self: *Surface) void {
         for (search_bar_button_roles) |role| {
-            if (self.searchBarButtonHwnd(role)) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+            if (self.searchBarButtonHwnd(role)) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         }
     }
 
@@ -25805,7 +21835,7 @@ pub const Surface = struct {
             self.search_bar_results_hwnd,
         };
         for (handles) |maybe_hwnd| {
-            if (maybe_hwnd) |hwnd| _ = InvalidateRect(hwnd, null, 0);
+            if (maybe_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
         }
     }
 
@@ -25813,7 +21843,7 @@ pub const Surface = struct {
         if (rect.right <= rect.left or rect.bottom <= rect.top) return;
         const host = self.host orelse return;
         const hwnd = host.hwnd orelse return;
-        _ = InvalidateRect(hwnd, &rect, 0);
+        _ = sys.InvalidateRect(hwnd, &rect, 0);
     }
 
     fn invalidateSearchBarFrame(self: *Surface) void {
@@ -25873,11 +21903,11 @@ pub const Surface = struct {
     }
 
     fn createSearchBarButton(self: *Surface, host: *Host, parent: HWND, role: SearchBarButtonRole) !HWND {
-        const hwnd = CreateWindowExW(
+        const hwnd = sys.CreateWindowExW(
             0,
             prompt_button_class,
             searchBarButtonLabel(role),
-            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+            c.WS_CHILD | c.WS_TABSTOP | c.BS_OWNERDRAW,
             0,
             0,
             28,
@@ -25886,7 +21916,7 @@ pub const Surface = struct {
             @ptrFromInt(searchBarButtonCommandId(role)),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
         host.subclassButton(
             hwnd,
             &hostButtonProc,
@@ -25901,45 +21931,41 @@ pub const Surface = struct {
         const host = self.host orelse return;
         const hwnd = host.hwnd orelse return;
 
-        self.search_bar_bg_hwnd = CreateWindowExW(
+        self.search_bar_bg_hwnd = sys.CreateWindowExW(
             0,
             prompt_label_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_CLIPSIBLINGS | SS_OWNERDRAW,
+            c.WS_CHILD | c.WS_CLIPSIBLINGS | c.SS_OWNERDRAW,
             0,
             0,
             160,
             host_search_bar_height,
             hwnd,
-            @ptrFromInt(SEARCH_BG_ID),
+            @ptrFromInt(c.SEARCH_BG_ID),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
-        self.search_bar_edit_hwnd = CreateWindowExW(
+        self.search_bar_edit_hwnd = sys.CreateWindowExW(
             0,
             prompt_edit_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL,
+            c.WS_CHILD | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
             0,
             0,
             160,
             host_search_bar_height - 10,
             hwnd,
-            @ptrFromInt(SEARCH_EDIT_ID),
+            @ptrFromInt(c.SEARCH_EDIT_ID),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
         const edit_hwnd = self.search_bar_edit_hwnd.?;
-        _ = SetWindowLongPtrW(
+        setWindowData(edit_hwnd, host);
+        const edit_prev = sys.SetWindowLongPtrW(
             edit_hwnd,
-            GWLP_USERDATA,
-            @as(LONG_PTR, @intCast(@intFromPtr(host))),
-        );
-        const edit_prev = SetWindowLongPtrW(
-            edit_hwnd,
-            GWLP_WNDPROC,
+            c.GWLP_WNDPROC,
             @as(LONG_PTR, @intCast(@intFromPtr(&searchEditProc))),
         );
         self.search_bar_edit_prev_proc = if (edit_prev == 0)
@@ -25948,13 +21974,13 @@ pub const Surface = struct {
             @ptrFromInt(@as(usize, @intCast(edit_prev)));
         const edit_margin = @as(u16, @intCast(@max(host.scaled(10), 6)));
         const packed_margins: isize = @intCast(@as(usize, edit_margin) | (@as(usize, edit_margin) << 16));
-        _ = SendMessageW(
+        _ = sys.SendMessageW(
             edit_hwnd,
-            EM_SETMARGINS,
-            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            c.EM_SETMARGINS,
+            c.EC_LEFTMARGIN | c.EC_RIGHTMARGIN,
             packed_margins,
         );
-        _ = SendMessageW(edit_hwnd, EM_SETCUEBANNER, 0, @as(LPARAM, @intCast(@intFromPtr(search_edit_cue.ptr))));
+        _ = sys.SendMessageW(edit_hwnd, c.EM_SETCUEBANNER, 0, @as(LPARAM, @intCast(@intFromPtr(search_edit_cue.ptr))));
         self.search_bar_edit_uia_provider = if (self.app.com_initialized)
             win32_uia.TerminalProvider.create(
                 std.heap.page_allocator,
@@ -25965,7 +21991,7 @@ pub const Surface = struct {
                 break :blk null;
             }
         else blk: {
-            log.warn("search edit UIA provider disabled: UI thread is not a confirmed STA", .{});
+            log.debug("search edit UIA provider disabled: UI thread is not a confirmed STA", .{});
             break :blk null;
         };
 
@@ -25976,20 +22002,20 @@ pub const Surface = struct {
         self.search_bar_word_hwnd = try self.createSearchBarButton(host, hwnd, .whole_word);
         self.search_bar_close_hwnd = try self.createSearchBarButton(host, hwnd, .close);
 
-        self.search_bar_results_hwnd = CreateWindowExW(
+        self.search_bar_results_hwnd = sys.CreateWindowExW(
             0,
             prompt_label_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
-            WS_CHILD | SS_RIGHT | SS_CENTERIMAGE,
+            c.WS_CHILD | c.SS_RIGHT | c.SS_CENTERIMAGE,
             0,
             0,
             96,
             18,
             hwnd,
-            @ptrFromInt(SEARCH_RESULTS_ID),
+            @ptrFromInt(c.SEARCH_RESULTS_ID),
             self.app.hinstance,
             null,
-        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        ) orelse return lastError();
 
         self.applySearchBarFont(host.chrome_font);
         _ = try self.syncSearchBarResultsText();
@@ -26013,15 +22039,15 @@ pub const Surface = struct {
             alloc.free(value);
             self.search_bar_results_cache = null;
         }
-        if (self.search_bar_results_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_close_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_word_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_case_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_regex_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_next_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_prev_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_edit_hwnd) |hwnd| _ = DestroyWindow(hwnd);
-        if (self.search_bar_bg_hwnd) |hwnd| _ = DestroyWindow(hwnd);
+        if (self.search_bar_results_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_close_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_word_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_case_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_regex_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_next_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_prev_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_edit_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
+        if (self.search_bar_bg_hwnd) |hwnd| _ = sys.DestroyWindow(hwnd);
 
         self.search_bar_results_hwnd = null;
         self.search_bar_close_hwnd = null;
@@ -26179,7 +22205,7 @@ pub const Surface = struct {
         );
         changed = bg_visibility_changed or changed;
         if (changed) {
-            if (self.search_bar_bg_hwnd) |bg_hwnd| _ = InvalidateRect(bg_hwnd, null, 0);
+            if (self.search_bar_bg_hwnd) |bg_hwnd| _ = sys.InvalidateRect(bg_hwnd, null, 0);
         }
 
         return changed;
@@ -26196,8 +22222,8 @@ pub const Surface = struct {
 
         const value_w = try std.unicode.utf8ToUtf16LeAllocZ(self.app.core_app.alloc, value);
         defer self.app.core_app.alloc.free(value_w);
-        if (SetWindowTextW(edit_hwnd, value_w.ptr) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.SetWindowTextW(edit_hwnd, value_w.ptr) == 0) {
+            return lastError();
         }
         if (self.search_bar_edit_uia_provider) |provider| {
             provider.raiseTextChanged();
@@ -26263,7 +22289,7 @@ pub const Surface = struct {
             previous_query_len,
             text.len,
         );
-        try self.search_bar.setQuery(text, @intCast(GetTickCount64()));
+        try self.search_bar.setQuery(text, @intCast(sys.GetTickCount64()));
         if (invalidate_core_search) {
             if (text.len == 0) {
                 _ = try self.core_surface.setSearchQuery("", self.searchQueryOptions());
@@ -26302,11 +22328,11 @@ pub const Surface = struct {
     }
 
     fn handleSearchToggleClick(self: *Surface, command_id: usize) !bool {
-        const now_ms: i64 = @intCast(GetTickCount64());
+        const now_ms: i64 = @intCast(sys.GetTickCount64());
         switch (command_id) {
-            SEARCH_REGEX_ID => self.search_bar.toggleRegex(now_ms),
-            SEARCH_CASE_ID => self.search_bar.toggleCase(now_ms),
-            SEARCH_WORD_ID => self.search_bar.toggleWord(now_ms),
+            c.SEARCH_REGEX_ID => self.search_bar.toggleRegex(now_ms),
+            c.SEARCH_CASE_ID => self.search_bar.toggleCase(now_ms),
+            c.SEARCH_WORD_ID => self.search_bar.toggleWord(now_ms),
             else => return false,
         }
 
@@ -26323,7 +22349,7 @@ pub const Surface = struct {
         if (stop_search) {
             _ = try self.core_surface.endSearch();
             if (refocus_terminal) {
-                if (self.hwnd) |hwnd| _ = SetFocus(hwnd);
+                if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
             }
             return;
         }
@@ -26339,7 +22365,7 @@ pub const Surface = struct {
         try host.layout();
         host.forceHostCompositionPaint();
         if (refocus_terminal) {
-            if (self.hwnd) |hwnd| _ = SetFocus(hwnd);
+            if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
         }
     }
 
@@ -26380,8 +22406,8 @@ pub const Surface = struct {
         host.forceHostCompositionPaint();
 
         if (self.search_bar_edit_hwnd) |edit_hwnd| {
-            _ = SetFocus(edit_hwnd);
-            _ = SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
+            _ = sys.SetFocus(edit_hwnd);
+            _ = sys.SendMessageW(edit_hwnd, c.EM_SETSEL, 0, -1);
         }
 
         if (initial.len > 0 and (!self.search_active or !same_query)) {
@@ -26419,7 +22445,7 @@ pub const Surface = struct {
                     try h.setBanner(.none, null);
                 }
             }
-            const status_h = h.statusBarHeight();
+            const status_h = Host.statusBarHeight();
             if (!chrome_invalidated and inspectorChromeVisible(h.overlay_mode, status_h)) {
                 if (chromeTextNeedsFullInvalidation(status_h)) {
                     h.invalidateChromeText();
@@ -26454,7 +22480,7 @@ pub const Surface = struct {
     fn toggleMaximize(self: *Surface) void {
         const hwnd = self.windowHwnd() orelse return;
         if (self.fullscreen) return;
-        _ = ShowWindow(hwnd, if (IsZoomed(hwnd) != 0) SW_RESTORE else SW_MAXIMIZE);
+        _ = sys.ShowWindow(hwnd, if (sys.IsZoomed(hwnd) != 0) c.SW_RESTORE else c.SW_MAXIMIZE);
     }
 
     fn applyRuntimeConfig(self: *Surface, config: *const configpkg.Config) !void {
@@ -26482,8 +22508,8 @@ pub const Surface = struct {
     fn resizeSplitFallback(self: *Surface, value: apprt.action.ResizeSplit) !bool {
         const hwnd = self.hwnd orelse return false;
         var client_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) {
+            return lastError();
         }
 
         const delta = resizeSplitFallbackDelta(value);
@@ -26532,7 +22558,7 @@ pub const Surface = struct {
     fn resetWindowSize(self: *Surface) !void {
         const size = self.default_client_size orelse return;
         if (self.fullscreen) try self.leaveFullscreen();
-        if (self.windowHwnd()) |hwnd| _ = ShowWindow(hwnd, SW_RESTORE);
+        if (self.windowHwnd()) |hwnd| _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
         const client_size = scaleInitialClientSize(size, self.content_scale);
         try self.resizeClientArea(client_size.width, client_size.height);
     }
@@ -26545,14 +22571,14 @@ pub const Surface = struct {
             return;
         }
         const hwnd = self.windowHwnd() orelse return;
-        _ = SetWindowPos(
+        _ = sys.SetWindowPos(
             hwnd,
             null,
             0,
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
         );
     }
 
@@ -26575,28 +22601,28 @@ pub const Surface = struct {
         self.fullscreen = true;
         try self.applyWindowStyle();
 
-        const monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) orelse
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        const monitor = sys.MonitorFromWindow(hwnd, c.MONITOR_DEFAULTTONEAREST) orelse
+            return lastError();
         var info: MONITORINFO = .{
             .cbSize = @sizeOf(MONITORINFO),
             .rcMonitor = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
             .rcWork = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
             .dwFlags = 0,
         };
-        if (GetMonitorInfoW(monitor, &info) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetMonitorInfoW(monitor, &info) == 0) {
+            return lastError();
         }
 
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else null,
             info.rcMonitor.left,
             info.rcMonitor.top,
             info.rcMonitor.right - info.rcMonitor.left,
             info.rcMonitor.bottom - info.rcMonitor.top,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            c.SWP_FRAMECHANGED | c.SWP_NOACTIVATE,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -26605,25 +22631,25 @@ pub const Surface = struct {
         self.fullscreen = false;
         try self.applyWindowStyle();
 
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
             self.restore_rect.left,
             self.restore_rect.top,
             self.restore_rect.right - self.restore_rect.left,
             self.restore_rect.bottom - self.restore_rect.top,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            c.SWP_FRAMECHANGED | c.SWP_NOACTIVATE,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
 
-        if (self.restore_maximized) _ = ShowWindow(hwnd, SW_MAXIMIZE);
+        if (self.restore_maximized) _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
     }
 
     fn captureRestoreState(self: *Surface) void {
         const hwnd = self.windowHwnd() orelse return;
-        self.restore_maximized = IsZoomed(hwnd) != 0;
-        if (GetWindowRect(hwnd, &self.restore_rect) == 0) {
+        self.restore_maximized = sys.IsZoomed(hwnd) != 0;
+        if (sys.GetWindowRect(hwnd, &self.restore_rect) == 0) {
             self.restore_rect = .{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
         }
     }
@@ -26693,12 +22719,12 @@ pub const Surface = struct {
         const hwnd = self.windowHwnd() orelse return;
         const hosted = self.host != null;
         var client_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) {
+            return lastError();
         }
         var window_rect: RECT = undefined;
-        if (GetWindowRect(hwnd, &window_rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetWindowRect(hwnd, &window_rect) == 0) {
+            return lastError();
         }
 
         const current_client_width = client_rect.right - client_rect.left;
@@ -26708,16 +22734,16 @@ pub const Surface = struct {
         const frame_width = current_window_width - current_client_width;
         const frame_height = current_window_height - current_client_height;
 
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             hwnd,
             null,
             0,
             0,
             @as(i32, @intCast(client_width)) + frame_width,
             @as(i32, @intCast(client_height)) + frame_height,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            c.SWP_NOMOVE | c.SWP_NOZORDER | c.SWP_NOACTIVATE,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
 
         if (hosted) {
@@ -26784,14 +22810,14 @@ pub const Surface = struct {
         const host = self.host orelse return;
         if (host.activeSurface() != self) return;
 
-        _ = SetWindowPos(
+        _ = sys.SetWindowPos(
             hwnd,
             null,
             0,
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
         );
     }
 
@@ -26805,26 +22831,26 @@ pub const Surface = struct {
         const hwnd = self.windowHwnd() orelse return;
         const source_hwnd = source.windowHwnd() orelse return;
         var rect: RECT = undefined;
-        if (GetWindowRect(source_hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.GetWindowRect(source_hwnd, &rect) == 0) {
+            return lastError();
         }
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
             rect.left,
             rect.top,
             rect.right - rect.left,
             rect.bottom - rect.top,
-            SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
 
         if (!self.fullscreen) {
-            if (IsZoomed(source_hwnd) != 0) {
-                _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            if (sys.IsZoomed(source_hwnd) != 0) {
+                _ = sys.ShowWindow(hwnd, c.SW_MAXIMIZE);
             } else {
-                _ = ShowWindow(hwnd, SW_RESTORE);
+                _ = sys.ShowWindow(hwnd, c.SW_RESTORE);
             }
         }
     }
@@ -26839,8 +22865,8 @@ pub const Surface = struct {
         const hwnd = self.windowHwnd() orelse return;
         var client_rect: RECT = undefined;
         var window_rect: RECT = undefined;
-        if (GetClientRect(hwnd, &client_rect) == 0) return;
-        if (GetWindowRect(hwnd, &window_rect) == 0) return;
+        if (sys.GetClientRect(hwnd, &client_rect) == 0) return;
+        if (sys.GetWindowRect(hwnd, &window_rect) == 0) return;
 
         const frame_width = (window_rect.right - window_rect.left) - (client_rect.right - client_rect.left);
         const frame_height = (window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top);
@@ -26867,17 +22893,17 @@ pub const Surface = struct {
             self.host != null,
         );
 
-        _ = SetWindowLongPtrW(hwnd, GWL_STYLE, @bitCast(@as(isize, @intCast(style))));
-        if (SetWindowPos(
+        _ = sys.SetWindowLongPtrW(hwnd, c.GWL_STYLE, @bitCast(@as(isize, @intCast(style))));
+        if (sys.SetWindowPos(
             hwnd,
             null,
             0,
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -26887,48 +22913,48 @@ pub const Surface = struct {
             self.background_opacity_default,
             self.background_opacity_force_opaque,
         );
-        const ex_style_raw = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        const ex_style_raw = sys.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE);
         var ex_style: u32 = @intCast(@as(usize, @bitCast(ex_style_raw)));
 
         if (opacity >= 0.999) {
-            if ((ex_style & WS_EX_LAYERED) != 0) {
-                ex_style &= ~@as(u32, WS_EX_LAYERED);
-                _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
-                _ = SetWindowPos(
+            if ((ex_style & c.WS_EX_LAYERED) != 0) {
+                ex_style &= ~@as(u32, c.WS_EX_LAYERED);
+                _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
+                _ = sys.SetWindowPos(
                     hwnd,
                     null,
                     0,
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOZORDER | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
                 );
             }
             return;
         }
 
-        if ((ex_style & WS_EX_LAYERED) == 0) {
-            ex_style |= WS_EX_LAYERED;
-            _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
+        if ((ex_style & c.WS_EX_LAYERED) == 0) {
+            ex_style |= c.WS_EX_LAYERED;
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWL_EXSTYLE, @bitCast(@as(isize, @intCast(ex_style))));
         }
 
-        if (SetLayeredWindowAttributes(hwnd, 0, alphaByteForOpacity(opacity), LWA_ALPHA) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.SetLayeredWindowAttributes(hwnd, 0, alphaByteForOpacity(opacity), c.LWA_ALPHA) == 0) {
+            return lastError();
         }
     }
 
     fn applyTopmost(self: *Surface) !void {
         const hwnd = self.activeSharedHostWindowHwnd() orelse return;
-        if (SetWindowPos(
+        if (sys.SetWindowPos(
             hwnd,
             if (self.topmost) HWND_TOPMOST else HWND_NOTOPMOST,
             0,
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            c.SWP_NOMOVE | c.SWP_NOSIZE | c.SWP_NOACTIVATE | c.SWP_FRAMECHANGED,
         ) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+            return lastError();
         }
     }
 
@@ -26976,7 +23002,9 @@ pub const Surface = struct {
         if (self.host) |host| {
             const pane_count = if (host.activeTab()) |tab| tab.leafCount() else 0;
             if (hostChromeNeedsFocusRepaint(pane_count)) host.repaintContentChrome();
-            if (focus_state_changed) host.refreshChrome() catch {};
+            if (focus_state_changed) {
+                runUiActionOrLog("focus chrome refresh failed", host.refreshChrome());
+            }
         }
     }
 
@@ -27028,11 +23056,11 @@ pub const Surface = struct {
         const forms = imeWindowForms(ime_pos, self.content_scale);
 
         const surface_hwnd = self.hwnd orelse return;
-        const himc = ImmGetContext(surface_hwnd) orelse return;
-        defer _ = ImmReleaseContext(surface_hwnd, himc);
+        const himc = sys.ImmGetContext(surface_hwnd) orelse return;
+        defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
 
-        const composition_set = ImmSetCompositionWindow(himc, &forms.composition) != 0;
-        const candidate_set = ImmSetCandidateWindow(himc, &forms.candidate) != 0;
+        const composition_set = sys.ImmSetCompositionWindow(himc, &forms.composition) != 0;
+        const candidate_set = sys.ImmSetCandidateWindow(himc, &forms.candidate) != 0;
         if (composition_set and candidate_set) {
             writeImeWindowFormsTrace(self.app.core_app.alloc, ime_pos, self.content_scale, forms);
         }
@@ -27041,11 +23069,11 @@ pub const Surface = struct {
     fn handleImeResult(self: *Surface) void {
         if (!self.core_initialized) return;
         const surface_hwnd = self.hwnd orelse return;
-        const himc = ImmGetContext(surface_hwnd) orelse return;
-        defer _ = ImmReleaseContext(surface_hwnd, himc);
+        const himc = sys.ImmGetContext(surface_hwnd) orelse return;
+        defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
 
         // Get the byte length of the result string
-        const byte_len = ImmGetCompositionStringW(himc, GCS_RESULTSTR, null, 0);
+        const byte_len = sys.ImmGetCompositionStringW(himc, c.GCS_RESULTSTR, null, 0);
         if (byte_len <= 0) return;
         const len: u32 = @intCast(byte_len);
         const wchar_count = len / 2;
@@ -27060,7 +23088,7 @@ pub const Surface = struct {
         };
         defer if (wchar_count > stack_buf.len) self.app.core_app.alloc.free(buf);
 
-        const read = ImmGetCompositionStringW(himc, GCS_RESULTSTR, buf.ptr, len);
+        const read = sys.ImmGetCompositionStringW(himc, c.GCS_RESULTSTR, buf.ptr, len);
         if (read <= 0) return;
         const actual_wchars: usize = @intCast(read);
         const result_slice = buf[0 .. actual_wchars / 2];
@@ -27089,11 +23117,11 @@ pub const Surface = struct {
     fn handleImeComposition(self: *Surface) void {
         if (!self.core_initialized) return;
         const surface_hwnd = self.hwnd orelse return;
-        const himc = ImmGetContext(surface_hwnd) orelse return;
-        defer _ = ImmReleaseContext(surface_hwnd, himc);
+        const himc = sys.ImmGetContext(surface_hwnd) orelse return;
+        defer _ = sys.ImmReleaseContext(surface_hwnd, himc);
 
         // Get the byte length of the composition string
-        const byte_len = ImmGetCompositionStringW(himc, GCS_COMPSTR, null, 0);
+        const byte_len = sys.ImmGetCompositionStringW(himc, c.GCS_COMPSTR, null, 0);
         if (byte_len <= 0) {
             self.core_surface.preeditCallback(null) catch {};
             return;
@@ -27110,7 +23138,7 @@ pub const Surface = struct {
         };
         defer if (wchar_count > stack_buf.len) self.app.core_app.alloc.free(buf);
 
-        const read = ImmGetCompositionStringW(himc, GCS_COMPSTR, buf.ptr, len);
+        const read = sys.ImmGetCompositionStringW(himc, c.GCS_COMPSTR, buf.ptr, len);
         if (read <= 0) {
             self.core_surface.preeditCallback(null) catch {};
             return;
@@ -27132,9 +23160,9 @@ pub const Surface = struct {
     fn handleDropFiles(self: *Surface, wParam: WPARAM) void {
         if (!self.core_initialized) return;
         const hDrop: *anyopaque = @ptrFromInt(wParam);
-        defer DragFinish(hDrop);
+        defer sys.DragFinish(hDrop);
 
-        const file_count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+        const file_count = sys.DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
         if (file_count == 0) return;
 
         const alloc = self.app.core_app.alloc;
@@ -27144,13 +23172,13 @@ pub const Surface = struct {
         var i: UINT = 0;
         while (i < file_count) : (i += 1) {
             // Get required buffer length (not counting null terminator)
-            const wchar_len = DragQueryFileW(hDrop, i, null, 0);
+            const wchar_len = sys.DragQueryFileW(hDrop, i, null, 0);
             if (wchar_len == 0) continue;
 
             // Allocate UTF-16 buffer (+1 for null)
             const buf = alloc.alloc(u16, wchar_len + 1) catch continue;
             defer alloc.free(buf);
-            _ = DragQueryFileW(hDrop, i, buf.ptr, wchar_len + 1);
+            _ = sys.DragQueryFileW(hDrop, i, buf.ptr, wchar_len + 1);
 
             // Convert UTF-16 to UTF-8
             var utf8_buf: [1024]u8 = undefined;
@@ -27167,11 +23195,11 @@ pub const Surface = struct {
             if (needs_quoting) {
                 result.append(alloc, '\'') catch continue;
                 // Escape any existing single quotes within the path
-                for (path) |c| {
-                    if (c == '\'') {
+                for (path) |char| {
+                    if (char == '\'') {
                         result.appendSlice(alloc, "'\\''") catch continue;
                     } else {
-                        result.append(alloc, c) catch continue;
+                        result.append(alloc, char) catch continue;
                     }
                 }
                 result.append(alloc, '\'') catch continue;
@@ -27212,11 +23240,11 @@ pub const Surface = struct {
         self.cursor_pos = cursorPosFromLParam(lParam);
         if (state == .press) {
             if (self.hwnd) |hwnd| {
-                _ = SetFocus(hwnd);
-                _ = SetCapture(hwnd);
+                _ = sys.SetFocus(hwnd);
+                _ = sys.SetCapture(hwnd);
             }
         } else {
-            _ = ReleaseCapture();
+            _ = sys.ReleaseCapture();
         }
 
         self.core_surface.cursorPosCallback(self.cursor_pos, mods) catch |err| {
@@ -27237,13 +23265,13 @@ pub const Surface = struct {
 
         const hi = highWord(@as(usize, @intCast(wParam)));
         const button: input.MouseButton = switch (hi) {
-            XBUTTON1 => .four,
-            XBUTTON2 => .five,
+            c.XBUTTON1 => .four,
+            c.XBUTTON2 => .five,
             else => return,
         };
         const state: input.MouseButtonState = switch (msg) {
-            WM_XBUTTONDOWN => .press,
-            WM_XBUTTONUP => .release,
+            c.WM_XBUTTONDOWN => .press,
+            c.WM_XBUTTONUP => .release,
             else => return,
         };
         const mods = mouseModsFromWParam(wParam);
@@ -27251,11 +23279,11 @@ pub const Surface = struct {
         self.cursor_pos = cursorPosFromLParam(lParam);
         if (state == .press) {
             if (self.hwnd) |h| {
-                _ = SetFocus(h);
-                _ = SetCapture(h);
+                _ = sys.SetFocus(h);
+                _ = sys.SetCapture(h);
             }
         } else {
-            _ = ReleaseCapture();
+            _ = sys.ReleaseCapture();
         }
 
         self.core_surface.cursorPosCallback(self.cursor_pos, mods) catch |err| {
@@ -27277,7 +23305,7 @@ pub const Surface = struct {
     fn handleMouseWheel(self: *Surface, scroll: NormalizedWheelScroll) void {
         if (!self.core_initialized) return;
         if (self.scrollbarScrollable()) {
-            const now_ms = GetTickCount64();
+            const now_ms = sys.GetTickCount64();
             self.noteScrollbarActivity(now_ms);
             self.syncScrollbarWindowNow(now_ms) catch |err| {
                 log.warn("win32 scrollbar wheel refresh failed err={}", .{err});
@@ -27571,7 +23599,7 @@ pub const Surface = struct {
         if (!self.scrollbarScrollable()) {
             self.scrollbar_state = .{};
         } else {
-            const now_ms = GetTickCount64();
+            const now_ms = sys.GetTickCount64();
             switch (self.scrollbarPolicy()) {
                 .always => self.scrollbar_state.visibility = .visible,
                 .dynamic => if (offset_changed) self.noteScrollbarActivity(now_ms),
@@ -27601,12 +23629,12 @@ pub const Surface = struct {
 
     fn applyCursor(self: *Surface) bool {
         if (!self.mouse_visible) {
-            _ = SetCursor(null);
+            _ = sys.SetCursor(null);
             return true;
         }
 
         const cursor_name: INTRESOURCE = switch (self.mouse_shape) {
-            .default => IDC_ARROW,
+            .default => c.IDC_ARROW,
             .help => @as(INTRESOURCE, @ptrFromInt(32651)),
             .pointer, .grab, .grabbing => @as(INTRESOURCE, @ptrFromInt(32649)),
             .progress => @as(INTRESOURCE, @ptrFromInt(32650)),
@@ -27624,10 +23652,10 @@ pub const Surface = struct {
             .copy,
             .zoom_in,
             .zoom_out,
-            => IDC_ARROW,
+            => c.IDC_ARROW,
         };
 
-        _ = SetCursor(LoadCursorW(null, cursor_name));
+        _ = sys.SetCursor(sys.LoadCursorW(null, cursor_name));
         return true;
     }
 
@@ -27707,10 +23735,10 @@ pub const Surface = struct {
             }
             alloc.free(owned);
         }
-        for (contents) |c| {
-            const mime_copy = try alloc.dupeZ(u8, c.mime);
+        for (contents) |content| {
+            const mime_copy = try alloc.dupeZ(u8, content.mime);
             errdefer alloc.free(mime_copy);
-            const data_copy = try alloc.dupeZ(u8, c.data);
+            const data_copy = try alloc.dupeZ(u8, content.data);
             // Both dupes succeeded — commit atomically into owned[]
             // and advance filled. The per-iter mime errdefer goes
             // out of scope without firing.
@@ -27739,16 +23767,16 @@ pub const Surface = struct {
     }
 
     fn readClipboardText(self: *Surface) !?[:0]u8 {
-        if (OpenClipboard(self.hwnd) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.OpenClipboard(self.hwnd) == 0) {
+            return lastError();
         }
-        defer _ = CloseClipboard();
+        defer _ = sys.CloseClipboard();
 
-        if (IsClipboardFormatAvailable(CF_UNICODETEXT) == 0) return null;
+        if (sys.IsClipboardFormatAvailable(c.CF_UNICODETEXT) == 0) return null;
 
-        const handle = GetClipboardData(CF_UNICODETEXT) orelse return null;
-        const locked = GlobalLock(handle) orelse return null;
-        defer _ = GlobalUnlock(handle);
+        const handle = sys.GetClipboardData(c.CF_UNICODETEXT) orelse return null;
+        const locked = sys.GlobalLock(handle) orelse return null;
+        defer _ = sys.GlobalUnlock(handle);
 
         const text_w: [*:0]const u16 = @ptrCast(@alignCast(locked));
         const slice_w = std.mem.sliceTo(text_w, 0);
@@ -27760,29 +23788,29 @@ pub const Surface = struct {
         const text_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, text);
         defer alloc.free(text_w);
 
-        if (OpenClipboard(self.hwnd) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.OpenClipboard(self.hwnd) == 0) {
+            return lastError();
         }
-        defer _ = CloseClipboard();
+        defer _ = sys.CloseClipboard();
 
-        if (EmptyClipboard() == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.EmptyClipboard() == 0) {
+            return lastError();
         }
 
         const bytes = (text_w.len + 1) * @sizeOf(u16);
-        const mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes) orelse
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        errdefer _ = GlobalFree(mem);
+        const mem = sys.GlobalAlloc(c.GMEM_MOVEABLE | c.GMEM_ZEROINIT, bytes) orelse
+            return lastError();
+        errdefer _ = sys.GlobalFree(mem);
 
-        const locked = GlobalLock(mem) orelse
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        defer _ = GlobalUnlock(mem);
+        const locked = sys.GlobalLock(mem) orelse
+            return lastError();
+        defer _ = sys.GlobalUnlock(mem);
 
         const dst: [*]u16 = @ptrCast(@alignCast(locked));
         @memcpy(dst[0 .. text_w.len + 1], text_w[0 .. text_w.len + 1]);
 
-        if (SetClipboardData(CF_UNICODETEXT, mem) == null) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.SetClipboardData(c.CF_UNICODETEXT, mem) == null) {
+            return lastError();
         }
     }
 
@@ -27804,9 +23832,9 @@ pub const Surface = struct {
         // Lazily register CF_HTML once per App. The ID is process-
         // local and stable.
         if (self.app.cf_html_format == 0) {
-            const id = RegisterClipboardFormatW(CF_HTML_NAME);
+            const id = sys.RegisterClipboardFormatW(CF_HTML_NAME);
             if (id == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+                return lastError();
             }
             self.app.cf_html_format = id;
         }
@@ -27831,13 +23859,13 @@ pub const Surface = struct {
         const plain_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, plain_src);
         defer alloc.free(plain_w);
 
-        if (OpenClipboard(self.hwnd) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.OpenClipboard(self.hwnd) == 0) {
+            return lastError();
         }
-        defer _ = CloseClipboard();
+        defer _ = sys.CloseClipboard();
 
-        if (EmptyClipboard() == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
+        if (sys.EmptyClipboard() == 0) {
+            return lastError();
         }
 
         // CF_HTML payload: the wrapped byte stream + a trailing
@@ -27846,37 +23874,37 @@ pub const Surface = struct {
         // free on that path.
         {
             const bytes = wrapped.len + 1;
-            const mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes) orelse
-                return windows.unexpectedError(windows.kernel32.GetLastError());
-            errdefer _ = GlobalFree(mem);
-            const locked = GlobalLock(mem) orelse
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            const mem = sys.GlobalAlloc(c.GMEM_MOVEABLE | c.GMEM_ZEROINIT, bytes) orelse
+                return lastError();
+            errdefer _ = sys.GlobalFree(mem);
+            const locked = sys.GlobalLock(mem) orelse
+                return lastError();
             {
-                defer _ = GlobalUnlock(mem);
+                defer _ = sys.GlobalUnlock(mem);
                 const dst: [*]u8 = @ptrCast(locked);
                 @memcpy(dst[0..wrapped.len], wrapped);
                 dst[wrapped.len] = 0;
             }
-            if (SetClipboardData(cf_html, mem) == null) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (sys.SetClipboardData(cf_html, mem) == null) {
+                return lastError();
             }
         }
 
         // CF_UNICODETEXT fallback.
         {
             const bytes = (plain_w.len + 1) * @sizeOf(u16);
-            const mem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes) orelse
-                return windows.unexpectedError(windows.kernel32.GetLastError());
-            errdefer _ = GlobalFree(mem);
-            const locked = GlobalLock(mem) orelse
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            const mem = sys.GlobalAlloc(c.GMEM_MOVEABLE | c.GMEM_ZEROINIT, bytes) orelse
+                return lastError();
+            errdefer _ = sys.GlobalFree(mem);
+            const locked = sys.GlobalLock(mem) orelse
+                return lastError();
             {
-                defer _ = GlobalUnlock(mem);
+                defer _ = sys.GlobalUnlock(mem);
                 const dst: [*]u16 = @ptrCast(@alignCast(locked));
                 @memcpy(dst[0 .. plain_w.len + 1], plain_w[0 .. plain_w.len + 1]);
             }
-            if (SetClipboardData(CF_UNICODETEXT, mem) == null) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
+            if (sys.SetClipboardData(c.CF_UNICODETEXT, mem) == null) {
+                return lastError();
             }
         }
     }
@@ -27884,16 +23912,248 @@ pub const Surface = struct {
     fn destroyGL(self: *Surface) void {
         if (self.hglrc != null) {
             self.clearGLContextCurrent();
-            _ = wglDeleteContext(self.hglrc);
+            _ = sys.wglDeleteContext(self.hglrc);
             self.hglrc = null;
         }
 
         if (self.hdc != null) {
-            if (self.hwnd) |hwnd| _ = ReleaseDC(hwnd, self.hdc);
+            if (self.hwnd) |hwnd| _ = sys.ReleaseDC(hwnd, self.hdc);
             self.hdc = null;
         }
 
         self.hwnd = null;
+    }
+};
+
+/// Byte-zeroed storage used only where no valid headless initializer or
+/// declared default exists. The returned value is NOT a valid instance;
+/// reading it before a real value is written is illegal behavior. Palette
+/// counts guard their unused slots, and `core_initialized = false` guards the
+/// inert `CoreSurface` field.
+fn uninitializedInertStorage(comptime T: type) T {
+    var value: T = undefined;
+    @memset(std.mem.asBytes(&value), 0);
+    return value;
+}
+
+/// Headless CoreApp/App/Host/Surface fixture for Win32 action and
+/// structural-history tests. Caller-owned storage keeps the familiar local
+/// names used by assertions while this fixture owns initialized resources and
+/// their teardown. Guarded CoreSurface and unused palette slots are inert
+/// storage, not valid live instances.
+const TestSession = struct {
+    const max_hosts = 4;
+    const max_surfaces = 8;
+
+    const HostOptions = struct {
+        storage: *Host,
+        id: u32 = 1,
+        register: bool = false,
+        active_tab: usize = 0,
+        next_tab_id: u32 = 1,
+    };
+
+    const SurfaceOptions = struct {
+        storage: *Surface,
+        host: ?*Host = null,
+        register: bool = false,
+        window_visible: bool = true,
+        host_active: bool = true,
+        window_focused: bool = false,
+        undo_allocator: ?Allocator = null,
+        free_launch_profile_key_on_deinit: bool = false,
+    };
+
+    const TabOptions = struct {
+        host: *Host,
+        surface: *Surface,
+        id: u32,
+    };
+
+    const Options = struct {
+        core_app: *CoreApp,
+        app: *App,
+        hosts: []const HostOptions = &.{},
+        surfaces: []const SurfaceOptions = &.{},
+        tabs: []const TabOptions = &.{},
+        focused: bool = true,
+        shell_runtime_initialized: bool = false,
+    };
+
+    const SurfaceRecord = struct {
+        surface: *Surface,
+        undo_initialized: bool = true,
+        free_launch_profile_key: bool = false,
+    };
+
+    allocator: Allocator = std.testing.allocator,
+    core_app: ?*CoreApp = null,
+    app: ?*App = null,
+    core_app_initialized: bool = false,
+    app_initialized: bool = false,
+    hosts: [max_hosts]?*Host = .{null} ** max_hosts,
+    host_count: usize = 0,
+    surfaces: [max_surfaces]?SurfaceRecord = .{null} ** max_surfaces,
+    surface_count: usize = 0,
+
+    fn init(self: *TestSession, options: Options) !void {
+        self.* = .{};
+        if (options.hosts.len > max_hosts or options.surfaces.len > max_surfaces) {
+            return error.TestSessionCapacityExceeded;
+        }
+
+        self.core_app = options.core_app;
+        try options.core_app.init(self.allocator);
+        self.core_app_initialized = true;
+        errdefer self.deinit();
+        options.core_app.focused = options.focused;
+
+        const app_config = try configpkg.Config.default(self.allocator);
+        options.app.* = .{
+            .core_app = options.core_app,
+            .config = app_config,
+            .hinstance = sys.GetModuleHandleW(null),
+            // These initializers only establish inert model state; they do not
+            // create windows, initialize COM, or start compositor devices.
+            .settings_window = win32_settings.SettingsWindow.init(.{
+                .ctx = @ptrCast(options.app),
+                .alloc = self.allocator,
+                .hinstance = sys.GetModuleHandleW(null),
+                .ownerWindow = &settingsOwnerWindowThunk,
+                .chromeBg = &settingsChromeBgThunk,
+                .textPrimary = &settingsTextPrimaryThunk,
+                .themeColors = &settingsThemeColorsThunk,
+                .highContrast = &settingsHighContrastThunk,
+                .openInEditor = &settingsOpenInEditorThunk,
+                .currentConfig = &settingsCurrentConfigThunk,
+                .saveAndReload = &settingsSaveAndReloadThunk,
+                .configRevision = &settingsConfigRevisionThunk,
+                .previewField = &settingsPreviewFieldThunk,
+                .notifyConflict = &settingsNotifyConflictThunk,
+                .notifySuccess = &settingsNotifySuccessThunk,
+                .customUiaProvidersEnabled = &settingsCustomUiaProvidersEnabledThunk,
+                .deferUiaDisconnect = &settingsDeferUiaDisconnectThunk,
+                .onClosed = &settingsOnClosedThunk,
+            }),
+            .link_hover_tracker = win32_link_preview.HoverTracker.init(),
+            .shell_compositor_driver = win32_compositor_native.NativeDriver.init(self.allocator),
+            .shell_compositor = win32_compositor.Backend.init(.{}, null),
+            .shell_runtime = win32_shell.runtime.Runtime.init(self.allocator),
+            .shell_runtime_initialized = options.shell_runtime_initialized,
+        };
+        self.app = options.app;
+        self.app_initialized = true;
+
+        for (options.hosts) |host_options| {
+            const host = host_options.storage;
+            host.* = .{
+                .app = options.app,
+                .id = host_options.id,
+                .active_tab = host_options.active_tab,
+                .next_tab_id = host_options.next_tab_id,
+                // Item, tagged-payload, and ranked elements have no declared
+                // defaults. Zero counts/catalog guard these invalid slots from
+                // reads until production code overwrites them. Label bytes do
+                // have a valid zero value, so their array uses valid elements.
+                .palette_catalog_items = uninitializedInertStorage([palette_catalog_capacity]PaletteItem),
+                .palette_catalog_payloads = uninitializedInertStorage([palette_catalog_capacity]PalettePayload),
+                .palette_catalog_labels = @splat(@splat(0)),
+                .palette_list_ranked = uninitializedInertStorage([win32_palette.max_ranked]PaletteRanked),
+            };
+            self.hosts[self.host_count] = host;
+            self.host_count += 1;
+            if (host_options.register) try options.app.hosts.append(self.allocator, host);
+        }
+
+        for (options.surfaces) |surface_options| {
+            const surface = surface_options.storage;
+            const undo_allocator = surface_options.undo_allocator orelse self.allocator;
+            surface.* = .{
+                .app = options.app,
+                .host = surface_options.host,
+                .host_id = if (surface_options.host) |host| host.id else 0,
+                .window_visible = surface_options.window_visible,
+                .host_active = surface_options.host_active,
+                .window_focused = surface_options.window_focused,
+                // No valid headless CoreSurface initializer exists. This
+                // byte-zeroed field is NOT a valid CoreSurface;
+                // core_initialized=false guards it, and reading it is illegal
+                // behavior while that guard remains false.
+                .core_surface = uninitializedInertStorage(CoreSurface),
+                .undo_stack = win32_undo.UndoStack.init(undo_allocator),
+                .search_bar = win32_search_bar.SearchBar.init(self.allocator),
+                .drop_target = win32_surface_drop_target.DropTarget.init(
+                    self.allocator,
+                    @ptrCast(surface),
+                    &surfaceDropPayloadCallback,
+                ),
+            };
+            self.surfaces[self.surface_count] = .{
+                .surface = surface,
+                .free_launch_profile_key = surface_options.free_launch_profile_key_on_deinit,
+            };
+            self.surface_count += 1;
+            if (surface_options.register) try options.app.windows.append(self.allocator, surface);
+        }
+
+        for (options.tabs) |tab_options| {
+            try tab_options.host.tabs.append(
+                self.allocator,
+                try Tab.init(self.allocator, tab_options.id, tab_options.surface),
+            );
+        }
+    }
+
+    fn deinitSurfaceUndo(self: *TestSession, surface: *Surface) void {
+        for (self.surfaces[0..self.surface_count]) |*maybe_record| {
+            if (maybe_record.*) |*record| {
+                if (record.surface != surface or !record.undo_initialized) continue;
+                record.surface.undo_stack.deinit();
+                record.undo_initialized = false;
+                return;
+            }
+        }
+    }
+
+    fn deinit(self: *TestSession) void {
+        var surface_index = self.surface_count;
+        while (surface_index > 0) {
+            surface_index -= 1;
+            if (self.surfaces[surface_index]) |*record| {
+                if (record.free_launch_profile_key) {
+                    if (record.surface.launch_profile_key) |value| self.allocator.free(value);
+                    record.surface.launch_profile_key = null;
+                }
+                if (record.undo_initialized) record.surface.undo_stack.deinit();
+                record.surface.search_bar.deinit();
+                record.surface.drop_target.deinit();
+            }
+        }
+
+        var host_index = self.host_count;
+        while (host_index > 0) {
+            host_index -= 1;
+            const host = self.hosts[host_index] orelse continue;
+            host.setBanner(.none, null) catch {};
+            host.clearStructuralHistory(.normal);
+            host.structural_undo_entries.deinit(self.allocator);
+            host.structural_redo_entries.deinit(self.allocator);
+            while (host.tabs.items.len > 0) {
+                var tab = host.tabs.orderedRemove(0);
+                tab.deinit();
+            }
+            host.tabs.deinit(self.allocator);
+        }
+
+        if (self.app_initialized) {
+            const app = self.app.?;
+            app.shell_runtime.deinit();
+            app.config.deinit();
+            app.hosts.deinit(self.allocator);
+            app.windows.deinit(self.allocator);
+        }
+        if (self.core_app_initialized) self.core_app.?.deinit();
+        self.* = .{};
     }
 };
 
@@ -27933,41 +24193,21 @@ test "win32 undo prune expires local and structural histories" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.windows = .empty;
-    app.hosts = .empty;
-    defer {
-        app.windows.deinit(std.testing.allocator);
-        app.hosts.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
-    var host: Host = .{
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
         .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.hosts.append(std.testing.allocator, &host);
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .register = true },
+            .{ .storage = &surface_b },
+        },
+    });
+    defer session.deinit();
 
     try surface_a.undo_stack.push(.{
         .kind = .clear_screen,
@@ -28029,38 +24269,16 @@ test "win32 undo redo actions prune expired empty-host structural history before
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
-    var app: App = .{
+    var app: App = undefined;
+    var host: Host = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
         .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-        .hosts = .empty,
-        .windows = .empty,
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-    app.config.@"undo-timeout" = .{ .duration = 0 };
-
-    var host: Host = .{
         .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.setBanner(.none, null) catch {};
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    try app.hosts.append(std.testing.allocator, &host);
+        .hosts = &.{.{ .storage = &host, .register = true }},
+    });
+    defer session.deinit();
+    app.config.@"undo-timeout" = .{ .duration = 0 };
     try host.structural_undo_entries.append(std.testing.allocator, .{
         .kind = .close_tab,
         .timestamp_ms = 0,
@@ -28094,32 +24312,21 @@ test "win32 local undo capture invalidates host structural redo only" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.host = &host;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.host = &host;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 1);
     try host.structural_redo_entries.append(std.testing.allocator, .{
@@ -28142,32 +24349,21 @@ test "win32 snapshotless local action invalidates local redo and host structural
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.host = &host;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.host = &host;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 11);
     try host.structural_redo_entries.append(std.testing.allocator, .{
@@ -28190,32 +24386,21 @@ test "win32 unsupported structural action invalidates local redo and host struct
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.host = &host;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.host = &host;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 40);
     try host.structural_undo_entries.append(std.testing.allocator, .{
@@ -28247,49 +24432,29 @@ test "win32 unsupported tab structural action invalidates affected tab redo and 
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var surface_c: Surface = undefined;
-    surface_c.app = &app;
-    surface_c.host = &host;
-    surface_c.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_c.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 50);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 51);
     try pushUndoAndRedoBranch(&surface_c.undo_stack, std.testing.allocator, 52);
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -28338,37 +24503,24 @@ test "win32 unsupported tab structural action invalidates affected tab redo and 
 test "win32 local undo push failure preserves host structural redo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
-    var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var arena: [64]u8 = undefined;
+    var arena: [64]u8 = .{0} ** 64;
     var fixed: std.heap.FixedBufferAllocator = .init(&arena);
-
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.host = &host;
-    surface_a.undo_stack = win32_undo.UndoStack.init(fixed.allocator());
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.host = &host;
-
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .undo_allocator = fixed.allocator() },
+            .{ .storage = &surface_b, .host = &host },
+        },
+    });
+    defer session.deinit();
     try host.structural_redo_entries.append(std.testing.allocator, .{
         .kind = .split_create,
         .timestamp_ms = 77,
@@ -28400,38 +24552,29 @@ test "win32 structural redo invalidation clears affected tab redo only" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-    };
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var surface_c: Surface = undefined;
-    surface_c.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_c.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a },
+            .{ .storage = &surface_b },
+            .{ .storage = &surface_c },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 10);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 20);
     try pushUndoAndRedoBranch(&surface_c.undo_stack, std.testing.allocator, 30);
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -28463,80 +24606,27 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    try core_app.init(std.testing.allocator);
-    defer core_app.deinit();
-
-    var app: App = .{
-        .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var app: App = undefined;
+    var host: Host = undefined;
     var source: Surface = undefined;
-    source.app = &app;
-    source.host = &host;
-    source.host_id = host.id;
-    source.hwnd = null;
-    source.core_initialized = false;
-    source.window_visible = true;
-    source.host_active = true;
-    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer source.undo_stack.deinit();
-
     var sibling: Surface = undefined;
-    sibling.app = &app;
-    sibling.host = &host;
-    sibling.host_id = host.id;
-    sibling.hwnd = null;
-    sibling.core_initialized = false;
-    sibling.window_visible = true;
-    sibling.host_active = true;
-    sibling.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer sibling.undo_stack.deinit();
-
     var other: Surface = undefined;
-    other.app = &app;
-    other.host = &host;
-    other.host_id = host.id;
-    other.hwnd = null;
-    other.core_initialized = false;
-    other.window_visible = true;
-    other.host_active = true;
-    other.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer other.undo_stack.deinit();
-
     var created: Surface = undefined;
-    created.app = &app;
-    created.host = &host;
-    created.host_id = host.id;
-    created.hwnd = null;
-    created.core_initialized = false;
-    created.window_visible = false;
-    created.host_active = false;
-    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer created.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 3 }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &sibling, .host = &host, .register = true },
+            .{ .storage = &other, .host = &host, .register = true },
+            .{ .storage = &created, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &sibling);
     defer {
         var cleanup = inserted;
@@ -28553,13 +24643,6 @@ test "win32 new_tab action inserts after the active tab by default, clears curre
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&source) orelse host.tabs.items[0].focused;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &other));
-    host.active_tab = 0;
-    host.next_tab_id = 3;
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &source);
-    try app.windows.append(std.testing.allocator, &sibling);
-    try app.windows.append(std.testing.allocator, &other);
 
     try pushUndoAndRedoBranch(&source.undo_stack, std.testing.allocator, 120);
     try pushUndoAndRedoBranch(&sibling.undo_stack, std.testing.allocator, 121);
@@ -28650,77 +24733,28 @@ test "win32 new_tab action appends when window-new-tab-position is end" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    try core_app.init(std.testing.allocator);
-    defer core_app.deinit();
-
-    var app: App = .{
-        .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-    app.config.@"window-new-tab-position" = .end;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var app: App = undefined;
+    var host: Host = undefined;
     var source: Surface = undefined;
-    source.app = &app;
-    source.host = &host;
-    source.host_id = host.id;
-    source.hwnd = null;
-    source.core_initialized = false;
-    source.window_visible = true;
-    source.host_active = true;
-    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer source.undo_stack.deinit();
-
     var other: Surface = undefined;
-    other.app = &app;
-    other.host = &host;
-    other.host_id = host.id;
-    other.hwnd = null;
-    other.core_initialized = false;
-    other.window_visible = true;
-    other.host_active = true;
-    other.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer other.undo_stack.deinit();
-
     var created: Surface = undefined;
-    created.app = &app;
-    created.host = &host;
-    created.host_id = host.id;
-    created.hwnd = null;
-    created.core_initialized = false;
-    created.window_visible = false;
-    created.host_active = false;
-    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer created.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &other));
-    host.active_tab = 0;
-    host.next_tab_id = 3;
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &source);
-    try app.windows.append(std.testing.allocator, &other);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 3 }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &other, .host = &host, .register = true },
+            .{ .storage = &created, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &source, .id = 1 },
+            .{ .host = &host, .surface = &other, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    app.config.@"window-new-tab-position" = .end;
 
     const Hook = struct {
         var host_ref: *Host = undefined;
@@ -28769,83 +24803,34 @@ test "win32 profile tab open appends when window-new-tab-position is end" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    try core_app.init(std.testing.allocator);
-    defer core_app.deinit();
-
-    var app: App = .{
-        .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-    app.config.@"window-new-tab-position" = .end;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var app: App = undefined;
+    var host: Host = undefined;
     var source: Surface = undefined;
-    source.app = &app;
-    source.host = &host;
-    source.host_id = host.id;
-    source.hwnd = null;
-    source.core_initialized = false;
-    source.window_visible = true;
-    source.host_active = true;
-    source.launch_profile_key = null;
-    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer source.undo_stack.deinit();
-
     var other: Surface = undefined;
-    other.app = &app;
-    other.host = &host;
-    other.host_id = host.id;
-    other.hwnd = null;
-    other.core_initialized = false;
-    other.window_visible = true;
-    other.host_active = true;
-    other.launch_profile_key = null;
-    other.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer other.undo_stack.deinit();
-
     var created: Surface = undefined;
-    created.app = &app;
-    created.host = &host;
-    created.host_id = host.id;
-    created.hwnd = null;
-    created.core_initialized = false;
-    created.window_visible = false;
-    created.host_active = false;
-    created.launch_profile_key = null;
-    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer {
-        if (created.launch_profile_key) |value| std.testing.allocator.free(value);
-        created.undo_stack.deinit();
-    }
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &other));
-    host.active_tab = 0;
-    host.next_tab_id = 3;
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &source);
-    try app.windows.append(std.testing.allocator, &other);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 3 }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &other, .host = &host, .register = true },
+            .{
+                .storage = &created,
+                .host = &host,
+                .window_visible = false,
+                .host_active = false,
+                .free_launch_profile_key_on_deinit = true,
+            },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &source, .id = 1 },
+            .{ .host = &host, .surface = &other, .id = 2 },
+        },
+    });
+    defer session.deinit();
+    app.config.@"window-new-tab-position" = .end;
 
     const Hook = struct {
         var host_ref: *Host = undefined;
@@ -28905,85 +24890,37 @@ test "win32 profile tab open inserts after active tab when window-new-tab-positi
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    try core_app.init(std.testing.allocator);
-    defer core_app.deinit();
-
-    var app: App = .{
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var other: Surface = undefined;
+    var created: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
         .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 3 }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &other, .host = &host, .register = true },
+            .{
+                .storage = &created,
+                .host = &host,
+                .window_visible = false,
+                .host_active = false,
+                .free_launch_profile_key_on_deinit = true,
+            },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &source, .id = 1 },
+            .{ .host = &host, .surface = &other, .id = 2 },
+        },
+    });
+    defer session.deinit();
     // default is .current — explicitly set for clarity
     app.config.@"window-new-tab-position" = .current;
 
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var source: Surface = undefined;
-    source.app = &app;
-    source.host = &host;
-    source.host_id = host.id;
-    source.hwnd = null;
-    source.core_initialized = false;
-    source.window_visible = true;
-    source.host_active = true;
-    source.launch_profile_key = null;
-    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer source.undo_stack.deinit();
-
-    var other: Surface = undefined;
-    other.app = &app;
-    other.host = &host;
-    other.host_id = host.id;
-    other.hwnd = null;
-    other.core_initialized = false;
-    other.window_visible = true;
-    other.host_active = true;
-    other.launch_profile_key = null;
-    other.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer other.undo_stack.deinit();
-
-    var created: Surface = undefined;
-    created.app = &app;
-    created.host = &host;
-    created.host_id = host.id;
-    created.hwnd = null;
-    created.core_initialized = false;
-    created.window_visible = false;
-    created.host_active = false;
-    created.launch_profile_key = null;
-    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer {
-        if (created.launch_profile_key) |value| std.testing.allocator.free(value);
-        created.undo_stack.deinit();
-    }
-
     // active_tab = 0; new tab should be inserted at index 1 (between tab1 and tab2)
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &other));
-    host.active_tab = 0;
-    host.next_tab_id = 3;
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &source);
-    try app.windows.append(std.testing.allocator, &other);
 
     const Hook = struct {
         var host_ref: *Host = undefined;
@@ -29045,63 +24982,25 @@ test "win32 moveTab invalidates current tab redo and structural history before r
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var surface_c: Surface = undefined;
-    surface_c.app = &app;
-    surface_c.host = &host;
-    surface_c.hwnd = null;
-    surface_c.core_initialized = false;
-    surface_c.window_visible = true;
-    surface_c.host_active = true;
-    surface_c.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_c.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29118,9 +25017,6 @@ test "win32 moveTab invalidates current tab redo and structural history before r
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_c));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_c);
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 30);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 31);
     try pushUndoAndRedoBranch(&surface_c.undo_stack, std.testing.allocator, 32);
@@ -29162,63 +25058,25 @@ test "win32 closeTab other clears current tab redo and structural history before
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var surface_c: Surface = undefined;
-    surface_c.app = &app;
-    surface_c.host = &host;
-    surface_c.hwnd = null;
-    surface_c.core_initialized = false;
-    surface_c.window_visible = true;
-    surface_c.host_active = true;
-    surface_c.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_c.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_c, .host = &host, .register = true },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29235,9 +25093,6 @@ test "win32 closeTab other clears current tab redo and structural history before
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_c));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_c);
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 40);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 41);
@@ -29277,74 +25132,30 @@ test "win32 closeTab right clears current tab redo and structural history before
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_left: Surface = undefined;
-    surface_left.app = &app;
-    surface_left.host = &host;
-    surface_left.hwnd = null;
-    surface_left.core_initialized = false;
-    surface_left.window_visible = true;
-    surface_left.host_active = true;
-    surface_left.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_left.undo_stack.deinit();
-
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var surface_right: Surface = undefined;
-    surface_right.app = &app;
-    surface_right.host = &host;
-    surface_right.hwnd = null;
-    surface_right.core_initialized = false;
-    surface_right.window_visible = true;
-    surface_right.host_active = true;
-    surface_right.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_right.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_left, .host = &host, .register = true },
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &surface_right, .host = &host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_left, .id = 1 },
+            .{ .host = &host, .surface = &surface_a, .id = 2 },
+        },
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_left));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29361,12 +25172,6 @@ test "win32 closeTab right clears current tab redo and structural history before
     host.tabs.items[1].tree = next_tree;
     host.tabs.items[1].focused = host.tabs.items[1].findHandle(&surface_a) orelse host.tabs.items[1].focused;
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &surface_right));
-    host.active_tab = 1;
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_left);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_right);
 
     try pushUndoAndRedoBranch(&surface_left.undo_stack, std.testing.allocator, 50);
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 51);
@@ -29409,53 +25214,23 @@ test "win32 closeTab other no-op preserves redo and structural history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29471,8 +25246,6 @@ test "win32 closeTab other no-op preserves redo and structural history" {
     host.tabs.items[0].tree.deinit();
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 60);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 61);
@@ -29508,64 +25281,28 @@ test "win32 closeTab right no-op preserves redo and structural history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_left: Surface = undefined;
-    surface_left.app = &app;
-    surface_left.host = &host;
-    surface_left.hwnd = null;
-    surface_left.core_initialized = false;
-    surface_left.window_visible = true;
-    surface_left.host_active = true;
-    surface_left.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_left.undo_stack.deinit();
-
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_left, .host = &host, .register = true },
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_left, .id = 1 },
+            .{ .host = &host, .surface = &surface_a, .id = 2 },
+        },
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_left));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -29581,10 +25318,6 @@ test "win32 closeTab right no-op preserves redo and structural history" {
     host.tabs.items[1].tree.deinit();
     host.tabs.items[1].tree = next_tree;
     host.tabs.items[1].focused = host.tabs.items[1].findHandle(&surface_a) orelse host.tabs.items[1].focused;
-    host.active_tab = 1;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_left);
-    try app.windows.append(std.testing.allocator, &surface_a);
 
     try pushUndoAndRedoBranch(&surface_left.undo_stack, std.testing.allocator, 70);
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 71);
@@ -29623,47 +25356,18 @@ test "win32 closeTab this on last tab detaches tab for undo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.setBanner(.none, null) catch {};
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.host_active = true;
-    surface.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
 
     try std.testing.expect(try app.closeTab(.app, .this));
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
@@ -29681,47 +25385,18 @@ test "win32 prune preserves empty host while structural undo remains" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.setBanner(.none, null) catch {};
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.host_active = true;
-    surface.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
 
     const entry = host.detachTabForUndo(0) orelse unreachable;
     try host.structural_undo_entries.append(std.testing.allocator, entry);
@@ -29739,52 +25414,18 @@ test "win32 app undo redo replays last tab close without active surface" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
-    var app: App = .{
-        .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-        .hosts = .empty,
-        .windows = .empty,
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.setBanner(.none, null) catch {};
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var app: App = undefined;
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.window_focused = false;
-    surface.host_active = true;
-    surface.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
 
     try std.testing.expect(try app.closeTab(.app, .this));
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
@@ -29812,85 +25453,31 @@ test "win32 app undo redo uses focused host" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
-    var app: App = .{
-        .core_app = &core_app,
-        .config = try configpkg.Config.default(std.testing.allocator),
-        .hinstance = GetModuleHandleW(null),
-        .hosts = .empty,
-        .windows = .empty,
-    };
-    defer {
-        app.config.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host_a: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host_a.setBanner(.none, null) catch {};
-        host_a.clearStructuralHistory(.normal);
-        host_a.structural_undo_entries.deinit(std.testing.allocator);
-        host_a.structural_redo_entries.deinit(std.testing.allocator);
-        for (host_a.tabs.items) |*tab| tab.deinit();
-        host_a.tabs.deinit(std.testing.allocator);
-    }
-
-    var host_b: Host = .{
-        .app = &app,
-        .id = 2,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host_b.setBanner(.none, null) catch {};
-        host_b.clearStructuralHistory(.normal);
-        host_b.structural_undo_entries.deinit(std.testing.allocator);
-        host_b.structural_redo_entries.deinit(std.testing.allocator);
-        for (host_b.tabs.items) |*tab| tab.deinit();
-        host_b.tabs.deinit(std.testing.allocator);
-    }
-
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host_a;
-    surface_a.host_id = host_a.id;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.window_focused = false;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host_b;
-    surface_b.host_id = host_b.id;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.window_focused = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 1, .register = true },
+            .{ .storage = &host_b, .id = 2, .register = true },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a, .register = true },
+            .{ .storage = &surface_b, .host = &host_b, .register = true, .window_focused = true },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 11 },
+            .{ .host = &host_b, .surface = &surface_b, .id = 22 },
+        },
+    });
+    defer session.deinit();
 
-    try host_a.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 11, &surface_a));
-    try host_b.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 22, &surface_b));
-    try app.hosts.append(std.testing.allocator, &host_a);
-    try app.hosts.append(std.testing.allocator, &host_b);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_b);
-
-    const now = GetTickCount64();
+    const now = sys.GetTickCount64();
     try host_a.structural_undo_entries.append(std.testing.allocator, .{
         .kind = .close_tab,
         .timestamp_ms = now,
@@ -29942,41 +25529,17 @@ test "win32 structural undo OOM rolls close_tab entry back to undo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = false;
-    surface.host_active = false;
-    surface.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .window_visible = false, .host_active = false }},
+    });
+    defer session.deinit();
 
     try host.structural_redo_entries.ensureTotalCapacity(std.testing.allocator, 1);
     try host.structural_undo_entries.append(std.testing.allocator, .{
@@ -30006,55 +25569,22 @@ test "win32 structural redo OOM rolls split_create entry back to redo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var source: Surface = undefined;
-    source.app = &app;
-    source.host = &host;
-    source.hwnd = null;
-    source.core_initialized = false;
-    source.window_visible = true;
-    source.host_active = true;
-    source.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer source.undo_stack.deinit();
-
     var created: Surface = undefined;
-    created.app = &app;
-    created.host = &host;
-    created.hwnd = null;
-    created.core_initialized = false;
-    created.window_visible = false;
-    created.host_active = false;
-    created.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer created.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &source));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &source);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &created, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
     try host.structural_undo_entries.ensureTotalCapacity(std.testing.allocator, 1);
     try host.structural_redo_entries.append(std.testing.allocator, .{
         .kind = .split_create,
@@ -30084,62 +25614,25 @@ test "win32 closeTab this restores tab when structural undo push fails" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .active_tab = 1,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.host_id = host.id;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.window_focused = false;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.host_id = host.id;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.window_focused = false;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_b));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_b);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 77);
 
     var backing: [0]u8 = .{};
@@ -30162,46 +25655,21 @@ test "win32 closeTab this on last tab restores tab when structural undo push fai
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.host_active = true;
-    surface.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host, .register = true }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
+    // The former partial App left undo-timeout uninitialized. This test is
+    // about reserve OOM preserving redo, so make pruning explicitly inert.
+    app.config.@"undo-timeout" = .{ .duration = std.math.maxInt(u64) };
 
     try host.structural_redo_entries.append(std.testing.allocator, .{
         .kind = .split_create,
@@ -30232,53 +25700,23 @@ test "win32 resizeSplit fallback OOM preserves redo and structural history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -30294,8 +25732,6 @@ test "win32 resizeSplit fallback OOM preserves redo and structural history" {
     host.tabs.items[0].tree.deinit();
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 80);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 81);
@@ -30318,7 +25754,7 @@ test "win32 resizeSplit fallback OOM preserves redo and structural history" {
         } },
     });
 
-    var tiny: [1]u8 = undefined;
+    var tiny: [1]u8 = .{0};
     var fixed: std.heap.FixedBufferAllocator = .init(&tiny);
     const original_alloc = core_app.alloc;
     core_app.alloc = fixed.allocator();
@@ -30340,53 +25776,23 @@ test "win32 equalizeSplits fallback OOM preserves redo and structural history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -30402,8 +25808,6 @@ test "win32 equalizeSplits fallback OOM preserves redo and structural history" {
     host.tabs.items[0].tree.deinit();
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 90);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 91);
@@ -30426,7 +25830,7 @@ test "win32 equalizeSplits fallback OOM preserves redo and structural history" {
         } },
     });
 
-    var tiny: [1]u8 = undefined;
+    var tiny: [1]u8 = .{0};
     var fixed: std.heap.FixedBufferAllocator = .init(&tiny);
     const original_alloc = core_app.alloc;
     core_app.alloc = fixed.allocator();
@@ -30448,49 +25852,22 @@ test "win32 resizeSplit fallback no-op preserves redo and structural history" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &detached_surface, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 100);
     try host.structural_undo_entries.append(std.testing.allocator, .{
@@ -30523,49 +25900,22 @@ test "win32 equalizeSplits fallback no-op preserves redo and structural history"
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &detached_surface, .host = &host },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 110);
     try host.structural_undo_entries.append(std.testing.allocator, .{
@@ -30598,61 +25948,25 @@ test "win32 toggle_split_zoom invalidates structural redo" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-    detached_surface.hwnd = null;
-    detached_surface.core_initialized = false;
-    detached_surface.window_visible = false;
-    detached_surface.host_active = false;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &detached_surface, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -30668,8 +25982,6 @@ test "win32 toggle_split_zoom invalidates structural redo" {
     host.tabs.items[0].tree.deinit();
     host.tabs.items[0].tree = next_tree;
     host.tabs.items[0].focused = host.tabs.items[0].findHandle(&surface_a) orelse host.tabs.items[0].focused;
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 10);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 11);
 
@@ -30696,48 +26008,25 @@ test "win32 swapTabs invalidates structural history before drag reorder" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_b));
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 30);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 40);
 
@@ -30778,46 +26067,25 @@ test "win32 close_surface on single-surface tab invalidates structural history" 
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_b));
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 12);
 
     try host.structural_undo_entries.append(std.testing.allocator, .{
@@ -30851,55 +26119,25 @@ test "win32 close_surface on split pane clears structural history before shell c
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-    detached_surface.hwnd = null;
-    detached_surface.core_initialized = false;
-    detached_surface.window_visible = false;
-    detached_surface.host_active = false;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+            .{ .storage = &detached_surface, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -30950,65 +26188,25 @@ test "win32 windowDestroyed backup clears affected tab redo and structural redo 
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.running = false;
-    app.shell_runtime_initialized = false;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    surface_a.pending_close_tree = null;
-    surface_a.pending_shell_close = null;
-    defer surface_a.undo_stack.deinit();
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-    detached_surface.hwnd = null;
-    detached_surface.core_initialized = false;
-    detached_surface.window_visible = false;
-    detached_surface.host_active = false;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &detached_surface, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -31025,10 +26223,6 @@ test "win32 windowDestroyed backup clears affected tab redo and structural redo 
     host.tabs.items[0].tree = next_tree;
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 30);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 31);
-
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_b);
 
     try host.structural_undo_entries.append(std.testing.allocator, .{
         .kind = .close_tab,
@@ -31065,64 +26259,25 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.running = false;
-    app.shell_runtime_initialized = false;
-    app.hosts = .empty;
-    app.windows = .empty;
-    defer {
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .structural_undo_entries = .empty,
-        .structural_redo_entries = .empty,
-    };
-    defer {
-        host.clearStructuralHistory(.normal);
-        host.structural_undo_entries.deinit(std.testing.allocator);
-        host.structural_redo_entries.deinit(std.testing.allocator);
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
-    surface_a.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    surface_a.pending_close_tree = null;
-    surface_a.pending_shell_close = null;
-
     var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
-    surface_b.undo_stack = win32_undo.UndoStack.init(std.testing.allocator);
-    defer surface_b.undo_stack.deinit();
-
     var detached_surface: Surface = undefined;
-    detached_surface.app = &app;
-    detached_surface.host = &host;
-    detached_surface.hwnd = null;
-    detached_surface.core_initialized = false;
-    detached_surface.window_visible = false;
-    detached_surface.host_active = false;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host, .register = true },
+            .{ .storage = &surface_b, .host = &host, .register = true },
+            .{ .storage = &detached_surface, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &surface_a, .id = 1 }},
+    });
+    defer session.deinit();
 
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
     const inserted = try SplitTreeSurface.init(std.testing.allocator, &surface_b);
     defer {
         var cleanup = inserted;
@@ -31140,10 +26295,6 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
     try pushUndoAndRedoBranch(&surface_a.undo_stack, std.testing.allocator, 40);
     try pushUndoAndRedoBranch(&surface_b.undo_stack, std.testing.allocator, 41);
 
-    try app.hosts.append(std.testing.allocator, &host);
-    try app.windows.append(std.testing.allocator, &surface_a);
-    try app.windows.append(std.testing.allocator, &surface_b);
-
     try host.structural_redo_entries.append(std.testing.allocator, .{
         .kind = .split_create,
         .timestamp_ms = 11,
@@ -31154,8 +26305,7 @@ test "win32 windowDestroyed backup skips closing surface redo after undo teardow
         } },
     });
 
-    surface_a.undo_stack.deinit();
-    surface_a.undo_stack = undefined;
+    session.deinitSurfaceUndo(&surface_a);
 
     app.windowDestroyed(&surface_a);
 
@@ -31214,39 +26364,29 @@ test "win32 terminal undo snapshot restores terminal state" {
 test "win32 close_tab structural undo restores and redoes a detached tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
     var surface_a: Surface = undefined;
     var surface_b: Surface = undefined;
-    surface_a.hwnd = null;
-    surface_b.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_b.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_b.window_visible = true;
-    surface_a.host_active = true;
-    surface_b.host_active = true;
-
-    var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
-    var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
         .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .active_tab = 1,
-    };
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface_a));
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 2, &surface_b));
+        .hosts = &.{.{ .storage = &host, .active_tab = 1 }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .tabs = &.{
+            .{ .host = &host, .surface = &surface_a, .id = 1 },
+            .{ .host = &host, .surface = &surface_b, .id = 2 },
+        },
+    });
+    defer session.deinit();
 
     var entry = host.detachTabForUndo(1).?;
-    defer entry.dispose(&host, .host_destroy) catch {};
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
 
     try std.testing.expectEqual(@as(usize, 1), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
@@ -31269,37 +26409,22 @@ test "win32 close_tab structural undo restores and redoes a detached tab" {
 test "win32 close_tab structural undo detaches the last remaining tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    var surface: Surface = undefined;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.host_active = true;
-
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
+    var host: Host = undefined;
+    var surface: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
         .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .active_tab = 0,
-    };
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
 
     var entry = host.detachTabForUndo(0).?;
-    defer entry.dispose(&host, .host_destroy) catch {};
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
 
     try std.testing.expectEqual(@as(usize, 0), host.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.active_tab);
@@ -31312,35 +26437,21 @@ test "win32 close_tab structural redo can detach the last restored tab" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-
-    var host: Host = .{
-        .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .active_tab = 0,
-    };
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
+    var host: Host = undefined;
     var surface: Surface = undefined;
-    surface.app = &app;
-    surface.host = &host;
-    surface.host_id = host.id;
-    surface.hwnd = null;
-    surface.core_initialized = false;
-    surface.window_visible = true;
-    surface.host_active = true;
-
-    try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 1, &surface));
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host }},
+        .surfaces = &.{.{ .storage = &surface, .host = &host }},
+        .tabs = &.{.{ .host = &host, .surface = &surface, .id = 1 }},
+    });
+    defer session.deinit();
 
     var entry = host.detachTabForUndo(0).?;
-    defer entry.dispose(&host, .host_destroy) catch {};
+    defer entry.dispose(&host, .host_destroy) catch {}; // Best-effort test teardown.
 
     const close_tab = &entry.payload.close_tab;
     try std.testing.expect(try host.restoreClosedTabEntry(close_tab));
@@ -31359,53 +26470,29 @@ test "win32 split_create structural undo removes and redoes the split" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     var core_app: CoreApp = undefined;
-    core_app.alloc = std.testing.allocator;
-
     var app: App = undefined;
-    app.core_app = &core_app;
-    app.hosts = .empty;
-    app.windows = .empty;
-    app.shell_runtime = win32_shell.runtime.Runtime.init(std.testing.allocator);
-    app.shell_runtime_initialized = true;
-    defer {
-        app.shell_runtime.deinit();
-        app.hosts.deinit(std.testing.allocator);
-        app.windows.deinit(std.testing.allocator);
-    }
-
-    var host: Host = .{
+    var host: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
         .app = &app,
-        .id = 1,
-        .tabs = .empty,
-        .active_tab = 0,
-    };
+        .hosts = &.{.{ .storage = &host, .register = true }},
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host },
+            .{ .storage = &surface_b, .host = &host },
+        },
+        .shell_runtime_initialized = true,
+    });
+    defer session.deinit();
+
     var shell_window = try app.shell_runtime.prepare(.create_window);
     defer shell_window.deinit();
     try shell_window.commit(&app.shell_runtime);
     host.shell_id = shell_window.created.window;
-    try app.hosts.append(std.testing.allocator, &host);
-    defer {
-        for (host.tabs.items) |*tab| tab.deinit();
-        host.tabs.deinit(std.testing.allocator);
-    }
-
-    var surface_a: Surface = undefined;
-    surface_a.app = &app;
-    surface_a.host = &host;
-    surface_a.hwnd = null;
-    surface_a.core_initialized = false;
-    surface_a.window_visible = true;
-    surface_a.host_active = true;
     surface_a.shell_id = shell_window.created.pane;
     surface_a.shell_committed = true;
-
-    var surface_b: Surface = undefined;
-    surface_b.app = &app;
-    surface_b.host = &host;
-    surface_b.hwnd = null;
-    surface_b.core_initialized = false;
-    surface_b.window_visible = true;
-    surface_b.host_active = true;
 
     var initial_tab = try Tab.init(std.testing.allocator, 1, &surface_a);
     initial_tab.shell_id = shell_window.created.tab;
@@ -31486,268 +26573,6 @@ test "win32 runtime can initialize config" {
     try std.testing.expect(@intFromPtr(app.hinstance) != 0);
 }
 
-test "win32 keyFromVirtualKey maps core keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(input.Key.key_a, keyFromVirtualKey(VK_A, 0));
-    try std.testing.expectEqual(input.Key.enter, keyFromVirtualKey(VK_RETURN, 0));
-    try std.testing.expectEqual(input.Key.numpad_enter, keyFromVirtualKey(VK_RETURN, KF_EXTENDED));
-    try std.testing.expectEqual(input.Key.arrow_left, keyFromVirtualKey(VK_LEFT, 0));
-    try std.testing.expectEqual(input.Key.f12, keyFromVirtualKey(VK_F1 + 11, 0));
-    try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(VK_OEM_7, 0));
-}
-
-test "win32 shouldDeferTextToCharMessage only defers plain text keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(UINT, 0x0004), TO_UNICODE_NO_STATE_CHANGE);
-    try std.testing.expectEqual(@as(usize, 1), utf16CodeUnitCount('a'));
-    try std.testing.expectEqual(@as(usize, 2), utf16CodeUnitCount(0x1F642));
-    try std.testing.expect(shouldDeferTextToCharMessage(
-        .press,
-        .key_a,
-        .{},
-        .{ .len = 1, .unshifted_codepoint = 'a', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(shouldDeferTextToCharMessage(
-        .repeat,
-        .space,
-        .{},
-        .{ .len = 1, .unshifted_codepoint = ' ', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(shouldDeferTextToCharMessage(
-        .press,
-        .quote,
-        .{},
-        .{ .unshifted_codepoint = '\'', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(!shouldDeferTextToCharMessage(
-        .press,
-        .digit_2,
-        .{ .ctrl = true, .alt = true },
-        .{ .unshifted_codepoint = '2', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(shouldDeferTextToCharMessage(
-        .press,
-        .equal,
-        .{ .ctrl = true, .alt = true, .sides = .{ .alt = .right } },
-        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(!shouldDeferTextToCharMessage(
-        .press,
-        .equal,
-        .{ .alt = true, .sides = .{ .alt = .right } },
-        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(!shouldDeferTextToCharMessage(
-        .press,
-        .equal,
-        .{
-            .ctrl = true,
-            .alt = true,
-            .sides = .{ .ctrl = .right, .alt = .right },
-        },
-        .{ .len = 1, .unshifted_codepoint = '=', .deferred_utf16_units = 1 },
-    ));
-    try std.testing.expect(!shouldDeferTextToCharMessage(
-        .press,
-        .enter,
-        .{},
-        .{ .unshifted_codepoint = 0x0D },
-    ));
-}
-
-test "win32 deferred char authorization respects key handling effect" {
-    try std.testing.expect(shouldAuthorizeDeferredCharMessage(.ignored));
-    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.consumed));
-    try std.testing.expect(!shouldAuthorizeDeferredCharMessage(.closed));
-}
-
-test "win32 VK_PACKET key down authorizes one unit without direct text or modifiers" {
-    const message = keyEventFromWin32Message(WM_KEYDOWN, VK_PACKET, 0).?;
-    try std.testing.expectEqual(input.Action.press, message.event.action);
-    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
-    try std.testing.expectEqualStrings("", message.event.utf8);
-    try std.testing.expect(message.event.composing);
-    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
-    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
-    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
-    try std.testing.expectEqual(@as(usize, 1), message.deferred_utf16_units);
-}
-
-test "win32 VK_PACKET key up authorizes no units or text" {
-    const message = keyEventFromWin32Message(WM_KEYUP, VK_PACKET, 0).?;
-    try std.testing.expectEqual(input.Action.release, message.event.action);
-    try std.testing.expectEqual(input.Key.unidentified, message.event.key);
-    try std.testing.expectEqualStrings("", message.event.utf8);
-    try std.testing.expect(!message.event.composing);
-    try std.testing.expectEqual(@as(u21, 0), message.event.unshifted_codepoint);
-    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.mods));
-    try std.testing.expect(std.meta.eql(input.Mods{}, message.event.consumed_mods));
-    try std.testing.expectEqual(@as(usize, 0), message.deferred_utf16_units);
-}
-
-test "win32 authorized char commit preserves packet control characters" {
-    var utf8_buf: [8]u8 = undefined;
-    const fixtures = [_]struct { codepoint: u21, expected: []const u8 }{
-        .{ .codepoint = '\r', .expected = "\r" },
-        .{ .codepoint = '\n', .expected = "\n" },
-        .{ .codepoint = '\t', .expected = "\t" },
-        .{ .codepoint = 0x08, .expected = "\x08" },
-        .{ .codepoint = 0x1B, .expected = "\x1B" },
-    };
-    for (fixtures) |fixture| {
-        const event = charCommitEvent(fixture.codepoint, 0, &utf8_buf).?;
-        try std.testing.expectEqual(input.Key.unidentified, event.key);
-        try std.testing.expectEqual(fixture.codepoint, event.unshifted_codepoint);
-        try std.testing.expectEqualStrings(fixture.expected, event.utf8);
-    }
-}
-
-test "win32 deferred char authorization preserves pending units across non-text events" {
-    var state: DeferredCharState = .{};
-    state.authorize(1);
-    // Release and unrelated non-text key messages authorize zero units.
-    state.authorize(0);
-    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
-    try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char dead key and composition consume exact units" {
-    var state: DeferredCharState = .{};
-    state.authorize(1);
-    state.consumeDeadChar();
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-
-    state.authorize(1);
-    try std.testing.expectEqual(@as(?u21, 0x00E9), state.consumeCodeUnit(0x00E9, false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char authorization blocks unsolicited and IME text" {
-    var state: DeferredCharState = .{};
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
-
-    state.authorize(1);
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', true));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
-}
-
-test "win32 deferred char two surrogate keydowns consume two code units" {
-    var state: DeferredCharState = .{};
-    state.authorize(1);
-    state.authorize(1);
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
-    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
-    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char supplementary expectation authorizes both units" {
-    var state: DeferredCharState = .{};
-    state.authorize(2);
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
-    try std.testing.expectEqual(@as(usize, 1), state.pending_units);
-    try std.testing.expectEqual(@as(?u21, 0x1F642), state.consumeCodeUnit(0xDE42, false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char commits 256 delayed BMP authorizations" {
-    var state: DeferredCharState = .{};
-    for (0..256) |_| state.authorize(1);
-    try std.testing.expectEqual(@as(usize, 256), state.pending_units);
-
-    for (0..256) |_| {
-        try std.testing.expectEqual(@as(?u21, 'a'), state.consumeCodeUnit('a', false));
-    }
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-}
-
-test "win32 deferred char malformed surrogate clears authorization state" {
-    var state: DeferredCharState = .{};
-    state.authorize(3);
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit(0xD83D, false));
-    try std.testing.expectEqual(@as(?u21, null), state.consumeCodeUnit('a', false));
-    try std.testing.expectEqual(@as(usize, 0), state.pending_units);
-    try std.testing.expectEqual(@as(?u16, null), state.high_surrogate);
-}
-
-test "win32 deferred char authorization saturates only at usize maximum" {
-    var state: DeferredCharState = .{
-        .pending_units = std.math.maxInt(usize) - 1,
-    };
-    state.authorize(2);
-    try std.testing.expectEqual(std.math.maxInt(usize), state.pending_units);
-}
-
-test "win32 hotkeySpecForTrigger maps physical key triggers" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const spec = hotkeySpecForTrigger(.{
-        .key = .{ .physical = .key_a },
-        .mods = .{ .ctrl = true, .shift = true },
-    }).?;
-
-    try std.testing.expectEqual(@as(UINT, MOD_CONTROL | MOD_SHIFT), spec.modifiers);
-    try std.testing.expectEqual(@as(UINT, VK_A), spec.vk);
-}
-
-test "win32 hotkeySpecForTrigger maps unicode triggers with implicit shift" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const spec = hotkeySpecForTrigger(.{
-        .key = .{ .unicode = '+' },
-        .mods = .{ .alt = true },
-    }).?;
-
-    try std.testing.expectEqual(@as(UINT, MOD_ALT | MOD_SHIFT), spec.modifiers);
-    try std.testing.expectEqual(@as(UINT, VK_OEM_PLUS), spec.vk);
-}
-
-test "win32 hotkeySpecForTrigger rejects unsupported catch-all triggers" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(hotkeySpecForTrigger(.{
-        .key = .catch_all,
-        .mods = .{ .ctrl = true },
-    }) == null);
-}
-
-test "win32 hotkeySpecEql detects duplicate resolved triggers" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const physical = hotkeySpecForTrigger(.{
-        .key = .{ .physical = .backquote },
-        .mods = .{ .ctrl = true },
-    }).?;
-    const unicode = hotkeySpecForTrigger(.{
-        .key = .{ .unicode = '`' },
-        .mods = .{ .ctrl = true },
-    }).?;
-    const shifted = hotkeySpecForTrigger(.{
-        .key = .{ .unicode = '~' },
-        .mods = .{ .ctrl = true },
-    }).?;
-
-    try std.testing.expect(hotkeySpecEql(physical, unicode));
-    try std.testing.expect(!hotkeySpecEql(physical, shifted));
-}
-
-test "win32 hotkeyRegistrationFailureReason names conflicts" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualStrings(
-        "already registered by another app or another noctty instance",
-        hotkeyRegistrationFailureReason(.HOTKEY_ALREADY_REGISTERED),
-    );
-    try std.testing.expectEqualStrings(
-        "access denied; hotkey may be reserved, occupied by an elevated app, or blocked by policy",
-        hotkeyRegistrationFailureReason(.ACCESS_DENIED),
-    );
-}
-
 test "win32 quitTimerDelayMs clamps to at least one second" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -31784,16 +26609,16 @@ test "win32 systemBackdropTypeForBuild gates unsupported builds" {
     config.@"background-opacity" = 0.85;
     config.@"background-blur" = .true;
 
-    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN10_22H2));
-    try std.testing.expect(!supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_21H2));
-    try std.testing.expect(supportsDwmSystemBackdropAttribute(OS_BUILD_WIN11_22H2));
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN10_22H2));
+    try std.testing.expect(!supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN11_21H2));
+    try std.testing.expect(supportsDwmSystemBackdropAttribute(c.OS_BUILD_WIN11_22H2));
 
-    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN10_22H2));
-    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_21H2));
-    try std.testing.expectEqual(DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
+    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN10_22H2));
+    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_21H2));
+    try std.testing.expectEqual(c.DWMSBT_TABBEDWINDOW, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_22H2));
 
     config.@"background-blur" = .false;
-    try std.testing.expectEqual(DWMSBT_NONE, systemBackdropTypeForBuild(&config, OS_BUILD_WIN11_22H2));
+    try std.testing.expectEqual(c.DWMSBT_NONE, systemBackdropTypeForBuild(&config, c.OS_BUILD_WIN11_22H2));
 }
 
 test "win32 configuredHostWindowPosition requires both coordinates" {
@@ -31847,12 +26672,12 @@ test "win32 IME windows use scaled terminal caret geometry" {
         .{ .x = 1.5, .y = 2 },
     );
 
-    try std.testing.expectEqual(CFS_POINT, forms.composition.dwStyle);
+    try std.testing.expectEqual(c.CFS_POINT, forms.composition.dwStyle);
     try std.testing.expectEqual(@as(i32, 18), forms.composition.ptCurrentPos.x);
     try std.testing.expectEqual(@as(i32, 68), forms.composition.ptCurrentPos.y);
 
     try std.testing.expectEqual(@as(u32, 0), forms.candidate.dwIndex);
-    try std.testing.expectEqual(CFS_EXCLUDE, forms.candidate.dwStyle);
+    try std.testing.expectEqual(c.CFS_EXCLUDE, forms.candidate.dwStyle);
     try std.testing.expectEqual(forms.composition.ptCurrentPos.x, forms.candidate.ptCurrentPos.x);
     try std.testing.expectEqual(forms.composition.ptCurrentPos.y, forms.candidate.ptCurrentPos.y);
     try std.testing.expectEqual(@as(i32, 18), forms.candidate.rcArea.left);
@@ -31864,109 +26689,11 @@ test "win32 IME windows use scaled terminal caret geometry" {
 test "win32 mouseButtonFromMessage maps standard buttons" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(input.MouseButton.left, mouseButtonFromMessage(WM_LBUTTONDOWN).?);
-    try std.testing.expectEqual(input.MouseButton.right, mouseButtonFromMessage(WM_RBUTTONDOWN).?);
-    try std.testing.expectEqual(input.MouseButton.middle, mouseButtonFromMessage(WM_MBUTTONDOWN).?);
-    try std.testing.expect(mouseButtonFromMessage(WM_XBUTTONDOWN) == null);
-    try std.testing.expect(mouseButtonFromMessage(WM_XBUTTONUP) == null);
-}
-
-test "win32 XButton wParam decoding maps forward and back buttons" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    // XBUTTON1 in HIWORD of wParam
-    const wp1 = (@as(usize, XBUTTON1) << 16) | @as(usize, MK_XBUTTON1);
-    try std.testing.expectEqual(XBUTTON1, highWord(wp1));
-
-    // XBUTTON2 in HIWORD of wParam
-    const wp2 = (@as(usize, XBUTTON2) << 16) | @as(usize, MK_XBUTTON2);
-    try std.testing.expectEqual(XBUTTON2, highWord(wp2));
-}
-
-test "win32 normalizeWheelDelta maps discrete wheel steps to pixel deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = 3, .chars = 5 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .vertical, 120);
-
-    try std.testing.expectApproxEqAbs(48.0, event.yoff, 0.0001);
-    try std.testing.expectEqual(@as(f64, 0), event.xoff);
-    try std.testing.expect(!event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
-}
-
-test "win32 normalizeWheelDelta maps horizontal wheel steps to pixel deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = 3, .chars = 5 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .horizontal, 120);
-
-    try std.testing.expectApproxEqAbs(40.0, event.xoff, 0.0001);
-    try std.testing.expectEqual(@as(f64, 0), event.yoff);
-    try std.testing.expect(!event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
-}
-
-test "win32 normalizeWheelDelta scales high-resolution input proportionally" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = 3, .chars = 3 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .vertical, 40);
-
-    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
-    try std.testing.expect(event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
-}
-
-test "win32 normalizeWheelDelta honors page scroll settings" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = WHEEL_PAGESCROLL, .chars = 3 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .vertical, 120);
-
-    try std.testing.expectApproxEqAbs(584.0, event.yoff, 0.0001);
-    try std.testing.expect(!event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
-}
-
-test "win32 normalizeWheelDelta ignores page scroll settings for high-resolution input" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = WHEEL_PAGESCROLL, .chars = 3 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .vertical, 40);
-
-    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
-    try std.testing.expect(event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
-}
-
-test "win32 normalizeWheelDelta ignores disabled notch settings for high-resolution input" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const event = normalizeWheelDelta(.{
-        .settings = .{ .lines = 0, .chars = 0 },
-        .cell_size = .{ .width = 8, .height = 16 },
-        .viewport = .{ .width = 800, .height = 600 },
-    }, .vertical, 40);
-
-    try std.testing.expectApproxEqAbs(16.0 / 3.0, event.yoff, 0.0001);
-    try std.testing.expect(event.mods.precision);
-    try std.testing.expect(event.mods.pixel_delta);
+    try std.testing.expectEqual(input.MouseButton.left, mouseButtonFromMessage(c.WM_LBUTTONDOWN).?);
+    try std.testing.expectEqual(input.MouseButton.right, mouseButtonFromMessage(c.WM_RBUTTONDOWN).?);
+    try std.testing.expectEqual(input.MouseButton.middle, mouseButtonFromMessage(c.WM_MBUTTONDOWN).?);
+    try std.testing.expect(mouseButtonFromMessage(c.WM_XBUTTONDOWN) == null);
+    try std.testing.expect(mouseButtonFromMessage(c.WM_XBUTTONUP) == null);
 }
 
 test "win32 renderer repaint request coalesces until paint completes" {
@@ -32003,71 +26730,12 @@ test "win32 host composition redraw avoids terminal child HWNDs" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const flags = hostCompositionRedrawFlags();
-    try std.testing.expect((flags & RDW_INVALIDATE) != 0);
-    try std.testing.expect((flags & RDW_ERASE) != 0);
-    try std.testing.expect((flags & RDW_FRAME) != 0);
-    try std.testing.expect((flags & RDW_UPDATENOW) != 0);
-    try std.testing.expect((flags & RDW_NOCHILDREN) != 0);
-    try std.testing.expect((flags & RDW_ALLCHILDREN) == 0);
-}
-
-test "win32-opengl-startup-failure-message-explains-error-126" {
-    var buf: [4096]u8 = undefined;
-    const message = try formatOpenGLStartupFailureMessage(&buf, error.Unexpected, .{
-        .step = .create_context,
-        .win32_error = ERROR_MOD_NOT_FOUND,
-        .zig_error_name = "Unexpected",
-    });
-
-    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: 126 (ERROR_MOD_NOT_FOUND)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "AMD+NVIDIA hybrid GPU") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "DirectX or ANGLE fallback") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "https://github.com/amanthanvi/noctty/issues/64") != null);
-}
-
-test "win32-opengl-startup-failure-message-explains-version-floor" {
-    var buf: [4096]u8 = undefined;
-    const message = try formatOpenGLStartupFailureMessage(&buf, error.OpenGLOutdated, .{
-        .step = .version_check,
-        .zig_error_name = "OpenGLOutdated",
-    });
-
-    try std.testing.expect(std.mem.indexOf(u8, message, "OpenGL 4.3 through WGL") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "required OpenGL 4.3 feature level") != null);
-    try std.testing.expect(std.mem.indexOf(u8, message, "Win32 error: not reported") != null);
-}
-
-test "win32-opengl-startup-failure-recording-is-startup-scoped" {
-    clearOpenGLStartupFailure();
-    recordOpenGLStartupError(.make_current, error.Unexpected);
-    try std.testing.expect(currentOpenGLStartupFailure() == null);
-
-    beginOpenGLStartupDiagnostics();
-    try std.testing.expect(openGLStartupDiagnosticsActive());
-
-    clearOpenGLStartupFailure();
-    try std.testing.expect(!openGLStartupDiagnosticsActive());
-    try std.testing.expect(currentOpenGLStartupFailure() == null);
-}
-
-test "win32-opengl-startup-failure-preserves-win32-loader-cause" {
-    clearOpenGLStartupFailure();
-    beginOpenGLStartupDiagnostics();
-
-    try std.testing.expect(recordOpenGLStartupFailure(.{
-        .step = .load_opengl32,
-        .win32_error = ERROR_MOD_NOT_FOUND,
-    }));
-    try std.testing.expect(!recordOpenGLStartupFailure(.{
-        .step = .load_functions,
-        .zig_error_name = "OpenGLFunctionLoadFailed",
-    }));
-
-    const failure = currentOpenGLStartupFailure().?;
-    try std.testing.expectEqual(OpenGLStartupStep.load_opengl32, failure.step);
-    try std.testing.expectEqual(@as(?DWORD, ERROR_MOD_NOT_FOUND), failure.win32_error);
-
-    clearOpenGLStartupFailure();
+    try std.testing.expect((flags & c.RDW_INVALIDATE) != 0);
+    try std.testing.expect((flags & c.RDW_ERASE) != 0);
+    try std.testing.expect((flags & c.RDW_FRAME) != 0);
+    try std.testing.expect((flags & c.RDW_UPDATENOW) != 0);
+    try std.testing.expect((flags & c.RDW_NOCHILDREN) != 0);
+    try std.testing.expect((flags & c.RDW_ALLCHILDREN) == 0);
 }
 
 test "win32 requestRepaint preserves renderer request during live resize" {
@@ -32145,12 +26813,12 @@ test "win32 flushDeferredVisibleSurfaceRepaints schedules deferred visible surfa
 test "win32 getSize prefers live hwnd client rect over cached size" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const hinstance = GetModuleHandleW(null);
-    const hwnd = CreateWindowExW(
+    const hinstance = sys.GetModuleHandleW(null);
+    const hwnd = sys.CreateWindowExW(
         0,
         prompt_label_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
-        WS_POPUP | WS_VISIBLE,
+        c.WS_POPUP | c.WS_VISIBLE,
         0,
         0,
         320,
@@ -32159,8 +26827,8 @@ test "win32 getSize prefers live hwnd client rect over cached size" {
         null,
         hinstance,
         null,
-    ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
-    defer _ = DestroyWindow(hwnd);
+    ) orelse return lastError();
+    defer _ = sys.DestroyWindow(hwnd);
 
     var app: App = undefined;
     var surface: Surface = undefined;
@@ -32236,19 +26904,19 @@ test "win32 startupHostWindowStyle respects decoration and fullscreen frame stat
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(
-        effectiveHostWindowStyle(true, false, true) & ~@as(u32, WS_VISIBLE),
+        effectiveHostWindowStyle(true, false, true) & ~@as(u32, c.WS_VISIBLE),
         startupHostWindowStyle(true, false),
     );
     try std.testing.expectEqual(
-        effectiveHostWindowStyle(false, false, true) & ~@as(u32, WS_VISIBLE),
+        effectiveHostWindowStyle(false, false, true) & ~@as(u32, c.WS_VISIBLE),
         startupHostWindowStyle(false, false),
     );
     try std.testing.expectEqual(
-        effectiveHostWindowStyle(false, true, true) & ~@as(u32, WS_VISIBLE),
+        effectiveHostWindowStyle(false, true, true) & ~@as(u32, c.WS_VISIBLE),
         startupHostWindowStyle(false, true),
     );
-    try std.testing.expect((startupHostWindowStyle(true, false) & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((startupHostWindowStyle(true, false) & WS_VISIBLE) == 0);
+    try std.testing.expect((startupHostWindowStyle(true, false) & c.WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((startupHostWindowStyle(true, false) & c.WS_VISIBLE) == 0);
 }
 
 test "win32 initialDecorationsVisible follows startup source" {
@@ -32314,8 +26982,8 @@ test "win32 surfaceWindowStyle clips sibling repaints" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const style = surfaceWindowStyle();
-    try std.testing.expect((style & WS_CLIPSIBLINGS) != 0);
-    try std.testing.expect((style & WS_CHILD) != 0);
+    try std.testing.expect((style & c.WS_CLIPSIBLINGS) != 0);
+    try std.testing.expect((style & c.WS_CHILD) != 0);
 }
 
 test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
@@ -32324,17 +26992,17 @@ test "win32 shouldUseIntegratedTitlebar gates on Win11 build floor" {
     try std.testing.expect(!shouldUseIntegratedTitlebar(0, .auto));
     try std.testing.expect(!shouldUseIntegratedTitlebar(21_999, .auto));
     try std.testing.expect(shouldUseIntegratedTitlebar(22_000, .auto));
-    try std.testing.expect(shouldUseIntegratedTitlebar(OS_BUILD_WIN11_22H2, .always));
-    try std.testing.expect(!shouldUseIntegratedTitlebar(OS_BUILD_WIN11_22H2, .never));
+    try std.testing.expect(shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .always));
+    try std.testing.expect(!shouldUseIntegratedTitlebar(c.OS_BUILD_WIN11_22H2, .never));
 }
 
 test "win32 effectiveHostWindowStyle preserves clipchildren for hosted surfaces" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expect((effectiveHostWindowStyle(true, false, true) & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(false, false, true) & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(true, true, true) & WS_CLIPCHILDREN) != 0);
-    try std.testing.expect((effectiveHostWindowStyle(true, false, false) & WS_CLIPCHILDREN) == 0);
+    try std.testing.expect((effectiveHostWindowStyle(true, false, true) & c.WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((effectiveHostWindowStyle(false, false, true) & c.WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((effectiveHostWindowStyle(true, true, true) & c.WS_CLIPCHILDREN) != 0);
+    try std.testing.expect((effectiveHostWindowStyle(true, false, false) & c.WS_CLIPCHILDREN) == 0);
 }
 
 test "win32 sharesHostWindowState only for same-host clones" {
@@ -32508,9 +27176,9 @@ test "win32 shared host topmost and opacity equality track separate window state
 test "win32 hostPresentShowCommand skips redundant maximize for visible hosts" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(?i32, SW_SHOW), hostPresentShowCommand(false, false, false));
-    try std.testing.expectEqual(@as(?i32, SW_MAXIMIZE), hostPresentShowCommand(false, false, true));
-    try std.testing.expectEqual(@as(?i32, SW_RESTORE), hostPresentShowCommand(true, true, false));
+    try std.testing.expectEqual(@as(?i32, c.SW_SHOW), hostPresentShowCommand(false, false, false));
+    try std.testing.expectEqual(@as(?i32, c.SW_MAXIMIZE), hostPresentShowCommand(false, false, true));
+    try std.testing.expectEqual(@as(?i32, c.SW_RESTORE), hostPresentShowCommand(true, true, false));
     try std.testing.expectEqual(@as(?i32, null), hostPresentShowCommand(true, false, true));
 }
 
@@ -32697,7 +27365,7 @@ test "win32 IPC silent client read is bounded" {
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
         std.testing.allocator,
         "\\\\.\\pipe\\noctty-ipc-timeout-{d}",
-        .{GetTickCount64()},
+        .{sys.GetTickCount64()},
         0,
     );
     defer std.testing.allocator.free(pipe_name_utf8);
@@ -32707,10 +27375,10 @@ test "win32 IPC silent client read is bounded" {
     );
     defer std.testing.allocator.free(pipe_name);
 
-    const server = CreateNamedPipeW(
+    const server = sys.CreateNamedPipeW(
         pipe_name.ptr,
-        PIPE_ACCESS_DUPLEX,
-        windows.PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
         1,
         1024,
         1024,
@@ -32720,7 +27388,7 @@ test "win32 IPC silent client read is bounded" {
     try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(server);
 
-    try std.testing.expectEqual(@as(BOOL, 0), ConnectNamedPipe(server, null));
+    try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
     try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
 
     const client = windows.kernel32.CreateFileW(
@@ -32735,7 +27403,7 @@ test "win32 IPC silent client read is bounded" {
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
 
-    const connected = ConnectNamedPipe(server, null);
+    const connected = sys.ConnectNamedPipe(server, null);
     if (connected == 0) {
         try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
     }
@@ -33223,106 +27891,6 @@ test "win32 non-WSL split cwd keeps startup cwd candidate" {
     ));
 }
 
-test "win32 profileIndexByKey finds launch profile key" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .shell = "cmd.exe" },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "wsl:Ubuntu",
-            .label = "Ubuntu",
-            .command = .{ .shell = "wsl.exe" },
-        },
-    };
-
-    try std.testing.expectEqual(@as(?usize, 1), profileIndexByKey(&profiles, "wsl:Ubuntu"));
-    try std.testing.expectEqual(@as(?usize, null), profileIndexByKey(&profiles, "missing"));
-}
-
-test "win32 buildWindowTitle appends active status segments" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildWindowTitle(std.testing.allocator, "pwsh", .{
-        .pwd = "/Users/amant",
-        .scrollbar = .{
-            .total = 200,
-            .offset = 50,
-            .len = 40,
-        },
-        .readonly = true,
-        .secure_input = true,
-        .key_sequence_active = true,
-        .key_table_name = "resize",
-        .search = .{
-            .active = true,
-            .needle = "foo",
-            .total = 4,
-            .selected = 2,
-        },
-        .progress = "progress:35%",
-    });
-    defer std.testing.allocator.free(title);
-
-    try std.testing.expectEqualStrings(
-        "pwsh | readonly | sensitive | keys | table:resize | cwd:/Users/amant | find:foo (2/4) | progress:35%",
-        title,
-    );
-}
-
-test "win32 buildWindowTitle uses default title when base is null" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildWindowTitle(std.testing.allocator, null, .{});
-    defer std.testing.allocator.free(title);
-
-    try std.testing.expectEqualStrings("noctty", title);
-}
-
-test "win32 resolveWindowBaseTitle prefers tab then surface override" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualStrings(
-        "tab",
-        resolveWindowBaseTitle("terminal", "surface", "tab").?,
-    );
-    try std.testing.expectEqualStrings(
-        "surface",
-        resolveWindowBaseTitle("terminal", "surface", null).?,
-    );
-    try std.testing.expectEqualStrings(
-        "terminal",
-        resolveWindowBaseTitle("terminal", null, null).?,
-    );
-}
-
-test "win32 effectiveBackgroundOpacity respects opaque override" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(f64, 0.4), effectiveBackgroundOpacity(0.4, false));
-    try std.testing.expectEqual(@as(f64, 1.0), effectiveBackgroundOpacity(0.4, true));
-    try std.testing.expectEqual(@as(u8, 128), alphaByteForOpacity(0.5));
-    try std.testing.expectEqual(@as(u8, 1), hiddenScrollbarAlphaByte());
-}
-
-test "win32 resizeSplitFallbackDelta maps directions to window deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualDeep(
-        ResizeSplitFallbackDelta{ .width = -24, .height = 0 },
-        resizeSplitFallbackDelta(.{ .amount = 24, .direction = .left }),
-    );
-    try std.testing.expectEqualDeep(
-        ResizeSplitFallbackDelta{ .width = 0, .height = 12 },
-        resizeSplitFallbackDelta(.{ .amount = 12, .direction = .down }),
-    );
-}
-
 test "win32 splitDirectionFromAction preserves requested split direction" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -33397,47 +27965,6 @@ test "win32 session save skips quick terminal tabs" {
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows.len);
     try std.testing.expectEqual(@as(usize, 1), mixed_state.windows[0].tabs.len);
     try std.testing.expectEqual(@as(usize, 0), mixed_state.windows[0].selected_tab);
-}
-
-fn sessionStatePolicyAllows(safe_mode: bool, policy: configpkg.Config.WindowSaveState) bool {
-    return !safe_mode and policy != .never;
-}
-
-const SessionRestoreTransaction = struct {
-    app: ?*App = null,
-    host: ?*Host = null,
-    committed: bool = false,
-
-    fn noteSurface(self: *SessionRestoreTransaction, surface: *Surface) void {
-        if (self.host == null) {
-            self.app = surface.app;
-            self.host = surface.host;
-        }
-    }
-
-    fn commit(self: *SessionRestoreTransaction) void {
-        self.committed = true;
-    }
-
-    fn rollback(self: *SessionRestoreTransaction) void {
-        if (self.committed) return;
-        const app = self.app orelse return;
-        const host = self.host orelse return;
-        app.rollbackSessionRestoreHost(host);
-    }
-};
-
-fn sessionRestorePolicyAllows(
-    safe_mode: bool,
-    policy: configpkg.Config.WindowSaveState,
-    initial_window: bool,
-    has_initial_command: bool,
-    startup_profile_picker: bool,
-) bool {
-    return sessionStatePolicyAllows(safe_mode, policy) and
-        initial_window and
-        !has_initial_command and
-        !startup_profile_picker;
 }
 
 test "win32 safe mode never mutates saved session state" {
@@ -33584,232 +28111,6 @@ test "win32 session restore rejects split tree with missing pane surface" {
     );
 }
 
-test "win32 nextInspectorVisible follows requested mode" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(nextInspectorVisible(false, .toggle));
-    try std.testing.expect(!nextInspectorVisible(true, .toggle));
-    try std.testing.expect(nextInspectorVisible(false, .show));
-    try std.testing.expect(!nextInspectorVisible(true, .hide));
-}
-
-test "win32 tab inspector toggle hides any active pane inspector" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(nextTabInspectorVisible(false, .toggle));
-    try std.testing.expect(!nextTabInspectorVisible(true, .toggle));
-    try std.testing.expect(nextTabInspectorVisible(true, .show));
-    try std.testing.expect(!nextTabInspectorVisible(false, .hide));
-}
-
-test "win32 primarySurfaceIndex prefers active tab of first host" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const entries = [_]SurfaceOrderEntry{
-        .{ .host_id = 11, .host_active = false },
-        .{ .host_id = 22, .host_active = true },
-        .{ .host_id = 11, .host_active = true },
-    };
-    try std.testing.expectEqual(@as(?usize, 2), primarySurfaceIndex(&entries));
-
-    const fallback = [_]SurfaceOrderEntry{
-        .{ .host_id = 11, .host_active = false },
-        .{ .host_id = 22, .host_active = true },
-    };
-    try std.testing.expectEqual(@as(?usize, 0), primarySurfaceIndex(&fallback));
-}
-
-test "win32 buildHostAwareBaseTitle prefixes host tab position" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const titled = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
-        .index = 1,
-        .total = 3,
-    });
-    defer std.testing.allocator.free(titled);
-    try std.testing.expectEqualStrings("[2/3] pwsh", titled);
-
-    const single = try buildHostAwareBaseTitle(std.testing.allocator, "pwsh", .{
-        .index = 0,
-        .total = 1,
-    });
-    defer std.testing.allocator.free(single);
-    try std.testing.expectEqualStrings("pwsh", single);
-}
-
-test "win32 buildTabButtonLabel marks active tab and pane count" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildTabButtonLabel(std.testing.allocator, "pwsh", 1, true, 3, 24, true);
-    defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("* 2: pwsh (3)", title);
-}
-
-test "win32 buildTabButtonLabel omits pane count for single pane tabs" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildTabButtonLabel(std.testing.allocator, "pwsh", 0, false, 1, 24, false);
-    defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("1: pwsh", title);
-}
-
-test "win32 buildTabButtonLabel compacts long titles" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildTabButtonLabel(std.testing.allocator, "this-is-a-very-long-terminal-title", 0, false, 1, 24, false);
-    defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("1: this-is-a-very-long-t...", title);
-}
-
-test "win32 buildTabButtonLabel drops pane count when tabs are narrow" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const title = try buildTabButtonLabel(std.testing.allocator, "logs-and-output-pane", 1, false, 3, 9, false);
-    defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("2: logs-a...", title);
-}
-
-test "win32 hostTabLabelMaxLen shrinks with narrow tab widths" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(usize, 24), hostTabLabelMaxLen(260));
-    try std.testing.expectEqual(@as(usize, 9), hostTabLabelMaxLen(98));
-    try std.testing.expectEqual(@as(usize, 6), hostTabLabelMaxLen(40));
-    try std.testing.expect(shouldShowPaneCount(180, 3));
-    try std.testing.expect(!shouldShowPaneCount(120, 3));
-}
-
-test "win32 visibleTabRange windows tabs around the active tab" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 3 }, visibleTabRange(6, 0, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 2, .count = 3 }, visibleTabRange(6, 3, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 3, .count = 3 }, visibleTabRange(6, 5, 324));
-    try std.testing.expectEqualDeep(VisibleTabRange{ .start = 0, .count = 2 }, visibleTabRange(2, 1, 500));
-}
-
-test "win32 buildTabOverviewBannerText lists active tabs and pane counts" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const banner = try buildTabOverviewBannerText(std.testing.allocator, &.{
-        .{ .title = "pwsh", .pane_count = 1, .active = true },
-        .{ .title = "logs-and-output-pane", .pane_count = 3, .active = false },
-    });
-    defer std.testing.allocator.free(banner);
-    try std.testing.expectEqualStrings("Tabs: *1:pwsh | 2:logs-and-output... (3)", banner);
-}
-
-test "win32 buildSearchButtonLabel reflects active search state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const active = try buildSearchButtonLabel(std.testing.allocator, true, 8, 2);
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("[F] 2/8", active);
-
-    const passive = try buildSearchButtonLabel(std.testing.allocator, false, 5, null);
-    defer std.testing.allocator.free(passive);
-    try std.testing.expectEqualStrings("Find 5", passive);
-
-    const idle = try buildSearchButtonLabel(std.testing.allocator, false, null, null);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Find", idle);
-}
-
-test "win32 buildProfilesButtonLabel reflects selected cached profile" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .git_bash,
-            .key = "git-bash",
-            .label = "Git Bash",
-            .command = .{ .direct = &.{"bash.exe"} },
-        },
-    };
-
-    const active = try buildProfilesButtonLabel(std.testing.allocator, true, &profiles, 1, 1);
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("Pick Git Bash", active);
-
-    const idle = try buildProfilesButtonLabel(std.testing.allocator, false, &profiles, 0, null);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Launch Power...", idle);
-}
-
-test "win32 profilesButtonKeyAction maps focused launcher keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(ProfilesButtonKeyAction.open, profilesButtonKeyAction(VK_RETURN).?);
-    try std.testing.expectEqual(ProfilesButtonKeyAction.toggle, profilesButtonKeyAction(VK_SPACE).?);
-    try std.testing.expectEqual(ProfilesButtonKeyAction.previous, profilesButtonKeyAction(VK_LEFT).?);
-    try std.testing.expectEqual(ProfilesButtonKeyAction.next, profilesButtonKeyAction(VK_DOWN).?);
-    try std.testing.expectEqual(ProfilesButtonKeyAction.first, profilesButtonKeyAction(VK_HOME).?);
-    try std.testing.expectEqual(ProfilesButtonKeyAction.last, profilesButtonKeyAction(VK_END).?);
-}
-
-test "win32 profileShortcutIndexFromKey supports top row and numpad digits" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey('1'));
-    try std.testing.expectEqual(@as(?usize, 4), profileShortcutIndexFromKey('5'));
-    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey('9'));
-    try std.testing.expectEqual(@as(?usize, 0), profileShortcutIndexFromKey(0x61));
-    try std.testing.expectEqual(@as(?usize, 8), profileShortcutIndexFromKey(0x69));
-    try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('0'));
-    try std.testing.expectEqual(@as(?usize, null), profileShortcutIndexFromKey('A'));
-}
-
-test "win32 quickSlotShortcutProfileIndex maps visible launcher slots" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotShortcutProfileIndex(5, 0, '1', true));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotShortcutProfileIndex(5, 0, '2', true));
-    try std.testing.expectEqual(@as(?usize, 3), quickSlotShortcutProfileIndex(5, 0, '3', true));
-    try std.testing.expectEqual(@as(?usize, 0), quickSlotShortcutProfileIndex(5, 3, '1', true));
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotShortcutProfileIndex(5, 3, '2', true));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(5, 0, '4', true));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotShortcutProfileIndex(5, 0, '1', false));
-}
-
-test "win32 quickSlotPinOrdinalFromKey maps visible pin slots" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 0), quickSlotPinOrdinalFromKey('1', true, true));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotPinOrdinalFromKey('3', true, true));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('4', true, true));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('1', true, false));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotPinOrdinalFromKey('1', false, true));
-}
-
-test "win32 clearQuickSlotPinsRequested detects clear shortcut" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(clearQuickSlotPinsRequested(VK_0, true, true));
-    try std.testing.expect(clearQuickSlotPinsRequested(VK_NUMPAD0, true, true));
-    try std.testing.expect(!clearQuickSlotPinsRequested('1', true, true));
-    try std.testing.expect(!clearQuickSlotPinsRequested(VK_0, true, false));
-    try std.testing.expect(!clearQuickSlotPinsRequested(VK_0, false, true));
-}
-
-test "win32 quickSlotFocusKeyAction maps painted quick slot focus keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.previous, quickSlotFocusKeyAction(VK_LEFT).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.previous, quickSlotFocusKeyAction(VK_UP).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.next, quickSlotFocusKeyAction(VK_RIGHT).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.next, quickSlotFocusKeyAction(VK_DOWN).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.first, quickSlotFocusKeyAction(VK_HOME).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.last, quickSlotFocusKeyAction(VK_END).?);
-    try std.testing.expectEqual(QuickSlotFocusKeyAction.open, quickSlotFocusKeyAction(VK_RETURN).?);
-    try std.testing.expect(quickSlotFocusKeyAction(VK_SPACE) == null);
-}
-
 test "win32 taskbar progress mapping preserves state and percent" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -33858,23 +28159,6 @@ test "win32 taskbar progress mapping covers set error and indeterminate" {
     });
     try std.testing.expectEqual(win32_taskbar_progress.TBPF_INDETERMINATE, busy.flags);
     try std.testing.expect(busy.value == null);
-}
-
-test "win32 progress status and taskbar mapping clamp percent to shell range" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const report: terminal.osc.Command.ProgressReport = .{
-        .state = .set,
-        .progress = 255,
-    };
-
-    const mapped = win32_taskbar_progress.mapProgressReport(report);
-    try std.testing.expectEqual(@as(u64, 100), mapped.value.?.completed);
-    try std.testing.expectEqual(@as(u64, 100), mapped.value.?.total);
-
-    const status = try formatProgressStatus(std.testing.allocator, report);
-    defer if (status) |owned| std.testing.allocator.free(owned);
-    try std.testing.expectEqualStrings("progress:100%", status.?);
 }
 
 test "win32 activeSurfaceForHost isolates taskbar progress by host and tab" {
@@ -34203,27 +28487,15 @@ test "win32 cycleProfileOpenTarget wraps launcher target order" {
     try std.testing.expectEqual(ProfileOpenTarget.split, cycleProfileOpenTarget(.tab, true));
 }
 
-test "win32 launchTargetButtonLabel reflects selected launcher slot" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const pane = try launchTargetButtonLabel(std.testing.allocator, .split, 2, 2);
-    defer std.testing.allocator.free(pane);
-    try std.testing.expectEqualStrings("*3 Pane", pane);
-
-    const tab = try launchTargetButtonLabel(std.testing.allocator, .tab, null, null);
-    defer std.testing.allocator.free(tab);
-    try std.testing.expectEqualStrings("Tab", tab);
-}
-
 test "win32 launchTargetButtonKeyAction maps focused target keys" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(VK_LEFT).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(VK_UP).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(VK_RIGHT).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(VK_SPACE).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.first, launchTargetButtonKeyAction(VK_HOME).?);
-    try std.testing.expectEqual(LaunchTargetButtonKeyAction.last, launchTargetButtonKeyAction(VK_END).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(c.VK_LEFT).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.previous, launchTargetButtonKeyAction(c.VK_UP).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_RIGHT).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.next, launchTargetButtonKeyAction(c.VK_SPACE).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.first, launchTargetButtonKeyAction(c.VK_HOME).?);
+    try std.testing.expectEqual(LaunchTargetButtonKeyAction.last, launchTargetButtonKeyAction(c.VK_END).?);
 }
 
 test "win32 parseProfileOpenTarget accepts terminal-style launch target names" {
@@ -34235,306 +28507,6 @@ test "win32 parseProfileOpenTarget accepts terminal-style launch target names" {
     try std.testing.expectEqual(ProfileOpenTarget.split, parseProfileOpenTarget("split").?);
     try std.testing.expectEqual(ProfileOpenTarget.split, parseProfileOpenTarget("pane").?);
     try std.testing.expect(parseProfileOpenTarget("definitely_not_real") == null);
-}
-
-test "win32 launchTargetButtonLabel reflects Windows-style target wording" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const tab = try launchTargetButtonLabel(std.testing.allocator, .tab, null, null);
-    defer std.testing.allocator.free(tab);
-    try std.testing.expectEqualStrings("Tab", tab);
-
-    const win = try launchTargetButtonLabel(std.testing.allocator, .window, null, null);
-    defer std.testing.allocator.free(win);
-    try std.testing.expectEqualStrings("Win", win);
-
-    const pane = try launchTargetButtonLabel(std.testing.allocator, .split, null, null);
-    defer std.testing.allocator.free(pane);
-    try std.testing.expectEqualStrings("Pane", pane);
-}
-
-test "win32 preferredProfileIndex respects host key then app key then hint" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .git_bash,
-            .key = "git-bash",
-            .label = "Git Bash",
-            .command = .{ .direct = &.{"bash.exe"} },
-        },
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .direct = &.{"cmd.exe"} },
-        },
-    };
-
-    try std.testing.expectEqual(@as(?usize, 1), preferredProfileIndex(&profiles, "git-bash", null, "cmd", 0));
-    try std.testing.expectEqual(@as(?usize, 2), preferredProfileIndex(&profiles, null, "cmd.exe", "pwsh", 0));
-    try std.testing.expectEqual(@as(?usize, 0), preferredProfileIndex(&profiles, null, null, "power", 2));
-    try std.testing.expectEqual(@as(?usize, null), preferredProfileIndex(&profiles, null, null, "definitely_not_real", 1));
-}
-
-test "win32 resolveProfileSelection supports index and prefix matching" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "Ubuntu",
-            .label = "WSL: Ubuntu",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu", "~" } },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "Ubuntu-Preview",
-            .label = "WSL: Ubuntu Preview",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu-Preview", "~" } },
-        },
-    };
-
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 0 }, resolveProfileSelection(&profiles, "", 0));
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 1 }, resolveProfileSelection(&profiles, "2", 0));
-    try std.testing.expectEqualDeep(ProfileSelection{ .exact = 0 }, resolveProfileSelection(&profiles, "powers", 1));
-    try std.testing.expectEqualDeep(ProfileSelection{ .ambiguous = 2 }, resolveProfileSelection(&profiles, "ubu", 0));
-    try std.testing.expectEqualDeep(ProfileSelection.invalid, resolveProfileSelection(&profiles, "9", 0));
-}
-
-test "win32 buildProfileOverlayLabel and hint reflect selected profile" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .direct = &.{"cmd.exe"} },
-        },
-    };
-
-    const label = try buildProfileOverlayLabel(std.testing.allocator, &profiles, "cmd", 0);
-    defer std.testing.allocator.free(label);
-    try std.testing.expectEqualStrings("Profile 2/2 CMD C>", label);
-
-    const hint = try buildProfileHintText(std.testing.allocator, &profiles, "cmd", 0, .window, .{ "pwsh.exe", "cmd.exe", null });
-    defer std.testing.allocator.free(hint);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "CMD C>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Command Prompt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "run cmd.exe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Pinned slot 2.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "opens a new window") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Alt+1-3 launches visible slots") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Alt+Shift+1-3 pins the current profile") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Alt+Shift+0 clears pinning") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "Quick picks: 1 PWSH >>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hint, "2 CMD C>") != null);
-}
-
-test "win32 buildProfileDetailText reflects selected launcher state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .pwsh,
-        .key = "pwsh.exe",
-        .label = "PowerShell",
-        .command = .{ .direct = &.{"pwsh.exe"} },
-    };
-    const profiles = [_]windows_shell.Profile{
-        profile,
-        .{
-            .kind = .git_bash,
-            .key = "git-bash",
-            .label = "Git Bash",
-            .command = .{ .direct = &.{"bash.exe"} },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "wsl:Ubuntu",
-            .label = "WSL: Ubuntu",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu" } },
-        },
-    };
-
-    const overlay = try buildProfileDetailText(std.testing.allocator, &profile, &profiles, true, .split, "git,pwsh,Ubuntu,cmd", .{ "pwsh.exe", "git-bash", null });
-    defer std.testing.allocator.free(overlay);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Selected profile: PWSH >> PowerShell") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Run pwsh.exe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Pinned slot 1.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "opens a split") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Alt+1-3 launches visible slots") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Alt+Shift+1-3 pins the current profile") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Alt+Shift+0 clears pinning") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Quick picks: 1 PWSH >> PowerShell") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overlay, "Order: git > pwsh > Ubuntu > cmd.") != null);
-
-    const idle = try buildProfileDetailText(std.testing.allocator, &profile, &profiles, false, .window, "git,pwsh,Ubuntu,cmd", .{ "pwsh.exe", "git-bash", null });
-    defer std.testing.allocator.free(idle);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Default profile: PWSH >> PowerShell") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Run pwsh.exe") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Pinned slot 1.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "New hosts inherit this PowerShell profile with automatic shell integration.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "opens a new window") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+1-3 launches visible slots") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+Shift+1-3 pins the current profile") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Alt+Shift+0 clears pinning") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Top slots: 1 PWSH >>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "2 GIT $> Git Bash") != null);
-    try std.testing.expect(std.mem.indexOf(u8, idle, "Order: git > pwsh > Ubuntu > cmd.") != null);
-}
-
-test "win32 buildProfileDetailText appends shell integration guidance when present" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .cmd,
-        .key = "cmd.exe",
-        .label = "Command Prompt",
-        .command = .{ .direct = &.{"cmd.exe"} },
-    };
-
-    const detail = try buildProfileDetailText(
-        std.testing.allocator,
-        &profile,
-        &.{profile},
-        false,
-        .tab,
-        null,
-        .{ null, null, null },
-    );
-    defer std.testing.allocator.free(detail);
-
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        detail,
-        "New hosts inherit this Command Prompt profile; shell integration unavailable.",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        detail,
-        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, detail, "+ opens a new tab") != null);
-}
-
-test "win32 buildProfileCommandPreviewText compacts shell command preview" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .wsl_distro,
-        .key = "Ubuntu",
-        .label = "WSL: Ubuntu",
-        .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu", "--cd", "~" } },
-    };
-
-    const preview = try buildProfileCommandPreviewText(std.testing.allocator, &profile, 14);
-    defer std.testing.allocator.free(preview);
-    try std.testing.expectEqualStrings("wsl.exe -d ...", preview);
-}
-
-test "win32 buildProfileOrderSummaryText compacts launcher order" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const summary = (try buildProfileOrderSummaryText(
-        std.testing.allocator,
-        "git,pwsh,Ubuntu,cmd,powershell",
-        4,
-    )).?;
-    defer std.testing.allocator.free(summary);
-    try std.testing.expectEqualStrings("git > pwsh > Ubuntu > cmd > ...", summary);
-}
-
-test "win32 buildProfileQuickPickText reflects ordered launcher profiles" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profiles = [_]windows_shell.Profile{
-        .{
-            .kind = .git_bash,
-            .key = "git-bash",
-            .label = "Git Bash",
-            .command = .{ .direct = &.{"bash.exe"} },
-        },
-        .{
-            .kind = .pwsh,
-            .key = "pwsh.exe",
-            .label = "PowerShell",
-            .command = .{ .direct = &.{"pwsh.exe"} },
-        },
-        .{
-            .kind = .wsl_distro,
-            .key = "wsl:Ubuntu",
-            .label = "WSL: Ubuntu",
-            .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu" } },
-        },
-        .{
-            .kind = .cmd,
-            .key = "cmd.exe",
-            .label = "Command Prompt",
-            .command = .{ .direct = &.{"cmd.exe"} },
-        },
-        .{
-            .kind = .powershell,
-            .key = "powershell.exe",
-            .label = "Windows PowerShell",
-            .command = .{ .direct = &.{"powershell.exe"} },
-        },
-    };
-
-    const quick = (try buildProfileQuickPickText(std.testing.allocator, &profiles, 4, 10)).?;
-    defer std.testing.allocator.free(quick);
-    try std.testing.expectEqualStrings(
-        "1 GIT $> Git Bash | 2 PWSH >> PowerShell | 3 WSL <> WSL: Ub... | 4 CMD C> Command... | ...",
-        quick,
-    );
-}
-
-test "win32 buildProfileStatusBadgeText reflects selected profile kind" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .git_bash,
-        .key = "git-bash",
-        .label = "Git Bash",
-        .command = .{ .direct = &.{"bash.exe"} },
-    };
-
-    const badge = try buildProfileStatusBadgeText(std.testing.allocator, &profile, 0, 0);
-    defer std.testing.allocator.free(badge);
-    try std.testing.expectEqualStrings("Git Bash", badge);
-}
-
-test "win32 profileStatusBadgeTextLen matches built text" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .git_bash,
-        .key = "git-bash",
-        .label = "Git Bash",
-        .command = .{ .direct = &.{"bash.exe"} },
-    };
-
-    const badge = try buildProfileStatusBadgeText(std.testing.allocator, &profile, 0, 0);
-    defer std.testing.allocator.free(badge);
-    try std.testing.expectEqual(badge.len, profileStatusBadgeTextLen(&profile, 0, 0));
 }
 
 test "win32 windowNewTabInsertIndex respects current and end positions" {
@@ -34720,40 +28692,6 @@ test "win32 prepareActiveTabVisibility hides inactive tab surfaces first" {
     try std.testing.expect(!surface_c.host_active);
 }
 
-test "win32 buildProfileQuickSlotChipText reflects ordered quick slot badge" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .wsl_distro,
-        .key = "wsl:Ubuntu",
-        .label = "WSL: Ubuntu",
-        .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu" } },
-    };
-
-    const chip = try buildProfileQuickSlotChipText(std.testing.allocator, &profile, 2, 2);
-    defer std.testing.allocator.free(chip);
-    try std.testing.expectEqualStrings("*3 WSL", chip);
-}
-
-test "win32 profileQuickSlotChipTextLen matches built text" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const profile: windows_shell.Profile = .{
-        .kind = .wsl_distro,
-        .key = "wsl:Ubuntu",
-        .label = "WSL: Ubuntu",
-        .command = .{ .direct = &.{ "wsl.exe", "-d", "Ubuntu" } },
-    };
-
-    const pinned = try buildProfileQuickSlotChipText(std.testing.allocator, &profile, 2, 2);
-    defer std.testing.allocator.free(pinned);
-    try std.testing.expectEqual(pinned.len, profileQuickSlotChipTextLen(&profile, 2, 2));
-
-    const unpinned = try buildProfileQuickSlotChipText(std.testing.allocator, &profile, 1, null);
-    defer std.testing.allocator.free(unpinned);
-    try std.testing.expectEqual(unpinned.len, profileQuickSlotChipTextLen(&profile, 1, null));
-}
-
 test "win32 quickSlotChipColors follow profile hover accent" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -34786,79 +28724,6 @@ test "win32 pinnedChipMarkerColor follows profile accent" {
     // Light mode
     try std.testing.expectEqual(rgb(140, 96, 8), pinnedChipMarkerColor(.git_bash, false, false));
     try std.testing.expectEqual(rgb(120, 80, 4), pinnedChipMarkerColor(.git_bash, false, true));
-}
-
-test "win32 launcherChipRightInset reserves badge and target space" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(i32, 5), launcherChipRightInset(false, false));
-    try std.testing.expectEqual(@as(i32, 12), launcherChipRightInset(false, true));
-    try std.testing.expectEqual(@as(i32, 16), launcherChipRightInset(true, false));
-    try std.testing.expectEqual(@as(i32, 16), launcherChipRightInset(true, true));
-}
-
-test "win32 targetButtonLabelRightInset reserves target badge space" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(i32, 0), targetButtonLabelRightInset(null));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.tab));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.window));
-    try std.testing.expectEqual(@as(i32, 12), targetButtonLabelRightInset(.split));
-}
-
-test "win32 buttonLabelRightInset reserves slot and target badge space" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(i32, 0), buttonLabelRightInset(null, null));
-    try std.testing.expectEqual(@as(i32, 12), buttonLabelRightInset(null, .tab));
-    try std.testing.expectEqual(@as(i32, 16), buttonLabelRightInset(0, null));
-    try std.testing.expectEqual(@as(i32, 16), buttonLabelRightInset(0, .split));
-    try std.testing.expectEqual(@as(i32, 12), buttonLabelRightInset(9, .window));
-}
-
-test "win32 shouldPaintQuickSlotTargetMarker follows active chip state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!shouldPaintQuickSlotTargetMarker(false, false));
-    try std.testing.expect(shouldPaintQuickSlotTargetMarker(true, false));
-    try std.testing.expect(shouldPaintQuickSlotTargetMarker(false, true));
-}
-
-test "win32 profileOpenTargetMarkerColor reflects launcher target" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(rgb(132, 172, 238), profileOpenTargetMarkerColor(.tab));
-    try std.testing.expectEqual(rgb(236, 182, 118), profileOpenTargetMarkerColor(.window));
-    try std.testing.expectEqual(rgb(126, 204, 148), profileOpenTargetMarkerColor(.split));
-}
-
-test "win32 profileOpenTargetBadgeGlyph reflects launcher target" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(u8, 'T'), profileOpenTargetBadgeGlyph(.tab));
-    try std.testing.expectEqual(@as(u8, 'W'), profileOpenTargetBadgeGlyph(.window));
-    try std.testing.expectEqual(@as(u8, 'S'), profileOpenTargetBadgeGlyph(.split));
-}
-
-test "win32 pinnedSlotBadgeDigit reflects visible quick slot ordinals" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?u8, '1'), pinnedSlotBadgeDigit(0));
-    try std.testing.expectEqual(@as(?u8, '3'), pinnedSlotBadgeDigit(2));
-    try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(null));
-    try std.testing.expectEqual(@as(?u8, null), pinnedSlotBadgeDigit(9));
-}
-
-test "win32 quickSlotProfileIndex skips the selected profile and preserves order" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotProfileIndex(5, 0, 0, 3));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotProfileIndex(5, 0, 1, 3));
-    try std.testing.expectEqual(@as(?usize, 3), quickSlotProfileIndex(5, 0, 2, 3));
-    try std.testing.expectEqual(@as(?usize, 0), quickSlotProfileIndex(5, 3, 0, 3));
-    try std.testing.expectEqual(@as(?usize, 1), quickSlotProfileIndex(5, 3, 1, 3));
-    try std.testing.expectEqual(@as(?usize, 2), quickSlotProfileIndex(5, 3, 2, 3));
-    try std.testing.expectEqual(@as(?usize, null), quickSlotProfileIndex(1, 0, 0, 3));
 }
 
 test "win32 nextQuickSlotFocus cycles visible painted quick slots" {
@@ -34911,14 +28776,6 @@ test "win32 applyQuickSlotPreferenceOrder promotes pinned launcher profiles" {
     try std.testing.expectEqualStrings("wsl:Ubuntu", profiles[3].key);
 }
 
-test "win32 findLauncherQuickSlotOrdinal finds runtime-pinned slots" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 0), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "git-bash"));
-    try std.testing.expectEqual(@as(?usize, 1), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "CMD.EXE"));
-    try std.testing.expectEqual(@as(?usize, null), findLauncherQuickSlotOrdinal(.{ "git-bash", "cmd.exe", null }, "pwsh.exe"));
-}
-
 test "win32 launcherQuickSlotAssignmentNeedsChange skips no-op pin replays" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -34963,56 +28820,6 @@ test "win32 selectedProfileSelectionNeedsChange skips identical selection state"
     ));
 }
 
-test "win32 buildProfileChromeBadgeText adds profile glyph treatment" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const pwsh = try buildProfileChromeBadgeText(std.testing.allocator, .pwsh);
-    defer std.testing.allocator.free(pwsh);
-    try std.testing.expectEqualStrings("PWSH >>", pwsh);
-
-    const wsl = try buildProfileChromeBadgeText(std.testing.allocator, .wsl_distro);
-    defer std.testing.allocator.free(wsl);
-    try std.testing.expectEqualStrings("WSL <>", wsl);
-}
-
-test "win32 profileKindDetail exposes shell integration posture" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const pwsh = profileKindDetail(.pwsh);
-    try std.testing.expectEqualStrings(
-        "PowerShell profile with automatic shell integration",
-        pwsh.summary,
-    );
-    try std.testing.expectEqual(@as(?[]const u8, null), pwsh.next_step);
-
-    const wsl = profileKindDetail(.wsl_distro);
-    try std.testing.expectEqualStrings(
-        "WSL distro profile; shell integration depends on the Linux shell",
-        wsl.summary,
-    );
-    try std.testing.expectEqualStrings(
-        "Enable shell integration inside the selected WSL shell startup.",
-        wsl.next_step.?,
-    );
-
-    const git_bash = profileKindDetail(.git_bash);
-    try std.testing.expectEqualStrings(
-        "Git Bash profile with automatic shell integration",
-        git_bash.summary,
-    );
-    try std.testing.expectEqual(@as(?[]const u8, null), git_bash.next_step);
-
-    const cmd = profileKindDetail(.cmd);
-    try std.testing.expectEqualStrings(
-        "Command Prompt profile; shell integration unavailable",
-        cmd.summary,
-    );
-    try std.testing.expectEqualStrings(
-        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
-        cmd.next_step.?,
-    );
-}
-
 test "win32 startupProfilePickerEnabled parses launcher env values" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -35023,94 +28830,6 @@ test "win32 startupProfilePickerEnabled parses launcher env values" {
     try std.testing.expect(!startupProfilePickerEnabled("0"));
     try std.testing.expect(!startupProfilePickerEnabled("false"));
     try std.testing.expect(!startupProfilePickerEnabled("no"));
-}
-
-test "win32 buildSearchOverlayLabel reflects match counts" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const active = try buildSearchOverlayLabel(std.testing.allocator, 8, 2);
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("Find 2/8", active);
-
-    const passive = try buildSearchOverlayLabel(std.testing.allocator, 5, null);
-    defer std.testing.allocator.free(passive);
-    try std.testing.expectEqualStrings("Find 5", passive);
-
-    const idle = try buildSearchOverlayLabel(std.testing.allocator, null, null);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Find", idle);
-}
-
-test "win32 buildSearchBarResultsText reflects docked search states" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
-    defer bar.deinit();
-
-    const idle = try buildSearchBarResultsText(std.testing.allocator, &bar);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings(search_results_idle, idle);
-
-    try bar.setQuery("foo", 10);
-    const pending = try buildSearchBarResultsText(std.testing.allocator, &bar);
-    defer std.testing.allocator.free(pending);
-    try std.testing.expectEqualStrings(search_results_pending, pending);
-
-    bar.searched = true;
-    bar.total = 0;
-    const none = try buildSearchBarResultsText(std.testing.allocator, &bar);
-    defer std.testing.allocator.free(none);
-    try std.testing.expectEqualStrings(search_results_none, none);
-
-    bar.total = 12;
-    bar.selected = 3;
-    const active = try buildSearchBarResultsText(std.testing.allocator, &bar);
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("3/12", active);
-}
-
-test "win32 showSearchBarResults only shows status chip for non-empty queries" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try std.testing.expect(!showSearchBarResults(&bar));
-    try bar.setQuery("search-open", 10);
-    try std.testing.expect(showSearchBarResults(&bar));
-}
-
-test "win32 searchBarNeedsRelayoutForQueryChange only trips on empty-state transitions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarNeedsRelayoutForQueryChange(0, 0));
-    try std.testing.expect(searchBarNeedsRelayoutForQueryChange(0, 1));
-    try std.testing.expect(!searchBarNeedsRelayoutForQueryChange(4, 9));
-    try std.testing.expect(searchBarNeedsRelayoutForQueryChange(3, 0));
-}
-
-test "win32 searchBarShouldInvalidateCoreSearchOnEdit invalidates active query edits" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarShouldInvalidateCoreSearchOnEdit(0, 0));
-    try std.testing.expect(!searchBarShouldInvalidateCoreSearchOnEdit(0, 1));
-    try std.testing.expect(searchBarShouldInvalidateCoreSearchOnEdit(5, 2));
-    try std.testing.expect(searchBarShouldInvalidateCoreSearchOnEdit(5, 0));
-}
-
-test "win32 shouldAcceptCoreSearchUpdates rejects pending docked search state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try std.testing.expect(shouldAcceptCoreSearchUpdates(&bar));
-
-    try bar.setQuery("search-open", 10);
-    try std.testing.expect(!shouldAcceptCoreSearchUpdates(&bar));
-
-    bar.searched = true;
-    try std.testing.expect(shouldAcceptCoreSearchUpdates(&bar));
 }
 
 test "win32 surfaceLayoutRuntimeSync only trips on visibility or pane rect changes" {
@@ -35508,22 +29227,6 @@ test "win32 surfaceFocusedActivationNeedsHostSync requires actual surface focus"
     try std.testing.expect(surfaceFocusedActivationNeedsHostSync(false, true, 2, 2, true, false));
 }
 
-test "win32 profileChromeNeedsFullTextInvalidation only trips for status-only profile chrome" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!profileChromeNeedsFullTextInvalidation(.profile, 0));
-    try std.testing.expect(!profileChromeNeedsFullTextInvalidation(.profile, 24));
-    try std.testing.expect(!profileChromeNeedsFullTextInvalidation(.none, 0));
-    try std.testing.expect(profileChromeNeedsFullTextInvalidation(.none, 24));
-}
-
-test "win32 chromeTextNeedsFullInvalidation only trips when status bar is visible" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!chromeTextNeedsFullInvalidation(0));
-    try std.testing.expect(chromeTextNeedsFullInvalidation(24));
-}
-
 test "win32 optionalOwnedStringEquals handles present and null values" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -35576,229 +29279,11 @@ test "win32 scrollbarPaintKeyChanged only trips on visible scrollbar paint input
     try std.testing.expect(scrollbarPaintKeyChanged(base, .{ .rect = base.rect, .total = 2000, .len = 21, .offset = 1979, .dpi = 144, .hovered = false, .dragging = false, .marker_revision = 4 }));
 }
 
-test "win32 searchBarResultsVisual marks no-match state with error colors" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bar = win32_search_bar.SearchBar.init(std.testing.allocator);
-    defer bar.deinit();
-
-    try bar.setQuery("zzzzz", 10);
-    bar.searched = true;
-    bar.total = 0;
-
-    const theme = darkTheme();
-    const visual = searchBarResultsVisual(&theme, &bar);
-    try std.testing.expectEqual(theme.error_fg, visual.border);
-    try std.testing.expectEqual(theme.error_fg, visual.fg);
-}
-
-test "win32 searchBarButtonShowsLabel keeps docked search buttons icon-only" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarButtonShowsLabel(.prev, 80));
-    try std.testing.expect(!searchBarButtonShowsLabel(.close, 80));
-    try std.testing.expect(!searchBarButtonShowsLabel(.regex, 40));
-    try std.testing.expect(!searchBarButtonShowsLabel(.regex, 64));
-    try std.testing.expect(!searchBarButtonShowsLabel(.case_sensitive, 72));
-    try std.testing.expect(!searchBarButtonShowsLabel(.whole_word, 80));
-}
-
 test "win32 wmCommandChildHwnd handles null lParam" {
     try std.testing.expectEqual(@as(?HWND, null), wmCommandChildHwnd(0));
 
     const child = wmCommandChildHwnd(0x1234).?;
     try std.testing.expectEqual(@as(usize, 0x1234), @intFromPtr(child));
-}
-
-test "win32 buildTabOverviewOverlayLabel reflects current host tab" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const multi = try buildTabOverviewOverlayLabel(std.testing.allocator, 1, 4);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expectEqualStrings("Tab 2/4", multi);
-
-    const single = try buildTabOverviewOverlayLabel(std.testing.allocator, 0, 1);
-    defer std.testing.allocator.free(single);
-    try std.testing.expectEqualStrings("Tab", single);
-}
-
-test "win32 buildOverlayPaintLabelText reflects live overlay mode" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const command = try buildOverlayPaintLabelText(
-        std.testing.allocator,
-        .command_palette,
-        "toggle_",
-        null,
-        null,
-        .{},
-        .{ .match_count = 4, .title = "Toggle fullscreen", .subtitle = "Fullscreen", .available = true },
-    );
-    defer std.testing.allocator.free(command);
-    try std.testing.expectEqualStrings("Command 4", command);
-
-    const search = try buildOverlayPaintLabelText(
-        std.testing.allocator,
-        .search,
-        "",
-        8,
-        2,
-        .{},
-        .{},
-    );
-    defer std.testing.allocator.free(search);
-    try std.testing.expectEqualStrings("Find 2/8", search);
-
-    const title = try buildOverlayPaintLabelText(
-        std.testing.allocator,
-        .surface_title,
-        "",
-        null,
-        null,
-        .{},
-        .{},
-    );
-    defer std.testing.allocator.free(title);
-    try std.testing.expectEqualStrings("Window title", title);
-}
-
-test "win32 buildOverlayFeedbackText prefers inline banner state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-
-    const info = try buildOverlayFeedbackText(
-        std.testing.allocator,
-        .info,
-        "Try: new_tab",
-        .command_palette,
-        "",
-        null,
-        null,
-        null,
-        .{},
-        1,
-        snap,
-        empty_mru,
-        .{},
-    );
-    defer std.testing.allocator.free(info);
-    try std.testing.expectEqualStrings("Info: Try: new_tab", info);
-
-    const err = try buildOverlayFeedbackText(
-        std.testing.allocator,
-        .err,
-        "Unknown Ghostty action",
-        .command_palette,
-        "",
-        null,
-        null,
-        null,
-        .{},
-        1,
-        snap,
-        empty_mru,
-        .{},
-    );
-    defer std.testing.allocator.free(err);
-    try std.testing.expectEqualStrings("Error: Unknown Ghostty action", err);
-
-    const fallback = try buildOverlayFeedbackText(
-        std.testing.allocator,
-        .none,
-        null,
-        .search,
-        "needle",
-        "needle",
-        8,
-        2,
-        .{},
-        1,
-        snap,
-        empty_mru,
-        .{},
-    );
-    defer std.testing.allocator.free(fallback);
-    try std.testing.expect(std.mem.indexOf(u8, fallback, "next match") != null);
-}
-
-test "win32 nextTabOverviewSelection wraps and clamps" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(usize, 2), nextTabOverviewSelection(1, 4, false));
-    try std.testing.expectEqual(@as(usize, 4), nextTabOverviewSelection(1, 4, true));
-    try std.testing.expectEqual(@as(usize, 1), nextTabOverviewSelection(4, 4, false));
-    try std.testing.expectEqual(@as(usize, 1), nextTabOverviewSelection(9, 4, false));
-}
-
-test "win32 tabDirectionFromWheelDelta maps wheel direction to tab navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(apprt.action.GotoTab.previous, tabDirectionFromWheelDelta(120));
-    try std.testing.expectEqual(apprt.action.GotoTab.next, tabDirectionFromWheelDelta(-120));
-}
-
-test "win32 searchDirectionFromWheelDelta maps wheel direction to search navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(input.Binding.Action.NavigateSearch.next, searchDirectionFromWheelDelta(120));
-    try std.testing.expectEqual(input.Binding.Action.NavigateSearch.previous, searchDirectionFromWheelDelta(-120));
-}
-
-test "win32 searchBarSearchedState helpers preserve pending searches on null callbacks" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!searchBarSearchedStateForTotal(null));
-    try std.testing.expect(searchBarSearchedStateForTotal(0));
-
-    try std.testing.expect(!searchBarSearchedStateForSelected(null, null));
-    try std.testing.expect(searchBarSearchedStateForSelected(null, 5));
-    try std.testing.expect(searchBarSearchedStateForSelected(2, null));
-}
-
-test "win32 searchBarDisplayStateChanged only trips on visible results changes" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const same = win32_search_bar.SearchBar{
-        .searched = true,
-        .total = 12,
-        .selected = 3,
-        .alloc = std.testing.allocator,
-    };
-    try std.testing.expect(!searchBarDisplayStateChanged(&same, true, 12, 3));
-    try std.testing.expect(searchBarDisplayStateChanged(&same, false, 12, 3));
-    try std.testing.expect(searchBarDisplayStateChanged(&same, true, 11, 3));
-    try std.testing.expect(searchBarDisplayStateChanged(&same, true, 12, 4));
-}
-
-test "win32 scrollStatusTextChanged only trips on indicator visibility or percent deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const hidden_bottom: terminal.Scrollbar = .{ .total = 2000, .len = 21, .offset = 1979 };
-    const hidden_short: terminal.Scrollbar = .{ .total = 21, .len = 21, .offset = 0 };
-    const visible_50: terminal.Scrollbar = .{ .total = 2000, .len = 21, .offset = 1000 };
-    const visible_50_neighbor: terminal.Scrollbar = .{ .total = 2000, .len = 21, .offset = 1001 };
-    const visible_51: terminal.Scrollbar = .{ .total = 2000, .len = 21, .offset = 1020 };
-
-    try std.testing.expect(!scrollStatusTextChanged(hidden_short, hidden_bottom));
-    try std.testing.expect(scrollStatusTextChanged(hidden_bottom, visible_50));
-    try std.testing.expect(!scrollStatusTextChanged(visible_50, visible_50_neighbor));
-    try std.testing.expect(scrollStatusTextChanged(visible_50, visible_51));
-}
-
-test "win32 commandPaletteDirectionFromWheelDelta maps wheel direction to completion direction" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(commandPaletteDirectionFromWheelDelta(120));
-    try std.testing.expect(!commandPaletteDirectionFromWheelDelta(-120));
-}
-
-test "win32 profileDirectionFromWheelDelta maps wheel direction to profile navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(profileDirectionFromWheelDelta(120));
-    try std.testing.expect(!profileDirectionFromWheelDelta(-120));
 }
 
 test "win32 overlayEditBorderColor reflects mode and focus" {
@@ -35982,144 +29467,6 @@ test "win32 profileKind label and hint colors follow profile accent" {
     try std.testing.expectEqual(rgb(140, 96, 8), profileKindHintColor(.git_bash, false));
 }
 
-test "win32 tabButtonKeyAction maps focused-tab keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(TabButtonKeyAction.previous, tabButtonKeyAction(VK_LEFT, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_previous, tabButtonKeyAction(VK_LEFT, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.next, tabButtonKeyAction(VK_RIGHT, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_next, tabButtonKeyAction(VK_RIGHT, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.first, tabButtonKeyAction(VK_HOME, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_first, tabButtonKeyAction(VK_HOME, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.last, tabButtonKeyAction(VK_END, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.move_last, tabButtonKeyAction(VK_END, true).?);
-    try std.testing.expectEqual(TabButtonKeyAction.rename, tabButtonKeyAction(VK_F2, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.close, tabButtonKeyAction(VK_DELETE, false).?);
-    try std.testing.expectEqual(TabButtonKeyAction.overview, tabButtonKeyAction(VK_APPS, false).?);
-    try std.testing.expect(tabButtonKeyAction(VK_RETURN, false) == null);
-}
-
-test "win32 moveTabAmountToEdge computes direct host reorder delta" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(isize, -2), moveTabAmountToEdge(4, 2, true));
-    try std.testing.expectEqual(@as(isize, 1), moveTabAmountToEdge(4, 2, false));
-    try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 0, true));
-    try std.testing.expectEqual(@as(isize, 0), moveTabAmountToEdge(4, 3, false));
-}
-
-test "win32 searchButtonKeyAction maps focused search button keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(SearchButtonKeyAction.next, searchButtonKeyAction(VK_F3, false).?);
-    try std.testing.expectEqual(SearchButtonKeyAction.previous, searchButtonKeyAction(VK_F3, true).?);
-    try std.testing.expectEqual(SearchButtonKeyAction.dismiss, searchButtonKeyAction(VK_ESCAPE, false).?);
-    try std.testing.expect(searchButtonKeyAction(VK_RETURN, false) == null);
-}
-
-test "win32 docked search key actions preserve semantic next and previous navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchCoreDirectionFromKeyAction(.next).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchCoreDirectionFromKeyAction(.previous).?,
-    );
-    try std.testing.expect(dockedSearchCoreDirectionFromKeyAction(.dismiss) == null);
-}
-
-test "win32 docked search arrow buttons follow visible up and down navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchButtonDirection(SEARCH_PREV_ID).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchButtonDirection(SEARCH_NEXT_ID).?,
-    );
-    try std.testing.expect(dockedSearchButtonDirection(0) == null);
-}
-
-test "win32 docked search Enter and Shift+Enter follow the arrow-key contract" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        dockedSearchArrowDirection(VK_DOWN).?,
-        dockedSearchEnterDirection(false),
-    );
-    try std.testing.expectEqual(
-        dockedSearchArrowDirection(VK_UP).?,
-        dockedSearchEnterDirection(true),
-    );
-}
-
-test "win32 docked search Up and Down keys follow the visible button contract" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.next,
-        dockedSearchArrowDirection(VK_UP).?,
-    );
-    try std.testing.expectEqual(
-        input.Binding.Action.NavigateSearch.previous,
-        dockedSearchArrowDirection(VK_DOWN).?,
-    );
-    try std.testing.expect(dockedSearchArrowDirection(VK_LEFT) == null);
-}
-
-test "win32 docked search selection preserves newest-first visible numbering" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 0), searchSelectedRawFromCoreDisplay(1));
-    try std.testing.expectEqual(@as(?usize, 7), searchSelectedRawFromCoreDisplay(8));
-    try std.testing.expectEqual(@as(?usize, 1), searchSelectedDisplayFromRaw(0, 8));
-    try std.testing.expectEqual(@as(?usize, 8), searchSelectedDisplayFromRaw(7, 8));
-}
-
-test "win32 docked search preview advances visible numbering with navigation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(?usize, 6), advanceSearchSelectedRaw(7, 8, .previous, true));
-    try std.testing.expectEqual(@as(?usize, 0), advanceSearchSelectedRaw(7, 8, .next, true));
-    try std.testing.expectEqual(@as(?usize, 7), searchSelectedDisplayFromRaw(
-        advanceSearchSelectedRaw(7, 8, .previous, true),
-        8,
-    ));
-    try std.testing.expectEqual(@as(?usize, 1), searchSelectedDisplayFromRaw(
-        advanceSearchSelectedRaw(7, 8, .next, true),
-        8,
-    ));
-}
-
-test "win32 docked search sequential visible order increments while moving older and up" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const total: ?usize = 2500;
-    var raw: ?usize = null;
-
-    try std.testing.expectEqual(@as(?usize, null), searchSelectedDisplayFromRaw(raw, total));
-
-    raw = searchSelectedRawFromCoreDisplay(1);
-    try std.testing.expectEqual(@as(?usize, 1), searchSelectedDisplayFromRaw(raw, total));
-
-    raw = advanceSearchSelectedRaw(raw, total, .next, true);
-    try std.testing.expectEqual(@as(?usize, 2), searchSelectedDisplayFromRaw(raw, total));
-
-    raw = advanceSearchSelectedRaw(raw, total, .next, true);
-    try std.testing.expectEqual(@as(?usize, 3), searchSelectedDisplayFromRaw(raw, total));
-
-    raw = advanceSearchSelectedRaw(raw, total, .previous, true);
-    try std.testing.expectEqual(@as(?usize, 2), searchSelectedDisplayFromRaw(raw, total));
-
-    raw = advanceSearchSelectedRaw(raw, total, .previous, true);
-    try std.testing.expectEqual(@as(?usize, 1), searchSelectedDisplayFromRaw(raw, total));
-}
-
 test "win32 searchBarGroupRect ignores hidden placements" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -36176,107 +29523,6 @@ test "win32 scrollbarProxyPointFromSurfaceCursor tracks the right-edge hover ban
     try std.testing.expect(!outside.over_band);
 }
 
-test "win32 tabsButtonKeyAction maps focused tabs button keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(TabsButtonKeyAction.previous, tabsButtonKeyAction(VK_LEFT).?);
-    try std.testing.expectEqual(TabsButtonKeyAction.previous, tabsButtonKeyAction(VK_UP).?);
-    try std.testing.expectEqual(TabsButtonKeyAction.next, tabsButtonKeyAction(VK_RIGHT).?);
-    try std.testing.expectEqual(TabsButtonKeyAction.next, tabsButtonKeyAction(VK_DOWN).?);
-    try std.testing.expectEqual(TabsButtonKeyAction.rename, tabsButtonKeyAction(VK_F2).?);
-    try std.testing.expectEqual(TabsButtonKeyAction.overview, tabsButtonKeyAction(VK_APPS).?);
-    try std.testing.expect(tabsButtonKeyAction(VK_RETURN) == null);
-}
-
-test "win32 commandButtonKeyAction maps focused command button keys" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(CommandButtonKeyAction.toggle, commandButtonKeyAction(VK_RETURN).?);
-    try std.testing.expectEqual(CommandButtonKeyAction.toggle, commandButtonKeyAction(VK_SPACE).?);
-    try std.testing.expectEqual(CommandButtonKeyAction.previous, commandButtonKeyAction(VK_UP).?);
-    try std.testing.expectEqual(CommandButtonKeyAction.next, commandButtonKeyAction(VK_DOWN).?);
-    try std.testing.expectEqual(CommandButtonKeyAction.dismiss, commandButtonKeyAction(VK_ESCAPE).?);
-    try std.testing.expect(commandButtonKeyAction(VK_F2) == null);
-}
-
-test "win32 command palette toggle binding is recognized inside action chains" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const absent = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .paste_from_clipboard };
-    const present = [_]input.Binding.Action{ .{ .copy_to_clipboard = .mixed }, .toggle_command_palette };
-    try std.testing.expect(!bindingActionsToggleCommandPalette(&absent));
-    try std.testing.expect(bindingActionsToggleCommandPalette(&present));
-}
-
-test "win32 buildInspectorBannerText reflects host inspector context" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const multi = try buildInspectorBannerText(std.testing.allocator, .{ .index = 1, .total = 4 }, 3, false);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expectEqualStrings("Inspector active | tab 2/4 | panes 3 | toggle Inspect to return", multi);
-
-    const zoomed = try buildInspectorBannerText(std.testing.allocator, .{ .index = 0, .total = 2 }, 2, true);
-    defer std.testing.allocator.free(zoomed);
-    try std.testing.expectEqualStrings("Inspector active | tab 1/2 | panes 2 | zoomed | toggle Inspect to return", zoomed);
-
-    const single = try buildInspectorBannerText(std.testing.allocator, .{ .index = 0, .total = 1 }, 1, false);
-    defer std.testing.allocator.free(single);
-    try std.testing.expectEqualStrings("Inspector active | tab 1/1 | toggle Inspect to return", single);
-}
-
-test "win32 buildHostBannerText prefixes info and error banners" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const plain = try buildHostBannerText(std.testing.allocator, .none, "ready");
-    defer std.testing.allocator.free(plain);
-    try std.testing.expectEqualStrings("ready", plain);
-
-    const info = try buildHostBannerText(std.testing.allocator, .info, "ready");
-    defer std.testing.allocator.free(info);
-    try std.testing.expectEqualStrings("Info: ready", info);
-
-    const err = try buildHostBannerText(std.testing.allocator, .err, "ready");
-    defer std.testing.allocator.free(err);
-    try std.testing.expectEqualStrings("Error: ready", err);
-}
-
-test "win32 overlayPaintCacheDirty ignores repaint-only dirtiness" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const cached = std.unicode.utf8ToUtf16LeStringLiteral("ok");
-
-    try std.testing.expect(!overlayPaintCacheDirty(false, .search, cached, cached, null));
-    try std.testing.expect(!overlayPaintCacheDirty(false, .profile, cached, cached, cached));
-
-    try std.testing.expect(overlayPaintCacheDirty(true, .search, cached, cached, null));
-    try std.testing.expect(overlayPaintCacheDirty(false, .search, null, cached, null));
-    try std.testing.expect(overlayPaintCacheDirty(false, .profile, cached, cached, null));
-}
-
-test "win32 profileChromeVisible only trips for profile overlay or visible status bar" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(profileChromeVisible(.profile, 0));
-    try std.testing.expect(profileChromeVisible(.none, 24));
-    try std.testing.expect(!profileChromeVisible(.none, 0));
-    try std.testing.expect(!profileChromeVisible(.search, 0));
-}
-
-test "win32 inspector chrome visibility only trips for banner or visible status bar" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(inspectorChromeVisible(.none, 0));
-    try std.testing.expect(inspectorChromeVisible(.search, 24));
-    try std.testing.expect(!inspectorChromeVisible(.search, 0));
-}
-
-test "win32 inspector visibility changes require host relayout" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(inspectorVisibilityChangeNeedsHostRelayout(true));
-    try std.testing.expect(!inspectorVisibilityChangeNeedsHostRelayout(false));
-}
-
 test "win32 surface focus state updates focused split handle" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -36285,79 +29531,6 @@ test "win32 surface focus state updates focused split handle" {
     try std.testing.expect(!surfaceFocusStateChanged(0, root, 0, root));
     try std.testing.expect(surfaceFocusStateChanged(0, root, 0, split_child));
     try std.testing.expect(surfaceFocusStateChanged(0, root, 1, root));
-}
-
-test "win32 inspector panel visibility is tab scoped" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(inspectorPanelVisibleForState(.none, true));
-    try std.testing.expect(!inspectorPanelVisibleForState(.none, false));
-    try std.testing.expect(!inspectorPanelVisibleForState(.command_palette, true));
-}
-
-test "win32 overlay edit child rect preserves frame border" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const frame = RECT{ .left = 100, .top = 20, .right = 300, .bottom = 58 };
-    const child = overlayEditChildRectFromFrame(frame, 8, 6);
-    try std.testing.expectEqual(@as(i32, 108), child.left);
-    try std.testing.expectEqual(@as(i32, 26), child.top);
-    try std.testing.expectEqual(@as(i32, 292), child.right);
-    try std.testing.expectEqual(@as(i32, 52), child.bottom);
-    try std.testing.expect(child.bottom < frame.bottom);
-}
-
-test "win32 overlay edit frame offsets scale with DPI" {
-    const dpis = [_]u32{ 96, 192, 288 };
-    for (dpis, 1..) |dpi, scale| {
-        const scale_i32: i32 = @intCast(scale);
-        const padding = 10 * scale_i32;
-        const label_w = 100 * scale_i32;
-        const cancel_w = 80 * scale_i32;
-        const row_h = 30 * scale_i32;
-        const overlay_y = 20 * scale_i32;
-        const frame = overlayEditFrameRect(
-            800 * scale_i32,
-            overlay_y,
-            padding,
-            label_w,
-            cancel_w,
-            0,
-            row_h,
-            dpi,
-        );
-        try std.testing.expectEqual(overlay_y + 4 * scale_i32, frame.top);
-        try std.testing.expectEqual(frame.top + row_h, frame.bottom);
-        try std.testing.expectEqual(
-            800 * scale_i32 - cancel_w - padding * 2 - 6 * scale_i32,
-            frame.right,
-        );
-    }
-
-    const narrow = overlayEditFrameRect(220, 20, 10, 100, 80, 0, 30, 96);
-    const close_left = 220 - 80 - 10;
-    try std.testing.expectEqual(@as(i32, 10), narrow.left);
-    try std.testing.expect(narrow.right <= close_left);
-    try std.testing.expect(narrow.right >= narrow.left);
-
-    for ([_]i32{ 80, 100, 120, 140 }) |width| {
-        const visibility = overlayActionVisibilityForWidth(width, 10, 80, 80, false, 96);
-        const effective_cancel: i32 = if (visibility.cancel) 80 else 0;
-        const frame = overlayEditFrameRect(width, 20, 10, 100, effective_cancel, 0, 30, 96);
-        const child = overlayEditChildRectFromFrame(frame, 8, 6);
-        try std.testing.expect(child.left >= frame.left);
-        try std.testing.expect(child.right <= frame.right);
-        try std.testing.expect(child.left <= child.right);
-        if (visibility.cancel) try std.testing.expect(child.right <= width - 80 - 10);
-    }
-    for ([_]i32{ 1, 10, 20, 30 }) |width| {
-        const frame = overlayEditFrameRect(width, 20, 10, 100, 0, 0, 30, 96);
-        try std.testing.expect(frame.left >= 0);
-        try std.testing.expect(frame.right <= width);
-        try std.testing.expect(frame.right > frame.left);
-    }
-    try std.testing.expect(!overlayActionVisibilityForWidth(220, 10, 80, 80, true, 96).accept);
-    try std.testing.expect(overlayActionVisibilityForWidth(230, 10, 80, 80, true, 96).accept);
 }
 
 test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
@@ -36401,320 +29574,16 @@ test "win32 confirm overlay keeps a bounded visible action at narrow widths" {
     try std.testing.expect(wide.cancel_x + wide.cancel_width <= 230);
 }
 
-test "win32 GDI text length accepts empty sentinel slices" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    const empty = try std.unicode.utf8ToUtf16LeAllocZ(alloc, "");
-    defer alloc.free(empty);
-    try std.testing.expectEqual(@as(i32, 0), utf16GdiTextLen(empty));
-
-    const confirm = try std.unicode.utf8ToUtf16LeAllocZ(alloc, "Confirm");
-    defer alloc.free(confirm);
-    try std.testing.expectEqual(@as(i32, 7), utf16GdiTextLen(confirm));
-}
-
-test "win32 command palette hides duplicate accept button" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!overlayAcceptButtonVisible(.command_palette));
-    try std.testing.expect(overlayAcceptButtonVisible(.profile));
-    try std.testing.expect(overlayAcceptButtonVisible(.search));
-    try std.testing.expect(overlayAcceptButtonVisible(.confirm));
-    try std.testing.expect(!overlayEditFrameVisible(.confirm));
-    try std.testing.expect(overlayEditFrameVisible(.command_palette));
-    try std.testing.expect(overlayEditFrameVisible(.profile));
-}
-
-test "win32 transient overlay focus ring includes every visible control" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .edit, false));
-    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .accept, false));
-    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .cancel, false));
-    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.profile, .edit, true));
-    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.profile, .accept, true));
-    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.profile, .cancel, true));
-
-    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.command_palette, .edit, false));
-    try std.testing.expectEqual(OverlayFocusSlot.edit, nextOverlayFocusSlot(.command_palette, .cancel, true));
-    try std.testing.expectEqual(OverlayFocusSlot.cancel, nextOverlayFocusSlot(.confirm, .accept, false));
-    try std.testing.expectEqual(OverlayFocusSlot.accept, nextOverlayFocusSlot(.confirm, .cancel, true));
-
-    try std.testing.expectEqual(
-        OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.profile, .edit, false, true, false, true),
-    );
-    try std.testing.expectEqual(
-        OverlayFocusSlot.cancel,
-        nextVisibleOverlayFocusSlot(.confirm, .accept, false, false, false, true),
-    );
-    try std.testing.expectEqual(
-        OverlayFocusSlot.accept,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, true, false, true, true),
-    );
-    try std.testing.expectEqual(
-        null,
-        nextVisibleOverlayFocusSlot(.command_palette, .edit, false, true, false, false),
-    );
-    try std.testing.expectEqual(
-        null,
-        nextVisibleOverlayFocusSlot(.confirm, .cancel, false, false, false, true),
-    );
-}
-
 test "win32 overlay buttons activate only for their exact click notification" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const accept: HWND = @ptrFromInt(0x10);
     const cancel: HWND = @ptrFromInt(0x20);
-    try std.testing.expect(expectedButtonClick(BN_CLICKED, accept, accept));
-    try std.testing.expect(!expectedButtonClick(BN_SETFOCUS, accept, accept));
-    try std.testing.expect(!expectedButtonClick(BN_KILLFOCUS, accept, accept));
-    try std.testing.expect(!expectedButtonClick(BN_CLICKED, cancel, accept));
-    try std.testing.expect(!expectedButtonClick(BN_CLICKED, null, accept));
-}
-
-test "win32 inspectorBannerStateChanged only trips on actual banner deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(!inspectorBannerStateChanged(.none, .none, null, true));
-    try std.testing.expect(inspectorBannerStateChanged(.none, .none, null, false));
-    try std.testing.expect(!inspectorBannerStateChanged(.none, .info, host_banner_inspector_inactive, false));
-    try std.testing.expect(inspectorBannerStateChanged(.none, .err, "error", false));
-    try std.testing.expect(!inspectorBannerStateChanged(.search, .none, null, true));
-}
-
-test "win32 windowTitleSyncChanged only trips on actual title deltas" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expect(windowTitleSyncChanged(null, "noctty"));
-    try std.testing.expect(!windowTitleSyncChanged("noctty", "noctty"));
-    try std.testing.expect(windowTitleSyncChanged("noctty", "noctty - 2"));
-}
-
-test "win32 buildInspectorPanelTitleText reflects host inspector context" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const multi = try buildInspectorPanelTitleText(std.testing.allocator, .{ .index = 1, .total = 4 }, 3, false);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "Inspector") != null);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "tab 2/4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "3 panes") != null);
-
-    const zoomed = try buildInspectorPanelTitleText(std.testing.allocator, .{ .index = 0, .total = 2 }, 2, true);
-    defer std.testing.allocator.free(zoomed);
-    try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed") != null);
-}
-
-test "win32 buildInspectorPanelHintText reflects live inspector scope" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const single = try buildInspectorPanelHintText(std.testing.allocator, 1, false);
-    defer std.testing.allocator.free(single);
-    try std.testing.expect(std.mem.indexOf(u8, single, "this tab") != null);
-
-    const multi = try buildInspectorPanelHintText(std.testing.allocator, 3, false);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "3 panes") != null);
-
-    const zoomed = try buildInspectorPanelHintText(std.testing.allocator, 2, true);
-    defer std.testing.allocator.free(zoomed);
-    try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoomed pane") != null);
-}
-
-test "win32 buildInspectorDetailText reflects pane and zoom context" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const multi = try buildInspectorDetailText(std.testing.allocator, .{ .index = 1, .total = 4 }, 3, false);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "tab 2/4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, multi, "3 panes") != null);
-
-    const zoomed = try buildInspectorDetailText(std.testing.allocator, .{ .index = 0, .total = 2 }, 2, true);
-    defer std.testing.allocator.free(zoomed);
-    try std.testing.expect(std.mem.indexOf(u8, zoomed, "zoom") != null);
-}
-
-test "win32 buildSearchDetailText reflects live search context" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const active = try buildSearchDetailText(std.testing.allocator, "needle", 8, 2);
-    defer std.testing.allocator.free(active);
-    try std.testing.expect(std.mem.indexOf(u8, active, "needle") != null);
-    try std.testing.expect(std.mem.indexOf(u8, active, "2 of 8") != null);
-
-    const pending = try buildSearchDetailText(std.testing.allocator, "logs", null, null);
-    defer std.testing.allocator.free(pending);
-    try std.testing.expect(std.mem.indexOf(u8, pending, "refine") != null);
-}
-
-test "win32 buildOverlayAcceptLabel reflects overlay action state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const palette_idle = try buildOverlayAcceptLabel(std.testing.allocator, .command_palette, "", null, null, null, .{});
-    defer std.testing.allocator.free(palette_idle);
-    try std.testing.expectEqualStrings("Close", palette_idle);
-
-    const palette_run = try buildOverlayAcceptLabel(
-        std.testing.allocator,
-        .command_palette,
-        "new_tab",
-        null,
-        null,
-        null,
-        .{ .match_count = 1, .title = "New tab", .subtitle = "Action", .available = true },
-    );
-    defer std.testing.allocator.free(palette_run);
-    try std.testing.expectEqualStrings("Activate", palette_run);
-
-    const palette_matches = try buildOverlayAcceptLabel(
-        std.testing.allocator,
-        .command_palette,
-        "0x96f",
-        null,
-        null,
-        null,
-        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
-    );
-    defer std.testing.allocator.free(palette_matches);
-    try std.testing.expectEqualStrings("Activate", palette_matches);
-
-    const palette_hidden = try buildOverlayAcceptLabel(
-        std.testing.allocator,
-        .command_palette,
-        "0x96f",
-        null,
-        null,
-        null,
-        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
-    );
-    defer std.testing.allocator.free(palette_hidden);
-    try std.testing.expectEqualStrings("Resize", palette_hidden);
-
-    const search_next = try buildOverlayAcceptLabel(std.testing.allocator, .search, "needle", "needle", 8, 2, .{});
-    defer std.testing.allocator.free(search_next);
-    try std.testing.expectEqualStrings("Next", search_next);
-
-    const search_find = try buildOverlayAcceptLabel(std.testing.allocator, .search, "other", "needle", 8, 2, .{});
-    defer std.testing.allocator.free(search_find);
-    try std.testing.expectEqualStrings("Find", search_find);
-
-    const tab_go = try buildOverlayAcceptLabel(std.testing.allocator, .tab_overview, "2", null, null, null, .{});
-    defer std.testing.allocator.free(tab_go);
-    try std.testing.expectEqualStrings("Go", tab_go);
-
-    const title_apply = try buildOverlayAcceptLabel(std.testing.allocator, .surface_title, "logs", null, null, null, .{});
-    defer std.testing.allocator.free(title_apply);
-    try std.testing.expectEqualStrings("Apply", title_apply);
-}
-
-test "win32 buildOverlayHintText reflects live overlay guidance" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-
-    const command_unique = try buildOverlayHintText(
-        std.testing.allocator,
-        .command_palette,
-        "reload_",
-        null,
-        null,
-        null,
-        .{},
-        1,
-        snap,
-        empty_mru,
-    );
-    defer std.testing.allocator.free(command_unique);
-    try std.testing.expect(std.mem.indexOf(u8, command_unique, "reload_config") != null);
-
-    const search_next = try buildOverlayHintText(
-        std.testing.allocator,
-        .search,
-        "needle",
-        "needle",
-        8,
-        2,
-        .{},
-        1,
-        snap,
-        empty_mru,
-    );
-    defer std.testing.allocator.free(search_next);
-    try std.testing.expect(std.mem.indexOf(u8, search_next, "2/8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, search_next, "next match") != null);
-
-    const tab_invalid = try buildOverlayHintText(
-        std.testing.allocator,
-        .tab_overview,
-        "8",
-        null,
-        null,
-        null,
-        .{ .index = 1, .total = 4 },
-        2,
-        snap,
-        empty_mru,
-    );
-    defer std.testing.allocator.free(tab_invalid);
-    try std.testing.expect(std.mem.indexOf(u8, tab_invalid, "out of range") != null);
-
-    const tab_title = try buildOverlayHintText(
-        std.testing.allocator,
-        .tab_title,
-        "logs",
-        null,
-        null,
-        null,
-        .{ .index = 0, .total = 3 },
-        2,
-        snap,
-        empty_mru,
-    );
-    defer std.testing.allocator.free(tab_title);
-    try std.testing.expect(std.mem.indexOf(u8, tab_title, "tab 1/3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tab_title, "2 panes") != null);
-}
-
-test "win32 overlayCancelLabel reflects overlay mode" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqualStrings("Close", overlayCancelLabel(.search));
-    try std.testing.expectEqualStrings("Cancel", overlayCancelLabel(.surface_title));
-}
-
-test "win32 buildCommandButtonLabel reflects live palette state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const active = try buildCommandButtonLabel(std.testing.allocator, true, "toggle_fullscreen");
-    defer std.testing.allocator.free(active);
-    try std.testing.expectEqualStrings("Cmd toggle...", active);
-
-    const armed = try buildCommandButtonLabel(std.testing.allocator, true, "");
-    defer std.testing.allocator.free(armed);
-    try std.testing.expectEqualStrings("[Cmd]", armed);
-
-    const idle = try buildCommandButtonLabel(std.testing.allocator, false, null);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Cmd", idle);
-}
-
-test "win32 buildInspectorButtonLabel reflects inspector and pane state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const visible = try buildInspectorButtonLabel(std.testing.allocator, true, 3);
-    defer std.testing.allocator.free(visible);
-    try std.testing.expectEqualStrings("[Inspect 3]", visible);
-
-    const multi = try buildInspectorButtonLabel(std.testing.allocator, false, 2);
-    defer std.testing.allocator.free(multi);
-    try std.testing.expectEqualStrings("Inspect 2", multi);
-
-    const idle = try buildInspectorButtonLabel(std.testing.allocator, false, 1);
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Inspect", idle);
+    try std.testing.expect(expectedButtonClick(c.BN_CLICKED, accept, accept));
+    try std.testing.expect(!expectedButtonClick(c.BN_SETFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(c.BN_KILLFOCUS, accept, accept));
+    try std.testing.expect(!expectedButtonClick(c.BN_CLICKED, cancel, accept));
+    try std.testing.expect(!expectedButtonClick(c.BN_CLICKED, null, accept));
 }
 
 test "win32 palette theme preview can restore original config clone" {
@@ -36746,78 +29615,6 @@ test "win32 palette theme commit mutates pending without losing rollback source"
     try std.testing.expectEqualStrings("Committed Theme", pending.theme.?.light);
 }
 
-test "win32 buildCommandPaletteOverlayLabel reflects palette state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const idle = try buildCommandPaletteOverlayLabel(std.testing.allocator, "", .{});
-    defer std.testing.allocator.free(idle);
-    try std.testing.expectEqualStrings("Command", idle);
-
-    const matches = try buildCommandPaletteOverlayLabel(
-        std.testing.allocator,
-        "0x96f",
-        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
-    );
-    defer std.testing.allocator.free(matches);
-    try std.testing.expectEqualStrings("Command 1", matches);
-
-    const invalid = try buildCommandPaletteOverlayLabel(
-        std.testing.allocator,
-        "definitely_not_real",
-        .{},
-    );
-    defer std.testing.allocator.free(invalid);
-    try std.testing.expectEqualStrings("Command ?", invalid);
-}
-
-test "win32 command palette rich feedback never calls a theme an action miss" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const feedback = try buildCommandPaletteFeedbackText(
-        std.testing.allocator,
-        "0x96f",
-        &.{},
-        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme", .available = true },
-    );
-    defer std.testing.allocator.free(feedback);
-    try std.testing.expect(std.mem.indexOf(u8, feedback, "0x96f") != null);
-    try std.testing.expect(std.mem.indexOf(u8, feedback, "Bundled theme") != null);
-    try std.testing.expect(std.mem.indexOf(u8, feedback, "No matching action") == null);
-
-    const hidden_feedback = try buildCommandPaletteFeedbackText(
-        std.testing.allocator,
-        "0x96f",
-        &.{},
-        .{ .match_count = 1, .title = "0x96f", .subtitle = "Bundled theme" },
-    );
-    defer std.testing.allocator.free(hidden_feedback);
-    try std.testing.expect(std.mem.indexOf(u8, hidden_feedback, "window larger") != null);
-}
-
-test "win32 commandPaletteCompletionCandidate resolves and cycles defaults" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-
-    try std.testing.expectEqualStrings(
-        "reload_config",
-        commandPaletteCompletionCandidate(snap, "reload_", "reload_", false).?,
-    );
-
-    // toggle_* has multiple matches in defaults; first-next/reverse should
-    // land on entries that all begin with "toggle_".
-    const first = commandPaletteCompletionCandidate(snap, "toggle_", "toggle_", false).?;
-    try std.testing.expect(std.mem.startsWith(u8, first, "toggle_"));
-
-    const second = commandPaletteCompletionCandidate(snap, "toggle_", first, false).?;
-    try std.testing.expect(std.mem.startsWith(u8, second, "toggle_"));
-    try std.testing.expect(!std.mem.eql(u8, first, second));
-
-    const reverse = commandPaletteCompletionCandidate(snap, "toggle_", first, true).?;
-    try std.testing.expect(std.mem.startsWith(u8, reverse, "toggle_"));
-    try std.testing.expect(!std.mem.eql(u8, reverse, first));
-}
-
 test "win32 rich palette completion cycles duplicate display text by stable id" {
     var items: [2]PaletteItem = undefined;
     var payloads: [2]PalettePayload = undefined;
@@ -36846,65 +29643,6 @@ test "win32 rich palette completion cycles duplicate display text by stable id" 
     try std.testing.expectEqualStrings("Same title", first.text);
     try std.testing.expectEqualStrings("Same title", second.text);
     try std.testing.expect(!first.id.eql(second.id));
-}
-
-test "win32 commandPaletteBannerText shows ready banner for valid action" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-    const banner = (try commandPaletteBannerText(std.testing.allocator, snap, "new_tab", empty_mru)).?;
-    defer std.testing.allocator.free(banner);
-    try std.testing.expect(std.mem.startsWith(u8, banner, "Ready: new_tab"));
-    try std.testing.expect(std.mem.indexOf(u8, banner, "Open a new tab") != null);
-}
-
-test "win32 commandPaletteBannerText suggests matching actions" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-    const banner = (try commandPaletteBannerText(std.testing.allocator, snap, "new_", empty_mru)).?;
-    defer std.testing.allocator.free(banner);
-    // Top-5 match cap means a specific "new_split:*" may or may not
-    // appear, but the banner should list at least new_tab and at
-    // least one new_split variant.
-    try std.testing.expect(std.mem.indexOf(u8, banner, "new_tab") != null);
-    try std.testing.expect(std.mem.indexOf(u8, banner, "new_split") != null);
-}
-
-test "win32 commandPaletteBannerText resolves unique prefix" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-    const banner = (try commandPaletteBannerText(std.testing.allocator, snap, "reload_", empty_mru)).?;
-    defer std.testing.allocator.free(banner);
-    try std.testing.expect(std.mem.startsWith(u8, banner, "Ready: reload_config"));
-    try std.testing.expect(std.mem.indexOf(u8, banner, "Reload") != null);
-}
-
-test "win32 commandPaletteBannerText uses fullscreen description" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-    const banner = (try commandPaletteBannerText(std.testing.allocator, snap, "toggle_fullscreen", empty_mru)).?;
-    defer std.testing.allocator.free(banner);
-    try std.testing.expect(std.mem.startsWith(u8, banner, "Ready: toggle_fullscreen"));
-    try std.testing.expect(std.mem.indexOf(u8, banner, "fullscreen") != null);
-}
-
-test "win32 commandPaletteBannerText suggests tab overview action" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const snap = PaletteSnapshot.fromDefaults();
-    const empty_mru: []const []const u8 = &.{};
-    const banner = (try commandPaletteBannerText(std.testing.allocator, snap, "toggle_tab", empty_mru)).?;
-    defer std.testing.allocator.free(banner);
-    try std.testing.expect(std.mem.indexOf(u8, banner, "toggle_tab_overview") != null);
-    // "tab overview" is part of the default description verbatim.
-    try std.testing.expect(std.mem.indexOf(u8, banner, "tab overview") != null);
 }
 
 test "win32 desiredTabIndex cycles and clamps" {
@@ -36953,18 +29691,18 @@ test "win32 tab button mouse-up only closes when released in close zone" {
 test "win32 captionButtonSysCommand maps integrated titlebar buttons" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(?WPARAM, SC_MINIMIZE), captionButtonSysCommand(HTMINBUTTON, false));
-    try std.testing.expectEqual(@as(?WPARAM, SC_MINIMIZE), captionButtonSysCommand(HTMINBUTTON, true));
-    try std.testing.expectEqual(@as(?WPARAM, SC_MAXIMIZE), captionButtonSysCommand(HTMAXBUTTON, false));
-    try std.testing.expectEqual(@as(?WPARAM, SC_RESTORE), captionButtonSysCommand(HTMAXBUTTON, true));
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_MINIMIZE), captionButtonSysCommand(c.HTMINBUTTON, false));
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_MINIMIZE), captionButtonSysCommand(c.HTMINBUTTON, true));
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_MAXIMIZE), captionButtonSysCommand(c.HTMAXBUTTON, false));
+    try std.testing.expectEqual(@as(?WPARAM, c.SC_RESTORE), captionButtonSysCommand(c.HTMAXBUTTON, true));
 }
 
 test "win32 captionButtonSysCommand ignores non minimize/maximize hit tests" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(HTCLIENT, false));
-    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(HTCAPTION, false));
-    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(HTCLOSE, false));
+    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLIENT, false));
+    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCAPTION, false));
+    try std.testing.expectEqual(@as(?WPARAM, null), captionButtonSysCommand(c.HTCLOSE, false));
 }
 
 test "win32 titlebar glyph mapping uses Win11 glyph codepoints" {

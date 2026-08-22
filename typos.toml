@@ -73,10 +73,3 @@ GIR = "GIR"
 rin = "rin"
 # sprites
 ower = "ower"
-
-[type.po]
-extend-glob = ["*.po"]
-check-file = false
-
-[type.swift.extend-words]
-inout = "inout"

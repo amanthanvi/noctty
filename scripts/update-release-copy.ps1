@@ -12,7 +12,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
 $readmePath = Join-Path $repoRoot 'README.md'
 $readme = [System.IO.File]::ReadAllText($readmePath)
 if ($readme -notmatch 'noctty\s+(?<version>\d+\.\d+\.\d+)\]\(https://github\.com/amanthanvi/noctty/releases/tag/v\k<version>\)') {

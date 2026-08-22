@@ -2,7 +2,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'common.ps1')
+$repoRoot = Get-RepoRoot
 $failures = [System.Collections.Generic.List[string]]::new()
 $node = Get-Command node -ErrorAction SilentlyContinue
 $tracked = @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- '*.ps1' '*.psm1' '*.json')

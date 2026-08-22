@@ -9,7 +9,6 @@ https://deps.files.ghostty.org/gettext-0.24.tar.gz
 https://deps.files.ghostty.org/ghostty-themes-release-20260323-152405-a2c7b60.tgz
 https://deps.files.ghostty.org/glslang-12201278a1a05c0ce0b6eb6026c65cd3e9247aa041b1c260324bf29cee559dd23ba1.tar.gz
 https://deps.files.ghostty.org/gobject-2025-11-08-23-1.tar.zst
-https://deps.files.ghostty.org/gtk4-layer-shell-1.1.0.tar.gz
 https://deps.files.ghostty.org/harfbuzz-11.0.0.tar.xz
 https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz
 https://deps.files.ghostty.org/libpng-1220aa013f0c83da3fb64ea6d327f9173fa008d10e28bc9349eac3463457723b1c66.tar.gz

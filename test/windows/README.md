@@ -7,6 +7,128 @@ Each interactive Win11 harness uses its own repo-local sandbox under
 only that harness's logs/temp state instead of tearing down sibling
 validators.
 
+## interactive-win11-accessibility.ps1
+
+Full interactive UI Automation story for terminal text, focus, notifications,
+Settings, themes, High Contrast, and accessibility idle/stress behavior.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-accessibility.ps1 -ResetState
+```
+
+## interactive-win11-key-input.ps1
+
+Validates Win32 keyboard and Unicode input delivery plus focus ownership across
+the supported key scenarios.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-key-input.ps1 -ResetState -Key a
+```
+
+## interactive-win11-new-tab.ps1
+
+Validates new-tab creation, focus, and preservation of maximized host-window
+state while inactive tabs initialize.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-new-tab.ps1 -ResetState
+```
+
+## interactive-win11-configured-size.ps1
+
+Launches a terminal with configured row and column dimensions and verifies the
+resulting console and native-window size evidence.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-configured-size.ps1 -ResetState
+```
+
+## interactive-win11-shell-command.ps1
+
+Validates configured `cmd.exe` and PowerShell shell-command launch paths,
+captured output, exit status, and failure diagnostics.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-shell-command.ps1 -ResetState
+```
+
+## interactive-win11-shell-command-live.ps1
+
+Types a Noctty CLI action into a live terminal and validates focus, screen
+capture, and command output.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-shell-command-live.ps1 -ResetState -CliAction +help
+```
+
+## interactive-win11-pr-smoke.ps1
+
+Serial PR smoke entry point for startup, input, tabs, resize, undo,
+accessibility, palette-theme, and session-restore harnesses.
+
+```powershell
+pwsh -NoProfile -File .\interactive-win11-pr-smoke.ps1 -ResetState
+```
+
+## interactive-win11-stateful-lib.ps1
+
+Dot-sourced helpers for stateful window discovery, Win32 messaging, pixel
+sampling, process launch, and cleanup. It is not a standalone harness.
+
+## cli-shell-command.ps1
+
+Runs a Noctty CLI action through `cmd.exe` or PowerShell and verifies its
+exit code plus expected redirected text.
+
+```powershell
+pwsh -NoProfile -File .\cli-shell-command.ps1 -Shell cmd -Arguments +help -ExpectedText 'Usage: noctty'
+```
+
+## cli-redirected-text-action.ps1
+
+Runs a GUI-subsystem CLI action with redirected stdout/stderr and verifies
+clean, bounded text-mode completion. Wired into `package-portable-cli.ps1`.
+
+```powershell
+pwsh -NoProfile -File .\cli-redirected-text-action.ps1 -Action +help -ExpectedText 'Usage: noctty'
+```
+
+## cli-detached-action.ps1
+
+Validates a detached CLI action, its resource discovery, timeout behavior, and
+absence of the native CLI-failure dialog.
+
+```powershell
+pwsh -NoProfile -File .\cli-detached-action.ps1 -Action +version
+```
+
+## package-portable-cli.ps1
+
+Packages or reuses a portable build, then runs shell, redirected-text, and
+detached-action checks against the staged artifacts.
+
+```powershell
+pwsh -NoProfile -File .\package-portable-cli.ps1 -Version 0.0.1
+```
+
+## assert-interactive-runner.ps1
+
+GitHub Actions preflight for the dedicated interactive Windows runner. It
+checks OS/session/runner provenance and can write the evidence JSON path.
+
+```powershell
+pwsh -NoProfile -File .\assert-interactive-runner.ps1 -OutputPath .\runner-evidence.json
+```
+
+## powershell-shell-integration.ps1
+
+Manual check for PowerShell shell-integration prompt hooks, OSC output, URI
+escaping, feature flags, and cleanup. It is not wired into an automated runner.
+
+```powershell
+pwsh -NoProfile -File .\powershell-shell-integration.ps1
+```
+
 ## interactive-win11-validate.ps1
 
 Composite Win11 validator. It runs launch-helper checks and startup smoke,
@@ -202,7 +324,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\interactive-win11-session-restore
 ## ..\..\scripts\interactive-win11.ps1
 
 Generic repo-local Win11 launcher for ad hoc debugging. It uses the
-same sandbox/bootstrap logic as the focused harnesses and can either
+same sandbox setup logic as the focused harnesses and can either
 launch `noctty` directly or open a shell with the sandbox
 environment applied.
 
@@ -211,6 +333,16 @@ Run with:
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File ..\..\scripts\interactive-win11.ps1 -ResetState
 ```
+
+## Style
+
+- Define reusable helpers as `function Verb-Noun { ... }` with a `param(...)`
+  block and typed, PascalCase parameters where practical.
+- Resolve `$repoRoot` once, then dot-source shared code with
+  `. (Join-Path $repoRoot 'scripts\name.ps1')`.
+- Aim for roughly 120 columns. Wrap multi-parameter invocations with splatting
+  or aligned continuations; keep indivisible diagnostic strings and pinned
+  regular expressions intact.
 
 ## test_dll_init.c
 

@@ -139,14 +139,6 @@ in
       };
     }
     {
-      name = "N-V-__8AALiNBAA-_0gprYr92CjrMj1I5bqNu0TSJOnjFNSr";
-      path = fetchZigArtifact {
-        name = "gtk4_layer_shell";
-        url = "https://deps.files.ghostty.org/gtk4-layer-shell-1.1.0.tar.gz";
-        hash = "sha256-mChCgSYKXu9bT2OlXxbEv2p4ihAgptsDfssPcfozaYg=";
-      };
-    }
-    {
       name = "N-V-__8AAG02ugUcWec-Ndp-i7JTsJ0dgF8nnJRUInkGLG7G";
       path = fetchZigArtifact {
         name = "harfbuzz";
