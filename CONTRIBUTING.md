@@ -6,6 +6,8 @@ This repository is a public, Windows-only project. Issues and pull
 requests are welcome, but contributions need to be small in scope, well
 reasoned, and validated against the Windows runtime shipped here.
 
+Upstream-derived changes must follow the [upstream merge policy](docs/upstream-merge-policy.md).
+
 For usage questions, design discussion, or anything that isn't a
 reproducible bug, use
 [Discussions](https://github.com/amanthanvi/noctty/discussions).
