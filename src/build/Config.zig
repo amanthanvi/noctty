@@ -37,6 +37,7 @@ strip: bool = false,
 
 /// Artifacts
 emit_bench: bool = false,
+emit_conpty_host: bool = false,
 emit_docs: bool = false,
 emit_exe: bool = false,
 emit_helpgen: bool = false,
@@ -244,6 +245,16 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
         "Build and install the benchmark executables.",
     ) orelse false;
 
+    config.emit_conpty_host = b.option(
+        bool,
+        "emit-conpty-host",
+        "Build and install the standalone Windows ConPTY host spike.",
+    ) orelse false;
+
+    if (config.emit_conpty_host and target.result.os.tag != .windows) {
+        return error.ConptyHostRequiresWindowsTarget;
+    }
+
     config.emit_helpgen = b.option(
         bool,
         "emit-helpgen",
@@ -257,6 +268,7 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
     ) orelse emit_docs: {
         // If we are emitting any other artifacts then we default to false.
         if (config.emit_bench or
+            config.emit_conpty_host or
             config.emit_test_exe or
             config.emit_helpgen or
             config.emit_lib_vt) break :emit_docs false;

@@ -252,11 +252,14 @@ Terminal's #20077 proposal). This increment validates the third tier
 of the session promise without committing the XL build. **Shape:**
 standalone `conpty-host` exe reusing `src/pty.zig`/`Command.zig`:
 owns one pwsh under ConPTY, ring-buffers output, serves a named pipe;
-test = attach, run a TUI, hard-kill the client, reattach, confirm the
-shell survived and the viewport repaints on a resize nudge. Green
+test = attach, run a synthetic alt-screen TUI, hard-kill the client,
+reattach, confirm the shell survived, and receive a cursor-addressed
+redraw containing the same pre-kill content after a resize nudge. Green
 graduates durable-session planning (C16); red caps the aspiration
 honestly. Evidence:
 [durable-session-spike report](wayfinder/competitive-analysis/research/durable-session-spike.md).
+**Result (2026-08-21): GREEN; C16 may graduate to planning, while the
+XL implementation remains deferred and unscheduled.**
 
 ### C17 · Named layouts: profile + split tree + hotkey in one object — M · [#133](https://github.com/amanthanvi/noctty/issues/133)
 
