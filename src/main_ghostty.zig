@@ -19,6 +19,13 @@ const MainReturn = switch (build_config.artifact) {
 };
 
 pub fn main() !MainReturn {
+    const dll_search_error = if (comptime builtin.target.os.tag == .windows and
+        build_config.artifact == .exe and
+        build_config.app_runtime == .win32)
+        apprt.win32.setDefaultDllDirectories()
+    else
+        null;
+
     if (comptime builtin.target.os.tag == .windows and
         build_config.artifact == .exe and
         build_config.app_runtime == .win32)
@@ -33,6 +40,13 @@ pub fn main() !MainReturn {
     };
     defer state.deinit();
     const alloc = state.alloc;
+
+    if (dll_search_error) |err| {
+        std.log.warn(
+            "failed to restrict default DLL search directories win32_error={d}",
+            .{@intFromEnum(err)},
+        );
+    }
 
     if (comptime builtin.mode == .Debug) {
         std.log.warn("This is a debug build. Performance will be very poor.", .{});

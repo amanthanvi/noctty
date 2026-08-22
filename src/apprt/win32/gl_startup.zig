@@ -50,6 +50,16 @@ pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
     return .{ .previous_mode = previous_mode, .active = true };
 }
 
+/// Remove the current directory and inherited PATH from bare-name DLL
+/// resolution before process initialization can trigger any dynamic loads.
+/// The caller captures and logs a failure only after global logging is ready.
+pub fn setDefaultDllDirectories() ?windows.Win32Error {
+    if (sys.SetDefaultDllDirectories(c.LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) != 0) {
+        return null;
+    }
+    return windows.kernel32.GetLastError();
+}
+
 pub const OpenGLStartupStep = enum {
     get_dc,
     choose_pixel_format,

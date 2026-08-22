@@ -435,7 +435,14 @@ Use **New Elevated Window** in the command palette, or bind
 `new_window_elevated:`. The empty payload uses the current/default Windows
 shell profile; `new_window_elevated:<profile-key>` selects a detected profile
 by key. Windows shows a UAC prompt before the new process starts. Cancelling
-the prompt leaves the current window unchanged.
+the prompt leaves the current window unchanged. The relaunch call is
+synchronous, so the initiating window is unresponsive while the UAC prompt is
+open.
+
+The roadmap originally asked for a per-profile `run elevated` flag. Windows
+profiles in noctty are detected from installed shells rather than declared in
+a user-authored profile schema, so there is no profile property to set. The
+per-profile equivalent is a `new_window_elevated:<profile-key>` binding.
 
 An elevated noctty is a separate process and a separate window. Its title is
 prefixed with `Administrator: `. Elevated and non-elevated tabs cannot be
@@ -445,23 +452,38 @@ shell across that boundary is not a supported design.
 Single-instance IPC is scoped by integrity level. A normal launch and
 `+new-window` forward only to an existing noctty at the caller's integrity
 level. From an elevated shell, `+new-window` therefore opens in the elevated
-group (and starts an elevated noctty when that group is absent), while
-`+list-windows` lists only elevated windows. The same commands from a
-non-elevated shell see only the non-elevated group; neither direction silently
-forwards a window across the integrity boundary.
+group (and starts an elevated noctty when that group is absent). A
+default-terminal handoff from an elevated console lands in that same
+`.elevated` group. The automation surface is scoped identically:
+`+list-windows` sees only its integrity group and `+perform-action` can target
+only windows in that group. The same commands from a non-elevated shell see
+only the non-elevated group; neither direction silently forwards or automates
+a window across the integrity boundary.
 
-Elevated processes do not read or write
-`%LOCALAPPDATA%\noctty\session-state.json`. They never restore an earlier
-workspace, never overwrite the non-elevated saved workspace, and are not
-resurrected by session restore. Configuration and other per-user state still
-resolve from the same `%LOCALAPPDATA%\noctty\` profile as the non-elevated
-process.
+Toast activation, Explorer, and jump-list launches start a medium-integrity
+process. They cannot activate into an existing elevated window and instead use
+or start the `.medium` group.
+
+A split-token elevated process (`TokenElevationTypeFull`) does not read or
+write `%LOCALAPPDATA%\noctty\session-state.json`. It never restores an earlier
+workspace, overwrites the non-elevated saved workspace, or gets resurrected by
+session restore. With UAC disabled, or under the built-in Administrator
+account, Windows reports the process as elevated but uses the default token
+elevation type. In that case the `Administrator: ` title prefix and
+`.elevated` pipe grouping still apply, while session restore remains enabled
+because there is no non-elevated split-token counterpart to protect.
+Configuration and other per-user state still resolve from the same
+`%LOCALAPPDATA%\noctty\` profile as the non-elevated process.
 
 An elevated noctty loads the same `%LOCALAPPDATA%\noctty\config.ghostty` and
 the same explicit `--config-file` overrides as a non-elevated process. Those
 files remain writable by the ordinary user account, so anything that can
 modify the configuration, including `command`, `shell-integration`, and theme
 paths, runs at high integrity the next time an elevated window opens.
+
+At process startup, noctty restricts bare-name DLL resolution to the
+application directory, System32, and explicitly added DLL directories. The
+current directory and inherited `PATH` are excluded from that search order.
 
 UIPI also prevents files from being dragged from non-elevated Explorer into
 an elevated noctty window. No message-filter exception is installed; use a

@@ -207,6 +207,7 @@ pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
 pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
 pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
+pub const setDefaultDllDirectories = gl_startup.setDefaultDllDirectories;
 pub const OpenGLStartupStep = gl_startup.OpenGLStartupStep;
 const beginOpenGLStartupDiagnostics = gl_startup.beginOpenGLStartupDiagnostics;
 pub const clearOpenGLStartupFailure = gl_startup.clearOpenGLStartupFailure;
@@ -1051,9 +1052,7 @@ fn connectToIpcPipe(
             windows.OPEN_EXISTING,
             // Deny impersonation outright rather than relying on the server
             // never having read a message from us. See the constants.
-            windows.FILE_ATTRIBUTE_NORMAL |
-                c.SECURITY_SQOS_PRESENT |
-                c.SECURITY_IDENTIFICATION,
+            win32_ipc.client_pipe_open_flags,
             null,
         );
         if (handle != windows.INVALID_HANDLE_VALUE) {
@@ -3353,9 +3352,13 @@ pub const App = struct {
 
     core_app: *CoreApp,
     config: configpkg.Config,
-    /// Cached process-token elevation state. This scopes IPC and session
-    /// persistence consistently for the full lifetime of the process.
+    /// Cached TokenElevation state. This scopes the title and IPC namespace
+    /// consistently for the full lifetime of the process.
     is_elevated: bool = false,
+    /// Session persistence is excluded only for a genuine full split token.
+    /// UAC-off and built-in-Administrator tokens are elevated but default
+    /// elevation type, so they keep normal session persistence.
+    session_state_excluded_for_elevation: bool = false,
     config_revision: u64 = 1,
     resolved_theme: ThemeColors = darkTheme(),
     hinstance: HINSTANCE,
@@ -3542,7 +3545,26 @@ pub const App = struct {
         const embedding_mode = win32_terminal_handoff.isEmbeddingProcess(core_app.alloc);
         const recovery_startup = if (embedding_mode) RecoveryStartup{} else beginRecoveryStartup(core_app.alloc);
         const safe_mode = opts.safe_mode or recovery_startup.decision == .safe_mode;
-        const is_elevated = try win32_elevation.isProcessElevated();
+        const is_elevated = win32_elevation.isProcessElevated() catch |err| elevated: {
+            log.warn(
+                "failed to query TokenElevation; treating process as elevated for title and IPC isolation err={}",
+                .{err},
+            );
+            break :elevated true;
+        };
+        const session_state_excluded_for_elevation = if (is_elevated) excluded: {
+            const elevation_type = win32_elevation.processTokenElevationType() catch |err| {
+                log.warn(
+                    "failed to query TokenElevationType; leaving session state enabled because exclusion requires TokenElevationTypeFull err={}",
+                    .{err},
+                );
+                break :excluded false;
+            };
+            break :excluded win32_elevation.excludesSessionState(
+                is_elevated,
+                elevation_type,
+            );
+        } else false;
         self.* = .{
             .core_app = core_app,
             .config = if (safe_mode) config: {
@@ -3552,6 +3574,7 @@ pub const App = struct {
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
             .is_elevated = is_elevated,
+            .session_state_excluded_for_elevation = session_state_excluded_for_elevation,
             .safe_mode = safe_mode,
             .embedding_mode = embedding_mode,
             .recovery_startup = recovery_startup,
@@ -3566,6 +3589,14 @@ pub const App = struct {
         // SetWinEventHook registration already has somewhere to deliver.
         cloak_event_app = self;
         win32_power.setCloakEventHandler(&onHostCloakEvent);
+        if (self.session_state_excluded_for_elevation and
+            self.config.@"window-save-state" != .never)
+        {
+            log.info(
+                "win32 session state disabled: process token is TokenElevationTypeFull (split-token elevated)",
+                .{},
+            );
+        }
         // Snapshot the CLI --config-file override BEFORE any code has
         // a chance to chdir. See the field comment above.
         self.cli_config_override_path = cliConfigFileOverride(core_app.alloc) catch null;
@@ -4250,7 +4281,7 @@ pub const App = struct {
     }
 
     fn loadSessionState(self: *App) !?std.json.Parsed(win32_session_state.SessionState) {
-        if (self.is_elevated) return null;
+        if (self.session_state_excluded_for_elevation) return null;
         if (!self.sessionStateEnabled()) return null;
         const path = self.sessionStatePath() orelse return null;
         defer self.core_app.alloc.free(path);
@@ -4842,7 +4873,7 @@ pub const App = struct {
     }
 
     fn saveSessionState(self: *const App) bool {
-        if (self.is_elevated) return false;
+        if (self.session_state_excluded_for_elevation) return false;
         if (!self.sessionStateEnabled()) return false;
         const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
@@ -5370,7 +5401,7 @@ pub const App = struct {
         );
         if (first_pipe == windows.INVALID_HANDLE_VALUE) {
             const create_error = windows.kernel32.GetLastError();
-            if (win32_elevation.isIpcPipeClaimConflict(create_error)) {
+            if (win32_ipc.isIpcPipeClaimConflict(create_error)) {
                 log.warn("win32 IPC pipe ownership claim failed err={}; retrying startup forward once", .{create_error});
                 const forwarded = self.tryForwardStartupToExistingInstance() catch |err| failed: {
                     log.warn("win32 IPC retry forward failed err={}", .{err});
@@ -33933,7 +33964,7 @@ test "win32 elevation authenticates a same-process pipe server token" {
         0,
         null,
         windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_ipc.client_pipe_open_flags,
         null,
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
@@ -33944,8 +33975,18 @@ test "win32 elevation authenticates a same-process pipe server token" {
         try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
     }
 
+    const identity = try win32_elevation.inspectPipeServerIdentity(
+        std.testing.allocator,
+        client,
+    );
+    try std.testing.expectEqual(sys.GetCurrentProcessId(), identity.process_id);
+    try std.testing.expect(identity.same_user);
     try std.testing.expectEqual(
         try win32_elevation.isProcessElevated(),
+        identity.elevated,
+    );
+    try std.testing.expectEqual(
+        identity.same_user and identity.elevated,
         try win32_elevation.authenticateElevatedPipeServer(
             std.testing.allocator,
             client,
@@ -35661,7 +35702,7 @@ test "win32 IPC silent synchronous client read is bounded" {
         0,
         null,
         windows.OPEN_EXISTING,
-        windows.FILE_ATTRIBUTE_NORMAL,
+        win32_ipc.client_pipe_open_flags,
         null,
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);

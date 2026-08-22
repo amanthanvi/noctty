@@ -3,20 +3,27 @@ const configpkg = @import("../config.zig");
 
 const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
+const log = std.log.scoped(.win32_elevation);
 
 pub const title_prefix = "Administrator: ";
 
 const token_query: windows.DWORD = 0x0008;
 const process_query_limited_information: windows.DWORD = 0x1000;
 const token_user_class: c_int = 1;
+const token_elevation_type_class: c_int = 18;
 const token_elevation_class: c_int = 20;
 const sw_show_normal: c_int = 1;
 const see_mask_flag_no_ui: windows.ULONG = 0x00000400;
 const sddl_revision_1: windows.DWORD = 1;
-const file_flag_first_pipe_instance: windows.DWORD = 0x00080000;
 
 const TokenElevation = extern struct {
     token_is_elevated: windows.DWORD,
+};
+
+pub const TokenElevationType = enum(windows.DWORD) {
+    default = 1,
+    full = 2,
+    limited = 3,
 };
 
 const SidAndAttributes = extern struct {
@@ -101,6 +108,37 @@ fn queryProcessElevated() !bool {
     defer _ = windows.CloseHandle(token_handle);
 
     return try tokenIsElevated(token_handle);
+}
+
+/// Return the current process token's UAC split-token elevation type.
+///
+/// This query intentionally does not share the `TokenElevation` cache. A
+/// class-18 failure must not discard a valid class-20 result used to scope
+/// the title and single-instance IPC namespace.
+pub fn processTokenElevationType() !TokenElevationType {
+    const token_handle = try openProcessToken(windows.GetCurrentProcess());
+    defer _ = windows.CloseHandle(token_handle);
+
+    var raw_type: windows.DWORD = 0;
+    var returned_size: windows.DWORD = 0;
+    if (GetTokenInformation(
+        token_handle,
+        token_elevation_type_class,
+        &raw_type,
+        @sizeOf(windows.DWORD),
+        &returned_size,
+    ) == 0) {
+        return windows.unexpectedError(windows.kernel32.GetLastError());
+    }
+    if (returned_size < @sizeOf(windows.DWORD)) return error.Unexpected;
+    return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
+}
+
+pub fn excludesSessionState(
+    elevated: bool,
+    elevation_type: TokenElevationType,
+) bool {
+    return elevated and elevation_type == .full;
 }
 
 fn openProcessToken(process: windows.HANDLE) !windows.HANDLE {
@@ -226,12 +264,19 @@ pub fn adoptPipeSecurityDescriptor(descriptor: *anyopaque) IpcPipeSecurity {
     };
 }
 
-/// Authenticate the process at the server end of a connected elevated pipe.
-/// The server must run elevated under the same token user SID as this process.
-pub fn authenticateElevatedPipeServer(
+pub const PipeServerIdentity = struct {
+    process_id: windows.DWORD,
+    same_user: bool,
+    elevated: bool,
+};
+
+/// Inspect the process at the server end of a connected pipe. Keeping these
+/// results observable lets the live Win32 test prove that both PID lookup and
+/// token-user SID comparison ran, even when the test process is not elevated.
+pub fn inspectPipeServerIdentity(
     alloc: Allocator,
     pipe: windows.HANDLE,
-) !bool {
+) !PipeServerIdentity {
     var server_process_id: windows.DWORD = 0;
     if (GetNamedPipeServerProcessId(pipe, &server_process_id) == 0) {
         return windows.unexpectedError(windows.kernel32.GetLastError());
@@ -250,25 +295,30 @@ pub fn authenticateElevatedPipeServer(
     const server_token = try openProcessToken(server_process);
     defer _ = windows.CloseHandle(server_token);
 
-    if (!(try tokenIsElevated(server_token))) return false;
-
     const current_user_bytes = try allocTokenUser(alloc, current_token);
     defer alloc.free(current_user_bytes);
     const server_user_bytes = try allocTokenUser(alloc, server_token);
     defer alloc.free(server_user_bytes);
 
-    return EqualSid(
+    const same_user = EqualSid(
         tokenUser(current_user_bytes).user.sid,
         tokenUser(server_user_bytes).user.sid,
     ) != 0;
+    return .{
+        .process_id = server_process_id,
+        .same_user = same_user,
+        .elevated = try tokenIsElevated(server_token),
+    };
 }
 
-pub fn ipcPipeOpenMode(base_mode: windows.DWORD, first_instance: bool) windows.DWORD {
-    return base_mode | if (first_instance) file_flag_first_pipe_instance else 0;
-}
-
-pub fn isIpcPipeClaimConflict(err: windows.Win32Error) bool {
-    return err == .ACCESS_DENIED or err == .PIPE_BUSY;
+/// Authenticate the process at the server end of a connected elevated pipe.
+/// The server must run elevated under the same token user SID as this process.
+pub fn authenticateElevatedPipeServer(
+    alloc: Allocator,
+    pipe: windows.HANDLE,
+) !bool {
+    const identity = try inspectPipeServerIdentity(alloc, pipe);
+    return identity.same_user and identity.elevated;
 }
 
 /// Allocate the effective window title, including the elevation marker when
@@ -470,6 +520,13 @@ pub fn launchElevated(
 
     const err = windows.kernel32.GetLastError();
     if (err == .CANCELLED) return .cancelled;
+    log.warn(
+        "ShellExecuteExW runas failed win32_error={d} hInstApp=0x{x}",
+        .{
+            @intFromEnum(err),
+            if (info.instance) |instance| @intFromPtr(instance) else 0,
+        },
+    );
     return windows.unexpectedError(err);
 }
 
@@ -562,16 +619,11 @@ test "elevation IPC pipe SDDL is owner-only at high integrity" {
     );
 }
 
-test "elevation IPC pipe claims only the first instance" {
-    const base_mode: windows.DWORD = 0x00000003;
-    try std.testing.expectEqual(
-        base_mode | file_flag_first_pipe_instance,
-        ipcPipeOpenMode(base_mode, true),
-    );
-    try std.testing.expectEqual(base_mode, ipcPipeOpenMode(base_mode, false));
-    try std.testing.expect(isIpcPipeClaimConflict(.ACCESS_DENIED));
-    try std.testing.expect(isIpcPipeClaimConflict(.PIPE_BUSY));
-    try std.testing.expect(!isIpcPipeClaimConflict(.INVALID_PARAMETER));
+test "elevation session state exclusion requires a full split token" {
+    try std.testing.expect(excludesSessionState(true, .full));
+    try std.testing.expect(!excludesSessionState(true, .default));
+    try std.testing.expect(!excludesSessionState(true, .limited));
+    try std.testing.expect(!excludesSessionState(false, .full));
 }
 
 test "elevation relaunch parameters forward config class and cwd exactly" {
@@ -636,6 +688,27 @@ test "elevation relaunch parameters serialize and outer-quote direct command" {
 
     try testing.expectEqualStrings(
         \\--working-directory=C:\work "--command=direct:pwsh.exe -NoLogo \"C:\Program Files\profile.ps1\" \"say \\\"hello\\\"\""
+    , parameters);
+}
+
+test "elevation relaunch parameters double a trailing backslash before closing quote" {
+    const testing = std.testing;
+    const argv = [_][]const u8{"C:\\noctty.exe"};
+    const direct_args = [_][:0]const u8{ "cmd.exe", "C:\\path\\" };
+    const command: configpkg.Command = .{ .direct = &direct_args };
+
+    const parameters = try buildRelaunchParameters(
+        testing.allocator,
+        &argv,
+        null,
+        "C:\\work",
+        "C:\\startup",
+        command,
+    );
+    defer testing.allocator.free(parameters);
+
+    try testing.expectEqualStrings(
+        \\--working-directory=C:\work "--command=direct:cmd.exe \"C:\path\\\\\""
     , parameters);
 }
 
