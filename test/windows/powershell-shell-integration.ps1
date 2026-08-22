@@ -17,6 +17,7 @@ function Assert-True {
 $script:OriginalPrompt = $function:global:prompt
 $script:OriginalOut = [Console]::Out
 $script:OriginalFeatures = $env:GHOSTTY_SHELL_FEATURES
+$script:OriginalUtf8Console = $env:GHOSTTY_UTF8_CONSOLE
 $script:TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-ps-si-" + [guid]::NewGuid().ToString('n'))
 
 try {
@@ -27,7 +28,9 @@ try {
 
     function global:prompt { 'PS> ' }
 
+    $env:GHOSTTY_UTF8_CONSOLE = '1'
     . (Join-Path $RepoRoot 'src\shell-integration\powershell\integration.ps1')
+    Assert-True (-not (Test-Path Env:GHOSTTY_UTF8_CONSOLE)) "UTF-8 console launch signal leaked into the interactive environment"
 
     $cwdUri = __ghostty_encode_cwd_uri
     Assert-True ($cwdUri.StartsWith('file://')) "OSC 7 cwd URI must include file:// scheme"
@@ -130,6 +133,11 @@ try {
         Remove-Item Env:GHOSTTY_SHELL_FEATURES -ErrorAction SilentlyContinue
     } else {
         $env:GHOSTTY_SHELL_FEATURES = $script:OriginalFeatures
+    }
+    if ($null -eq $script:OriginalUtf8Console) {
+        Remove-Item Env:GHOSTTY_UTF8_CONSOLE -ErrorAction SilentlyContinue
+    } else {
+        $env:GHOSTTY_UTF8_CONSOLE = $script:OriginalUtf8Console
     }
     Remove-Item -LiteralPath $script:TempDir -Recurse -Force -ErrorAction SilentlyContinue
 }

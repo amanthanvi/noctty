@@ -626,6 +626,7 @@ pub const Config = struct {
     env_override: configpkg.RepeatableStringMap = .{},
     shell_integration: configpkg.Config.ShellIntegration = .detect,
     shell_integration_features: configpkg.Config.ShellIntegrationFeatures = .{},
+    utf8_console: configpkg.Utf8Console = .auto,
     cursor_blink: ?bool = null,
     working_directory: ?[]const u8 = null,
     working_directory_home: bool = false,
@@ -795,7 +796,13 @@ const Subprocess = struct {
         // This is not apprt-specific, so we do it here.
         env.remove("VTE_VERSION");
 
+        const utf8_console = if (builtin.os.tag == .windows)
+            windows_shell.shouldApplyUtf8ConsoleForCurrentSystem(cfg.utf8_console)
+        else
+            false;
+
         // Setup our shell integration, if we can.
+        var powershell_utf8_console = false;
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
                 cfg.command orelse switch (builtin.os.tag) {
@@ -849,6 +856,10 @@ const Subprocess = struct {
                 .{integration.shell},
             );
 
+            if (utf8_console and integration.shell == .powershell) {
+                powershell_utf8_console = true;
+            }
+
             break :shell integration.command;
         };
 
@@ -858,6 +869,7 @@ const Subprocess = struct {
                 shell_command,
                 cfg.working_directory,
                 cfg.working_directory_home,
+                utf8_console,
             )
         else
             shell_command;
@@ -869,6 +881,13 @@ const Subprocess = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
             );
+        }
+
+        // This is an internal, per-launch signal. Do not inherit or allow an
+        // env override to replay a decision from a differently configured shell.
+        env.remove("GHOSTTY_UTF8_CONSOLE");
+        if (powershell_utf8_console) {
+            try env.put("GHOSTTY_UTF8_CONSOLE", "1");
         }
 
         // Build our args list

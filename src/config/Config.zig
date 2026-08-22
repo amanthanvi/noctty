@@ -3086,6 +3086,34 @@ keybind: Keybinds = .{},
 /// hard-fail attachment to make descendant cleanup deterministic.
 @"windows-job-object-kill-on-close": bool = false,
 
+/// Controls Windows console UTF-8 setup for bare interactive Command Prompt
+/// launches and interactive PowerShell sessions. This has no effect on WSL or
+/// Git Bash sessions.
+///
+/// The available modes are:
+///
+///   * `auto` (default) - Enable UTF-8 unless either the machine ANSI or OEM
+///     code page is a legacy CJK page: 932 (Shift-JIS), 936 (GBK), 949
+///     (EUC-KR), or 950 (Big5). Those code pages are left unchanged to avoid
+///     breaking programs that depend on them.
+///   * `always` - Enable UTF-8 even when a legacy CJK code page is active.
+///   * `never` - Do not set an environment signal, change Command Prompt
+///     arguments, or alter PowerShell console encodings.
+///
+/// For a bare interactive `cmd.exe`, the preamble runs `chcp 65001` silently
+/// before the prompt and is a no-op when the live console is already UTF-8;
+/// cmd launches with any command tail are left unchanged.
+///
+/// The PowerShell half is performed by the injected shell-integration script,
+/// not by noctty itself: it sets `[Console]::InputEncoding` and
+/// `[Console]::OutputEncoding` only when their live code pages differ. It
+/// therefore requires automatic shell-integration injection to have happened.
+/// With `shell-integration = none`, or with a PowerShell command line that
+/// injection declines (`-Command`, `-File`, `-EncodedCommand`,
+/// `-NonInteractive`), `utf8-console` has no effect on PowerShell at all. The
+/// `cmd.exe` half does not depend on shell integration.
+@"utf8-console": Utf8Console = .auto,
+
 /// Retained compatibility settings from the removed GTK runtime.
 ///
 /// These keys continue to parse so existing configs remain loadable, but they
@@ -8315,6 +8343,9 @@ pub const ShellIntegration = enum {
     nushell,
     zsh,
 };
+
+/// See utf8-console.
+pub const Utf8Console = windows_shell.Utf8Console;
 
 /// Shell integration features
 pub const ShellIntegrationFeatures = packed struct {
