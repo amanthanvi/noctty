@@ -18,11 +18,10 @@ comptime {
 
 const default_ring_size = 1024 * 1024;
 const max_frame_payload = 64 * 1024;
+// LOCAL affects AppContainer pipe-name resolution, not desktop-process security.
 const pipe_prefix = "\\\\.\\pipe\\LOCAL\\noctty-conpty-host-";
 const pipe_access_duplex = 0x00000003;
 const file_flag_first_pipe_instance = 0x00080000;
-const pipe_readmode_byte = 0x00000000;
-const pipe_wait = 0x00000000;
 const pipe_reject_remote_clients = 0x00000008;
 const token_query = 0x0008;
 const token_user_class = 1;
@@ -200,16 +199,15 @@ const Ring = struct {
         return self.statsLocked();
     }
 
-    fn readUntil(self: *Ring, cursor: *u64, end: ?u64, dst: []u8) usize {
+    fn read(self: *Ring, cursor: *u64, dst: []u8) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         const retained_start = self.total - self.len;
         if (cursor.* < retained_start) cursor.* = retained_start;
-        const available_end = @min(self.total, end orelse self.total);
-        if (cursor.* >= available_end) return 0;
+        if (cursor.* >= self.total) return 0;
 
-        const read_len: usize = @intCast(@min(available_end - cursor.*, dst.len));
+        const read_len: usize = @intCast(@min(self.total - cursor.*, dst.len));
         const offset: usize = @intCast(cursor.* - retained_start);
         const read_at = (self.head + offset) % self.bytes.len;
         const first_len = @min(read_len, self.bytes.len - read_at);
@@ -349,17 +347,23 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
 
     var security = try PipeSecurity.init(alloc);
     defer security.deinit();
-    try printStdout(
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    try stdout_writer.interface.print(
         "CONPTY_HOST_READY pipe={s} host_pid={} shell_pid={} ring_capacity={} security=current-user\n",
         .{ pipe_name, windows.GetCurrentProcessId(), shell_pid, ring_size },
     );
+    try stdout_writer.interface.flush();
 
     while (shellRunning(command.pid.?)) {
         var security_attributes = security.attributes();
+        // FIRST_PIPE_INSTANCE fails closed on a collision. It does not prevent a
+        // same-user process from squatting this name between recreated instances;
+        // same-user attackers are outside this feasibility spike's threat model.
         const pipe = windows.kernel32.CreateNamedPipeW(
             pipe_name_w.ptr,
             pipe_access_duplex | file_flag_first_pipe_instance,
-            windows.PIPE_TYPE_BYTE | pipe_readmode_byte | pipe_wait | pipe_reject_remote_clients,
+            windows.PIPE_TYPE_BYTE | pipe_reject_remote_clients,
             1,
             max_frame_payload,
             max_frame_payload,
@@ -371,6 +375,9 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
         }
         defer _ = windows.CloseHandle(pipe);
 
+        // Spike limitation: this synchronous accept has no cancellation. If the
+        // shell exits with no client attached, the host waits here until a client
+        // connects. Product code would need an overlapped, cancellable accept.
         const connected = ConnectNamedPipe(pipe, null);
         if (connected == 0 and @intFromEnum(windows.kernel32.GetLastError()) != error_pipe_connected) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
@@ -411,7 +418,7 @@ fn serveClient(
 
     var payload: [max_frame_payload]u8 = undefined;
     while (shellRunning(shell)) {
-        const read_len = ring.readUntil(&cursor, null, &output);
+        const read_len = ring.read(&cursor, &output);
         if (read_len > 0) try sendFrame(pipe, .output, output[0..read_len]);
 
         var available: windows.DWORD = 0;
@@ -640,11 +647,4 @@ fn makePipeName(alloc: Allocator, name: []const u8) ![:0]u8 {
         }
     }
     return std.fmt.allocPrintSentinel(alloc, pipe_prefix ++ "{s}", .{name}, 0);
-}
-
-fn printStdout(comptime format: []const u8, args: anytype) !void {
-    var buffer: [1024]u8 = undefined;
-    var writer = std.fs.File.stdout().writer(&buffer);
-    try writer.interface.print(format, args);
-    try writer.interface.flush();
 }
