@@ -164,10 +164,17 @@ Enable update checks in your config:
 auto-update = check
 ```
 
-The updater calls
-`api.github.com/repos/amanthanvi/noctty/releases/latest` at most once
-every 24 hours and never replaces binaries silently. In `check` mode it
-opens the release page when a newer stable version exists.
+The updater checks the configured release feed at most once every 24 hours
+and never replaces binaries silently. The feed defaults to noctty's GitHub
+Releases API and can be changed with `auto-update-feed-url`; checksum,
+Authenticode, and pinned-publisher-key verification remain mandatory
+regardless of the feed host. For tests and diagnostics,
+`NOCTTY_UPDATE_FEED_URL` overrides the compiled-in default when no explicit
+`auto-update-feed-url` is set. The precedence is explicit config, then the
+environment variable, then the compiled-in default. In `check` mode it opens
+the release page when a newer stable version exists.
+
+The feed URL is configurable if the release host ever changes.
 
 `auto-update = download` goes further. It downloads only stable Windows
 installer releases that ship architecture-specific SHA256 metadata, then
