@@ -2463,8 +2463,8 @@ fn copySelectionToClipboards(
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
 
-            // Note: We don't apply codepoint mappings to VT format since it contains
-            // escape sequences that should be preserved as-is
+            // Codepoint mappings affect terminal cell text; formatter-generated
+            // VT escape sequences are preserved as-is.
             try contents.append(alloc, .{
                 .mime = "text/plain",
                 .data = try aw.toOwnedSliceSentinel(0),
@@ -2480,8 +2480,7 @@ fn copySelectionToClipboards(
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
 
-            // Note: We don't apply codepoint mappings to HTML format since HTML
-            // has its own character encoding and entity system
+            // Codepoint mappings are applied before HTML encoding.
             try contents.append(alloc, .{
                 .mime = "text/html",
                 .data = try aw.toOwnedSliceSentinel(0),
@@ -2499,7 +2498,7 @@ fn copySelectionToClipboards(
             });
 
             assert(aw.written().len == 0);
-            // Second, generate HTML without codepoint mappings
+            // Second, generate HTML with the same codepoint mappings.
             formatter = .init(self.io.terminal.screens.active, opts: {
                 var copy = opts;
                 copy.emit = .html;
@@ -2515,7 +2514,6 @@ fn copySelectionToClipboards(
             formatter.content = .{ .selection = sel };
             try formatter.format(&aw.writer);
 
-            // Note: We don't apply codepoint mappings to HTML format
             try contents.append(alloc, .{
                 .mime = "text/html",
                 .data = try aw.toOwnedSliceSentinel(0),

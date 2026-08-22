@@ -32,6 +32,8 @@ paths, shells, updates, automation, and troubleshooting, see
   (all OSC 52 selectors target the single native Windows clipboard).
 - Bidi, combining marks, grapheme cluster rendering.
 - Kitty graphics protocol and inline image display.
+- Kitty keyboard protocol input includes press, repeat, and release events,
+  Caps Lock, Num Lock, and left/right physical modifier state.
 - Shell integration for bash, zsh, fish, elvish, nushell, and PowerShell
   (PowerShell through `shell-integration = detect`); `cmd.exe` is a
   plain fallback without prompt/cwd/command-finish integration.
@@ -71,7 +73,9 @@ Win32-validated VT protocol coverage is tracked in
   scrolling.
 - Clipboard paste confirmation for risky content, including dropped
   payloads, gated by `clipboard-paste-protection`. HTML copy writes both
-  Windows CF_HTML and a plain-text fallback.
+  Windows CF_HTML and a plain-text fallback. `clipboard-codepoint-map` applies
+  to plain, VT, and HTML selection copies; clipboard reads, URL copies, OSC 52
+  writes, and `write_screen_file` exports are unchanged.
 - A configurable quick terminal on the top, bottom, left, right, or center
   of the selected monitor area. It has no default binding; `global:`
   keybinds use `RegisterHotKey`. `exclusive` keyboard interactivity falls
@@ -80,7 +84,9 @@ Win32-validated VT protocol coverage is tracked in
   when WinRT cannot show a toast. Command-finish toasts focus the
   originating surface when clicked; other toasts, including OSC 9 and OSC
   777 notifications, have no click action. Packaged Start menu identity is
-  required for reliable cold-start activation.
+  required for reliable cold-start activation. Command-finish focus policy,
+  duration threshold, and bell/`notify` actions are honored when shell
+  integration or OSC 133 supplies command marks.
 - Windows taskbar progress for the active pane in each host window, driven
   by terminal progress reports when `progress-style` is enabled.
 - Session restore via `window-save-state`: windows, tabs, splits,
@@ -89,6 +95,9 @@ Win32-validated VT protocol coverage is tracked in
 - Ctrl-based default keybindings, mostly shared with Ghostty's
   non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
   pane focus and `Alt+F4` to close the window.
+- `key-remap` affects focused and in-app keybinds plus terminal encoding, but
+  does not change physical key identity. Win32 `global:` hotkeys keep the
+  literal configured chord.
 - Native settings window (Appearance, Terminal, Shell, Privacy, Updates,
   Keybindings, Advanced) that stages edits until Save and patches your
   config without rewriting unrelated text.
