@@ -4,13 +4,19 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-12, against current fork HEAD.
+Last updated: 2026-08-22, against fork HEAD `d031dc474`.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
 [windows-capability-matrix.md](windows-capability-matrix.md). For Windows
 paths, shells, updates, automation, and troubleshooting, see
 [windows.md](windows.md).
+
+## Upstream
+
+noctty is based on post-`v1.3.1` upstream main (`1.3.2-dev`, `ba398dfff`,
+2026-04-05). It is a hard fork with scheduled merge windows; see the
+[upstream merge policy](upstream-merge-policy.md).
 
 ## Supported platform
 
