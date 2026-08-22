@@ -49,6 +49,7 @@ $iconPath = Join-Path $primaryArtifactRootPath $iconName
 $releaseBaseUrl = "https://github.com/$Repo/releases/download/$tagValue"
 $projectUrl = "https://github.com/$Repo"
 $releaseUrl = "$projectUrl/releases/tag/$tagValue"
+$licenseUrl = "$projectUrl/blob/$tagValue/LICENSE"
 $iconUrl = "$releaseBaseUrl/$iconName"
 $packageDescription = @"
 noctty is a Windows terminal emulator that reuses Ghostty's terminal core under a native Win32 front end.
@@ -171,10 +172,15 @@ if ($UpstreamBaseVersion) {
 Reset-Directory -Path $outputRootPath
 
 $scoopRoot = Join-Path $outputRootPath "scoop"
+$chocolateyRoot = Join-Path $outputRootPath "chocolatey"
+$chocolateyToolsRoot = Join-Path $chocolateyRoot "tools"
 $metadataPath = Join-Path $outputRootPath "metadata.json"
 $scoopManifestPath = Join-Path $scoopRoot "$ScoopPackageName.json"
+$chocolateyNuspecPath = Join-Path $chocolateyRoot "noctty.nuspec"
+$chocolateyInstallPath = Join-Path $chocolateyToolsRoot "chocolateyInstall.ps1"
 
 New-Item -ItemType Directory -Path $scoopRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $chocolateyToolsRoot -Force | Out-Null
 
 $scoopManifest = [ordered]@{
     version      = $Version
@@ -193,6 +199,80 @@ foreach ($arch in $Architectures) {
     }
 }
 Set-Content -LiteralPath $scoopManifestPath -Value ($scoopManifest | ConvertTo-Json -Depth 5)
+
+$escapedDescription = [System.Security.SecurityElement]::Escape($packageDescription)
+$chocolateyNuspec = @"
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>noctty</id>
+    <version>$Version</version>
+    <title>noctty</title>
+    <authors>Aman Thanvi</authors>
+    <owners>Aman Thanvi</owners>
+    <projectUrl>$projectUrl</projectUrl>
+    <licenseUrl>$licenseUrl</licenseUrl>
+    <iconUrl>$iconUrl</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <summary>$escapedDescription</summary>
+    <description>$escapedDescription</description>
+    <releaseNotes>$releaseUrl</releaseNotes>
+    <copyright>Copyright Aman Thanvi</copyright>
+    <tags>noctty terminal emulator windows ghostty</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
+"@
+Set-Content -LiteralPath $chocolateyNuspecPath -Value $chocolateyNuspec -Encoding utf8
+
+$x64SetupUrl = if ($artifacts.Contains("x64")) { $artifacts["x64"].setupUrl } else { "" }
+$x64SetupSha256 = if ($artifacts.Contains("x64")) { $artifacts["x64"].setupSha256 } else { "" }
+$arm64SetupUrl = if ($artifacts.Contains("arm64")) { $artifacts["arm64"].setupUrl } else { "" }
+$arm64SetupSha256 = if ($artifacts.Contains("arm64")) { $artifacts["arm64"].setupSha256 } else { "" }
+$chocolateyInstall = @'
+$ErrorActionPreference = 'Stop'
+
+$machineArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$installers = @{
+    x64 = @{
+        url = '__X64_SETUP_URL__'
+        checksum = '__X64_SETUP_SHA256__'
+    }
+    arm64 = @{
+        url = '__ARM64_SETUP_URL__'
+        checksum = '__ARM64_SETUP_SHA256__'
+    }
+}
+
+if ($machineArchitecture -notin @('x64', 'arm64')) {
+    throw "Unsupported Windows architecture for noctty: $machineArchitecture"
+}
+
+$installer = $installers[$machineArchitecture]
+if ([string]::IsNullOrWhiteSpace($installer.url) -or [string]::IsNullOrWhiteSpace($installer.checksum)) {
+    throw "The noctty Chocolatey package does not include a $machineArchitecture installer."
+}
+
+$packageArgs = @{
+    packageName = 'noctty'
+    fileType = 'exe'
+    url = $installer.url
+    checksum = $installer.checksum
+    checksumType = 'sha256'
+    silentArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS'
+    validExitCodes = @(0, 1641, 3010)
+}
+
+Install-ChocolateyPackage @packageArgs
+'@
+$chocolateyInstall = $chocolateyInstall.
+    Replace("__X64_SETUP_URL__", $x64SetupUrl).
+    Replace("__X64_SETUP_SHA256__", $x64SetupSha256).
+    Replace("__ARM64_SETUP_URL__", $arm64SetupUrl).
+    Replace("__ARM64_SETUP_SHA256__", $arm64SetupSha256)
+Set-Content -LiteralPath $chocolateyInstallPath -Value $chocolateyInstall -Encoding utf8
 
 $metadataArchitectures = [ordered]@{}
 foreach ($arch in $Architectures) {
@@ -254,6 +334,11 @@ $metadata = [ordered]@{
         manifestPath  = $scoopManifestPath
         manifestRelPath = "$ScoopPackageName.json"
     }
+    chocolatey = [ordered]@{
+        packageName     = "noctty"
+        nuspecPath      = $chocolateyNuspecPath
+        packageDirectory = $chocolateyRoot
+    }
 }
 
 if ($UpstreamBaseVersion) {
@@ -269,4 +354,5 @@ if ($FirstForkPatch -gt 0) {
 Set-Content -LiteralPath $metadataPath -Value ($metadata | ConvertTo-Json -Depth 8)
 
 Write-Host "Scoop manifest         : $scoopManifestPath"
+Write-Host "Chocolatey nuspec      : $chocolateyNuspecPath"
 Write-Host "Metadata               : $metadataPath"
