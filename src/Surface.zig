@@ -1355,9 +1355,11 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
             log.err("error handling abnormal child exit err={}", .{err});
             return;
         };
-        self.queueRender() catch |err| {
-            log.warn("failed to notify renderer of abnormal child exit err={}", .{err});
-        };
+        if (comptime builtin.os.tag == .windows) {
+            self.queueRender() catch |err| {
+                log.warn("failed to notify renderer of abnormal child exit err={}", .{err});
+            };
+        }
 
         return;
     }

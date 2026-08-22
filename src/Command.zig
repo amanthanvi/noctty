@@ -54,9 +54,7 @@ const PostForkFn = fn (*Command) PostForkError!void;
 /// adding a null terminator since POSIX systems are so common.
 path: [:0]const u8,
 
-/// Command-line arguments. It is the responsibility of the caller to set
-/// args[0] to the command. If args is empty then args[0] will automatically
-/// be set to equal path.
+/// Command-line arguments. The caller must set args[0] to a non-empty command.
 args: []const [:0]const u8,
 
 /// On Windows, the final argument is a raw cmd.exe `/C` command string.
@@ -270,6 +268,8 @@ fn startPosix(self: *Command, arena: Allocator) !void {
 }
 
 fn startWindows(self: *Command, arena: Allocator) !void {
+    if (self.args.len == 0 or self.args[0].len == 0) return error.InvalidExe;
+
     const application_w = try std.unicode.utf8ToUtf16LeAllocZ(arena, self.path);
     const application_name_w: ?[*:0]u16 = if (windowsShouldSearchPath(self.path))
         null
@@ -825,6 +825,29 @@ test "Command: windows-direct-command-line keeps argv quoting" {
         "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"say \\\"hello\\\"\" \"C:\\Program Files\\noctty\\\\\"",
         actual,
     );
+}
+
+test "Command: windows-command-line rejects empty executable argument" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const cases = [_][]const [:0]const u8{
+        &.{},
+        &.{""},
+    };
+
+    for (cases) |args| {
+        var cmd: Command = .{
+            .path = "cmd.exe",
+            .args = args,
+            .os_pre_exec = null,
+            .rt_pre_exec = null,
+            .rt_post_fork = null,
+            .rt_pre_exec_info = undefined,
+            .rt_post_fork_info = undefined,
+        };
+
+        try testing.expectError(error.InvalidExe, cmd.start(testing.allocator));
+    }
 }
 
 test "Command: windows-cmd-shell-command-line executes quoted command" {
