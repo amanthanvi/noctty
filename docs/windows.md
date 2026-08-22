@@ -55,6 +55,23 @@ Important files and directories:
 | `%LOCALAPPDATA%\noctty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
 | `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
 
+### Portable mode
+
+Place a regular file named `noctty.portable`, `portable.txt`, or
+`config.ghostty` beside the running executable to opt into portable mode. A
+directory with one of those names is not a marker. A freshly extracted portable
+ZIP is not portable by default: it contains `config-template.ghostty`, which is
+not a marker. Create `noctty.portable` (an empty file is sufficient) when you
+want a self-contained installation.
+
+In portable mode, config, state, and cache data live beside the executable,
+including `config.ghostty`, `update-state.json`, session state, crash dumps, and
+caches. This location takes precedence over `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME`, and `%LOCALAPPDATA%`, so the extracted folder can be moved as
+one unit without leaving noctty runtime data on the host.
+If `%LOCALAPPDATA%\noctty` already contains data, startup logs a warning that
+portable mode is using the adjacent data instead; no automatic migration occurs.
+
 The portable ZIP carries the bundled resources next to the executable.
 Don't move only `noctty.exe` out of the extracted tree; it needs the
 packaged `share` resources for themes, terminfo, shell integration, and
@@ -177,22 +194,36 @@ the release page when a newer stable version exists.
 The feed URL is configurable if the release host ever changes.
 
 `auto-update = download` goes further. It downloads only stable Windows
-installer releases that ship architecture-specific SHA256 metadata, then
-verifies the installer's SHA-256 against that manifest and requires a
-valid Windows Authenticode signature before staging the installer under
-the local noctty state directory. The signature check is not generic:
-the signer's public key must match a SHA-256 SPKI pin compiled into the
-app, so an installer signed by any other key is rejected even when its
-signature is otherwise valid. Unsigned installers fail that verification
-too, and neither is staged. See
+releases that ship architecture-specific SHA256 metadata, then verifies the
+selected installer or portable ZIP against that manifest before staging it
+under the local noctty state directory. Installers require a valid Windows
+Authenticode signature. Portable updates additionally require a PowerShell
+payload-manifest asset whose Authenticode signer matches the pinned publisher
+key and whose SHA-256 entries cover every extracted file. Every extracted
+`.exe`, `.com`, and `.dll` must also pass its own Authenticode check. The
+signature check is not generic: the
+signer's public key must match a SHA-256 SPKI pin compiled into the app, so a
+binary signed by any other key is rejected even when its signature is otherwise
+valid. Unsigned binaries fail that verification too. See
 [ADR 0005](adr/0005-pin-updater-publisher-public-keys.md) for the pinning
 and key-rotation rules.
 
 For installer-managed installs, the update notice can launch the verified
 staged installer. Applying an update is always user-initiated: it
 re-verifies the staged installer, records apply intent, launches the
-installer elevated (UAC may prompt), and exits the app. Portable ZIP
-auto-apply is not implemented yet.
+installer elevated (UAC may prompt), and exits the app.
+
+For portable installs, **Apply** re-verifies the staged ZIP payload, records the
+pending update, and exits noctty. On the next launch, noctty backs up the files
+being replaced, swaps in the staged payload, and starts the new build. The new
+build confirms the update only when its version matches the staged target;
+otherwise noctty restores the backup. A new build that exits with an error
+during the bounded startup check, or a swap that remains unconfirmed on a later
+launch, also rolls back and relaunches the previous build.
+
+Portable apply fails closed until a release publishes that signed complete-file
+manifest. Releases without it are not downloaded or staged for portable apply;
+the update notice opens the normal GitHub release page for manual updating.
 
 The updater is also the only outbound network call the app makes; there
 is no telemetry and no analytics.
