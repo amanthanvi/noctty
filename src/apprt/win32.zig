@@ -2401,6 +2401,25 @@ const RecoveryStartup = struct {
     decision: win32_recovery.Decision = .normal,
 };
 
+const recovery_safe_mode_banner =
+    "Safe mode: repeated incomplete startups. Built-in defaults are active; your config and saved session were not loaded. Restart noctty to retry normal startup.";
+const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
+const recovery_safe_mode_fallback_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty entered safe mode. Restart to retry normal startup.");
+
+fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
+    return if (decision == .safe_mode) recovery_safe_mode_banner else null;
+}
+
+fn persistMergedRecoveryReady(
+    startup: *RecoveryStartup,
+    merged: win32_recovery.StartupAttemptRecord,
+    persist_result: anyerror!void,
+) !void {
+    try persist_result;
+    @memcpy(startup.attempts[0..merged.attempts.len], merged.attempts);
+    startup.count = merged.attempts.len;
+}
+
 fn unixMillis() u64 {
     return @intCast(@max(std.time.milliTimestamp(), 0));
 }
@@ -2551,6 +2570,12 @@ fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
     return result;
 }
 
+const recovery_persist_attempt_limit = 3;
+
+fn shouldRetryRecoveryPersist(err: anyerror, attempt: usize) bool {
+    return err != error.OutOfMemory and attempt + 1 < recovery_persist_attempt_limit;
+}
+
 fn persistRecoveryRecord(
     alloc: Allocator,
     attempts: []const win32_recovery.StartupAttempt,
@@ -2559,7 +2584,15 @@ fn persistRecoveryRecord(
     defer alloc.free(path);
     const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
     defer alloc.free(encoded);
-    try writePersistentFileAlloc(alloc, path, encoded);
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        writePersistentFileAlloc(alloc, path, encoded) catch |err| {
+            if (!shouldRetryRecoveryPersist(err, attempt)) return err;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+        return;
+    }
 }
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
@@ -2935,6 +2968,16 @@ pub const App = struct {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
+        // The initial window is usable at this point, so persist readiness
+        // before showing the modal recovery explanation. The notice must not
+        // keep the next launch in safe mode if this process is terminated
+        // while it is visible.
+        self.markRecoveryReady();
+
+        if (recoverySafeModeNotice(self.recovery_startup.decision)) |notice| {
+            self.showRecoverySafeModeNotice(notice);
+        }
+
         self.scheduleGlobalHotkeySync();
         if (self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
@@ -2943,8 +2986,6 @@ pub const App = struct {
             };
         }
         if (self.windows.items.len == 0) self.startQuitTimer();
-
-        self.markRecoveryReady();
 
         var msg: MSG = undefined;
         while (true) {
@@ -3311,11 +3352,10 @@ pub const App = struct {
             log.warn("win32 recovery: ready marker merge failed err={}", .{err});
             return;
         };
-        @memcpy(self.recovery_startup.attempts[0..merged.attempts.len], merged.attempts);
-        self.recovery_startup.count = merged.attempts.len;
-        persistRecoveryRecord(
-            self.core_app.alloc,
-            self.recovery_startup.attempts[0..self.recovery_startup.count],
+        persistMergedRecoveryReady(
+            &self.recovery_startup,
+            merged,
+            persistRecoveryRecord(self.core_app.alloc, merged.attempts),
         ) catch |err| log.warn("win32 recovery: ready marker persist failed err={}", .{err});
     }
 
@@ -4210,6 +4250,29 @@ pub const App = struct {
             }
         }
         try self.showInfoMessage(.app, "noctty", message);
+    }
+
+    fn showRecoverySafeModeNotice(self: *App, message: []const u8) void {
+        const owner: ?HWND = if (self.primarySurface()) |surface|
+            if (surface.host) |host| host.hwnd else null
+        else
+            null;
+        const message_w = std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, message) catch {
+            _ = MessageBoxW(
+                owner,
+                recovery_safe_mode_fallback_w,
+                recovery_safe_mode_caption_w,
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            );
+            return;
+        };
+        defer self.core_app.alloc.free(message_w);
+        _ = MessageBoxW(
+            owner,
+            message_w,
+            recovery_safe_mode_caption_w,
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
     }
 
     /// True when any user-facing top-level UI window is still alive —
@@ -33478,6 +33541,41 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(sessionStatePolicyAllows(false, .default));
     try std.testing.expect(sessionStatePolicyAllows(false, .always));
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
+}
+
+test "win32 recovery failed ready persistence remains retryable" {
+    var startup: RecoveryStartup = .{};
+    startup.attempts[0] = .{ .started_at_unix_ms = 100 };
+    startup.count = 1;
+    const merged_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
+    };
+
+    try std.testing.expectError(
+        error.AccessDenied,
+        persistMergedRecoveryReady(
+            &startup,
+            .{ .attempts = &merged_attempts },
+            error.AccessDenied,
+        ),
+    );
+    try std.testing.expectEqual(@as(?u64, null), startup.attempts[0].ready_at_unix_ms);
+}
+
+test "win32 recovery persistence retry policy is bounded" {
+    try std.testing.expect(shouldRetryRecoveryPersist(error.AccessDenied, 0));
+    try std.testing.expect(shouldRetryRecoveryPersist(error.AccessDenied, 1));
+    try std.testing.expect(!shouldRetryRecoveryPersist(error.AccessDenied, 2));
+    try std.testing.expect(!shouldRetryRecoveryPersist(error.OutOfMemory, 0));
+}
+
+test "win32 recovery safe mode always has a visible notice" {
+    try std.testing.expectEqualStrings(
+        recovery_safe_mode_banner,
+        recoverySafeModeNotice(.safe_mode).?,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.normal));
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.quarantine_session));
 }
 
 test "win32 explicit startup flows bypass session restore" {
