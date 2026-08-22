@@ -82,7 +82,16 @@ test('demo scenes keep the release-copy guardrail needles', () => {
   assert.match(text, /windows-\$arch-setup\.exe/);
   assert.match(text, /windows-\$arch-portable\.zip/);
   assert.match(text, /x64 and ARM64/);
-  assert.match(text, /SmartScreen may still warn while reputation builds\./);
+  // The signing certificate is self-signed, so SmartScreen reputation never
+  // accrues and the warning does not fade. docs/getting-started.md is the
+  // source of truth; the demo must not promise otherwise.
+  assert.match(text, /SmartScreen may still warn: the certificate is self-signed\./);
+  assert.doesNotMatch(text, /while reputation builds/);
   assert.match(text, /%LOCALAPPDATA%\\noctty\\config\.ghostty/);
   assert.match(text, /noctty-9\.9\.9-windows-\$arch-setup\.exe/);
+  // The portable zip already contains a top-level noctty/ directory
+  // (CreateFromDirectory with includeBaseDirectory), so extracting into
+  // .\noctty would produce .\noctty\noctty\noctty.exe.
+  assert.match(text, /Expand-Archive noctty\.zip -DestinationPath \./);
+  assert.doesNotMatch(text, /-DestinationPath \.\\\\noctty/);
 });

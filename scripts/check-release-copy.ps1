@@ -207,8 +207,8 @@ if ($latestVersion) {
     Require-Contains -RelativePath "README.md" -Needle $legacyName -Reason "README should document the legacy x64 checksum alias."
 
     $escapedVersion = [regex]::Escape($latestVersion)
-    Require-Regex -RelativePath "site/version.js" -Pattern "DEFAULT_WG_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
-    Require-Regex -RelativePath "site/terminal.js" -Pattern "WG_VERSION\s*=\s*\(typeof window !== 'undefined' && window\.WG_VERSION\)\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
+    Require-Regex -RelativePath "site/version.js" -Pattern "DEFAULT_NC_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
+    Require-Regex -RelativePath "site/terminal.js" -Pattern "NC_VERSION\s*=\s*\(typeof window !== 'undefined' && window\.NC_VERSION\)\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
     Require-Regex -RelativePath "site/index.html" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "The landing page should ship the current README release version as its compiled default."
     Require-Regex -RelativePath "docs/getting-started.md" -Pattern ('current stable release is\s+`?' + $escapedVersion + '`?(?![\d.])') -Reason "Getting-started stable version should match README."
 }

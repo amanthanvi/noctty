@@ -26,10 +26,10 @@ export function observeElementVisibility(Observer, element, onChange) {
   return () => observer.disconnect();
 }
 
-const WG_REPO = 'amanthanvi/noctty';
+const NC_REPO = 'amanthanvi/noctty';
 const PROMPT = 'PS C:\\Users\\dev>';
 
-let WG_VERSION = (typeof window !== 'undefined' && window.WG_VERSION) || '1.3.123';
+let NC_VERSION = (typeof window !== 'undefined' && window.NC_VERSION) || '1.3.123';
 
 export function buildScenes(v) {
   return [
@@ -38,11 +38,11 @@ export function buildScenes(v) {
       lines: [
         { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
         { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-setup.exe -OutFile noctty-setup.exe` },
+        { kind: 'cmd', text: `iwr https://github.com/${NC_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-setup.exe -OutFile noctty-setup.exe` },
         { kind: 'cmd', text: '.\\noctty-setup.exe' },
         { kind: 'out', text: '→ installer build: Start menu entry and standard uninstall path' },
         { kind: 'out', text: '→ x64 and ARM64 installers are Authenticode-signed.' },
-        { kind: 'out', text: '→ SmartScreen may still warn while reputation builds.' },
+        { kind: 'out', text: '→ SmartScreen may still warn: the certificate is self-signed.' },
       ],
     },
     {
@@ -50,8 +50,8 @@ export function buildScenes(v) {
       lines: [
         { kind: 'cmd', text: "$archEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }" },
         { kind: 'cmd', text: "$arch = if ($archEnv -eq 'ARM64') { 'arm64' } else { 'x64' }" },
-        { kind: 'cmd', text: `iwr https://github.com/${WG_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-portable.zip -OutFile noctty.zip` },
-        { kind: 'cmd', text: 'Expand-Archive noctty.zip -DestinationPath .\\noctty' },
+        { kind: 'cmd', text: `iwr https://github.com/${NC_REPO}/releases/download/v${v}/noctty-${v}-windows-$arch-portable.zip -OutFile noctty.zip` },
+        { kind: 'cmd', text: 'Expand-Archive noctty.zip -DestinationPath .' },
         { kind: 'cmd', text: '.\\noctty\\noctty.exe' },
         { kind: 'out', text: '→ same signed Win32 runtime, no install step required' },
       ],
@@ -69,16 +69,16 @@ export function buildScenes(v) {
 }
 
 if (typeof document !== 'undefined') {
-  initTerminalDemo(document.querySelector('[data-wg-terminal]'));
+  initTerminalDemo(document.querySelector('[data-nc-terminal]'));
 }
 
 function initTerminalDemo(root) {
   if (!root) return;
-  const body = root.querySelector('.wg-terminal__body');
-  const motionButton = root.querySelector('.wg-terminal__motion');
+  const body = root.querySelector('.nc-terminal__body');
+  const motionButton = root.querySelector('[data-nc-motion]');
   if (!body || !motionButton) return;
 
-  let scenes = buildScenes(WG_VERSION);
+  let scenes = buildScenes(NC_VERSION);
   let sceneIdx = 0;
   let lineIdx = 0;
   let typed = 0;
@@ -114,7 +114,7 @@ function initTerminalDemo(root) {
 
   function makeCaret() {
     const caret = document.createElement('span');
-    caret.className = 'wg-caret';
+    caret.className = 'nc-caret';
     caret.setAttribute('aria-hidden', 'true');
     caret.textContent = '▋';
     return caret;
@@ -123,10 +123,10 @@ function initTerminalDemo(root) {
   function appendCommandLine(text, withCaret) {
     const p = document.createElement('p');
     const prompt = document.createElement('span');
-    prompt.className = 'wg-terminal__prompt';
+    prompt.className = 'nc-terminal__prompt';
     prompt.textContent = PROMPT;
     const live = document.createElement('span');
-    live.className = 'wg-terminal__live';
+    live.className = 'nc-terminal__live';
     const textNode = document.createTextNode(text);
     live.append(textNode);
     if (withCaret) live.append(makeCaret());
@@ -137,7 +137,7 @@ function initTerminalDemo(root) {
 
   function appendOutputLine(text) {
     const div = document.createElement('div');
-    div.className = 'wg-terminal__line wg-terminal__line--dim';
+    div.className = 'nc-terminal__line nc-terminal__line--dim';
     div.textContent = text;
     body.append(div);
   }
@@ -168,7 +168,7 @@ function initTerminalDemo(root) {
     const line = scene.lines[lineIdx];
 
     if (!line) {
-      if (!body.querySelector('.wg-caret')) appendCommandLine('', true);
+      if (!body.querySelector('.nc-caret')) appendCommandLine('', true);
       schedule(() => {
         sceneIdx = (sceneIdx + 1) % scenes.length;
         resetScene();
@@ -188,7 +188,7 @@ function initTerminalDemo(root) {
         }, 32 + Math.random() * 48);
       } else {
         schedule(() => {
-          liveText.parentNode.querySelector('.wg-caret')?.remove();
+          liveText.parentNode.querySelector('.nc-caret')?.remove();
           liveText = null;
           typed = 0;
           lineIdx += 1;
@@ -247,12 +247,12 @@ function initTerminalDemo(root) {
     });
   }
 
-  window.addEventListener('wg-version-updated', (event) => {
-    const next = event?.detail?.version || window.WG_VERSION;
-    if (!next || next === WG_VERSION) return;
-    WG_VERSION = next;
-    window.WG_VERSION = next;
-    scenes = buildScenes(WG_VERSION);
+  window.addEventListener('nc-version-updated', (event) => {
+    const next = event?.detail?.version || window.NC_VERSION;
+    if (!next || next === NC_VERSION) return;
+    NC_VERSION = next;
+    window.NC_VERSION = next;
+    scenes = buildScenes(NC_VERSION);
     if (shouldAnimate()) {
       resetScene();
       clearTimer();

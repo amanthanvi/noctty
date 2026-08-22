@@ -1,10 +1,10 @@
-// Release version chip: shows the compiled default immediately, then
+// Release version text: shows the compiled default immediately, then
 // refreshes from GitHub Releases when the browser is idle. Never downgrades
 // below the compiled version.
 
-const DEFAULT_WG_VERSION = '1.3.123';
-const WG_REPO = 'amanthanvi/noctty';
-const CACHE_KEY = 'wg-latest-release-v1';
+const DEFAULT_NC_VERSION = '1.3.123';
+const NC_REPO = 'amanthanvi/noctty';
+const CACHE_KEY = 'nc-latest-release-v1';
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const RELEASE_FETCH_TIMEOUT_MS = 4000;
 
@@ -46,9 +46,9 @@ function cacheVersion(tag) {
 }
 
 function renderVersion(version) {
-  const chip = document.getElementById('wg-version');
-  if (chip) chip.textContent = `v${version}`;
-  const summary = document.getElementById('wg-version-summary');
+  const versionEl = document.getElementById('nc-version');
+  if (versionEl) versionEl.textContent = `v${version}`;
+  const summary = document.getElementById('nc-version-summary');
   if (summary) {
     summary.textContent = `Version ${version}, latest release, for Windows 10 and 11 on x64 and ARM64, MIT licensed.`;
   }
@@ -56,19 +56,19 @@ function renderVersion(version) {
 
 function shouldPublishVersion(tag) {
   const normalizedTag = normalizeStableSemver(tag);
-  const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
-  const currentBaseline = compareSemver(current, DEFAULT_WG_VERSION) >= 0
+  const current = normalizeStableSemver(window.NC_VERSION) || DEFAULT_NC_VERSION;
+  const currentBaseline = compareSemver(current, DEFAULT_NC_VERSION) >= 0
     ? current
-    : DEFAULT_WG_VERSION;
+    : DEFAULT_NC_VERSION;
   return normalizedTag !== null && compareSemver(normalizedTag, currentBaseline) > 0;
 }
 
 function publishVersion(tag) {
   const normalizedTag = normalizeStableSemver(tag);
   if (!normalizedTag || !shouldPublishVersion(normalizedTag)) return false;
-  window.WG_VERSION = normalizedTag;
+  window.NC_VERSION = normalizedTag;
   renderVersion(normalizedTag);
-  window.dispatchEvent(new CustomEvent('wg-version-updated', { detail: { version: normalizedTag } }));
+  window.dispatchEvent(new CustomEvent('nc-version-updated', { detail: { version: normalizedTag } }));
   return true;
 }
 
@@ -77,7 +77,7 @@ async function fetchLatestVersion() {
   const timeoutId = setTimeout(() => controller.abort(), RELEASE_FETCH_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`https://api.github.com/repos/${WG_REPO}/releases/latest`, {
+    const res = await fetch(`https://api.github.com/repos/${NC_REPO}/releases/latest`, {
       signal: controller.signal,
     });
     if (res.status === 429 || res.status === 403) return;
@@ -96,7 +96,7 @@ async function fetchLatestVersion() {
 function scheduleLatestVersionFetch() {
   const cached = readCachedVersion();
   if (cached) {
-    const current = normalizeStableSemver(window.WG_VERSION) || DEFAULT_WG_VERSION;
+    const current = normalizeStableSemver(window.NC_VERSION) || DEFAULT_NC_VERSION;
     const cachedMatchesCurrent = compareSemver(cached, current) === 0;
     if (publishVersion(cached) || cachedMatchesCurrent) return;
   }
@@ -105,5 +105,5 @@ function scheduleLatestVersionFetch() {
   idle(fetchLatestVersion, { timeout: RELEASE_FETCH_TIMEOUT_MS });
 }
 
-window.WG_VERSION = window.WG_VERSION || DEFAULT_WG_VERSION;
+window.NC_VERSION = window.NC_VERSION || DEFAULT_NC_VERSION;
 scheduleLatestVersionFetch();

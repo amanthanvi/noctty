@@ -1,70 +1,74 @@
 <!DOCTYPE html>
-<html lang="en" class="wg-no-js">
+<html lang="en" class="nc-no-js" data-theme="dark">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Noctty | Not found</title>
-  <meta name="robots" content="noindex">
-  <meta name="theme-color" content="#15151a" media="(prefers-color-scheme: dark)">
-  <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml">
-
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
-  <link
-    rel="stylesheet"
-    href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
-    media="print"
-    onload="this.media='all'"
-  >
-  <noscript>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
-  </noscript>
-
-  <link rel="stylesheet" href="/styles.css?v=494c763203348e4e07a0084bcff86d32ccc0a441a3804e891851fee01d053593">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Not found, Noctty</title>
+  <meta name="description" content="That page does not exist on noctty.com." />
+  <meta name="robots" content="noindex, follow" />
+  <meta name="theme-color" content="#05060d" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f7f5ed" media="(prefers-color-scheme: light)" />
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="shortcut icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css?v=277d0599d404296a8dd7b631eae2493b04ac3121877fc4b9d9790519bd0134b8" />
   <script>
     (function () {
       var root = document.documentElement;
-      root.className = root.className.replace(/\bwg-no-js\b/, "wg-js");
+      root.classList.remove("nc-no-js");
+      root.classList.add("nc-js");
       try {
-        root.setAttribute("data-theme", localStorage.getItem("wg-theme") || "dark");
+        var stored = localStorage.getItem("nc-theme");
+        if (!stored) {
+          var legacy = localStorage.getItem("wg-theme");
+          if (legacy) {
+            stored = legacy;
+            localStorage.setItem("nc-theme", legacy);
+            localStorage.removeItem("wg-theme");
+          }
+        }
+        root.setAttribute("data-theme", stored || "dark");
       } catch (e) {}
     })();
   </script>
 </head>
 <body>
-  <main class="wg-hero">
-    <div class="wg-container">
-      <div class="wg-hero__badge" aria-label="404">
-        <span class="wg-color-dots" aria-hidden="true">
-          <span class="wg-color-dot wg-color-dot--red"><span class="wg-color-dot__chip"></span></span>
-          <span class="wg-color-dot wg-color-dot--green"><span class="wg-color-dot__chip"></span></span>
-          <span class="wg-color-dot wg-color-dot--blue"><span class="wg-color-dot__chip"></span></span>
-          <span class="wg-color-dot wg-color-dot--yellow"><span class="wg-color-dot__chip"></span></span>
-        </span>
-        <span>404</span>
-      </div>
+  <a class="nc-skip-link" href="#main-content">Skip to content</a>
 
-      <h1 class="wg-hero__title">
-        That page<span class="wg-accent-red">,</span><br>
-        does not ship<span class="wg-accent-blue">.</span>
-      </h1>
-
-      <p class="wg-hero__caption">
-        noctty.com stays deliberately small so the claims can stay accurate.
-        Head back to the landing page, the latest release, or the repo docs.
-      </p>
-
-      <div class="wg-hero__actions">
-        <a class="wg-button wg-button--primary" href="/">Home</a>
-        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/noctty/releases/latest" target="_blank" rel="noreferrer">Latest release</a>
-        <a class="wg-button wg-button--secondary" href="https://github.com/amanthanvi/noctty/blob/main/docs/status.md" target="_blank" rel="noreferrer">Status</a>
-      </div>
+  <header class="nc-topbar">
+    <div class="nc-shell nc-topbar__inner">
+      <a class="nc-wordmark" href="/" aria-label="Noctty home">
+        <svg class="nc-wordmark__mark" width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+          <rect x="1" y="1" width="30" height="30" rx="7" fill="#16173A" />
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M5.6 14.6a8.6 8.6 0 1 0 17.2 0 8.6 8.6 0 1 0-17.2 0ZM10.1 13.2a6.1 6.1 0 1 0 12.2 0 6.1 6.1 0 1 0-12.2 0Z" fill="#F4F1E3" />
+          <path d="M25.2 5.4 26.05 6.95 27.6 7.8 26.05 8.65 25.2 10.2 24.35 8.65 22.8 7.8 24.35 6.95Z" fill="#8FB7FF" />
+          <circle cx="27.3" cy="12.6" r="0.7" fill="#8FB7FF" />
+          <rect x="18.5" y="23.8" width="6.4" height="2.6" rx="1.3" fill="#7DD3A8" />
+        </svg>
+        <span class="nc-wordmark__text">Noctty</span>
+      </a>
+      <nav class="nc-nav" aria-label="Primary">
+        <a class="nc-nav__link" href="https://github.com/amanthanvi/noctty" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <button type="button" class="nc-theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme">
+          <svg width="16" height="16" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M5.6 14.6a8.6 8.6 0 1 0 17.2 0 8.6 8.6 0 1 0-17.2 0ZM10.1 13.2a6.1 6.1 0 1 0 12.2 0 6.1 6.1 0 1 0-12.2 0Z" fill="currentColor" />
+            <path d="M25.2 5.4 26.05 6.95 27.6 7.8 26.05 8.65 25.2 10.2 24.35 8.65 22.8 7.8 24.35 6.95Z" fill="currentColor" opacity="0.7" />
+          </svg>
+        </button>
+      </nav>
     </div>
+  </header>
+
+  <main id="main-content" class="nc-shell nc-lost">
+    <h1 class="nc-lost__title">That page does not exist.</h1>
+    <p class="nc-lost__body">
+      The link may be out of date. The download and the install commands are on
+      the front page.
+    </p>
+    <p class="nc-lost__action">
+      <a class="nc-button nc-button--primary" href="/">Back to noctty.com</a>
+    </p>
   </main>
 
-  <script src="/app.js?v=113e9150fa49b29393d89fc58a691314977b03da0cf7853199627c62f4d98eae"></script>
+  <script type="module" src="/app.js?v=98916ae44c47820a7a796236e272181592d780769a90b706acea8eeb8eead2d1"></script>
 </body>
 </html>
