@@ -481,9 +481,12 @@ The updater checks the configured release feed at most once every 24 hours
 and never replaces binaries silently. The feed defaults to noctty's GitHub
 Releases API and can be changed with `auto-update-feed-url`; checksum,
 Authenticode, and pinned-publisher-key verification stay mandatory whatever
-the feed host. In `check` mode it opens the release page when a newer stable
-version exists. It is the only outbound network call the app makes; there is
-no telemetry and no analytics.
+the feed host. For tests and diagnostics, `NOCTTY_UPDATE_FEED_URL` overrides
+the compiled-in default when no explicit `auto-update-feed-url` is set. The
+precedence is explicit config, then the environment variable, then the
+compiled-in default. In `check` mode it opens the release page when a newer
+stable version exists. It is the only outbound network call the app makes;
+there is no telemetry and no analytics.
 
 Upstream Ghostty is leaving GitHub, so the maintainer periodically checks
 that the `upstream` remote and the release-feed host are still live and

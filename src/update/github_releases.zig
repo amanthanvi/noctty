@@ -7,8 +7,6 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const log = std.log.scoped(.update_github_releases);
 
-pub const repo_owner = "amanthanvi";
-pub const repo_name = "noctty";
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/noctty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/noctty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
@@ -128,16 +126,23 @@ pub const CheckOptions = struct {
 };
 
 pub fn resolveReleaseFeedUrl(alloc: Allocator, configured: ?[]const u8) ![]u8 {
-    const env_value = try internal_os.getEnvVarOwnedTrimmedNotEmpty(
-        alloc,
-        "NOCTTY_UPDATE_FEED_URL",
-    );
-    defer if (env_value) |value| alloc.free(value);
-
-    const candidate = env_value orelse if (configured) |value|
+    const configured_value = if (configured) |value|
         std.mem.trim(u8, value, &std.ascii.whitespace)
     else
         "";
+    const env_value = if (configured_value.len == 0)
+        try internal_os.getEnvVarOwnedTrimmedNotEmpty(
+            alloc,
+            "NOCTTY_UPDATE_FEED_URL",
+        )
+    else
+        null;
+    defer if (env_value) |value| alloc.free(value);
+
+    const candidate = if (configured_value.len > 0)
+        configured_value
+    else
+        env_value orelse "";
     if (candidate.len == 0) return alloc.dupe(u8, latest_stable_api_url);
     _ = validateHttpsUrl(candidate) catch {
         log.warn("ignoring non-HTTPS update feed URL; using the default release feed", .{});
@@ -337,14 +342,6 @@ pub fn checkLatestStableRelease(
     return .{ .update_available = release };
 }
 
-pub fn releaseUrlForVersion(alloc: Allocator, version_text: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        alloc,
-        "https://github.com/{s}/{s}/releases/tag/v{s}",
-        .{ repo_owner, repo_name, version_text },
-    );
-}
-
 pub fn stageWindowsInstall(
     alloc: Allocator,
     state_path: []const u8,
@@ -377,6 +374,12 @@ pub fn stageWindowsInstall(
         try verifyAuthenticodeSignature(installer_path, null);
     } else {
         return error.AuthenticodeRequiresWindows;
+    }
+
+    const installer_version = try readWindowsFileVersion(alloc, installer_path);
+    const claimed_version = try parseVersionText(release.version_text);
+    if (!installerVersionAtLeastClaim(installer_version, claimed_version)) {
+        return error.InstallerVersionOlderThanRelease;
     }
 
     const sha256_hex = try alloc.dupe(u8, &std.fmt.bytesToHex(actual_digest, .lower));
@@ -487,6 +490,39 @@ fn replaceOptionalOwned(alloc: Allocator, slot: *?[]u8, value: []u8) void {
     slot.* = value;
 }
 
+fn resolveRedirectTarget(
+    alloc: Allocator,
+    base_url: []const u8,
+    location: []const u8,
+) ![]u8 {
+    const base_uri = try validateHttpsUrl(base_url);
+    const combined_len = std.math.add(
+        usize,
+        base_url.len,
+        location.len,
+    ) catch return error.OutOfMemory;
+    const resolution_len = std.math.mul(
+        usize,
+        3,
+        std.math.add(usize, combined_len, 1) catch return error.OutOfMemory,
+    ) catch return error.OutOfMemory;
+    const resolution_buf = try alloc.alloc(u8, resolution_len);
+    defer alloc.free(resolution_buf);
+    @memcpy(resolution_buf[0..location.len], location);
+    var aux_buf = resolution_buf;
+    const resolved = base_uri.resolveInPlace(location.len, &aux_buf) catch
+        return error.InvalidUpdateUrl;
+
+    const resolved_url = try std.fmt.allocPrint(
+        alloc,
+        "{f}",
+        .{resolved.fmt(.all)},
+    );
+    errdefer alloc.free(resolved_url);
+    _ = try validateHttpsUrl(resolved_url);
+    return resolved_url;
+}
+
 fn fetchHttps(
     alloc: Allocator,
     context: []const u8,
@@ -519,32 +555,7 @@ fn fetchHttps(
             if (response.head.status.class() == .redirect) {
                 if (redirect_count >= 3) return error.TooManyHttpRedirects;
                 const location = response.head.location orelse return error.HttpRedirectLocationMissing;
-
-                const combined_len = std.math.add(
-                    usize,
-                    current_url.len,
-                    location.len,
-                ) catch return error.OutOfMemory;
-                const resolution_len = std.math.mul(
-                    usize,
-                    3,
-                    std.math.add(usize, combined_len, 1) catch return error.OutOfMemory,
-                ) catch return error.OutOfMemory;
-                const resolution_buf = try alloc.alloc(u8, resolution_len);
-                defer alloc.free(resolution_buf);
-                @memcpy(resolution_buf[0..location.len], location);
-                var aux_buf = resolution_buf;
-                const resolved = uri.resolveInPlace(location.len, &aux_buf) catch
-                    return error.InvalidUpdateUrl;
-
-                const resolved_url = try std.fmt.allocPrint(
-                    alloc,
-                    "{f}",
-                    .{resolved.fmt(.all)},
-                );
-                errdefer alloc.free(resolved_url);
-                _ = try validateHttpsUrl(resolved_url);
-                next_url = resolved_url;
+                next_url = try resolveRedirectTarget(alloc, current_url, location);
 
                 const redirect_reader = response.reader(&.{});
                 _ = redirect_reader.discardRemaining() catch |err| switch (err) {
@@ -770,6 +781,94 @@ fn lockedHandleMatchesPath(alloc: Allocator, path: []const u8, handle: std.os.wi
     return std.ascii.eqlIgnoreCase(final_path, path);
 }
 
+const WindowsFileVersion = struct {
+    major: u16,
+    minor: u16,
+    patch: u16,
+    build: u16,
+};
+
+fn installerVersionAtLeastClaim(
+    installer: WindowsFileVersion,
+    claimed: std.SemanticVersion,
+) bool {
+    const installer_parts = [_]u64{
+        installer.major,
+        installer.minor,
+        installer.patch,
+        installer.build,
+    };
+    const claimed_parts = [_]u64{
+        claimed.major,
+        claimed.minor,
+        claimed.patch,
+        0,
+    };
+    for (installer_parts, claimed_parts) |actual, expected| {
+        if (actual != expected) return actual > expected;
+    }
+    return true;
+}
+
+fn readWindowsFileVersion(alloc: Allocator, path: []const u8) !WindowsFileVersion {
+    if (builtin.os.tag != .windows) return error.AuthenticodeRequiresWindows;
+
+    const windows = std.os.windows;
+    const GetFileVersionInfoSizeWFn = *const fn ([*:0]const u16, *u32) callconv(.winapi) u32;
+    const GetFileVersionInfoWFn = *const fn ([*:0]const u16, u32, u32, *anyopaque) callconv(.winapi) windows.BOOL;
+    const VerQueryValueWFn = *const fn (*const anyopaque, [*:0]const u16, *?*anyopaque, *u32) callconv(.winapi) windows.BOOL;
+
+    const module = windows.LoadLibraryW(
+        std.unicode.utf8ToUtf16LeStringLiteral("version.dll"),
+    ) catch return error.InstallerVersionInfoUnavailable;
+    defer windows.FreeLibrary(module);
+
+    const size_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoSizeW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const info_proc = windows.kernel32.GetProcAddress(module, "GetFileVersionInfoW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const query_proc = windows.kernel32.GetProcAddress(module, "VerQueryValueW") orelse
+        return error.InstallerVersionInfoUnavailable;
+    const getFileVersionInfoSize: GetFileVersionInfoSizeWFn = @ptrCast(@alignCast(size_proc));
+    const getFileVersionInfo: GetFileVersionInfoWFn = @ptrCast(@alignCast(info_proc));
+    const verQueryValue: VerQueryValueWFn = @ptrCast(@alignCast(query_proc));
+
+    const path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, path);
+    defer alloc.free(path_w);
+
+    var unused_handle: u32 = 0;
+    const info_size = getFileVersionInfoSize(path_w.ptr, &unused_handle);
+    if (info_size == 0) return error.InstallerVersionInfoUnavailable;
+
+    const info = try alloc.alignedAlloc(u8, std.mem.Alignment.of(VsFixedFileInfo), info_size);
+    defer alloc.free(info);
+    if (getFileVersionInfo(path_w.ptr, 0, info_size, info.ptr) == 0) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+
+    var fixed_raw: ?*anyopaque = null;
+    var fixed_len: u32 = 0;
+    if (verQueryValue(
+        info.ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("\\"),
+        &fixed_raw,
+        &fixed_len,
+    ) == 0 or fixed_raw == null or fixed_len < @sizeOf(VsFixedFileInfo)) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+
+    const fixed: *const VsFixedFileInfo = @ptrCast(@alignCast(fixed_raw.?));
+    if (fixed.signature != vs_fixed_file_info_signature) {
+        return error.InstallerVersionInfoUnavailable;
+    }
+    return .{
+        .major = @truncate(fixed.file_version_ms >> 16),
+        .minor = @truncate(fixed.file_version_ms),
+        .patch = @truncate(fixed.file_version_ls >> 16),
+        .build = @truncate(fixed.file_version_ls),
+    };
+}
+
 fn verifyAuthenticodeSignature(
     path: []const u8,
     file_handle: ?std.os.windows.HANDLE,
@@ -952,6 +1051,22 @@ const WTD_CHOICE_FILE: u32 = 1;
 const WTD_STATEACTION_VERIFY: u32 = 1;
 const WTD_STATEACTION_CLOSE: u32 = 2;
 const cert_e_untrusted_root: i32 = @bitCast(@as(u32, 0x800B0109));
+const vs_fixed_file_info_signature: u32 = 0xFEEF04BD;
+const VsFixedFileInfo = extern struct {
+    signature: u32,
+    struct_version: u32,
+    file_version_ms: u32,
+    file_version_ls: u32,
+    product_version_ms: u32,
+    product_version_ls: u32,
+    file_flags_mask: u32,
+    file_flags: u32,
+    file_os: u32,
+    file_type: u32,
+    file_subtype: u32,
+    file_date_ms: u32,
+    file_date_ls: u32,
+};
 const WinTrustFileInfo = extern struct {
     cbStruct: u32,
     pcwszFilePath: [*:0]const u16,
@@ -1244,12 +1359,15 @@ test "update release feed resolution" {
         configured: ?[]const u8,
         expected: []const u8,
     }{
-        .{ .env = "https://env.example/latest", .configured = "https://config.example/latest", .expected = "https://env.example/latest" },
+        .{ .env = "https://env.example/latest", .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
         .{ .env = null, .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
         .{ .env = null, .configured = null, .expected = latest_stable_api_url },
         .{ .env = " \t\r\n ", .configured = "  https://config.example/latest  ", .expected = "https://config.example/latest" },
+        .{ .env = "https://env.example/latest", .configured = " \t\r\n ", .expected = "https://env.example/latest" },
         .{ .env = " \t\r\n ", .configured = " \t\r\n ", .expected = latest_stable_api_url },
-        .{ .env = "http://env.example/latest", .configured = "https://config.example/latest", .expected = latest_stable_api_url },
+        .{ .env = "http://env.example/latest", .configured = "https://config.example/latest", .expected = "https://config.example/latest" },
+        .{ .env = "https://env.example/latest", .configured = "file:///tmp/latest", .expected = latest_stable_api_url },
+        .{ .env = "http://env.example/latest", .configured = null, .expected = latest_stable_api_url },
         .{ .env = null, .configured = "file:///tmp/latest", .expected = latest_stable_api_url },
     };
 
@@ -1264,6 +1382,34 @@ test "update release feed resolution" {
         defer alloc.free(resolved);
         try std.testing.expectEqualStrings(case.expected, resolved);
     }
+}
+
+test "update installer version must meet the claimed release version" {
+    const claimed = try std.SemanticVersion.parse("1.3.100");
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 100,
+        .build = 0,
+    }, claimed));
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 100,
+        .build = 7,
+    }, claimed));
+    try std.testing.expect(installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 4,
+        .patch = 0,
+        .build = 0,
+    }, claimed));
+    try std.testing.expect(!installerVersionAtLeastClaim(.{
+        .major = 1,
+        .minor = 3,
+        .patch = 99,
+        .build = 65535,
+    }, claimed));
 }
 
 test "cached update respects dismissal" {
@@ -1491,10 +1637,47 @@ test "http status mapping distinguishes update response failures" {
     );
 }
 
-test "redirect URL validation refuses plaintext HTTP" {
+test "update redirect target resolution accepts absolute HTTPS URL" {
+    const alloc = std.testing.allocator;
+    const resolved = try resolveRedirectTarget(
+        alloc,
+        "https://updates.example/releases/latest",
+        "https://cdn.example/noctty/latest.json",
+    );
+    defer alloc.free(resolved);
+    try std.testing.expectEqualStrings("https://cdn.example/noctty/latest.json", resolved);
+}
+
+test "update redirect target resolution resolves a relative URL" {
+    const alloc = std.testing.allocator;
+    const resolved = try resolveRedirectTarget(
+        alloc,
+        "https://updates.example/releases/stable/latest.json",
+        "../next.json",
+    );
+    defer alloc.free(resolved);
+    try std.testing.expectEqualStrings("https://updates.example/releases/next.json", resolved);
+}
+
+test "update redirect target resolution refuses plaintext HTTP" {
     try std.testing.expectError(
         error.InvalidUpdateUrl,
-        validateHttpsUrl("http://updates.example/releases/latest"),
+        resolveRedirectTarget(
+            std.testing.allocator,
+            "https://updates.example/releases/latest",
+            "http://updates.example/releases/latest",
+        ),
+    );
+}
+
+test "update redirect target resolution refuses garbage target" {
+    try std.testing.expectError(
+        error.InvalidUpdateUrl,
+        resolveRedirectTarget(
+            std.testing.allocator,
+            "https://updates.example/releases/latest",
+            "//[",
+        ),
     );
 }
 

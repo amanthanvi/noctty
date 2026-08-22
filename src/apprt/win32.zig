@@ -2575,6 +2575,7 @@ const UpdateCheckRequest = struct {
     release_feed_url: []u8,
     force: bool,
     manual: bool,
+    configured_feed_ignored_non_https: bool,
     respect_dismissal: bool,
     download: bool,
 
@@ -5464,6 +5465,9 @@ pub const App = struct {
             self.config.@"auto-update-feed-url",
         );
         errdefer self.core_app.alloc.free(release_feed_url);
+        const configured_feed_ignored_non_https = configuredFeedIsNonHttps(
+            self.config.@"auto-update-feed-url",
+        );
 
         request.* = .{
             .alloc = self.core_app.alloc,
@@ -5474,6 +5478,7 @@ pub const App = struct {
             .release_feed_url = release_feed_url,
             .force = opts.force,
             .manual = opts.manual,
+            .configured_feed_ignored_non_https = configured_feed_ignored_non_https,
             .respect_dismissal = opts.respect_dismissal,
             .download = self.config.@"auto-update" == .download,
         };
@@ -9676,6 +9681,7 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
                 .{@errorName(err)},
             ) catch null;
         }
+        appendConfiguredFeedIgnoredNote(request, completion);
         postUpdateCheckCompletion(request.ui_thread_id, completion);
         return;
     };
@@ -9738,11 +9744,35 @@ fn updateCheckThreadMain(request: *UpdateCheckRequest) void {
         },
     }
 
+    appendConfiguredFeedIgnoredNote(request, completion);
     postUpdateCheckCompletion(request.ui_thread_id, completion);
 }
 
 fn tryOrNull(alloc: Allocator, text: []const u8) ?[]u8 {
     return alloc.dupe(u8, text) catch null;
+}
+
+fn configuredFeedIsNonHttps(configured: ?[]const u8) bool {
+    const value = configured orelse return false;
+    const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (trimmed.len == 0) return false;
+    const uri = std.Uri.parse(trimmed) catch return false;
+    return !std.ascii.eqlIgnoreCase(uri.scheme, "https");
+}
+
+fn appendConfiguredFeedIgnoredNote(
+    request: *const UpdateCheckRequest,
+    completion: *UpdateCheckCompletion,
+) void {
+    if (!request.manual or !request.configured_feed_ignored_non_https) return;
+
+    const note = "Configured update feed ignored because its URL is not HTTPS.";
+    const message = if (completion.manual_message) |existing|
+        std.fmt.allocPrint(request.alloc, "{s} {s}", .{ existing, note }) catch return
+    else
+        request.alloc.dupe(u8, note) catch return;
+    if (completion.manual_message) |existing| request.alloc.free(existing);
+    completion.manual_message = message;
 }
 
 fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
@@ -9752,6 +9782,8 @@ fn updateStageFailureMessage(alloc: Allocator, err: anyerror) ![]u8 {
         error.InvalidChecksum => "SHA256SUMS.txt contains an invalid checksum",
         error.InstallerChecksumMismatch => "the downloaded installer did not match SHA256SUMS.txt",
         error.InvalidAuthenticodeSignature => "the installer Authenticode signature could not be trusted",
+        error.InstallerVersionInfoUnavailable => "the installer VersionInfo block was missing or unreadable",
+        error.InstallerVersionOlderThanRelease => "the installer version was older than the release feed version",
         error.AuthenticodeRequiresWindows => "Authenticode verification is only available on Windows",
         error.SignatureVerifierUnavailable => "Windows signature verification is unavailable",
         error.InvalidStatePath => "the updater state directory could not be resolved",
