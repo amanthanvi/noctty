@@ -162,9 +162,25 @@ try {
 
     $stage = 'initial-attach'
     $stateToken = "STATE_$([Guid]::NewGuid().ToString('N'))"
+    $tuiProbeId = [Guid]::NewGuid().ToString('N')
+    $tuiContentToken = "TUI_CONTENT_$tuiProbeId"
+    $tuiInitialRedrawToken = "TUI_REDRAW_80x24_$tuiProbeId"
+    $tuiResizedRedrawToken = "TUI_REDRAW_100x31_$tuiProbeId"
+    $escape = [char]27
+    $boxTop = '+----------------------------------------------------------+'
+    # ConPTY consumes the application's VT and emits a normalized redraw. Match
+    # the cursor-home redraw plus the unique content/size tokens, not the exact
+    # application byte sequence that conhost intentionally normalizes.
+    $cursorHomeBox = [regex]::Escape("$escape[H$boxTop")
+    $initialTuiPattern = '(?s)' + [regex]::Escape("$escape[?1049h") +
+        '.{0,256}' + $cursorHomeBox + '.{0,2048}' +
+        [regex]::Escape($tuiContentToken) + '.{0,2048}' + [regex]::Escape($tuiInitialRedrawToken)
+    $resizedTuiPattern = '(?s)' + [regex]::Escape("$escape[2J") +
+        '.{0,256}' + $cursorHomeBox + '.{0,2048}' +
+        [regex]::Escape($tuiContentToken) + '.{0,2048}' + [regex]::Escape($tuiResizedRedrawToken)
     $initialInput = Join-Path $sandbox 'initial.input'
     $initialCommand = @"
-`$global:ConptySpikeState='$stateToken'; Write-Output ('SHELL_PID={0}' -f `$PID); Write-Output ('STATE_SET={0}' -f `$global:ConptySpikeState); for (`$iteration=0; `$iteration -lt 50; `$iteration++) { `$size=`$Host.UI.RawUI.WindowSize; Write-Output ('VIEWPORT={0}x{1}' -f `$size.Width,`$size.Height); Start-Sleep -Milliseconds 100 }; Write-Output 'LONG_RUNNING_DONE'
+`$global:ConptySpikeState='$stateToken'; `$escape=[char]27; `$lastWidth=0; `$lastHeight=0; `$resizeSeen=`$false; Write-Output ('SHELL_PID={0}' -f `$PID); Write-Output ('STATE_SET={0}' -f `$global:ConptySpikeState); try { [Console]::Write("`$escape[?1049h"); for (`$iteration=0; `$iteration -lt 400; `$iteration++) { `$size=`$Host.UI.RawUI.WindowSize; if (`$size.Width -ne `$lastWidth -or `$size.Height -ne `$lastHeight) { `$redrawToken='TUI_REDRAW_{0}x{1}_$tuiProbeId' -f `$size.Width,`$size.Height; [Console]::Write(("`$escape[2J`$escape[1;1H$boxTop`$escape[2;1H| $tuiContentToken |`$escape[3;1H$boxTop`$escape[4;1H{0}" -f `$redrawToken)); `$lastWidth=`$size.Width; `$lastHeight=`$size.Height; if (`$size.Width -eq 100 -and `$size.Height -eq 31) { `$resizeSeen=`$true; break } }; Start-Sleep -Milliseconds 50 } } finally { [Console]::Write("`$escape[?1049l") }; if (-not `$resizeSeen) { throw 'synthetic TUI did not observe 100x31' }; Write-Output 'LONG_RUNNING_DONE'
 "@.Trim() + "`r"
     [System.IO.File]::WriteAllText($initialInput, $initialCommand, [System.Text.UTF8Encoding]::new($false))
 
@@ -190,8 +206,8 @@ try {
         -StderrPath $client1.Stderr)
     [void](Wait-TextPattern `
         -Path $client1.Stdout `
-        -Pattern 'VIEWPORT=80x24' `
-        -Description 'initial long-running viewport loop' `
+        -Pattern $initialTuiPattern `
+        -Description 'initial cursor-addressed alt-screen box' `
         -Process $client1.Process `
         -StderrPath $client1.Stderr)
     if ($shellPid -ne $hostReportedShellPid) {
@@ -216,8 +232,14 @@ try {
         -StayOnEof
     [void](Wait-TextPattern `
         -Path $client2.Stdout `
-        -Pattern 'VIEWPORT=100x31' `
-        -Description 'reattached viewport repaint after resize' `
+        -Pattern $resizedTuiPattern `
+        -Description 'reattached cursor-addressed alt-screen redraw after resize' `
+        -Process $client2.Process `
+        -StderrPath $client2.Stderr)
+    [void](Wait-TextPattern `
+        -Path $client2.Stdout `
+        -Pattern ([regex]::Escape("$escape[?1049l")) `
+        -Description 'alt-screen exit after resized redraw' `
         -Process $client2.Process `
         -StderrPath $client2.Stderr)
     [void](Wait-TextPattern `
@@ -376,7 +398,9 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         shell_pid = $shellPid
         same_shell_pid = $true
         shell_state_intact = $true
-        viewport_repaint = '100x31'
+        alt_screen_entered = $true
+        alt_screen_redraw = 'cursor-addressed-preexisting-content@100x31'
+        alt_screen_exited = $true
         detached_drain = $true
         detached_output_completed = $true
         ring_capacity_bytes = $ringCapacity
@@ -385,11 +409,11 @@ Write-Output ('REATTACH_PID={0}' -f `$PID); Write-Output ('REATTACH_STATE={0}' -
         replay_bytes = $replayBytes
         oldest_replay_absent = $true
         newest_replay_present = $true
-        host_private_baseline_bytes = $privateBaseline
-        host_private_max_detached_bytes = $maxPrivate
-        host_private_growth_bytes = $privateGrowth
-        private_growth_within_ring_cap = $true
-        pipe_security = 'current-user-DACL+reject-remote'
+        observed_host_private_baseline_bytes = $privateBaseline
+        observed_host_private_max_detached_bytes = $maxPrivate
+        observed_host_private_growth_bytes = $privateGrowth
+        observed_private_growth_within_ring_cap = $true
+        pipe_security = 'current-user-DACL+first-instance+reject-remote'
         detach_frame = $true
         ceiling = 'same-logon-session-only;never-logoff-or-reboot'
     }
