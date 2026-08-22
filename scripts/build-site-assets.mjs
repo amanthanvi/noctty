@@ -3,8 +3,7 @@
  * Refresh the static site's integrity metadata:
  *  - the CSP inline-script hash in site/_headers (both pages must carry a
  *    byte-identical inline theme bootstrap, so exactly one hash is pinned)
- *  - the CSP event-handler hash for the font stylesheet onload attribute
- *    (hashed from the HTML-decoded value the browser actually executes)
+ *  - the CSP prohibition on inline event handlers (fonts are self-hosted)
  *  - SHA-256 cache keys (?v=...) on local asset references in both pages
  *
  * Run: node scripts/build-site-assets.mjs [--check]
@@ -29,37 +28,6 @@ const sha256Hex = (text) => crypto.createHash("sha256").update(text, "utf8").dig
 const sha256Base64 = (text) => crypto.createHash("sha256").update(text, "utf8").digest("base64");
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// Browsers execute the HTML-decoded attribute value, so an encoded handler
-// like onload="this.media=&#39;all&#39;" must hash the same as its literal form.
-// This builder owns that decoded hash for both _headers generation and the
-// PowerShell header verifier. This is deliberately not a full HTML decoder: any
-// reference outside the small supported set fails the build instead of
-// risking a hash the browser would disagree with (named references beyond
-// these five, out-of-range or surrogate code points, and the 0x80-0x9F range
-// browsers remap via windows-1252 all decode differently across parsers).
-const NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-
-export function decodeHtmlEntities(text) {
-  return text.replace(/&(#[xX][0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g, (match, body) => {
-    if (body[0] === "#") {
-      const codePoint = body[1] === "x" || body[1] === "X"
-        ? Number.parseInt(body.slice(2), 16)
-        : Number.parseInt(body.slice(1), 10);
-      if (Number.isNaN(codePoint) ||
-          codePoint > 0x10ffff ||
-          (codePoint >= 0xd800 && codePoint <= 0xdfff) ||
-          (codePoint >= 0x80 && codePoint <= 0x9f)) {
-        throw new Error(`Unsupported HTML character reference "${match}"; use a literal character or one of the plain numeric forms.`);
-      }
-      return String.fromCodePoint(codePoint);
-    }
-    if (!Object.hasOwn(NAMED_ENTITIES, body)) {
-      throw new Error(`Unsupported HTML named reference "${match}"; only ${Object.keys(NAMED_ENTITIES).map((name) => `&${name};`).join(" ")} are recognized.`);
-    }
-    return NAMED_ENTITIES[body];
-  });
-}
-
 function readSiteFile(relativePath) {
   const text = fs.readFileSync(path.join(siteRoot, relativePath), "utf8");
   if (/\r/.test(text)) {
@@ -70,7 +38,6 @@ function readSiteFile(relativePath) {
 
 function getInlineScriptContract() {
   let sharedScript;
-  let sharedOnload;
 
   for (const htmlName of ["index.html", "404.html"]) {
     const html = readSiteFile(htmlName);
@@ -85,34 +52,25 @@ function getInlineScriptContract() {
     const eventAttributeCount = [
       ...html.matchAll(/\s+on[a-z][a-z0-9_-]*\s*=/gis),
     ].length;
-    const eventHandlers = [
-      ...html.matchAll(
-        /\s+on[a-z][a-z0-9_-]*\s*=\s*(?<quote>["'])(?<body>.*?)\k<quote>/gis,
-      ),
-    ];
-    if (eventAttributeCount !== 1 || eventHandlers.length !== 1) {
-      throw new Error(`Expected exactly one quoted CSP-hashed event handler in site/${htmlName}.`);
+    if (eventAttributeCount !== 0) {
+      throw new Error(
+        `Expected no inline event handler attributes in site/${htmlName}; found ${eventAttributeCount}. The CSP pins script-src-attr 'none'.`,
+      );
     }
-    const onload = decodeHtmlEntities(eventHandlers[0].groups.body);
 
     if (sharedScript !== undefined && script !== sharedScript) {
       throw new Error("site/index.html and site/404.html inline bootstrap scripts differ; they must be byte-identical.");
     }
-    if (sharedOnload !== undefined && onload !== sharedOnload) {
-      throw new Error("site/index.html and site/404.html onload handlers differ; they must be identical.");
-    }
     sharedScript = script;
-    sharedOnload = onload;
   }
 
   return {
     scriptHashes: [`sha256-${sha256Base64(sharedScript)}`],
-    scriptAttributeHashes: [`sha256-${sha256Base64(sharedOnload)}`],
   };
 }
 
 export function getHeaderContract() {
-  const { scriptHashes, scriptAttributeHashes } = getInlineScriptContract();
+  const { scriptHashes } = getInlineScriptContract();
   const cspDirectives = [
     ["default-src", ["'self'"]],
     ["base-uri", ["'none'"]],
@@ -120,12 +78,9 @@ export function getHeaderContract() {
     ["frame-ancestors", ["'none'"]],
     ["form-action", ["'self'"]],
     ["script-src", ["'self'", ...scriptHashes.map((hash) => `'${hash}'`)]],
-    [
-      "script-src-attr",
-      ["'unsafe-hashes'", ...scriptAttributeHashes.map((hash) => `'${hash}'`)],
-    ],
-    ["style-src", ["'self'", "https://fonts.googleapis.com"]],
-    ["font-src", ["'self'", "https://fonts.gstatic.com"]],
+    ["script-src-attr", ["'none'"]],
+    ["style-src", ["'self'"]],
+    ["font-src", ["'self'"]],
     ["connect-src", ["'self'", "https://api.github.com"]],
     ["img-src", ["'self'", "data:"]],
     ["frame-src", ["'none'"]],
@@ -154,7 +109,6 @@ export function getHeaderContract() {
   return {
     generated_headers_base64: Buffer.from(headersText, "utf8").toString("base64"),
     script_hashes: scriptHashes,
-    script_attribute_hashes: scriptAttributeHashes,
     root: {
       cache_control: cacheControl,
       content_security_policy: contentSecurityPolicy,

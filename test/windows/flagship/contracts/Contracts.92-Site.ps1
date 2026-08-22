@@ -60,9 +60,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlStepBlock -Content $testWorkflowText -Name 'Site unit tests' -Source $testWorkflow)
         }
-        Pattern = '(?ms)node --test site/tests/terminal\.test\.mjs site/tests/build-site-assets\.test\.mjs.*?LASTEXITCODE'
+        Pattern = '(?ms)node --test "site/tests/\*\*/\*\.test\.mjs".*?LASTEXITCODE'
         Kind = 'Text'
-        Description = 'the test workflow runs both static-site Node test files directly without package metadata'
+        Description = 'the test workflow recursively discovers every static-site Node test file without package metadata'
     }
 )
 
@@ -318,7 +318,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteIndexText
         }
-        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.png".*?property="og:image:type" content="image/png".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.png"'
+        Pattern = '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.jpg"'
         Kind = 'Text'
         Description = 'social previews use a current raster large-image card with explicit dimensions'
     }
@@ -327,7 +327,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $sitePayloadBuilderText
         }
-        Pattern = "'assets/noctty-social\.png'"
+        Pattern = "'assets/noctty-social\.jpg'"
         Kind = 'Text'
         Description = 'the deterministic Cloudflare payload includes the social preview image'
     }
@@ -363,9 +363,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)scriptHashes: \[`sha256-\$\{sha256Base64\(sharedScript\)\}`\].*?scriptAttributeHashes: \[`sha256-\$\{sha256Base64\(sharedOnload\)\}`\].*?script-src.*?scriptHashes.*?script-src-attr.*?scriptAttributeHashes'
+        Pattern = '(?ms)function getInlineScriptContract.*?eventAttributeCount.*?no inline event handler attributes.*?scriptHashes: \[`sha256-\$\{sha256Base64\(sharedScript\)\}`\].*?script-src.*?scriptHashes.*?script-src-attr.*?''none'''
         Kind = 'Text'
-        Description = 'the asset builder derives both CSP hashes from the live HTML sources'
+        Description = 'the asset builder derives the CSP script hash from live HTML and refuses inline event handlers'
     }
     @{
         File = $siteAssetBuilder
@@ -808,18 +808,18 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteHeadersText
         }
-        Pattern = "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'unsafe-hashes' 'sha256-[^']+';"
+        Pattern = "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'none';"
         Kind = 'Text'
-        Description = 'the single shared inline bootstrap and the font load handler each use one narrow CSP hash'
+        Description = 'the single shared inline bootstrap uses one narrow CSP hash and inline event handlers are forbidden outright'
     }
     @{
         File = $siteHeaders
         Content = {
             $siteHeadersText
         }
-        Pattern = "style-src 'self' https://fonts\.googleapis\.com;"
+        Pattern = "style-src 'self'; font-src 'self';"
         Kind = 'Text'
-        Description = 'stylesheet sources are pinned to self plus Google Fonts without inline styles'
+        Description = 'stylesheet and font sources are pinned to self, so no third-party origin can serve either'
     }
     @{
         File = $siteHeaders
@@ -849,9 +849,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)--print-header-contract.*?generated_headers_base64.*?script_hashes.*?script_attribute_hashes'
+        Pattern = '(?ms)--print-header-contract.*?generated_headers_base64.*?script_hashes'
         Kind = 'Text'
-        Description = 'the site asset builder exposes its generated _headers and derived CSP hashes as one machine-readable contract'
+        Description = 'the site asset builder exposes its generated _headers and derived CSP script hash as one machine-readable contract'
     }
     @{
         File = $siteAssetBuilder
@@ -885,9 +885,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteHeaderContract -Raw)
         }
-        Pattern = '(?ms)function Assert-ReviewedContentSecurityPolicy.*?ScriptHashes.*?ScriptAttributeHashes.*?base-uri.*?''none''.*?object-src.*?''none''.*?frame-ancestors.*?''none''.*?style-src.*?https://fonts\.googleapis\.com.*?font-src.*?https://fonts\.gstatic\.com.*?connect-src.*?https://api\.github\.com.*?declaredDirectives\.Count.*?dynamicHashDirectives\.Count.*?Assert-ReviewedContentSecurityPolicy.*?-Policy \$csp.*?-ScriptHashes @\(\$derivedHeaderContract\.script_hashes\).*?-ScriptAttributeHashes @\(\$derivedHeaderContract\.script_attribute_hashes\)'
+        Pattern = '(?ms)function Assert-ReviewedContentSecurityPolicy.*?ScriptHashes.*?script-src-attr.*?''none''.*?style-src.*?''self''.*?font-src.*?''self''.*?connect-src.*?https://api\.github\.com.*?dynamicHashDirectives.*?script-src.*?ScriptHashes.*?declaredDirectives\.Count.*?dynamicHashDirectives\.Count.*?Assert-ReviewedContentSecurityPolicy.*?-Policy \$csp.*?-ScriptHashes @\(\$derivedHeaderContract\.script_hashes\)'
         Kind = 'Text'
-        Description = 'the verifier independently pins the CSP directives and origins while accepting only builder-derived SHA-256 slots'
+        Description = 'the verifier independently pins exact complete CSP sources, forbids inline handlers, and accepts only the builder-derived script hash slot'
     }
     @{
         File = $siteHeaderContract
@@ -897,6 +897,20 @@ Invoke-ContractTable -Contracts @(
         Pattern = '(?ms)expectedPermissions.*?accelerometer=\(\).*?autoplay=\(\).*?gyroscope=\(\).*?magnetometer=\(\).*?declaredPermissionTokens.*?declaredPermissions.*?expectedPermissions\.Count.*?denylist contract'
         Kind = 'Text'
         Description = 'permissions policy retains an exact duplicate-free denylist after generated-byte verification'
+    }
+)
+Invoke-ContractTable -Contracts @(
+    @{
+        File = $siteAssetBuilder
+        Pattern = 'script(?:AttributeHashes|_attribute_hashes)|sharedOnl[o]ad|decodeHtmlEntit[i]es|NAMED_ENTIT[I]ES'
+        Kind = 'WorkflowAbsent'
+        Description = 'the builder has no vestigial event-handler hash derivation or emitted contract field'
+    }
+    @{
+        File = $siteHeaderContract
+        Pattern = '[Ss]cript(?:AttributeHashes|_attribute_hashes)'
+        Kind = 'WorkflowAbsent'
+        Description = 'the PowerShell reviewer has no vestigial event-handler hash parameter or JSON plumbing'
     }
 )
 
@@ -957,23 +971,17 @@ try {
         $fixtureHeadersText,
         "script-src 'self' '(?<hash>sha256-[^']+)'"
     ).Groups['hash'].Value
-    $attributeHash = [regex]::Match(
-        $fixtureHeadersText,
-        "script-src-attr 'unsafe-hashes' '(?<hash>sha256-[^']+)'"
-    ).Groups['hash'].Value
-    if ([string]::IsNullOrWhiteSpace($scriptHash) -or
-        [string]::IsNullOrWhiteSpace($attributeHash)) {
-        throw 'Could not identify CSP hashes for the directive-swap regression.'
+    if ([string]::IsNullOrWhiteSpace($scriptHash)) {
+        throw 'Could not identify the CSP script hash for the directive-swap regression.'
     }
+    # script-src-attr is pinned to 'none', so migrating the inline-bootstrap
+    # hash out of script-src and into script-src-attr must fail both directives.
     $swappedHeaders = $fixtureHeadersText.Replace(
-        "'$scriptHash'",
-        "'__NOCTTY_SCRIPT_HASH__'"
+        "script-src 'self' '$scriptHash'",
+        "script-src 'self'"
     ).Replace(
-        "'$attributeHash'",
-        "'$scriptHash'"
-    ).Replace(
-        "'__NOCTTY_SCRIPT_HASH__'",
-        "'$attributeHash'"
+        "script-src-attr 'none'",
+        "script-src-attr 'unsafe-hashes' '$scriptHash'"
     )
     [IO.File]::WriteAllText(
         $fixtureHeadersPath,
@@ -997,7 +1005,7 @@ try {
 
     $reusedHashHeaders = $fixtureHeadersText.Replace(
         "style-src 'self'",
-        "script-src-elem '$attributeHash'; style-src 'self'"
+        "script-src-elem '$scriptHash'; style-src 'self'"
     )
     [IO.File]::WriteAllText(
         $fixtureHeadersPath,
@@ -1073,42 +1081,53 @@ try {
     )
     $fixtureIndexPath = Join-Path $siteCspFixtureRoot 'index.html'
     $fixtureIndexText = [IO.File]::ReadAllText($fixtureIndexPath)
+    if ($fixtureIndexText -notmatch '(?m)^<body>$') {
+        throw 'CSP handler-injection regression lost its <body> anchor.'
+    }
     [IO.File]::WriteAllText(
         $fixtureIndexPath,
         $fixtureIndexText.Replace(
-            "onload=`"this.media='all'`"",
-            "onload=`"this.media='screen'`""
+            '<body>',
+            '<body onload="this.dataset.x = 1">'
         ),
         [Text.UTF8Encoding]::new($false)
     )
-    $editedHandlerRejected = $false
+    $injectedHandlerRejected = $false
     try {
         & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
     }
     catch {
         if ($_.Exception.Message -notmatch
-            'Could not derive the site header contract') {
+            'no inline event handler attributes') {
             throw
         }
-        $editedHandlerRejected = $true
+        $injectedHandlerRejected = $true
     }
-    if (-not $editedHandlerRejected) {
-        throw 'Site CSP contract accepted an untracked event-handler edit.'
+    if (-not $injectedHandlerRejected) {
+        throw 'Site CSP contract accepted an injected inline event handler.'
     }
 
     [IO.File]::WriteAllText(
         $fixtureIndexPath,
         $fixtureIndexText.Replace(
-            "onload=`"this.media='all'`"",
-            'onload="this.media=&#39;all&#39;"'
+            '<body>',
+            '<body onload="this.dataset.x =&#32;1">'
         ),
         [Text.UTF8Encoding]::new($false)
     )
+    $encodedHandlerRejected = $false
     try {
         & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
     }
     catch {
-        throw 'Site CSP contract did not hash the browser-decoded handler text.'
+        if ($_.Exception.Message -notmatch
+            'no inline event handler attributes') {
+            throw
+        }
+        $encodedHandlerRejected = $true
+    }
+    if (-not $encodedHandlerRejected) {
+        throw 'Site CSP contract accepted an entity-encoded inline event handler.'
     }
 
     [IO.File]::WriteAllText(
@@ -1264,11 +1283,22 @@ try {
             throw "Site deploy manifest is missing $requiredPayloadPath."
         }
     }
+    $expectedPayloadAssets = @(
+        'assets/app-window.webp'
+        'assets/favicon.svg'
+        'assets/fonts/OFL-JetBrainsMono.txt'
+        'assets/fonts/OFL-SpaceGrotesk.txt'
+        'assets/fonts/jetbrains-mono.woff2'
+        'assets/fonts/space-grotesk.woff2'
+        'assets/hero-sky.webp'
+        'assets/noctty-social.jpg'
+    )
     $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
-    if ($payloadAssetPaths.Count -ne 2 -or
-        $payloadAssetPaths -cnotcontains 'assets/favicon.svg' -or
-        $payloadAssetPaths -cnotcontains 'assets/noctty-social.png') {
-        throw 'Site deploy manifest assets escaped the favicon and social-preview allowlist.'
+    if ($payloadAssetPaths.Count -ne $expectedPayloadAssets.Count -or
+        @($expectedPayloadAssets | Where-Object {
+            $payloadAssetPaths -cnotcontains $_
+        }).Count -ne 0) {
+        throw 'Site deploy manifest assets escaped the site asset allowlist.'
     }
 }
 finally {

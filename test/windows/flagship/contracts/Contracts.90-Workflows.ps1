@@ -19,9 +19,9 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow)
         }
-        Pattern = '(?ms)- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?- name: Site unit tests.*?node --test site/tests/terminal\.test\.mjs site/tests/build-site-assets\.test\.mjs.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
+        Pattern = '(?ms)- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?- name: Site unit tests.*?node --test "site/tests/\*\*/\*\.test\.mjs".*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}'
         Kind = 'Text'
-        Description = 'dependency-free site asset and unit-test gates run in fail-closed order'
+        Description = 'dependency-free site asset and recursively discovered unit-test gates run in fail-closed order'
     }
     @{
         File = "$testWorkflow :: Remote release copy checks"

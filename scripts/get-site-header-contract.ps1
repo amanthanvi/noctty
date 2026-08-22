@@ -15,10 +15,7 @@ function Assert-ReviewedContentSecurityPolicy {
         [string] $Policy,
 
         [Parameter(Mandatory)]
-        [string[]] $ScriptHashes,
-
-        [Parameter(Mandatory)]
-        [string[]] $ScriptAttributeHashes
+        [string[]] $ScriptHashes
     )
 
     $declaredDirectives = [Collections.Generic.Dictionary[
@@ -47,11 +44,9 @@ function Assert-ReviewedContentSecurityPolicy {
         'object-src' = [string[]] @("'none'")
         'frame-ancestors' = [string[]] @("'none'")
         'form-action' = [string[]] @("'self'")
-        'style-src' = [string[]] @(
-            "'self'",
-            'https://fonts.googleapis.com'
-        )
-        'font-src' = [string[]] @("'self'", 'https://fonts.gstatic.com')
+        'script-src-attr' = [string[]] @("'none'")
+        'style-src' = [string[]] @("'self'")
+        'font-src' = [string[]] @("'self'")
         'connect-src' = [string[]] @("'self'", 'https://api.github.com')
         'img-src' = [string[]] @("'self'", 'data:')
         'frame-src' = [string[]] @("'none'")
@@ -59,29 +54,22 @@ function Assert-ReviewedContentSecurityPolicy {
         'manifest-src' = [string[]] @("'self'")
         'upgrade-insecure-requests' = [string[]] @()
     }
-    $derivedHashSets = @($ScriptHashes, $ScriptAttributeHashes)
-    foreach ($derivedHashes in $derivedHashSets) {
-        $derivedHashSet = [Collections.Generic.HashSet[string]]::new(
-            [StringComparer]::Ordinal
-        )
-        foreach ($hash in $derivedHashes) {
-            [void] $derivedHashSet.Add($hash)
-        }
-        if ($derivedHashes.Count -ne $derivedHashSet.Count -or
-            @($derivedHashes | Where-Object {
-                $_ -cnotmatch '^sha256-[A-Za-z0-9+/]+={0,2}$'
-            }).Count -ne 0) {
-            throw 'HTML-derived CSP hashes are invalid or duplicated.'
-        }
+    $derivedHashSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($hash in $ScriptHashes) {
+        [void] $derivedHashSet.Add($hash)
+    }
+    if ($ScriptHashes.Count -ne $derivedHashSet.Count -or
+        @($ScriptHashes | Where-Object {
+            $_ -cnotmatch '^sha256-[A-Za-z0-9+/]+={0,2}$'
+        }).Count -ne 0) {
+        throw 'HTML-derived CSP hashes are invalid or duplicated.'
     }
     $dynamicHashDirectives = [ordered] @{
         'script-src' = [string[]] @(
             "'self'"
             $ScriptHashes | ForEach-Object { "'$_'" }
-        )
-        'script-src-attr' = [string[]] @(
-            "'unsafe-hashes'"
-            $ScriptAttributeHashes | ForEach-Object { "'$_'" }
         )
     }
     if ($declaredDirectives.Count -ne
@@ -139,12 +127,19 @@ if (-not (Test-Path -LiteralPath $headersPath -PathType Leaf)) {
 }
 
 $headerBuilder = Join-Path (Get-RepoRoot) 'scripts/build-site-assets.mjs'
-$derivedHeaderJson = & node $headerBuilder `
-    --print-header-contract `
-    "--site-directory=$siteRoot"
-if ($LASTEXITCODE -ne 0) {
-    throw "Could not derive the site header contract (exit $LASTEXITCODE)."
+$derivedHeaderOutput = @(
+    & node $headerBuilder `
+        --print-header-contract `
+        "--site-directory=$siteRoot" 2>&1
+)
+$headerBuilderExitCode = $LASTEXITCODE
+if ($headerBuilderExitCode -ne 0) {
+    $headerBuilderError = @(
+        $derivedHeaderOutput | ForEach-Object { [string] $_ }
+    ) -join [Environment]::NewLine
+    throw "Could not derive the site header contract (exit $headerBuilderExitCode): $headerBuilderError"
 }
+$derivedHeaderJson = $derivedHeaderOutput -join [Environment]::NewLine
 $derivedHeaderContract = $derivedHeaderJson | ConvertFrom-Json -Depth 6
 $expectedHeaderBytes = [Convert]::FromBase64String(
     [string] $derivedHeaderContract.generated_headers_base64
@@ -257,8 +252,7 @@ if ($declaredPermissionTokens.Count -ne $declaredPermissions.Count -or
 $csp = $security['Content-Security-Policy']
 Assert-ReviewedContentSecurityPolicy `
     -Policy $csp `
-    -ScriptHashes @($derivedHeaderContract.script_hashes) `
-    -ScriptAttributeHashes @($derivedHeaderContract.script_attribute_hashes)
+    -ScriptHashes @($derivedHeaderContract.script_hashes)
 if ($csp -cne [string] $derivedHeaderContract.root.content_security_policy) {
     throw 'Tracked site CSP differs from the HTML-derived source of truth.'
 }
