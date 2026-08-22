@@ -211,6 +211,7 @@ Recommended order:
 7. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
+   - Chocolatey package push
 
 If a tag already exists and the workflow failed before publish, configure
 the missing signing secrets and then rerun the failed `Release` workflow or
@@ -250,6 +251,23 @@ scoop install noctty/noctty
 
 Release preflight verifies that the configured manifest exists, defaulting
 to `bucket/noctty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
+
+### Chocolatey
+
+- Secret: `CHOCO_API_KEY`
+- Package id: `noctty`
+
+The release workflow always generates the Chocolatey package metadata. It
+skips `choco pack` and `choco push` cleanly when `CHOCO_API_KEY` is absent.
+To publish a generated package manually:
+
+```powershell
+choco pack .\noctty.nuspec --output-directory .\out
+choco push .\out\noctty.<version>.nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+```
+
+Creating the chocolatey.org account and configuring its API key remain
+maintainer steps outside this repository.
 
 ## Zig version
 
