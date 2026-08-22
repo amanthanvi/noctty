@@ -581,7 +581,7 @@ var cmd_clink_detection_cache: CmdClinkDetectionCache = .{};
 /// PROMPT syntax; ESC followed by `\\` terminates each OSC sequence.
 fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
     if (existing) |current| {
-        if (std.mem.startsWith(u8, current, cmd_prompt_osc_a)) {
+        if (std.mem.indexOf(u8, current, cmd_prompt_osc_a) != null) {
             return try alloc.dupe(u8, current);
         }
     }
@@ -812,8 +812,20 @@ test "cmd prompt construction is idempotent" {
     defer testing.allocator.free(prompt);
     const repeated = try buildCmdPrompt(testing.allocator, prompt);
     defer testing.allocator.free(repeated);
+    const clink_prefixed = try std.fmt.allocPrint(
+        testing.allocator,
+        "C\x08L\x08I\x08N\x08K\x08 \x08{s}",
+        .{prompt},
+    );
+    defer testing.allocator.free(clink_prefixed);
+    const prefixed_repeated = try buildCmdPrompt(
+        testing.allocator,
+        clink_prefixed,
+    );
+    defer testing.allocator.free(prefixed_repeated);
 
     try testing.expectEqualStrings(prompt, repeated);
+    try testing.expectEqualStrings(clink_prefixed, prefixed_repeated);
 }
 
 test "cmd Clink path composition prepends once and rejects semicolons" {
