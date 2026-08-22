@@ -34406,10 +34406,10 @@ test "win32 buildProfileDetailText appends shell integration guidance when prese
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     const profile: windows_shell.Profile = .{
-        .kind = .cmd,
-        .key = "cmd.exe",
-        .label = "Command Prompt",
-        .command = .{ .direct = &.{"cmd.exe"} },
+        .kind = .wsl_default,
+        .key = "wsl.exe",
+        .label = "WSL",
+        .command = .{ .direct = &.{"wsl.exe"} },
     };
 
     const detail = try buildProfileDetailText(
@@ -34426,12 +34426,12 @@ test "win32 buildProfileDetailText appends shell integration guidance when prese
     try std.testing.expect(std.mem.indexOf(
         u8,
         detail,
-        "New hosts inherit this Command Prompt profile; shell integration unavailable.",
+        "New hosts inherit this WSL default profile; shell integration depends on the Linux shell.",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         detail,
-        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+        "Enable shell integration inside the selected WSL shell startup.",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "+ opens a new tab") != null);
 }
@@ -35004,13 +35004,10 @@ test "win32 profileKindDetail exposes shell integration posture" {
 
     const cmd = profileKindDetail(.cmd);
     try std.testing.expectEqualStrings(
-        "Command Prompt profile; shell integration unavailable",
+        "Command Prompt profile with PROMPT-based shell integration; Clink adds command-start/finish and exit-code marks",
         cmd.summary,
     );
-    try std.testing.expectEqualStrings(
-        "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
-        cmd.next_step.?,
-    );
+    try std.testing.expectEqual(@as(?[]const u8, null), cmd.next_step);
 }
 
 test "win32 startupProfilePickerEnabled parses launcher env values" {

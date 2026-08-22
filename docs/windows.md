@@ -74,9 +74,26 @@ The profile picker detects common Windows shells:
 Shell integration is automatic for PowerShell and directly launched
 Unix-like shells such as Git Bash; WSL sessions manage their own
 integration inside the distribution. PowerShell integration emits OSC 7
-working-directory updates and OSC 133 prompt markers. `cmd.exe` is a
-plain fallback shell today, with no automatic prompt, cwd, or
-command-finish integration.
+working-directory updates and OSC 133 prompt markers.
+
+For `cmd.exe`, noctty wraps the inherited `PROMPT` value, falling back to
+cmd's `$P$G` default when it is unset. A `PROMPT` supplied through noctty's
+`env = PROMPT=...` configuration is applied afterward and intentionally
+replaces this wrapper. The wrapper emits OSC 133 A/B prompt marks and OSC 9;9
+working-directory reports. If `clink.bat` or `clink_x64.exe` is found on
+`PATH` or under `%LOCALAPPDATA%\clink`, noctty prepends its shipped Lua
+directory to `CLINK_PATH`. This only makes the script discoverable after Clink
+is active through autorun, `clink inject`, or an explicit Clink launch; noctty
+does not inject or launch Clink. When loaded, the script adds OSC 133 C/D
+command marks and the exit code before the next prompt. `os.geterrorlevel()`
+reports a truthful exit code only while Clink's `cmd.get_errorlevel` setting is
+enabled (the default). Without the loaded Clink script, prompt navigation and
+cwd reporting still work, but there are no command-finish marks or exit codes.
+On a UNC working directory, `$P` produces a network path that the current OSC
+cwd conversion retains with an extra leading `/`, so it is not a valid local
+cwd. `PROMPT` is inherited session-wide, so `echo on` batch execution and
+`cmd /c` children can print the wrapped value for command lines and emit
+spurious OSC 133 marks.
 
 `utf8-console` controls UTF-8 setup for bare interactive `cmd.exe` launches,
 Windows PowerShell 5.1, and PowerShell 7 (`pwsh`) sessions. `auto` is the default

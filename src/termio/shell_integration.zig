@@ -23,6 +23,9 @@ pub const Shell = enum {
     /// points are left untouched so exit behavior and payload semantics
     /// are preserved.
     powershell,
+    /// Windows Command Prompt. `PROMPT` supplies prompt/cwd marks, and an
+    /// optional Clink script supplies command-start/command-finish marks.
+    cmd,
 };
 
 /// The result of setting up a shell integration.
@@ -85,6 +88,13 @@ pub fn setup(
         },
 
         .powershell => try setupPowerShell(alloc_arena, command, resource_dir),
+
+        .cmd => try setupCmd(
+            alloc_arena,
+            command,
+            resource_dir,
+            env,
+        ),
     } orelse return null;
 
     return .{
@@ -111,6 +121,7 @@ test "force shell" {
 
         const command: config.Command = switch (shell) {
             .powershell => .{ .direct = &.{"pwsh.exe"} },
+            .cmd => .{ .direct = &.{"cmd.exe"} },
             else => .{ .shell = "sh" },
         };
 
@@ -121,7 +132,9 @@ test "force shell" {
             &env,
             shell,
         );
-        if (shell == .powershell and builtin.os.tag != .windows) {
+        if ((shell == .powershell or shell == .cmd) and
+            builtin.os.tag != .windows)
+        {
             try testing.expect(result == null);
         } else {
             try testing.expectEqual(shell, result.?.shell);
@@ -191,6 +204,12 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
         return .powershell;
     }
 
+    if (std.ascii.eqlIgnoreCase(exe, "cmd") or
+        std.ascii.eqlIgnoreCase(exe, "cmd.exe"))
+    {
+        return .cmd;
+    }
+
     return null;
 }
 
@@ -218,6 +237,11 @@ test detectShell {
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "PowerShell.EXE" }));
     try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoProfile" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{ .shell = "cmd.exe" }));
+    try testing.expectEqual(.cmd, try detectShell(alloc, .{
+        .direct = &.{"C:\\Windows\\System32\\cmd.exe"},
+    }));
 
     if (comptime builtin.target.os.tag.isDarwin()) {
         try testing.expect(try detectShell(alloc, .{ .shell = "/bin/bash" }) == null);
@@ -510,6 +534,482 @@ fn setupPowerShell(
     )) orelse return null;
 
     return .{ .direct = injected };
+}
+
+const cmd_default_prompt = "$P$G";
+// OSC 9;9 feeds the same cwd handler as OSC 7, so use its accepted URI form.
+// The kitty scheme keeps cmd's unescaped `$P` Windows path intact.
+const cmd_prompt_osc_a = "$E]133;A$E\\";
+const cmd_prompt_prefix = cmd_prompt_osc_a ++
+    "$E]9;9;kitty-shell-cwd://localhost/$P$E\\";
+const cmd_prompt_suffix = "$E]133;B$E\\";
+const cmd_clink_executables = [_][]const u8{
+    "clink.bat",
+    "clink_x64.exe",
+};
+const CmdClinkDetectionCache = struct {
+    mutex: std.Thread.Mutex = .{},
+    snapshot: ?Snapshot = null,
+
+    const Snapshot = struct {
+        path: []u8,
+        local_app_data: []u8,
+        installed: bool,
+    };
+};
+var cmd_clink_detection_cache: CmdClinkDetectionCache = .{};
+
+/// Build a cmd PROMPT value that preserves the user's prompt while adding
+/// prompt boundaries and the current working directory. `$E` is ESC in cmd's
+/// PROMPT syntax; ESC followed by `\\` terminates each OSC sequence.
+fn buildCmdPrompt(alloc: Allocator, existing: ?[]const u8) ![]u8 {
+    if (existing) |current| {
+        if (std.mem.indexOf(u8, current, cmd_prompt_osc_a) != null) {
+            return try alloc.dupe(u8, current);
+        }
+    }
+
+    return try std.fmt.allocPrint(
+        alloc,
+        "{s}{s}{s}",
+        .{ cmd_prompt_prefix, existing orelse cmd_default_prompt, cmd_prompt_suffix },
+    );
+}
+
+fn composeCmdClinkPath(
+    alloc: Allocator,
+    existing: ?[]const u8,
+    integration_dir: []const u8,
+) ![]u8 {
+    const current = existing orelse "";
+    if (current.len == 0) return try alloc.dupe(u8, integration_dir);
+
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(alloc);
+    try result.appendSlice(alloc, integration_dir);
+
+    var dirs = std.mem.splitScalar(u8, current, ';');
+    while (dirs.next()) |raw_dir| {
+        const dir = std.mem.trim(u8, raw_dir, " \t\"");
+        if (std.ascii.eqlIgnoreCase(dir, integration_dir)) continue;
+        try result.append(alloc, ';');
+        try result.appendSlice(alloc, raw_dir);
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
+
+fn cmdClinkIntegrationDirSafe(integration_dir: []const u8) bool {
+    return std.mem.indexOfScalar(u8, integration_dir, ';') == null;
+}
+
+fn setupCmd(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+    env: *EnvMap,
+) !?config.Command {
+    if (builtin.os.tag != .windows) return null;
+    if (!isInteractiveCmd(alloc, command)) return null;
+
+    const prompt = try buildCmdPrompt(alloc, env.get("PROMPT"));
+    defer alloc.free(prompt);
+    try env.put("PROMPT", prompt);
+
+    const integration_dir = try std.fs.path.join(alloc, &.{
+        resource_dir,
+        "shell-integration",
+        "cmd",
+    });
+    defer alloc.free(integration_dir);
+
+    if (!cmdClinkIntegrationDirSafe(integration_dir)) {
+        log.warn(
+            "cmd Clink integration disabled because its path contains a semicolon path={s}",
+            .{integration_dir},
+        );
+        return try command.clone(alloc);
+    }
+
+    if (try clinkInstalled(alloc, env)) {
+        const script_path = try std.fs.path.join(alloc, &.{
+            integration_dir,
+            "clink.lua",
+        });
+        defer alloc.free(script_path);
+
+        if (fileExistsAbsolute(script_path)) {
+            const clink_path = try composeCmdClinkPath(
+                alloc,
+                env.get("CLINK_PATH"),
+                integration_dir,
+            );
+            defer alloc.free(clink_path);
+            try env.put("CLINK_PATH", clink_path);
+        } else {
+            log.warn("cmd Clink integration script is unavailable path={s}", .{script_path});
+        }
+    }
+
+    return try command.clone(alloc);
+}
+
+fn isInteractiveCmd(alloc: Allocator, command: config.Command) bool {
+    var arg_iter = command.argIterator(alloc) catch return false;
+    defer arg_iter.deinit();
+
+    _ = arg_iter.next() orelse return false;
+    while (arg_iter.next()) |arg| {
+        if (cmdMode(arg)) |keep_open| return keep_open;
+    }
+    return true;
+}
+
+fn cmdMode(arg: []const u8) ?bool {
+    if (arg.len < 2 or arg[0] != '/') return null;
+
+    var index: usize = 0;
+    while (index + 1 < arg.len) : (index += 1) {
+        if (arg[index] != '/') continue;
+        switch (std.ascii.toLower(arg[index + 1])) {
+            'c', 'r' => return false,
+            'k' => return true,
+            else => {},
+        }
+    }
+
+    return null;
+}
+
+fn clinkInstalled(alloc: Allocator, env: *const EnvMap) !bool {
+    if (builtin.os.tag != .windows) return false;
+
+    const path = env.get("PATH") orelse "";
+    const local_app_data = env.get("LOCALAPPDATA") orelse "";
+
+    cmd_clink_detection_cache.mutex.lock();
+    defer cmd_clink_detection_cache.mutex.unlock();
+
+    if (cmd_clink_detection_cache.snapshot) |snapshot| {
+        if (std.mem.eql(u8, snapshot.path, path) and
+            std.mem.eql(u8, snapshot.local_app_data, local_app_data))
+        {
+            return snapshot.installed;
+        }
+    }
+
+    const installed = try clinkInstalledUncached(alloc, path, local_app_data);
+    const cache_alloc = std.heap.page_allocator;
+    const path_copy = try cache_alloc.dupe(u8, path);
+    errdefer cache_alloc.free(path_copy);
+    const local_app_data_copy = try cache_alloc.dupe(u8, local_app_data);
+    errdefer cache_alloc.free(local_app_data_copy);
+
+    if (cmd_clink_detection_cache.snapshot) |snapshot| {
+        cache_alloc.free(snapshot.path);
+        cache_alloc.free(snapshot.local_app_data);
+    }
+    cmd_clink_detection_cache.snapshot = .{
+        .path = path_copy,
+        .local_app_data = local_app_data_copy,
+        .installed = installed,
+    };
+    return installed;
+}
+
+fn clinkInstalledUncached(
+    alloc: Allocator,
+    path: []const u8,
+    local_app_data: []const u8,
+) !bool {
+    if (local_app_data.len > 0) {
+        const local_clink_dir = try std.fs.path.resolve(
+            alloc,
+            &.{ local_app_data, "clink" },
+        );
+        defer alloc.free(local_clink_dir);
+        if (try directoryContainsClink(alloc, local_clink_dir)) return true;
+    }
+
+    if (path.len > 0) {
+        var dirs = std.mem.splitScalar(u8, path, ';');
+        while (dirs.next()) |raw_dir| {
+            const dir = std.mem.trim(u8, raw_dir, " \t\"");
+            if (cmdPathEntrySafeToProbe(dir) and
+                try directoryContainsClink(alloc, dir)) return true;
+        }
+    }
+
+    return false;
+}
+
+fn cmdPathEntrySafeToProbe(dir: []const u8) bool {
+    return dir.len >= 3 and
+        std.ascii.isAlphabetic(dir[0]) and
+        dir[1] == ':' and
+        (dir[2] == '\\' or dir[2] == '/');
+}
+
+fn directoryContainsClink(alloc: Allocator, dir: []const u8) !bool {
+    for (cmd_clink_executables) |exe| {
+        const candidate = try std.fs.path.resolve(alloc, &.{ dir, exe });
+        defer alloc.free(candidate);
+        if (fileExistsAbsolute(candidate)) return true;
+    }
+    return false;
+}
+
+fn fileExistsAbsolute(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
+test "cmd prompt construction defaults and preserves escapes" {
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, null);
+    defer testing.allocator.free(prompt);
+
+    try testing.expectEqualStrings(
+        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\$P$G$E]133;B$E\\",
+        prompt,
+    );
+}
+
+test "cmd prompt construction preserves user prompt" {
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, "[$T] $P$_$$ ");
+    defer testing.allocator.free(prompt);
+
+    try testing.expectEqualStrings(
+        "$E]133;A$E\\$E]9;9;kitty-shell-cwd://localhost/$P$E\\[$T] $P$_$$ $E]133;B$E\\",
+        prompt,
+    );
+}
+
+test "cmd prompt construction is idempotent" {
+    const testing = std.testing;
+
+    const prompt = try buildCmdPrompt(testing.allocator, "[$T] $P$_$$ ");
+    defer testing.allocator.free(prompt);
+    const repeated = try buildCmdPrompt(testing.allocator, prompt);
+    defer testing.allocator.free(repeated);
+    const clink_prefixed = try std.fmt.allocPrint(
+        testing.allocator,
+        "C\x08L\x08I\x08N\x08K\x08 \x08{s}",
+        .{prompt},
+    );
+    defer testing.allocator.free(clink_prefixed);
+    const prefixed_repeated = try buildCmdPrompt(
+        testing.allocator,
+        clink_prefixed,
+    );
+    defer testing.allocator.free(prefixed_repeated);
+
+    try testing.expectEqualStrings(prompt, repeated);
+    try testing.expectEqualStrings(clink_prefixed, prefixed_repeated);
+}
+
+test "cmd Clink path composition prepends once and rejects semicolons" {
+    const testing = std.testing;
+
+    const empty = try composeCmdClinkPath(testing.allocator, "", "C:\\noctty\\cmd");
+    defer testing.allocator.free(empty);
+    try testing.expectEqualStrings("C:\\noctty\\cmd", empty);
+
+    const existing = try composeCmdClinkPath(
+        testing.allocator,
+        "C:\\user\\clink;D:\\shared\\clink",
+        "C:\\noctty\\cmd",
+    );
+    defer testing.allocator.free(existing);
+    try testing.expectEqualStrings(
+        "C:\\noctty\\cmd;C:\\user\\clink;D:\\shared\\clink",
+        existing,
+    );
+
+    const idempotent = try composeCmdClinkPath(
+        testing.allocator,
+        existing,
+        "C:\\noctty\\cmd",
+    );
+    defer testing.allocator.free(idempotent);
+    try testing.expectEqualStrings(existing, idempotent);
+
+    const repeated = try composeCmdClinkPath(
+        testing.allocator,
+        "C:\\user\\clink;C:\\noctty\\cmd;D:\\shared\\clink",
+        "C:\\noctty\\cmd",
+    );
+    defer testing.allocator.free(repeated);
+    try testing.expectEqualStrings(
+        "C:\\noctty\\cmd;C:\\user\\clink;D:\\shared\\clink",
+        repeated,
+    );
+
+    try testing.expect(cmdClinkIntegrationDirSafe("C:\\noctty\\cmd"));
+    try testing.expect(!cmdClinkIntegrationDirSafe("C:\\unsafe;path\\cmd"));
+}
+
+test "cmd Clink detection covers PATH and LocalAppData" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.makePath("path-bat");
+    try tmp_dir.dir.makePath("path-x64");
+    try tmp_dir.dir.makePath("local/clink");
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "path-bat/clink.bat",
+        .data = "",
+    });
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "path-x64/clink_x64.exe",
+        .data = "",
+    });
+
+    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const path_bat = try std.fs.path.join(alloc, &.{ root, "path-bat" });
+    const path_x64 = try std.fs.path.join(alloc, &.{ root, "path-x64" });
+    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
+
+    try testing.expect(try clinkInstalledUncached(alloc, path_bat, ""));
+    try testing.expect(try clinkInstalledUncached(alloc, path_x64, ""));
+    try testing.expect(!try clinkInstalledUncached(alloc, "", local_app_data));
+
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "local/clink/clink_x64.exe",
+        .data = "",
+    });
+    try testing.expect(try clinkInstalledUncached(alloc, path_bat, local_app_data));
+
+    try testing.expect(cmdPathEntrySafeToProbe(path_bat));
+    try testing.expect(!cmdPathEntrySafeToProbe("relative\\clink"));
+    try testing.expect(!cmdPathEntrySafeToProbe("C:relative\\clink"));
+    try testing.expect(!cmdPathEntrySafeToProbe("\\rooted\\clink"));
+    try testing.expect(!cmdPathEntrySafeToProbe("\\\\server\\share\\clink"));
+    try testing.expect(!cmdPathEntrySafeToProbe("//server/share/clink"));
+    try testing.expect(cmdPathEntrySafeToProbe("D:/absolute/clink"));
+}
+
+test "cmd Clink setup fails closed for semicolon integration path" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.makePath("resources;unsafe/shell-integration/cmd");
+    try tmp_dir.dir.makePath("local/clink");
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "resources;unsafe/shell-integration/cmd/clink.lua",
+        .data = "",
+    });
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "local/clink/clink_x64.exe",
+        .data = "",
+    });
+
+    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const resource_dir = try std.fs.path.join(alloc, &.{ root, "resources;unsafe" });
+    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("LOCALAPPDATA", local_app_data);
+    try env.put("CLINK_PATH", "C:\\trusted\\clink");
+
+    _ = (try setupCmd(
+        alloc,
+        .{ .direct = &.{"cmd.exe"} },
+        resource_dir,
+        &env,
+    )).?;
+    try testing.expectEqualStrings("C:\\trusted\\clink", env.get("CLINK_PATH").?);
+}
+
+test "cmd Clink detection caches one environment snapshot" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.makePath("path");
+    try tmp_dir.dir.makePath("local");
+
+    const root = try tmp_dir.dir.realpathAlloc(alloc, ".");
+    const path = try std.fs.path.join(alloc, &.{ root, "path" });
+    const local_app_data = try std.fs.path.join(alloc, &.{ root, "local" });
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try env.put("PATH", path);
+    try env.put("LOCALAPPDATA", local_app_data);
+
+    try testing.expect(!try clinkInstalled(alloc, &env));
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "path/clink.bat",
+        .data = "",
+    });
+    try testing.expect(!try clinkInstalled(alloc, &env));
+
+    const changed_path = try std.fmt.allocPrint(alloc, "{s};relative", .{path});
+    try env.put("PATH", changed_path);
+    try testing.expect(try clinkInstalled(alloc, &env));
+}
+
+test "cmd integration follows cmd slash switch modes" {
+    const testing = std.testing;
+
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/C", "payload" },
+    }));
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/Cpayload" },
+    }));
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/D", "/Q", "/C", "payload" },
+    }));
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/d/q/c", "payload" },
+    }));
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/R", "payload" },
+    }));
+    try testing.expect(!isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/C/K", "payload" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/K" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/D", "/Q", "/K" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/K", "chcp 65001 >nul" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "/K/C", "payload" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{ "cmd.exe", "-c", "payload" },
+    }));
+    try testing.expect(isInteractiveCmd(testing.allocator, .{
+        .direct = &.{"cmd.exe"},
+    }));
 }
 
 /// Set up the shell integration features environment variable.
@@ -1343,6 +1843,10 @@ const TmpResourcesDir = struct {
             }),
             .powershell => try tmp_dir.dir.writeFile(.{
                 .sub_path = "shell-integration/powershell/integration.ps1",
+                .data = "",
+            }),
+            .cmd => try tmp_dir.dir.writeFile(.{
+                .sub_path = "shell-integration/cmd/clink.lua",
                 .data = "",
             }),
             else => {},
