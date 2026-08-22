@@ -35,6 +35,10 @@ checksummed and bound to the canonical release workflow by GitHub build
 provenance. The legacy `SHA256SUMS.txt` file remains an x64 auto-update
 compatibility alias.
 
+A Chocolatey package (`noctty`) is built by the release workflow but has not
+been published yet, so `choco install noctty` does not work today. It will
+after the first push clears chocolatey.org moderation.
+
 [getting-started.md](getting-started.md) covers download and install,
 including the SmartScreen warning. [verify-release.md](verify-release.md)
 covers checksum, provenance, and signature checks.

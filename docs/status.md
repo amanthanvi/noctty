@@ -181,6 +181,8 @@ Win32-validated VT protocol coverage is tracked in
 ### Windows package managers
 
 - WinGet package id: `AmanThanvi.noctty` (bootstrap pending).
+- Chocolatey package id: `noctty` (built by the release workflow; not yet
+  published).
 - Scoop bucket: `https://github.com/amanthanvi/scoop-noctty`.
 
 ### Crash reports
