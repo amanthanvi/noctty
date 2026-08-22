@@ -3192,10 +3192,16 @@ keybind: Keybinds = .{},
 ///
 /// For a bare interactive `cmd.exe`, the preamble runs `chcp 65001` silently
 /// before the prompt and is a no-op when the live console is already UTF-8;
-/// cmd launches with any command tail are left unchanged. For interactive
-/// Windows PowerShell 5.1 and PowerShell 7 (`pwsh`), the existing shell
-/// integration sets both `[Console]::InputEncoding` and
-/// `[Console]::OutputEncoding` to UTF-8 only when their live code pages differ.
+/// cmd launches with any command tail are left unchanged.
+///
+/// The PowerShell half is performed by the injected shell-integration script,
+/// not by noctty itself: it sets `[Console]::InputEncoding` and
+/// `[Console]::OutputEncoding` only when their live code pages differ. It
+/// therefore requires automatic shell-integration injection to have happened.
+/// With `shell-integration = none`, or with a PowerShell command line that
+/// injection declines (`-Command`, `-File`, `-EncodedCommand`,
+/// `-NonInteractive`), `utf8-console` has no effect on PowerShell at all. The
+/// `cmd.exe` half does not depend on shell integration.
 @"utf8-console": Utf8Console = .auto,
 
 /// Retained compatibility settings from the removed GTK runtime.
