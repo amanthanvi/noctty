@@ -46,6 +46,7 @@ pub const Handler = struct {
             .kitty => |*p| if (comptime build_options.kitty_graphics) {
                 p.feed(byte) catch |err| {
                     log.warn("kitty graphics protocol error: {}", .{err});
+                    p.deinit();
                     self.state = .ignore;
                 };
             } else unreachable,
@@ -167,6 +168,22 @@ test "Kitty command with overflow i32" {
     h.start();
     for ("Ga=p,i=1,z=-9999999999") |c| h.feed(alloc, c);
     try testing.expect(h.end() == null);
+}
+
+test "kitty feed error deinits parser" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Feed a valid kitty command start to allocate parser state, then
+    // trigger an error during feed via an integer overflow. The testing
+    // allocator will detect leaks if deinit is not called.
+    var h: Handler = .{};
+    defer h.deinit();
+    h.start();
+    for ("Ga=p,i=10000000000;") |c| h.feed(alloc, c);
+    try testing.expect(h.state == .ignore);
 }
 
 test "valid Kitty command" {
