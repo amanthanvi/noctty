@@ -279,6 +279,7 @@ jobs:
           . (Join-Path $PWD "scripts/windows-architecture.ps1")
           . (Join-Path $PWD "scripts/signing-trust.ps1")
           $version = "${{ steps.meta.outputs.version }}"
+          $conptyPin = Get-Content -LiteralPath (Join-Path $PWD "dist/windows/conpty-redist.json") -Raw | ConvertFrom-Json
           $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
           $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PWD "src/update/github_releases.zig"))
           if ($allowedPins.Count -eq 0) { throw "Updater publisher-pin allowlist is empty." }
@@ -286,12 +287,13 @@ jobs:
           function Assert-ReleaseSignature {
             param(
               [string]$Path,
-              [string]$Label
+              [string]$Label,
+              [switch]$Microsoft
             )
 
             $sig = Get-AuthenticodeSignature -LiteralPath $Path
             $statusAccepted = $sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid
-            if (-not $statusAccepted -and $trustSelfSigned -and
+            if (-not $statusAccepted -and -not $Microsoft -and $trustSelfSigned -and
                 $sig.SignerCertificate -and
                 $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
                 (Test-SelfSignedTrustStatus -Signature $sig -Path $Path)) {
@@ -302,6 +304,13 @@ jobs:
             }
             if (-not $sig.SignerCertificate) {
               throw "$Label has no Authenticode signer certificate: $Path"
+            }
+            if ($Microsoft) {
+              $signerName = $sig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+              if ($signerName -cne "Microsoft Corporation") {
+                throw "$Label is not signed by Microsoft Corporation: $Path"
+              }
+              return
             }
             $pin = Get-CertificateSpkiSha256 -Certificate $sig.SignerCertificate
             if ($allowedPins -notcontains $pin) {
@@ -339,6 +348,19 @@ jobs:
             foreach ($relative in @("noctty/noctty.com", "noctty/noctty.exe", "noctty/ghostty-vt.dll")) {
               $path = Join-Path $extractDir $relative
               Assert-ReleaseSignature -Path $path -Label "$relative $arch"
+            }
+
+            $conptyArchitecture = $conptyPin.architectures.PSObject.Properties[$arch].Value
+            foreach ($payload in @(
+              @{ RelativePath = "noctty/conpty.dll"; Pin = $conptyArchitecture.conptyDll },
+              @{ RelativePath = "noctty/OpenConsole.exe"; Pin = $conptyArchitecture.openConsoleExe }
+            )) {
+              $path = Join-Path $extractDir $payload.RelativePath
+              $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+              if ($actualHash -cne ([string]$payload.Pin.sha256).ToLowerInvariant()) {
+                throw "$($payload.RelativePath) $arch does not match the pinned ConPTY SHA-256."
+              }
+              Assert-ReleaseSignature -Path $path -Label "$($payload.RelativePath) $arch" -Microsoft
             }
           }
 

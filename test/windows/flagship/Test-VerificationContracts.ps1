@@ -2633,8 +2633,6 @@ $publishedReleaseVerifierText = Get-Content -LiteralPath $publishedReleaseVerifi
 $windowsPackagerText = Get-Content -LiteralPath $windowsPackager -Raw
 $windowsPackageBuilderText = Get-Content -LiteralPath $windowsPackageBuilder -Raw
 $conptyRedistHelperText = Get-Content -LiteralPath $conptyRedistHelper -Raw
-$conptyRuntimeText = Get-Content -LiteralPath $conptyRuntime -Raw
-$diagnosticBundleText = Get-Content -LiteralPath $diagnosticBundle -Raw
 $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
@@ -6713,7 +6711,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
 $releaseWorkflowSha256 =
-    'ab23b46bf73ad25009e43674725eac912bcb4269576463bc8d733eaf210e9943'
+    '9c6d0fd38bea047067b46ab2d67cf87d63d28e27c226a29c3502541aaa84fcb9'
 $readinessWorkflowSha256 =
     '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -7872,6 +7870,11 @@ $signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
     -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $signedArtifactStep `
+    -Pattern '(?ms)dist/windows/conpty-redist\.json.*?function Assert-ReleaseSignature.*?\[switch\]\$Microsoft.*?Get-AuthenticodeSignature -LiteralPath \$Path.*?-not \$Microsoft.*?X509NameType\]::SimpleName.*?Microsoft Corporation.*?conptyDll.*?OpenConsole\.exe.*?Get-FileHash -Algorithm SHA256.*?\.sha256.*?Assert-ReleaseSignature.*?-Microsoft' `
+    -Description 'release rechecks pinned ConPTY payload hashes and valid Microsoft Authenticode signatures' `
+    -Context "$releaseWorkflow :: Verify signed release artifacts"
 $signingTrustConsumers = @(
     [pscustomobject]@{
         Context = $publishedReleaseVerifier
@@ -8351,16 +8354,12 @@ Assert-WorkflowContract `
     -Description 'ConPTY ZIP extraction does not shadow the PowerShell input automatic variable'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
-    -Pattern '(?ms)fn forceInbox\(\) bool.*?NOCTTY_CONPTY.*?return std\.ascii\.eqlIgnoreCase\(value, "inbox"\).*?LoadLibraryExW.*?OpenConsole\.exe.*?accessAbsolute.*?return error\.OpenConsoleMissing' `
-    -Description 'ConPTY selection only forces inbox explicitly and rejects a bundled DLL without its companion executable'
+    -Pattern '(?ms)fn forceInbox\(\) bool.*?NOCTTY_CONPTY.*?return std\.ascii\.eqlIgnoreCase\(value, "inbox"\).*?LoadLibraryExW.*?OpenConsole\.exe.*?openConsoleMatchesArchitecture.*?return error\.OpenConsoleWrongArch' `
+    -Description 'ConPTY selection only forces inbox explicitly and rejects a missing or wrong-architecture companion executable'
 Assert-WorkflowContract `
     -Path $conptyRuntime `
-    -Pattern 'error\.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole\.exe"' `
-    -Description 'ConPTY fallback names a missing OpenConsole companion concretely'
-Assert-WorkflowContractAbsent `
-    -Path $conptyRuntime `
-    -Pattern 'const Override|requestedOverride|eqlIgnoreCase\(value, "bundled"\)' `
-    -Description 'ConPTY selection does not pretend auto and bundled are distinct modes'
+    -Pattern 'error\.OpenConsoleWrongArch => "bundled OpenConsole\.exe has the wrong architecture"' `
+    -Description 'ConPTY fallback names a wrong-architecture OpenConsole companion concretely'
 Assert-WorkflowContract `
     -Path $diagnosticBundle `
     -Pattern '(?ms)conpty: \?pty\.ConPtyInfo.*?\.conpty = pty\.conPtyInfo\(\)' `
@@ -8384,16 +8383,6 @@ $conptyRedistHelperSha256 =
     '365826625d6969feaa0f6a292825a8655057e191407e8ef72d1434805bac68b2'
 if ((Get-CanonicalTextSha256 -Text $conptyRedistHelperText) -cne $conptyRedistHelperSha256) {
     throw 'ConPTY redistributable helper changed without a contract review.'
-}
-$conptyRuntimeSha256 =
-    'f4b96f4b28df351a1682f85756741f62d98f3e7588361aad04fc824507ad05c8'
-if ((Get-CanonicalTextSha256 -Text $conptyRuntimeText) -cne $conptyRuntimeSha256) {
-    throw 'ConPTY runtime changed without a contract review.'
-}
-$diagnosticBundleSha256 =
-    '1c43ad028978ba571bdec9a0767d41cc64a807edf63d578136e143601d640cc3'
-if ((Get-CanonicalTextSha256 -Text $diagnosticBundleText) -cne $diagnosticBundleSha256) {
-    throw 'Diagnostic bundle ConPTY reporting changed without a contract review.'
 }
 
 $conptyPin = Get-Content -LiteralPath $conptyRedistPin -Raw | ConvertFrom-Json

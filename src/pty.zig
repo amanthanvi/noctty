@@ -7,67 +7,6 @@ const assert = @import("quirks.zig").inlineAssert;
 
 const log = std.log.scoped(.pty);
 
-const conpty_transport_probe_begin_marker = "NOCTTY-PROBE-BEGIN";
-const conpty_transport_probe_middle_marker = "NOCTTY-PROBE-MIDDLE";
-const conpty_transport_probe_end_marker = "NOCTTY-PROBE-END";
-const conpty_transport_probe_kitty_apc = "\x1b_Gf=24,s=4,v=1,a=T;Tk9DVFRZS0lUVFkh\x1b\\";
-const conpty_transport_probe_sixel_dcs = "\x1bPqNOCTTYSIXEL~\x1b\\";
-const conpty_transport_probe_expected = conpty_transport_probe_begin_marker ++
-    conpty_transport_probe_kitty_apc ++
-    conpty_transport_probe_middle_marker ++
-    conpty_transport_probe_sixel_dcs ++
-    conpty_transport_probe_end_marker;
-
-pub fn runConPtyTransportProbeChildIfRequested() void {
-    if (comptime builtin.os.tag != .windows) return;
-
-    const child = std.process.getEnvVarOwned(
-        std.heap.page_allocator,
-        "NOCTTY_CONPTY_TRANSPORT_PROBE_CHILD",
-    ) catch return;
-    defer std.heap.page_allocator.free(child);
-    if (!std.mem.eql(u8, child, "1")) return;
-
-    const Child = struct {
-        extern "kernel32" fn GetConsoleMode(
-            console: windows.HANDLE,
-            mode: *windows.DWORD,
-        ) callconv(.winapi) c_int;
-        extern "kernel32" fn SetConsoleMode(
-            console: windows.HANDLE,
-            mode: windows.DWORD,
-        ) callconv(.winapi) c_int;
-
-        fn run() noreturn {
-            const stdout = std.fs.File.stdout().handle;
-            var mode: windows.DWORD = 0;
-            if (GetConsoleMode(stdout, &mode) == 0) std.process.exit(91);
-            if (SetConsoleMode(stdout, mode | 0x0001 | 0x0004) == 0) std.process.exit(92);
-
-            var total: usize = 0;
-            while (total < conpty_transport_probe_expected.len) {
-                var written: windows.DWORD = 0;
-                if (windows.kernel32.WriteFile(
-                    stdout,
-                    conpty_transport_probe_expected[total..].ptr,
-                    @intCast(conpty_transport_probe_expected.len - total),
-                    &written,
-                    null,
-                ) == 0 or written == 0) std.process.exit(93);
-                total += written;
-            }
-            std.process.exit(0);
-        }
-    };
-
-    Child.run();
-}
-
-test "Windows ConPTY transport probe child dispatch" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    runConPtyTransportProbeChildIfRequested();
-}
-
 pub const ConPtySource = enum {
     bundled,
     inbox,
@@ -93,6 +32,19 @@ pub const ConPtyInfo = struct {
 pub fn conPtyInfo() ?ConPtyInfo {
     if (comptime builtin.os.tag != .windows) return null;
     return WindowsConPty.functions().info();
+}
+
+pub const conpty_fallback_banner =
+    "Bundled ConPTY is unavailable; using the in-box conhost. Kitty graphics and Sixel passthrough may be stripped on this Windows build.";
+
+pub fn hasPendingConPtyFallbackBanner() bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    return WindowsConPty.fallback_banner_pending.load(.acquire);
+}
+
+pub fn takeConPtyFallbackBanner() bool {
+    if (comptime builtin.os.tag != .windows) return false;
+    return WindowsConPty.fallback_banner_pending.swap(false, .acq_rel);
 }
 
 /// Redeclare this winsize struct so we can just use a Zig struct. This
@@ -416,6 +368,7 @@ const WindowsConPty = struct {
         NotFound,
         LoadFailed,
         OpenConsoleMissing,
+        OpenConsoleWrongArch,
         CreateSymbolMissing,
         ResizeSymbolMissing,
         CloseSymbolMissing,
@@ -437,20 +390,28 @@ const WindowsConPty = struct {
         }
     };
 
-    var resolved: ?Functions = null;
+    const inbox_functions: Functions = .{
+        .source = .inbox,
+        .create = &windows.exp.kernel32.CreatePseudoConsole,
+        .resize = &windows.exp.kernel32.ResizePseudoConsole,
+        .close = &windows.exp.kernel32.ClosePseudoConsole,
+    };
+    var bundled_functions: Functions = inbox_functions;
+    var selected = std.atomic.Value(*const Functions).init(&inbox_functions);
     var resolver_once = std.once(initialize);
     var bundled_hpc_created = std.atomic.Value(bool).init(false);
+    var fallback_banner_pending = std.atomic.Value(bool).init(false);
 
     fn functions() *const Functions {
         resolver_once.call();
-        return &resolved.?;
+        return selected.load(.acquire);
     }
 
     fn initialize() void {
-        resolved = resolve();
+        selected.store(resolve(), .release);
     }
 
-    fn resolve() Functions {
+    fn resolve() *const Functions {
         if (forceInbox()) {
             log.warn(
                 "bundled ConPTY disabled by NOCTTY_CONPTY=inbox; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
@@ -459,13 +420,15 @@ const WindowsConPty = struct {
         } else {
             if (loadBundled()) |bundled| {
                 log.info("using bundled ConPTY: {s}", .{bundled.bundled_path.?});
-                return bundled;
+                bundled_functions = bundled;
+                return &bundled_functions;
             } else |err| {
                 const reason = switch (err) {
                     error.PathUnavailable => "bundled ConPTY path could not be resolved",
                     error.NotFound => "bundled ConPTY not found",
                     error.LoadFailed => "bundled ConPTY failed to load",
                     error.OpenConsoleMissing => "bundled ConPTY is missing OpenConsole.exe",
+                    error.OpenConsoleWrongArch => "bundled OpenConsole.exe has the wrong architecture",
                     error.CreateSymbolMissing => "bundled ConPTY is missing CreatePseudoConsole",
                     error.ResizeSymbolMissing => "bundled ConPTY is missing ResizePseudoConsole",
                     error.CloseSymbolMissing => "bundled ConPTY is missing ClosePseudoConsole",
@@ -474,15 +437,11 @@ const WindowsConPty = struct {
                     "{s}; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
                     .{reason},
                 );
+                signalFallbackBanner();
             }
         }
 
-        return .{
-            .source = .inbox,
-            .create = &windows.exp.kernel32.CreatePseudoConsole,
-            .resize = &windows.exp.kernel32.ResizePseudoConsole,
-            .close = &windows.exp.kernel32.ClosePseudoConsole,
-        };
+        return &inbox_functions;
     }
 
     fn forceInbox() bool {
@@ -528,8 +487,12 @@ const WindowsConPty = struct {
             &.{ exe_dir, "OpenConsole.exe" },
         ) catch return error.PathUnavailable;
         defer std.heap.page_allocator.free(open_console_path);
-        std.fs.accessAbsolute(open_console_path, .{}) catch
-            return error.OpenConsoleMissing;
+        if (openConsoleMatchesArchitecture(open_console_path)) |matches| {
+            if (!matches) return error.OpenConsoleWrongArch;
+        } else |err| switch (err) {
+            error.FileNotFound => return error.OpenConsoleMissing,
+            else => return error.OpenConsoleMissing,
+        }
 
         const create: windows.exp.CreatePseudoConsoleFn = @ptrCast(@alignCast(
             windows.kernel32.GetProcAddress(module, "CreatePseudoConsole") orelse
@@ -554,17 +517,46 @@ const WindowsConPty = struct {
         };
     }
 
+    fn openConsoleMatchesArchitecture(path: []const u8) !bool {
+        var file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+
+        var dos_header: [64]u8 = undefined;
+        if (try file.readAll(&dos_header) != dos_header.len) return false;
+        if (!std.mem.eql(u8, dos_header[0..2], "MZ")) return false;
+
+        const pe_offset = std.mem.readInt(u32, dos_header[0x3c..0x40], .little);
+        try file.seekTo(@as(u64, pe_offset));
+        var pe_header: [6]u8 = undefined;
+        if (try file.readAll(&pe_header) != pe_header.len) return false;
+        if (!std.mem.eql(u8, pe_header[0..4], "PE\x00\x00")) return false;
+
+        const expected: u16 = switch (builtin.cpu.arch) {
+            .x86 => 0x014c,
+            .x86_64 => 0x8664,
+            .arm, .thumb => 0x01c4,
+            .aarch64 => 0xaa64,
+            else => return false,
+        };
+        return std.mem.readInt(u16, pe_header[4..6], .little) == expected;
+    }
+
+    fn signalFallbackBanner() void {
+        if (comptime builtin.mode != .ReleaseFast) return;
+        fallback_banner_pending.store(true, .release);
+    }
+
     fn resetForTest() void {
         std.debug.assert(builtin.is_test);
         // No live HPCON may cross this reset or its module provenance would change.
 
-        if (resolved) |value| {
-            if (value.module) |module| _ = windows.kernel32.FreeLibrary(module);
-            if (value.bundled_path) |path| std.heap.page_allocator.free(path);
-        }
-        resolved = null;
+        selected.store(&inbox_functions, .release);
+        if (bundled_functions.module) |module| _ = windows.kernel32.FreeLibrary(module);
+        if (bundled_functions.bundled_path) |path| std.heap.page_allocator.free(path);
+        bundled_functions = inbox_functions;
         resolver_once = std.once(initialize);
         bundled_hpc_created.store(false, .release);
+        fallback_banner_pending.store(false, .release);
     }
 };
 
@@ -582,6 +574,7 @@ const WindowsPty = struct {
     out_pipe_pty: windows.HANDLE,
     in_pipe_pty: windows.HANDLE,
     pseudo_console: windows.exp.HPCON,
+    conpty: *const WindowsConPty.Functions,
     size: winsize,
 
     pub const OpenError = error{Unexpected};
@@ -674,7 +667,7 @@ const WindowsPty = struct {
         try windows.SetHandleInformation(pty.out_pipe, windows.HANDLE_FLAG_INHERIT, 0);
         try windows.SetHandleInformation(pty.out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
 
-        const conpty = WindowsConPty.functions();
+        var conpty = WindowsConPty.functions();
         const source = conpty.source;
         var result = conpty.create(
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
@@ -689,15 +682,20 @@ const WindowsPty = struct {
             source == .bundled and
             !WindowsConPty.bundled_hpc_created.load(.acquire))
         {
-            log.warn(
-                "bundled ConPTY failed to create a pseudo console; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
-                .{},
-            );
-            WindowsConPty.resolved.?.source = .inbox;
-            WindowsConPty.resolved.?.create = &windows.exp.kernel32.CreatePseudoConsole;
-            WindowsConPty.resolved.?.resize = &windows.exp.kernel32.ResizePseudoConsole;
-            WindowsConPty.resolved.?.close = &windows.exp.kernel32.ClosePseudoConsole;
-            result = windows.exp.kernel32.CreatePseudoConsole(
+            if (WindowsConPty.selected.cmpxchgStrong(
+                conpty,
+                &WindowsConPty.inbox_functions,
+                .acq_rel,
+                .acquire,
+            ) == null) {
+                log.warn(
+                    "bundled ConPTY failed to create a pseudo console; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
+                    .{},
+                );
+                WindowsConPty.signalFallbackBanner();
+            }
+            conpty = &WindowsConPty.inbox_functions;
+            result = conpty.create(
                 .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
                 pty.in_pipe_pty,
                 pty.out_pipe_pty,
@@ -707,6 +705,7 @@ const WindowsPty = struct {
         }
         if (result != windows.S_OK) return error.Unexpected;
 
+        pty.conpty = conpty;
         pty.size = size;
         return pty;
     }
@@ -716,7 +715,7 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.in_pipe);
         _ = windows.CloseHandle(self.out_pipe_pty);
         _ = windows.CloseHandle(self.out_pipe);
-        WindowsConPty.functions().close(self.pseudo_console);
+        self.conpty.close(self.pseudo_console);
         self.* = undefined;
     }
 
@@ -731,7 +730,7 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        const result = WindowsConPty.functions().resize(
+        const result = self.conpty.resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );
@@ -792,201 +791,62 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
     }
 }
 
-test "Windows ConPTY transport probe reports APC and DCS survival" {
+test "Windows ConPTY bundled loader rejects a DLL without create symbol" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const Probe = struct {
-        const Command = @import("Command.zig");
-        const timeout_ms = 10_000;
-        const quiet_ns = 500 * std.time.ns_per_ms;
-        const wait_timeout: windows.DWORD = 258;
-        const begin_marker = conpty_transport_probe_begin_marker;
-        const middle_marker = conpty_transport_probe_middle_marker;
-        const end_marker = conpty_transport_probe_end_marker;
-        const kitty_apc = conpty_transport_probe_kitty_apc;
-        const sixel_dcs = conpty_transport_probe_sixel_dcs;
-        const expected = conpty_transport_probe_expected;
-
-        const Survival = enum {
-            byte_exact,
-            altered,
-            dropped,
-        };
-
-        extern "kernel32" fn GetProcessId(
-            process: windows.HANDLE,
-        ) callconv(.winapi) windows.DWORD;
-
-        fn classify(observed: []const u8, sequence: []const u8) Survival {
-            if (std.mem.eql(u8, observed, sequence)) return .byte_exact;
-            if (observed.len == 0) return .dropped;
-            return .altered;
-        }
-
-        fn between(
-            observed: []const u8,
-            start_marker: []const u8,
-            stop_marker: []const u8,
-        ) ![]const u8 {
-            const start_offset = std.mem.indexOf(u8, observed, start_marker) orelse
-                return error.TransportProbeStartMarkerMissing;
-            const start = start_offset + start_marker.len;
-            const relative_end = std.mem.indexOf(u8, observed[start..], stop_marker) orelse
-                return error.TransportProbeEndMarkerMissing;
-            return observed[start .. start + relative_end];
-        }
-
-        fn printHex(label: []const u8, bytes: []const u8) void {
-            std.debug.print("transport-probe {s}=", .{label});
-            for (bytes) |byte| std.debug.print("{x:0>2}", .{byte});
-            std.debug.print("\n", .{});
-        }
-
-        fn terminateAndConfirm(process: windows.HANDLE) !void {
-            const terminate_error = if (windows.kernel32.TerminateProcess(process, 1) == 0)
-                windows.kernel32.GetLastError()
-            else
-                null;
-            const final_wait = windows.kernel32.WaitForSingleObject(process, windows.INFINITE);
-            if (final_wait == windows.WAIT_FAILED) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
-            }
-            if (final_wait != 0) return error.TransportProbeUnexpectedFinalWaitResult;
-            if (terminate_error) |err| return windows.unexpectedError(err);
-        }
-
-        fn readOutput(
-            pty: *WindowsPty,
-            process: windows.HANDLE,
-            buffer: []u8,
-        ) ![]const u8 {
-            var total: usize = 0;
-            const process_deadline = std.time.nanoTimestamp() + (timeout_ms * std.time.ns_per_ms);
-            var process_signaled = false;
-            var quiet_since: i128 = 0;
-
-            while (true) {
-                var available: windows.DWORD = 0;
-                if (windows.exp.kernel32.PeekNamedPipe(
-                    pty.out_pipe,
-                    null,
-                    0,
-                    null,
-                    &available,
-                    null,
-                ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
-
-                if (available > 0) {
-                    if (total == buffer.len) return error.TransportProbeOutputTooLarge;
-                    const read_len = @min(@as(usize, available), buffer.len - total);
-                    var read: windows.DWORD = 0;
-                    if (windows.kernel32.ReadFile(
-                        pty.out_pipe,
-                        buffer[total..][0..read_len].ptr,
-                        @intCast(read_len),
-                        &read,
-                        null,
-                    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
-                    total += read;
-                    if (process_signaled) quiet_since = std.time.nanoTimestamp();
-                }
-
-                const wait_result = windows.kernel32.WaitForSingleObject(process, 0);
-                if (wait_result == 0) {
-                    if (!process_signaled) {
-                        process_signaled = true;
-                        quiet_since = std.time.nanoTimestamp();
-                    }
-                    if (available == 0 and
-                        std.time.nanoTimestamp() - quiet_since >= quiet_ns)
-                    {
-                        return buffer[0..total];
-                    }
-                } else if (wait_result == windows.WAIT_FAILED) {
-                    return windows.unexpectedError(windows.kernel32.GetLastError());
-                } else if (wait_result != wait_timeout) {
-                    return error.TransportProbeUnexpectedWaitResult;
-                }
-                if (!process_signaled and std.time.nanoTimestamp() >= process_deadline) {
-                    return error.TransportProbeChildTimedOut;
-                }
-                if (available == 0) std.Thread.sleep(10 * std.time.ns_per_ms);
-            }
-        }
-
-        fn run() !void {
-            const allocator = std.testing.allocator;
-            std.debug.print("transport-probe parent_pid={d}\n", .{windows.GetCurrentProcessId()});
-            const self_path = try std.fs.selfExePathAlloc(allocator);
-            defer allocator.free(self_path);
-            const self_path_z = try allocator.dupeZ(u8, self_path);
-            defer allocator.free(self_path_z);
-            var child_env = try std.process.getEnvMap(allocator);
-            defer child_env.deinit();
-            try child_env.put("NOCTTY_CONPTY_TRANSPORT_PROBE_CHILD", "1");
-
-            var pty = try WindowsPty.open(.{
-                .ws_row = 24,
-                .ws_col = 200,
-            });
-            defer pty.deinit();
-
-            var command: Command = .{
-                .path = self_path_z,
-                .args = &.{self_path_z},
-                .env = &child_env,
-                .pseudo_console = pty.pseudo_console,
-                .os_pre_exec = null,
-                .rt_pre_exec = null,
-                .rt_post_fork = null,
-                .rt_pre_exec_info = undefined,
-                .rt_post_fork_info = undefined,
+    const testing = std.testing;
+    const Fixture = struct {
+        fn moveAside(path: []const u8, backup: []const u8) !bool {
+            std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => return err,
             };
-            try command.start(std.testing.allocator);
-            const process = command.pid.?;
-            defer _ = windows.CloseHandle(process);
+            try std.fs.renameAbsolute(path, backup);
+            return true;
+        }
 
-            const child_pid = GetProcessId(process);
-            std.debug.print("transport-probe child_pid={d}\n", .{child_pid});
-
-            var observed_buffer: [64 * 1024]u8 = undefined;
-            const observed = readOutput(&pty, process, &observed_buffer) catch |err| {
-                try terminateAndConfirm(process);
-                return err;
+        fn restore(path: []const u8, backup: []const u8, moved: bool) void {
+            std.fs.deleteFileAbsolute(path) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => std.debug.panic("failed to remove ConPTY test fixture: {}", .{err}),
             };
-
-            var exit_code: windows.DWORD = undefined;
-            if (windows.kernel32.GetExitCodeProcess(process, &exit_code) == 0) {
-                return windows.unexpectedError(windows.kernel32.GetLastError());
-            }
-            try std.testing.expectEqual(@as(windows.DWORD, 0), exit_code);
-
-            const info = conPtyInfo().?;
-            const kitty_observed = try between(observed, begin_marker, middle_marker);
-            const sixel_observed = try between(observed, middle_marker, end_marker);
-            const kitty = classify(kitty_observed, kitty_apc);
-            const sixel = classify(sixel_observed, sixel_dcs);
-
-            std.debug.print("transport-probe source={t}\n", .{info.source});
-            printHex("expected_hex", expected);
-            printHex("observed_hex", observed);
-            printHex("kitty_expected_hex", kitty_apc);
-            printHex("kitty_observed_hex", kitty_observed);
-            std.debug.print("transport-probe kitty_apc={t}\n", .{kitty});
-            printHex("sixel_expected_hex", sixel_dcs);
-            printHex("sixel_observed_hex", sixel_observed);
-            std.debug.print("transport-probe sixel_dcs={t}\n", .{sixel});
+            if (moved) std.fs.renameAbsolute(backup, path) catch |err| {
+                std.debug.panic("failed to restore staged ConPTY file: {}", .{err});
+            };
         }
     };
 
-    const enabled = std.process.getEnvVarOwned(
-        std.testing.allocator,
-        "NOCTTY_CONPTY_TRANSPORT_PROBE",
-    ) catch return error.SkipZigTest;
-    defer std.testing.allocator.free(enabled);
-    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+    WindowsConPty.resetForTest();
+    defer WindowsConPty.resetForTest();
 
-    try Probe.run();
+    var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_dir = try std.fs.selfExeDirPath(&exe_dir_buf);
+    const conpty_path = try std.fs.path.join(testing.allocator, &.{ exe_dir, "conpty.dll" });
+    defer testing.allocator.free(conpty_path);
+    const open_console_path = try std.fs.path.join(testing.allocator, &.{ exe_dir, "OpenConsole.exe" });
+    defer testing.allocator.free(open_console_path);
+    const suffix = try std.fmt.allocPrint(testing.allocator, ".noctty-test-backup-{d}", .{windows.GetCurrentProcessId()});
+    defer testing.allocator.free(suffix);
+    const conpty_backup = try std.mem.concat(testing.allocator, u8, &.{ conpty_path, suffix });
+    defer testing.allocator.free(conpty_backup);
+    const open_console_backup = try std.mem.concat(testing.allocator, u8, &.{ open_console_path, suffix });
+    defer testing.allocator.free(open_console_backup);
+
+    var conpty_moved = false;
+    var open_console_moved = false;
+    defer Fixture.restore(open_console_path, open_console_backup, open_console_moved);
+    defer Fixture.restore(conpty_path, conpty_backup, conpty_moved);
+    conpty_moved = try Fixture.moveAside(conpty_path, conpty_backup);
+    open_console_moved = try Fixture.moveAside(open_console_path, open_console_backup);
+
+    const system_root = try std.process.getEnvVarOwned(testing.allocator, "SystemRoot");
+    defer testing.allocator.free(system_root);
+    const known_bad = try std.fs.path.join(testing.allocator, &.{ system_root, "System32", "version.dll" });
+    defer testing.allocator.free(known_bad);
+    try std.fs.copyFileAbsolute(known_bad, conpty_path, .{});
+    try std.fs.copyFileAbsolute(known_bad, open_console_path, .{});
+
+    try testing.expectError(error.CreateSymbolMissing, WindowsConPty.loadBundled());
 }
 
 test {
