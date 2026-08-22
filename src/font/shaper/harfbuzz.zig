@@ -1520,10 +1520,10 @@ test "shape nerd font PUA glyphs without notdef" {
     defer testdata.deinit();
 
     const codepoints = [_]u21{
-        'A',    ' ', 0xE0B0, ' ', 0xE0B1, ' ',
-        0xE0B2, ' ', 0xE0B3, ' ', 0xE0B4, ' ',
-        0xE0B5, ' ', 0xE0B6, ' ', 0xF023, ' ',
-        0xE5FF,
+        'A',    ' ', 0xE0B0,  ' ', 0xE0B1, ' ',
+        0xE0B2, ' ', 0xE0B3,  ' ', 0xE0B4, ' ',
+        0xE0B5, ' ', 0xE0B6,  ' ', 0xF023, ' ',
+        0xE5FF, ' ', 0xF02A2,
     };
     var text: [128]u8 = undefined;
     var text_len: usize = 0;
