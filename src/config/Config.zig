@@ -25,6 +25,7 @@ const inputpkg = @import("../input.zig");
 const internal_os = @import("../os/main.zig");
 const cli_args = @import("../cli/args.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
+const win32_session_state = @import("../apprt/win32_session_state.zig");
 
 const conditional = @import("conditional.zig");
 const Conditional = conditional.Conditional;
@@ -66,6 +67,8 @@ const terminal = struct {
 };
 
 const log = std.log.scoped(.config);
+
+pub const window_save_state_scrollback_max_lines: u32 = @intCast(win32_session_state.max_scrollback_lines);
 
 /// Key is an enum of all the available configuration keys. This is used
 /// when paired with diff to determine what fields have changed in a config,
@@ -2170,11 +2173,26 @@ keybind: Keybinds = .{},
 ///
 /// On Windows this persists the practical window/session shape on app exit:
 /// host window rectangle/state plus tab, split, profile, working-directory,
-/// and explicit title metadata. Terminal contents and child process state are
-/// not restored. Quick-terminal tabs/splits are also not saved; the quick
-/// terminal is recreated from current quick-terminal configuration the next
-/// time it is toggled.
+/// and explicit title metadata. Child process state is not restored. The
+/// opt-in `window-save-state-scrollback` setting can additionally restore a
+/// bounded plain-text snapshot of each pane. Quick-terminal tabs/splits are
+/// not saved; the quick terminal is recreated from current quick-terminal
+/// configuration the next time it is toggled.
 @"window-save-state": WindowSaveState = .default,
+
+/// The requested maximum number of plain-text screen and scrollback lines to
+/// persist for each pane when `window-save-state` is active. The default `0`
+/// disables pane snapshots because terminal output becomes data at rest and may
+/// contain secrets. Values above 10,000 are clamped to 10,000. Actual captures
+/// may contain fewer lines: all panes share a 512 KiB encoded snapshot budget,
+/// each pane is conservatively pre-limited using its current width, and a single
+/// line may not exceed 16 KiB.
+///
+/// Colors and styles are not persisted. After `toggle_secure_input` engages
+/// the sensitive-input indicator for a pane, that pane is excluded from
+/// snapshots for the rest of the session, even if the indicator is later
+/// turned off.
+@"window-save-state-scrollback": u32 = 0,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
 /// If this is disabled, surfaces are resized in pixel increments. This is
@@ -4089,6 +4107,11 @@ pub fn finalize(self: *Config) !void {
 
     // Clamp our contrast
     self.@"minimum-contrast" = @min(21, @max(1, self.@"minimum-contrast"));
+
+    self.@"window-save-state-scrollback" = @min(
+        self.@"window-save-state-scrollback",
+        window_save_state_scrollback_max_lines,
+    );
 
     // Minimum window size
     if (self.@"window-width" > 0) self.@"window-width" = @max(10, self.@"window-width");
@@ -9950,6 +9973,21 @@ test "default quit-after-last-window-closed is enabled in the Windows fork" {
     defer cfg.deinit();
 
     try testing.expect(cfg.@"quit-after-last-window-closed");
+}
+
+test "window session scrollback defaults off and clamps the configured line count" {
+    const testing = std.testing;
+
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    try testing.expectEqual(@as(u32, 0), cfg.@"window-save-state-scrollback");
+
+    cfg.@"window-save-state-scrollback" = window_save_state_scrollback_max_lines + 1;
+    try cfg.finalize();
+    try testing.expectEqual(
+        window_save_state_scrollback_max_lines,
+        cfg.@"window-save-state-scrollback",
+    );
 }
 
 test "clone preserves conditional state" {

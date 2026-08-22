@@ -1,13 +1,18 @@
-//! Windows session-state schema for a future restore flow.
+//! Windows session-state schema.
 //!
-//! First slice only: layout, working-directory, profile, and explicit title
-//! overrides. Deliberately excludes terminal contents, scrollback, command
-//! lines, and other runtime process state.
+//! Persists layout, working-directory, profile, explicit title overrides, and
+//! optional bounded plain-text pane snapshots. Runtime child process state is
+//! deliberately excluded.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const current_schema_version: u32 = 1;
+pub const max_scrollback_lines: usize = 10_000;
+pub const max_scrollback_line_bytes: usize = 16 * 1024;
+/// Maximum conservative encoded-JSON storage charged to all pane snapshots.
+pub const max_total_scrollback_bytes: usize = 512 * 1024;
+pub const scrollback_snapshot_storage_overhead: usize = 96;
 
 pub const ValidationError = error{
     UnsupportedVersion,
@@ -22,6 +27,9 @@ pub const ValidationError = error{
     InvalidWindowRect,
     UnreachableNode,
     TooManySessionLayoutNodes,
+    TooManyScrollbackLines,
+    ScrollbackLineTooLong,
+    ScrollbackBudgetExceeded,
 };
 
 pub const ValidateError = ValidationError || Allocator.Error;
@@ -75,6 +83,12 @@ pub const Pane = struct {
     profile: ?[]const u8 = null,
     title_override: ?[]const u8 = null,
     tab_title_override: ?[]const u8 = null,
+    scrollback: ?ScrollbackSnapshot = null,
+};
+
+pub const ScrollbackSnapshot = struct {
+    captured_at_unix_ms: u64,
+    lines: []const []const u8 = &.{},
 };
 
 pub const Split = struct {
@@ -114,9 +128,27 @@ pub fn parseAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionSta
     }
 
     var parsed = try std.json.parseFromSlice(SessionState, alloc, raw, .{
+        .allocate = .alloc_always,
         .ignore_unknown_fields = false,
     });
     errdefer parsed.deinit();
+
+    var scrollback_bytes: usize = 0;
+    for (parsed.value.windows) |window| {
+        for (window.tabs) |tab| {
+            for (@constCast(tab.layout.nodes)) |*node| {
+                switch (node.*) {
+                    .pane => |*pane| validatePaneScrollback(
+                        pane.*,
+                        &scrollback_bytes,
+                    ) catch {
+                        pane.scrollback = null;
+                    },
+                    .split => {},
+                }
+            }
+        }
+    }
 
     try validateAlloc(alloc, parsed.value);
     return parsed;
@@ -127,13 +159,14 @@ pub fn validateAlloc(alloc: Allocator, state: SessionState) ValidateError!void {
         return error.UnsupportedVersion;
     }
 
+    var scrollback_bytes: usize = 0;
     for (state.windows) |window| {
         try validateWindowRect(window);
         if (window.tabs.len == 0) return error.EmptyTabs;
         if (window.selected_tab >= window.tabs.len) return error.InvalidSelectedTab;
 
         for (window.tabs) |tab| {
-            const leaf_count = try validateLayoutTree(alloc, tab.layout);
+            const leaf_count = try validateLayoutTree(alloc, tab.layout, &scrollback_bytes);
             if (tab.selected_leaf >= leaf_count) return error.InvalidSelectedLeaf;
         }
     }
@@ -154,7 +187,11 @@ fn validateWindowRect(window: Window) ValidationError!void {
     }
 }
 
-fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize {
+fn validateLayoutTree(
+    alloc: Allocator,
+    layout: LayoutTree,
+    scrollback_bytes: *usize,
+) ValidateError!usize {
     if (layout.nodes.len == 0) return error.EmptyLayout;
     if (layout.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
 
@@ -187,7 +224,8 @@ fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize 
         frame.expanded = true;
 
         switch (layout.nodes[frame.index]) {
-            .pane => {
+            .pane => |pane| {
+                try validatePaneScrollback(pane, scrollback_bytes);
                 visited[frame.index] = 2;
                 leaf_count += 1;
                 stack_len -= 1;
@@ -221,6 +259,47 @@ fn validateLayoutTree(alloc: Allocator, layout: LayoutTree) ValidateError!usize 
     }
 
     return leaf_count;
+}
+
+fn validatePaneScrollback(pane: Pane, total_bytes: *usize) ValidationError!void {
+    const snapshot = pane.scrollback orelse return;
+    if (snapshot.lines.len > max_scrollback_lines) return error.TooManyScrollbackLines;
+
+    var snapshot_bytes = scrollback_snapshot_storage_overhead;
+    for (snapshot.lines) |line| {
+        if (line.len > max_scrollback_line_bytes) return error.ScrollbackLineTooLong;
+        const line_bytes = scrollbackLineStorageBytes(line) orelse
+            return error.ScrollbackBudgetExceeded;
+        if (line_bytes > max_total_scrollback_bytes -| snapshot_bytes) {
+            return error.ScrollbackBudgetExceeded;
+        }
+        snapshot_bytes += line_bytes;
+    }
+
+    if (snapshot_bytes > max_total_scrollback_bytes -| total_bytes.*) {
+        return error.ScrollbackBudgetExceeded;
+    }
+    total_bytes.* += snapshot_bytes;
+}
+
+/// Conservative JSON storage charge for one persisted line, including quotes
+/// and a delimiter. This is shared by capture and schema validation so a file
+/// written within the budget also fits the persistence read allowance.
+pub fn scrollbackLineStorageBytes(line: []const u8) ?usize {
+    var bytes: usize = 3;
+    for (line) |byte| {
+        const encoded: usize = if (byte < 0x20)
+            switch (byte) {
+                '\x08', '\x0c', '\n', '\r', '\t' => 2,
+                else => 6,
+            }
+        else switch (byte) {
+            '"', '\\' => 2,
+            else => 1,
+        };
+        bytes = std.math.add(usize, bytes, encoded) catch return null;
+    }
+    return bytes;
 }
 
 fn expectSessionStateEqual(expected: SessionState, actual: SessionState) !void {
@@ -258,6 +337,7 @@ fn expectNodeEqual(expected: Node, actual: Node) !void {
             try expectOptionalStringEqual(expected_pane.profile, actual_pane.profile);
             try expectOptionalStringEqual(expected_pane.title_override, actual_pane.title_override);
             try expectOptionalStringEqual(expected_pane.tab_title_override, actual_pane.tab_title_override);
+            try expectOptionalScrollbackEqual(expected_pane.scrollback, actual_pane.scrollback);
         },
         .split => |expected_split| {
             const actual_split = actual.split;
@@ -277,6 +357,37 @@ fn expectOptionalStringEqual(expected: ?[]const u8, actual: ?[]const u8) !void {
     }
 
     try std.testing.expect(actual == null);
+}
+
+fn expectOptionalScrollbackEqual(
+    expected: ?ScrollbackSnapshot,
+    actual: ?ScrollbackSnapshot,
+) !void {
+    if (expected) |expected_value| {
+        try std.testing.expect(actual != null);
+        const actual_value = actual.?;
+        try std.testing.expectEqual(
+            expected_value.captured_at_unix_ms,
+            actual_value.captured_at_unix_ms,
+        );
+        try std.testing.expectEqual(expected_value.lines.len, actual_value.lines.len);
+        for (expected_value.lines, actual_value.lines) |expected_line, actual_line| {
+            try std.testing.expectEqualStrings(expected_line, actual_line);
+        }
+        return;
+    }
+
+    try std.testing.expect(actual == null);
+}
+
+fn encodeTestPane(pane: Pane) ![]u8 {
+    const nodes = [_]Node{.{ .pane = pane }};
+    const tabs = [_]Tab{.{
+        .selected_leaf = 0,
+        .layout = .{ .root = 0, .nodes = &nodes },
+    }};
+    const windows = [_]Window{.{ .selected_tab = 0, .tabs = &tabs }};
+    return encodeAlloc(std.testing.allocator, .{ .windows = &windows });
 }
 
 test "win32 session state round-trips split layout metadata" {
@@ -331,6 +442,118 @@ test "win32 session state round-trips split layout metadata" {
     defer parsed.deinit();
 
     try expectSessionStateEqual(state, parsed.value);
+}
+
+test "win32 session state round-trips pane scrollback snapshot" {
+    const lines = [_][]const u8{
+        "plain output",
+        "tab\tseparated",
+        "colors are not serialized",
+    };
+    const pane: Pane = .{
+        .cwd = "C:\\src\\noctty",
+        .scrollback = .{
+            .captured_at_unix_ms = 1_777_777_777_123,
+            .lines = &lines,
+        },
+    };
+
+    const encoded = try encodeTestPane(pane);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"scrollback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\\u001b") == null);
+
+    var parsed = try parseAlloc(std.testing.allocator, encoded);
+    defer parsed.deinit();
+    const actual = parsed.value.windows[0].tabs[0].layout.nodes[0].pane;
+    try expectOptionalScrollbackEqual(pane.scrollback, actual.scrollback);
+    const parsed_line = actual.scrollback.?.lines[0];
+    const encoded_start = @intFromPtr(encoded.ptr);
+    const parsed_start = @intFromPtr(parsed_line.ptr);
+    try std.testing.expect(parsed_start < encoded_start or parsed_start >= encoded_start + encoded.len);
+}
+
+test "win32 session state enforces scrollback line and byte caps" {
+    const too_many_lines = [_][]const u8{"x"} ** (max_scrollback_lines + 1);
+    try std.testing.expectError(
+        error.TooManyScrollbackLines,
+        encodeTestPane(.{ .scrollback = .{
+            .captured_at_unix_ms = 1,
+            .lines = &too_many_lines,
+        } }),
+    );
+
+    const long_line = try std.testing.allocator.alloc(u8, max_scrollback_line_bytes + 1);
+    defer std.testing.allocator.free(long_line);
+    @memset(long_line, 'x');
+    try std.testing.expectError(
+        error.ScrollbackLineTooLong,
+        encodeTestPane(.{ .scrollback = .{
+            .captured_at_unix_ms = 2,
+            .lines = &.{long_line},
+        } }),
+    );
+    const budget_line = try std.testing.allocator.alloc(u8, max_scrollback_line_bytes);
+    defer std.testing.allocator.free(budget_line);
+    @memset(budget_line, '\\');
+    const budget_line_count = max_total_scrollback_bytes /
+        (scrollbackLineStorageBytes(budget_line).? + 1) + 1;
+    const budget_lines = try std.testing.allocator.alloc([]const u8, budget_line_count);
+    defer std.testing.allocator.free(budget_lines);
+    @memset(budget_lines, budget_line);
+    try std.testing.expectError(
+        error.ScrollbackBudgetExceeded,
+        encodeTestPane(.{ .scrollback = .{
+            .captured_at_unix_ms = 3,
+            .lines = budget_lines,
+        } }),
+    );
+}
+
+test "win32 session state load drops invalid pane scrollback without losing split layout" {
+    const long_line = try std.testing.allocator.alloc(u8, max_scrollback_line_bytes + 1);
+    defer std.testing.allocator.free(long_line);
+    @memset(long_line, 'x');
+
+    const nodes = [_]Node{
+        .{ .split = .{
+            .axis = .horizontal,
+            .ratio = 0.5,
+            .first = 1,
+            .second = 2,
+        } },
+        .{ .pane = .{ .scrollback = .{
+            .captured_at_unix_ms = 2,
+            .lines = &.{long_line},
+        } } },
+        .{ .pane = .{ .cwd = "C:\\layout-survives" } },
+    };
+    const tabs = [_]Tab{.{
+        .selected_leaf = 1,
+        .layout = .{ .root = 0, .nodes = &nodes },
+    }};
+    const windows = [_]Window{.{ .selected_tab = 0, .tabs = &tabs }};
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(SessionState{ .windows = &windows }, .{
+        .whitespace = .minified,
+        .emit_null_optional_fields = false,
+    }, &out.writer);
+    const raw = try out.toOwnedSlice();
+    defer std.testing.allocator.free(raw);
+
+    var parsed = try parseAlloc(std.testing.allocator, raw);
+    defer parsed.deinit();
+    const parsed_tab = parsed.value.windows[0].tabs[0];
+    try std.testing.expectEqual(@as(usize, 3), parsed_tab.layout.nodes.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed_tab.selected_leaf);
+    try std.testing.expectEqual(Axis.horizontal, parsed_tab.layout.nodes[0].split.axis);
+    try std.testing.expect(parsed_tab.layout.nodes[1].pane.scrollback == null);
+    try std.testing.expectEqualStrings(
+        "C:\\layout-survives",
+        parsed_tab.layout.nodes[2].pane.cwd.?,
+    );
 }
 
 test "win32 session state omits unset optional pane metadata" {

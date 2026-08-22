@@ -60,8 +60,9 @@ Win32-validated VT protocol coverage is tracked in
   system-wide keyboard hooks the way macOS Secure Keyboard Entry does).
 - Drag-and-drop of files into the terminal.
 - Session restore via `window-save-state`: windows, tabs, splits,
-  profiles, working directories, and explicit titles come back; terminal
-  contents and child processes do not.
+  profiles, working directories, and explicit titles come back. The opt-in
+  `window-save-state-scrollback` setting restores bounded, clearly marked
+  plain-text pane snapshots; child processes do not come back.
 - Ctrl-based default keybindings, mostly shared with Ghostty's
   non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
   pane focus and `Alt+F4` to close the window.

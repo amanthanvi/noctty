@@ -136,15 +136,36 @@ unrelated text. The full feature detail for both lives in the
 
 Session restore persists the practical shape of your workspace: host
 windows, tabs, split layout, selected profiles, working directories, and
-explicit titles. It doesn't restore terminal contents or child process
-state.
+explicit titles. Set `window-save-state-scrollback` to a nonzero line count
+to request up to that many lines from each pane's screen and scrollback. The
+default is `0` (off) because terminal output becomes data at rest and can
+contain secrets. The configured request is clamped to 10,000 lines, but the
+actual capture can be smaller: all panes share a 512 KiB encoded snapshot
+budget, each pane is conservatively pre-limited using its current width, and
+any individual line over 16 KiB is omitted. Wide panes and panes captured
+later can therefore retain fewer lines.
+
+Snapshots are stored and restored as plain text, without colors or styles.
+Soft-wrapped display rows become separate hard lines. A row containing invalid
+UTF-8 or C0/C1 control bytes other than a supported horizontal tab is omitted
+whole rather than sanitized. If capture happens while the alternate screen is
+active, the snapshot contains the TUI screen rather than the shell history.
+Each restored pane ends with a compact
+`--- RESTORED SNAPSHOT END | ...Z ---` separator containing the capture time.
+PowerShell/ConPTY startup repaint pushes the restored snapshot above the live
+prompt, so the window opens at a clean prompt; scroll up to find the snapshot
+and its separator. Engaging `toggle_secure_input` once excludes that pane from
+snapshots for the rest of the session, even if the indicator is later turned
+off. Child processes are not restored.
 
 If the session-state file is unreadable, noctty moves it aside to a
 sibling named after the original with a `.corrupt` suffix, logs the
 failure, and starts with a fresh window. A numeric suffix is added
 (`.corrupt.1`, `.corrupt.2`, and so on) when an earlier quarantine file
 is already there, so nothing is overwritten. If the move fails, the
-original file is left untouched.
+original file is left untouched. Older builds use a strict session-state
+schema, so downgrading while a saved state contains `scrollback` can quarantine
+that file as `.corrupt`.
 
 Three consecutive pre-ready startup failures automatically select an
 ephemeral safe mode: built-in config, no session restore. You can also
