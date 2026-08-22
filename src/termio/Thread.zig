@@ -138,6 +138,49 @@ pub fn deinit(self: *Thread) void {
     self.loop.deinit();
 }
 
+fn writeCommandError(
+    alloc: Allocator,
+    io: *termio.Termio,
+    err: anyerror,
+    cause: ?anyerror,
+    heading: []const u8,
+    detail: []const u8,
+) void {
+    const command = std.mem.join(alloc, " ", switch (io.backend) {
+        .exec => |*exec| exec.subprocess.args,
+    }) catch "<command unavailable>";
+    const error_heading = if (cause != null)
+        "error starting IO thread"
+    else
+        "error in IO thread";
+    const cause_suffix = if (cause) |value|
+        std.fmt.allocPrint(alloc, " (cause: {})", .{value}) catch
+            " (underlying error unavailable)"
+    else
+        "";
+    const str = std.fmt.allocPrint(
+        alloc,
+        \\{s}: {}{s}
+        \\
+        \\{s}
+        \\
+        \\{s}
+        \\
+        \\{s}
+        \\If this looks like a bug, please report it.
+        \\
+        \\This terminal is non-functional. Please close it and try again.
+    ,
+        .{ error_heading, err, cause_suffix, heading, command, detail },
+    ) catch
+        \\Out of memory. This terminal is non-functional. Please close it and try again.
+    ;
+
+    const t = io.renderer_state.terminal;
+    t.eraseDisplay(.complete, false);
+    t.printString(str) catch {};
+}
+
 /// The main entrypoint for the thread.
 pub fn threadMain(self: *Thread, io: *termio.Termio) void {
     // Call child function so we can use errors...
@@ -212,58 +255,33 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
             },
 
             error.ProcessNotStarted => {
-                const command = std.mem.join(alloc, " ", switch (io.backend) {
-                    .exec => |*exec| exec.subprocess.args,
-                }) catch "<command unavailable>";
-                const str = std.fmt.allocPrint(
+                const cause = switch (io.backend) {
+                    .exec => |*exec| exec.process_start_error,
+                } orelse err;
+                writeCommandError(
                     alloc,
-                    \\error starting IO thread: {}
-                    \\
-                    \\Ghostty failed to launch the requested command:
-                    \\
-                    \\{s}
-                    \\
+                    io,
+                    err,
+                    cause,
+                    "noctty failed to launch the requested command:",
                     \\No child process was created, so there is no exit code.
                     \\
                     \\The underlying shell or command was unable to be started.
-                    \\This error is usually due to exhausting a system resource.
-                    \\If this looks like a bug, please report it.
-                    \\
-                    \\This terminal is non-functional. Please close it and try again.
-                ,
-                    .{ err, command },
-                ) catch
-                    \\Out of memory. This terminal is non-functional. Please close it and try again.
-                ;
-
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
+                    \\Check the reported cause above; common causes include a
+                    \\missing, inaccessible, or invalid executable.
+                    ,
+                );
             },
 
             else => {
-                const command = std.mem.join(alloc, " ", switch (io.backend) {
-                    .exec => |*exec| exec.subprocess.args,
-                }) catch "<command unavailable>";
-                const str = std.fmt.allocPrint(
+                writeCommandError(
                     alloc,
-                    \\error in IO thread: {}
-                    \\
-                    \\Ghostty encountered an IO-thread failure while running the requested command:
-                    \\
-                    \\{s}
-                    \\
-                    \\The command or its terminal IO could not continue.
-                    \\If this looks like a bug, please report it.
-                    \\
-                    \\This terminal is non-functional. Please close it and try again.
-                ,
-                    .{ err, command },
-                ) catch
-                    \\Out of memory. This terminal is non-functional. Please close it and try again.
-                ;
-
-                t.eraseDisplay(.complete, false);
-                t.printString(str) catch {};
+                    io,
+                    err,
+                    null,
+                    "noctty encountered an IO-thread failure while running the requested command:",
+                    "The command or its terminal IO could not continue.",
+                );
             },
         }
     };

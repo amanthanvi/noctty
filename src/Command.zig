@@ -59,7 +59,7 @@ path: [:0]const u8,
 /// be set to equal path.
 args: []const [:0]const u8,
 
-/// On Windows, the final argument is a raw cmd.exe `/S /C` command string.
+/// On Windows, the final argument is a raw cmd.exe `/C` command string.
 /// It must bypass argv quoting because cmd.exe uses its own quote rules.
 windows_cmd_shell: bool = false,
 
@@ -366,12 +366,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (job_handle) |handle| _ = windows.CloseHandle(handle);
     }
 
-    var flags: windows.DWORD = windows.exp.CREATE_UNICODE_ENVIRONMENT;
-    if (attribute_list != null) flags |= windows.exp.EXTENDED_STARTUPINFO_PRESENT;
-    if (job_handle != null) flags |= windows.exp.CREATE_SUSPENDED;
+    const flags: std.os.windows.CreateProcessFlags = .{
+        .create_unicode_environment = true,
+        .extended_startupinfo_present = attribute_list != null,
+        .create_suspended = job_handle != null,
+    };
 
     var process_information: windows.PROCESS_INFORMATION = undefined;
-    if (windows.exp.kernel32.CreateProcessW(
+    try std.os.windows.CreateProcessW(
         application_name_w,
         if (command_line_w) |w| w.ptr else null,
         null,
@@ -382,7 +384,7 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         if (cwd_w) |w| w.ptr else null,
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
-    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    );
     errdefer {
         _ = windows.kernel32.TerminateProcess(process_information.hProcess, 1);
         _ = windows.CloseHandle(process_information.hThread);
@@ -696,19 +698,17 @@ fn windowsCreateCommandLine(
     const writer = &buf.writer;
 
     if (cmd_shell) {
-        debug.assert(argv.len == 4);
-        debug.assert(mem.eql(u8, argv[1], "/S"));
-        debug.assert(mem.eql(u8, argv[2], "/C"));
+        debug.assert(argv.len == 3);
+        debug.assert(mem.eql(u8, argv[1], "/C"));
     }
 
     for (argv, 0..) |arg, arg_i| {
         if (arg_i != 0) try writer.writeByte(' ');
 
-        // cmd.exe strips the first and final quote with `/S /C`, leaving
-        // the enclosed command exactly as the user authored it. Applying
-        // MSVCRT quoting here would turn inner quotes into literal `\"`
-        // bytes, which cmd.exe does not treat as escapes.
-        if (cmd_shell and arg_i == 3) {
+        // cmd.exe applies its own quote rules to the raw command after `/C`.
+        // Applying MSVCRT quoting here would turn inner quotes into literal
+        // `\"` bytes, which cmd.exe does not treat as escapes.
+        if (cmd_shell and arg_i == 2) {
             try writer.writeByte('"');
             try writer.writeAll(arg);
             try writer.writeByte('"');
@@ -753,47 +753,50 @@ test "Command: windows-cmd-shell-command-line preserves cmd tail" {
         .{
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
-                "/S",
                 "/C",
                 "cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"cmd.exe /c \"chcp 65001 >nul && wsl.exe -- tmux new-session -A -s main\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
-                "/S",
                 "/C",
                 "cmd.exe /c \"echo a && echo b\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"cmd.exe /c \"echo a && echo b\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"cmd.exe /c \"echo a && echo b\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
-                "/S",
                 "/C",
                 "echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo hello world > \"C:\\Program Files\\Noctty Logs\\output.txt\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows\\System32\\cmd.exe",
-                "/S",
                 "/C",
                 "echo \"C:\\Program Files\\noctty\\\"",
             },
-            .expected = "C:\\Windows\\System32\\cmd.exe /S /C \"echo \"C:\\Program Files\\noctty\\\"\"",
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"echo \"C:\\Program Files\\noctty\\\"\"",
         },
         .{
             .argv = &.{
                 "C:\\Windows Root\\System32\\cmd.exe",
-                "/S",
                 "/C",
                 "\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"",
             },
-            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /S /C \"\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"\"",
+            .expected = "\"C:\\Windows Root\\System32\\cmd.exe\" /C \"\"C:\\Program Files\\Noctty Tools\\probe.exe\" --message \"hello world\"\"",
+        },
+        .{
+            .argv = &.{
+                "C:\\Windows\\System32\\cmd.exe",
+                "/C",
+                "C:\\Program Files\\Git\\usr\\bin\\echo.exe",
+            },
+            .expected = "C:\\Windows\\System32\\cmd.exe /C \"C:\\Program Files\\Git\\usr\\bin\\echo.exe\"",
         },
     };
 
@@ -845,7 +848,6 @@ test "Command: windows-cmd-shell-command-line executes quoted command" {
         .path = cmd_path,
         .args = &.{
             cmd_path,
-            "/S",
             "/C",
             "cmd.exe /d /c \"echo QUOTED_A && echo QUOTED_B\"",
         },

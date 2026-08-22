@@ -1336,17 +1336,20 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
 
         log.warn("abnormal process exit detected, showing error message", .{});
 
-        // Keep the native notification, but always put the actionable details
-        // in the terminal too. A transient banner must not suppress the
-        // command, runtime, exit code, and close instructions.
-        _ = self.rt_app.performAction(
+        // Win32 banners are transient and omit the command and close
+        // instructions, so this fork also writes the actionable report in the
+        // terminal on Windows. Other apprts retain the native-or-terminal
+        // fallback contract.
+        if (self.rt_app.performAction(
             .{ .surface = self },
             .show_child_exited,
             info,
         ) catch |err| gui: {
             log.err("error trying to show native child exited GUI err={}", .{err});
             break :gui false;
-        };
+        }) {
+            if (comptime builtin.os.tag != .windows) return;
+        }
 
         self.childExitedAbnormally(info) catch |err| {
             log.err("error handling abnormal child exit err={}", .{err});
@@ -1379,9 +1382,6 @@ fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
         // If the native GUI can't be shown, display a text message in the
         // terminal.
         self.renderer_state.mutex.lock();
-        defer self.queueRender() catch |err| {
-            log.warn("failed to notify renderer of child exit err={}", .{err});
-        };
         defer self.renderer_state.mutex.unlock();
         const t: *terminal.Terminal = self.renderer_state.terminal;
         t.carriageReturn();

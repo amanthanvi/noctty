@@ -680,8 +680,7 @@ function Invoke-ConfiguredShellCommandScenario {
         [string[]] $RejectedText = @(),
         [Parameter(Mandatory)] [string] $CapturePath,
         [Parameter(Mandatory)] [string] $StdoutPath,
-        [Parameter(Mandatory)] [string] $StderrPath,
-        [DateTime] $ScenarioDeadline = [DateTime]::MinValue
+        [Parameter(Mandatory)] [string] $StderrPath
     )
 
     Remove-Item -LiteralPath $CapturePath, $StdoutPath, $StderrPath -ErrorAction SilentlyContinue
@@ -702,12 +701,7 @@ function Invoke-ConfiguredShellCommandScenario {
 
     $scenarioHostHwnd = [IntPtr]::Zero
     try {
-        $scenarioDeadline = if ($ScenarioDeadline -eq [DateTime]::MinValue) {
-            [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-        }
-        else {
-            $ScenarioDeadline
-        }
+        $scenarioDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description "$Name host window" -Process $scenarioProcess -Condition {
             (Find-HostWindow -ProcessId $scenarioProcess.Id) -ne [IntPtr]::Zero
         }
@@ -844,7 +838,6 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $co
 ) | Set-Content -LiteralPath $failedStartConfigPath -Encoding ASCII
 
 if ($ConfiguredScenariosOnly) {
-    $configuredDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $quotedResult = Invoke-ConfiguredShellCommandScenario `
         -Name 'quoted' `
         -ConfigPath $quotedConfigPath `
@@ -852,8 +845,7 @@ if ($ConfiguredScenariosOnly) {
         -RejectedText @('Ghostty failed to launch the requested command:') `
         -CapturePath $quotedCapturePath `
         -StdoutPath $quotedStdoutPath `
-        -StderrPath $quotedStderrPath `
-        -ScenarioDeadline $configuredDeadline
+        -StderrPath $quotedStderrPath
 
     $abnormalResult = Invoke-ConfiguredShellCommandScenario `
         -Name 'abnormal' `
@@ -866,22 +858,23 @@ if ($ConfiguredScenariosOnly) {
         ) `
         -CapturePath $abnormalCapturePath `
         -StdoutPath $abnormalStdoutPath `
-        -StderrPath $abnormalStderrPath `
-        -ScenarioDeadline $configuredDeadline
+        -StderrPath $abnormalStderrPath
 
     $failedStartResult = Invoke-ConfiguredShellCommandScenario `
         -Name 'failed-start' `
         -ConfigPath $failedStartConfigPath `
         -ExpectedText @(
-            'Ghostty failed to launch the requested command:',
+            'error starting IO thread: error.ProcessNotStarted (cause: error.FileNotFound)',
+            'noctty failed to launch the requested command:',
             $missingExecutablePath,
             'No child process was created, so there is no exit code.',
+            'common causes include a',
+            'missing, inaccessible, or invalid executable.',
             'This terminal is non-functional. Please close it and try again.'
         ) `
         -CapturePath $failedStartCapturePath `
         -StdoutPath $failedStartStdoutPath `
-        -StderrPath $failedStartStderrPath `
-        -ScenarioDeadline $configuredDeadline
+        -StderrPath $failedStartStderrPath
 
     Write-Host (
         'interactive-win11 configured shell command validation: PASS ' +
