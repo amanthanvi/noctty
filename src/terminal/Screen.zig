@@ -1359,6 +1359,8 @@ pub fn clearRows(
 ) void {
     defer self.assertIntegrity();
 
+    self.semanticPromptInvalidateRange(tl, bl);
+
     var it = self.pages.pageIterator(.right_down, tl, bl);
     while (it.next()) |chunk| {
         for (chunk.rows()) |*row| {
@@ -2425,6 +2427,14 @@ pub fn semanticPromptStartInput(self: *Screen) Allocator.Error!void {
     if (!self.semantic_prompt.seen) return;
     var it = self.cursor.page_pin.*.promptIterator(.left_up, null);
     const prompt = it.next() orelse return;
+
+    // A shell that redraws in place can start new input on the very row the
+    // last completed command was recorded against. Retaining that record
+    // would let extraction read the line the user is typing right now.
+    if (self.semantic_prompt.last_command) |command| {
+        if (command.prompt.*.eql(prompt)) self.clearLastCommand();
+    }
+
     self.semantic_prompt.pending_command = try self.pages.trackPin(prompt);
 }
 
@@ -2452,10 +2462,21 @@ pub fn semanticPromptEndCommand(self: *Screen) Allocator.Error!void {
         return;
     }
 
-    const output_end = if (self.pages.highlightSemanticContent(prompt.*, .output)) |hl|
-        try self.pages.trackPin(hl.end)
-    else
-        null;
+    // `highlightSemanticContent` scans to the next prompt (or the bottom of
+    // the screen), so on its own it can run past the D cursor and pick up
+    // stale rows. Clamp to the last text cell at or before the D cursor.
+    const output_end = if (self.pages.highlightSemanticContent(prompt.*, .output)) |hl| end: {
+        const cursor_pin = self.cursor.page_pin.*;
+        if (!cursor_pin.before(hl.end)) break :end try self.pages.trackPin(hl.end);
+
+        var clamped = hl.start;
+        var cell_it = cursor_pin.cellIterator(.left_up, hl.start);
+        while (cell_it.next()) |p| {
+            clamped = p;
+            if (p.rowAndCell().cell.hasText()) break;
+        }
+        break :end try self.pages.trackPin(clamped);
+    } else null;
     errdefer if (output_end) |pin| self.pages.untrackPin(pin);
 
     self.clearLastCommand();
@@ -2464,6 +2485,12 @@ pub fn semanticPromptEndCommand(self: *Screen) Allocator.Error!void {
         .output_end = output_end,
     };
     self.semantic_prompt.active_command = null;
+}
+
+/// True while a command has emitted OSC 133;C but not yet OSC 133;D, i.e. the
+/// shell is busy running something rather than sitting at an idle prompt.
+pub fn semanticPromptCommandRunning(self: *const Screen) bool {
+    return self.semantic_prompt.active_command != null;
 }
 
 /// Discard B/C state when a new prompt begins without a completing D mark.
@@ -2488,6 +2515,35 @@ fn clearLastCommand(self: *Screen) void {
         if (command.output_end) |pin| self.pages.untrackPin(pin);
     }
     self.semantic_prompt.last_command = null;
+}
+
+/// Drop any retained command whose tracked pins lie inside a region that is
+/// about to be erased. Without this a stale pin silently "revalidates" once a
+/// later prompt reuses the same physical row.
+fn semanticPromptInvalidateRange(
+    self: *Screen,
+    tl: point.Point,
+    bl: ?point.Point,
+) void {
+    if (!self.semantic_prompt.seen) return;
+
+    const top = self.pages.pin(tl) orelse return;
+    const bottom = if (bl) |pt|
+        self.pages.pin(pt) orelse return
+    else
+        self.pages.getBottomRight(tl) orelse return;
+
+    if (self.semantic_prompt.pending_command) |pin| {
+        if (pin.*.isBetween(top, bottom)) self.clearPendingCommand();
+    }
+    if (self.semantic_prompt.active_command) |pin| {
+        if (pin.*.isBetween(top, bottom)) self.clearActiveCommand();
+    }
+    if (self.semantic_prompt.last_command) |command| {
+        const hit = command.prompt.*.isBetween(top, bottom) or
+            if (command.output_end) |pin| pin.*.isBetween(top, bottom) else false;
+        if (hit) self.clearLastCommand();
+    }
 }
 
 fn clearSemanticPromptCommandState(self: *Screen) void {
@@ -10648,6 +10704,97 @@ test "Screen: last-command copies C/D output without B input" {
     defer alloc.free(output);
     try testing.expectEqualStrings("output without B", output);
     try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Screen: last-command is dropped when its rows are erased" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo done");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\ndone");
+    try s.semanticPromptEndCommand();
+
+    {
+        const command = (try s.lastCommandString(alloc)).?;
+        defer alloc.free(command);
+        try testing.expectEqualStrings("echo done", command);
+    }
+
+    // ED2 wipes the recorded rows; the record must not survive to be revived
+    // by whatever prompt reuses those rows next.
+    s.clearRows(.{ .active = .{} }, null, false);
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+
+    // A new prompt reusing the same physical rows must not resurrect it.
+    s.cursorAbsolute(0, 0);
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("secret being typed");
+
+    try testing.expect((try s.lastCommandString(alloc)) == null);
+    try testing.expect((try s.lastCommandOutputString(alloc)) == null);
+}
+
+test "Screen: last-command output stops at the D cursor" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    // Stale output text further down the screen that a later command must
+    // never absorb into its own C..D region.
+    s.cursorAbsolute(0, 3);
+    try s.testWriteString("stale text below");
+    s.cursorAbsolute(0, 0);
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo hi");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try s.testWriteString("\nhi");
+    try s.semanticPromptEndCommand();
+
+    const output = (try s.lastCommandOutputString(alloc)).?;
+    defer alloc.free(output);
+    try testing.expectEqualStrings("hi", output);
+}
+
+test "Screen: last-command reports whether a command is running" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 30, .rows = 6, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try testing.expect(!s.semanticPromptCommandRunning());
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("sleep 10");
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(s.semanticPromptCommandRunning());
+
+    try s.semanticPromptEndCommand();
+    try testing.expect(!s.semanticPromptCommandRunning());
 }
 
 test "Screen: last-command rejects a completed region trimmed from scrollback" {

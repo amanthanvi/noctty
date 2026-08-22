@@ -6191,6 +6191,25 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             const command = command: {
                 self.renderer_state.mutex.lock();
                 defer self.renderer_state.mutex.unlock();
+
+                // Never type into an alternate-screen program (a TUI) and
+                // never type while a command is still running: in both cases
+                // the bytes would land somewhere the user did not intend.
+                if (self.io.terminal.screens.active_key != .primary) {
+                    log.info(
+                        "rerun last command ignored: the alternate screen is active",
+                        .{},
+                    );
+                    return true;
+                }
+                if (self.io.terminal.screens.active.semanticPromptCommandRunning()) {
+                    log.info(
+                        "rerun last command ignored: a command is still running",
+                        .{},
+                    );
+                    return true;
+                }
+
                 break :command try self.io.terminal.screens.active.lastCommandString(
                     self.alloc,
                 );
@@ -7340,7 +7359,8 @@ fn completeClipboardPaste(
 /// the stricter contract required for unattended command execution: one
 /// non-empty UTF-8 line with no control or Unicode line-separator characters.
 fn rerunCommandIsSafe(data: []const u8) bool {
-    if (data.len == 0 or !input.paste.isSafe(data)) return false;
+    if (data.len == 0 or data.len > rerun_command_max_len) return false;
+    if (!input.paste.isSafe(data)) return false;
 
     const view = std.unicode.Utf8View.init(data) catch return false;
     var it = view.iterator();
@@ -7348,7 +7368,14 @@ fn rerunCommandIsSafe(data: []const u8) bool {
         if (cp < 0x20 or
             (cp >= 0x7F and cp <= 0x9F) or
             cp == 0x2028 or
-            cp == 0x2029)
+            cp == 0x2029 or
+            // Bidi and other invisible formatting controls: they can make the
+            // command the user sees differ from the command that runs.
+            (cp >= 0x200B and cp <= 0x200F) or
+            (cp >= 0x202A and cp <= 0x202E) or
+            (cp >= 0x2060 and cp <= 0x2064) or
+            (cp >= 0x2066 and cp <= 0x2069) or
+            cp == 0xFEFF)
         {
             return false;
         }
@@ -7356,6 +7383,11 @@ fn rerunCommandIsSafe(data: []const u8) bool {
 
     return true;
 }
+
+/// Recovered command text longer than this is rejected rather than submitted.
+/// A recovered line that long is far more likely to be a mis-parse than
+/// something the user actually typed.
+const rerun_command_max_len: usize = 4096;
 
 test "Surface: last-command rerun safety reuses paste protection and rejects controls" {
     const testing = std.testing;
@@ -7370,6 +7402,14 @@ test "Surface: last-command rerun safety reuses paste protection and rejects con
     try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA8two"));
     try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xA9two"));
     try testing.expect(!rerunCommandIsSafe("one\xC0two"));
+    try testing.expect(!rerunCommandIsSafe("one\xE2\x80\xAEtwo"));
+    try testing.expect(!rerunCommandIsSafe("one\xE2\x81\xA6two"));
+    try testing.expect(!rerunCommandIsSafe("one\xEF\xBB\xBFtwo"));
+
+    const too_long = "e" ** (rerun_command_max_len + 1);
+    try testing.expect(!rerunCommandIsSafe(too_long));
+    const at_limit = "e" ** rerun_command_max_len;
+    try testing.expect(rerunCommandIsSafe(at_limit));
 }
 
 fn completeClipboardReadOSC52(
