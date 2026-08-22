@@ -740,7 +740,11 @@ pub fn init(
         try termio.Termio.init(&self.io, alloc, .{
             .size = size,
             .full_config = config,
-            .config = try termio.Termio.DerivedConfig.init(alloc, config),
+            .config = try termio.Termio.DerivedConfig.init(
+                alloc,
+                config,
+                app.config_conditional_state,
+            ),
             .backend = .{ .exec = io_exec },
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
@@ -1943,7 +1947,11 @@ pub fn updateConfig(
         errdefer renderer_message.deinit();
         var termio_config_ptr = try self.alloc.create(termio.Termio.DerivedConfig);
         errdefer self.alloc.destroy(termio_config_ptr);
-        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
+        termio_config_ptr.* = try termio.Termio.DerivedConfig.init(
+            self.alloc,
+            config,
+            self.config_conditional_state,
+        );
         errdefer termio_config_ptr.deinit();
 
         self.renderer_thread.send(renderer_message);

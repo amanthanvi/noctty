@@ -2401,6 +2401,25 @@ const RecoveryStartup = struct {
     decision: win32_recovery.Decision = .normal,
 };
 
+const recovery_safe_mode_banner =
+    "Safe mode: repeated incomplete startups. Built-in defaults are active; your config and saved session were not loaded. Restart noctty to retry normal startup.";
+const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
+const recovery_safe_mode_fallback_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty entered safe mode. Restart to retry normal startup.");
+
+fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
+    return if (decision == .safe_mode) recovery_safe_mode_banner else null;
+}
+
+fn persistMergedRecoveryReady(
+    startup: *RecoveryStartup,
+    merged: win32_recovery.StartupAttemptRecord,
+    persist_result: anyerror!void,
+) !void {
+    try persist_result;
+    @memcpy(startup.attempts[0..merged.attempts.len], merged.attempts);
+    startup.count = merged.attempts.len;
+}
+
 fn unixMillis() u64 {
     return @intCast(@max(std.time.milliTimestamp(), 0));
 }
@@ -2551,6 +2570,12 @@ fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
     return result;
 }
 
+const recovery_persist_attempt_limit = 3;
+
+fn shouldRetryRecoveryPersist(err: anyerror, attempt: usize) bool {
+    return err != error.OutOfMemory and attempt + 1 < recovery_persist_attempt_limit;
+}
+
 fn persistRecoveryRecord(
     alloc: Allocator,
     attempts: []const win32_recovery.StartupAttempt,
@@ -2559,7 +2584,15 @@ fn persistRecoveryRecord(
     defer alloc.free(path);
     const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
     defer alloc.free(encoded);
-    try writePersistentFileAlloc(alloc, path, encoded);
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        writePersistentFileAlloc(alloc, path, encoded) catch |err| {
+            if (!shouldRetryRecoveryPersist(err, attempt)) return err;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            continue;
+        };
+        return;
+    }
 }
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
@@ -2861,6 +2894,13 @@ pub const App = struct {
             @tagName(compositor_status.state),
             if (compositor_status.fallback_reason) |reason| @tagName(reason) else null,
         });
+
+        // Core conditional configuration defaults to light. Synchronize it
+        // with Windows before the first surface is created so conditional
+        // themes and terminal color-scheme reports start on the right branch.
+        self.syncSystemColorScheme() catch |err| {
+            log.warn("initial win32 color scheme sync failed err={}", .{err});
+        };
     }
 
     /// Bring the STA apartment online for in-process COM consumers
@@ -2928,6 +2968,16 @@ pub const App = struct {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
+        // The initial window is usable at this point, so persist readiness
+        // before showing the modal recovery explanation. The notice must not
+        // keep the next launch in safe mode if this process is terminated
+        // while it is visible.
+        self.markRecoveryReady();
+
+        if (recoverySafeModeNotice(self.recovery_startup.decision)) |notice| {
+            self.showRecoverySafeModeNotice(notice);
+        }
+
         self.scheduleGlobalHotkeySync();
         if (self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
@@ -2936,8 +2986,6 @@ pub const App = struct {
             };
         }
         if (self.windows.items.len == 0) self.startQuitTimer();
-
-        self.markRecoveryReady();
 
         var msg: MSG = undefined;
         while (true) {
@@ -3304,11 +3352,10 @@ pub const App = struct {
             log.warn("win32 recovery: ready marker merge failed err={}", .{err});
             return;
         };
-        @memcpy(self.recovery_startup.attempts[0..merged.attempts.len], merged.attempts);
-        self.recovery_startup.count = merged.attempts.len;
-        persistRecoveryRecord(
-            self.core_app.alloc,
-            self.recovery_startup.attempts[0..self.recovery_startup.count],
+        persistMergedRecoveryReady(
+            &self.recovery_startup,
+            merged,
+            persistRecoveryRecord(self.core_app.alloc, merged.attempts),
         ) catch |err| log.warn("win32 recovery: ready marker persist failed err={}", .{err});
     }
 
@@ -4205,6 +4252,29 @@ pub const App = struct {
         try self.showInfoMessage(.app, "noctty", message);
     }
 
+    fn showRecoverySafeModeNotice(self: *App, message: []const u8) void {
+        const owner: ?HWND = if (self.primarySurface()) |surface|
+            if (surface.host) |host| host.hwnd else null
+        else
+            null;
+        const message_w = std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, message) catch {
+            _ = MessageBoxW(
+                owner,
+                recovery_safe_mode_fallback_w,
+                recovery_safe_mode_caption_w,
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            );
+            return;
+        };
+        defer self.core_app.alloc.free(message_w);
+        _ = MessageBoxW(
+            owner,
+            message_w,
+            recovery_safe_mode_caption_w,
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
+    }
+
     /// True when any user-facing top-level UI window is still alive —
     /// either a terminal Host or the settings window. The quit timer
     /// and message-loop exit check both use this so the app doesn't
@@ -4537,14 +4607,15 @@ pub const App = struct {
             },
 
             .reload_config => {
-                if (target != .app) return false;
                 if (value.soft) {
-                    try self.core_app.updateConfig(self, &self.config);
-                    if (self.config.@"app-notifications".@"config-reload") {
-                        try self.showDesktopNotification(.app, "noctty", "Configuration reloaded");
+                    switch (target) {
+                        .app => try self.core_app.updateConfig(self, &self.config),
+                        .surface => |core_surface| try core_surface.updateConfig(&self.config),
                     }
                     return true;
                 }
+
+                if (target != .app) return false;
 
                 // Same startup-cwd restoration dance as
                 // `settingsSaveAndReload`: `Config.load` calls
@@ -5461,6 +5532,17 @@ pub const App = struct {
                 log.warn("win32 scrollbar refresh failed err={}", .{err});
             };
         }
+    }
+
+    fn syncSystemColorScheme(self: *App) !void {
+        const scheme = systemColorSchemeForDarkMode(isSystemDarkMode());
+
+        // Surface state must change before the app-wide reload because
+        // App.updateConfig applies each surface's own conditional state.
+        for (self.windows.items) |surface| {
+            try surface.core().colorSchemeCallback(scheme);
+        }
+        try self.core_app.colorSchemeEvent(self, scheme);
     }
 
     fn reconfigureTheme(self: *App) void {
@@ -10099,7 +10181,7 @@ const Host = struct {
                 .name = theme.name,
                 .display_name = self.storePaletteCatalogLabel(theme.name),
                 .description = switch (theme.location) {
-                    .user => "User theme",
+                    .user, .legacy_user => "User theme",
                     .resources => "Bundled theme",
                 },
                 .enabled = true,
@@ -17023,6 +17105,15 @@ fn isSystemDarkMode() bool {
     return data == 0; // 0 = dark mode, 1 = light mode
 }
 
+fn systemColorSchemeForDarkMode(is_dark: bool) apprt.ColorScheme {
+    return if (is_dark) .dark else .light;
+}
+
+test "issue149 Windows dark mode maps to terminal color scheme" {
+    try std.testing.expectEqual(apprt.ColorScheme.light, systemColorSchemeForDarkMode(false));
+    try std.testing.expectEqual(apprt.ColorScheme.dark, systemColorSchemeForDarkMode(true));
+}
+
 fn readDynamicScrollbars(default_value: bool) bool {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Control Panel\\Accessibility");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("DynamicScrollbars");
@@ -21862,6 +21953,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();
                 v.app.reconfigureTheme();
+                v.app.syncSystemColorScheme() catch |err| {
+                    log.warn("win32 color scheme sync failed err={}", .{err});
+                };
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -33447,6 +33541,41 @@ test "win32 safe mode never mutates saved session state" {
     try std.testing.expect(sessionStatePolicyAllows(false, .default));
     try std.testing.expect(sessionStatePolicyAllows(false, .always));
     try std.testing.expect(!sessionStatePolicyAllows(false, .never));
+}
+
+test "win32 recovery failed ready persistence remains retryable" {
+    var startup: RecoveryStartup = .{};
+    startup.attempts[0] = .{ .started_at_unix_ms = 100 };
+    startup.count = 1;
+    const merged_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
+    };
+
+    try std.testing.expectError(
+        error.AccessDenied,
+        persistMergedRecoveryReady(
+            &startup,
+            .{ .attempts = &merged_attempts },
+            error.AccessDenied,
+        ),
+    );
+    try std.testing.expectEqual(@as(?u64, null), startup.attempts[0].ready_at_unix_ms);
+}
+
+test "win32 recovery persistence retry policy is bounded" {
+    try std.testing.expect(shouldRetryRecoveryPersist(error.AccessDenied, 0));
+    try std.testing.expect(shouldRetryRecoveryPersist(error.AccessDenied, 1));
+    try std.testing.expect(!shouldRetryRecoveryPersist(error.AccessDenied, 2));
+    try std.testing.expect(!shouldRetryRecoveryPersist(error.OutOfMemory, 0));
+}
+
+test "win32 recovery safe mode always has a visible notice" {
+    try std.testing.expectEqualStrings(
+        recovery_safe_mode_banner,
+        recoverySafeModeNotice(.safe_mode).?,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.normal));
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.quarantine_session));
 }
 
 test "win32 explicit startup flows bypass session restore" {
