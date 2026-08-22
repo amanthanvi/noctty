@@ -359,6 +359,9 @@ pub const Action = union(Key) {
     /// Move keyboard focus between the terminal pane and the window
     /// chrome regions (tab strip, docked search, host banner).
     cycle_focus_region: CycleFocusRegion,
+    /// Relaunch the application through the Windows elevation prompt. The
+    /// target supplies the invoking surface context when available.
+    new_window_elevated: NewWindowElevated,
 
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
@@ -432,6 +435,7 @@ pub const Action = union(Key) {
         launch_layout,
         toggle_quick_select,
         cycle_focus_region,
+        new_window_elevated,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -591,6 +595,22 @@ pub const NewWindow = struct {
     pub fn cval(self: NewWindow) C {
         _ = self;
         return .{};
+    }
+};
+
+pub const NewWindowElevated = struct {
+    profile_key: []const u8,
+
+    pub const C = extern struct {
+        profile_key: [*]const u8,
+        profile_key_len: usize,
+    };
+
+    pub fn cval(self: NewWindowElevated) C {
+        return .{
+            .profile_key = self.profile_key.ptr,
+            .profile_key_len = self.profile_key.len,
+        };
     }
 };
 

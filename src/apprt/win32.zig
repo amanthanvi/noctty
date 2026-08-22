@@ -66,6 +66,7 @@ const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
 const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const win32_hints = @import("win32_hints.zig");
+const win32_elevation = @import("win32_elevation.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
@@ -808,13 +809,18 @@ fn sanitizeIpcNamespace(alloc: Allocator, raw: ?[]const u8) ![]const u8 {
     return try buf.toOwnedSlice(alloc);
 }
 
-fn allocIpcPipeName(alloc: Allocator, raw_namespace: ?[]const u8) ![:0]const u16 {
+fn allocIpcPipeName(
+    alloc: Allocator,
+    raw_namespace: ?[]const u8,
+    elevated: bool,
+) ![:0]const u16 {
     const namespace = try sanitizeIpcNamespace(alloc, raw_namespace);
     defer alloc.free(namespace);
 
-    const pipe_name_utf8 = try std.fmt.allocPrint(alloc, "{s}{s}", .{
+    const pipe_name_utf8 = try std.fmt.allocPrint(alloc, "{s}{s}{s}", .{
         ipc_pipe_prefix,
         namespace,
+        if (elevated) ".elevated" else ".medium",
     });
     defer alloc.free(pipe_name_utf8);
 
@@ -824,10 +830,11 @@ fn allocIpcPipeName(alloc: Allocator, raw_namespace: ?[]const u8) ![:0]const u16
 fn resolveIpcPipeNameForTarget(
     alloc: Allocator,
     target: apprt.ipc.Target,
+    elevated: bool,
 ) ![:0]const u16 {
     return switch (target) {
-        .class => |class| allocIpcPipeName(alloc, class),
-        .detect => allocIpcPipeName(alloc, null),
+        .class => |class| allocIpcPipeName(alloc, class, elevated),
+        .detect => allocIpcPipeName(alloc, null, elevated),
     };
 }
 
@@ -1029,7 +1036,11 @@ fn descriptorIntegrityRidFromSddl(sddl: []const u16) error{InvalidSecurityDescri
     return error.InvalidSecurityDescriptor;
 }
 
-fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
+fn connectToIpcPipe(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    elevated: bool,
+) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
         const handle = windows.kernel32.CreateFileW(
@@ -1054,6 +1065,26 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
                     .{},
                 );
                 return error.PipeUnreachable;
+            }
+            // The descriptor check above proves the server is the same user
+            // and at least our integrity level. When we are elevated we also
+            // read the server's TOKEN, which is a different source: it
+            // survives a descriptor that was set once and then dropped, and
+            // it is what `win32_elevation` tests against.
+            if (elevated) {
+                const trusted = win32_elevation.authenticateElevatedPipeServer(
+                    alloc,
+                    handle,
+                ) catch |err| {
+                    _ = windows.CloseHandle(handle);
+                    log.warn("refusing elevated IPC server because authentication could not be completed err={}", .{err});
+                    return error.UntrustedIpcServer;
+                };
+                if (!trusted) {
+                    _ = windows.CloseHandle(handle);
+                    log.warn("refusing elevated IPC server because its token owner or elevation state did not match", .{});
+                    return error.UntrustedIpcServer;
+                }
             }
             setIpcClientNonblocking(handle) catch |err| {
                 _ = windows.CloseHandle(handle);
@@ -1097,11 +1128,12 @@ fn setIpcClientNonblocking(pipe: windows.HANDLE) !void {
 fn sendNewWindowIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     arguments: ?[]const [:0]const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return false,
+    const pipe = connectToIpcPipe(alloc, pipe_name, elevated) catch |err| switch (err) {
+        error.FileNotFound, error.UntrustedIpcServer => return false,
         // No instance we are allowed to talk to. Report "not forwarded" so
         // the caller starts a local instance instead of aborting startup.
         error.PipeUnreachable => {
@@ -1126,11 +1158,12 @@ fn sendNewWindowIpc(
 fn sendListWindowsIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     response_timeout_ms: u64,
 ) !?[]u8 {
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
-        error.FileNotFound, error.PipeUnreachable => return null,
+    const pipe = connectToIpcPipe(alloc, pipe_name, elevated) catch |err| switch (err) {
+        // All three mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable, error.UntrustedIpcServer => return null,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -1153,6 +1186,7 @@ fn sendListWindowsIpc(
 fn sendPerformActionIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     target: apprt.ipc.AutomationActionTarget,
     action_text: []const u8,
     response_timeout_ms: u64,
@@ -1164,17 +1198,19 @@ fn sendPerformActionIpc(
         0,
     );
     defer alloc.free(request);
-    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
 fn sendAutomationAckRequest(
+    alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     request: []u8,
     response_timeout_ms: u64,
 ) !bool {
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
-        error.FileNotFound, error.PipeUnreachable => return false,
+    const pipe = connectToIpcPipe(alloc, pipe_name, elevated) catch |err| switch (err) {
+        // All three mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable, error.UntrustedIpcServer => return false,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -1190,6 +1226,7 @@ fn sendAutomationAckRequest(
 fn sendFocusIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     target: apprt.ipc.AutomationTarget,
     response_timeout_ms: u64,
 ) !bool {
@@ -1199,12 +1236,13 @@ fn sendFocusIpc(
         0,
     );
     defer alloc.free(request);
-    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
 fn sendNewTabIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     target: apprt.ipc.AutomationTarget,
     working_directory: ?[]const u8,
     response_timeout_ms: u64,
@@ -1216,12 +1254,13 @@ fn sendNewTabIpc(
         0,
     );
     defer alloc.free(request);
-    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
 fn sendNewSplitIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     target: apprt.ipc.AutomationTarget,
     direction: apprt.ipc.AutomationSplitDirection,
     working_directory: ?[]const u8,
@@ -1235,12 +1274,13 @@ fn sendNewSplitIpc(
         0,
     );
     defer alloc.free(request);
-    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
 fn sendAutomationTextIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     target: apprt.ipc.AutomationTarget,
     value: []const u8,
     response_timeout_ms: u64,
@@ -1252,7 +1292,7 @@ fn sendAutomationTextIpc(
         0,
     );
     defer alloc.free(request);
-    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+    return sendAutomationAckRequest(alloc, pipe_name, elevated, request, response_timeout_ms);
 }
 
 fn automationRequestDeadline(response_timeout_ms: u64) u64 {
@@ -1528,6 +1568,7 @@ fn logForwardedArgvRejection(rejection: ForwardedArgvRejection) void {
 fn sendLaunchLayoutIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     name: []const u8,
     response_timeout_ms: u64,
 ) !bool {
@@ -1541,8 +1582,8 @@ fn sendLaunchLayoutIpc(
     );
     defer alloc.free(request);
 
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound, error.PipeUnreachable => return false,
+    const pipe = connectToIpcPipe(alloc, pipe_name, elevated) catch |err| switch (err) {
+        error.FileNotFound, error.PipeUnreachable, error.UntrustedIpcServer => return false,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -1559,12 +1600,14 @@ fn sendLaunchLayoutIpc(
 fn trySendStartupLaunchLayoutIpc(
     alloc: Allocator,
     pipe_name: [:0]const u16,
+    elevated: bool,
     name: ?[]const u8,
 ) !?bool {
     const layout_name = name orelse return null;
     return try sendLaunchLayoutIpc(
         alloc,
         pipe_name,
+        elevated,
         layout_name,
         win32_ipc.automation_response_timeout_ms,
     );
@@ -2003,37 +2046,26 @@ fn createIpcServerPipe(
     );
 }
 
-fn ipcServerMain(app: *App) void {
-    const pipe_name = app.ipc_pipe_name orelse return;
+/// Serve the single-instance IPC pipe.
+///
+/// The first instance is claimed by `startIpcServer` rather than here,
+/// because the claim RESULT is a startup decision: losing it means another
+/// instance already owns this integrity-scoped name, and the loser retries
+/// its startup forward instead of listening. `security_arg` owns the
+/// descriptor every instance is created with and is released here.
+fn ipcServerMain(
+    app: *App,
+    first_pipe: windows.HANDLE,
+    security_arg: win32_elevation.IpcPipeSecurity,
+) void {
+    var security = security_arg;
+    defer security.deinit();
+    const security_attributes = security.securityAttributes();
 
-    // Fail closed: with the default named-pipe security descriptor the pipe
-    // grants Administrators and LocalSystem full control, grants Everyone
-    // read (enough to occupy instances and observe the channel), and is
-    // reachable over SMB. Refuse to listen at all if the descriptor cannot
-    // be built rather than falling back to that.
-    const descriptor = allocIpcPipeSecurityDescriptor() catch |err| {
-        log.warn("failed to build win32 IPC pipe security descriptor err={}", .{err});
-        return;
-    };
-    defer _ = sys.LocalFree(descriptor);
-
-    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
-        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
-        .lpSecurityDescriptor = descriptor,
-        .bInheritHandle = windows.FALSE,
-    };
-
-    // Claim the name once. If another process already holds it this fails
-    // and we do not listen at all, rather than joining a namespace someone
-    // else owns.
-    var pipe = createIpcServerPipe(pipe_name, &security_attributes, true);
-    if (pipe == windows.INVALID_HANDLE_VALUE) {
-        log.warn("failed to claim first win32 IPC pipe instance err={}", .{
-            windows.kernel32.GetLastError(),
-        });
-        return;
-    }
+    var pipe = first_pipe;
     defer _ = windows.CloseHandle(pipe);
+
+    const pipe_name = app.ipc_pipe_name orelse return;
 
     server: while (!app.ipc_stop_requested.load(.acquire)) {
         connect: while (!app.ipc_stop_requested.load(.acquire)) {
@@ -2052,7 +2084,7 @@ fn ipcServerMain(app: *App) void {
                     }
                     const replacement = createIpcServerPipe(
                         pipe_name,
-                        &security_attributes,
+                        security_attributes,
                         false,
                     );
                     if (replacement == windows.INVALID_HANDLE_VALUE) {
@@ -2075,7 +2107,7 @@ fn ipcServerMain(app: *App) void {
         }
         const replacement = createIpcServerPipe(
             pipe_name,
-            &security_attributes,
+            security_attributes,
             false,
         );
         if (replacement == windows.INVALID_HANDLE_VALUE) {
@@ -3321,6 +3353,9 @@ pub const App = struct {
 
     core_app: *CoreApp,
     config: configpkg.Config,
+    /// Cached process-token elevation state. This scopes IPC and session
+    /// persistence consistently for the full lifetime of the process.
+    is_elevated: bool = false,
     config_revision: u64 = 1,
     resolved_theme: ThemeColors = darkTheme(),
     hinstance: HINSTANCE,
@@ -3507,6 +3542,7 @@ pub const App = struct {
         const embedding_mode = win32_terminal_handoff.isEmbeddingProcess(core_app.alloc);
         const recovery_startup = if (embedding_mode) RecoveryStartup{} else beginRecoveryStartup(core_app.alloc);
         const safe_mode = opts.safe_mode or recovery_startup.decision == .safe_mode;
+        const is_elevated = try win32_elevation.isProcessElevated();
         self.* = .{
             .core_app = core_app,
             .config = if (safe_mode) config: {
@@ -3515,6 +3551,7 @@ pub const App = struct {
                 try config.finalize();
                 break :config config;
             } else try configpkg.Config.load(core_app.alloc),
+            .is_elevated = is_elevated,
             .safe_mode = safe_mode,
             .embedding_mode = embedding_mode,
             .recovery_startup = recovery_startup,
@@ -3751,7 +3788,15 @@ pub const App = struct {
 
         // Safe mode is an isolated recovery process. It neither forwards into
         // the normal instance nor competes for that instance's IPC endpoint.
-        if (!self.embedding_mode and !self.safe_mode) try self.startIpcServer();
+        if (!self.embedding_mode and !self.safe_mode and try self.startIpcServer()) {
+            // Lost the first-instance race and the retry forward succeeded:
+            // same successful-startup outcome as the forward above, and the
+            // same reason the marker failure is only logged.
+            self.markRecoveryReady() catch |err| {
+                log.warn("win32 recovery: forwarded launch ready marker failed err={}", .{err});
+            };
+            return;
+        }
 
         if (!self.embedding_mode and self.config.@"launch-layout" != null) {
             const name = self.config.@"launch-layout".?;
@@ -4205,6 +4250,7 @@ pub const App = struct {
     }
 
     fn loadSessionState(self: *App) !?std.json.Parsed(win32_session_state.SessionState) {
+        if (self.is_elevated) return null;
         if (!self.sessionStateEnabled()) return null;
         const path = self.sessionStatePath() orelse return null;
         defer self.core_app.alloc.free(path);
@@ -4796,6 +4842,7 @@ pub const App = struct {
     }
 
     fn saveSessionState(self: *const App) bool {
+        if (self.is_elevated) return false;
         if (!self.sessionStateEnabled()) return false;
         const path = self.sessionStatePath() orelse return false;
         defer self.core_app.alloc.free(path);
@@ -5255,6 +5302,7 @@ pub const App = struct {
         if (try trySendStartupLaunchLayoutIpc(
             self.core_app.alloc,
             pipe_name,
+            self.is_elevated,
             self.config.@"launch-layout",
         )) |forwarded| return forwarded;
 
@@ -5264,14 +5312,17 @@ pub const App = struct {
         return try sendNewWindowIpc(
             self.core_app.alloc,
             pipe_name,
+            self.is_elevated,
             arguments,
             win32_ipc.automation_response_timeout_ms,
         );
     }
 
-    fn startIpcServer(self: *App) !void {
-        if (self.config.@"single-instance" != .true) return;
-        if (self.ipc_thread != null) return;
+    /// Start the IPC server. Returns true only when a lost first-instance race
+    /// was resolved by forwarding this startup to the process that won it.
+    fn startIpcServer(self: *App) !bool {
+        if (self.config.@"single-instance" != .true) return false;
+        if (self.ipc_thread != null) return false;
 
         self.ipc_namespace = try sanitizeIpcNamespace(self.core_app.alloc, self.config.class);
         errdefer {
@@ -5279,25 +5330,92 @@ pub const App = struct {
             self.ipc_namespace = null;
         }
 
-        self.ipc_pipe_name = try allocIpcPipeName(self.core_app.alloc, self.ipc_namespace);
-        errdefer {
-            if (self.ipc_pipe_name) |pipe_name| self.core_app.alloc.free(pipe_name);
-            self.ipc_pipe_name = null;
-        }
+        const pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
+        var pipe_name_owned = true;
+        defer if (pipe_name_owned) self.core_app.alloc.free(pipe_name);
 
+        // Both branches fail closed. With the DEFAULT named-pipe descriptor
+        // the endpoint grants Administrators and LocalSystem full control,
+        // grants Everyone read (enough to occupy instances and observe the
+        // channel), and is reachable over SMB, so refuse to listen at all
+        // rather than fall back to it. An elevated instance gets the stricter
+        // owner-only DACL plus an `NRNW` high mandatory label; every other
+        // instance gets the owner-pinned descriptor labelled with this
+        // token's OWN integrity level.
+        var pipe_security: win32_elevation.IpcPipeSecurity = security: {
+            if (self.is_elevated) {
+                break :security win32_elevation.initElevatedPipeSecurity(
+                    self.core_app.alloc,
+                ) catch |err| {
+                    log.warn("failed to build elevated IPC pipe security; continuing without an IPC server err={}", .{err});
+                    return false;
+                };
+            }
+            const descriptor = allocIpcPipeSecurityDescriptor() catch |err| {
+                log.warn("failed to build win32 IPC pipe security descriptor; continuing without an IPC server err={}", .{err});
+                return false;
+            };
+            break :security win32_elevation.adoptPipeSecurityDescriptor(descriptor);
+        };
+        var pipe_security_owned = true;
+        defer if (pipe_security_owned) pipe_security.deinit();
+
+        // Claim the name once, and act on the RESULT. Losing it means another
+        // instance already owns this integrity-scoped name, which is the
+        // ordinary single-instance case, not a failure.
+        const first_pipe = createIpcServerPipe(
+            pipe_name,
+            pipe_security.securityAttributes(),
+            true,
+        );
+        if (first_pipe == windows.INVALID_HANDLE_VALUE) {
+            const create_error = windows.kernel32.GetLastError();
+            if (win32_elevation.isIpcPipeClaimConflict(create_error)) {
+                log.warn("win32 IPC pipe ownership claim failed err={}; retrying startup forward once", .{create_error});
+                const forwarded = self.tryForwardStartupToExistingInstance() catch |err| failed: {
+                    log.warn("win32 IPC retry forward failed err={}", .{err});
+                    break :failed false;
+                };
+                if (forwarded) return true;
+                log.warn("win32 IPC pipe remains owned by another process; continuing without an IPC server so this window can run locally", .{});
+                return false;
+            }
+
+            log.warn("failed to create first win32 IPC pipe instance; continuing without an IPC server err={}", .{create_error});
+            return false;
+        }
+        var first_pipe_owned = true;
+        defer if (first_pipe_owned) {
+            _ = windows.CloseHandle(first_pipe);
+        };
+
+        self.ipc_pipe_name = pipe_name;
+        errdefer self.ipc_pipe_name = null;
         self.ipc_stop_requested.store(false, .release);
-        self.ipc_thread = try std.Thread.spawn(.{}, ipcServerMain, .{self});
+        self.ipc_thread = try std.Thread.spawn(
+            .{},
+            ipcServerMain,
+            .{ self, first_pipe, pipe_security },
+        );
+        first_pipe_owned = false;
+        pipe_security_owned = false;
+        pipe_name_owned = false;
+        return false;
     }
 
     fn resolveIpcPipeName(self: *const App, alloc: Allocator) ![:0]const u16 {
-        return allocIpcPipeName(alloc, self.config.class);
+        return allocIpcPipeName(alloc, self.config.class, self.is_elevated);
     }
 
     fn stopIpcServer(self: *App) void {
         if (self.ipc_thread) |thread| {
             self.ipc_stop_requested.store(true, .release);
             if (self.ipc_pipe_name) |pipe_name| {
-                if (connectToIpcPipe(pipe_name)) |pipe| {
+                if (connectToIpcPipe(
+                    self.core_app.alloc,
+                    pipe_name,
+                    self.is_elevated,
+                )) |pipe| {
                     _ = windows.CloseHandle(pipe);
                 } else |_| {}
             }
@@ -6008,6 +6126,80 @@ pub const App = struct {
                 return layoutActionResult(self.saveNamedLayout(target, value.name));
             },
 
+            .new_window_elevated => {
+                const alloc = self.core_app.alloc;
+                const source = self.findSurfaceForTarget(target);
+
+                const cwd = cwd: {
+                    if (source) |surface| {
+                        if (surface.core().pwd(alloc) catch null) |live_pwd| {
+                            if (live_pwd.len > 0) break :cwd live_pwd;
+                            alloc.free(live_pwd);
+                        }
+                        if (surface.pwd) |cached_pwd| {
+                            if (cached_pwd.len > 0) break :cwd try alloc.dupe(u8, cached_pwd);
+                        }
+                    }
+                    if (self.startup_cwd) |startup_cwd| {
+                        if (startup_cwd.len > 0) break :cwd try alloc.dupe(u8, startup_cwd);
+                    }
+                    break :cwd try std.process.getCwdAlloc(alloc);
+                };
+                defer alloc.free(cwd);
+
+                var command: ?configpkg.Command = null;
+                var temporary_profiles: ?[]windows_shell.Profile = null;
+                defer if (temporary_profiles) |profiles| {
+                    windows_shell.deinitProfiles(alloc, profiles);
+                };
+                const profile_key: ?[]const u8 = if (value.profile_key.len > 0)
+                    value.profile_key
+                else if (source) |surface|
+                    surface.launch_profile_key
+                else
+                    null;
+                if (profile_key) |key| {
+                    const source_host: ?*Host = if (source) |surface|
+                        surface.host
+                    else
+                        null;
+                    const profile: ?*const windows_shell.Profile = if (source_host) |host|
+                        try host.profileForKey(key)
+                    else profile: {
+                        const profiles = try windows_shell.listProfiles(alloc);
+                        temporary_profiles = profiles;
+                        const index = profileIndexByKey(profiles, key) orelse break :profile null;
+                        break :profile &profiles[index];
+                    };
+                    command = (profile orelse {
+                        log.warn("elevated window profile not found key={s}", .{key});
+                        return false;
+                    }).command;
+                }
+
+                const process_argv = try std.process.argsAlloc(alloc);
+                defer std.process.argsFree(alloc, process_argv);
+                const argv = try alloc.alloc([]const u8, process_argv.len);
+                defer alloc.free(argv);
+                for (process_argv, 0..) |arg, i| argv[i] = arg;
+
+                const parameters = try win32_elevation.buildRelaunchParameters(
+                    alloc,
+                    argv,
+                    self.config.class,
+                    cwd,
+                    self.startup_cwd orelse cwd,
+                    command,
+                );
+                defer alloc.free(parameters);
+
+                switch (try win32_elevation.launchElevated(alloc, parameters, cwd)) {
+                    .launched => {},
+                    .cancelled => log.info("win32 elevated launch cancelled by user", .{}),
+                }
+                return true;
+            },
+
             .new_tab => {
                 const source = self.findSurfaceForTarget(target);
                 _ = try self.createNewTab(source, null, false, false);
@@ -6709,11 +6901,16 @@ pub const App = struct {
                     return err;
                 };
 
-                const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
+                const elevated = try win32_elevation.isProcessElevated();
+                const pipe_name = try resolveIpcPipeNameForTarget(
+                    alloc,
+                    target,
+                    elevated,
+                );
                 defer alloc.free(pipe_name);
                 const forwarded = switch (launch_layout) {
-                    .none => try sendNewWindowIpc(alloc, pipe_name, value.arguments, response_timeout_ms),
-                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, name, response_timeout_ms),
+                    .none => try sendNewWindowIpc(alloc, pipe_name, elevated, value.arguments, response_timeout_ms),
+                    .name => |name| try sendLaunchLayoutIpc(alloc, pipe_name, elevated, name, response_timeout_ms),
                 };
                 if (forwarded) return true;
                 return try spawnWindowProcess(alloc, target, value);
@@ -6726,9 +6923,10 @@ pub const App = struct {
         target: apprt.ipc.Target,
         response_timeout_ms: u64,
     ) !?[]u8 {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target, elevated);
         defer alloc.free(pipe_name);
-        return try sendListWindowsIpc(alloc, pipe_name, response_timeout_ms);
+        return try sendListWindowsIpc(alloc, pipe_name, elevated, response_timeout_ms);
     }
 
     pub fn performAutomationAction(
@@ -6738,9 +6936,10 @@ pub const App = struct {
         action_text: []const u8,
         response_timeout_ms: u64,
     ) !bool {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, target, elevated);
         defer alloc.free(pipe_name);
-        return try sendPerformActionIpc(alloc, pipe_name, action_target, action_text, response_timeout_ms);
+        return try sendPerformActionIpc(alloc, pipe_name, elevated, action_target, action_text, response_timeout_ms);
     }
 
     pub fn focusAutomationTarget(
@@ -6749,9 +6948,10 @@ pub const App = struct {
         automation_target: apprt.ipc.AutomationTarget,
         response_timeout_ms: u64,
     ) !bool {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target, elevated);
         defer alloc.free(pipe_name);
-        return try sendFocusIpc(alloc, pipe_name, automation_target, response_timeout_ms);
+        return try sendFocusIpc(alloc, pipe_name, elevated, automation_target, response_timeout_ms);
     }
 
     pub fn newAutomationTab(
@@ -6761,11 +6961,13 @@ pub const App = struct {
         working_directory: ?[]const u8,
         response_timeout_ms: u64,
     ) !bool {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target, elevated);
         defer alloc.free(pipe_name);
         return try sendNewTabIpc(
             alloc,
             pipe_name,
+            elevated,
             automation_target,
             working_directory,
             response_timeout_ms,
@@ -6780,11 +6982,13 @@ pub const App = struct {
         working_directory: ?[]const u8,
         response_timeout_ms: u64,
     ) !bool {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target, elevated);
         defer alloc.free(pipe_name);
         return try sendNewSplitIpc(
             alloc,
             pipe_name,
+            elevated,
             automation_target,
             direction,
             working_directory,
@@ -6799,11 +7003,13 @@ pub const App = struct {
         text: []const u8,
         response_timeout_ms: u64,
     ) !bool {
-        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        const elevated = try win32_elevation.isProcessElevated();
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target, elevated);
         defer alloc.free(pipe_name);
         return try sendAutomationTextIpc(
             alloc,
             pipe_name,
+            elevated,
             automation_target,
             text,
             response_timeout_ms,
@@ -17100,16 +17306,18 @@ const Host = struct {
     fn syncWindowTitle(self: *Host) !bool {
         const hwnd = self.hwnd orelse return false;
         const alloc = self.app.core_app.alloc;
-        const surface = self.activeSurface() orelse {
-            if (!windowTitleSyncChanged(self.cached_window_title, "noctty")) return false;
-            try appendOwnedString(alloc, &self.cached_window_title, "noctty");
-            _ = sys.SetWindowTextW(hwnd, default_title);
-            return true;
-        };
+        const surface = self.activeSurface();
         const host_base_title = try buildHostAwareBaseTitle(
             alloc,
-            if (surface.effectiveTitle()) |value| value else null,
-            self.app.hostTabStatus(surface),
+            if (surface) |active|
+                if (active.effectiveTitle()) |value| value else null
+            else
+                null,
+            if (surface) |active|
+                self.app.hostTabStatus(active)
+            else
+                .{ .index = 0, .total = 1 },
+            self.app.is_elevated,
         );
         defer alloc.free(host_base_title);
         if (!windowTitleSyncChanged(self.cached_window_title, host_base_title)) return false;
@@ -33665,16 +33873,84 @@ test "win32 sanitizeIpcNamespace normalizes invalid characters" {
     try std.testing.expectEqualStrings("team_alpha__beta", actual);
 }
 
-test "win32 allocIpcPipeName prefixes sanitized namespace" {
+test "win32 elevated IPC pipe names are integrity scoped" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const pipe_name = try allocIpcPipeName(std.testing.allocator, "demo class");
+    const medium_name = try allocIpcPipeName(std.testing.allocator, "demo class", false);
+    defer std.testing.allocator.free(medium_name);
+
+    const medium_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, medium_name[0..medium_name.len]);
+    defer std.testing.allocator.free(medium_utf8);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class.medium", medium_utf8);
+
+    const elevated_name = try allocIpcPipeName(std.testing.allocator, "demo class", true);
+    defer std.testing.allocator.free(elevated_name);
+
+    const elevated_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, elevated_name[0..elevated_name.len]);
+    defer std.testing.allocator.free(elevated_utf8);
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class.elevated", elevated_utf8);
+
+    const adversarial_medium = try allocIpcPipeName(std.testing.allocator, "demo class.elevated", false);
+    defer std.testing.allocator.free(adversarial_medium);
+    try std.testing.expect(!std.mem.eql(u16, adversarial_medium, elevated_name));
+}
+
+test "win32 elevation authenticates a same-process pipe server token" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty-elevation-auth-{d}-{d}",
+        .{ sys.GetCurrentProcessId(), sys.GetTickCount64() },
+        0,
+    );
+    defer std.testing.allocator.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        pipe_name_utf8,
+    );
     defer std.testing.allocator.free(pipe_name);
 
-    const pipe_name_utf8 = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, pipe_name[0..pipe_name.len]);
-    defer std.testing.allocator.free(pipe_name_utf8);
+    const server = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+        1,
+        1024,
+        1024,
+        0,
+        null,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
 
-    try std.testing.expectEqualStrings("\\\\.\\pipe\\noctty.demo_class", pipe_name_utf8);
+    try std.testing.expectEqual(@as(BOOL, 0), sys.ConnectNamedPipe(server, null));
+    try std.testing.expectEqual(windows.Win32Error.PIPE_LISTENING, windows.kernel32.GetLastError());
+
+    const client = windows.kernel32.CreateFileW(
+        pipe_name.ptr,
+        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(client);
+
+    const connected = sys.ConnectNamedPipe(server, null);
+    if (connected == 0) {
+        try std.testing.expectEqual(windows.Win32Error.PIPE_CONNECTED, windows.kernel32.GetLastError());
+    }
+
+    try std.testing.expectEqual(
+        try win32_elevation.isProcessElevated(),
+        try win32_elevation.authenticateElevatedPipeServer(
+            std.testing.allocator,
+            client,
+        ),
+    );
 }
 
 test "win32 named layout encoding uses the persistence read limit" {
@@ -35138,7 +35414,7 @@ test "win32 IPC client authenticates the connected pipe descriptor" {
     // to OUR OWN server succeeding is what proves the check ran and passed
     // rather than being skipped: if the SID comparison were broken in the
     // "reject" direction this returns `error.PipeUnreachable` instead.
-    const client = try connectToIpcPipe(pipe_name);
+    const client = try connectToIpcPipe(alloc, pipe_name, false);
     defer _ = windows.CloseHandle(client);
 
     // And directly, so a future refactor that drops the call site still
@@ -35592,6 +35868,7 @@ test "win32 launch-layout IPC validates names before cold fallback" {
         sendLaunchLayoutIpc(
             std.testing.allocator,
             pipe_name,
+            false,
             "CON",
             win32_ipc.automation_response_timeout_ms,
         ),
@@ -35609,11 +35886,11 @@ test "win32 startup layout forwarding intercepts before generic argv" {
 
     try std.testing.expectEqual(
         @as(?bool, null),
-        try trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, null),
+        try trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, false, null),
     );
     try std.testing.expectError(
         error.InvalidAutomationAction,
-        trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, "CON"),
+        trySendStartupLaunchLayoutIpc(std.testing.allocator, pipe_name, false, "CON"),
     );
 }
 
