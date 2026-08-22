@@ -668,7 +668,6 @@ const DT_LEFT = 0x00000000;
 const default_metrics: win32_theme.ThemeMetrics = .{};
 const host_tab_height: i32 = default_metrics.height_tab;
 const host_tab_height_integrated: i32 = default_metrics.height_tab_integrated;
-const host_titlebar_height: i32 = default_metrics.height_titlebar;
 const host_caption_button_w: i32 = default_metrics.caption_button_w;
 const host_caption_button_h: i32 = default_metrics.caption_button_h;
 const host_overlay_height: i32 = default_metrics.height_overlay;
@@ -9339,7 +9338,7 @@ const Host = struct {
         // widths survive, while the integrated-caption policy
         // (caption row inside client + maximized invisible-margin
         // compensation) stays centralized in `win32_nc_layout`.
-        const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
+        const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState = if (IsZoomed(hwnd) != 0) .maximized else .normal;
         const adjusted = win32_nc_layout.calcNcClientRect(.{
             .left = params.rgrc[0].left,
@@ -9370,7 +9369,7 @@ const Host = struct {
             .bottom = win_rect.bottom,
         };
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
-        const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
+        const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState =
             if (IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, cursor, metrics, state);
@@ -13805,13 +13804,22 @@ const Host = struct {
         overlay_height: i32,
         inspector_height: i32,
     ) win32_nc_layout.ContentBands {
+        const caption_bottom = if (self.usingIntegratedTitlebar())
+            self.ncMetrics().caption_button_h
+        else
+            0;
         return win32_nc_layout.contentBands(
             tab_bottom,
-            self.scaled(host_titlebar_height),
-            self.scaled(host_caption_button_h),
-            self.usingIntegratedTitlebar(),
+            caption_bottom,
             overlay_height,
             inspector_height,
+        );
+    }
+
+    fn ncMetrics(self: *const Host) win32_nc_layout.Metrics {
+        return win32_nc_layout.metricsDefault(
+            self.current_dpi,
+            host_caption_button_h,
         );
     }
 
@@ -13894,12 +13902,7 @@ const Host = struct {
         return x;
     }
 
-    fn contentRect(self: *Host) !RECT {
-        const hwnd = self.hwnd orelse return error.InvalidHost;
-        var rect: RECT = undefined;
-        if (GetClientRect(hwnd, &rect) == 0) {
-            return windows.unexpectedError(windows.kernel32.GetLastError());
-        }
+    fn contentRectFromClient(self: *Host, rect: RECT) RECT {
         const tab_offset: i32 = self.tabBarHeight();
         const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
         const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
@@ -13908,12 +13911,17 @@ const Host = struct {
             .left = 0,
             .top = bands.content_top,
             .right = rect.right,
-            .bottom = win32_nc_layout.contentBottom(
-                bands.content_top,
-                rect.bottom,
-                self.statusBarHeight(),
-            ),
+            .bottom = @max(bands.content_top + 1, rect.bottom - self.statusBarHeight()),
         };
+    }
+
+    fn contentRect(self: *Host) !RECT {
+        const hwnd = self.hwnd orelse return error.InvalidHost;
+        var rect: RECT = undefined;
+        if (GetClientRect(hwnd, &rect) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+        return self.contentRectFromClient(rect);
     }
 
     fn close(self: *Host) void {
@@ -14979,7 +14987,7 @@ const Host = struct {
         theme: *const win32_theme.ThemeColors,
     ) void {
         const cb_w = self.scaled(host_caption_button_w);
-        const cb_h = self.scaled(host_caption_button_h);
+        const cb_h = self.ncMetrics().caption_button_h;
         if (cb_w <= 0 or cb_h <= 0) return;
 
         const maximized = if (self.hwnd) |h| IsZoomed(h) != 0 else false;
@@ -15054,11 +15062,7 @@ const Host = struct {
             .left = 0,
             .top = bands.content_top,
             .right = client_rect.right,
-            .bottom = win32_nc_layout.contentBottom(
-                bands.content_top,
-                client_rect.bottom,
-                status_h,
-            ),
+            .bottom = @max(bands.content_top + 1, client_rect.bottom - status_h),
         };
         const top_rect = RECT{
             .left = client_rect.left,
@@ -24217,7 +24221,12 @@ pub const Surface = struct {
             self.drop_target_registered = false;
         };
 
-        const content_rect = try host.contentRect();
+        const content_rect = host.contentRect() catch host.contentRectFromClient(.{
+            .left = 0,
+            .top = 0,
+            .right = 1280,
+            .bottom = 800,
+        });
         _ = applyChildRect(hwnd, &self.placement, content_rect);
         self.placement.visible = false;
         self.placement.visible_known = true;

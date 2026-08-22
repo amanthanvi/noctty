@@ -71,14 +71,14 @@ pub const Metrics = struct {
 };
 
 /// Return default metrics scaled linearly from 96 dpi base values.
-pub fn metricsDefault(dpi: u32) Metrics {
+pub fn metricsDefault(dpi: u32, caption_button_height: i32) Metrics {
     const scale = @as(i32, @intCast(dpi));
     return .{
         .size_frame_y = scaleDim(4, scale),
         .size_frame_x = scaleDim(4, scale),
         .padded_border = scaleDim(4, scale),
         .caption_button_w = scaleDim(46, scale),
-        .caption_button_h = scaleDim(40, scale),
+        .caption_button_h = scaleDim(caption_button_height, scale),
         .edge_resize_width = scaleDim(8, scale),
     };
 }
@@ -236,30 +236,6 @@ fn scaleDim(base: i32, dpi: i32) i32 {
     return @divTrunc(base * dpi + 48, 96);
 }
 
-/// Client-relative top of terminal content below app-painted chrome.
-/// The tab and caption bands are independently sized; overlays begin below
-/// whichever band extends farther into the client area.
-pub fn terminalContentTop(
-    tab_bottom: i32,
-    caption_bottom: i32,
-    overlay_height: i32,
-    inspector_height: i32,
-) i32 {
-    return @max(tab_bottom, caption_bottom) + overlay_height + inspector_height;
-}
-
-/// Bottom of the app-painted tab/caption band. All dimensions are already
-/// scaled for the host's current DPI.
-pub fn captionBandBottom(
-    tab_bottom: i32,
-    titlebar_height: i32,
-    caption_button_height: i32,
-    integrated: bool,
-) i32 {
-    if (!integrated) return tab_bottom;
-    return @max(tab_bottom, @max(titlebar_height, caption_button_height));
-}
-
 pub const ContentBands = struct {
     overlay_top: i32,
     inspector_top: i32,
@@ -269,33 +245,17 @@ pub const ContentBands = struct {
 /// Boundaries for panels stacked between the tab/caption band and terminal.
 pub fn contentBands(
     tab_bottom: i32,
-    titlebar_height: i32,
-    caption_button_height: i32,
-    integrated: bool,
+    caption_bottom: i32,
     overlay_height: i32,
     inspector_height: i32,
 ) ContentBands {
-    const chrome_bottom = captionBandBottom(
-        tab_bottom,
-        titlebar_height,
-        caption_button_height,
-        integrated,
-    );
+    const chrome_bottom = @max(tab_bottom, caption_bottom);
     const inspector_top = chrome_bottom + overlay_height;
     return .{
         .overlay_top = chrome_bottom,
         .inspector_top = inspector_top,
-        .content_top = terminalContentTop(
-            tab_bottom,
-            chrome_bottom,
-            overlay_height,
-            inspector_height,
-        ),
+        .content_top = inspector_top + inspector_height,
     };
-}
-
-pub fn contentBottom(content_top: i32, client_bottom: i32, status_height: i32) i32 {
-    return @max(content_top + 1, client_bottom - status_height);
 }
 
 fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
@@ -320,7 +280,7 @@ fn edgeHitTest(window: Rect, cursor: Point, ew: i32) ?HitTest {
 // ---------------------------------------------------------------------------
 
 test "metricsDefault: 96 dpi produces base values" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     try std.testing.expectEqual(@as(i32, 4), m.size_frame_x);
     try std.testing.expectEqual(@as(i32, 4), m.size_frame_y);
     try std.testing.expectEqual(@as(i32, 4), m.padded_border);
@@ -330,14 +290,14 @@ test "metricsDefault: 96 dpi produces base values" {
 }
 
 test "metricsDefault: 144 dpi (150%)" {
-    const m = metricsDefault(144);
+    const m = metricsDefault(144, 40);
     try std.testing.expectEqual(@as(i32, 6), m.size_frame_x);
     try std.testing.expectEqual(@as(i32, 69), m.caption_button_w);
     try std.testing.expectEqual(@as(i32, 60), m.caption_button_h);
 }
 
 test "metricsDefault: 192 dpi (200%)" {
-    const m = metricsDefault(192);
+    const m = metricsDefault(192, 40);
     try std.testing.expectEqual(@as(i32, 8), m.size_frame_x);
     try std.testing.expectEqual(@as(i32, 92), m.caption_button_w);
     try std.testing.expectEqual(@as(i32, 80), m.caption_button_h);
@@ -346,7 +306,7 @@ test "metricsDefault: 192 dpi (200%)" {
 // -- calcNcClientRect -------------------------------------------------------
 
 test "normal: zero top, keep side borders" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const proposed = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const r = calcNcClientRect(proposed, m, .normal);
     try std.testing.expectEqual(@as(i32, 4), r.left);
@@ -356,7 +316,7 @@ test "normal: zero top, keep side borders" {
 }
 
 test "maximized: additional top inset" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const proposed = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const r = calcNcClientRect(proposed, m, .maximized);
     // top = size_frame_y + padded_border = 4 + 4 = 8
@@ -364,7 +324,7 @@ test "maximized: additional top inset" {
 }
 
 test "sides preserved in both states" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const proposed = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
     const rn = calcNcClientRect(proposed, m, .normal);
     const rm = calcNcClientRect(proposed, m, .maximized);
@@ -379,21 +339,21 @@ test "sides preserved in both states" {
 // -- hitTest ----------------------------------------------------------------
 
 test "top-left corner: resize wins over sysmenu in outer frame" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     try std.testing.expectEqual(HitTest.topleft, hitTest(win, .{ .x = 0, .y = 0 }, m, .normal));
     try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, .{ .x = 20, .y = 20 }, m, .normal));
 }
 
 test "topleft resize at bottom-left corner" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Bottom-left corner is unambiguously bottomleft resize.
     try std.testing.expectEqual(HitTest.bottomleft, hitTest(win, .{ .x = 0, .y = 799 }, m, .normal));
 }
 
 test "top-right corner: resize wins over close in outer frame" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     try std.testing.expectEqual(HitTest.topright, hitTest(win, .{ .x = 1279, .y = 0 }, m, .normal));
     try std.testing.expectEqual(HitTest.close, hitTest(win, .{ .x = 1257, .y = 20 }, m, .normal));
@@ -401,7 +361,7 @@ test "top-right corner: resize wins over close in outer frame" {
 }
 
 test "over close button" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     const cx = @divTrunc(btns.close.left + btns.close.right, 2);
@@ -410,7 +370,7 @@ test "over close button" {
 }
 
 test "over max button" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     const cx = @divTrunc(btns.max.left + btns.max.right, 2);
@@ -419,7 +379,7 @@ test "over max button" {
 }
 
 test "over min button" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     const cx = @divTrunc(btns.min.left + btns.min.right, 2);
@@ -428,7 +388,7 @@ test "over min button" {
 }
 
 test "caption area between sysmenu and buttons" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Pick a point in the caption row, past sysmenu, before buttons.
     // Sysmenu occupies [0, 40) horizontally; buttons start at 1280 - 3*46 = 1142.
@@ -437,21 +397,21 @@ test "caption area between sysmenu and buttons" {
 }
 
 test "client area below caption" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // y = 200 is well below the caption row (40 px).
     try std.testing.expectEqual(HitTest.client, hitTest(win, .{ .x = 640, .y = 200 }, m, .normal));
 }
 
 test "bottom edge strip" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // y = 799 (last row), x in the middle — avoids corner zones.
     try std.testing.expectEqual(HitTest.bottom, hitTest(win, .{ .x = 640, .y = 799 }, m, .normal));
 }
 
 test "maximized edge resize -> client not bottom" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Same position as "bottom edge strip" but maximized — edge resize
     // strips are suppressed.
@@ -459,7 +419,7 @@ test "maximized edge resize -> client not bottom" {
 }
 
 test "sysmenu icon rect (leftmost 40px of caption row)" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     // Centre of the sysmenu rect: x = 20, y = 20.
     try std.testing.expectEqual(HitTest.sysmenu, hitTest(win, .{ .x = 20, .y = 20 }, m, .normal));
@@ -468,14 +428,14 @@ test "sysmenu icon rect (leftmost 40px of caption row)" {
 // -- captionButtonsRect -----------------------------------------------------
 
 test "buttons flush right" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     try std.testing.expectEqual(@as(i32, 1280), btns.close.right);
 }
 
 test "buttons ordered right-to-left" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     try std.testing.expect(btns.close.left < win.right);
@@ -484,7 +444,7 @@ test "buttons ordered right-to-left" {
 }
 
 test "button height == metrics.caption_button_h" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 0, .top = 0, .right = 1280, .bottom = 800 };
     const btns = captionButtonsRect(win, m, .normal);
     try std.testing.expectEqual(m.caption_button_h, btns.close.height());
@@ -497,7 +457,7 @@ test "button height == metrics.caption_button_h" {
 }
 
 test "maximized buttons align to visible caption row" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
     const btns = captionButtonsRect(win, m, .maximized);
     const expected_top = win.top + m.size_frame_y + m.padded_border;
@@ -507,7 +467,7 @@ test "maximized buttons align to visible caption row" {
 }
 
 test "maximized hit test follows shifted caption buttons" {
-    const m = metricsDefault(96);
+    const m = metricsDefault(96, 40);
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
     const btns = captionButtonsRect(win, m, .maximized);
     const max_x = @divTrunc(btns.max.left + btns.max.right, 2);
@@ -519,7 +479,7 @@ test "maximized hit test follows shifted caption buttons" {
 }
 
 test "maximized caption row starts below invisible top margin at 150% dpi" {
-    const m = metricsDefault(144);
+    const m = metricsDefault(144, 40);
     const win = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
     const caption_top = win.top + m.size_frame_y + m.padded_border;
 
@@ -528,7 +488,7 @@ test "maximized caption row starts below invisible top margin at 150% dpi" {
 }
 
 test "max button hit test scales at 150% dpi for snap hover" {
-    const m = metricsDefault(144);
+    const m = metricsDefault(144, 40);
     const win = Rect{ .left = 40, .top = 20, .right = 1480, .bottom = 920 };
     const btns = captionButtonsRect(win, m, .normal);
     const max_x = @divTrunc(btns.max.left + btns.max.right, 2);
@@ -548,16 +508,17 @@ test "Issue150 terminal content clears independently sized integrated caption" {
     const tab_height_dip: i32 = 32;
 
     for (dpis) |dpi| {
-        const metrics = metricsDefault(@intCast(dpi));
+        const metrics = metricsDefault(@intCast(dpi), 40);
         for (states) |state| {
             const client = calcNcClientRect(window, metrics, state);
             const caption = captionButtonsRect(window, metrics, state);
-            const content_screen_top = client.top + terminalContentTop(
+            const bands = contentBands(
                 scaleDim(tab_height_dip, @intCast(dpi)),
                 metrics.caption_button_h,
                 0,
                 0,
             );
+            const content_screen_top = client.top + bands.content_top;
             try std.testing.expect(content_screen_top >= caption.close.bottom);
         }
     }
@@ -568,34 +529,45 @@ test "Issue150 runtime DPI changes recompute integrated content boundary" {
     const window = Rect{ .left = 100, .top = 50, .right = 1380, .bottom = 850 };
 
     for (dpi_sequence) |dpi| {
-        const metrics = metricsDefault(@intCast(dpi));
+        const metrics = metricsDefault(@intCast(dpi), 40);
         const client = calcNcClientRect(window, metrics, .maximized);
         const caption = captionButtonsRect(window, metrics, .maximized);
-        const content_screen_top = client.top + terminalContentTop(
+        const bands = contentBands(
             scaleDim(32, dpi),
             metrics.caption_button_h,
             0,
             0,
         );
+        const content_screen_top = client.top + bands.content_top;
         try std.testing.expect(content_screen_top >= caption.close.bottom);
     }
 }
 
 test "Issue150 non-integrated content keeps tab and panel offsets" {
-    try std.testing.expectEqual(@as(i32, 132), terminalContentTop(32, 0, 58, 42));
+    const bands = contentBands(32, 0, 58, 42);
+    try std.testing.expectEqual(@as(i32, 132), bands.content_top);
 }
 
 test "Issue150 panels start below an unequal integrated caption band" {
-    const bands = contentBands(32, 48, 40, true, 58, 42);
+    const bands = contentBands(32, 48, 58, 42);
     try std.testing.expectEqual(@as(i32, 48), bands.overlay_top);
     try std.testing.expectEqual(@as(i32, 106), bands.inspector_top);
     try std.testing.expectEqual(@as(i32, 148), bands.content_top);
 }
 
-test "Issue150 small clients keep content bottom after content top" {
-    const bands = contentBands(32, 48, 40, true, 58, 42);
+test "Issue150 shipped integrated bands start content at tab bottom" {
+    const tab_height_dip: i32 = 40;
+    const titlebar_height_dip: i32 = 40;
+    const caption_height_dip: i32 = 40;
+    const dpi: i32 = 96;
+
+    const metrics = metricsDefault(@intCast(dpi), caption_height_dip);
+    const tab_bottom = scaleDim(tab_height_dip, dpi);
     try std.testing.expectEqual(
-        bands.content_top + 1,
-        contentBottom(bands.content_top, 80, 0),
+        scaleDim(titlebar_height_dip, dpi),
+        metrics.caption_button_h,
     );
+
+    const bands = contentBands(tab_bottom, metrics.caption_button_h, 0, 0);
+    try std.testing.expectEqual(tab_bottom, bands.content_top);
 }
