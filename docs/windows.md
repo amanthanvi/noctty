@@ -99,9 +99,14 @@ Windows defaults are available:
   `Ctrl+Shift+Y`. This requires OSC 133;C and OSC 133;D command-output
   boundaries.
 - `rerun_last_command` — run the most recent recoverable single-line command
-  again, `Ctrl+Shift+R`. This requires shell integration that emits OSC 133;B
-  and OSC 133;C command-input boundaries; noctty does not read or modify the
-  shell's line editor.
+  again. This has no default keybind; use the command palette or bind it
+  yourself. It requires shell integration that emits OSC 133;B and OSC 133;C
+  command-input boundaries; noctty does not read or modify the shell's line
+  editor. It refuses to act while the alternate screen is active or while a
+  command is still running, and rejects recovered text that is empty,
+  multi-line, over 4096 bytes, or carries control or invisible formatting
+  characters. The recovered text comes from the shell's own OSC 133 marks, so
+  it is only as trustworthy as the program that emitted them.
 
 `utf8-console` controls UTF-8 setup for bare interactive `cmd.exe` launches,
 Windows PowerShell 5.1, and PowerShell 7 (`pwsh`) sessions. `auto` is the default
