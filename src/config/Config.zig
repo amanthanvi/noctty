@@ -6184,6 +6184,17 @@ pub const Keybinds = struct {
                 .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true, .ctrl = true } },
                 .{ .jump_to_prompt = 1 },
             );
+            // `rerun_last_command` deliberately has no default binding: it
+            // submits a command, and `ctrl+shift+r` is the chord our own
+            // getting-started guide shows users rebinding to reload_config.
+            // It stays available from the command palette and user keybinds.
+            if (comptime builtin.target.os.tag == .windows) {
+                try self.set.put(
+                    alloc,
+                    .{ .key = .{ .unicode = 'y' }, .mods = .{ .shift = true, .ctrl = true } },
+                    .{ .copy_last_command_output = {} },
+                );
+            }
 
             // Search
             try self.set.putFlags(
@@ -7318,6 +7329,47 @@ pub const Keybinds = struct {
                 .key = .{ .physical = case.key },
             }) == null);
         }
+    }
+
+    test "Windows last-command defaults preserve prompt navigation without conflicts" {
+        if (builtin.target.os.tag != .windows) return error.SkipZigTest;
+
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var keybinds: Keybinds = .{};
+        try keybinds.init(arena.allocator());
+
+        const cases = [_]struct {
+            trigger: inputpkg.Binding.Trigger,
+            action: inputpkg.Binding.Action,
+        }{
+            .{
+                .trigger = .{ .key = .{ .physical = .page_up }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .{ .jump_to_prompt = -1 },
+            },
+            .{
+                .trigger = .{ .key = .{ .physical = .page_down }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .{ .jump_to_prompt = 1 },
+            },
+            .{
+                .trigger = .{ .key = .{ .unicode = 'y' }, .mods = .{ .shift = true, .ctrl = true } },
+                .action = .copy_last_command_output,
+            },
+        };
+
+        for (cases) |case| {
+            const entry = keybinds.set.get(case.trigger).?.value_ptr.*;
+            try testing.expect(entry == .leaf);
+            try testing.expectEqual(case.action, entry.leaf.action);
+        }
+
+        // Rerun is palette-only by default and must not claim ctrl+shift+r.
+        try testing.expect(keybinds.set.get(.{
+            .key = .{ .unicode = 'r' },
+            .mods = .{ .shift = true, .ctrl = true },
+        }) == null);
     }
 
     test "clone with tables" {

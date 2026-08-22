@@ -1177,6 +1177,8 @@ pub fn semanticPrompt(
         .fresh_line => try self.semanticPromptFreshLine(),
 
         .fresh_line_new_prompt => {
+            self.screens.active.semanticPromptAbortCommand();
+
             // "First do a fresh-line."
             try self.semanticPromptFreshLine();
 
@@ -1252,6 +1254,7 @@ pub fn semanticPrompt(
             self.screens.active.cursorSetSemanticContent(.{
                 .input = .clear_explicit,
             });
+            try self.screens.active.semanticPromptStartInput();
         },
 
         .end_prompt_start_input_terminate_eol => {
@@ -1259,11 +1262,13 @@ pub fn semanticPrompt(
             self.screens.active.cursorSetSemanticContent(.{
                 .input = .clear_eol,
             });
+            try self.screens.active.semanticPromptStartInput();
         },
 
         .end_input_start_output => {
             // "End of input, and start of output."
             self.screens.active.cursorSetSemanticContent(.output);
+            try self.screens.active.semanticPromptStartOutput();
 
             // If our current row is marked as a prompt and we're
             // at column zero then we assume we're un-prompting. This
@@ -1282,6 +1287,8 @@ pub fn semanticPrompt(
         },
 
         .end_command => {
+            try self.screens.active.semanticPromptEndCommand();
+
             // From a terminal state perspective, this doesn't really do
             // anything. Other terminals appear to do nothing here. I think
             // its reasonable at this point to reset our semantic content
