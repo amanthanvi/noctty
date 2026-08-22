@@ -53,9 +53,9 @@ fn decodeScalar(
 /// For non-SIMD enabled builds, we trim the padding from the end of the
 /// base64 input in order to get identical output with the SIMD version.
 fn scalarInput(input: []const u8) []const u8 {
-    var i: usize = 0;
-    while (input[input.len - i - 1] == '=') i += 1;
-    return input[0 .. input.len - i];
+    var end = input.len;
+    while (end > 0 and input[end - 1] == '=') end -= 1;
+    return input[0..end];
 }
 
 // base64.cpp
@@ -73,6 +73,14 @@ test "base64 maxLen" {
     const testing = std.testing;
     const len = maxLen("aGVsbG8gd29ybGQ=");
     try testing.expectEqual(11, len);
+}
+
+test "base64 empty input" {
+    const testing = std.testing;
+    var output: [0]u8 = .{};
+
+    try testing.expectEqual(0, maxLen(""));
+    try testing.expectEqualStrings("", try decode("", &output));
 }
 
 test "base64 decode" {
