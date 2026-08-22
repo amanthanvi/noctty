@@ -25,6 +25,8 @@ Each release publishes signed Windows artifacts for x64 and ARM64:
   without an installer.
 - `SHA256SUMS-windows-<arch>.txt`: architecture-specific checksums.
 
+Chocolatey installs are available with `choco install noctty`.
+
 The installer and the binaries inside the portable ZIP are
 Authenticode-signed with a self-signed certificate; the ZIP container
 itself is checksummed, not signed.
