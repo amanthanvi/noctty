@@ -531,6 +531,10 @@ pub const Action = union(enum) {
     /// this will bring it to the front.
     new_window,
 
+    /// Open a new elevated window, optionally using the profile identified
+    /// by the payload key. An empty payload uses the current/default profile.
+    new_window_elevated: []const u8,
+
     /// Open a new tab.
     new_tab,
 
@@ -1310,6 +1314,7 @@ pub const Action = union(enum) {
 
             // These are app but can be special-cased in a surface context.
             .new_window,
+            .new_window_elevated,
             .undo,
             .redo,
             => .app,
@@ -3328,6 +3333,23 @@ test "parse: action with enum" {
         try testing.expect(binding.action == .new_split);
         try testing.expectEqual(Action.SplitDirection.right, binding.action.new_split);
     }
+}
+
+test "parse elevated window action with optional profile key" {
+    const testing = std.testing;
+
+    const keyed = try parseSingle("a=new_window_elevated:admin-shell");
+    try testing.expect(keyed.action == .new_window_elevated);
+    try testing.expectEqualStrings("admin-shell", keyed.action.new_window_elevated);
+
+    const default = try parseSingle("a=new_window_elevated:");
+    try testing.expect(default.action == .new_window_elevated);
+    try testing.expectEqualStrings("", default.action.new_window_elevated);
+
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    try default.action.format(&buf.writer);
+    try testing.expectEqualStrings("new_window_elevated:", buf.written());
 }
 
 test "parse: action with enum with default" {

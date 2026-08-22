@@ -5254,6 +5254,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .{ .parent = self },
             ),
 
+            .new_window_elevated => |profile_key| try self.app.newWindowElevated(
+                self.rt_app,
+                self,
+                profile_key,
+            ),
+
             // Undo and redo both support both surface and app targeting.
             // If we are triggering on a surface then we perform the
             // action with the surface target.
