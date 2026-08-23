@@ -6,6 +6,26 @@ $readinessPreflightInvocationStep = Get-YamlStepBlock `
     -Content $readinessWorkflowText `
     -Name 'Validate release configuration' `
     -Source $readinessWorkflow
+$releaseCheckoutStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Checkout code' `
+    -Source $releaseWorkflow
+$releaseX64PackageStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Build and package x64 release artifacts' `
+    -Source $releaseWorkflow
+$releaseArm64PackageStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Build and package ARM64 release artifacts' `
+    -Source $releaseWorkflow
+$releaseSubmitWingetStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Submit WinGet manifest update' `
+    -Source $releaseWorkflow
+$releasePublishScoopStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Publish Scoop manifest' `
+    -Source $releaseWorkflow
 $releasePreflightAction = Join-Path $repoRoot '.github\actions\release-preflight\action.yml'
 $releasePreflightActionText = Get-Content -LiteralPath $releasePreflightAction -Raw
 $normalizedReleasePreflightActionText = @(
@@ -37,13 +57,13 @@ $releaseInteractiveEvidenceScriptSha256 =
 $releaseInteractiveEvidenceStepSha256 =
     '88a9d8d525eca9bb31327fdad515af39488a63b418222036b82edf94db945b6f'
 $releasePreflightStepSha256 =
-    'df670c151c2bfc75bba3ad85039c5125a2d8a039dcaf2a7456bc18e9ba9f6072'
+    'd3af932ec3bf2369351ac7c9d70eac3f94ee4de13110f8277e0aa8e85e992fec'
 $readinessPreflightStepSha256 =
-    '3b5844aeba60eab87f3caa862ac7f4d470cd0bbdbefa1e407a7ee5bb9209f814'
+    '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '85f96cf4befe59fa3f5988a5d2f85cb3de73ef54fca42bd71111c9b2cdfa33b4'
+    '8f036589577bf9a2e70feda2e40e750a428c50f290c2c34449469aaeee98ac73'
 $readinessWorkflowSha256 =
-    '20975b3b060791476bf94668913371f91e87970ed6875216504f0b07d613a04e'
+    '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
 # including triggers, permissions, inherited job metadata, and unprotected steps.
 foreach ($workflow in @(
@@ -62,8 +82,96 @@ foreach ($workflow in @(
     )
     if (-not $jobEnvironment.Success -or
         $jobEnvironment.Groups['body'].Value -match
-            '(?m)^      (?:SCOOP_BUCKET_TOKEN|WINGETCREATE_TOKEN):') {
-        throw "Publish-capable package-manager tokens escaped into job-level env: $($workflow.Context)"
+            '(?m)^      (?:SCOOP_BUCKET_TOKEN|WINGETCREATE_TOKEN|WINDOWS_CODESIGN_PFX_BASE64|WINDOWS_CODESIGN_PFX_PASSWORD):') {
+        throw "Sensitive release credentials escaped into job-level env: $($workflow.Context)"
+    }
+}
+$releaseCheckoutCredentialSetting =
+    '          persist-credentials: false'
+$releaseCheckoutWithBlock = [regex]::Match(
+    (ConvertTo-CanonicalText -Text $releaseCheckoutStep),
+    '(?ms)^        with:\s*\n(?<body>(?:^          .*?(?:\n|$))+)'
+)
+if (-not $releaseCheckoutWithBlock.Success -or
+    @([regex]::Matches(
+        $releaseCheckoutWithBlock.Groups['body'].Value,
+        '(?m)^' + [regex]::Escape($releaseCheckoutCredentialSetting) + '$'
+    )).Count -ne 1) {
+    throw "Release checkout must disable persisted GitHub credentials: $releaseWorkflow"
+}
+$signingSecretMappings = [ordered] @{
+    WINDOWS_CODESIGN_PFX_BASE64 =
+        '          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}'
+    WINDOWS_CODESIGN_PFX_PASSWORD =
+        '          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}'
+}
+$signingSecretConsumerSpecs = @(
+    [pscustomobject] @{
+        Context = "$releaseWorkflow :: Release preflight"
+        StepText = $releasePreflightInvocationStep
+    }
+    [pscustomobject] @{
+        Context = "$readinessWorkflow :: Validate release configuration"
+        StepText = $readinessPreflightInvocationStep
+    }
+    [pscustomobject] @{
+        Context = "$releaseWorkflow :: Build and package x64 release artifacts"
+        StepText = $releaseX64PackageStep
+    }
+    [pscustomobject] @{
+        Context = "$releaseWorkflow :: Build and package ARM64 release artifacts"
+        StepText = $releaseArm64PackageStep
+    }
+)
+foreach ($consumer in $signingSecretConsumerSpecs) {
+    $canonicalStep = ConvertTo-CanonicalText -Text $consumer.StepText
+    $stepEnvironment = [regex]::Match(
+        $canonicalStep,
+        '(?ms)^        env:\s*\n(?<body>(?:^          .*?(?:\n|$))+)'
+    )
+    if (-not $stepEnvironment.Success) {
+        throw "Signing secret env block is missing: $($consumer.Context)"
+    }
+    foreach ($mapping in $signingSecretMappings.Values) {
+        if (@([regex]::Matches(
+            $stepEnvironment.Groups['body'].Value,
+            '(?m)^' + [regex]::Escape($mapping) + '$'
+        )).Count -ne 1) {
+            throw "Signing secret mapping is missing or redirected: $($consumer.Context)"
+        }
+    }
+}
+foreach ($workflow in @(
+    [pscustomobject] @{
+        Context = $releaseWorkflow
+        Content = $releaseWorkflowText
+        ExpectedConsumers = 3
+    }
+    [pscustomobject] @{
+        Context = $readinessWorkflow
+        Content = $readinessWorkflowText
+        ExpectedConsumers = 1
+    }
+)) {
+    foreach ($secretName in $signingSecretMappings.Keys) {
+        $mapping = $signingSecretMappings[$secretName]
+        $mappingPattern =
+            '(?m)^' + [regex]::Escape($mapping) + '\r?$'
+        if (@([regex]::Matches(
+            $workflow.Content,
+            $mappingPattern
+        )).Count -ne $workflow.ExpectedConsumers) {
+            throw "Signing secret consumer count changed: $($workflow.Context) :: $secretName"
+        }
+        $contentWithoutExpectedMappings = [regex]::Replace(
+            $workflow.Content,
+            $mappingPattern,
+            ''
+        )
+        if ($contentWithoutExpectedMappings -match
+            [regex]::Escape($secretName)) {
+            throw "Signing secret escaped an approved consumer: $($workflow.Context) :: $secretName"
+        }
     }
 }
 $commonWorkflowBoundaryMutations = @(
@@ -234,6 +342,16 @@ $protectedStepEnvelopeSpecs = @(
                 Label = 'release WinGet token redirect'
                 Target = '          wingetcreate-token: ${{ secrets.WINGETCREATE_TOKEN }}'
                 Replacement = '          wingetcreate-token: ${{ secrets.FORGED_WINGET_TOKEN }}'
+            },
+            @{
+                Label = 'release PFX payload redirect'
+                Target = '          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}'
+                Replacement = '          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.FORGED_PFX_BASE64 }}'
+            },
+            @{
+                Label = 'release PFX password redirect'
+                Target = '          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}'
+                Replacement = '          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.FORGED_PFX_PASSWORD }}'
             }
         )
     },
@@ -267,6 +385,16 @@ $protectedStepEnvelopeSpecs = @(
                 Label = 'readiness WinGet token redirect'
                 Target = '          wingetcreate-token: ${{ secrets.WINGETCREATE_TOKEN }}'
                 Replacement = '          wingetcreate-token: ${{ secrets.FORGED_WINGET_TOKEN }}'
+            },
+            @{
+                Label = 'readiness PFX payload redirect'
+                Target = '          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}'
+                Replacement = '          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.FORGED_PFX_BASE64 }}'
+            },
+            @{
+                Label = 'readiness PFX password redirect'
+                Target = '          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}'
+                Replacement = '          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.FORGED_PFX_PASSWORD }}'
             }
         )
     }
@@ -1258,6 +1386,8 @@ $releaseScoopPublisher = Join-Path $repoRoot 'scripts\release-publish-scoop.ps1'
 $releaseScoopPublisherText = Get-Content -LiteralPath $releaseScoopPublisher -Raw
 $releaseWingetSubmitter = Join-Path $repoRoot 'scripts\release-submit-winget.ps1'
 $releaseWingetSubmitterText = Get-Content -LiteralPath $releaseWingetSubmitter -Raw
+$releaseArtifactVerifier = Join-Path $repoRoot 'scripts\release-verify-artifacts.ps1'
+$releaseArtifactVerifierText = Get-Content -LiteralPath $releaseArtifactVerifier -Raw
 $releaseDefenderScanner = Join-Path $repoRoot 'scripts\release-scan-defender.ps1'
 $releaseDefenderScannerText = Get-Content -LiteralPath $releaseDefenderScanner -Raw
 $releaseCommon = Join-Path $repoRoot 'scripts\common.ps1'
@@ -1282,21 +1412,22 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseGithubPublisher
         Content = $releaseGithubPublisherText
         ExpectedSha256 =
-            'af67a087e056294e81be91ff6a9fe4e7ba83dc355914663adada1b760e3775bc'
+            '6ce232e8332d32aa61a9c1f6730e6188f2696e1bb6a82a0c9151e7fa01c9c3f5'
         CriticalStatement = '& gh release view $Tag --repo $Repository *> $null'
     }
     [pscustomobject] @{
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            '213862abecda4bb4fab3073b143d11adf23fddbc17fbf3bd379e4890fcbca320'
-        CriticalStatement = '    & git push origin HEAD'
+            '5b90add3fbcb3e237ff597d48657558fd609340385e5c09b7a01c6a803cb49d7'
+        CriticalStatement =
+            "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
     }
     [pscustomobject] @{
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            '7c95de37d2ca9cf3eb194bc8e440c9f5eeff19b61f29e7e4f01fa80616e377f3'
+            'f07065e30708b0b763fcefb2ea1990364c1cd978386b9ffbc7e3f30a09f2032f'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1359,25 +1490,318 @@ foreach ($spec in $protectedReleaseScriptSpecs) {
         }
     }
 }
+$scoopCredentialHelperPush =
+    "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
+if ($releaseScoopPublisherText -match '(?i)x-access-token|git\s+remote\s+set-url' -or
+    @([regex]::Matches(
+        (ConvertTo-CanonicalText -Text $releaseScoopPublisherText),
+        [regex]::Escape($scoopCredentialHelperPush)
+    )).Count -ne 1 -or
+    $releaseScoopPublisherText -notmatch
+        '(?ms)GetRelativePath\(\s*\$RunnerTemp,\s*\$bucketDirectory\s*\).*?finally\s*\{\s*Remove-ValidatedScoopClone\s*\}') {
+    throw 'Scoop publisher must use an ephemeral gh credential helper and finally-clean only its validated temp clone.'
+}
+if ($releaseScoopPublisherText -notmatch
+        '(?ms)\$gitNetworkBoundArgs = @\(.*?''http\.lowSpeedLimit=1''.*?''http\.lowSpeedTime=60''.*?& git @gitNetworkBoundArgs @credentialHelperArgs @cloneArgs.*?& git @gitNetworkBoundArgs -c ''credential\.helper=''.*?push origin HEAD') {
+    throw 'Scoop clone and push must both retain narrow Git low-speed transport bounds.'
+}
+if ($releaseScoopPublisherText -notmatch
+        '(?ms)\$manifestRelativePath = if \(\[string\]::IsNullOrWhiteSpace\(\$ManifestPath\)\) \{\s*''bucket/noctty\.json''') {
+    throw 'Scoop publisher must map absent, empty, and whitespace manifest configuration to the safe default.'
+}
+$scoopTokens = $null
+$scoopParseErrors = $null
+$scoopAst = [Management.Automation.Language.Parser]::ParseInput(
+    $releaseScoopPublisherText,
+    [ref] $scoopTokens,
+    [ref] $scoopParseErrors
+)
+if ($scoopParseErrors.Count -ne 0) {
+    throw "Scoop publisher does not parse: $releaseScoopPublisher"
+}
+$scoopCleanupFunctions = @($scoopAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Remove-ValidatedScoopClone'
+}, $true))
+if ($scoopCleanupFunctions.Count -ne 1 -or
+    $scoopCleanupFunctions[0].Extent.Text -notmatch
+        '(?ms)Get-Item -LiteralPath \$bucketDirectory -Force -ErrorAction Stop.*?-not \$cloneItem\.PSIsContainer.*?FileAttributes\]::ReparsePoint.*?Remove-Item -LiteralPath \$bucketDirectory -Recurse -Force' -or
+    @([regex]::Matches(
+        $releaseScoopPublisherText,
+        '(?m)^\s*Remove-ValidatedScoopClone\s*$'
+    )).Count -ne 2 -or
+    @([regex]::Matches(
+        $releaseScoopPublisherText,
+        'Remove-Item -LiteralPath \$bucketDirectory -Recurse -Force'
+    )).Count -ne 1) {
+    throw 'Scoop clone cleanup must be factored through one directory/reparse-refusing function at both cleanup sites.'
+}
+$scoopCleanupProbeRoot = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    ('noctty-scoop-cleanup-contract-' + [guid]::NewGuid().ToString('N'))
+$scoopCleanupArtifactRoot = Join-Path $scoopCleanupProbeRoot 'artifacts'
+$scoopCleanupMetadataDirectory = Join-Path `
+    $scoopCleanupArtifactRoot `
+    'noctty-1.3.999-windows-x64\package-managers'
+$scoopCleanupManifestSource = Join-Path `
+    $scoopCleanupProbeRoot `
+    'noctty.json'
+$scoopCleanupClonePath = Join-Path `
+    $scoopCleanupProbeRoot `
+    'noctty-scoop-bucket'
+$previousScoopCleanupToken = $env:GH_TOKEN
+try {
+    [void] (New-Item `
+        -ItemType Directory `
+        -Path $scoopCleanupMetadataDirectory `
+        -Force)
+    Set-Content -LiteralPath $scoopCleanupManifestSource -Value '{}'
+    @{
+        scoop = @{
+            manifestPath = $scoopCleanupManifestSource
+        }
+    } |
+        ConvertTo-Json -Depth 3 |
+        Set-Content -LiteralPath (
+            Join-Path $scoopCleanupMetadataDirectory 'metadata.json'
+        )
+    Set-Content -LiteralPath $scoopCleanupClonePath -Value 'must survive'
+    $env:GH_TOKEN = 'noctty-cleanup-contract-token'
+    function git {
+        throw 'Scoop cleanup contract unexpectedly reached git.'
+    }
+    $cleanupRejected = $false
+    try {
+        & $releaseScoopPublisher `
+            -Version 1.3.999 `
+            -BucketRepository 'owner/repository' `
+            -ArtifactRoot $scoopCleanupArtifactRoot `
+            -RunnerTemp $scoopCleanupProbeRoot `
+            -ManifestPath 'bucket/noctty.json' 6> $null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'Scoop clone path is not a directory') {
+            throw "Scoop cleanup refusal probe returned the wrong failure: $($_.Exception.Message)"
+        }
+        $cleanupRejected = $true
+    }
+    if (-not $cleanupRejected -or
+        -not (Test-Path -LiteralPath $scoopCleanupClonePath -PathType Leaf)) {
+        throw 'Scoop cleanup refusal probe deleted or accepted a non-directory clone path.'
+    }
+}
+finally {
+    $env:GH_TOKEN = $previousScoopCleanupToken
+    Remove-Item Function:\git -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $scoopCleanupClonePath -PathType Leaf) {
+        Remove-Item -LiteralPath $scoopCleanupClonePath -Force
+    }
+    if (Test-Path -LiteralPath $scoopCleanupProbeRoot) {
+        $cleanupProbeItem = Get-Item `
+            -LiteralPath $scoopCleanupProbeRoot `
+            -Force
+        if (-not $cleanupProbeItem.PSIsContainer -or
+            ($cleanupProbeItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Scoop cleanup contract temp root became unsafe to remove.'
+        }
+        Remove-Item `
+            -LiteralPath $scoopCleanupProbeRoot `
+            -Recurse `
+            -Force
+    }
+}
+$scoopManifestValidationIndex = $releaseScoopPublisherText.IndexOf(
+    '[System.IO.Path]::IsPathRooted($manifestRelativePath)',
+    [StringComparison]::Ordinal
+)
+$scoopManifestNormalizationIndex = $releaseScoopPublisherText.IndexOf(
+    '$destinationManifestPath = [System.IO.Path]::GetFullPath(',
+    [StringComparison]::Ordinal
+)
+$scoopManifestContainmentIndex = $releaseScoopPublisherText.IndexOf(
+    '$destinationManifestPath.StartsWith(',
+    [StringComparison]::Ordinal
+)
+$scoopManifestReparseIndex = $releaseScoopPublisherText.IndexOf(
+    '[System.IO.FileAttributes]::ReparsePoint',
+    [StringComparison]::Ordinal
+)
+$scoopManifestCreateIndex = $releaseScoopPublisherText.IndexOf(
+    'New-Item -ItemType Directory -Path $destinationManifestDirectory',
+    [StringComparison]::Ordinal
+)
+$scoopManifestCopyIndex = $releaseScoopPublisherText.IndexOf(
+    'Copy-Item -LiteralPath $metadata.scoop.manifestPath',
+    [StringComparison]::Ordinal
+)
+$scoopManifestAddIndex = $releaseScoopPublisherText.IndexOf(
+    '& git add -- $manifestRelativePath',
+    [StringComparison]::Ordinal
+)
+if ($releaseScoopPublisherText -notmatch
+        '(?ms)\$manifestPathSegments.*?-ceq ''\.\.''.*?Scoop manifest path must not contain parent traversal' -or
+    $scoopManifestValidationIndex -lt 0 -or
+    $scoopManifestNormalizationIndex -le $scoopManifestValidationIndex -or
+    $scoopManifestContainmentIndex -le $scoopManifestNormalizationIndex -or
+    $scoopManifestReparseIndex -le $scoopManifestContainmentIndex -or
+    $scoopManifestCreateIndex -le $scoopManifestReparseIndex -or
+    $scoopManifestCopyIndex -le $scoopManifestCreateIndex -or
+    $scoopManifestAddIndex -le $scoopManifestCopyIndex) {
+    throw 'Scoop manifest destination must be normalized, clone-confined, and reparse-checked before write or git add.'
+}
+$scoopManifestPathProbeRoot = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    'noctty-scoop-manifest-path-contract'
+$invalidScoopManifestPaths = @(
+    [pscustomobject] @{
+        Label = 'rooted path'
+        Value = Join-Path $scoopManifestPathProbeRoot 'outside.json'
+    }
+    [pscustomobject] @{
+        Label = 'parent traversal'
+        Value = '..\outside.json'
+    }
+    [pscustomobject] @{
+        Label = 'nested parent traversal'
+        Value = 'bucket\..\outside.json'
+    }
+    [pscustomobject] @{
+        Label = 'forward-slash parent traversal'
+        Value = 'bucket/../../outside.json'
+    }
+    [pscustomobject] @{
+        Label = 'directory-like path'
+        Value = 'bucket\'
+    }
+)
+$previousScoopProbeToken = $env:GH_TOKEN
+try {
+    $env:GH_TOKEN = 'noctty-contract-probe-token'
+    foreach ($case in $invalidScoopManifestPaths) {
+        $rejected = $false
+        try {
+            & $releaseScoopPublisher `
+                -Version 1.3.999 `
+                -BucketRepository 'owner/repository' `
+                -ManifestPath $case.Value `
+                -RunnerTemp $scoopManifestPathProbeRoot `
+                -WhatIf 6> $null
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'Scoop manifest path') {
+                throw "Scoop manifest path probe returned the wrong failure: $($case.Label) :: $($_.Exception.Message)"
+            }
+            $rejected = $true
+        }
+        if (-not $rejected) {
+            throw "Scoop manifest path probe accepted $($case.Label)."
+        }
+    }
+    foreach ($defaultPath in @('', '   ')) {
+        & $releaseScoopPublisher `
+            -Version 1.3.999 `
+            -BucketRepository 'owner/repository' `
+            -ManifestPath $defaultPath `
+            -RunnerTemp $scoopManifestPathProbeRoot `
+            -WhatIf 6> $null
+    }
+    & $releaseScoopPublisher `
+        -Version 1.3.999 `
+        -BucketRepository 'owner/repository' `
+        -RunnerTemp $scoopManifestPathProbeRoot `
+        -WhatIf 6> $null
+    & $releaseScoopPublisher `
+        -Version 1.3.999 `
+        -BucketRepository 'owner/repository' `
+        -ManifestPath 'bucket\.\noctty.json' `
+        -RunnerTemp $scoopManifestPathProbeRoot `
+        -WhatIf 6> $null
+}
+finally {
+    $env:GH_TOKEN = $previousScoopProbeToken
+}
+$checksumMembershipGuard =
+    '$checksumEntries.Count -ne $expectedChecksumNames.Count'
+$checksumMembershipIndex = $releaseArtifactVerifierText.IndexOf(
+    $checksumMembershipGuard,
+    [StringComparison]::Ordinal
+)
+$checksumHashLoopIndex = $releaseArtifactVerifierText.IndexOf(
+    'foreach ($path in @($setup, $portable))',
+    [StringComparison]::Ordinal
+)
+if ($releaseArtifactVerifierText -notmatch
+        '(?ms)\$expectedChecksumNames = @\(.*?GetFileName\(\$setup\).*?GetFileName\(\$portable\).*?\$checksumEntries\.Count -ne \$expectedChecksumNames\.Count.*?Where-Object\s*\{\s*-not \$checksumEntries\.Contains\(\$_\)' -or
+    $checksumMembershipIndex -lt 0 -or
+    $checksumHashLoopIndex -le $checksumMembershipIndex) {
+    throw 'Local artifact verification must require exactly the setup and portable checksum entries before comparing hashes.'
+}
+if ($releaseGithubPublisherText -notmatch
+        '(?m)^\s*& gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease"\s*$') {
+    throw 'Existing GitHub releases must explicitly reconcile prerelease true and false.'
+}
+$wingetTokens = $null
+$wingetParseErrors = $null
+$wingetAst = [Management.Automation.Language.Parser]::ParseInput(
+    $releaseWingetSubmitterText,
+    [ref] $wingetTokens,
+    [ref] $wingetParseErrors
+)
+if ($wingetParseErrors.Count -ne 0) {
+    throw "WinGet submitter does not parse: $releaseWingetSubmitter"
+}
+$wingetWebRequests = @($wingetAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Invoke-WebRequest'
+}, $true))
+if ($wingetWebRequests.Count -ne 3 -or
+    @($wingetWebRequests | Where-Object {
+        @($_.CommandElements | Where-Object {
+            $_ -is [Management.Automation.Language.CommandParameterAst] -and
+                $_.ParameterName -ceq 'TimeoutSec'
+        }).Count -ne 1
+    }).Count -ne 0) {
+    throw 'Every WinGet network request must have exactly one bounded TimeoutSec parameter.'
+}
+if ($releaseWingetSubmitterText -notmatch
+        '(?ms)ProcessStartInfo.*?\.ArgumentList\.Add\(.*?ReadToEndAsync\(\).*?WaitForExit\(\$WinGetCreateTimeoutSeconds \* 1000\).*?\.Kill\(\).*?WaitForExit\(\$ProcessTerminationTimeoutSeconds \* 1000\).*?\.Dispose\(\)' -or
+    $releaseWingetSubmitterText -match
+        '(?m)^\s*&\s+wingetcreate\b|\bStart-Process\b|\.Arguments\s*=' -or
+    $releaseWingetSubmitterText -notmatch
+        '(?m)^\s*\[void\]\s*\$startInfo\.ArgumentList\.Add\(\$env:WINGETCREATE_TOKEN\)\s*$' -or
+    $releaseWingetSubmitterText -notmatch
+        '(?ms)\$output = \$output\.Replace\(\$env:WINGETCREATE_TOKEN, ''\[REDACTED\]''\).*?Write-Host \$_') {
+    throw 'WinGet submit must use a recorded, asynchronously drained, bounded process without joined command strings.'
+}
+if ($releaseSubmitWingetStep -notmatch '(?m)^        timeout-minutes: 15\s*$') {
+    throw 'The WinGet workflow step must retain a 15-minute second timeout guard.'
+}
+if ($releasePublishScoopStep -notmatch '(?m)^        timeout-minutes: 10\s*$') {
+    throw 'The Scoop workflow step must retain a 10-minute second timeout guard.'
+}
 Invoke-ContractTable -Contracts @(
     @{
         File = $releaseGithubPublisher
         Content = { $releaseGithubPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository.*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
+        Pattern = '(?ms)SupportsShouldProcess.*?Get-WindowsPackageArchitectures.*?legacy-checksums.*?noctty-icon\.svg.*?gh release view \$Tag --repo \$Repository.*?gh release create \$Tag --repo \$Repository.*?Failed to create.*?gh release edit \$Tag --repo \$Repository --title \$Title "--prerelease=\$Prerelease".*?Failed to edit.*?gh release upload \$Tag --repo \$Repository.*?Failed to upload'
         Kind = 'Text'
         Description = 'GitHub publisher preserves both-architecture assets, legacy alias, fork pinning, prerelease support, and fail-closed mutation paths'
     }
     @{
         File = $releaseScoopPublisher
         Content = { $releaseScoopPublisherText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Skipping Scoop publish: SCOOP_BUCKET_TOKEN.*?Skipping Scoop publish: SCOOP_BUCKET_REPO.*?package-managers/metadata\.json.*?repo.*?clone.*?--depth.*?--branch.*?x-access-token:\$env:GH_TOKEN.*?git diff --cached --quiet --exit-code.*?manifest is unchanged.*?git commit.*?git push origin HEAD.*?Pop-Location'
+        Pattern = '(?ms)SupportsShouldProcess.*?Skipping Scoop publish: SCOOP_BUCKET_TOKEN.*?Skipping Scoop publish: SCOOP_BUCKET_REPO.*?GetRelativePath\(\s*\$RunnerTemp,\s*\$bucketDirectory\s*\).*?IsPathRooted\(\$manifestRelativePath\).*?\$destinationManifestPath\.StartsWith.*?Remove-ValidatedScoopClone.*?package-managers/metadata\.json.*?gitNetworkBoundArgs.*?http\.lowSpeedLimit=1.*?http\.lowSpeedTime=60.*?credentialHelperArgs.*?clone.*?--depth.*?--branch.*?git diff --cached --quiet --exit-code.*?manifest is unchanged.*?git commit.*?credential\.helper=!gh auth git-credential.*?git push failed.*?Pop-Location.*?finally.*?Remove-ValidatedScoopClone'
         Kind = 'Text'
-        Description = 'Scoop publisher keeps credential/config skips, branch-aware shallow clone, authenticated push, unchanged no-op, and fail-closed git operations'
+        Description = 'Scoop publisher confines the manifest and keeps bounded authenticated clone/push, unchanged no-op, and fail-closed git operations'
     }
     @{
         File = $releaseWingetSubmitter
         Content = { $releaseWingetSubmitterText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Skipping WinGet submit: WINGETCREATE_TOKEN.*?Initial WinGet bootstrap is still manual.*?api\.github\.com/repos/microsoft/winget-pkgs.*?\$statusCode -eq 404.*?is not bootstrapped.*?Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?0x80073D06.*?higher version of this package is already installed.*?arm64.*?x64.*?installerUrlArgs\.Count -ne 2.*?wingetcreate update.*?--submit.*?--no-open.*?--token \$env:WINGETCREATE_TOKEN.*?ExitCode -ne 0'
+        Pattern = '(?ms)SupportsShouldProcess.*?Skipping WinGet submit: WINGETCREATE_TOKEN.*?Initial WinGet bootstrap is still manual.*?api\.github\.com/repos/microsoft/winget-pkgs.*?TimeoutSec \$NetworkTimeoutSeconds.*?\$statusCode -eq 404.*?is not bootstrapped.*?Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?0x80073D06.*?higher version of this package is already installed.*?aka\.ms/Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?TimeoutSec \$NetworkTimeoutSeconds.*?wingetcreate/latest/msixbundle.*?TimeoutSec \$NetworkTimeoutSeconds.*?arm64.*?x64.*?installerUrlArgs\.Count -ne 2.*?ProcessStartInfo.*?''update''.*?''--submit''.*?''--no-open''.*?ArgumentList.*?WINGETCREATE_TOKEN.*?ReadToEndAsync.*?WaitForExit.*?Kill.*?Dispose.*?ExitCode -ne 0'
         Kind = 'Text'
         Description = 'WinGet submitter preserves bootstrap skip, VCLibs newer-version tolerance, exact dual architecture URLs, authenticated noninteractive submit, and fail-closed exit handling'
     }

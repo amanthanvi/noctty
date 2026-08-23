@@ -8,7 +8,19 @@ param(
 
     [string] $ArtifactRoot,
 
-    [string] $TempDirectory = $env:TEMP
+    [string] $TempDirectory = $env:TEMP,
+
+    [ValidateRange(1, 300)]
+    [int] $NetworkTimeoutSeconds = 60,
+
+    [ValidateRange(1, 1800)]
+    [int] $WinGetCreateTimeoutSeconds = 600,
+
+    [ValidateRange(1, 120)]
+    [int] $ProcessTerminationTimeoutSeconds = 30,
+
+    [ValidateRange(1, 120)]
+    [int] $StreamDrainTimeoutSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +61,7 @@ try {
     Invoke-WebRequest `
         -Uri $manifestApiUrl `
         -Headers @{ 'User-Agent' = 'noctty-release-workflow' } `
+        -TimeoutSec $NetworkTimeoutSeconds `
         -ErrorAction Stop | Out-Null
 }
 catch {
@@ -93,6 +106,7 @@ function Install-AppxPackageIfNeeded {
 Invoke-WebRequest `
     -Uri 'https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx' `
     -OutFile $vcLibsPath `
+    -TimeoutSec $NetworkTimeoutSeconds `
     -ErrorAction Stop
 Install-AppxPackageIfNeeded `
     -Path $vcLibsPath `
@@ -100,6 +114,7 @@ Install-AppxPackageIfNeeded `
 Invoke-WebRequest `
     -Uri 'https://aka.ms/wingetcreate/latest/msixbundle' `
     -OutFile $bundlePath `
+    -TimeoutSec $NetworkTimeoutSeconds `
     -ErrorAction Stop
 Install-AppxPackageIfNeeded -Path $bundlePath -Label 'wingetcreate bundle'
 
@@ -127,19 +142,115 @@ if ($installerUrlArgs.Count -ne 2 -or
 function Invoke-WinGetCreateUpdate {
     param([string[]] $InstallerUrlArgs)
 
-    $output = & wingetcreate update $PackageIdentifier `
-        --version $Version `
-        --urls $InstallerUrlArgs `
-        --release-notes-url $metadata.release.releaseUrl `
-        --submit `
-        --no-open `
-        --token $env:WINGETCREATE_TOKEN 2>&1
-    $exitCode = $LASTEXITCODE
-    $output | ForEach-Object { Write-Host $_ }
+    $wingetCreateCommand = Get-Command `
+        wingetcreate `
+        -CommandType Application `
+        -ErrorAction Stop |
+        Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($wingetCreateCommand.Source)) {
+        throw 'Unable to resolve the wingetcreate executable path.'
+    }
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $wingetCreateCommand.Source
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $arguments = @(
+        'update',
+        $PackageIdentifier,
+        '--version',
+        $Version,
+        '--urls'
+    )
+    $arguments += $InstallerUrlArgs
+    $arguments += @(
+        '--release-notes-url',
+        [string] $metadata.release.releaseUrl,
+        '--submit',
+        '--no-open',
+        '--token'
+    )
+    foreach ($argument in $arguments) {
+        [void] $startInfo.ArgumentList.Add([string] $argument)
+    }
+    [void] $startInfo.ArgumentList.Add($env:WINGETCREATE_TOKEN)
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $standardOutputTask = $null
+    $standardErrorTask = $null
+    $standardOutput = ''
+    $standardError = ''
+    $exitCode = $null
+    $timedOut = $false
+    $terminationError = $null
+    try {
+        if (-not $process.Start()) {
+            throw 'Failed to start wingetcreate.'
+        }
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+
+        if (-not $process.WaitForExit($WinGetCreateTimeoutSeconds * 1000)) {
+            $timedOut = $true
+            try {
+                $process.Kill()
+            }
+            catch {
+                $terminationError = $_.Exception.Message
+            }
+            try {
+                if (-not $process.WaitForExit($ProcessTerminationTimeoutSeconds * 1000)) {
+                    $terminationError = 'the recorded process did not exit after termination'
+                }
+            }
+            catch {
+                $terminationError = $_.Exception.Message
+            }
+        }
+
+        $streamTasks = [System.Threading.Tasks.Task[]] @(
+            $standardOutputTask,
+            $standardErrorTask
+        )
+        if (-not [System.Threading.Tasks.Task]::WaitAll(
+            $streamTasks,
+            $StreamDrainTimeoutSeconds * 1000
+        )) {
+            throw "Timed out draining wingetcreate output after $StreamDrainTimeoutSeconds seconds."
+        }
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        if ($process.HasExited) {
+            $exitCode = $process.ExitCode
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    $output = @($standardOutput, $standardError) -join "`n"
+    if (-not [string]::IsNullOrEmpty($env:WINGETCREATE_TOKEN)) {
+        $output = $output.Replace($env:WINGETCREATE_TOKEN, '[REDACTED]')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($output)) {
+        $output -split '\r?\n' | ForEach-Object { Write-Host $_ }
+    }
+    if ($timedOut) {
+        $detail = if ($terminationError) {
+            " Termination detail: $terminationError."
+        } else {
+            ''
+        }
+        throw "wingetcreate update timed out after $WinGetCreateTimeoutSeconds seconds.$detail"
+    }
 
     return @{
         ExitCode = $exitCode
-        Output = (@($output) -join "`n")
+        Output = $output
     }
 }
 

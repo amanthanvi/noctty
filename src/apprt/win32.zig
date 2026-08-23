@@ -12411,7 +12411,7 @@ const Host = struct {
                 }
                 const action = input.Binding.Action.parse(text) catch |err| {
                     log.warn("win32 command palette invalid action action={s} err={}", .{ text, err });
-                    try self.setBanner(.err, "Unknown Ghostty action. Example: new_tab or toggle_fullscreen");
+                    try self.setBanner(.err, labels.command_palette_unknown_action);
                     if (self.palette_list_uia_provider) |provider| {
                         win32_uia.events.raiseNotification(&provider.base, .action_aborted, "Unknown command");
                     }

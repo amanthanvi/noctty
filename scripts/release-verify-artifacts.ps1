@@ -75,6 +75,16 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
     }
 
     $checksumEntries = Get-ChecksumEntries -Path $checksums
+    $expectedChecksumNames = @(
+        [System.IO.Path]::GetFileName($setup),
+        [System.IO.Path]::GetFileName($portable)
+    )
+    if ($checksumEntries.Count -ne $expectedChecksumNames.Count -or
+        @($expectedChecksumNames | Where-Object {
+            -not $checksumEntries.Contains($_)
+        }).Count -gt 0) {
+        throw "$([System.IO.Path]::GetFileName($checksums)) must contain exactly the setup and portable assets for $architecture."
+    }
     foreach ($path in @($setup, $portable)) {
         $name = [System.IO.Path]::GetFileName($path)
         $hash = Get-FileSha256Lower -Path $path

@@ -105,7 +105,7 @@ if ($LASTEXITCODE -ne 0) {
         throw "Failed to create GitHub release $Tag."
     }
 } else {
-    & gh release edit $Tag --repo $Repository --title $Title
+    & gh release edit $Tag --repo $Repository --title $Title "--prerelease=$Prerelease"
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to edit GitHub release $Tag."
     }

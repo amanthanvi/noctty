@@ -19,3 +19,9 @@ test('the generated CSP keeps stylesheet and font origins self-only', () => {
   const policy = getHeaderContract().root.content_security_policy;
   assert.match(policy, /style-src 'self'; font-src 'self';/);
 });
+
+test('the generated catch-all cache policy covers root and not-found responses', () => {
+  const contract = getHeaderContract();
+  assert.equal(contract.root.cache_control, 'public, max-age=0, must-revalidate');
+  assert.equal(contract.not_found.cache_control, contract.root.cache_control);
+});

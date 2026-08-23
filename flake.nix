@@ -18,26 +18,22 @@
       flake = false;
     };
 
-    zig = {
-      url = "github:mitchellh/zig-overlay";
-      inputs = {
-        nixpkgs.follows = "nixpkgs";
-        flake-compat.follows = "flake-compat";
-        systems.follows = "systems";
-      };
+    zon2nix = {
+      url = "github:jcollie/zon2nix?rev=c28e93f3ba133d4c1b1d65224e2eebede61fd071";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
   outputs = {
     self,
     nixpkgs,
-    zig,
+    systems,
+    zon2nix,
     ...
   }: let
     inherit (nixpkgs) lib legacyPackages;
 
-    # Our supported systems are the same supported systems as the Zig binaries.
-    platforms = lib.attrNames zig.packages;
+    platforms = import systems;
 
     # libghostty-vt currently installs ELF shared-library outputs, so do not
     # expose the package derivation on Darwin.
@@ -46,17 +42,16 @@
     forAllPlatforms = f: lib.genAttrs platforms (s: f legacyPackages.${s});
     forBuildablePlatforms = f: lib.genAttrs buildablePlatforms (s: f legacyPackages.${s});
 
-    zigFor = pkgs: zig.packages.${pkgs.stdenv.hostPlatform.system}."0.15.2";
-
     mkPkgArgs = pkgs: optimize: {
       inherit optimize;
       revision = self.shortRev or self.dirtyShortRev or "dirty";
-      zig_0_15 = zigFor pkgs;
+      zig_0_15 = pkgs.zig_0_15;
     };
   in {
     devShells = forAllPlatforms (pkgs: {
       default = pkgs.callPackage ./nix/devShell.nix {
-        zig = zigFor pkgs;
+        zig = pkgs.zig_0_15;
+        zon2nix = zon2nix.packages.${pkgs.stdenv.hostPlatform.system}.zon2nix;
       };
     });
 

@@ -117,7 +117,7 @@ export function getHeaderContract() {
       referrer_policy: "strict-origin-when-cross-origin",
       permissions_policy: permissionsPolicy,
     },
-    not_found: { cache_control: "no-store" },
+    not_found: { cache_control: cacheControl },
   };
 }
 

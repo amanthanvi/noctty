@@ -50,6 +50,8 @@ pub const PaletteCompletion = struct {
     id: PaletteStableId,
 };
 
+pub const command_palette_unknown_action = "Unknown Noctty action. Example: new_tab or toggle_fullscreen";
+
 const search_prev_label = std.unicode.utf8ToUtf16LeStringLiteral("Prev match");
 const search_next_label = std.unicode.utf8ToUtf16LeStringLiteral("Next match");
 const search_regex_label = std.unicode.utf8ToUtf16LeStringLiteral("Regex");
@@ -3226,7 +3228,7 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
     const err = try buildOverlayFeedbackText(
         std.testing.allocator,
         .err,
-        "Unknown Ghostty action",
+        command_palette_unknown_action,
         .command_palette,
         "",
         null,
@@ -3239,7 +3241,10 @@ test "win32 buildOverlayFeedbackText prefers inline banner state" {
         .{},
     );
     defer std.testing.allocator.free(err);
-    try std.testing.expectEqualStrings("Error: Unknown Ghostty action", err);
+    try std.testing.expectEqualStrings(
+        "Error: Unknown Noctty action. Example: new_tab or toggle_fullscreen",
+        err,
+    );
 
     const fallback = try buildOverlayFeedbackText(
         std.testing.allocator,

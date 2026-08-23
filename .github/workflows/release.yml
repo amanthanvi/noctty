@@ -34,8 +34,6 @@ jobs:
       SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
       SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
       SCOOP_BUCKET_MANIFEST_PATH: ${{ vars.SCOOP_BUCKET_MANIFEST_PATH }}
-      WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
-      WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
       WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
       WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
       WINDOWS_CODESIGN_MIN_VALIDITY_DAYS: ${{ vars.WINDOWS_CODESIGN_MIN_VALIDITY_DAYS }}
@@ -45,6 +43,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require remote default-branch head
         env:
@@ -210,6 +209,9 @@ jobs:
 
       - name: Release preflight
         uses: ./.github/actions/release-preflight
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         with:
           version: ${{ steps.meta.outputs.version }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
@@ -241,6 +243,8 @@ jobs:
         timeout-minutes: 35
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         run: >
           ./scripts/build-package-windows.ps1
           -Version $env:RELEASE_VERSION
@@ -254,6 +258,8 @@ jobs:
         timeout-minutes: 35
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
         run: >
           ./scripts/build-package-windows.ps1
@@ -327,6 +333,7 @@ jobs:
 
       - name: Publish Scoop manifest
         shell: pwsh
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
@@ -334,6 +341,7 @@ jobs:
 
       - name: Submit WinGet manifest update
         shell: pwsh
+        timeout-minutes: 15
         env:
           WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}

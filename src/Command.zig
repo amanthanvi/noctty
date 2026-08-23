@@ -990,9 +990,10 @@ test "Command: custom env vars" {
     defer env.deinit();
     try env.put("VALUE", "hello");
 
+    // Ignore user Command Processor AutoRun hooks so this stays hermetic.
     var cmd: Command = if (builtin.os.tag == .windows) .{
         .path = "C:\\Windows\\System32\\cmd.exe",
-        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "echo %VALUE%" },
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/D", "/C", "echo %VALUE%" },
         .stdout = stdout,
         .env = &env,
         .os_pre_exec = null,

@@ -26,6 +26,78 @@ if ([string]::IsNullOrWhiteSpace($BucketRepository)) {
     Write-Host 'Skipping Scoop publish: SCOOP_BUCKET_REPO is not configured.'
     return
 }
+if ([string]::IsNullOrWhiteSpace($RunnerTemp)) {
+    $RunnerTemp = [System.IO.Path]::GetTempPath()
+}
+$RunnerTemp = [System.IO.Path]::GetFullPath($RunnerTemp)
+$bucketDirectory = [System.IO.Path]::GetFullPath(
+    (Join-Path $RunnerTemp 'noctty-scoop-bucket')
+)
+$bucketRelativePath = [System.IO.Path]::GetRelativePath(
+    $RunnerTemp,
+    $bucketDirectory
+)
+if ($bucketRelativePath -cne 'noctty-scoop-bucket') {
+    throw "Refusing to use unexpected Scoop clone path: $bucketDirectory"
+}
+
+$manifestRelativePath = if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+    'bucket/noctty.json'
+} else {
+    $ManifestPath
+}
+if ([System.IO.Path]::IsPathRooted($manifestRelativePath)) {
+    throw "Scoop manifest path must be relative to the bucket clone: $manifestRelativePath"
+}
+$manifestPathSegments = @($manifestRelativePath -split '[\\/]')
+if (@($manifestPathSegments | Where-Object { $_ -ceq '..' }).Count -ne 0) {
+    throw "Scoop manifest path must not contain parent traversal: $manifestRelativePath"
+}
+if ([string]::IsNullOrWhiteSpace(
+        [System.IO.Path]::GetFileName($manifestRelativePath)
+    )) {
+    throw "Scoop manifest path must name a file: $manifestRelativePath"
+}
+try {
+    $destinationManifestPath = [System.IO.Path]::GetFullPath(
+        (Join-Path $bucketDirectory $manifestRelativePath)
+    )
+}
+catch {
+    throw "Scoop manifest path is invalid: $manifestRelativePath"
+}
+$bucketDirectoryPrefix = $bucketDirectory.TrimEnd(
+    [System.IO.Path]::DirectorySeparatorChar,
+    [System.IO.Path]::AltDirectorySeparatorChar
+) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $destinationManifestPath.StartsWith(
+        $bucketDirectoryPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Scoop manifest path escapes the bucket clone: $manifestRelativePath"
+}
+$manifestRelativePath = [System.IO.Path]::GetRelativePath(
+    $bucketDirectory,
+    $destinationManifestPath
+)
+
+function Remove-ValidatedScoopClone {
+    try {
+        $cloneItem = Get-Item -LiteralPath $bucketDirectory -Force -ErrorAction Stop
+    }
+    catch [System.Management.Automation.ItemNotFoundException] {
+        return
+    }
+    if (-not $cloneItem.PSIsContainer) {
+        throw "Scoop clone path is not a directory; refusing recursive cleanup: $bucketDirectory"
+    }
+    if (($cloneItem.Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Scoop clone path is a reparse point; refusing recursive cleanup: $bucketDirectory"
+    }
+    Remove-Item -LiteralPath $bucketDirectory -Recurse -Force
+}
+
 if (-not $PSCmdlet.ShouldProcess($BucketRepository, "publish noctty $Version Scoop manifest")) {
     return
 }
@@ -34,69 +106,103 @@ $repoRoot = Get-RepoRoot
 if ([string]::IsNullOrWhiteSpace($ArtifactRoot)) {
     $ArtifactRoot = Join-Path $repoRoot 'dist/artifacts'
 }
-if ([string]::IsNullOrWhiteSpace($RunnerTemp)) {
-    $RunnerTemp = [System.IO.Path]::GetTempPath()
-}
 $ArtifactRoot = [System.IO.Path]::GetFullPath($ArtifactRoot)
-$RunnerTemp = [System.IO.Path]::GetFullPath($RunnerTemp)
-
 $artifactDirectoryX64 = Join-Path $ArtifactRoot "noctty-$Version-windows-x64"
 $metadataPath = Join-Path $artifactDirectoryX64 'package-managers/metadata.json'
 $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-$manifestRelativePath = if ($ManifestPath) {
-    $ManifestPath
-} else {
-    'bucket/noctty.json'
-}
 
-$bucketDirectory = Join-Path $RunnerTemp 'noctty-scoop-bucket'
-if (Test-Path -LiteralPath $bucketDirectory) {
-    Remove-Item -LiteralPath $bucketDirectory -Recurse -Force
-}
+Remove-ValidatedScoopClone
 
-$cloneArgs = @('repo', 'clone', $BucketRepository, $bucketDirectory, '--', '--depth', '1')
+$gitNetworkBoundArgs = @(
+    '-c',
+    'http.lowSpeedLimit=1',
+    '-c',
+    'http.lowSpeedTime=60'
+)
+$credentialHelperArgs = @(
+    '-c',
+    'credential.helper=',
+    '-c',
+    'credential.helper=!gh auth git-credential'
+)
+$cloneArgs = @(
+    'clone',
+    '--depth',
+    '1'
+)
 if ($BucketBranch) {
     $cloneArgs += @('--branch', $BucketBranch)
 }
-& gh @cloneArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to clone Scoop bucket repo $BucketRepository."
-}
+$cloneArgs += @(
+    "https://github.com/$BucketRepository.git",
+    $bucketDirectory
+)
 
-$destinationManifestPath = Join-Path $bucketDirectory $manifestRelativePath
-$destinationManifestDirectory = Split-Path -Parent $destinationManifestPath
-New-Item -ItemType Directory -Path $destinationManifestDirectory -Force | Out-Null
-Copy-Item -LiteralPath $metadata.scoop.manifestPath -Destination $destinationManifestPath -Force
-
-Push-Location $bucketDirectory
 try {
-    & git remote set-url origin "https://x-access-token:$env:GH_TOKEN@github.com/$BucketRepository.git"
+    & git @gitNetworkBoundArgs @credentialHelperArgs @cloneArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "git remote set-url failed with exit code $LASTEXITCODE"
+        throw "Failed to clone Scoop bucket repo $BucketRepository."
     }
 
-    & git config user.name 'github-actions[bot]'
-    & git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-    & git add -- $manifestRelativePath
-    & git diff --cached --quiet --exit-code
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host 'Scoop manifest is unchanged; skipping push.'
-        return
+    $destinationManifestDirectory = Split-Path -Parent $destinationManifestPath
+    $relativeManifestDirectory = [System.IO.Path]::GetRelativePath(
+        $bucketDirectory,
+        $destinationManifestDirectory
+    )
+    $currentManifestDirectory = $bucketDirectory
+    foreach ($segment in @($relativeManifestDirectory -split '[\\/]')) {
+        if ($segment -ceq '.') { continue }
+        $currentManifestDirectory = Join-Path $currentManifestDirectory $segment
+        if (Test-Path -LiteralPath $currentManifestDirectory) {
+            $directoryItem = Get-Item -LiteralPath $currentManifestDirectory -Force
+            if (-not $directoryItem.PSIsContainer -or
+                ($directoryItem.Attributes -band
+                    [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Scoop manifest path crosses a non-directory or reparse point: $manifestRelativePath"
+            }
+        }
     }
-    if ($LASTEXITCODE -ne 1) {
-        throw "git diff --cached failed with exit code $LASTEXITCODE"
+    if (Test-Path -LiteralPath $destinationManifestPath) {
+        $destinationItem = Get-Item -LiteralPath $destinationManifestPath -Force
+        if ($destinationItem.PSIsContainer) {
+            throw "Scoop manifest path names a directory: $manifestRelativePath"
+        }
+        if (($destinationItem.Attributes -band
+                [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Scoop manifest path names a reparse point: $manifestRelativePath"
+        }
     }
+    New-Item -ItemType Directory -Path $destinationManifestDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $metadata.scoop.manifestPath -Destination $destinationManifestPath -Force
 
-    & git commit -m "noctty: update to $Version"
-    if ($LASTEXITCODE -ne 0) {
-        throw "git commit failed with exit code $LASTEXITCODE"
-    }
+    Push-Location $bucketDirectory
+    try {
+        & git config user.name 'github-actions[bot]'
+        & git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        & git add -- $manifestRelativePath
+        & git diff --cached --quiet --exit-code
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host 'Scoop manifest is unchanged; skipping push.'
+            return
+        }
+        if ($LASTEXITCODE -ne 1) {
+            throw "git diff --cached failed with exit code $LASTEXITCODE"
+        }
 
-    & git push origin HEAD
-    if ($LASTEXITCODE -ne 0) {
-        throw "git push failed with exit code $LASTEXITCODE"
+        & git commit -m "noctty: update to $Version"
+        if ($LASTEXITCODE -ne 0) {
+            throw "git commit failed with exit code $LASTEXITCODE"
+        }
+
+        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD
+        if ($LASTEXITCODE -ne 0) {
+            throw "git push failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
     }
 }
 finally {
-    Pop-Location
+    Remove-ValidatedScoopClone
 }

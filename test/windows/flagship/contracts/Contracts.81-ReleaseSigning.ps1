@@ -1,7 +1,7 @@
 $releaseArtifactVerifier = Join-Path $repoRoot 'scripts\release-verify-artifacts.ps1'
 $releaseArtifactVerifierText = Get-Content -LiteralPath $releaseArtifactVerifier -Raw
 $releaseArtifactVerifierSha256 =
-    '4bdaf3057a4cfa0f8347deb4e2e2bd984ee77f2ccd92ee6947bbdb27698bebe8'
+    'e8de14a74727b4049f5d4b5c66111cad26469205fb46b4639c97a1d059004c44'
 $canonicalReleaseArtifactVerifier = ConvertTo-CanonicalText `
     -Text $releaseArtifactVerifierText
 if ((Get-CanonicalTextSha256 -Text $canonicalReleaseArtifactVerifier) -cne
@@ -276,7 +276,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseArtifactVerifier
         Content = { $releaseArtifactVerifierText }
-        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind checksums.*?Get-ChecksumEntries.*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Expand-Archive.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Assert-ReleaseSignature'
+        Pattern = '(?ms)Get-WindowsPackageArchitectures.*?-Kind setup.*?-Kind portable.*?-Kind checksums.*?Get-ChecksumEntries.*?\$expectedChecksumNames = @\(.*?GetFileName\(\$setup\).*?GetFileName\(\$portable\).*?\$checksumEntries\.Count -ne \$expectedChecksumNames\.Count.*?\$checksumEntries\.Contains\(\$_\).*?Get-FileSha256Lower.*?Assert-ReleaseSignature.*?Setup \$architecture.*?Expand-Archive.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Assert-ReleaseSignature'
         Kind = 'Text'
         Description = 'local release verification checks both architecture checksum sets and all installer and portable PE signatures'
     }
