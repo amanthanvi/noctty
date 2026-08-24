@@ -1,18 +1,18 @@
 [CmdletBinding()]
 param([switch]$Rebuild, [switch]$ResetState, [switch]$ExerciseHighContrast, [int]$TimeoutSeconds = 60)
 $ErrorActionPreference = 'Stop'
+# Settling delay after restoring palette-theme presentation state.
+$script:PALETTE_THEME_SETTLE_MS = 750
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED) {
-    $args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
-    if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
-    $code = 0
-    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
-    exit $code
-}
+$args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
+if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
+Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' `
+    -ArgumentList $args
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'palette-theme' -ResetState:$ResetState -IncludeResourcesDir
 $layout = $harness.Layout
@@ -115,19 +115,19 @@ try {
         }
         if (-not $hcMutexAcquired) { throw 'Timed out waiting for the High Contrast harness mutex.' }
         if (Test-Path -LiteralPath $hcRecoveryPath) {
-            $recoveryHc = [NocttyStatefulNative+HIGHCONTRAST]::new(); $recoveryHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryHc)
-            if (-not [NocttyStatefulNative]::SystemParametersInfo(0x42, $recoveryHc.cbSize, [ref]$recoveryHc, 0)) { throw 'SPI_GETHIGHCONTRAST recovery failed.' }
+            $recoveryHc = [InteractiveWin11WindowNative+HIGHCONTRAST]::new(); $recoveryHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryHc)
+            if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x42, $recoveryHc.cbSize, [ref]$recoveryHc, 0)) { throw 'SPI_GETHIGHCONTRAST recovery failed.' }
             $recoveryHc.dwFlags = $recoveryHc.dwFlags -band (-bnot 1)
-            if (-not [NocttyStatefulNative]::SystemParametersInfo(0x43, $recoveryHc.cbSize, [ref]$recoveryHc, 2)) { throw 'SPI_SETHIGHCONTRAST recovery failed.' }
-            $recoveryReadback = [NocttyStatefulNative+HIGHCONTRAST]::new(); $recoveryReadback.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryReadback)
-            if (-not [NocttyStatefulNative]::SystemParametersInfo(0x42, $recoveryReadback.cbSize, [ref]$recoveryReadback, 0)) { throw 'SPI_GETHIGHCONTRAST recovery verification failed.' }
+            if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x43, $recoveryHc.cbSize, [ref]$recoveryHc, 2)) { throw 'SPI_SETHIGHCONTRAST recovery failed.' }
+            $recoveryReadback = [InteractiveWin11WindowNative+HIGHCONTRAST]::new(); $recoveryReadback.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($recoveryReadback)
+            if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x42, $recoveryReadback.cbSize, [ref]$recoveryReadback, 0)) { throw 'SPI_GETHIGHCONTRAST recovery verification failed.' }
             if (($recoveryReadback.dwFlags -band 1) -ne 0) { throw 'High Contrast remained enabled after interrupted-run recovery.' }
             Invoke-PostHighContrastPresentationCanary 'palette-theme-recovery-canary' $draculaRgb
             Remove-Item -LiteralPath $hcRecoveryPath -Force -ErrorAction Stop
             Write-Warning 'Restored High Contrast state left behind by an interrupted harness run.'
         }
-        $originalHc = [NocttyStatefulNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
-        if (-not [NocttyStatefulNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
+        $originalHc = [InteractiveWin11WindowNative+HIGHCONTRAST]::new(); $originalHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($originalHc)
+        if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x42, $originalHc.cbSize, [ref]$originalHc, 0)) { throw 'SPI_GETHIGHCONTRAST failed.' }
     }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $run = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-normal'; $runs.Add($run)
@@ -138,7 +138,7 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'Dracula background render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $draculaRgb }
     $edit = Open-ThemeQuery $hostHwnd '0x96f' $deadline $run.Process
-    Start-Sleep -Milliseconds 750
+    Start-Sleep -Milliseconds $script:PALETTE_THEME_SETTLE_MS
     Write-Host ('theme preview framebuffer rgb={0:x6}' -f ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF))
     Wait-InteractiveWin11Until -Deadline $deadline -Description '0x96f preview render' -Process $run.Process -Condition { ((Get-StatefulPixel $surface.Hwnd) -band 0xFFFFFF) -eq $themeRgb }
     $themeList = Get-StatefulChildren $hostHwnd | Where-Object Id -eq 2006 | Select-Object -First 1
@@ -178,7 +178,7 @@ try {
             [IO.Directory]::CreateDirectory((Split-Path -Parent $hcRecoveryPath)) | Out-Null
             [IO.File]::WriteAllText($hcRecoveryPath, 'restore-high-contrast-off', [Text.UTF8Encoding]::new($false))
             $hcChanged = $true
-            if (-not [NocttyStatefulNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
+            if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x43, $enabled.cbSize, [ref]$enabled, 2)) { throw 'SPI_SETHIGHCONTRAST enable failed.' }
         }
         $hcRun = Start-StatefulApp $layout $exe $repoRoot 'palette-theme-high-contrast'; $runs.Add($hcRun)
         $hcHost = Wait-StatefulHost $hcRun $deadline
@@ -229,9 +229,9 @@ try {
             Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
             throw
         }
-        $activeHc = [NocttyStatefulNative+HIGHCONTRAST]::new()
+        $activeHc = [InteractiveWin11WindowNative+HIGHCONTRAST]::new()
         $activeHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($activeHc)
-        if (-not [NocttyStatefulNative]::SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)) {
+        if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)) {
             Write-SuppressedPreviewDiagnostic $hcPixel $suppressedPreview
             throw 'SPI_GETHIGHCONTRAST verification failed after suppressed theme preview.'
         }
@@ -270,13 +270,13 @@ finally {
     $hcPresentationReady = $false
     if ($hcChanged) {
         try {
-            if (-not [NocttyStatefulNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) {
+            if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x43, $originalHc.cbSize, [ref]$originalHc, 2)) {
                 [void]$cleanupErrors.Add('Failed to restore the original High Contrast setting.')
             }
             else {
-                $restoredHc = [NocttyStatefulNative+HIGHCONTRAST]::new()
+                $restoredHc = [InteractiveWin11WindowNative+HIGHCONTRAST]::new()
                 $restoredHc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($restoredHc)
-                if (-not [NocttyStatefulNative]::SystemParametersInfo(0x42, $restoredHc.cbSize, [ref]$restoredHc, 0)) {
+                if (-not [InteractiveWin11WindowNative]::SystemParametersInfo(0x42, $restoredHc.cbSize, [ref]$restoredHc, 0)) {
                     [void]$cleanupErrors.Add('Failed to verify the restored High Contrast setting.')
                 }
                 elseif (($restoredHc.dwFlags -band 1) -ne ($originalHc.dwFlags -band 1)) {

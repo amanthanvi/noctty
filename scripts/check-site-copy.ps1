@@ -2,8 +2,8 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-$siteRoot = Join-Path $PSScriptRoot "..\\site"
-$siteRoot = [System.IO.Path]::GetFullPath($siteRoot)
+. (Join-Path $PSScriptRoot "common.ps1")
+$siteRoot = Join-Path (Get-RepoRoot) "site"
 
 if (-not (Test-Path $siteRoot)) {
     throw "Site root not found: $siteRoot"

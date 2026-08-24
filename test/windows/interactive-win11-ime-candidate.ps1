@@ -5,6 +5,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Settling delay for IME candidate-window observation.
+$script:IME_CANDIDATE_SETTLE_MS = 700
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -14,30 +16,22 @@ $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCo
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_IME_CANDIDATE_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
-using System.Text;
 
 public static class Win11ImeCandidateNative {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT {
         public int Left;
@@ -46,30 +40,8 @@ public static class Win11ImeCandidateNative {
         public int Bottom;
     }
 
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumChildWindows(IntPtr hWnd, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    [DllImport("user32.dll")]
-    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern IntPtr SetFocus(IntPtr hWnd);
-
 }
 '@
 
@@ -99,7 +71,7 @@ function Get-WindowClassName {
     )
 
     $builder = [System.Text.StringBuilder]::new(256)
-    [void] [Win11ImeCandidateNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
+    [void] [InteractiveWin11WindowNative]::GetClassNameW($Hwnd, $builder, $builder.Capacity)
     return $builder.ToString()
 }
 
@@ -110,11 +82,11 @@ function Find-HostWindow {
 
     $script:Win11ImeCandidateTargetProcessId = [uint32] $ProcessId
     $script:Win11ImeCandidateFoundHost = [IntPtr]::Zero
-    $callback = [Win11ImeCandidateNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         $windowProcessId = [uint32] 0
-        [void] [Win11ImeCandidateNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
+        [void] [InteractiveWin11WindowNative]::GetWindowThreadProcessId($hwnd, [ref] $windowProcessId)
         if ($windowProcessId -ne $script:Win11ImeCandidateTargetProcessId) {
             return $true
         }
@@ -127,7 +99,7 @@ function Find-HostWindow {
         return $true
     }
 
-    [void] [Win11ImeCandidateNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:Win11ImeCandidateFoundHost
 }
 
@@ -137,7 +109,7 @@ function Find-SurfaceWindow {
     )
 
     $script:Win11ImeCandidateFoundSurface = [IntPtr]::Zero
-    $callback = [Win11ImeCandidateNative+EnumWindowsProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
         if ((Get-WindowClassName -Hwnd $hwnd) -eq $surfaceClassName) {
@@ -148,7 +120,7 @@ function Find-SurfaceWindow {
         return $true
     }
 
-    [void] [Win11ImeCandidateNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void] [InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return $script:Win11ImeCandidateFoundSurface
 }
 
@@ -368,15 +340,15 @@ try {
     }
 
     $hostHwnd = Find-HostWindow -ProcessId $process.Id
-    [void] [Win11ImeCandidateNative]::ShowWindow($hostHwnd, $SW_RESTORE)
-    [void] [Win11ImeCandidateNative]::SetForegroundWindow($hostHwnd)
+    [void] [InteractiveWin11WindowNative]::ShowWindow($hostHwnd, $SW_RESTORE)
+    [void] [InteractiveWin11WindowNative]::SetForegroundWindow($hostHwnd)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'surface child window' -Process $process -Condition {
         (Find-SurfaceWindow -Parent $hostHwnd) -ne [IntPtr]::Zero
     }
 
     $surfaceHwnd = Find-SurfaceWindow -Parent $hostHwnd
-    [void] [Win11ImeCandidateNative]::SetFocus($surfaceHwnd)
+    [void] [InteractiveWin11WindowNative]::SetFocus($surfaceHwnd)
 
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'scripted caret readiness' -Process $process -Condition {
         $stderr = [string] (Get-InteractiveWin11TextFile -Path $stderrPath)
@@ -387,7 +359,7 @@ try {
         $stderr.Contains($successPattern) -and (Test-Path -LiteralPath $readyPath)
     }
 
-    Start-Sleep -Milliseconds 700
+    Start-Sleep -Milliseconds $script:IME_CANDIDATE_SETTLE_MS
     $surfaceRect = Get-ClientRectObject -Hwnd $surfaceHwnd
     if ($surfaceRect.Width -lt 360 -or $surfaceRect.Height -lt 240) {
         throw "surface is too small for stable IME anchor validation: $($surfaceRect.Width)x$($surfaceRect.Height)"

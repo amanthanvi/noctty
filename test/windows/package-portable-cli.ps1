@@ -11,6 +11,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Architecture = (Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })).Name
 $packageScript = Join-Path $repoRoot 'scripts\package-windows.ps1'
 $shellHarness = Join-Path $repoRoot 'test\windows\cli-shell-command.ps1'
+$redirectedHarness = Join-Path $repoRoot 'test\windows\cli-redirected-text-action.ps1'
 $detachedHarness = Join-Path $repoRoot 'test\windows\cli-detached-action.ps1'
 
 $stageBase = Join-Path $repoRoot ("dist\artifacts\noctty-{0}-windows-{1}" -f $Version, $Architecture)
@@ -64,6 +65,11 @@ foreach ($path in @($portableRoot, $portableExe, $portableCommand, $portableReso
     -BinDir $portableRoot `
     -Arguments @('+list-themes') `
     -ExpectedText '0x96f (resources)'
+
+& $redirectedHarness `
+    -ExePath $portableExe `
+    -Action '+help' `
+    -ExpectedText 'Usage: noctty [+action] [options]'
 
 & $detachedHarness `
     -ExePath $portableExe `

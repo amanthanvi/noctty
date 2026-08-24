@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sys = @import("win32/sys.zig");
 
 pub const TerminalPresentation = enum {
     wgl_swap_buffers_unchanged,
@@ -48,15 +49,11 @@ pub fn probeNativeCapability() Capability {
 const HMODULE = ?*anyopaque;
 const BOOL = i32;
 
-extern "kernel32" fn LoadLibraryA(name: [*:0]const u8) callconv(.winapi) HMODULE;
-extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) BOOL;
-
 fn hasExport(comptime library: [:0]const u8, comptime symbol: [:0]const u8) bool {
     if (comptime builtin.os.tag != .windows) return false;
-    const module = LoadLibraryA(library.ptr) orelse return false;
-    defer _ = FreeLibrary(module);
-    return GetProcAddress(module, symbol.ptr) != null;
+    const module = sys.LoadLibraryA(library.ptr) orelse return false;
+    defer _ = sys.FreeLibrary(module);
+    return sys.GetProcAddress(module, symbol.ptr) != null;
 }
 
 pub const WindowHandle = usize;

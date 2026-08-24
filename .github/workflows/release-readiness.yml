@@ -27,12 +27,9 @@ jobs:
       SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
       SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
       SCOOP_BUCKET_MANIFEST_PATH: ${{ vars.SCOOP_BUCKET_MANIFEST_PATH }}
-      WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
-      WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
       WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+      WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
       WINDOWS_CODESIGN_MIN_VALIDITY_DAYS: ${{ vars.WINDOWS_CODESIGN_MIN_VALIDITY_DAYS }}
-      SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
-      WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -41,17 +38,14 @@ jobs:
           persist-credentials: false
 
       - name: Validate release configuration
+        uses: ./.github/actions/release-preflight
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}
-        shell: pwsh
-        run: |
-          $scriptArgs = @{
-            Version = $env:RELEASE_VERSION
-            RequireSigning = $true
-            RequirePackageManagers = $env:REQUIRE_PACKAGE_MANAGERS -eq 'true'
-          }
-          ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/release-preflight.ps1 @scriptArgs
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        with:
+          version: ${{ inputs.version }}
+          prerelease: "false"
+          require-package-managers: ${{ inputs.require_package_managers }}
+          github-token: ${{ github.token }}
+          scoop-bucket-token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          wingetcreate-token: ${{ secrets.WINGETCREATE_TOKEN }}

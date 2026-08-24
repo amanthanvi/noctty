@@ -10,6 +10,7 @@ const std = @import("std");
 const windows = std.os.windows;
 const configpkg = @import("../config.zig");
 const win32_types = @import("win32_types.zig");
+const sys = @import("win32/sys.zig");
 
 pub const HANDLE = windows.HANDLE;
 pub const DWORD = windows.DWORD;
@@ -24,12 +25,7 @@ pub const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: DWORD = 0x00000008;
 pub const JOB_OBJECT_LIMIT_JOB_MEMORY: DWORD = 0x00000200;
 pub const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x00002000;
 
-pub const JOBOBJECTINFOCLASS = enum(i32) {
-    basic_limit_information = 2,
-    basic_process_id_list = 3,
-    extended_limit_information = 9,
-    _,
-};
+pub const JOBOBJECTINFOCLASS = sys.JOBOBJECTINFOCLASS;
 
 pub const IO_COUNTERS = extern struct {
     ReadOperationCount: u64 = 0,
@@ -61,38 +57,12 @@ pub const JOBOBJECT_EXTENDED_LIMIT_INFORMATION = extern struct {
     PeakJobMemoryUsed: SIZE_T = 0,
 };
 
-pub extern "kernel32" fn CreateJobObjectW(
-    lpJobAttributes: ?*SECURITY_ATTRIBUTES,
-    lpName: ?LPCWSTR,
-) callconv(.winapi) ?HANDLE;
-
-pub extern "kernel32" fn SetInformationJobObject(
-    hJob: HANDLE,
-    JobObjectInfoClass: JOBOBJECTINFOCLASS,
-    lpJobObjectInfo: *const anyopaque,
-    cbJobObjectInfoLength: DWORD,
-) callconv(.winapi) BOOL;
-
-pub extern "kernel32" fn QueryInformationJobObject(
-    hJob: HANDLE,
-    JobObjectInfoClass: JOBOBJECTINFOCLASS,
-    lpJobObjectInfo: *anyopaque,
-    cbJobObjectInfoLength: DWORD,
-    lpReturnLength: ?*DWORD,
-) callconv(.winapi) BOOL;
-
-pub extern "kernel32" fn AssignProcessToJobObject(
-    hJob: HANDLE,
-    hProcess: HANDLE,
-) callconv(.winapi) BOOL;
-
-pub extern "kernel32" fn GetProcessId(Process: HANDLE) callconv(.winapi) DWORD;
-
-pub extern "kernel32" fn OpenProcess(
-    dwDesiredAccess: DWORD,
-    bInheritHandle: BOOL,
-    dwProcessId: DWORD,
-) callconv(.winapi) ?HANDLE;
+pub const CreateJobObjectW = sys.CreateJobObjectW;
+pub const SetInformationJobObject = sys.SetInformationJobObject;
+pub const QueryInformationJobObject = sys.QueryInformationJobObject;
+pub const AssignProcessToJobObject = sys.AssignProcessToJobObject;
+pub const GetProcessId = sys.GetProcessId;
+pub const OpenProcess = sys.OpenProcess;
 
 pub const Mode = enum {
     never,

@@ -9,6 +9,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Recurring cadence for accessibility, focus, and window-state polls.
+$script:ACCESSIBILITY_POLL_MS = 100
+# Brief accessibility UI and paint settling delay.
+$script:ACCESSIBILITY_SETTLE_MS = 150
+# Event-delivery settling delay before accessibility assertions.
+$script:ACCESSIBILITY_EVENT_SETTLE_MS = 200
+# UI Automation tree settling delay after a state transition.
+$script:ACCESSIBILITY_TREE_SETTLE_MS = 300
+# Settings ownership and system-transition settling delay.
+$script:ACCESSIBILITY_SETTINGS_SETTLE_MS = 400
+# Final accessibility observation settling delay.
+$script:ACCESSIBILITY_FINAL_SETTLE_MS = 750
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 if ($IdleSoakSeconds -lt 0) { throw 'IdleSoakSeconds must be non-negative.' }
 if ($ThemeDiagnosticOnly -and $ColdDiagnosticOnly) {
@@ -17,6 +29,7 @@ if ($ThemeDiagnosticOnly -and $ColdDiagnosticOnly) {
 $launcherPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
+. (Join-Path $repoRoot 'scripts\interactive-win11-window-lib.ps1')
 
 function Get-AccessibilitySha256Hex {
     param([Parameter(Mandatory)][string] $Path)
@@ -66,18 +79,16 @@ if (Test-AccessibilityTransientHResult -HResult 0) {
     throw 'Accessibility transient HRESULT classifier accepted an unknown result.'
 }
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED) {
-    $forwarded = @('-TimeoutSeconds', $TimeoutSeconds.ToString(), '-IdleSoakSeconds', $IdleSoakSeconds.ToString())
-    if ($Rebuild) { $forwarded += '-Rebuild' }
-    if ($ResetState) { $forwarded += '-ResetState' }
-    if ($ThemeDiagnosticOnly) { $forwarded += '-ThemeDiagnosticOnly' }
-    if ($ColdDiagnosticOnly) { $forwarded += '-ColdDiagnosticOnly' }
-    $code = 0
-    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED' `
-        -ArgumentList $forwarded -ExitCode ([ref]$code)
-    exit $code
-}
+$forwarded = @('-TimeoutSeconds', $TimeoutSeconds.ToString(), '-IdleSoakSeconds', $IdleSoakSeconds.ToString())
+if ($Rebuild) { $forwarded += '-Rebuild' }
+if ($ResetState) { $forwarded += '-ResetState' }
+if ($ThemeDiagnosticOnly) { $forwarded += '-ThemeDiagnosticOnly' }
+if ($ColdDiagnosticOnly) { $forwarded += '-ColdDiagnosticOnly' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_ACCESSIBILITY_BOOTSTRAPPED' `
+    -ArgumentList $forwarded
 
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -739,28 +750,6 @@ public static class NocttyAccessibilityNative {
             timeoutMs,
             out result) != IntPtr.Zero;
     }
-    public static bool ForceForeground(IntPtr hwnd) {
-        // A synthetic Alt press temporarily satisfies the Win32 foreground-lock
-        // rules for an interactive test process without stealing focus by
-        // clicking an unverified desktop coordinate.
-        Submit(new INPUT[] { Key(0x12, 0, 0), Key(0x12, 0, KEYEVENTF_KEYUP) });
-        uint ignored;
-        uint targetThread = GetWindowThreadProcessId(hwnd, out ignored);
-        IntPtr foreground = GetForegroundWindow();
-        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
-        uint currentThread = GetCurrentThreadId();
-        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
-        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
-        try {
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            return GetForegroundWindow() == hwnd;
-        }
-        finally {
-            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
-            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
-        }
-    }
 }
 '@
 }
@@ -804,9 +793,9 @@ function Assert-AccessibilityInputOwner(
             return
         }
 
-        [void][NocttyAccessibilityNative]::ForceForeground($Process.MainWindowHandle)
+        [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
         if ($attempts -lt $maxAttempts -and [DateTime]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
         }
     } while ($attempts -lt $maxAttempts -and [DateTime]::UtcNow -lt $deadline)
 
@@ -841,7 +830,7 @@ function Send-AccessibilityChord(
     if (-not [NocttyAccessibilityNative]::SendChord($Keys)) {
         throw "SendInput failed for ${Description}: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTLE_MS
     Assert-AccessibilityInputOwner -Process $Process -Description "post-$Description" -ExpectedFocusedHwnd $ExpectedFocusedHwnd
 }
 
@@ -1672,7 +1661,7 @@ function Wait-AccessibilityTerminalCommandEcho(
                 )
             }
             $diagnostic.focus_recovery_count++
-            [void][NocttyAccessibilityNative]::ForceForeground($Process.MainWindowHandle)
+            [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
             $recoveredForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
             $recoveredFocusedHwnd =
                 [NocttyAccessibilityNative]::FocusedWindowFor($Process.MainWindowHandle)
@@ -1684,7 +1673,7 @@ function Wait-AccessibilityTerminalCommandEcho(
                     $recoveredDocument.SetFocus()
                 }
             }
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
             continue
         }
         try {
@@ -1707,12 +1696,12 @@ function Wait-AccessibilityTerminalCommandEcho(
                 [System.Windows.Automation.TextPattern]::Pattern,
                 [ref]$currentPattern
             )) {
-                Start-Sleep -Milliseconds 100
+                Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
                 continue
             }
             $TextPattern = $currentPattern
             $diagnostic.provider_reacquires++
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
             continue
         }
         $diagnostic.text_reads++
@@ -1738,7 +1727,7 @@ function Wait-AccessibilityTerminalCommandEcho(
             $diagnostic.full_echo_observed = $true
             return [pscustomobject]$diagnostic
         }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
     } while ([DateTime]::UtcNow -lt $effectiveDeadline)
 
     throw "Timed out waiting for $Description full command echo. Diagnostic=$($diagnostic | ConvertTo-Json -Compress)"
@@ -1749,11 +1738,13 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
     if ($null -ne $script:accessibilityOverallDeadline -and $script:accessibilityOverallDeadline -lt $effectiveDeadline) {
         $effectiveDeadline = $script:accessibilityOverallDeadline
     }
-    do {
-        if (& $Condition) { return }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $effectiveDeadline)
-    throw "Timed out waiting for $Description."
+    Wait-InteractiveWin11Until `
+        -Condition $Condition `
+        -Description $Description `
+        -Deadline $effectiveDeadline `
+        -PollMilliseconds $script:ACCESSIBILITY_POLL_MS `
+        -ConditionFirst `
+        -TimeoutMessage "Timed out waiting for $Description."
 }
 
 function Wait-AccessibilityWindowElement(
@@ -1908,7 +1899,7 @@ function Open-AccessibilitySettingsProbe {
             }
         }
         elseif (-not $sentForCurrentNoWindowState) {
-            [void][NocttyAccessibilityNative]::ForceForeground($Process.MainWindowHandle)
+            [void][InteractiveWin11WindowNative]::ForceForeground($Process.MainWindowHandle, $true, $true)
             $terminalHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren(
                 $Process.MainWindowHandle
             ))
@@ -1942,7 +1933,7 @@ function Open-AccessibilitySettingsProbe {
                 }
             }
         }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
     } while ([DateTime]::UtcNow -lt $deadline)
 
     $alive = if ($lastHwnd -eq [IntPtr]::Zero) {
@@ -2874,7 +2865,7 @@ function Invoke-AccessibilitySettingsCloseAction {
         [Parameter(Mandatory)][string] $Description
     )
 
-    if (-not [NocttyAccessibilityNative]::ForceForeground($SettingsProbe.Hwnd)) {
+    if (-not [InteractiveWin11WindowNative]::ForceForeground($SettingsProbe.Hwnd, $true, $true)) {
         throw "Unable to foreground $Description before its dirty-close request."
     }
     if (-not [NocttyAccessibilityNative]::PostMessageW(
@@ -3004,7 +2995,7 @@ function Get-ExactAccessibilityNotification(
     [string] $ExpectedKind,
     [string] $ExpectedDisplayString
 ) {
-    Start-Sleep -Milliseconds 300
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_TREE_SETTLE_MS
     $snapshot = [NocttyAccessibilityNative]::NotificationSnapshot
     $count = [int]$snapshot[0]
     $kind = [string]$snapshot[1]
@@ -3261,7 +3252,7 @@ $process = Start-Process -FilePath $exe -ArgumentList @(Get-InteractiveWin11Laun
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
         $process.Refresh()
         if ($process.HasExited) { throw "noctty exited before UIA query (exit $($process.ExitCode))." }
     } while ($process.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
@@ -3270,7 +3261,7 @@ try {
     $root = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
     if ($null -eq $root) { throw 'UI Automation returned no root element.' }
     [void][NocttyAccessibilityNative]::SetForegroundWindow($process.MainWindowHandle)
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTLE_MS
     $elements = @($root) + @($root.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
@@ -3305,7 +3296,7 @@ try {
         }
         $themeDiagnosticDocument = $script:themeDiagnosticDocuments[0]
         $themeDiagnosticTerminalHwnd = [IntPtr]$themeDiagnosticDocument.Current.NativeWindowHandle
-        [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic terminal focus' -Condition {
             return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
@@ -3422,7 +3413,7 @@ try {
             [Convert]::ToBase64String($themeDiagnosticConfigBytes)) {
             throw 'Targeted theme preview changed config.ghostty bytes.'
         }
-        [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $themeDiagnosticDocument.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'theme diagnostic pre-HC terminal focus' -Condition {
             return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq
@@ -3474,7 +3465,7 @@ try {
         )) {
             throw 'Cold diagnostic terminal Text element does not expose TextPattern.'
         }
-        [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         $document.SetFocus()
         Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'cold diagnostic terminal focus' -Condition {
             return [NocttyAccessibilityNative]::GetForegroundWindow() -eq $process.MainWindowHandle -and
@@ -3583,7 +3574,7 @@ try {
 
         if ($focusActivationAttempts -ge $focusActivationMaxAttempts) { break }
         $focusActivationAttempts++
-        [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+        [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
         try { $document.SetFocus() } catch { $documentFocusError = $_.Exception.Message }
 
         $bounds = $document.Current.BoundingRectangle
@@ -3662,7 +3653,7 @@ try {
                 )
             }
         }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
     } while ([DateTime]::UtcNow -lt $focusDeadline)
 
     # The final activation attempt can succeed at the deadline. Re-query
@@ -3718,7 +3709,7 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'terminal TextChanged event' -Condition {
         return [NocttyAccessibilityNative]::TextChangedCount -gt 0
     }
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_EVENT_SETTLE_MS
     $textChangedCount = [NocttyAccessibilityNative]::TextChangedCount
     $textChangedElapsedSeconds = [Math]::Max(0.2, ([DateTime]::UtcNow - $textChangedObservationStart).TotalSeconds)
     $textChangedLimit = [int][Math]::Ceiling($textChangedElapsedSeconds * 25) + 2
@@ -3930,7 +3921,7 @@ try {
         -Description 'open accessibility command palette')
     $palette = $null
     do {
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:ACCESSIBILITY_POLL_MS
         $palette = @($root.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
             [System.Windows.Automation.PropertyCondition]::new(
@@ -4049,7 +4040,7 @@ try {
                 $paletteNativeFocusElement.Current.Name -ne 'Command palette query') {
                 throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocus)."
             }
-            [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+            [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
             return $false
         }
         $script:paletteFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -4217,7 +4208,7 @@ try {
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
-                    [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+                    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
                     return $false
                 }
                 if ($null -eq $script:palette) {
@@ -4343,7 +4334,7 @@ try {
                     if ($paletteNativeFocusBeforeRecovery -ne $paletteQueryHwnd) {
                         throw "Recovered command palette query lost native focus before foreground recovery (focused=$paletteNativeFocusBeforeRecovery expected=$paletteQueryHwnd)."
                     }
-                    [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+                    [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
                     return $false
                 }
                 $script:paletteRecovered = @($root.FindAll(
@@ -4500,7 +4491,7 @@ try {
             if ($searchNativeFocusBeforeRecovery -ne $searchNativeHwnd) {
                 throw "Docked search query lost native focus before foreground recovery (focused=$searchNativeFocusBeforeRecovery expected=$searchNativeHwnd)."
             }
-            [void][NocttyAccessibilityNative]::ForceForeground($process.MainWindowHandle)
+            [void][InteractiveWin11WindowNative]::ForceForeground($process.MainWindowHandle, $true, $true)
             return $false
         }
         $script:searchFocused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -4983,7 +4974,7 @@ try {
         try {
             Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'settings section focus and selection ownership' -Condition {
                 if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $settingsHwnd) {
-                    [void][NocttyAccessibilityNative]::ForceForeground($settingsHwnd)
+                    [void][InteractiveWin11WindowNative]::ForceForeground($settingsHwnd, $true, $true)
                     return $false
                 }
                 $focusSection.SetFocus()
@@ -5421,7 +5412,7 @@ try {
             if ($saveNativeFocusBeforeRecovery -ne $ownerSaveHwnd) {
                 throw "Settings Save lost native focus before foreground recovery (focused=$saveNativeFocusBeforeRecovery expected=$ownerSaveHwnd)."
             }
-            [void][NocttyAccessibilityNative]::ForceForeground($ownerSettingsHwnd)
+            [void][InteractiveWin11WindowNative]::ForceForeground($ownerSettingsHwnd, $true, $true)
             return $false
         }
         $script:ownerSaveFocusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -5441,9 +5432,9 @@ try {
     )) {
         throw "PostMessageW failed while closing settings owner host: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTINGS_SETTLE_MS
     if ([NocttyAccessibilityNative]::IsWindow($ownerProbeHost)) {
-        if (-not [NocttyAccessibilityNative]::ForceForeground($ownerProbeHost) -or
+        if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerProbeHost, $true, $true) -or
             -not [NocttyAccessibilityNative]::SendChord(@([uint16]0x0D))) {
             throw 'Unable to confirm settings owner host close.'
         }
@@ -5474,7 +5465,7 @@ try {
     )
     [System.Windows.Automation.Automation]::AddAutomationFocusChangedEventHandler($settingsFocusHandler)
     $settingsFocusRegistered = $true
-    if (-not [NocttyAccessibilityNative]::ForceForeground($ownerSettingsHwnd)) {
+    if (-not [InteractiveWin11WindowNative]::ForceForeground($ownerSettingsHwnd, $true, $true)) {
         throw 'Unable to foreground surviving Settings before its dirty-close request.'
     }
     if (-not [NocttyAccessibilityNative]::PostMessageW(
@@ -6013,8 +6004,8 @@ try {
             throw "Settings window was destroyed during UIA idle soak at ${second}s."
         }
         if ($IdleSoakSeconds -gt 1 -and $second -eq [Math]::Floor($IdleSoakSeconds / 2)) {
-            if (-not [NocttyAccessibilityNative]::ForceForeground($idleSettingsHwnd) -or
-                -not [NocttyAccessibilityNative]::ForceForeground($idleTerminalHostHwnd)) {
+            if (-not [InteractiveWin11WindowNative]::ForceForeground($idleSettingsHwnd, $true, $true) -or
+                -not [InteractiveWin11WindowNative]::ForceForeground($idleTerminalHostHwnd, $true, $true)) {
                 throw "Settings/main-window focus round trip failed during UIA idle soak at ${second}s."
             }
         }
@@ -6198,7 +6189,7 @@ try {
         -Deadline ([DateTime]::UtcNow.AddSeconds(5)) `
         -Process $process `
         -Description 'graceful accessibility close')
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds $script:ACCESSIBILITY_SETTINGS_SETTLE_MS
     $process.Refresh()
     if (-not $process.HasExited) {
         Assert-AccessibilityInputOwner -Process $process -Description 'confirm graceful accessibility close'
@@ -6348,7 +6339,7 @@ finally {
     catch { $cleanupFailures.Add("primary cleanup failed: $($_.Exception.Message)") }
 }
 
-Start-Sleep -Milliseconds 750
+Start-Sleep -Milliseconds $script:ACCESSIBILITY_FINAL_SETTLE_MS
 $explorerAfter = @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $currentSessionId)
 $explorerAfterIdentity = if ($explorerAfter.Count -eq 1) {
     "{0}/{1:o}" -f $explorerAfter[0].Id, $explorerAfter[0].StartTime.ToUniversalTime()

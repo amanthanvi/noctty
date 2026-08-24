@@ -7,11 +7,149 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+
+function Assert-ReviewedContentSecurityPolicy {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Policy,
+
+        [Parameter(Mandatory)]
+        [string[]] $ScriptHashes
+    )
+
+    $declaredDirectives = [Collections.Generic.Dictionary[
+        string,
+        string[]
+    ]]::new([StringComparer]::Ordinal)
+    foreach ($rawDirective in $Policy.Split(';')) {
+        $tokens = @(
+            $rawDirective.Trim().Split(
+                [char[]] " `t",
+                [StringSplitOptions]::RemoveEmptyEntries
+            )
+        )
+        if ($tokens.Count -eq 0 -or
+            -not $declaredDirectives.TryAdd(
+                $tokens[0],
+                [string[]] @($tokens | Select-Object -Skip 1)
+            )) {
+            throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+        }
+    }
+
+    $expectedStaticSources = [ordered] @{
+        'default-src' = [string[]] @("'self'")
+        'base-uri' = [string[]] @("'none'")
+        'object-src' = [string[]] @("'none'")
+        'frame-ancestors' = [string[]] @("'none'")
+        'form-action' = [string[]] @("'self'")
+        'script-src-attr' = [string[]] @("'none'")
+        'style-src' = [string[]] @("'self'")
+        'font-src' = [string[]] @("'self'")
+        'connect-src' = [string[]] @("'self'", 'https://api.github.com')
+        'img-src' = [string[]] @("'self'", 'data:')
+        'frame-src' = [string[]] @("'none'")
+        'worker-src' = [string[]] @("'none'")
+        'manifest-src' = [string[]] @("'self'")
+        'upgrade-insecure-requests' = [string[]] @()
+    }
+    $derivedHashSet = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
+    foreach ($hash in $ScriptHashes) {
+        [void] $derivedHashSet.Add($hash)
+    }
+    if ($ScriptHashes.Count -ne $derivedHashSet.Count -or
+        @($ScriptHashes | Where-Object {
+            $_ -cnotmatch '^sha256-[A-Za-z0-9+/]+={0,2}$'
+        }).Count -ne 0) {
+        throw 'HTML-derived CSP hashes are invalid or duplicated.'
+    }
+    $dynamicHashDirectives = [ordered] @{
+        'script-src' = [string[]] @(
+            "'self'"
+            $ScriptHashes | ForEach-Object { "'$_'" }
+        )
+    }
+    if ($declaredDirectives.Count -ne
+        $expectedStaticSources.Count + $dynamicHashDirectives.Count) {
+        throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+    }
+
+    foreach ($directiveName in $expectedStaticSources.Keys) {
+        if (-not $declaredDirectives.ContainsKey($directiveName)) {
+            throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+        }
+        [string[]] $actualSources = $declaredDirectives[$directiveName]
+        [string[]] $expectedSources = $expectedStaticSources[$directiveName]
+        $actualSourceSet = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+        )
+        foreach ($source in $actualSources) {
+            [void] $actualSourceSet.Add($source)
+        }
+        if ($actualSources.Count -ne $actualSourceSet.Count -or
+            $actualSourceSet.Count -ne $expectedSources.Count -or
+            @($expectedSources | Where-Object {
+                -not $actualSourceSet.Contains($_)
+            }).Count -ne 0) {
+            throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+        }
+    }
+
+    foreach ($directiveName in $dynamicHashDirectives.Keys) {
+        if (-not $declaredDirectives.ContainsKey($directiveName)) {
+            throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+        }
+        [string[]] $expectedSources = $dynamicHashDirectives[$directiveName]
+        [string[]] $actualSources = $declaredDirectives[$directiveName]
+        $actualSourceSet = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+        )
+        foreach ($source in $actualSources) {
+            [void] $actualSourceSet.Add($source)
+        }
+        if ($actualSources.Count -ne $actualSourceSet.Count -or
+            $actualSources.Count -ne $expectedSources.Count -or
+            @($expectedSources | Where-Object {
+                -not $actualSourceSet.Contains($_)
+            }).Count -ne 0) {
+            throw 'Site CSP does not match the independently reviewed directive and source allowlist.'
+        }
+    }
+}
 
 $siteRoot = [IO.Path]::GetFullPath($SiteDirectory).TrimEnd('\', '/')
 $headersPath = Join-Path $siteRoot '_headers'
 if (-not (Test-Path -LiteralPath $headersPath -PathType Leaf)) {
     throw 'Site header contract is missing _headers.'
+}
+
+$headerBuilder = Join-Path (Get-RepoRoot) 'scripts/build-site-assets.mjs'
+$derivedHeaderOutput = @(
+    & node $headerBuilder `
+        --print-header-contract `
+        "--site-directory=$siteRoot" 2>&1
+)
+$headerBuilderExitCode = $LASTEXITCODE
+if ($headerBuilderExitCode -ne 0) {
+    $headerBuilderError = @(
+        $derivedHeaderOutput | ForEach-Object { [string] $_ }
+    ) -join [Environment]::NewLine
+    throw "Could not derive the site header contract (exit $headerBuilderExitCode): $headerBuilderError"
+}
+$derivedHeaderJson = $derivedHeaderOutput -join [Environment]::NewLine
+$derivedHeaderContract = $derivedHeaderJson | ConvertFrom-Json -Depth 6
+$expectedHeaderBytes = [Convert]::FromBase64String(
+    [string] $derivedHeaderContract.generated_headers_base64
+)
+$actualHeaderBytes = [IO.File]::ReadAllBytes($headersPath)
+if (-not [Linq.Enumerable]::SequenceEqual[byte](
+        $actualHeaderBytes,
+        $expectedHeaderBytes
+    )) {
+    throw 'Site _headers does not byte-match the HTML-derived header contract. Run node scripts/build-site-assets.mjs.'
 }
 
 $blocks = [Collections.Generic.Dictionary[
@@ -111,177 +249,24 @@ if ($declaredPermissionTokens.Count -ne $declaredPermissions.Count -or
     throw 'Site permissions policy does not exactly match the denylist contract.'
 }
 
-function Get-CspSha256Source {
-    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
-
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
-    return 'sha256-' + [Convert]::ToBase64String(
-        [Security.Cryptography.SHA256]::HashData($bytes)
-    )
-}
-
-$expectedScriptHashes = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-$expectedScriptAttributeHashes = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-foreach ($htmlName in @('index.html', '404.html')) {
-    $htmlPath = Join-Path $siteRoot $htmlName
-    if (-not (Test-Path -LiteralPath $htmlPath -PathType Leaf)) {
-        throw "Site header contract is missing $htmlName."
-    }
-    $html = [IO.File]::ReadAllText(
-        $htmlPath,
-        [Text.UTF8Encoding]::new($false)
-    )
-    $inlineScripts = @(
-        [regex]::Matches($html, '(?is)<script(?<attrs>[^>]*)>(?<body>.*?)</script>') |
-            Where-Object { $_.Groups['attrs'].Value -notmatch '\bsrc\s*=' }
-    )
-    if ($inlineScripts.Count -ne 1) {
-        throw "Expected exactly one CSP-hashed inline script in $htmlName."
-    }
-    [void]$expectedScriptHashes.Add(
-        (Get-CspSha256Source -Value $inlineScripts[0].Groups['body'].Value)
-    )
-    # Fonts are self-hosted, so no page may carry an inline event handler at
-    # all. The CSP pins script-src-attr 'none', which is strictly stronger
-    # than hashing a handler with 'unsafe-hashes'.
-    $eventAttributeCount = [regex]::Matches(
-        $html,
-        '(?is)\s+on[a-z][a-z0-9_-]*\s*='
-    ).Count
-    if ($eventAttributeCount -ne 0) {
-        throw "Expected no inline event handler attributes in $htmlName; the site CSP pins script-src-attr 'none'."
-    }
-}
-
 $csp = $security['Content-Security-Policy']
-function Get-CspDirectiveSources {
-    param(
-        [Parameter(Mandatory)] [string] $Policy,
-        [Parameter(Mandatory)] [string] $DirectiveName
-    )
-
-    $matches = @(
-        $Policy.Split(';') |
-            ForEach-Object { $_.Trim() } |
-            Where-Object {
-                $_ -match ('^' + [regex]::Escape($DirectiveName) + '(?:\s|$)')
-            }
-    )
-    if ($matches.Count -ne 1) {
-        throw "Site CSP must declare $DirectiveName exactly once."
-    }
-    return @([regex]::Split($matches[0], '\s+') | Select-Object -Skip 1)
-}
-
-function Assert-ExactCspDirectiveSources {
-    param(
-        [Parameter(Mandatory)] [string] $DirectiveName,
-        [Parameter(Mandatory)] [AllowEmptyCollection()]
-        [string[]] $Expected
-    )
-
-    $declaredTokens = @(
-        Get-CspDirectiveSources -Policy $csp -DirectiveName $DirectiveName
-    )
-    $declared = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::Ordinal
-    )
-    $expectedSet = [Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::Ordinal
-    )
-    foreach ($token in $declaredTokens) {
-        [void]$declared.Add($token)
-    }
-    foreach ($token in $Expected) {
-        [void]$expectedSet.Add($token)
-    }
-    if ($declaredTokens.Count -ne $declared.Count -or
-        $Expected.Count -ne $expectedSet.Count -or
-        $declared.Count -ne $expectedSet.Count -or
-        @($expectedSet | Where-Object { -not $declared.Contains($_) }).Count -ne 0) {
-        throw "Site CSP $DirectiveName sources do not exactly match the site contract."
-    }
-}
-
-$expectedScriptSources = @("'self'") + @(
-    $expectedScriptHashes | ForEach-Object { "'$_'" }
-)
-$expectedScriptAttributeSources = @("'none'")
-$expectedCspDirectives = [ordered]@{
-    'default-src' = @("'self'")
-    'base-uri' = @("'none'")
-    'object-src' = @("'none'")
-    'frame-ancestors' = @("'none'")
-    'form-action' = @("'self'")
-    'script-src' = $expectedScriptSources
-    'script-src-attr' = $expectedScriptAttributeSources
-    'style-src' = @("'self'")
-    'font-src' = @("'self'")
-    'connect-src' = @("'self'", 'https://api.github.com')
-    'img-src' = @("'self'", 'data:')
-    'frame-src' = @("'none'")
-    'worker-src' = @("'none'")
-    'manifest-src' = @("'self'")
-    'upgrade-insecure-requests' = @()
-}
-$declaredDirectiveNames = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-foreach ($directive in $csp.Split(';')) {
-    $directive = $directive.Trim()
-    if (-not $directive) { continue }
-    $directiveName = [regex]::Split($directive, '\s+')[0]
-    if (-not $declaredDirectiveNames.Add($directiveName)) {
-        throw "Site CSP declares duplicate directive $directiveName."
-    }
-}
-if ($declaredDirectiveNames.Count -ne $expectedCspDirectives.Count -or
-    @($declaredDirectiveNames | Where-Object {
-        -not $expectedCspDirectives.Contains($_)
-    }).Count -ne 0) {
-    throw 'Site CSP does not declare the exact expected directive set.'
-}
-foreach ($directiveName in $expectedCspDirectives.Keys) {
-    Assert-ExactCspDirectiveSources `
-        -DirectiveName $directiveName `
-        -Expected $expectedCspDirectives[$directiveName]
-}
-
-$expectedHashes = [Collections.Generic.HashSet[string]]::new(
-    $expectedScriptHashes,
-    [StringComparer]::Ordinal
-)
-$expectedHashes.UnionWith($expectedScriptAttributeHashes)
-$declaredHashes = [Collections.Generic.HashSet[string]]::new(
-    [StringComparer]::Ordinal
-)
-foreach ($match in [regex]::Matches(
-    $csp,
-    "'(?<hash>sha256-[A-Za-z0-9+/]+=*)'"
-)) {
-    [void]$declaredHashes.Add($match.Groups['hash'].Value)
-}
-if ($declaredHashes.Count -ne $expectedHashes.Count -or
-    @($expectedHashes | Where-Object {
-        -not $declaredHashes.Contains($_)
-    }).Count -ne 0) {
-    throw 'Site CSP declares hashes outside the exact HTML source contract.'
+Assert-ReviewedContentSecurityPolicy `
+    -Policy $csp `
+    -ScriptHashes @($derivedHeaderContract.script_hashes)
+if ($csp -cne [string] $derivedHeaderContract.root.content_security_policy) {
+    throw 'Tracked site CSP differs from the HTML-derived source of truth.'
 }
 
 [ordered]@{
     root = [ordered]@{
-        cache_control = $security['Cache-Control']
-        content_security_policy = $csp
-        x_content_type_options = $security['X-Content-Type-Options']
-        x_frame_options = $security['X-Frame-Options']
-        referrer_policy = $security['Referrer-Policy']
-        permissions_policy = $permissions
+        cache_control = $derivedHeaderContract.root.cache_control
+        content_security_policy = $derivedHeaderContract.root.content_security_policy
+        x_content_type_options = $derivedHeaderContract.root.x_content_type_options
+        x_frame_options = $derivedHeaderContract.root.x_frame_options
+        referrer_policy = $derivedHeaderContract.root.referrer_policy
+        permissions_policy = $derivedHeaderContract.root.permissions_policy
     }
     not_found = [ordered]@{
-        cache_control = 'no-store'
+        cache_control = $derivedHeaderContract.not_found.cache_control
     }
 } | ConvertTo-Json -Depth 4 -Compress

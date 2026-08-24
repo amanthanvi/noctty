@@ -5,6 +5,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Poll cadence while waiting for smoke-test output.
+$script:SMOKE_POLL_MS = 100
+# Retry delay after transient smoke-test startup failures.
+$script:SMOKE_RETRY_MS = 250
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +19,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_SMOKE_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SMOKE_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SMOKE_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'smoke' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
@@ -67,7 +65,7 @@ $failureReason = $null
 
 try {
     while ([DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds $script:SMOKE_RETRY_MS
 
         $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
 
@@ -99,7 +97,7 @@ try {
             if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
                 break
             }
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds $script:SMOKE_POLL_MS
         }
 
         if (-not $failureReason -and $process.MainWindowHandle -eq [IntPtr]::Zero) {
