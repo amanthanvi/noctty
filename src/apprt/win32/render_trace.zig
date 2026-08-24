@@ -60,8 +60,12 @@ pub const RenderTrace = struct {
             alloc,
             "NOCTTY_RENDER_TRACE_FILE",
         ) catch return .{}) orelse return .{};
+        const trace_path = absolutizeTracePath(alloc, owned) catch |err| {
+            log.warn("unable to resolve render trace path err={}", .{err});
+            return .{};
+        };
 
-        return initWithClaimedPath(alloc, &render_trace_file_claimed, owned);
+        return initWithClaimedPath(alloc, &render_trace_file_claimed, trace_path);
     }
 
     fn initWithClaimedPath(
@@ -235,7 +239,10 @@ pub const RenderTrace = struct {
 
     fn writeSnapshot(self: *const RenderTrace) void {
         const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
+        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+            log.warn("unable to create render trace file path={s} err={}", .{ trace_path, err });
+            return;
+        };
         defer file.close();
 
         var buffer: [1024]u8 = undefined;
@@ -278,6 +285,14 @@ pub const RenderTrace = struct {
         stream.flush() catch return;
     }
 };
+
+fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(owned)) return owned;
+    defer alloc.free(owned);
+    const cwd = try std.process.getCwdAlloc(alloc);
+    defer alloc.free(cwd);
+    return try std.fs.path.join(alloc, &.{ cwd, owned });
+}
 
 fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
     return !claimed.swap(true, .acq_rel);
@@ -341,4 +356,13 @@ test "win32 render trace init rejects and frees a second process owner" {
     const second_trace = RenderTrace.initWithClaimedPath(std.testing.allocator, &claimed, second);
     defer if (second_trace.path) |path| std.testing.allocator.free(path);
     try std.testing.expect(second_trace.path == null);
+}
+
+test "win32 render trace resolves relative output paths against cwd" {
+    const relative = try std.testing.allocator.dupe(u8, "render-trace.json");
+    const absolute = try absolutizeTracePath(std.testing.allocator, relative);
+    defer std.testing.allocator.free(absolute);
+
+    try std.testing.expect(std.fs.path.isAbsolute(absolute));
+    try std.testing.expectEqualStrings("render-trace.json", std.fs.path.basename(absolute));
 }

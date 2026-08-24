@@ -24,28 +24,34 @@ const siteRoot = siteDirectoryArgument
   ? path.resolve(siteDirectoryArgument.slice("--site-directory=".length))
   : path.join(root, "site");
 
-const sha256Hex = (text) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
-const sha256Base64 = (text) => crypto.createHash("sha256").update(text, "utf8").digest("base64");
+const sha256Hex = (text) =>
+  crypto.createHash("sha256").update(text, "utf8").digest("hex");
+const sha256Base64 = (text) =>
+  crypto.createHash("sha256").update(text, "utf8").digest("base64");
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function readSiteFile(relativePath) {
-  const text = fs.readFileSync(path.join(siteRoot, relativePath), "utf8");
+function readSiteFile(relativePath, directory = siteRoot) {
+  const text = fs.readFileSync(path.join(directory, relativePath), "utf8");
   if (/\r/.test(text)) {
-    throw new Error(`site/${relativePath} must be LF-normalized (found CR bytes).`);
+    throw new Error(
+      `site/${relativePath} must be LF-normalized (found CR bytes).`,
+    );
   }
   return text;
 }
 
-function getInlineScriptContract() {
+function getInlineScriptContract(directory = siteRoot) {
   let sharedScript;
 
   for (const htmlName of ["index.html", "404.html"]) {
-    const html = readSiteFile(htmlName);
+    const html = readSiteFile(htmlName, directory);
     const inlineScripts = [
       ...html.matchAll(/<script(?<attrs>[^>]*)>(?<body>.*?)<\/script>/gis),
     ].filter((match) => !/\bsrc\s*=/.test(match.groups.attrs));
     if (inlineScripts.length !== 1) {
-      throw new Error(`Expected exactly one CSP-hashed inline script in site/${htmlName}.`);
+      throw new Error(
+        `Expected exactly one CSP-hashed inline script in site/${htmlName}.`,
+      );
     }
     const script = inlineScripts[0].groups.body;
 
@@ -59,7 +65,9 @@ function getInlineScriptContract() {
     }
 
     if (sharedScript !== undefined && script !== sharedScript) {
-      throw new Error("site/index.html and site/404.html inline bootstrap scripts differ; they must be byte-identical.");
+      throw new Error(
+        "site/index.html and site/404.html inline bootstrap scripts differ; they must be byte-identical.",
+      );
     }
     sharedScript = script;
   }
@@ -69,8 +77,8 @@ function getInlineScriptContract() {
   };
 }
 
-export function getHeaderContract() {
-  const { scriptHashes } = getInlineScriptContract();
+export function getHeaderContract(directory = siteRoot) {
+  const { scriptHashes } = getInlineScriptContract(directory);
   const cspDirectives = [
     ["default-src", ["'self'"]],
     ["base-uri", ["'none'"]],
@@ -89,7 +97,10 @@ export function getHeaderContract() {
     ["upgrade-insecure-requests", []],
   ];
   const contentSecurityPolicy = cspDirectives
-    .map(([name, sources]) => `${name}${sources.length > 0 ? ` ${sources.join(" ")}` : ""}`)
+    .map(
+      ([name, sources]) =>
+        `${name}${sources.length > 0 ? ` ${sources.join(" ")}` : ""}`,
+    )
     .join("; ");
   const cacheControl = "public, max-age=0, must-revalidate";
   const permissionsPolicy =
@@ -107,7 +118,9 @@ export function getHeaderContract() {
   ].join("\n");
 
   return {
-    generated_headers_base64: Buffer.from(headersText, "utf8").toString("base64"),
+    generated_headers_base64: Buffer.from(headersText, "utf8").toString(
+      "base64",
+    ),
     script_hashes: scriptHashes,
     root: {
       cache_control: cacheControl,
@@ -124,14 +137,20 @@ export function getHeaderContract() {
 function withAssetCacheKeys(html, htmlPath, assets) {
   let result = html;
   for (const [asset, digest] of Object.entries(assets)) {
-    const pattern = new RegExp(`(["'])(/?)${escapeRegExp(asset)}(?:\\?v=[^"']*)?\\1`, "g");
+    const pattern = new RegExp(
+      `(["'])(/?)${escapeRegExp(asset)}(?:\\?v=[^"']*)?\\1`,
+      "g",
+    );
     if (!pattern.test(result)) {
-      throw new Error(`${htmlPath} does not reference required local asset ${asset}.`);
+      throw new Error(
+        `${htmlPath} does not reference required local asset ${asset}.`,
+      );
     }
     pattern.lastIndex = 0;
     result = result.replace(
       pattern,
-      (_match, quote, rootPrefix) => `${quote}${rootPrefix}${asset}?v=${digest}${quote}`,
+      (_match, quote, rootPrefix) =>
+        `${quote}${rootPrefix}${asset}?v=${digest}${quote}`,
     );
   }
   return result;
@@ -155,7 +174,13 @@ function main() {
   const headerContract = getHeaderContract();
 
   const assetHashes = {};
-  for (const asset of ["styles.css", "app.js", "version.js", "install.js", "terminal.js"]) {
+  for (const asset of [
+    "styles.css",
+    "app.js",
+    "version.js",
+    "install.js",
+    "terminal.js",
+  ]) {
     assetHashes[asset] = sha256Hex(readSiteFile(asset));
   }
 
@@ -182,15 +207,22 @@ function main() {
   updateOrCheck("_headers", expectedHeaders, headers);
 
   if (failures.length > 0) {
-    throw new Error(`Deterministic site asset check failed:\n - ${failures.join("\n - ")}\nRun: node scripts/build-site-assets.mjs`);
+    throw new Error(
+      `Deterministic site asset check failed:\n - ${failures.join("\n - ")}\nRun: node scripts/build-site-assets.mjs`,
+    );
   }
 
-  console.log(checkOnly
-    ? "Site CSP hashes and SHA-256 asset cache keys are current."
-    : `Site assets current (script ${headerContract.script_hashes[0]}).`);
+  console.log(
+    checkOnly
+      ? "Site CSP hashes and SHA-256 asset cache keys are current."
+      : `Site assets current (script ${headerContract.script_hashes[0]}).`,
+  );
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (
+  process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url
+) {
   if (checkOnly && printHeaderContract) {
     throw new Error("Use only one of --check or --print-header-contract.");
   }

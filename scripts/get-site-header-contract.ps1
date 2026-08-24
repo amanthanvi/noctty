@@ -127,19 +127,40 @@ if (-not (Test-Path -LiteralPath $headersPath -PathType Leaf)) {
 }
 
 $headerBuilder = Join-Path (Get-RepoRoot) 'scripts/build-site-assets.mjs'
-$derivedHeaderOutput = @(
-    & node $headerBuilder `
-        --print-header-contract `
-        "--site-directory=$siteRoot" 2>&1
-)
-$headerBuilderExitCode = $LASTEXITCODE
-if ($headerBuilderExitCode -ne 0) {
-    $headerBuilderError = @(
-        $derivedHeaderOutput | ForEach-Object { [string] $_ }
-    ) -join [Environment]::NewLine
-    throw "Could not derive the site header contract (exit $headerBuilderExitCode): $headerBuilderError"
+$nodeCommand = Get-Command node -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $nodeCommand.Source
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+foreach ($argument in @(
+    $headerBuilder,
+    '--print-header-contract',
+    "--site-directory=$siteRoot"
+)) {
+    [void] $startInfo.ArgumentList.Add($argument)
 }
-$derivedHeaderJson = $derivedHeaderOutput -join [Environment]::NewLine
+$process = [Diagnostics.Process]::new()
+$process.StartInfo = $startInfo
+try {
+    if (-not $process.Start()) {
+        throw 'Could not start the site header contract builder.'
+    }
+    $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $derivedHeaderJson = $standardOutputTask.GetAwaiter().GetResult()
+    $headerBuilderError = $standardErrorTask.GetAwaiter().GetResult()
+    $headerBuilderExitCode = $process.ExitCode
+}
+finally {
+    $process.Dispose()
+}
+if ($headerBuilderExitCode -ne 0) {
+    throw "Could not derive the site header contract (exit $headerBuilderExitCode): $($headerBuilderError.Trim())"
+}
 $derivedHeaderContract = $derivedHeaderJson | ConvertFrom-Json -Depth 6
 $expectedHeaderBytes = [Convert]::FromBase64String(
     [string] $derivedHeaderContract.generated_headers_base64

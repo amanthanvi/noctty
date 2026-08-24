@@ -332,6 +332,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
+        if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
         timeout-minutes: 10
         env:
@@ -340,9 +341,10 @@ jobs:
         run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION
 
       - name: Submit WinGet manifest update
+        if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
         timeout-minutes: 15
         env:
-          WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: ./scripts/release-submit-winget.ps1 -Version $env:RELEASE_VERSION

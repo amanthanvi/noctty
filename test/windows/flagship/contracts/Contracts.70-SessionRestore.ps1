@@ -62,12 +62,18 @@ $sessionProbeDirectory = Join-Path (
     [IO.Path]::GetTempPath()
 ) ('noctty-session-contract-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($sessionProbeDirectory) | Out-Null
+$sessionOriginalExe = Get-Variable -Name exe -ValueOnly -ErrorAction SilentlyContinue
+$sessionOriginalLayout = Get-Variable -Name layout -ValueOnly -ErrorAction SilentlyContinue
+$sessionOriginalInstanceClass = Get-Variable -Name instanceClass -ValueOnly -ErrorAction SilentlyContinue
 $exe = Join-Path $sessionProbeDirectory 'noctty.exe'
 $sessionProbeCli = Join-Path $sessionProbeDirectory 'noctty.com'
 [IO.File]::WriteAllText($sessionProbeCli, 'contract shim')
 $sessionOriginalRepoRoot = $repoRoot
 $layout = [pscustomobject]@{ Logs = $sessionProbeDirectory }
 $instanceClass = 'noctty-interactive-contract'
+# The extracted snapshot helper consumes these variables dynamically; keep
+# static references so PSScriptAnalyzer can see the intentional uses.
+[void] @($exe, $layout, $instanceClass)
 $repoRoot = 'contract-repo-root'
 $script:SESSION_RESTORE_RETRY_MS = 17
 $script:sessionSnapshotProbeMode = 'success-on-third'
@@ -211,6 +217,9 @@ finally {
     Remove-Item -LiteralPath Function:\Get-SessionAutomationSnapshot -ErrorAction SilentlyContinue
     Remove-Variable -Scope Script -Name SESSION_RESTORE_RETRY_MS, sessionSnapshotProbeMode, sessionSnapshotStartCalls, sessionSnapshotStopCalls, sessionSnapshotSleepCalls, sessionSnapshotExitCodeCalls, sessionSnapshotLog -ErrorAction SilentlyContinue
     $repoRoot = $sessionOriginalRepoRoot
+    $exe = $sessionOriginalExe
+    $layout = $sessionOriginalLayout
+    $instanceClass = $sessionOriginalInstanceClass
     if ([IO.Directory]::Exists($sessionProbeDirectory)) {
         [IO.Directory]::Delete($sessionProbeDirectory, $true)
     }

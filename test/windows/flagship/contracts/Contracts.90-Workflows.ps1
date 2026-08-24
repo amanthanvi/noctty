@@ -317,6 +317,12 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $accessibilityChecker
+        Pattern = '(?ms)gh run download \$runId.*?--repo \$repository.*?\$provenance\.repository -ne \$repository'
+        Kind = 'Workflow'
+        Description = 'accessibility artifact download and provenance validation use the configured repository'
+    }
+    @{
+        File = $accessibilityChecker
         Pattern = '\$provenanceRunAttempt -ne \[int\]\$run\.run_attempt'
         Kind = 'Workflow'
         Description = 'runner provenance is bound to the GitHub run attempt'
@@ -383,13 +389,19 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $testWorkflow
-        Pattern = "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}"
+        Pattern = 'ref: \$\{\{ github\.event_name == ''pull_request'' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}'
         Kind = 'Workflow'
         Description = 'Test workflow checkouts use the immutable PR head SHA for pull requests'
     }
     @{
+        File = $testWorkflow
+        Pattern = '(?ms)- name: Setup Node\.js\s+uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903.*?node-version: 22.*?- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\).*?- name: Site unit tests.*?node --test "site/tests/\*\*/\*\.test\.mjs".*?if \(\$LASTEXITCODE -ne 0\)'
+        Kind = 'Workflow'
+        Description = 'site checks use a pinned supported Node version and retain fail-closed command guards'
+    }
+    @{
         File = (Join-Path $repoRoot '.github\workflows\windows-arm64.yml')
-        Pattern = "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}"
+        Pattern = 'ref: \$\{\{ github\.event_name == ''pull_request'' && github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}'
         Kind = 'Workflow'
         Description = 'ARM64 workflow checkout uses the immutable PR head SHA for pull requests'
     }

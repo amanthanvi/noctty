@@ -15,6 +15,8 @@ const sys = @import("sys.zig");
 
 const HostOverlayMode = win32_theme.HostOverlayMode;
 const RECT = sys.RECT;
+const overlay_right_gap_base: i32 = 6;
+const overlay_min_edit_width_base: i32 = 24;
 
 const OverlayActionVisibility = struct {
     accept: bool,
@@ -76,8 +78,8 @@ pub fn overlayEditFrameRect(
     dpi: u32,
 ) RECT {
     const top_offset = scaledBy(4, dpi);
-    const right_gap = scaledBy(6, dpi);
-    const min_edit_width = scaledBy(24, dpi);
+    const right_gap = scaledBy(overlay_right_gap_base, dpi);
+    const min_edit_width = scaledBy(overlay_min_edit_width_base, dpi);
     const effective_label_w = overlayLabelReservation(
         width,
         padding,
@@ -109,8 +111,8 @@ pub fn overlayLabelReservation(
     accept_reservation_w: i32,
     dpi: u32,
 ) i32 {
-    const right_gap = scaledBy(6, dpi);
-    const min_edit_width = scaledBy(24, dpi);
+    const right_gap = scaledBy(overlay_right_gap_base, dpi);
+    const min_edit_width = scaledBy(overlay_min_edit_width_base, dpi);
     const desired = @max(0, desired_label_w);
     const available_before_actions = width - @max(0, cancel_w) - @max(0, accept_reservation_w) -
         2 * @max(0, padding) - right_gap;
@@ -126,8 +128,8 @@ fn overlayActionVisibilityForWidth(
     dpi: u32,
 ) OverlayActionVisibility {
     const bounded_padding = @max(0, padding);
-    const right_gap = scaledBy(6, dpi);
-    const min_edit_width = scaledBy(24, dpi);
+    const right_gap = scaledBy(overlay_right_gap_base, dpi);
+    const min_edit_width = scaledBy(overlay_min_edit_width_base, dpi);
     const cancel = width >= @max(0, cancel_w) + 3 * bounded_padding + right_gap + min_edit_width;
     const accept = cancel and accept_requested and
         width >= @max(0, cancel_w) + @max(0, accept_w) + 4 * bounded_padding + right_gap + min_edit_width;

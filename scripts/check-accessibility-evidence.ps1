@@ -101,7 +101,7 @@ if ($evidenceArtifact.Count -ne 1) { throw "Workflow run $runId lacks one unexpi
 $downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-accessibility-evidence-$([Guid]::NewGuid().ToString('N'))"
 try {
     & gh run download $runId `
-        --repo amanthanvi/noctty `
+        --repo $repository `
         --name "flagship-interactive-win11-$runId" `
         --dir $downloadRoot
     if ($LASTEXITCODE -ne 0) { throw "Could not download interactive evidence artifact for run $runId." }
@@ -159,7 +159,7 @@ try {
         $provenanceWindowsBuild -lt 22000 -or
         $provenanceProcessSession -le 0 -or
         $provenanceProcessSession -ne $provenanceActiveSession -or
-        $provenance.repository -ne 'amanthanvi/noctty' -or
+        $provenance.repository -ne $repository -or
         $provenance.workflow -ne 'Test' -or
         [string]$provenance.run_id -ne [string]$runId -or
         $provenanceRunAttempt -lt 1 -or

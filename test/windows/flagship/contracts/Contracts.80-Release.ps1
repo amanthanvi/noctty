@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '8f036589577bf9a2e70feda2e40e750a428c50f290c2c34449469aaeee98ac73'
+    '7ca3ff5add29e1da961f6daf6a0f845f68f9284bdd7cfed059248d04d1467e4e'
 $readinessWorkflowSha256 =
     '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -82,7 +82,7 @@ foreach ($workflow in @(
     )
     if (-not $jobEnvironment.Success -or
         $jobEnvironment.Groups['body'].Value -match
-            '(?m)^      (?:SCOOP_BUCKET_TOKEN|WINGETCREATE_TOKEN|WINDOWS_CODESIGN_PFX_BASE64|WINDOWS_CODESIGN_PFX_PASSWORD):') {
+            '(?m)^      (?:SCOOP_BUCKET_TOKEN|WINGETCREATE_TOKEN|WINGET_CREATE_GITHUB_TOKEN|WINDOWS_CODESIGN_PFX_BASE64|WINDOWS_CODESIGN_PFX_PASSWORD):') {
         throw "Sensitive release credentials escaped into job-level env: $($workflow.Context)"
     }
 }
@@ -1405,7 +1405,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseDefenderScanner
         Content = $releaseDefenderScannerText
         ExpectedSha256 =
-            '5961dd3535abad30e5da2c7fe55b303616a2c58dd1daf0f591f4234c72925718'
+            '779a23fb4419a096a1bb46224954097fbf8585ead368e3f1e49ce5c736262404'
         CriticalStatement = '& $scanner -SignatureUpdate'
     }
     [pscustomobject] @{
@@ -1419,7 +1419,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseScoopPublisher
         Content = $releaseScoopPublisherText
         ExpectedSha256 =
-            '5b90add3fbcb3e237ff597d48657558fd609340385e5c09b7a01c6a803cb49d7'
+            'fface463353e30d293c0a77d02a0e2a45b085b29ef08c0077760c86f89320432'
         CriticalStatement =
             "        & git @gitNetworkBoundArgs -c 'credential.helper=' -c 'credential.helper=!gh auth git-credential' push origin HEAD"
     }
@@ -1427,7 +1427,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseWingetSubmitter
         Content = $releaseWingetSubmitterText
         ExpectedSha256 =
-            'f07065e30708b0b763fcefb2ea1990364c1cd978386b9ffbc7e3f30a09f2032f'
+            'cd0024dd1c5d178d9884c7fcbeaeadc94db03096e64ac7579dffa2fa6a2376f5'
         CriticalStatement =
             '$result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs'
     }
@@ -1768,14 +1768,29 @@ if ($wingetWebRequests.Count -ne 3 -or
     throw 'Every WinGet network request must have exactly one bounded TimeoutSec parameter.'
 }
 if ($releaseWingetSubmitterText -notmatch
-        '(?ms)ProcessStartInfo.*?\.ArgumentList\.Add\(.*?ReadToEndAsync\(\).*?WaitForExit\(\$WinGetCreateTimeoutSeconds \* 1000\).*?\.Kill\(\).*?WaitForExit\(\$ProcessTerminationTimeoutSeconds \* 1000\).*?\.Dispose\(\)' -or
+        '(?ms)ProcessStartInfo.*?\.ArgumentList\.Add\(.*?ReadToEndAsync\(\).*?WaitForExit\(\$WinGetCreateTimeoutSeconds \* 1000\).*?\.Kill\(\$true\).*?WaitForExit\(\$ProcessTerminationTimeoutSeconds \* 1000\).*?\.Dispose\(\)' -or
     $releaseWingetSubmitterText -match
-        '(?m)^\s*&\s+wingetcreate\b|\bStart-Process\b|\.Arguments\s*=' -or
+        '(?m)^\s*&\s+wingetcreate\b|\bStart-Process\b|\.Arguments\s*=|WINGETCREATE_TOKEN|''--token''' -or
     $releaseWingetSubmitterText -notmatch
-        '(?m)^\s*\[void\]\s*\$startInfo\.ArgumentList\.Add\(\$env:WINGETCREATE_TOKEN\)\s*$' -or
+        '(?m)^if \(-not \$env:WINGET_CREATE_GITHUB_TOKEN\) \{' -or
     $releaseWingetSubmitterText -notmatch
-        '(?ms)\$output = \$output\.Replace\(\$env:WINGETCREATE_TOKEN, ''\[REDACTED\]''\).*?Write-Host \$_') {
+        '(?ms)\$output = \$output\.Replace\(\$env:WINGET_CREATE_GITHUB_TOKEN, ''\[REDACTED\]''\).*?Write-Host \$_') {
     throw 'WinGet submit must use a recorded, asynchronously drained, bounded process without joined command strings.'
+}
+foreach ($stablePublisher in @(
+    [pscustomobject]@{ Name = 'Scoop'; Step = $releasePublishScoopStep },
+    [pscustomobject]@{ Name = 'WinGet'; Step = $releaseSubmitWingetStep }
+)) {
+    if ($stablePublisher.Step -notmatch
+        '(?m)^        if: steps\.meta\.outputs\.prerelease != ''true''\s*$') {
+        throw "$($stablePublisher.Name) publication must be gated to stable releases."
+    }
+}
+if ($releaseSubmitWingetStep -notmatch
+        '(?m)^          WINGET_CREATE_GITHUB_TOKEN: \$\{\{ secrets\.WINGETCREATE_TOKEN \}\}\s*$' -or
+    $releaseSubmitWingetStep -match
+        '(?m)^          WINGETCREATE_TOKEN:') {
+    throw 'The WinGet secret must reach wingetcreate only through its recognized environment variable.'
 }
 if ($releaseSubmitWingetStep -notmatch '(?m)^        timeout-minutes: 15\s*$') {
     throw 'The WinGet workflow step must retain a 15-minute second timeout guard.'
@@ -1801,7 +1816,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseWingetSubmitter
         Content = { $releaseWingetSubmitterText }
-        Pattern = '(?ms)SupportsShouldProcess.*?Skipping WinGet submit: WINGETCREATE_TOKEN.*?Initial WinGet bootstrap is still manual.*?api\.github\.com/repos/microsoft/winget-pkgs.*?TimeoutSec \$NetworkTimeoutSeconds.*?\$statusCode -eq 404.*?is not bootstrapped.*?Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?0x80073D06.*?higher version of this package is already installed.*?aka\.ms/Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?TimeoutSec \$NetworkTimeoutSeconds.*?wingetcreate/latest/msixbundle.*?TimeoutSec \$NetworkTimeoutSeconds.*?arm64.*?x64.*?installerUrlArgs\.Count -ne 2.*?ProcessStartInfo.*?''update''.*?''--submit''.*?''--no-open''.*?ArgumentList.*?WINGETCREATE_TOKEN.*?ReadToEndAsync.*?WaitForExit.*?Kill.*?Dispose.*?ExitCode -ne 0'
+        Pattern = '(?ms)SupportsShouldProcess.*?Skipping WinGet submit: WINGET_CREATE_GITHUB_TOKEN.*?Initial WinGet bootstrap is still manual.*?api\.github\.com/repos/microsoft/winget-pkgs.*?TimeoutSec \$NetworkTimeoutSeconds.*?\$statusCode -eq 404.*?is not bootstrapped.*?Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?0x80073D06.*?higher version of this package is already installed.*?aka\.ms/Microsoft\.VCLibs\.x64\.14\.00\.Desktop\.appx.*?TimeoutSec \$NetworkTimeoutSeconds.*?wingetcreate/latest/msixbundle.*?TimeoutSec \$NetworkTimeoutSeconds.*?arm64.*?x64.*?installerUrlArgs\.Count -ne 2.*?ProcessStartInfo.*?''update''.*?''--submit''.*?''--no-open''.*?ArgumentList.*?ReadToEndAsync.*?WaitForExit.*?Kill\(\$true\).*?Dispose.*?ExitCode -ne 0'
         Kind = 'Text'
         Description = 'WinGet submitter preserves bootstrap skip, VCLibs newer-version tolerance, exact dual architecture URLs, authenticated noninteractive submit, and fail-closed exit handling'
     }
@@ -1823,7 +1838,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseDefenderScanner
         Content = { $releaseDefenderScannerText }
-        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Text'
         Description = 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed'
     }

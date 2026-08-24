@@ -74,8 +74,10 @@ $portablePayloads = @(
     'noctty/noctty.exe',
     'noctty/ghostty-vt.dll'
 )
+$architectures = @(Get-WindowsPackageArchitectures)
+$expectedScanCount = $architectures.Count * (1 + $portablePayloads.Count)
 $scanPaths = @(
-    foreach ($architecture in (Get-WindowsPackageArchitectures)) {
+    foreach ($architecture in $architectures) {
         $artifactDirectory = Join-Path $ArtifactRoot "noctty-$Version-windows-$architecture"
         $setupName = New-WindowsPackageArtifactName `
             -Version $Version `
@@ -97,8 +99,8 @@ $scanPaths = @(
         }
     }
 )
-if ($scanPaths.Count -ne 8) {
-    throw "Expected exactly eight release artifacts for Defender scanning; found $($scanPaths.Count)."
+if ($scanPaths.Count -ne $expectedScanCount) {
+    throw "Expected exactly $expectedScanCount release artifacts for Defender scanning; found $($scanPaths.Count)."
 }
 
 foreach ($scanPath in $scanPaths) {

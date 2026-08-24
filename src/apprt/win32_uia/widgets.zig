@@ -6191,6 +6191,7 @@ test "settings provider behavior selection dispatch is bounded for a hung owner 
     }
 
     const select_thread = try std.Thread.spawn(.{}, Fixture.selectMain, .{&fixture});
+    defer select_thread.join();
     const select_wait = win32.WaitForSingleObject(select_done_event, 4000);
     try std.testing.expect(select_wait == win32.WAIT_OBJECT_0 or select_wait == win32.WAIT_TIMEOUT);
 
@@ -6202,8 +6203,6 @@ test "settings provider behavior selection dispatch is bounded for a hung owner 
     if (select_wait == win32.WAIT_TIMEOUT) {
         _ = win32.WaitForSingleObject(select_done_event, win32.INFINITE);
     }
-    select_thread.join();
-
     _ = win32.SetEvent(destroy_event);
     owner_thread.join();
     owner_joined = true;

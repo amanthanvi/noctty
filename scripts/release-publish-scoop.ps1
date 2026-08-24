@@ -178,8 +178,17 @@ try {
     Push-Location $bucketDirectory
     try {
         & git config user.name 'github-actions[bot]'
+        if ($LASTEXITCODE -ne 0) {
+            throw "git config user.name failed with exit code $LASTEXITCODE"
+        }
         & git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        if ($LASTEXITCODE -ne 0) {
+            throw "git config user.email failed with exit code $LASTEXITCODE"
+        }
         & git add -- $manifestRelativePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "git add failed with exit code $LASTEXITCODE"
+        }
         & git diff --cached --quiet --exit-code
         if ($LASTEXITCODE -eq 0) {
             Write-Host 'Scoop manifest is unchanged; skipping push.'

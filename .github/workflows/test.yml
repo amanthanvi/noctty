@@ -57,6 +57,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
 
+      - name: Setup Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
       - name: Deterministic site asset check
         shell: pwsh
         run: |

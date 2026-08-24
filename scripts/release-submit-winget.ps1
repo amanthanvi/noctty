@@ -26,8 +26,8 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 
-if (-not $env:WINGETCREATE_TOKEN) {
-    Write-Host 'Skipping WinGet submit: WINGETCREATE_TOKEN is not configured.'
+if (-not $env:WINGET_CREATE_GITHUB_TOKEN) {
+    Write-Host 'Skipping WinGet submit: WINGET_CREATE_GITHUB_TOKEN is not configured.'
     return
 }
 if ([string]::IsNullOrWhiteSpace($PackageIdentifier)) {
@@ -170,14 +170,11 @@ function Invoke-WinGetCreateUpdate {
         '--release-notes-url',
         [string] $metadata.release.releaseUrl,
         '--submit',
-        '--no-open',
-        '--token'
+        '--no-open'
     )
     foreach ($argument in $arguments) {
         [void] $startInfo.ArgumentList.Add([string] $argument)
     }
-    [void] $startInfo.ArgumentList.Add($env:WINGETCREATE_TOKEN)
-
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $standardOutputTask = $null
@@ -197,7 +194,7 @@ function Invoke-WinGetCreateUpdate {
         if (-not $process.WaitForExit($WinGetCreateTimeoutSeconds * 1000)) {
             $timedOut = $true
             try {
-                $process.Kill()
+                $process.Kill($true)
             }
             catch {
                 $terminationError = $_.Exception.Message
@@ -233,8 +230,8 @@ function Invoke-WinGetCreateUpdate {
     }
 
     $output = @($standardOutput, $standardError) -join "`n"
-    if (-not [string]::IsNullOrEmpty($env:WINGETCREATE_TOKEN)) {
-        $output = $output.Replace($env:WINGETCREATE_TOKEN, '[REDACTED]')
+    if (-not [string]::IsNullOrEmpty($env:WINGET_CREATE_GITHUB_TOKEN)) {
+        $output = $output.Replace($env:WINGET_CREATE_GITHUB_TOKEN, '[REDACTED]')
     }
     if (-not [string]::IsNullOrWhiteSpace($output)) {
         $output -split '\r?\n' | ForEach-Object { Write-Host $_ }

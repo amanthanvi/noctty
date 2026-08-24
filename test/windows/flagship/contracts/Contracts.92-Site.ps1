@@ -372,7 +372,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)for \(const asset of \["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)'
+        Pattern = '(?ms)for \(const asset of \[.*?"styles\.css".*?"app\.js".*?"version\.js".*?"install\.js".*?"terminal\.js".*?\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)'
         Kind = 'Text'
         Description = 'SHA-256 cache keys cover every local script and stylesheet referenced by each page'
     }
@@ -381,7 +381,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)if \(failures\.length > 0\) \{\s*throw new Error\(`Deterministic site asset check failed'
+        Pattern = '(?ms)if \(failures\.length > 0\) \{\s*throw new Error\(\s*`Deterministic site asset check failed'
         Kind = 'Text'
         Description = 'the deterministic asset check fails closed when committed hashes or cache keys are stale'
     }
@@ -596,6 +596,9 @@ function Assert-ImmutablePagesDeploymentOrigin {
 try {
     $pagesOrigin = [Uri]'https://11111111.noctty.pages.dev/'
     $apiOrigin = [Uri]'https://22222222.noctty.pages.dev/'
+    # The extracted deployment slice consumes this variable dynamically; keep
+    # the static reference so PSScriptAnalyzer can see the intentional use.
+    [void] $apiOrigin
     $DeploymentId = '11111111-1d01-4095-9774-6f8cfe7d7d1e'
     $mismatchMessage = $null
     try {
@@ -878,7 +881,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-Content -LiteralPath $siteHeaderContract -Raw)
         }
-        Pattern = '(?ms)build-site-assets\.mjs.*?--print-header-contract.*?--site-directory.*?generated_headers_base64.*?SequenceEqual\[byte\].*?does not byte-match.*?derivedHeaderContract\.root\.content_security_policy.*?ConvertTo-Json'
+        Pattern = '(?ms)build-site-assets\.mjs.*?ProcessStartInfo.*?RedirectStandardOutput = \$true.*?RedirectStandardError = \$true.*?--print-header-contract.*?--site-directory.*?ReadToEndAsync.*?generated_headers_base64.*?SequenceEqual\[byte\].*?does not byte-match.*?derivedHeaderContract\.root\.content_security_policy.*?ConvertTo-Json'
         Kind = 'Text'
         Description = 'the PowerShell header contract consumes and byte-verifies the builder-derived source of truth'
     }

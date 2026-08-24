@@ -122,11 +122,11 @@ function Get-YamlStepBlock {
     )
 
     $pattern = '(?ms)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?\n.*?(?=^      -[ \t]+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
-    $matches = [regex]::Matches($Content, $pattern)
-    if ($matches.Count -ne 1) {
-        throw "Expected exactly one workflow step '$Name'; found $($matches.Count): $Source"
+    $stepMatches = [regex]::Matches($Content, $pattern)
+    if ($stepMatches.Count -ne 1) {
+        throw "Expected exactly one workflow step '$Name'; found $($stepMatches.Count): $Source"
     }
-    $matches[0].Value
+    $stepMatches[0].Value
 }
 
 function Assert-DeferredZigFixtureExecution {

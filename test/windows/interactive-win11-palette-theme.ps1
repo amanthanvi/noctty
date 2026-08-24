@@ -7,12 +7,12 @@ if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-$args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
-if ($ExerciseHighContrast) { $args += '-ExerciseHighContrast' }
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }; if ($ResetState) { $forwardedArgs += '-ResetState' }
+if ($ExerciseHighContrast) { $forwardedArgs += '-ExerciseHighContrast' }
 Invoke-InteractiveWin11HarnessMain -RepoRoot $repoRoot -LauncherPath $launcher `
     -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PALETTE_THEME_BOOTSTRAPPED' `
-    -ArgumentList $args
+    -ArgumentList $forwardedArgs
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'palette-theme' -ResetState:$ResetState -IncludeResourcesDir
 $layout = $harness.Layout
