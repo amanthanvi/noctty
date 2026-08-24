@@ -1039,7 +1039,7 @@ test "Command: custom working directory" {
 
     var cmd: Command = if (builtin.os.tag == .windows) .{
         .path = "C:\\Windows\\System32\\cmd.exe",
-        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/C", "cd" },
+        .args = &.{ "C:\\Windows\\System32\\cmd.exe", "/D", "/C", "cd" },
         .stdout = stdout,
         .cwd = "C:\\Windows\\System32",
         .os_pre_exec = null,

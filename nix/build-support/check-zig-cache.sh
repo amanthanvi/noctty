@@ -51,6 +51,10 @@ BUILD_ZIG_ZON_NIX="$ROOT/build.zig.zon.nix"
 BUILD_ZIG_ZON_TXT="$ROOT/build.zig.zon.txt"
 BUILD_ZIG_ZON_JSON="$ROOT/build.zig.zon.json"
 
+OLD_HASH_NIX=""
+OLD_HASH_TXT=""
+OLD_HASH_JSON=""
+
 if [ -f "${BUILD_ZIG_ZON_NIX}" ]; then
   OLD_HASH_NIX=$(sha512sum "${BUILD_ZIG_ZON_NIX}" | awk '{print $1}')
 elif [ "$MODE" != "--update" ]; then
@@ -83,19 +87,35 @@ NEW_HASH_NIX=$(sha512sum "$WORK_DIR/build.zig.zon.nix" | awk '{print $1}')
 NEW_HASH_TXT=$(sha512sum "$WORK_DIR/build.zig.zon.txt" | awk '{print $1}')
 NEW_HASH_JSON=$(sha512sum "$WORK_DIR/build.zig.zon.json" | awk '{print $1}')
 
-if [ "${OLD_HASH_NIX}" == "${NEW_HASH_NIX}" ] && [ "${OLD_HASH_TXT}" == "${NEW_HASH_TXT}" ] && [ "${OLD_HASH_JSON}" == "${NEW_HASH_JSON}" ]; then
+NIX_CHANGED=0
+TXT_CHANGED=0
+JSON_CHANGED=0
+[ "${OLD_HASH_NIX}" == "${NEW_HASH_NIX}" ] || NIX_CHANGED=1
+[ "${OLD_HASH_TXT}" == "${NEW_HASH_TXT}" ] || TXT_CHANGED=1
+[ "${OLD_HASH_JSON}" == "${NEW_HASH_JSON}" ] || JSON_CHANGED=1
+
+if [ "$NIX_CHANGED" -eq 0 ] && [ "$TXT_CHANGED" -eq 0 ] && [ "$JSON_CHANGED" -eq 0 ]; then
   echo -e "\nOK: build.zig.zon.nix unchanged."
   echo -e "OK: build.zig.zon.txt unchanged."
   echo -e "OK: build.zig.zon.json unchanged."
   exit 0
 elif [ "$MODE" != "--update" ]; then
-  echo -e "\nERROR: build.zig.zon.nix, build.zig.zon.txt, or build.zig.zon.json needs to be updated.\n"
-  echo "    * Old build.zig.zon.nix hash:         ${OLD_HASH_NIX}"
-  echo "    * New build.zig.zon.nix hash:         ${NEW_HASH_NIX}"
-  echo "    * Old build.zig.zon.txt hash:         ${OLD_HASH_TXT}"
-  echo "    * New build.zig.zon.txt hash:         ${NEW_HASH_TXT}"
-  echo "    * Old build.zig.zon.json hash:        ${OLD_HASH_JSON}"
-  echo "    * New build.zig.zon.json hash:        ${NEW_HASH_JSON}"
+  echo -e "\nERROR: generated Zig cache files need to be updated:\n"
+  if [ "$NIX_CHANGED" -ne 0 ]; then
+    echo "    * build.zig.zon.nix"
+    echo "      old: ${OLD_HASH_NIX}"
+    echo "      new: ${NEW_HASH_NIX}"
+  fi
+  if [ "$TXT_CHANGED" -ne 0 ]; then
+    echo "    * build.zig.zon.txt"
+    echo "      old: ${OLD_HASH_TXT}"
+    echo "      new: ${NEW_HASH_TXT}"
+  fi
+  if [ "$JSON_CHANGED" -ne 0 ]; then
+    echo "    * build.zig.zon.json"
+    echo "      old: ${OLD_HASH_JSON}"
+    echo "      new: ${NEW_HASH_JSON}"
+  fi
   help
   exit 1
 else

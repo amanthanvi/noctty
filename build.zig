@@ -233,13 +233,13 @@ pub fn build(b: *std.Build) !void {
     if (config.app_runtime != .none) {
         try addBenchStep(b, &deps, config.baselineTarget(), "palette-match", "src/bench/palette_match.zig");
     } else {
-        try b.step(
+        const bench_step = b.step(
             "bench:palette-match",
             "Build and run bench/palette-match microbench",
-        ).addError(
-            "bench:palette-match requires an application runtime",
-            .{},
         );
+        bench_step.dependOn(&b.addFail(
+            "bench:palette-match requires an application runtime",
+        ).step);
     }
 }
 

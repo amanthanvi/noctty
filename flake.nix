@@ -42,10 +42,9 @@
     forAllPlatforms = f: lib.genAttrs platforms (s: f legacyPackages.${s});
     forBuildablePlatforms = f: lib.genAttrs buildablePlatforms (s: f legacyPackages.${s});
 
-    mkPkgArgs = pkgs: optimize: {
+    mkPkgArgs = optimize: {
       inherit optimize;
       revision = self.shortRev or self.dirtyShortRev or "dirty";
-      zig_0_15 = pkgs.zig_0_15;
     };
   in {
     devShells = forAllPlatforms (pkgs: {
@@ -56,12 +55,12 @@
     });
 
     packages = forBuildablePlatforms (pkgs: rec {
-      libghostty-vt-debug = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs pkgs "Debug");
-      libghostty-vt-releasesafe = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs pkgs "ReleaseSafe");
-      libghostty-vt-releasefast = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs pkgs "ReleaseFast");
-      libghostty-vt-debug-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs pkgs "Debug") // {simd = false;});
-      libghostty-vt-releasesafe-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs pkgs "ReleaseSafe") // {simd = false;});
-      libghostty-vt-releasefast-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs pkgs "ReleaseFast") // {simd = false;});
+      libghostty-vt-debug = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs "Debug");
+      libghostty-vt-releasesafe = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs "ReleaseSafe");
+      libghostty-vt-releasefast = pkgs.callPackage ./nix/libghostty-vt.nix (mkPkgArgs "ReleaseFast");
+      libghostty-vt-debug-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs "Debug") // {simd = false;});
+      libghostty-vt-releasesafe-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs "ReleaseSafe") // {simd = false;});
+      libghostty-vt-releasefast-no-simd = pkgs.callPackage ./nix/libghostty-vt.nix ((mkPkgArgs "ReleaseFast") // {simd = false;});
 
       libghostty-vt = libghostty-vt-releasefast;
       default = libghostty-vt;
