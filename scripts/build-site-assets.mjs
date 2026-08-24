@@ -55,8 +55,12 @@ function getInlineScriptContract(directory = siteRoot) {
     }
     const script = inlineScripts[0].groups.body;
 
+    const markupWithoutScripts = html.replace(
+      /<script[^>]*>.*?<\/script>/gis,
+      "",
+    );
     const eventAttributeCount = [
-      ...html.matchAll(/\s+on[a-z][a-z0-9_-]*\s*=/gis),
+      ...markupWithoutScripts.matchAll(/\s+on[a-z][a-z0-9_-]*\s*=/gis),
     ].length;
     if (eventAttributeCount !== 0) {
       throw new Error(

@@ -84,6 +84,16 @@ test("the generated CSP rejects inline event handler attributes", (t) => {
   );
 });
 
+test("the generated CSP ignores JavaScript on-property assignments", (t) => {
+  const script = "window.onerror = () => {};";
+  const siteRoot = createSiteFixture(
+    t,
+    htmlWithInlineScripts([script]),
+    htmlWithInlineScripts([script]),
+  );
+  assert.equal(getHeaderContract(siteRoot).script_hashes.length, 1);
+});
+
 test("the generated CSP rejects divergent index and not-found bootstraps", (t) => {
   const siteRoot = createSiteFixture(
     t,

@@ -395,6 +395,12 @@ Invoke-ContractTable -Contracts @(
     }
     @{
         File = $testWorkflow
+        Pattern = '(?ms)^permissions:\s+contents: read\s+concurrency:'
+        Kind = 'Workflow'
+        Description = 'Test workflow grants its GitHub token read-only repository contents access'
+    }
+    @{
+        File = $testWorkflow
         Pattern = '(?ms)- name: Setup Node\.js\s+uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903.*?node-version: 22.*?- name: Deterministic site asset check.*?node scripts/build-site-assets\.mjs --check.*?if \(\$LASTEXITCODE -ne 0\).*?- name: Site unit tests.*?node --test "site/tests/\*\*/\*\.test\.mjs".*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Workflow'
         Description = 'site checks use a pinned supported Node version and retain fail-closed command guards'
