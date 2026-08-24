@@ -5578,6 +5578,85 @@ test "Terminal: print wide char at right edge with hyperlink" {
     }
 }
 
+// A cursor style or hyperlink ID is an index into a set stored in the
+// page memory of the page the cursor pin points at. When scrollClear
+// (here via ED 22, kitty's scroll_complete) pushes the active area onto
+// a later page while the cursor pin is still on an earlier one,
+// cursorReload must migrate the cursor's style and hyperlink references
+// to the destination page. It previously replaced the pin directly,
+// leaving the cursor holding an ID that was dead or aliased an unrelated
+// entry on the new page, and the next print attached a live cell to it.
+// Found via fuzzing.
+test "Terminal: scrollClear across pages keeps cursor hyperlink refs page-local" {
+    const alloc = testing.allocator;
+
+    // Minimized from a 774-byte AFL fuzz input. Reading it:
+    //
+    //   A                 print, so REP has something to repeat
+    //   ESC [ 48111 b     REP, filling the page and spilling onto a second
+    //   ESC ] 8 ; ; 0x93  OSC 8; the C1 byte terminates the OSC and makes
+    //                     the URI non-empty, so a hyperlink starts
+    //   ESC [ 11 A        CUU, moving the cursor back onto the first page
+    //   ESC [ 22 J        ED 22, i.e. scroll_complete -> Screen.scrollClear
+    //   B                 print, which attaches the cursor hyperlink
+    //   ESC ] 8 ; ; ESC   OSC 8 with an empty URI, ending the hyperlink
+    //
+    // The grid must be wide enough to fill a page from a single REP, so
+    // this does not reproduce at 80x24.
+    const input = "A\x1b[48111b\x1b]8;;\x93\x1b[11A\x1b[22JB\x1b]8;;\x1b";
+
+    var t = try init(alloc, .{ .cols = 200, .rows = 50 });
+    defer t.deinit(alloc);
+
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice(input);
+    }
+
+    // With slow runtime safety on, the page integrity checks during the
+    // stream above already catch the bug. Verify the ref counts explicitly
+    // as well so this test is meaningful with runtime safety off: every
+    // cell holding a hyperlink ID owns a reference, so a count below the
+    // number of holding cells means a live cell points at an entry that
+    // was already freed.
+    var node_ = t.screens.active.pages.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const page = &node.data;
+        const cap = page.hyperlink_set.layout.cap;
+        if (cap == 0) continue;
+
+        const holders = try alloc.alloc(u32, cap);
+        defer alloc.free(holders);
+        @memset(holders, 0);
+
+        for (page.rows.ptr(page.memory)[0..page.size.rows]) |*row| {
+            if (!row.hyperlink) continue;
+            for (row.cells.ptr(page.memory)[0..page.size.cols]) |*cell| {
+                if (!cell.hyperlink) continue;
+                const id = page.lookupHyperlink(cell) orelse continue;
+                if (id < cap) holders[id] += 1;
+            }
+        }
+
+        for (holders, 0..) |held, id| {
+            if (held == 0) continue;
+            const refs = page.hyperlink_set.refCount(page.memory, @intCast(id));
+            try testing.expect(refs >= held);
+        }
+    }
+
+    // If the cursor still has an active hyperlink, its own extra
+    // reference must live on the cursor's page.
+    const cursor = &t.screens.active.cursor;
+    if (cursor.hyperlink_id != 0) {
+        const page = &cursor.page_pin.node.data;
+        try testing.expect(
+            page.hyperlink_set.refCount(page.memory, cursor.hyperlink_id) > 0,
+        );
+    }
+}
+
 test "Terminal: linefeed and carriage return" {
     var t = try init(testing.allocator, .{ .cols = 80, .rows = 80 });
     defer t.deinit(testing.allocator);
