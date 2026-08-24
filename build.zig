@@ -50,8 +50,7 @@ pub fn build(b: *std.Build) !void {
     const want_lib_vt_graph = config.emit_lib_vt or config.is_dep;
     const want_test_graph =
         config.emit_test_exe or
-        test_filters.len > 0 or
-        want_lib_vt_graph;
+        test_filters.len > 0;
 
     // Shared dependencies used by many artifacts.
     const deps = try SharedDeps.init(b, &config);
@@ -80,7 +79,10 @@ pub fn build(b: *std.Build) !void {
     } else null;
 
     // noctty executable, the actual runnable app binary.
-    const exe = try GhosttyExe.init(b, &config, &deps);
+    const exe = if (config.app_runtime != .none)
+        try GhosttyExe.init(b, &config, &deps)
+    else
+        null;
 
     // libghostty-vt is retained in this fork, but normal app builds
     // shouldn't pay to build/install it unless explicitly requested.
@@ -138,13 +140,13 @@ pub fn build(b: *std.Build) !void {
     if (config.emit_helpgen) deps.help_strings.install();
 
     if (config.emit_exe and config.app_runtime != .none) {
-        exe.install();
+        exe.?.install();
         if (resources) |r| r.install();
     }
 
     // Run step
     if (config.app_runtime != .none) {
-        const run_cmd = b.addRunArtifact(exe.exe);
+        const run_cmd = b.addRunArtifact(exe.?.exe);
         if (b.args) |args| run_cmd.addArgs(args);
         if (install_resources) run_cmd.setEnvironmentVariable(
             "GHOSTTY_RESOURCES_DIR",
@@ -228,7 +230,17 @@ pub fn build(b: *std.Build) !void {
     // `addBenchStep` wires the shared dep graph so harnesses can import
     // internal modules (e.g. `src/apprt/win32_palette.zig` pulls in zf
     // and the Command catalogue).
-    try addBenchStep(b, &deps, config.baselineTarget(), "palette-match", "src/bench/palette_match.zig");
+    if (config.app_runtime != .none) {
+        try addBenchStep(b, &deps, config.baselineTarget(), "palette-match", "src/bench/palette_match.zig");
+    } else {
+        const bench_step = b.step(
+            "bench:palette-match",
+            "Build and run bench/palette-match microbench",
+        );
+        bench_step.dependOn(&b.addFail(
+            "bench:palette-match requires an application runtime",
+        ).step);
+    }
 }
 
 fn addBenchStep(

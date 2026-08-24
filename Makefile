@@ -21,8 +21,5 @@ vendor/glad/include/glad/glad.h: vendor/glad/include/glad/gl.h
 	@echo "#include <glad/gl.h>" > $@
 
 clean:
-	rm -rf \
-		zig-out .zig-cache \
-		macos/build \
-		macos/GhosttyKit.xcframework
+	rm -rf zig-out .zig-cache
 .PHONY: clean
