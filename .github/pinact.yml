@@ -1,4 +1,1 @@
 version: 3
-ignore_actions:
-  - name: "DeterminateSystems/nix-installer-action"
-    ref: "main"
