@@ -37,4 +37,5 @@ test {
 
     _ = @import("termio/shell_integration.zig");
     _ = @import("termio/utf8_console.zig");
+    _ = @import("conpty_host.zig");
 }

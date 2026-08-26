@@ -75,6 +75,8 @@ pub const Pane = struct {
     profile: ?[]const u8 = null,
     title_override: ?[]const u8 = null,
     tab_title_override: ?[]const u8 = null,
+    /// Last-N lines of plain scrollback when `window-save-scrollback-lines` > 0.
+    scrollback: ?[]const u8 = null,
 };
 
 pub const Split = struct {
@@ -258,6 +260,7 @@ fn expectNodeEqual(expected: Node, actual: Node) !void {
             try expectOptionalStringEqual(expected_pane.profile, actual_pane.profile);
             try expectOptionalStringEqual(expected_pane.title_override, actual_pane.title_override);
             try expectOptionalStringEqual(expected_pane.tab_title_override, actual_pane.tab_title_override);
+            try expectOptionalStringEqual(expected_pane.scrollback, actual_pane.scrollback);
         },
         .split => |expected_split| {
             const actual_split = actual.split;

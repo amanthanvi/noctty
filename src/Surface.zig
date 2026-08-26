@@ -2319,6 +2319,75 @@ test "firstLine splits on CR LF" {
     try testing.expectEqualStrings("only", firstLine("only"));
 }
 
+/// Last-N lines of history+screen as plain text (C15). `max_lines == 0`
+/// returns null. Caller owns the slice.
+pub fn dumpScrollbackPlain(self: *const Surface, alloc: Allocator, max_lines: usize) !?[]u8 {
+    if (max_lines == 0) return null;
+
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+
+    const pages = &self.io.terminal.screens.active.pages;
+    const sel = terminal.Selection.init(
+        pages.getTopLeft(.history),
+        pages.getBottomRight(.screen) orelse return null,
+        false,
+    );
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+
+    const ScreenFormatter = terminal.formatter.ScreenFormatter;
+    var formatter: ScreenFormatter = .init(self.io.terminal.screens.active, .{
+        .emit = .plain,
+        .unwrap = true,
+        .trim = false,
+        .background = self.io.terminal.colors.background.get(),
+        .foreground = self.io.terminal.colors.foreground.get(),
+        .palette = &self.io.terminal.colors.palette.current,
+    });
+    formatter.content = .{ .selection = sel.ordered(
+        self.io.terminal.screens.active,
+        .forward,
+    ) };
+    try formatter.format(&out.writer);
+    const raw = try out.toOwnedSlice();
+    errdefer alloc.free(raw);
+    return try tailLinesOwned(alloc, raw, max_lines);
+}
+
+fn tailLinesOwned(alloc: Allocator, raw: []u8, max_lines: usize) ![]u8 {
+    defer alloc.free(raw);
+    if (max_lines == 0 or raw.len == 0) return try alloc.dupe(u8, "");
+
+    var count: usize = 0;
+    var i = raw.len;
+    while (i > 0) {
+        i -= 1;
+        if (raw[i] == '\n') {
+            count += 1;
+            if (count == max_lines) {
+                const start = i + 1;
+                return try alloc.dupe(u8, raw[start..]);
+            }
+        }
+    }
+    return try alloc.dupe(u8, raw);
+}
+
+/// Replay a saved snapshot into the screen, marked as restored (C15).
+pub fn restoreScrollbackSnapshot(self: *Surface, text: []const u8) !void {
+    if (text.len == 0) return;
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    try self.io.terminal.printString("── restored snapshot (not a live session) ──\r\n");
+    try self.io.terminal.printString(text);
+    if (text.len == 0 or text[text.len - 1] != '\n') {
+        try self.io.terminal.printString("\r\n");
+    }
+    try self.io.terminal.printString("── end snapshot ──\r\n");
+}
+
 /// Returns the selected text. This is allocated.
 pub fn selectionString(self: *Surface, alloc: Allocator) !?[:0]const u8 {
     self.renderer_state.mutex.lock();
@@ -5744,6 +5813,16 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         .copy_last_command_output => return try self.copyLastCommandOutput(),
 
         .rerun_last_command => return try self.rerunLastCommand(),
+
+        .open_elevated_window => return try self.rt_surface.openElevatedWindow(),
+
+        .apply_layout => |name| return try self.rt_app.applyNamedLayout(name),
+
+        .ssh_connect => |host| return try self.rt_app.connectSshHost(host, self.rt_surface),
+
+        .toggle_copy_mode => return self.rt_surface.toggleCopyMode(),
+
+        .select_hint => return try self.rt_surface.selectHint(),
 
         .write_screen_file => |v| try self.writeScreenFile(
             .screen,

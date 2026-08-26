@@ -4,7 +4,7 @@ What currently works in winghostty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-19, against current fork HEAD.
+Last updated: 2026-08-26, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -62,8 +62,9 @@ Win32-validated VT protocol coverage is tracked in
   system-wide keyboard hooks the way macOS Secure Keyboard Entry does).
 - Drag-and-drop of files into the terminal.
 - Session restore via `window-save-state`: windows, tabs, splits,
-  profiles, working directories, and explicit titles come back; terminal
-  contents and child processes do not.
+  profiles, working directories, and explicit titles come back. Set
+  `window-save-scrollback-lines` to also persist last-N lines per pane,
+  restored as a marked snapshot. Child processes are not restored.
 - Ctrl-based default keybindings, mostly shared with Ghostty's
   non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
   pane focus and `Alt+F4` to close the window.
@@ -85,9 +86,19 @@ Win32-validated VT protocol coverage is tracked in
 - Paste and drag-drop protection: core unsafe-paste confirm plus a
   Win32 severity classifier (control characters, shell metacharacters,
   mixed URL content, newlines).
-- Taskbar jump lists of recent working directories (from OSC 7 / OSC 9;9).
+- Taskbar jump lists of recent working directories (from OSC 7 / OSC 9;9)
+  plus named layouts (`--apply-layout=`).
 - Explorer "Open winghostty here" on directories and directory
   backgrounds (installer registry plus portable HKCU registration).
+- Named layouts in `%LOCALAPPDATA%\winghostty\layouts\<name>.json`
+  (`apply_layout:<name>` / `--apply-layout=`).
+- Open Elevated Window (separate process; mixed-elevation tabs are out).
+- Keyboard hints (`select_hint`) and modal copy mode (`toggle_copy_mode`).
+- SSH hosts parsed from `%USERPROFILE%\.ssh\config` and offered in the
+  command palette (`ssh_connect:<host>` runs system `ssh`).
+- ConPTY loader `LoadLibrary`s adjacent `conpty.dll` + `OpenConsole.exe`;
+  otherwise logs degraded Kitty/Sixel risk. See
+  [windows-conpty.md](windows-conpty.md).
 
 ### Renderer
 
@@ -111,6 +122,8 @@ Win32-validated VT protocol coverage is tracked in
 
 - WinGet package id: `AmanThanvi.winghostty`.
 - Scoop bucket: `https://github.com/amanthanvi/scoop-winghostty`.
+- Chocolatey package id: `winghostty` (release pipeline packs; push
+  requires `CHOCO_API_KEY`).
 
 ### Crash reports
 
@@ -172,13 +185,14 @@ and lands incrementally.
 
 No formal roadmap. Likely next areas:
 
-- Broader UI Automation / screen reader coverage.
+- Broader UI Automation / screen reader coverage. Matrix:
+  [windows-accessibility.md](windows-accessibility.md).
 - Continuing the `src/apprt/win32.zig` extraction.
-- Portable ZIP updater apply/rollback.
+- Portable ZIP extract into `.apply-new` before the swap/rollback helpers (C29).
+- Full `ITerminalHandoff` pipe-attach before setting DelegationTerminal.
 - Broader local crash metadata and report packaging.
 - ARB-context OpenGL migration paired with atlas rebuild.
-- Competitive-response waves after Wave 1: bundled OpenConsole, default
-  terminal handoff, scrollback restore, named layouts. See
-  [plans/2026-competitive-roadmap.md](../plans/2026-competitive-roadmap.md).
+- See [plans/2026-competitive-roadmap.md](../plans/2026-competitive-roadmap.md)
+  and [trust.md](trust.md).
 
 Contributions that advance any of the above are welcome.

@@ -29,6 +29,14 @@ const win32_settings = @import("win32_settings.zig");
 const win32_aumid = @import("win32_aumid.zig");
 const win32_jump_list = @import("win32_jump_list.zig");
 const win32_explorer_verb = @import("win32_explorer_verb.zig");
+const win32_power = @import("win32_power.zig");
+const win32_ssh_hosts = @import("win32_ssh_hosts.zig");
+const win32_named_layout = @import("win32_named_layout.zig");
+const win32_hints = @import("win32_hints.zig");
+const win32_copy_mode = @import("win32_copy_mode.zig");
+const win32_elevation = @import("win32_elevation.zig");
+const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
+const portable_apply = @import("../update/portable_apply.zig");
 const win32_chrome_state = @import("win32_chrome_state.zig");
 const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
@@ -1826,6 +1834,24 @@ fn applyProfileCommandConfig(
     config.command = try profile.command.clone(alloc);
 }
 
+fn copyModeSlice(text: []const u8, row: u16) ?[]const u8 {
+    var i: usize = 0;
+    var current: u16 = 0;
+    var start: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '\n') {
+            if (current == row) {
+                const end = if (i > start and text[i - 1] == '\r') i - 1 else i;
+                return text[start..end];
+            }
+            current += 1;
+            start = i + 1;
+        }
+    }
+    if (current == row) return text[start..];
+    return null;
+}
+
 fn splitWorkingDirectoryCandidate(live_pwd: ?[]const u8, cached_pwd: ?[]const u8) ?[]const u8 {
     if (live_pwd) |pwd| {
         if (pwd.len > 0) return pwd;
@@ -2066,6 +2092,14 @@ fn normalizeForwardedStartupArg(
         std.mem.eql(u8, arg, "--safe-mode"))
     {
         return null;
+    }
+
+    if (std.mem.eql(u8, arg, "--terminal-handoff")) {
+        return null;
+    }
+
+    if (std.mem.startsWith(u8, arg, "--apply-layout=")) {
+        return try alloc.dupeZ(u8, arg);
     }
 
     if (std.mem.startsWith(u8, arg, "--working-directory=")) {
@@ -2696,6 +2730,9 @@ pub const App = struct {
     taskbar_progress: ?win32_taskbar_progress.TaskbarProgress = null,
     jump_list_recent: [win32_jump_list.max_recent][]u8 = undefined,
     jump_list_recent_count: usize = 0,
+    power: win32_power.State = .{},
+    pending_apply_layout: ?[]u8 = null,
+    ssh_hosts: [][]const u8 = &.{},
     toast_activation_post_pending: std.atomic.Value(bool) = .init(false),
     /// Absolute path supplied via `--config-file <path>` on the CLI.
     /// Resolved ONCE against the startup cwd during `App.init` — that's
@@ -2807,9 +2844,13 @@ pub const App = struct {
         if (std.fs.selfExePathAlloc(core_app.alloc)) |exe_path| {
             defer core_app.alloc.free(exe_path);
             win32_explorer_verb.register(exe_path);
+            win32_terminal_handoff.registerLocalServer(exe_path);
         } else |err| {
             std.log.debug("explorer verb skipped; self exe path err={}", .{err});
         }
+        self.power = win32_power.query();
+        self.loadSshHosts();
+        self.capturePendingApplyLayout();
 
         // Windows version probe. Win11 build 22000+ enables the
         // integrated-titlebar path; older builds stay on the stock
@@ -2930,6 +2971,7 @@ pub const App = struct {
         if (self.config.@"initial-window") {
             const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
+            self.consumePendingApplyLayout();
             if (!restored and self.startup_profile_picker) {
                 if (self.primarySurface()) |surface| {
                     if (surface.host) |host| _ = host.toggleProfileOverlay();
@@ -3090,6 +3132,9 @@ pub const App = struct {
             self.core_app.alloc.free(self.jump_list_recent[jump_i]);
         }
         self.jump_list_recent_count = 0;
+        for (self.ssh_hosts) |host| self.core_app.alloc.free(host);
+        if (self.ssh_hosts.len > 0) self.core_app.alloc.free(self.ssh_hosts);
+        if (self.pending_apply_layout) |name| self.core_app.alloc.free(name);
         self.savePaletteMru();
         for (&self.palette_mru) |*slot| {
             if (slot.*) |owned| self.core_app.alloc.free(owned);
@@ -3246,6 +3291,114 @@ pub const App = struct {
             },
             .loaded => |parsed| parsed,
         };
+    }
+
+    fn capturePendingApplyLayout(self: *App) void {
+        var iter = cli_args.argsIterator(self.core_app.alloc) catch return;
+        defer iter.deinit();
+        while (iter.next()) |arg| {
+            if (std.mem.startsWith(u8, arg, "--apply-layout=")) {
+                const name = std.mem.trim(u8, arg["--apply-layout=".len..], &std.ascii.whitespace);
+                if (!win32_named_layout.isValidName(name)) continue;
+                if (self.pending_apply_layout) |old| self.core_app.alloc.free(old);
+                self.pending_apply_layout = self.core_app.alloc.dupe(u8, name) catch null;
+            }
+        }
+    }
+
+    fn consumePendingApplyLayout(self: *App) void {
+        const name = self.pending_apply_layout orelse return;
+        defer {
+            self.core_app.alloc.free(name);
+            self.pending_apply_layout = null;
+        }
+        _ = self.applyNamedLayout(name) catch |err| {
+            log.warn("pending named layout failed name={s} err={}", .{ name, err });
+        };
+    }
+
+    fn loadSshHosts(self: *App) void {
+        const home = std.process.getEnvVarOwned(self.core_app.alloc, "USERPROFILE") catch return;
+        defer self.core_app.alloc.free(home);
+        const path = std.fs.path.join(self.core_app.alloc, &.{ home, ".ssh", "config" }) catch return;
+        defer self.core_app.alloc.free(path);
+        const text = std.fs.cwd().readFileAlloc(self.core_app.alloc, path, 256 * 1024) catch return;
+        defer self.core_app.alloc.free(text);
+        const names = win32_ssh_hosts.parseConfig(self.core_app.alloc, text) catch return;
+        self.ssh_hosts = names;
+    }
+
+    pub fn applyNamedLayout(self: *App, name: []const u8) !bool {
+        if (!win32_named_layout.isValidName(name)) return false;
+        const dir = self.localAppDataPath("layouts") orelse return false;
+        defer self.core_app.alloc.free(dir);
+        var name_buf: [80]u8 = undefined;
+        const file_name = try win32_named_layout.fileName(name, &name_buf);
+        const path = try std.fs.path.join(self.core_app.alloc, &.{ dir, file_name });
+        defer self.core_app.alloc.free(path);
+
+        const raw = std.fs.cwd().readFileAlloc(self.core_app.alloc, path, 1 * 1024 * 1024) catch |err| {
+            log.warn("named layout read failed path={s} err={}", .{ path, err });
+            return false;
+        };
+        defer self.core_app.alloc.free(raw);
+
+        var parsed = win32_named_layout.parseLayout(self.core_app.alloc, raw) catch |err| {
+            log.warn("named layout parse failed path={s} err={}", .{ path, err });
+            return false;
+        };
+        defer parsed.deinit();
+
+        var restored_any = false;
+        for (parsed.value.windows) |window| {
+            if (self.restoreSessionWindow(window)) |_| {
+                restored_any = true;
+            } else |err| {
+                log.warn("named layout restore failed name={s} err={}", .{ name, err });
+            }
+        }
+        return restored_any;
+    }
+
+    fn publishJumpList(self: *App, exe_path: []const u8) void {
+        var layouts: [][]const u8 = &.{};
+        if (self.localAppDataPath("layouts")) |dir| {
+            defer self.core_app.alloc.free(dir);
+            layouts = win32_named_layout.listLayoutNames(self.core_app.alloc, dir) catch &.{};
+        }
+        defer {
+            for (layouts) |name| self.core_app.alloc.free(name);
+            if (layouts.len > 0) self.core_app.alloc.free(layouts);
+        }
+        win32_jump_list.publishCategories(
+            exe_path,
+            self.jump_list_recent[0..self.jump_list_recent_count],
+            layouts,
+        );
+    }
+
+    pub fn connectSshHost(self: *App, host: []const u8, source: ?*Surface) !bool {
+        if (!win32_ssh_hosts.isSafeHost(host)) return false;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        const alloc = config._arena.?.allocator();
+        var cmd_buf: [288]u8 = undefined;
+        const cmd = try std.fmt.bufPrintZ(&cmd_buf, "ssh {s}", .{host});
+        config.command = .{ .shell = try alloc.dupeZ(u8, cmd) };
+
+        var title_buf: [160]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "ssh {s}", .{host}) catch host;
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, title);
+        defer self.core_app.alloc.free(title_w);
+        _ = try self.createWindowSurface(&config, title_w.ptr, .{
+            .host_id = if (source) |v| v.host_id else null,
+            .tab_insert_index = if (source) |v| if (v.host) |host_ptr|
+                windowNewTabInsertIndex(host_ptr, self.config.@"window-new-tab-position")
+            else
+                null else null,
+            .clone_state_from = source,
+        });
+        return true;
     }
 
     fn restoreSessionState(self: *App) !bool {
@@ -3459,6 +3612,11 @@ pub const App = struct {
         if (pane.title_override) |title| try surface.setTitleOverride(title);
         if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
         if (pane.cwd) |cwd| try surface.setPwd(cwd);
+        if (pane.scrollback) |snapshot| {
+            surface.core_surface.restoreScrollbackSnapshot(snapshot) catch |err| {
+                log.warn("win32 session restore: scrollback replay failed err={}", .{err});
+            };
+        }
         return surface;
     }
 
@@ -3569,7 +3727,7 @@ pub const App = struct {
         for (host.tabs.items, 0..) |*tab, i| {
             if (tabContainsQuickTerminal(tab)) continue;
             if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildSessionTab(alloc, tab);
+            tabs[built] = try buildSessionTab(alloc, tab, self.config.@"window-save-scrollback-lines");
             built += 1;
         }
 
@@ -3586,13 +3744,13 @@ pub const App = struct {
         if (host.hwnd) |hwnd| {
             window.state = if (IsZoomed(hwnd) != 0) .maximized else .normal;
         }
-        _ = self;
         return window;
     }
 
     fn buildSessionTab(
         alloc: Allocator,
         tab: *const Tab,
+        scrollback_lines: usize,
     ) !win32_session_state.Tab {
         var selected_leaf: usize = 0;
         var leaf_index: usize = 0;
@@ -3607,13 +3765,14 @@ pub const App = struct {
 
         return .{
             .selected_leaf = selected_leaf,
-            .layout = try buildSessionLayout(alloc, tab),
+            .layout = try buildSessionLayout(alloc, tab, scrollback_lines),
         };
     }
 
     fn buildSessionLayout(
         alloc: Allocator,
         tab: *const Tab,
+        scrollback_lines: usize,
     ) !win32_session_state.LayoutTree {
         if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
@@ -3624,6 +3783,13 @@ pub const App = struct {
                     .profile = surface.launch_profile_key,
                     .title_override = surface.title_override,
                     .tab_title_override = surface.tab_title_override,
+                    .scrollback = if (scrollback_lines == 0)
+                        null
+                    else
+                        surface.core_surface.dumpScrollbackPlain(alloc, scrollback_lines) catch |err| blk: {
+                            log.warn("win32 session save: scrollback dump failed err={}", .{err});
+                            break :blk null;
+                        },
                 } },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {
@@ -4156,6 +4322,25 @@ pub const App = struct {
         defer self.core_app.alloc.free(install_dir);
 
         if (!isInstallerManagedInstallDir(install_dir)) {
+            if (portable_apply.isPortableZipName(staged.installer_path)) {
+                var plan = try portable_apply.planSwap(self.core_app.alloc, install_dir);
+                defer plan.deinit(self.core_app.alloc);
+                log.info(
+                    "portable ZIP apply planned root={s} new={s} old={s}",
+                    .{ plan.root, plan.new_path, plan.old_path },
+                );
+                // ponytail: extract+swap is the remaining apply-worker slice;
+                // this records the plan and quits so a helper can finish the
+                // rename after the current exe handle is released.
+                updatepkg.recordStagedApplyRequested(self.core_app.alloc, state_path, 0) catch |err| {
+                    log.warn("failed to record portable apply request err={}", .{err});
+                };
+                self.stopQuitTimer();
+                self.running = false;
+                self.destroyAllWindows();
+                if (self.windows.items.len == 0) PostQuitMessage(0);
+                return;
+            }
             self.showUpdateInfo(updateApplyFailureMessage(error.PortableInstallUpdateApplyUnsupported)) catch |banner_err| {
                 log.warn("failed to show updater apply failure err={}", .{banner_err});
             };
@@ -4208,7 +4393,7 @@ pub const App = struct {
     fn canApplyStagedUpdate(self: *App) bool {
         const install_dir = currentInstallDir(self.core_app.alloc) catch return false;
         defer self.core_app.alloc.free(install_dir);
-        return isInstallerManagedInstallDir(install_dir);
+        return true;
     }
 
     fn showUpdateInfo(self: *App, message: []const u8) !void {
@@ -9492,6 +9677,50 @@ const Host = struct {
         return slot[0..len];
     }
 
+    fn appendRuntimePaletteActions(self: *Host) void {
+        for (self.app.ssh_hosts) |host| {
+            if (!win32_ssh_hosts.isSafeHost(host)) continue;
+            var action_buf: [320]u8 = undefined;
+            const action = std.fmt.bufPrint(&action_buf, "ssh_connect:{s}", .{host}) catch continue;
+            const action_owned = self.storePaletteCatalogLabel(action);
+            var title_buf: [160]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buf, "SSH {s}", .{host}) catch host;
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.action, action_owned),
+                    .title = self.storePaletteCatalogLabel(title),
+                    .subtitle = "SSH host",
+                    .keywords = "ssh host remote",
+                },
+                .payload = .{ .action = .{ .action = action_owned } },
+            });
+        }
+
+        const dir = self.app.localAppDataPath("layouts") orelse return;
+        defer self.app.core_app.alloc.free(dir);
+        const names = win32_named_layout.listLayoutNames(self.app.core_app.alloc, dir) catch return;
+        defer {
+            for (names) |name| self.app.core_app.alloc.free(name);
+            self.app.core_app.alloc.free(names);
+        }
+        for (names) |name| {
+            var action_buf: [96]u8 = undefined;
+            const action = std.fmt.bufPrint(&action_buf, "apply_layout:{s}", .{name}) catch continue;
+            const action_owned = self.storePaletteCatalogLabel(action);
+            var title_buf: [96]u8 = undefined;
+            const title = std.fmt.bufPrint(&title_buf, "Layout {s}", .{name}) catch name;
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.action, action_owned),
+                    .title = self.storePaletteCatalogLabel(title),
+                    .subtitle = "Named layout",
+                    .keywords = "layout workspace",
+                },
+                .payload = .{ .action = .{ .action = action_owned } },
+            });
+        }
+    }
+
     fn appendPaletteDescriptor(self: *Host, descriptor: win32_palette.catalog.Descriptor) bool {
         const catalog = if (self.palette_catalog) |*value| value else return false;
         catalog.append(descriptor) catch |err| {
@@ -9722,6 +9951,7 @@ const Host = struct {
         catalog.appendRecentActionMru(snap, mru) catch |err| {
             log.warn("palette recent-action batch rejected err={}", .{err});
         };
+        self.appendRuntimePaletteActions();
 
         const ranked = catalog.rank(
             text,
@@ -10399,20 +10629,27 @@ const Host = struct {
             return;
         }
         const snap = self.paletteSnapshot();
-        const snapshot_index = payload.snapshot_index orelse {
-            self.abortPaletteAction("Command is no longer available; reopen the palette.");
-            return;
+        var runtime_action_buf: [320]u8 = undefined;
+        const action, const current_text = if (payload.snapshot_index) |snapshot_index| blk: {
+            if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) {
+                self.abortPaletteAction("Command is no longer available; reopen the palette.");
+                return;
+            }
+            const text = std.mem.span(snap.cvals[snapshot_index].action);
+            if (!std.mem.eql(u8, text, payload.action)) {
+                self.abortPaletteAction("Command changed; reopen the palette and try again.");
+                return;
+            }
+            break :blk .{ snap.commands[snapshot_index].action, text };
+        } else blk: {
+            const n = @min(payload.action.len, runtime_action_buf.len);
+            @memcpy(runtime_action_buf[0..n], payload.action[0..n]);
+            const parsed = input.Binding.Action.parse(runtime_action_buf[0..n]) catch {
+                self.abortPaletteAction("Command is no longer available; reopen the palette.");
+                return;
+            };
+            break :blk .{ parsed, runtime_action_buf[0..n] };
         };
-        if (snapshot_index >= snap.commands.len or snapshot_index >= snap.cvals.len) {
-            self.abortPaletteAction("Command is no longer available; reopen the palette.");
-            return;
-        }
-        const current_text = std.mem.span(snap.cvals[snapshot_index].action);
-        if (!std.mem.eql(u8, current_text, payload.action)) {
-            self.abortPaletteAction("Command changed; reopen the palette and try again.");
-            return;
-        }
-        const action = snap.commands[snapshot_index].action;
         const surface = self.activeSurface() orelse {
             self.abortPaletteAction("No active terminal is available for this command.");
             return;
@@ -14377,9 +14614,14 @@ const Host = struct {
             self.app.hostTabStatus(surface),
         );
         defer alloc.free(host_base_title);
-        if (!windowTitleSyncChanged(self.cached_window_title, host_base_title)) return false;
-        try appendOwnedString(alloc, &self.cached_window_title, host_base_title);
-        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, host_base_title);
+        var elevated_buf: [512]u8 = undefined;
+        const display_title = if (win32_elevation.isElevated())
+            win32_elevation.markTitle(host_base_title, &elevated_buf)
+        else
+            host_base_title;
+        if (!windowTitleSyncChanged(self.cached_window_title, display_title)) return false;
+        try appendOwnedString(alloc, &self.cached_window_title, display_title);
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, display_title);
         defer alloc.free(title_w);
         _ = SetWindowTextW(hwnd, title_w.ptr);
         return true;
@@ -23920,6 +24162,8 @@ pub const Surface = struct {
     scrollbar_marker_revision: u64 = 0,
     scrollbar_marker_budget: usize = 0,
     scrollbar_paint_cache: ?ScrollbarPaintKey = null,
+    copy_mode: win32_copy_mode.State = .{},
+    hint_index: usize = 0,
     pwd: ?[:0]const u8 = null,
     progress_status: ?[:0]const u8 = null,
     taskbar_progress: ?win32_taskbar_progress.ProgressReport = null,
@@ -25015,6 +25259,89 @@ pub const Surface = struct {
         };
     }
 
+    pub fn openElevatedWindow(self: *Surface) !bool {
+        const alloc = self.app.core_app.alloc;
+        const exe_path = try std.fs.selfExePathAlloc(alloc);
+        defer alloc.free(exe_path);
+        const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, exe_path);
+        defer alloc.free(exe_w);
+        // ShellExecuteW lpFile is the exe; lpParameters must not repeat it.
+        const result = ShellExecuteW(null, shell_runas, exe_w.ptr, null, null, SW_SHOW);
+        if (@intFromPtr(result) <= 32) return error.ElevationLaunchFailed;
+        return true;
+    }
+
+    pub fn toggleCopyMode(self: *Surface) bool {
+        if (self.copy_mode.active) {
+            self.copy_mode.leave();
+            if (self.host) |host| host.setBanner(.none, null) catch {};
+            return true;
+        }
+        self.copy_mode.enter(0, 0);
+        if (self.host) |host| host.setBanner(.info, "COPY MODE") catch {};
+        return true;
+    }
+
+    fn handleCopyModeVirtualKey(self: *Surface, vk: u16) bool {
+        const result = self.copy_mode.handleVirtualKey(vk, 24, 80);
+        switch (result) {
+            .ignored => return false,
+            .moved => return true,
+            .left => {
+                if (self.host) |host| host.setBanner(.none, null) catch {};
+                return true;
+            },
+            .copied => {
+                self.copyModeYank() catch {};
+                return true;
+            },
+        }
+    }
+
+    fn copyModeYank(self: *Surface) !void {
+        const alloc = self.app.core_app.alloc;
+        const text = self.core_surface.dumpScrollbackPlain(alloc, 200) catch return;
+        const owned = text orelse return;
+        defer alloc.free(owned);
+        const slice = copyModeSlice(owned, self.copy_mode.row) orelse owned;
+        const slice_z = try alloc.dupeZ(u8, slice);
+        defer alloc.free(slice_z);
+        try self.setClipboard(.standard, &.{.{
+            .mime = "text/plain",
+            .data = slice_z,
+        }}, false);
+    }
+
+    pub fn selectHint(self: *Surface) !bool {
+        const alloc = self.app.core_app.alloc;
+        const text = self.core_surface.dumpScrollbackPlain(alloc, 200) catch return false;
+        const owned = text orelse return false;
+        defer alloc.free(owned);
+        var matches: [win32_hints.max_matches]win32_hints.Match = undefined;
+        const n = win32_hints.findMatches(owned, &matches);
+        if (n == 0) return false;
+        const idx = self.hint_index % n;
+        self.hint_index = idx + 1;
+        const match = matches[idx];
+        const slice = owned[match.start..match.end];
+        const slice_z = try alloc.dupeZ(u8, slice);
+        defer alloc.free(slice_z);
+        try self.setClipboard(.standard, &.{.{
+            .mime = "text/plain",
+            .data = slice_z,
+        }}, false);
+        if (self.host) |host| {
+            var banner_buf: [192]u8 = undefined;
+            const banner = std.fmt.bufPrint(
+                &banner_buf,
+                "Hint {d}/{d}: {s}",
+                .{ idx + 1, n, slice },
+            ) catch slice;
+            host.setBanner(.info, banner) catch {};
+        }
+        return true;
+    }
+
     pub fn requestRepaint(self: *Surface) !void {
         // During an interactive drag-resize the OS drives WM_SIZE →
         // WM_PAINT on every mouse-delta; stacking additional
@@ -25030,6 +25357,10 @@ pub const Surface = struct {
         // enters a drag. Surfaces outside a Host (quick-terminal
         // pre-host-attach, pre-init paint) fall through without
         // gating.
+        self.app.power = win32_power.query();
+        if (win32_power.shouldThrottleUnfocused(self.app.power, self.window_focused)) {
+            return;
+        }
         const repaint_mode = surfaceRepaintRequestMode(self.host);
         try self.requestRepaintWithMode(repaint_mode);
     }
@@ -27002,6 +27333,9 @@ pub const Surface = struct {
 
     fn handleKeyMessage(self: *Surface, msg: UINT, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
+        if (self.copy_mode.active and (msg == WM_KEYDOWN or msg == WM_SYSKEYDOWN)) {
+            if (self.handleCopyModeVirtualKey(@intCast(wParam & 0xFFFF))) return;
+        }
 
         const message = keyEventFromWin32Message(msg, wParam, lParam) orelse return;
         const event = message.event;
@@ -27027,6 +27361,7 @@ pub const Surface = struct {
 
     fn handleCharMessage(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
         if (!self.core_initialized) return;
+        if (self.copy_mode.active) return;
 
         const code_unit: u16 = @intCast(wParam & 0xFFFF);
         const codepoint = self.deferred_char.consumeCodeUnit(
@@ -27461,7 +27796,7 @@ pub const Surface = struct {
         };
         if (std.fs.selfExePathAlloc(alloc)) |exe_path| {
             defer alloc.free(exe_path);
-            win32_jump_list.publish(exe_path, self.app.jump_list_recent[0..self.app.jump_list_recent_count]);
+            self.app.publishJumpList(exe_path);
         } else |_| {}
     }
 

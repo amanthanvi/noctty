@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>winghostty</id>
+    <version>0.0.0</version>
+    <title>winghostty</title>
+    <authors>Aman Thanvi</authors>
+    <projectUrl>https://github.com/amanthanvi/winghostty</projectUrl>
+    <licenseUrl>https://github.com/amanthanvi/winghostty/blob/main/LICENSE</licenseUrl>
+    <packageSourceUrl>https://github.com/amanthanvi/winghostty</packageSourceUrl>
+    <docsUrl>https://github.com/amanthanvi/winghostty/blob/main/docs/trust.md</docsUrl>
+    <bugTrackerUrl>https://github.com/amanthanvi/winghostty/issues</bugTrackerUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Windows-only Ghostty fork. Native Win32 terminal with signed releases.</description>
+    <tags>terminal ghostty console</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

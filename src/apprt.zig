@@ -74,4 +74,13 @@ test {
     _ = win32_tab_drop_zones;
     _ = win32_compositor;
     _ = win32_shell;
+    _ = @import("apprt/win32_named_layout.zig");
+    _ = @import("apprt/win32_power.zig");
+    _ = @import("apprt/win32_elevation.zig");
+    _ = @import("apprt/win32_hints.zig");
+    _ = @import("apprt/win32_copy_mode.zig");
+    _ = @import("apprt/win32_ssh_hosts.zig");
+    _ = @import("apprt/win32_terminal_handoff.zig");
+    _ = @import("apprt/win32_jump_list.zig");
+    _ = @import("apprt/win32_explorer_verb.zig");
 }

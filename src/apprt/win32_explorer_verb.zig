@@ -3,6 +3,10 @@
 //! Writes HKCU Directory / Directory\Background shell verbs pointing at
 //! the current executable. Installer copies the same keys for per-machine
 //! installs; this path covers portable / first-run.
+//!
+//! ponytail: Win11 IExplorerCommand is an in-proc COM DLL. Classic
+//! verbs cover Directory + Directory\\Background today; do not register
+//! a sparse COM class until that DLL exists.
 
 const std = @import("std");
 const builtin = @import("builtin");

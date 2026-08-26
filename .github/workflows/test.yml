@@ -108,6 +108,14 @@ jobs:
         # `zig build` duplicated the same Windows compile/link work.
         run: zig build -Demit-exe=true
 
+      - name: Windows bench harness (provisional C01 gates)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # PRODUCT.md budgets stay provisional until the first same-machine
+          # baseline. This records numbers; it must not fail the suite yet.
+          ./scripts/bench-windows.ps1 -Runs 1 -TimeoutMs 20000
+
       - name: Verify default source-build shader mode
         shell: pwsh
         run: |

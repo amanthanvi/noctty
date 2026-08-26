@@ -51,7 +51,8 @@ Important files and directories:
 | Path                                           | Purpose                                                                                        |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `%LOCALAPPDATA%\winghostty\config.ghostty`     | User config written on first launch.                                                           |
-| `%LOCALAPPDATA%\winghostty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
+| `%LOCALAPPDATA%\winghostty\session-state.json` | Window, tab, split, profile, cwd, title, and optional scrollback-snapshot restore state.       |
+| `%LOCALAPPDATA%\winghostty\layouts\`           | Named layout JSON files (`apply_layout:<name>` / `--apply-layout=`).                           |
 | `%LOCALAPPDATA%\winghostty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
 | `%LOCALAPPDATA%\winghostty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
 
@@ -100,14 +101,45 @@ command = wsl.exe
 ## OS entry points
 
 Taskbar jump lists show recent working directories reported by shell
-integration (OSC 7 / OSC 9;9). Clicking a destination opens a new
-window in that directory via `--working-directory`.
+integration (OSC 7 / OSC 9;9) plus named layouts. Clicking a directory
+opens a new window via `--working-directory`; a layout uses
+`--apply-layout=`.
 
 The installer and portable first-run registration add Explorer
 **Open winghostty here** on folders and folder backgrounds. Portable
 builds write HKCU verbs pointing at the current `winghostty.exe`;
 uninstall / moving the portable folder leaves those verbs stale until
-the next launch from the new path.
+the next launch from the new path. Win11 `IExplorerCommand` COM is
+the remaining C13 slice; classic verbs ship today.
+
+Named layouts live in `%LOCALAPPDATA%\winghostty\layouts\<name>.json`
+using the session-state schema. Apply with `apply_layout:<name>` or
+`--apply-layout=<name>`.
+
+## Elevation
+
+Elevated winghostty is a **separate process** launched with the
+`runas` verb (palette: Open Elevated Window). Mixed-elevation tabs
+in one window are out. Session restore never relaunches elevated
+windows; re-open them explicitly. The title is prefixed
+`[Administrator]` when the process is elevated.
+
+## SSH hosts
+
+winghostty parses `%USERPROFILE%\.ssh\config` `Host` lines (skips
+wildcards). Launch with the system client:
+
+```powershell
+winghostty -e ssh jump
+```
+
+No bundled SSH client and no credential vault.
+
+## Power
+
+On battery, unfocused panes skip extra renderer wakes (C02). Focused
+and AC-powered sessions stay on the normal path. Idle wattage belongs
+in [windows-benchmarks.md](windows-benchmarks.md) once a baseline exists.
 
 ## Prompt-mark navigation
 
@@ -208,8 +240,9 @@ unrelated text. The full feature detail for both lives in the
 
 Session restore persists the practical shape of your workspace: host
 windows, tabs, split layout, selected profiles, working directories, and
-explicit titles. It doesn't restore terminal contents or child process
-state.
+explicit titles. Set `window-save-scrollback-lines = N` to also persist
+the last N lines per pane as a marked snapshot (not a live session).
+Child processes are not restored.
 
 If the session-state file is unreadable, winghostty moves it aside to a
 sibling named after the original with a `.corrupt` suffix, logs the
@@ -257,7 +290,11 @@ For installer-managed installs, the update notice can launch the verified
 staged installer. Applying an update is always user-initiated: it
 re-verifies the staged installer, records apply intent, launches the
 installer elevated (UAC may prompt), and exits the app. Portable ZIP
-auto-apply is not implemented yet.
+apply plans the sibling `.apply-new` / `.apply-old` swap and quits so
+the current exe handle can be released; extracting the zip into
+`.apply-new` is the remaining helper slice. Re-point the updater API
+with `WINGHOSTTY_UPDATE_API_BASE` (C31). See also
+[windows-signing.md](windows-signing.md) and [trust.md](trust.md).
 
 The updater is also the only outbound network call the app makes; there
 is no telemetry and no analytics.
@@ -273,10 +310,18 @@ check logs when a global binding does not register.
 `quick-terminal-keyboard-interactivity = exclusive` maps to focused input
 on Windows. Global keyboard capture is intentionally not implemented.
 
+## Default terminal
+
+winghostty advertises a COM LocalServer32 class for `ITerminalHandoff`
+(`--terminal-handoff`) but does **not** write `DelegationTerminal`.
+Becoming the OS default before pipe-attach lands would open empty
+windows. Keep Windows Terminal (or conhost) as the default until that
+slice ships. See [windows-conpty.md](windows-conpty.md).
+
 ## Automation
 
-winghostty exposes a local Windows automation surface over the same
-single-instance IPC path used by `+new-window`.
+See [windows-automation.md](windows-automation.md) for the staged verb
+set. The short version:
 
 List windows, tabs, and panes:
 

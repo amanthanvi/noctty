@@ -686,3 +686,29 @@ jobs:
           if ($result.ExitCode -ne 0) {
             throw "wingetcreate update failed with exit code $($result.ExitCode)"
           }
+
+      - name: Publish Chocolatey package
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
+          if (-not (Test-Path -LiteralPath $metadataPath)) {
+            Write-Host "Skipping Chocolatey publish: package-managers metadata is missing."
+            return
+          }
+          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $installerUrl = [string]$metadata.installerUrl
+          $sha256 = [string]$metadata.installerSha256
+          if (-not $installerUrl -or -not $sha256) {
+            $installerUrl = [string]$metadata.winget.installerUrl
+            $sha256 = [string]$metadata.sha256
+          }
+          if (-not $installerUrl) {
+            Write-Host "Skipping Chocolatey publish: installer URL is missing."
+            return
+          }
+          if (-not $sha256) { $sha256 = "0" * 64 }
+          ./scripts/publish-chocolatey.ps1 -Version $version -InstallerUrl $installerUrl -Sha256 $sha256

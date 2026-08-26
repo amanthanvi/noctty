@@ -5,10 +5,12 @@ const internal_os = @import("../os/main.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const endpoint = @import("endpoint.zig");
+
 const log = std.log.scoped(.update_github_releases);
 
-pub const repo_owner = "amanthanvi";
-pub const repo_name = "winghostty";
+pub const repo_owner = endpoint.repo_owner;
+pub const repo_name = endpoint.repo_name;
 pub const latest_stable_api_url = "https://api.github.com/repos/amanthanvi/winghostty/releases/latest";
 pub const releases_url = "https://github.com/amanthanvi/winghostty/releases";
 pub const windows_checksums_asset_name_legacy = "SHA256SUMS.txt";
@@ -919,8 +921,11 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
     var response_buf: std.Io.Writer.Allocating = .init(alloc);
     defer response_buf.deinit();
 
+    const api_url = try endpoint.latestStableApiUrlOwned(alloc);
+    defer alloc.free(api_url);
+
     const result = try client.fetch(.{
-        .location = .{ .url = latest_stable_api_url },
+        .location = .{ .url = api_url },
         .extra_headers = &.{
             .{ .name = "accept", .value = "application/vnd.github+json" },
             .{ .name = "user-agent", .value = "winghostty-updater" },
@@ -929,7 +934,7 @@ fn fetchLatestStableRelease(alloc: Allocator) !Release {
         .response_writer = &response_buf.writer,
     });
 
-    try requireOkHttpStatus("release metadata", latest_stable_api_url, result.status);
+    try requireOkHttpStatus("release metadata", api_url, result.status);
 
     const body = try response_buf.toOwnedSlice();
     defer alloc.free(body);
@@ -1600,6 +1605,10 @@ test "windows updater extracts SPKI hash from certificate DER" {
 
     const actual = try certificateSpkiSha256(&cert_der);
     try std.testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test {
+    _ = @import("portable_apply.zig");
 }
 
 test "DER element rejects overflowing offsets and lengths" {

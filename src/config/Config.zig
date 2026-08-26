@@ -2176,6 +2176,12 @@ keybind: Keybinds = .{},
 /// time it is toggled.
 @"window-save-state": WindowSaveState = .default,
 
+/// When `window-save-state` is enabled, persist this many trailing
+/// scrollback lines per pane (C15). `0` (default) keeps the previous
+/// layout-only restore. Restored text is marked as a snapshot, not a
+/// live session. Snapshots are local plaintext and can contain secrets.
+@"window-save-scrollback-lines": usize = 0,
+
 /// Resize the window in discrete increments of the focused surface's cell size.
 /// If this is disabled, surfaces are resized in pixel increments. This is
 /// retained as a compatibility setting in the Windows-only fork and currently
@@ -6169,6 +6175,16 @@ pub const Keybinds = struct {
             );
 
             // Search
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'x' }, .mods = .{ .ctrl = true, .shift = true } },
+                .toggle_copy_mode,
+            );
+            try self.set.put(
+                alloc,
+                .{ .key = .{ .unicode = 'o' }, .mods = .{ .ctrl = true, .shift = true } },
+                .select_hint,
+            );
             try self.set.putFlags(
                 alloc,
                 .{ .key = .{ .unicode = 'f' }, .mods = .{ .ctrl = true, .shift = true } },

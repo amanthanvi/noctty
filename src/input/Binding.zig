@@ -502,6 +502,22 @@ pub const Action = union(enum) {
     /// prompt marks exist. Does not intercept the shell's editor.
     rerun_last_command,
 
+    /// Open a new elevated winghostty window via the Windows `runas` verb.
+    /// Mixed-elevation tabs are not supported; this is always a new process.
+    open_elevated_window,
+
+    /// Materialize a named layout from `%LOCALAPPDATA%\winghostty\layouts`.
+    apply_layout: []const u8,
+
+    /// Open a new tab running system `ssh` against a host from `~/.ssh/config`.
+    ssh_connect: []const u8,
+
+    /// Enter or leave modal copy mode (vi-style motions, `y` to copy).
+    toggle_copy_mode,
+
+    /// Label on-screen URLs/paths/hashes/IPs and copy the current hint.
+    select_hint,
+
     /// Write the entire scrollback into a temporary file with the specified
     /// action. The action determines what to do with the filepath.
     ///
@@ -1365,6 +1381,11 @@ pub const Action = union(enum) {
             .jump_to_prompt,
             .copy_last_command_output,
             .rerun_last_command,
+            .open_elevated_window,
+            .apply_layout,
+            .ssh_connect,
+            .toggle_copy_mode,
+            .select_hint,
             .write_scrollback_file,
             .write_screen_file,
             .write_selection_file,
@@ -3379,6 +3400,29 @@ test "parse: action with int" {
     {
         const binding = try parseSingle("a=rerun_last_command");
         try testing.expect(binding.action == .rerun_last_command);
+    }
+
+    {
+        const binding = try parseSingle("a=open_elevated_window");
+        try testing.expect(binding.action == .open_elevated_window);
+    }
+    {
+        const binding = try parseSingle("a=apply_layout:dev");
+        try testing.expect(binding.action == .apply_layout);
+        try testing.expectEqualStrings("dev", binding.action.apply_layout);
+    }
+    {
+        const binding = try parseSingle("a=ssh_connect:github.com");
+        try testing.expect(binding.action == .ssh_connect);
+        try testing.expectEqualStrings("github.com", binding.action.ssh_connect);
+    }
+    {
+        const binding = try parseSingle("a=toggle_copy_mode");
+        try testing.expect(binding.action == .toggle_copy_mode);
+    }
+    {
+        const binding = try parseSingle("a=select_hint");
+        try testing.expect(binding.action == .select_hint);
     }
 }
 

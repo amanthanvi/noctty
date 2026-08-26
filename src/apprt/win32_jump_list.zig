@@ -111,14 +111,26 @@ pub fn rememberPath(store: [][]u8, count: *usize, alloc: std.mem.Allocator, path
 }
 
 pub fn publish(exe_path: []const u8, recent: []const []const u8) void {
+    publishCategories(exe_path, recent, &.{});
+}
+
+pub fn publishCategories(
+    exe_path: []const u8,
+    recent: []const []const u8,
+    layouts: []const []const u8,
+) void {
     if (comptime builtin.os.tag != .windows) return;
-    if (recent.len == 0) return;
-    publishInner(exe_path, recent) catch |err| {
+    if (recent.len == 0 and layouts.len == 0) return;
+    publishInner(exe_path, recent, layouts) catch |err| {
         std.log.debug("jump list publish failed err={}", .{err});
     };
 }
 
-fn publishInner(exe_path: []const u8, recent: []const []const u8) !void {
+fn publishInner(
+    exe_path: []const u8,
+    recent: []const []const u8,
+    layouts: []const []const u8,
+) !void {
     var dest_ptr: ?*anyopaque = null;
     var hr = CoCreateInstance(&CLSID_DestinationList, null, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &dest_ptr);
     if (hr != S_OK or dest_ptr == null) return error.CoCreateFailed;
@@ -127,15 +139,6 @@ fn publishInner(exe_path: []const u8, recent: []const []const u8) !void {
 
     // ICustomDestinationList vtable after IUnknown: SetAppID, BeginList,
     // AppendCategory, AppendKnownCategory, AddUserTasks, CommitList, ...
-    const DestVtbl = extern struct {
-        unknown: IUnknown.Vtbl,
-        SetAppID: *const fn (*IUnknown, [*:0]const u16) callconv(.winapi) HRESULT,
-        BeginList: *const fn (*IUnknown, *u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
-        AppendCategory: *const fn (*IUnknown, [*:0]const u16, *IUnknown) callconv(.winapi) HRESULT,
-        AppendKnownCategory: *const fn (*IUnknown, u32) callconv(.winapi) HRESULT,
-        AddUserTasks: *const fn (*IUnknown, *IUnknown) callconv(.winapi) HRESULT,
-        CommitList: *const fn (*IUnknown) callconv(.winapi) HRESULT,
-    };
     const dest_vtbl: *const DestVtbl = @ptrCast(dest.vtbl);
 
     const aumid = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
@@ -151,8 +154,41 @@ fn publishInner(exe_path: []const u8, recent: []const []const u8) !void {
         _ = unk.vtbl.Release(unk);
     }
 
+    var exe_w_buf: [32768]u16 = undefined;
+    const exe_w_len = try std.unicode.utf8ToUtf16Le(&exe_w_buf, exe_path);
+    exe_w_buf[exe_w_len] = 0;
+    const exe_w = exe_w_buf[0..exe_w_len :0];
+
+    if (recent.len > 0) {
+        try appendLinkCategory(dest, dest_vtbl, exe_w, recent, "Recent directories", createDirLink);
+    }
+    if (layouts.len > 0) {
+        try appendLinkCategory(dest, dest_vtbl, exe_w, layouts, "Layouts", createLayoutLink);
+    }
+    hr = dest_vtbl.CommitList(dest);
+    if (hr != S_OK) return error.CommitListFailed;
+}
+
+const DestVtbl = extern struct {
+    unknown: IUnknown.Vtbl,
+    SetAppID: *const fn (*IUnknown, [*:0]const u16) callconv(.winapi) HRESULT,
+    BeginList: *const fn (*IUnknown, *u32, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AppendCategory: *const fn (*IUnknown, [*:0]const u16, *IUnknown) callconv(.winapi) HRESULT,
+    AppendKnownCategory: *const fn (*IUnknown, u32) callconv(.winapi) HRESULT,
+    AddUserTasks: *const fn (*IUnknown, *IUnknown) callconv(.winapi) HRESULT,
+    CommitList: *const fn (*IUnknown) callconv(.winapi) HRESULT,
+};
+
+fn appendLinkCategory(
+    dest: *IUnknown,
+    dest_vtbl: *const DestVtbl,
+    exe_w: [:0]const u16,
+    items: []const []const u8,
+    category_utf8: []const u8,
+    make_link: *const fn ([:0]const u16, []const u8) anyerror!*IUnknown,
+) !void {
     var coll_ptr: ?*anyopaque = null;
-    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, null, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &coll_ptr);
+    var hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, null, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &coll_ptr);
     if (hr != S_OK or coll_ptr == null) return error.CollectionFailed;
     const coll: *IUnknown = @ptrCast(@alignCast(coll_ptr.?));
     defer _ = coll.vtbl.Release(coll);
@@ -168,24 +204,32 @@ fn publishInner(exe_path: []const u8, recent: []const []const u8) !void {
     };
     const coll_vtbl: *const CollVtbl = @ptrCast(coll.vtbl);
 
-    var exe_w_buf: [32768]u16 = undefined;
-    const exe_w_len = try std.unicode.utf8ToUtf16Le(&exe_w_buf, exe_path);
-    exe_w_buf[exe_w_len] = 0;
-
-    for (recent) |dir| {
-        const link = createDirLink(exe_w_buf[0..exe_w_len :0], dir) catch continue;
+    for (items) |item| {
+        const link = make_link(exe_w, item) catch continue;
         defer _ = link.vtbl.Release(link);
         _ = coll_vtbl.AddObject(coll, link);
     }
 
-    const category = std.unicode.utf8ToUtf16LeStringLiteral("Recent directories");
-    hr = dest_vtbl.AppendCategory(dest, category, coll);
+    var cat_w: [64]u16 = undefined;
+    const cat_len = try std.unicode.utf8ToUtf16Le(&cat_w, category_utf8);
+    cat_w[cat_len] = 0;
+    hr = dest_vtbl.AppendCategory(dest, @ptrCast(&cat_w), coll);
     if (hr != S_OK) return error.AppendCategoryFailed;
-    hr = dest_vtbl.CommitList(dest);
-    if (hr != S_OK) return error.CommitListFailed;
 }
 
 fn createDirLink(exe_w: [:0]const u16, dir: []const u8) !*IUnknown {
+    var args_buf: [1024]u8 = undefined;
+    const args = try std.fmt.bufPrint(&args_buf, "--working-directory={s}", .{dir});
+    return createArgLink(exe_w, args, dir, true);
+}
+
+fn createLayoutLink(exe_w: [:0]const u16, name: []const u8) !*IUnknown {
+    var args_buf: [160]u8 = undefined;
+    const args = try std.fmt.bufPrint(&args_buf, "--apply-layout={s}", .{name});
+    return createArgLink(exe_w, args, name, false);
+}
+
+fn createArgLink(exe_w: [:0]const u16, args: []const u8, desc: []const u8, set_cwd: bool) !*IUnknown {
     var link_ptr: ?*anyopaque = null;
     const hr = CoCreateInstance(&CLSID_ShellLink, null, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, &link_ptr);
     if (hr != S_OK or link_ptr == null) return error.ShellLinkFailed;
@@ -218,18 +262,16 @@ fn createDirLink(exe_w: [:0]const u16, dir: []const u8) !*IUnknown {
     _ = link_vtbl.SetPath(link, exe_w.ptr);
     _ = link_vtbl.SetIconLocation(link, exe_w.ptr, 0);
 
-    var args_buf: [1024]u8 = undefined;
-    const args = try std.fmt.bufPrint(&args_buf, "--working-directory={s}", .{dir});
     var args_w: [1024]u16 = undefined;
     const args_w_len = try std.unicode.utf8ToUtf16Le(&args_w, args);
     args_w[args_w_len] = 0;
     _ = link_vtbl.SetArguments(link, @ptrCast(&args_w));
 
     var desc_w: [260]u16 = undefined;
-    const desc_len = try std.unicode.utf8ToUtf16Le(&desc_w, dir);
+    const desc_len = try std.unicode.utf8ToUtf16Le(&desc_w, desc);
     desc_w[desc_len] = 0;
     _ = link_vtbl.SetDescription(link, @ptrCast(&desc_w));
-    _ = link_vtbl.SetWorkingDirectory(link, @ptrCast(&desc_w));
+    if (set_cwd) _ = link_vtbl.SetWorkingDirectory(link, @ptrCast(&desc_w));
 
     return link;
 }

@@ -140,6 +140,21 @@ pub fn build(b: *std.Build) !void {
     if (config.emit_exe and config.app_runtime != .none) {
         exe.install();
         if (resources) |r| r.install();
+
+        if (config.target.result.os.tag == .windows) {
+            const conpty_host = b.addExecutable(.{
+                .name = "conpty-host",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("src/conpty_host.zig"),
+                    .target = config.target,
+                    .optimize = config.optimize,
+                    .strip = config.strip,
+                }),
+                .use_llvm = true,
+            });
+            conpty_host.subsystem = .Console;
+            b.getInstallStep().dependOn(&b.addInstallArtifact(conpty_host, .{}).step);
+        }
     }
 
     // Run step

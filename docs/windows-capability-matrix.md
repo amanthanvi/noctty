@@ -5,7 +5,7 @@ Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-08-19.
+Last reviewed: 2026-08-26.
 
 ## Status legend
 
@@ -34,8 +34,8 @@ Last reviewed: 2026-08-19.
 | [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows. `cmd.exe` gets OSC 133 A/B + OSC 9;9 from `PROMPT`; C/D marks require Clink. See [shell integration notes](#shell-integration).                                                                                   |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                         |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                         |
-| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
-| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\winghostty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
+| [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt). Portable ZIP apply plans the sibling swap then quits so the locked exe can be replaced; zip extract into `.apply-new` is the remaining slice. See [windows.md](windows.md#updates). |
+| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\winghostty\session-state.json`. `window-save-scrollback-lines` optionally restores last-N lines as a marked snapshot. Child processes are not restored.                                                                                               |
 | [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                           |
 | [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial. See [accessibility notes](#accessibility).                                                                                                                                                                                                                  |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                              |
@@ -47,7 +47,7 @@ Last reviewed: 2026-08-19.
 | [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. Below that floor, startup fails with a visible dialog. See [renderer notes](#renderer) and [windows.md](windows.md#gpu-floor).          |
 | [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream.      |
-| Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
+| Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action`. See [windows-automation.md](windows-automation.md). |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
 | Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
 | Native settings                                                                   | A native settings window with staged, source-preserving saves. See [native settings notes](#native-settings).              |
@@ -62,6 +62,14 @@ Last reviewed: 2026-08-19.
 | Explorer "Open here"                                                              | Classic HKCU verbs on Directory and Directory\\Background.                                                                 |
 | Prompt-mark navigation                                                            | Palette + default `jump_to_prompt` binds; copy-last-output and re-run last command.                                        |
 | UTF-8 console preamble                                                            | `utf8-console = auto\|always\|never`; auto skips legacy CJK ANSI code pages.                                               |
+| Named layouts                                                                     | `layouts\<name>.json` + `apply_layout` / `--apply-layout`.                                                                 |
+| Elevation                                                                         | Separate elevated window; mixed-elevation tabs out. See [windows.md](windows.md#elevation).                                |
+| Hints + copy mode                                                                 | `select_hint` / `toggle_copy_mode`.                                                                                        |
+| SSH host ingest                                                                   | Parses `~\.ssh\config` Host lines (no wildcards, no vault).                                                                |
+| ConPTY ownership                                                                  | Adjacent `conpty.dll` preferred; in-box fallback logged. [windows-conpty.md](windows-conpty.md).                           |
+| 1.3 Win32 audit                                                                   | [windows-1.3-audit.md](windows-1.3-audit.md).                                                                              |
+| Accessibility matrix                                                              | [windows-accessibility.md](windows-accessibility.md).                                                                      |
+| Trust / non-goals                                                                 | [trust.md](trust.md).                                                                                                      |
 
 ## Notes
 

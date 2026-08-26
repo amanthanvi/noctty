@@ -5,6 +5,7 @@ const posix = std.posix;
 const assert = @import("quirks.zig").inlineAssert;
 
 const log = std.log.scoped(.pty);
+const conpty_loader = @import("pty_conpty_loader.zig");
 
 /// Redeclare this winsize struct so we can just use a Zig struct. This
 /// layout should be correct on all tested platforms. The defaults on this
@@ -335,6 +336,7 @@ const WindowsPty = struct {
     out_pipe_pty: windows.HANDLE,
     in_pipe_pty: windows.HANDLE,
     pseudo_console: windows.exp.HPCON,
+    conpty: conpty_loader.Api,
     size: winsize,
 
     pub const OpenError = error{Unexpected};
@@ -427,7 +429,14 @@ const WindowsPty = struct {
         try windows.SetHandleInformation(pty.out_pipe, windows.HANDLE_FLAG_INHERIT, 0);
         try windows.SetHandleInformation(pty.out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
 
-        const result = windows.exp.kernel32.CreatePseudoConsole(
+        pty.conpty = conpty_loader.resolve();
+        if (pty.conpty.source == .bundled) {
+            log.info("using bundled OpenConsole ConPTY from conpty.dll", .{});
+        } else {
+            log.warn("{s}", .{conpty_loader.degradedWarning()});
+        }
+
+        const result = pty.conpty.create(
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
             pty.in_pipe_pty,
             pty.out_pipe_pty,
@@ -445,7 +454,7 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.in_pipe);
         _ = windows.CloseHandle(self.out_pipe_pty);
         _ = windows.CloseHandle(self.out_pipe);
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        self.conpty.close(self.pseudo_console);
         self.* = undefined;
     }
 
@@ -460,7 +469,7 @@ const WindowsPty = struct {
 
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        const result = windows.exp.kernel32.ResizePseudoConsole(
+        const result = self.conpty.resize(
             self.pseudo_console,
             .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
         );
@@ -478,6 +487,7 @@ const WindowsPty = struct {
 };
 
 test {
+    _ = @import("pty_conpty_loader.zig");
     const testing = std.testing;
     var ws: winsize = .{
         .ws_row = 50,

@@ -720,6 +720,28 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Send the previous command line plus Enter. Requires shell integration.",
         }},
 
+        .open_elevated_window => comptime &.{.{
+            .action = .open_elevated_window,
+            .title = "Open Elevated Window",
+            .description = "Launch a new Administrator winghostty window. Mixed-elevation tabs are not supported.",
+        }},
+
+        .apply_layout => comptime &.{},
+
+        .ssh_connect => comptime &.{},
+
+        .toggle_copy_mode => comptime &.{.{
+            .action = .toggle_copy_mode,
+            .title = "Toggle Copy Mode",
+            .description = "Enter or leave keyboard copy mode for the current pane.",
+        }},
+
+        .select_hint => comptime &.{.{
+            .action = .select_hint,
+            .title = "Select Hint",
+            .description = "Highlight the next URL, path, hash, or IP on screen and copy it.",
+        }},
+
         .write_scrollback_file,
         .goto_tab,
         .resize_split,
