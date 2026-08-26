@@ -1,0 +1,7 @@
+/*
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'sha256-NqHZXg5OEoYWSMHyfaptUTDwoVgE9IbbRzDnA2nvV1g='; script-src-attr 'none'; style-src 'self'; font-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' data:; frame-src 'none'; worker-src 'none'; manifest-src 'self'; upgrade-insecure-requests
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: accelerometer=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+  Cache-Control: public, max-age=0, must-revalidate

@@ -41,6 +41,14 @@ jobs:
         shell: pwsh
         run: ./scripts/check-release-copy.ps1
 
+      - name: Release copy UTC date tests (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/test-release-copy-date.ps1
+
+      - name: Release copy UTC date tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./scripts/test-release-copy-date.ps1
+
       - name: Remote release copy checks
         if: github.event_name == 'schedule'
         shell: pwsh
@@ -48,17 +56,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
 
-      - name: Install site dependencies
+      - name: Deterministic site asset check
         shell: pwsh
-        run: npm ci --prefix site
+        run: |
+          node scripts/build-site-assets.mjs --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Deterministic site bundle check
+      - name: Site unit tests
         shell: pwsh
-        run: ./scripts/check-site-bundle.ps1
+        run: |
+          node --test site/tests/terminal.test.mjs site/tests/build-site-assets.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Signing trust policy tests
         shell: pwsh
         run: ./scripts/test-signing-trust.ps1
+
+      - name: Windows build capability manifest tests
+        shell: pwsh
+        run: ./scripts/test-windows-build-capabilities.ps1
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -91,6 +107,19 @@ jobs:
         # This traverses the default build graph too; a preceding plain
         # `zig build` duplicated the same Windows compile/link work.
         run: zig build -Demit-exe=true
+
+      - name: Verify default source-build shader mode
+        shell: pwsh
+        run: |
+          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
+          Write-Host $versionText
+          if ($LASTEXITCODE -ne 0) {
+            throw "noctty.com +version failed with exit code $LASTEXITCODE."
+          }
+          if ($versionText -notmatch "Build Config" -or
+              $versionText -notmatch "custom shaders: disabled") {
+            throw "Default source build did not report disabled custom shaders."
+          }
 
       - name: Build ARM64 executable
         env:
@@ -128,16 +157,16 @@ jobs:
           retention-days: 14
           path: |
             test/windows/flagship/artifacts/portable-x64
-            dist/artifacts/winghostty-0.0.1-windows-x64
+            dist/artifacts/noctty-0.0.1-windows-x64
 
   windows-interactive:
     name: Windows 11 Interactive Composite
-    if: >-
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
-      github.event_name == 'schedule' ||
-      github.ref == 'refs/heads/main' ||
-      (github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11)
-    runs-on: [self-hosted, Windows, X64, winghostty-interactive]
+    # Dispatch-only: the interactive runner is registered ephemerally for
+    # release validation, so no standing runner exists to serve queued jobs.
+    # Dispatch Test with run_interactive_win11=true and arm the runner to
+    # produce release evidence.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_interactive_win11
+    runs-on: [self-hosted, Windows, X64, noctty-interactive]
     timeout-minutes: 60
 
     steps:
@@ -157,8 +186,8 @@ jobs:
       - name: Prove interactive runner provenance
         shell: pwsh
         env:
-          WINGHOSTTY_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/winghostty-runner-provenance.json"
+          NOCTTY_EXPECTED_CHECKOUT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: ./test/windows/assert-interactive-runner.ps1 -OutputPath "$env:RUNNER_TEMP/noctty-runner-provenance.json"
 
       - name: Run interactive Win11 composite
         shell: pwsh
@@ -170,6 +199,8 @@ jobs:
           $quick = '${{ github.event_name }}' -eq 'pull_request'
           if ($quick) {
             ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
@@ -195,4 +226,4 @@ jobs:
           path: |
             test/windows/flagship/artifacts/interactive-win11
             ${{ github.workspace }}/.sandbox/win11/**/logs/**
-            ${{ runner.temp }}/winghostty-runner-provenance.json
+            ${{ runner.temp }}/noctty-runner-provenance.json

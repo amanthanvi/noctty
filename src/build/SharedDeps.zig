@@ -5,14 +5,12 @@ const std = @import("std");
 const Config = @import("Config.zig");
 const HelpStrings = @import("HelpStrings.zig");
 const UnicodeTables = @import("UnicodeTables.zig");
-const GhosttyFrameData = @import("GhosttyFrameData.zig");
 
 config: *const Config,
 
 options: *std.Build.Step.Options,
 help_strings: HelpStrings,
 unicode_tables: UnicodeTables,
-framedata: GhosttyFrameData,
 uucode_tables: std.Build.LazyPath,
 
 /// Used to keep track of a list of file sources.
@@ -25,7 +23,6 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
         .config = cfg,
         .help_strings = try .init(b, cfg),
         .unicode_tables = try .init(b, cfg, uucode_tables),
-        .framedata = try .init(b),
         .uucode_tables = uucode_tables,
 
         // Setup by retarget
@@ -479,7 +476,6 @@ pub fn add(
 
     self.help_strings.addImport(step);
     self.unicode_tables.addImport(step);
-    self.framedata.addImport(step);
 
     return static_libs;
 }

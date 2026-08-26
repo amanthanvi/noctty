@@ -20,7 +20,7 @@ export module ghostty {
 
     # `ssh-terminfo`: auto-install xterm-ghostty terminfo on remote hosts
     if (has_feature "ssh-terminfo") {
-      let ghostty = ($env.GHOSTTY_BIN_DIR? | default "") | path join "winghostty"
+      let ghostty = ($env.GHOSTTY_BIN_DIR? | default "") | path join "noctty"
 
       let ssh_cfg = ^ssh -G ...$args
         | lines

@@ -1,6 +1,17 @@
 # Terminal accessibility and Settings theme regression plan
 
-Status: approved for execution.
+Status: follow-up in progress. Targeted unit/provider tests, focused native
+key-input scenarios, flagship contracts, a full Zig suite, and the full
+accessibility harness passed before the latest audit. Verifier follow-up and
+the output-architecture redesign are now source-complete: committed terminal
+output is emitted at the authoritative `StreamHandler`/parser seam and the raw
+Win32 VT re-parser is deleted. Focused semantic-output, transport, and
+announcement tests pass, and independent source implementation,
+semantic/deslop, and existing flagship-contract audits are clean. The final
+semantic-interest contract refresh, unified executable build, and full Zig
+suite also pass. The final automated live accessibility/theme/High
+Contrast/scaling/idle harness passes. Release workflow gates and human
+Narrator/NVDA acceptance remain pending.
 
 Date: 2026-07-23.
 
@@ -95,17 +106,17 @@ code as the module takes ownership.
 ### Window theme adapter
 
 Deepen `win32_theme` behind one window-kind-aware implementation for host and
-Settings windows. The interface consumes resolved theme and High Contrast state
-and owns:
+Settings windows. `WindowThemeAdapter` consumes resolved theme and High
+Contrast state and owns:
 
 - DWM light/dark attributes;
 - native control theme application;
-- semantic Settings brushes and control colors;
-- complete host/child invalidation after a theme-resource swap;
 - High Contrast fallback to Windows system colors.
 
-Settings transaction code keeps emitting typed live-preview effects. It does
-not learn DWM, brush, repaint, or control-tree details.
+`win32_settings.SettingsThemeAdapter` retains local ownership of semantic
+colors, GDI brushes, reentry protection, teardown, child theming, and complete
+Settings repaint. Host theme replacement retains host repaint ownership.
+Settings transaction code only emits typed live-preview effects.
 
 ## Implementation sequence
 
@@ -114,8 +125,8 @@ not learn DWM, brush, repaint, or control-tree details.
 - For terminal role, return one immutable degenerate range at the cached caret
   from legacy `GetSelection`.
 - Advertise `SupportedTextSelection_Single`.
-- Make terminal range `Select` behavior contract-consistent and harmless; do
-  not mutate PTY state merely to satisfy UIA.
+- Return `E_NOTIMPL` from terminal range `Select`; the immutable degenerate
+  caret remains readable/expandable without claiming a mutable selection.
 - Reuse the same snapshot/caret normalization as TextPattern2.
 - Replace tests that require `None`/zero ranges with parity assertions between
   legacy selection and TextPattern2 caret.
@@ -138,8 +149,19 @@ not learn DWM, brush, repaint, or control-tree details.
   `terminal` role where required by the provider contract.
 - Return `LiveSetting=Polite`.
 - Keep TextChanged and TextSelectionChanged for range invalidation/caret state.
-- Feed only newly produced readable terminal output to a bounded,
-  UI-thread-safe notification queue.
+- Emit committed semantic terminal output from the authoritative
+  `StreamHandler`/parser seam after parsing and the render decision complete;
+  offer only that output to the Surface-owned `TerminalOutputTransport`.
+- Keep the producer interest-gated, allocation-free, and nonblocking. The fixed
+  eight-by-1000-byte transport never enters the global app mailbox; contention
+  or capacity exhaustion becomes one ordered omission barrier.
+- Drain retained chunks plus the omission marker on the Win32 UI thread into
+  `TerminalAccessibilitySession`; its bounded notification FIFO owns
+  echo suppression and speech ordering. Snapshot refresh and provider queries
+  never derive, consume, or clear speech.
+- Keep the raw Win32 VT/control re-parser deleted. Control-string, C1,
+  malformed-sequence, and parser resynchronization behavior belongs to the
+  authoritative terminal parser, not a second accessibility state machine.
 - Suppress matching echoed key input and control-only/unreadable output.
 - Raise `UiaRaiseNotificationEvent` with an activity identifier dedicated to
   terminal output and a processing mode that preserves command output order
@@ -227,35 +249,106 @@ scripts/dev-windows.cmd zig build test -Dtest-filter=TerminalProvider
 scripts/dev-windows.cmd zig build test -Dtest-filter=terminal_UIA
 scripts/dev-windows.cmd zig build test -Dtest-filter=win32_settings
 scripts/dev-windows.cmd zig build -Demit-exe=true
-pwsh -NoProfile -File test/windows/interactive-win11-accessibility.ps1 -ResetState -ExecutablePath <exact-artifact>
+pwsh -NoProfile -File test/windows/interactive-win11-accessibility.ps1 -ResetState -TimeoutSeconds 20 -IdleSoakSeconds 60
 ```
 
-Then run the repository full test and exact-SHA interactive composite gates
-used for release.
+The final validation ran the repository full Zig suite, focused native
+key-input scenarios, and the full accessibility harness. This plan does not
+claim a pass for the broader interactive composite suite.
 
 ## Completion gates
 
-- [ ] Canonical caret exposed through legacy TextPattern and TextPattern2.
-- [ ] Focus/activation publishes a current snapshot before focus event.
-- [ ] Polite live metadata and sanitized, bounded new-output notifications
-      provide incremental screen-reader speech without echoed key duplication.
-- [ ] Terminal accessibility lifecycle has one deep module and old duplicate
+- [x] Canonical caret exposed through legacy TextPattern and TextPattern2.
+- [x] Focus/activation publishes a current snapshot before focus event.
+- [x] Polite metadata and the bounded, nonblocking Surface-to-session output
+      transport are implemented with echo suppression and explicit omission.
+- [x] Terminal accessibility lifecycle has one deep module and old duplicate
       ownership is deleted.
-- [ ] System-to-Dark preview repaints terminal chrome immediately.
-- [ ] Settings HWND and native controls visibly preview explicit Dark.
-- [ ] High Contrast preserves Windows system colors.
-- [ ] Preview discard restores pixels and leaves persisted config unchanged.
-- [ ] Unit/provider and interactive regressions pass.
-- [ ] Independent Sol audit has no actionable finding.
-- [ ] One bounded Fable re-audit has no actionable finding.
+- [x] System-to-Dark host repaint path is implemented.
+- [x] Settings HWND/native-control explicit-Dark path is implemented.
+- [x] High Contrast reset/system-color policy is implemented.
+- [x] Preview discard follows the same restoration path and preserves persisted
+      config bytes.
+- [x] Post-redesign targeted/unit/provider filters, unified executable build,
+      and full Zig suite pass on the final tree.
+- [x] Final automated live accessibility/theme/High-Contrast/scaling/idle
+      harness passes after the verifier and production follow-up; no broader
+      composite-suite result is claimed.
+- [x] Independent source implementation and semantic/deslop audits pass after
+      the production input/transport follow-up.
+- [x] Existing flagship verification contracts pass on the source-confirmed
+      closure.
+- [x] Final semantic-interest verification-contract refresh passes.
 - [ ] Human Narrator and NVDA acceptance cells pass.
+
+## Completion ledger
+
+- Targeted Zig filters for terminal-output transport/session,
+  `TerminalProvider`, and `win32_settings` pass on the current tree.
+- The semantic-output redesign is source-complete. `StreamHandler` records only
+  successfully committed, charset-mapped print/REP/CR/LF/tab output; hidden
+  status-display output is excluded. Same-batch RIS discards its erased prefix
+  and emits an ordered silent continuity reset, and interest epochs reject
+  stale pre-disable batches.
+- The duplicate Win32 VT/control re-parser and raw Termio forwarding are
+  deleted. Focused semantic-output, transport, and announcement filters plus
+  formatting and scoped diff checks pass.
+- Attached, focused panes with an acquired provider keep bounded semantic
+  capture interested independently of listener activity, closing the
+  false-to-true listener first-output gap; UIA event emission remains
+  listener-gated.
+- Independent source implementation and semantic/deslop closure audits are
+  clean. Existing flagship verification contracts and the final
+  semantic-interest contract refresh pass.
+- Final-tree `scripts/dev-windows.cmd zig build -Demit-exe=true`: PASS.
+- Final-tree `scripts/dev-windows.cmd zig build test
+  -Demit-test-exe=true`: PASS.
+- Real Win32 message-loop coverage passes five exact key-input scenarios:
+  classic `A`, classic Space, BMP Unicode, supplementary Unicode, and a
+  256-unit Unicode burst. Per-scenario sandbox/artifact names are unique;
+  the pure Zig test independently proves a 256-authorization deferred backlog.
+- Cursor-blink reset deadlines now ceil nanosecond remainders to milliseconds,
+  layered on the existing lifecycle rule that an active libxev completion is
+  never canceled or reset; its callback owns logical rearming.
+- The UIA selection contract is clean: terminal mutation support reports
+  `None`, legacy `GetSelection` still exposes one degenerate compatibility
+  caret, and `Select`/`AddToSelection`/`RemoveFromSelection` fail with the
+  expected invalid-operation contract.
+- Native C0 delivery for CR, LF, Tab, Backspace, and Escape is proven.
+  Alt+numpad experiments were fully reverted and remain a human/native residual
+  rather than an automated pass claim.
+- PowerShell 7 and Windows PowerShell 5.1 parse the accessibility harness and
+  flagship contract script; `Test-VerificationContracts.ps1` reports
+  `flagship verification contracts: PASS (2 scenarios)`.
+- The earlier full-suite pass was reconfirmed by the final-tree run above.
+- Final-tree full accessibility validation with `-ResetState -TimeoutSeconds
+  20 -IdleSoakSeconds 60`: PASS. Evidence:
+  `.sandbox/win11/github-noctty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json`
+  (`outcome=pass`, 119.962 seconds). It proves UIA notification/TextPattern
+  behavior, inactive-pane silence, and a 60-second idle soak with zero
+  TextChanged events or handle/thread/private-byte growth.
+- The final High Contrast proof completed an exact compound SPI, host HWND/DWM,
+  and Settings HWND/UIA/DWM restore with `DWMSBT_NONE=1`. The retained
+  diagnostic is
+  `high-contrast-restore-diagnostic.json`; the temporary recovery snapshot was
+  deleted after verified restoration.
+- Dark theme persistence is proven across Save, process exit, and a fresh
+  relaunch: Settings index `3`, exact dark host/Settings pixels, immersive-dark
+  DWM `1`, and host/Settings backdrop `1`, followed by exact sandbox-config
+  restoration.
+- Final cleanup restored High Contrast off and DPI 96 and left zero unexpected
+  noctty processes.
+- Pending: PR/review/merge/release gates and human Narrator/NVDA acceptance.
 
 ## Residual risks
 
 - Narrator’s exact legacy-caret heuristic is not a documented guarantee; human
   retest remains mandatory.
 - Native dark theming varies by Windows build; the supported Windows 11 matrix
-  must validate titlebar, combos, edit fields, disabled controls, and focus.
-- Moving session ownership is concurrency-sensitive. Lock-order and provider
-  teardown tests are mandatory.
+  still requires human validation of titlebar, combos, edit fields, disabled
+  controls, and focus.
+- Session ownership remains concurrency-sensitive despite clean automated
+  lock-order, provider-lifetime, and timer-lifecycle coverage.
+- Alt+numpad behavior remains a human/native compatibility residual; no
+  reverted experiment is counted as passing evidence.
 - Speech-output automation is not a substitute for a human screen-reader pass.

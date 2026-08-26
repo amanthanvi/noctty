@@ -20,7 +20,7 @@ jobs:
     runs-on: windows-11-arm
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      WINGHOSTTY_CI_VERSION: 0.0.1
+      NOCTTY_CI_VERSION: 0.0.1
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
 
     steps:
@@ -70,31 +70,37 @@ jobs:
         timeout-minutes: 20
         run: >
           ./scripts/build-package-windows.ps1
-          -Version $env:WINGHOSTTY_CI_VERSION
+          -Version $env:NOCTTY_CI_VERSION
           -Architecture arm64
 
       - name: Run ARM64 CLI smoke
         shell: pwsh
         run: |
-          $versionText = & .\zig-out\bin\winghostty.com +version | Out-String
+          $versionText = & .\zig-out\bin\noctty.com +version | Out-String
           Write-Host $versionText
+          if ($versionText -notmatch "Build Config") {
+            throw "noctty.com +version did not print the expected version output."
+          }
           if ($versionText -notmatch "custom shaders: enabled") {
-            throw "winghostty.com +version did not report custom shader support."
+            throw "noctty.com +version did not report custom shader support."
           }
 
       - name: Run packaged ARM64 CLI smoke
         shell: pwsh
         run: |
-          $portableRoot = Join-Path $PWD "dist/artifacts/winghostty-$env:WINGHOSTTY_CI_VERSION-windows-arm64/winghostty"
-          $portableCommand = Join-Path $portableRoot "winghostty.com"
+          $portableRoot = Join-Path $PWD "dist/artifacts/noctty-$env:NOCTTY_CI_VERSION-windows-arm64/noctty"
+          $portableCommand = Join-Path $portableRoot "noctty.com"
           if (-not (Test-Path -LiteralPath $portableCommand)) {
             throw "Missing packaged ARM64 command shim: $portableCommand"
           }
 
           $versionText = & $portableCommand +version | Out-String
           Write-Host $versionText
+          if ($versionText -notmatch "Build Config") {
+            throw "Packaged noctty.com +version did not print the expected version output."
+          }
           if ($versionText -notmatch "custom shaders: enabled") {
-            throw "Packaged winghostty.com +version did not report custom shader support."
+            throw "Packaged noctty.com +version did not report custom shader support."
           }
 
           $themesText = & $portableCommand +list-themes | Out-String

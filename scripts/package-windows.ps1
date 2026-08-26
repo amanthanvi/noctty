@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
 . (Join-Path $PSScriptRoot "signing-trust.ps1")
+. (Join-Path $PSScriptRoot "windows-build-capabilities.ps1")
 
 $archInfo = Get-WindowsPackageArchitecture -Architecture $(if ($Architecture) { $Architecture } else { Get-DefaultWindowsPackageArchitecture })
 $Architecture = $archInfo.Name
@@ -37,26 +38,27 @@ $localAppData = if ($env:LOCALAPPDATA) {
     Join-Path $userHome "AppData\Local"
 }
 $zigTarget = $archInfo.ZigTarget
-$stageBase = Join-Path $outputRootPath "winghostty-$Version-windows-$Architecture"
-$portableRoot = Join-Path $stageBase "winghostty"
+$stageBase = Join-Path $outputRootPath "noctty-$Version-windows-$Architecture"
+$portableRoot = Join-Path $stageBase "noctty"
 $zipPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind portable)
 $installerPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind setup)
 $checksumsPath = Join-Path $stageBase (New-WindowsPackageArtifactName -Version $Version -Architecture $Architecture -Kind checksums)
-$releaseIconPath = Join-Path $stageBase "winghostty-icon.svg"
+$releaseIconPath = Join-Path $stageBase "noctty-icon.svg"
 $zigOutBin = Join-Path $repoRoot "zig-out/bin"
 $zigOutShare = Join-Path $repoRoot "zig-out/share"
-$exePath = Join-Path $zigOutBin "winghostty.exe"
+$exePath = Join-Path $zigOutBin "noctty.exe"
+$buildCapabilitiesPath = Join-Path $zigOutBin "noctty-build-capabilities.json"
 $runtimeFiles = @(
-    "winghostty.com",
-    "winghostty.exe",
+    "noctty.com",
+    "noctty.exe",
     "ghostty-vt.dll"
 )
 $licensePath = Join-Path $repoRoot "LICENSE"
 $readmePath = Join-Path $repoRoot "README.md"
 $configTemplatePath = Join-Path $repoRoot "src/config/config-template"
-$innoScriptPath = Join-Path $repoRoot "dist/windows/winghostty.iss"
-$iconPath = Join-Path $repoRoot "dist/windows/winghostty.ico"
-$releaseIconSourcePath = Join-Path $repoRoot "images/winghostty-flag-light.svg"
+$innoScriptPath = Join-Path $repoRoot "dist/windows/noctty.iss"
+$iconPath = Join-Path $repoRoot "dist/windows/noctty.ico"
+$releaseIconSourcePath = Join-Path $repoRoot "images/noctty-flag-light.svg"
 $signingPfxPath = if ($env:WINDOWS_CODESIGN_PFX_PATH) {
     $env:WINDOWS_CODESIGN_PFX_PATH
 } else {
@@ -80,12 +82,12 @@ $signingTimestampUrl = if ($env:WINDOWS_CODESIGN_TIMESTAMP_URL) {
 $signingDescription = if ($env:WINDOWS_CODESIGN_DESCRIPTION) {
     $env:WINDOWS_CODESIGN_DESCRIPTION
 } else {
-    "winghostty"
+    "noctty"
 }
 $signingUrl = if ($env:WINDOWS_CODESIGN_URL) {
     $env:WINDOWS_CODESIGN_URL
 } else {
-    "https://github.com/amanthanvi/winghostty"
+    "https://github.com/amanthanvi/noctty"
 }
 $trustSelfSignedSigningCert = if ($env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED) {
     $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED
@@ -252,7 +254,7 @@ function New-TemporaryPfxFile {
         throw "WINDOWS_CODESIGN_PFX_BASE64 was not valid base64."
     }
 
-    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-signing-" + [System.Guid]::NewGuid().ToString("N") + ".pfx")
     [System.IO.File]::WriteAllBytes($path, $bytes)
     return $path
 }
@@ -397,15 +399,29 @@ try {
     if (-not $SkipBuild) {
         Push-Location $repoRoot
         try {
+            Remove-Item -LiteralPath $buildCapabilitiesPath -Force -ErrorAction SilentlyContinue
             & zig build -Demit-exe=true -Demit-lib-vt=true -Doptimize=ReleaseFast "-Dtarget=$zigTarget" -Dcpu=baseline -Dcustom-shaders=true "-Dversion-string=$Version"
             if ($LASTEXITCODE -ne 0) {
                 throw "Zig build failed with exit code $LASTEXITCODE."
             }
+            Write-WindowsBuildCapabilitiesManifest `
+                -Path $buildCapabilitiesPath `
+                -BinPath $zigOutBin `
+                -Version $Version `
+                -Architecture $Architecture `
+                -RuntimeFiles $runtimeFiles
         }
         finally {
             Pop-Location
         }
     }
+
+    Assert-WindowsBuildCapabilitiesManifest `
+        -Path $buildCapabilitiesPath `
+        -BinPath $zigOutBin `
+        -Version $Version `
+        -Architecture $Architecture `
+        -RuntimeFiles $runtimeFiles
 
     if (-not (Test-Path -LiteralPath $exePath)) {
         throw "Expected build output was not found: $exePath"
@@ -445,7 +461,7 @@ try {
     Copy-Item -LiteralPath $licensePath -Destination (Join-Path $portableRoot "LICENSE") -Force
     Copy-Item -LiteralPath $configTemplatePath -Destination (Join-Path $portableRoot "config-template.ghostty") -Force
     Copy-Item -LiteralPath $readmePath -Destination (Join-Path $portableRoot "README.md") -Force
-    Copy-Item -LiteralPath $iconPath -Destination (Join-Path $portableRoot "winghostty.ico") -Force
+    Copy-Item -LiteralPath $iconPath -Destination (Join-Path $portableRoot "noctty.ico") -Force
     Copy-Item -LiteralPath $releaseIconSourcePath -Destination $releaseIconPath -Force
 
     if (Test-Path -LiteralPath $zigOutShare) {
@@ -455,17 +471,17 @@ try {
     $hostArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     if ($hostArchitecture -eq $Architecture) {
         Write-Host "Packaging phase: verify custom shader capability"
-        $portableCommand = Join-Path $portableRoot "winghostty.com"
+        $portableCommand = Join-Path $portableRoot "noctty.com"
         $versionText = & $portableCommand +version | Out-String
         if ($LASTEXITCODE -ne 0) {
-            throw "Packaged winghostty.com +version failed with exit code $LASTEXITCODE."
+            throw "Packaged noctty.com +version failed with exit code $LASTEXITCODE."
         }
         if ($versionText -notmatch "custom shaders: enabled") {
-            throw "Packaged winghostty.com does not report custom shader support."
+            throw "Packaged noctty.com does not report custom shader support."
         }
     }
     else {
-        Write-Host "Packaging phase: defer custom shader capability check to native $Architecture smoke"
+        Write-Host "Packaging phase: custom shader capability verified by hash-bound $Architecture build manifest"
     }
 
     Write-Host "Packaging phase: create portable zip"

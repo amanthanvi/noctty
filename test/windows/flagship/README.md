@@ -16,10 +16,11 @@ pwsh -File test/windows/flagship/Test-VerificationContracts.ps1
 ```
 
 Hosted Windows CI runs the x64 portable smoke through
-`Invoke-PortableSmoke.ps1`. Same-repository pull requests run the stable GUI
-smoke subset; pushes to `main`, the nightly schedule, and opted-in manual
-dispatches run the full composite on the unlocked self-hosted runner labeled
-`winghostty-interactive`. Fork pull requests never execute on that runner.
+`Invoke-PortableSmoke.ps1`. The full composite runs only on opted-in
+manual dispatches (`run_interactive_win11=true`) on the unlocked
+self-hosted runner labeled `noctty-interactive`; no standing runner
+exists, so the machine is registered ephemerally when release evidence
+is needed. Fork pull requests never execute on that runner.
 The job fails unless the runner is Windows 11 x64, non-system, attached to the
 active console session with an Explorer shell, on the `Default` input desktop,
 and checked out at the exact workflow SHA. Its name, user, session, exact

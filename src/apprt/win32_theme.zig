@@ -1,4 +1,5 @@
 const std = @import("std");
+const win32_types = @import("win32_types.zig");
 const ProfileKind = @import("../config/windows_shell_types.zig").ProfileKind;
 
 /// Pack r/g/b bytes into a Win32 COLORREF (0x00BBGGRR).
@@ -95,6 +96,196 @@ pub const ThemeColors = struct {
 
     // Whether this is a dark theme (for DWM)
     is_dark: bool,
+};
+
+pub const SettingsSystemColors = struct {
+    window: u32,
+    window_text: u32,
+    button_face: u32,
+    button_text: u32,
+    gray_text: u32,
+};
+
+pub const SettingsColors = struct {
+    window_bg: u32,
+    rail_bg: u32,
+    text: u32,
+    disabled_text: u32,
+    edit_bg: u32,
+    edit_text: u32,
+    button_bg: u32,
+    button_text: u32,
+    is_dark: bool,
+    high_contrast: bool,
+};
+
+/// Resolve semantic Settings colors. High Contrast deliberately ignores every
+/// app-theme token and maps directly to the corresponding Windows system role.
+pub fn settingsColors(
+    theme: ThemeColors,
+    system: SettingsSystemColors,
+    high_contrast: bool,
+) SettingsColors {
+    if (high_contrast) {
+        return .{
+            .window_bg = system.button_face,
+            .rail_bg = system.window,
+            .text = system.button_text,
+            .disabled_text = system.gray_text,
+            .edit_bg = system.window,
+            .edit_text = system.window_text,
+            .button_bg = system.button_face,
+            .button_text = system.button_text,
+            .is_dark = false,
+            .high_contrast = true,
+        };
+    }
+    return .{
+        .window_bg = theme.chrome_bg,
+        .rail_bg = theme.overlay_bg,
+        .text = theme.text_primary,
+        .disabled_text = theme.text_disabled,
+        .edit_bg = theme.edit_bg,
+        .edit_text = theme.edit_fg,
+        .button_bg = theme.button_bg,
+        .button_text = theme.button_fg,
+        .is_dark = theme.is_dark,
+        .high_contrast = false,
+    };
+}
+
+pub fn settingsDwmDarkModeValue(colors: SettingsColors) u32 {
+    return if (!colors.high_contrast and colors.is_dark) 1 else 0;
+}
+
+const HWND = win32_types.HWND;
+const E_INVALIDARG: i32 = @bitCast(@as(u32, 0x80070057));
+const DWMWA_USE_IMMERSIVE_DARK_MODE_V1: u32 = 19;
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_CAPTION_COLOR: u32 = 35;
+const DWMWA_TEXT_COLOR: u32 = 36;
+const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+const DWMSBT_AUTO: u32 = 0;
+const DWMSBT_NONE: u32 = 1;
+const DWMSBT_MAINWINDOW: u32 = 2;
+const DWMSBT_TRANSIENTWINDOW: u32 = 3;
+const DWMSBT_TABBEDWINDOW: u32 = 4;
+
+extern "dwmapi" fn DwmSetWindowAttribute(HWND, u32, *const anyopaque, u32) callconv(.winapi) i32;
+extern "uxtheme" fn SetWindowTheme(HWND, ?[*:0]const u16, ?[*:0]const u16) callconv(.winapi) i32;
+
+const WindowKind = enum { host, settings };
+const NativeControlTheme = enum { system, explorer_light, explorer_dark };
+pub const dwm_color_default: u32 = 0xffff_ffff;
+
+const WindowThemePolicy = struct {
+    immersive_dark: u32,
+    caption_color: u32,
+    text_color: u32,
+    backdrop_type: u32,
+    native_controls: NativeControlTheme,
+};
+
+/// Shared window-kind-aware DWM/native policy. HWND resource ownership and
+/// invalidation remain with each window, but Host and Settings cannot diverge
+/// on Dark/High Contrast reset semantics.
+fn windowThemePolicy(
+    kind: WindowKind,
+    is_dark: bool,
+    high_contrast: bool,
+    caption_color: u32,
+    text_color: u32,
+    backdrop_type: u32,
+) WindowThemePolicy {
+    if (high_contrast) return .{
+        .immersive_dark = 0,
+        .caption_color = dwm_color_default,
+        .text_color = dwm_color_default,
+        .backdrop_type = DWMSBT_NONE,
+        .native_controls = .system,
+    };
+    return .{
+        .immersive_dark = @intFromBool(is_dark),
+        .caption_color = caption_color,
+        .text_color = text_color,
+        .backdrop_type = backdrop_type,
+        .native_controls = switch (kind) {
+            .host => .system,
+            .settings => if (is_dark) .explorer_dark else .explorer_light,
+        },
+    };
+}
+
+pub const WindowThemeAdapter = struct {
+    pub fn applyHost(
+        hwnd: HWND,
+        theme: ThemeColors,
+        high_contrast: bool,
+        caption_color: u32,
+        text_color: u32,
+        backdrop_type: u32,
+        supports_backdrop: bool,
+    ) void {
+        applyWindow(hwnd, windowThemePolicy(
+            .host,
+            theme.is_dark,
+            high_contrast,
+            caption_color,
+            text_color,
+            backdrop_type,
+        ), supports_backdrop);
+    }
+
+    pub fn applySettings(hwnd: HWND, colors: SettingsColors) void {
+        applyWindow(hwnd, windowThemePolicy(
+            .settings,
+            colors.is_dark,
+            colors.high_contrast,
+            colors.window_bg,
+            colors.text,
+            DWMSBT_NONE,
+        ), true);
+    }
+
+    pub fn applyNativeControl(hwnd: HWND, colors: SettingsColors) void {
+        const policy = windowThemePolicy(
+            .settings,
+            colors.is_dark,
+            colors.high_contrast,
+            colors.window_bg,
+            colors.text,
+            DWMSBT_NONE,
+        );
+        const theme: ?[*:0]const u16 = switch (policy.native_controls) {
+            .system => null,
+            .explorer_light => std.unicode.utf8ToUtf16LeStringLiteral("Explorer"),
+            .explorer_dark => std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer"),
+        };
+        _ = SetWindowTheme(hwnd, theme, null);
+    }
+
+    fn applyWindow(hwnd: HWND, policy: WindowThemePolicy, supports_backdrop: bool) void {
+        const hr = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            @ptrCast(&policy.immersive_dark),
+            @sizeOf(u32),
+        );
+        if (hr == E_INVALIDARG) _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE_V1,
+            @ptrCast(&policy.immersive_dark),
+            @sizeOf(u32),
+        );
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, @ptrCast(&policy.caption_color), @sizeOf(u32));
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, @ptrCast(&policy.text_color), @sizeOf(u32));
+        if (supports_backdrop) _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            @ptrCast(&policy.backdrop_type),
+            @sizeOf(u32),
+        );
+    }
 };
 
 pub const ProfileChromeAccent = struct {
@@ -825,4 +1016,68 @@ test "blendSemanticAccent stays in sane ranges" {
         try std.testing.expect(hsv.s >= 0.45 - 0.01 and hsv.s <= 0.75 + 0.01);
         try std.testing.expect(hsv.v >= 0.40 - 0.01 and hsv.v <= 0.90 + 0.01);
     }
+}
+
+test "settings colors follow explicit light and dark app themes" {
+    const system = SettingsSystemColors{
+        .window = 1,
+        .window_text = 2,
+        .button_face = 3,
+        .button_text = 4,
+        .gray_text = 5,
+    };
+    const light = settingsColors(lightTheme(), system, false);
+    const dark = settingsColors(darkTheme(), system, false);
+    try std.testing.expect(!light.is_dark);
+    try std.testing.expect(dark.is_dark);
+    try std.testing.expectEqual(lightTheme().chrome_bg, light.window_bg);
+    try std.testing.expectEqual(darkTheme().chrome_bg, dark.window_bg);
+    try std.testing.expect(light.window_bg != dark.window_bg);
+    try std.testing.expect(light.edit_bg != dark.edit_bg);
+}
+
+test "settings high contrast uses only exact system color roles" {
+    const system = SettingsSystemColors{
+        .window = 11,
+        .window_text = 12,
+        .button_face = 13,
+        .button_text = 14,
+        .gray_text = 15,
+    };
+    const colors = settingsColors(darkTheme(), system, true);
+    try std.testing.expect(colors.high_contrast);
+    try std.testing.expectEqual(system.button_face, colors.window_bg);
+    try std.testing.expectEqual(system.window, colors.rail_bg);
+    try std.testing.expectEqual(system.button_text, colors.text);
+    try std.testing.expectEqual(system.gray_text, colors.disabled_text);
+    try std.testing.expectEqual(system.window, colors.edit_bg);
+    try std.testing.expectEqual(system.window_text, colors.edit_text);
+    try std.testing.expectEqual(@as(u32, 0), settingsDwmDarkModeValue(colors));
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        settingsDwmDarkModeValue(settingsColors(darkTheme(), system, false)),
+    );
+}
+
+test "window theme policy actively resets sticky DWM state in high contrast" {
+    const policy = windowThemePolicy(.host, true, true, 1, 2, 4);
+    try std.testing.expectEqual(@as(u32, 0), policy.immersive_dark);
+    try std.testing.expectEqual(dwm_color_default, policy.caption_color);
+    try std.testing.expectEqual(dwm_color_default, policy.text_color);
+    try std.testing.expectEqual(DWMSBT_NONE, policy.backdrop_type);
+    try std.testing.expectEqual(NativeControlTheme.system, policy.native_controls);
+}
+
+test "settings window policy explicitly disables system backdrop" {
+    const policy = windowThemePolicy(.settings, true, false, 1, 2, DWMSBT_NONE);
+    try std.testing.expectEqual(DWMSBT_NONE, policy.backdrop_type);
+    try std.testing.expectEqual(NativeControlTheme.explorer_dark, policy.native_controls);
+}
+
+test "DWM system backdrop constants match Win32 ABI" {
+    try std.testing.expectEqual(@as(u32, 0), DWMSBT_AUTO);
+    try std.testing.expectEqual(@as(u32, 1), DWMSBT_NONE);
+    try std.testing.expectEqual(@as(u32, 2), DWMSBT_MAINWINDOW);
+    try std.testing.expectEqual(@as(u32, 3), DWMSBT_TRANSIENTWINDOW);
+    try std.testing.expectEqual(@as(u32, 4), DWMSBT_TABBEDWINDOW);
 }

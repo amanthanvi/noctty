@@ -36,10 +36,13 @@ renderer_state: *RendererState,
 
 /// A handle to wake up the renderer. This hints to the renderer that
 /// a repaint should happen.
-renderer_wakeup: xev.Async,
+renderer_wakeup: *xev.Async,
 
 /// The mailbox for renderer messages.
 renderer_mailbox: *RendererThread.Mailbox,
 
 /// The mailbox for sending the surface messages.
 surface_mailbox: apprt.surface.Mailbox,
+
+/// Nonblocking semantic terminal-output transport owned by the Surface.
+terminal_output_transport: *apprt.surface.TerminalOutputTransport,

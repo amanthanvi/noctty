@@ -86,8 +86,8 @@ pub const reviewed_help = [_]struct {
     keywords: []const u8,
 }{
     .{ .target = .keyboard_shortcuts, .title = "Keyboard shortcuts", .description = "Review keyboard navigation and bindings", .keywords = "keys keybindings commands" },
-    .{ .target = .settings, .title = "Open settings", .description = "Configure winghostty", .keywords = "preferences options" },
-    .{ .target = .configuration, .title = "Configuration guide", .description = "Learn the winghostty configuration format", .keywords = "config file syntax" },
+    .{ .target = .settings, .title = "Open settings", .description = "Configure noctty", .keywords = "preferences options" },
+    .{ .target = .configuration, .title = "Configuration guide", .description = "Learn the noctty configuration format", .keywords = "config file syntax" },
     .{ .target = .troubleshooting, .title = "Troubleshooting", .description = "Resolve common terminal problems", .keywords = "help repair support" },
     .{ .target = .diagnostics, .title = "Export diagnostics", .description = "Create a local redacted diagnostic bundle", .keywords = "logs debug bundle" },
     .{ .target = .accessibility, .title = "Accessibility", .description = "Keyboard, screen reader, contrast, and motion guidance", .keywords = "narrator nvda contrast reduced motion" },
@@ -407,11 +407,11 @@ test "action snapshot and blended targets share one ranked catalog" {
     });
     try catalog.append(.{
         .item = .{
-            .id = stableStringId(.theme, "Winghostty Dark"),
-            .title = "Winghostty Dark",
+            .id = stableStringId(.theme, "Noctty Dark"),
+            .title = "Noctty Dark",
             .keywords = "appearance",
         },
-        .payload = .{ .theme = "Winghostty Dark" },
+        .payload = .{ .theme = "Noctty Dark" },
     });
 
     var ranked_storage: [8]Ranked = undefined;
@@ -426,7 +426,7 @@ test "action snapshot and blended targets share one ranked catalog" {
     try std.testing.expectEqual(@as(u64, 42), catalog.payloadFor(tab_results[0]).?.tab);
 
     const theme_results = catalog.rank("%appearance", .{}, &ranked_storage);
-    try std.testing.expectEqualStrings("Winghostty Dark", catalog.payloadFor(theme_results[0]).?.theme);
+    try std.testing.expectEqualStrings("Noctty Dark", catalog.payloadFor(theme_results[0]).?.theme);
 }
 
 test "snapshot append is transactional on duplicate IDs" {
@@ -481,7 +481,7 @@ test "descriptor validation and stale ranked results fail closed" {
 
 test "installed theme snapshot and reviewed help produce typed payloads" {
     const themes = [_]ThemeEntry{
-        .{ .name = "Winghostty Dark", .description = "Dark built-in theme" },
+        .{ .name = "Noctty Dark", .description = "Dark built-in theme" },
         .{ .name = "Managed Light", .enabled = false, .disabled_reason = "Managed by policy" },
     };
     var item_storage: [16]Item = undefined;
@@ -492,7 +492,7 @@ test "installed theme snapshot and reviewed help produce typed payloads" {
 
     var ranked_storage: [16]Ranked = undefined;
     const theme_results = catalog.rank("%dark", .{}, &ranked_storage);
-    try std.testing.expectEqualStrings("Winghostty Dark", catalog.payloadFor(theme_results[0]).?.theme);
+    try std.testing.expectEqualStrings("Noctty Dark", catalog.payloadFor(theme_results[0]).?.theme);
     const help_results = catalog.rank("?keyboard", .{}, &ranked_storage);
     try std.testing.expectEqual(HelpTarget.keyboard_shortcuts, catalog.payloadFor(help_results[0]).?.help);
 }

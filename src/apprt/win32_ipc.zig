@@ -382,7 +382,7 @@ test "win32 IPC silent client read is bounded" {
 
     const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
         std.testing.allocator,
-        "\\\\.\\pipe\\winghostty-ipc-timeout-{d}",
+        "\\\\.\\pipe\\noctty-ipc-timeout-{d}",
         .{GetTickCount64()},
         0,
     );

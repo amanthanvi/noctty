@@ -389,6 +389,35 @@ fn syncDrawTimer(self: *Thread) void {
     );
 }
 
+/// Enqueue a message and wake the renderer to process it.
+///
+/// The first notification lets the renderer make room if the mailbox is
+/// full. The second covers the case where that notification is processed
+/// before the message is enqueued.
+pub fn send(self: *Thread, msg: rendererpkg.Message) void {
+    sendMessage(&self.wakeup, self.mailbox, msg);
+}
+
+/// Enqueue a message through a shared renderer wake handle.
+pub fn sendMessage(
+    wakeup: *xev.Async,
+    mailbox: *Mailbox,
+    msg: rendererpkg.Message,
+) void {
+    notify(wakeup);
+
+    // Renderer messages may transfer ownership or required state.
+    _ = mailbox.push(msg, .{ .forever = {} });
+
+    notify(wakeup);
+}
+
+fn notify(wakeup: *xev.Async) void {
+    wakeup.notify() catch |err| {
+        log.warn("error notifying renderer thread err={}", .{err});
+    };
+}
+
 /// Drain the mailbox.
 fn drainMailbox(self: *Thread) !bool {
     // There's probably a more elegant way to do this...
@@ -764,29 +793,33 @@ fn cursorTimerCallback(
         return .disarm;
     };
 
-    // An unfocused surface needs no recurring cursor timer. Focus regain will
-    // arm a new one once this callback has been popped and the completion is
-    // therefore safe to reuse.
-    if (!t.flags.focused) {
-        t.flags.cursor_blink_visible = true;
-        t.cursor_blink_reset_at = null;
-        return .disarm;
-    }
-
     // Input or focus regain may have requested a fresh interval while this
     // completion was already queued. Honor the remaining logical delay here,
     // from the timer's own callback, rather than resetting the queued object.
-    if (t.cursor_blink_reset_at) |reset_at| {
-        const elapsed_ms = elapsed: {
+    const reset_elapsed_ns: ?u64 = if (t.flags.focused)
+        if (t.cursor_blink_reset_at) |reset_at| elapsed: {
             const now = std.time.Instant.now() catch break :elapsed 0;
-            break :elapsed now.since(reset_at) / std.time.ns_per_ms;
-        };
-        const remaining_ms = cursorBlinkRemainingMs(cursorBlinkInterval(), elapsed_ms);
-        if (remaining_ms > 0) {
-            t.armCursorTimerIfDead(remaining_ms);
+            break :elapsed now.since(reset_at);
+        } else null
+    else
+        null;
+    switch (cursorBlinkTimerDecision(
+        t.flags.focused,
+        cursorBlinkInterval(),
+        reset_elapsed_ns,
+    )) {
+        .disarm => {
+            // An unfocused surface needs no recurring cursor timer. Focus
+            // regain will arm a new one once this callback has been popped.
+            t.flags.cursor_blink_visible = true;
+            t.cursor_blink_reset_at = null;
             return .disarm;
-        }
-        t.cursor_blink_reset_at = null;
+        },
+        .rearm_after => |delay_ms| {
+            t.armCursorTimerIfDead(delay_ms);
+            return .disarm;
+        },
+        .toggle => t.cursor_blink_reset_at = null,
     }
 
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
@@ -829,17 +862,70 @@ fn cursorBlinkInterval() u64 {
     return CURSOR_BLINK_INTERVAL;
 }
 
-fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ms: u64) u64 {
-    return interval_ms -| elapsed_ms;
+fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ns: u64) u64 {
+    const interval_ns = interval_ms *| std.time.ns_per_ms;
+    const remaining_ns = interval_ns -| elapsed_ns;
+    return remaining_ns / std.time.ns_per_ms +
+        @intFromBool(remaining_ns % std.time.ns_per_ms != 0);
 }
 
-test "cursor blink reset deadline saturates safely" {
+const CursorBlinkTimerDecision = union(enum) {
+    disarm,
+    rearm_after: u64,
+    toggle,
+};
+
+fn cursorBlinkTimerDecision(
+    focused: bool,
+    interval_ms: u64,
+    reset_elapsed_ns: ?u64,
+) CursorBlinkTimerDecision {
+    if (!focused) return .disarm;
+    if (reset_elapsed_ns) |elapsed_ns| {
+        const remaining_ms = cursorBlinkRemainingMs(interval_ms, elapsed_ns);
+        if (remaining_ms > 0) return .{ .rearm_after = remaining_ms };
+    }
+    return .toggle;
+}
+
+test "cursor blink reset deadline rounds up and clamps" {
     const testing = std.testing;
 
     try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 0));
-    try testing.expectEqual(@as(u64, 1), cursorBlinkRemainingMs(500, 499));
-    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 500));
-    try testing.expectEqual(@as(u64, 0), cursorBlinkRemainingMs(500, 750));
+    try testing.expectEqual(@as(u64, 500), cursorBlinkRemainingMs(500, 1));
+    try testing.expectEqual(
+        @as(u64, 1),
+        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms - 1),
+    );
+    try testing.expectEqual(
+        @as(u64, 0),
+        cursorBlinkRemainingMs(500, 500 * std.time.ns_per_ms),
+    );
+    try testing.expectEqual(
+        @as(u64, 0),
+        cursorBlinkRemainingMs(500, 750 * std.time.ns_per_ms),
+    );
+}
+
+test "cursor blink timer decision preserves focus and reset state" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.disarm,
+        cursorBlinkTimerDecision(false, 500, 1),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.toggle,
+        cursorBlinkTimerDecision(true, 500, null),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision{ .rearm_after = 500 },
+        cursorBlinkTimerDecision(true, 500, 1),
+    );
+    try testing.expectEqual(
+        CursorBlinkTimerDecision.toggle,
+        cursorBlinkTimerDecision(true, 500, 500 * std.time.ns_per_ms),
+    );
 }
 
 test "renderer follow-up check tracks visible terminal dirtiness" {
@@ -863,4 +949,111 @@ test "renderer follow-up check tracks visible terminal dirtiness" {
 
     try term.printString("x");
     try testing.expect(terminal_render_dirty.needsRendererWake(&term));
+}
+
+test "send wakes the renderer before waiting on a full mailbox" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // This is the deadlock from the original bug, in miniature: a full
+    // mailbox whose consumer is asleep and only drains once woken. If
+    // `send` pushes before notifying, nothing ever wakes the consumer and
+    // the push waits forever.
+    var mailbox = try Mailbox.create(alloc);
+    defer mailbox.destroy(alloc);
+
+    var filled: usize = 0;
+    while (mailbox.push(.{ .reset_cursor_blink = {} }, .{ .instant = {} }) != 0) {
+        filled += 1;
+    }
+    try testing.expect(filled > 0);
+
+    // Confirm the mailbox really is full before we test the blocking path.
+    try testing.expectEqual(
+        @as(Mailbox.Size, 0),
+        mailbox.push(.{ .focus = true }, .{ .instant = {} }),
+    );
+
+    const Consumer = struct {
+        loop: xev.Loop,
+        wakeup: *xev.Async,
+        wakeup_c: xev.Completion = .{},
+        guard: xev.Timer,
+        guard_c: xev.Completion = .{},
+        mailbox: *Mailbox,
+        to_drain: usize,
+        woken: bool = false,
+        ready: std.atomic.Value(bool) = .init(false),
+
+        const Consumer = @This();
+
+        /// Pop exactly the messages we pre-filled, leaving whatever the
+        /// sender adds. Draining until empty would race the sender's push.
+        fn drain(self: *Consumer) void {
+            for (0..self.to_drain) |_| _ = self.mailbox.pop();
+            self.loop.stop();
+        }
+
+        fn onWake(
+            self_: ?*Consumer,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Async.WaitError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            const self = self_.?;
+            self.woken = true;
+            self.drain();
+            return .disarm;
+        }
+
+        fn onGuard(
+            self_: ?*Consumer,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            r: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            _ = r catch {};
+            // Safety valve. On a regression the wakeup never arrives, so we
+            // drain anyway and let the `woken` assertion fail rather than
+            // hanging the test suite forever.
+            self_.?.drain();
+            return .disarm;
+        }
+
+        fn run(self: *Consumer) void {
+            self.wakeup.wait(&self.loop, &self.wakeup_c, Consumer, self, onWake);
+            self.guard.run(&self.loop, &self.guard_c, 5000, Consumer, self, onGuard);
+            self.ready.store(true, .release);
+            self.loop.run(.until_done) catch {};
+        }
+    };
+
+    var wakeup = try xev.Async.init();
+    defer wakeup.deinit();
+
+    var consumer: Consumer = .{
+        .loop = try xev.Loop.init(.{}),
+        .wakeup = &wakeup,
+        .guard = try xev.Timer.init(),
+        .mailbox = mailbox,
+        .to_drain = filled,
+    };
+    defer consumer.loop.deinit();
+    defer consumer.guard.deinit();
+
+    const consumer_thread = try std.Thread.spawn(.{}, Consumer.run, .{&consumer});
+    while (!consumer.ready.load(.acquire)) std.Thread.yield() catch {};
+
+    sendMessage(&wakeup, mailbox, .{ .focus = true });
+    consumer_thread.join();
+
+    // The consumer was woken by `send`, not by the safety valve.
+    try testing.expect(consumer.woken);
+
+    // And the message was delivered rather than dropped.
+    const delivered = mailbox.pop();
+    try testing.expect(delivered != null);
+    try testing.expect(std.meta.activeTag(delivered.?) == .focus);
+    try testing.expect(mailbox.pop() == null);
 }

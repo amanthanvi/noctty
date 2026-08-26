@@ -1,11 +1,11 @@
 # Windows Capability Matrix
 
-Maps current official Ghostty docs surfaces to winghostty behavior on
+Maps current official Ghostty docs surfaces to noctty behavior on
 Windows. Cells stay short; rows with real nuance point into the
 [Notes](#notes) section below. Update rows when Windows behavior changes or
 when upstream docs add or remove a surface that this fork cares about.
 
-Last reviewed: 2026-07-11.
+Last reviewed: 2026-08-12.
 
 ## Status legend
 
@@ -18,35 +18,35 @@ Last reviewed: 2026-07-11.
 
 ## Supported
 
-| Ghostty docs surface                                                                                               | winghostty note                                                                                                                                                 |
+| Ghostty docs surface                                                                                               | noctty note                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\winghostty\config.ghostty`; live reload via `Ctrl+Shift+,`.                             |
-| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; default bindings are Windows-native.                                                         |
+| [Configuration](https://ghostty.org/docs/config) and [option reference](https://ghostty.org/docs/config/reference) | Same config grammar and generated docs. Config lives at `%LOCALAPPDATA%\noctty\config.ghostty`; live reload via `Ctrl+Shift+,`.                             |
+| [Custom keybindings](https://ghostty.org/docs/config/keybind)                                                      | Same `keybind = trigger=action` grammar and `+list-keybinds` flow; defaults are the shared non-macOS set with Windows-specific exceptions.                      |
 | [Color Theme](https://ghostty.org/docs/features/theme)                                                             | Built-in themes, separate light/dark themes, custom themes, and `+list-themes` ship on Windows.                                                                 |
 | [Configuration: `background-opacity`](https://ghostty.org/docs/config/reference)                                   | Transparent terminal backgrounds work on Windows and can be toggled live.                                                                                       |
 | [Terminal API (VT)](https://ghostty.org/docs/vt) and [VT reference](https://ghostty.org/docs/vt/reference)         | The shared Ghostty terminal core carries the documented VT/OSC/Kitty surface. Win32-validated coverage: [windows-vt-conformance.md](windows-vt-conformance.md). |
-| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in winghostty.                                                                                                |
+| [Features overview: windows, tabs, and splits](https://ghostty.org/docs/features)                                  | Native Win32 windows, tabs, and splits ship today in noctty.                                                                                                |
 
 ## Partial
 
-| Ghostty docs surface                                                                         | winghostty note                                                                                                                                                                                                                                                                       |
+| Ghostty docs surface                                                                         | noctty note                                                                                                                                                                                                                                                                       |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Shell integration](https://ghostty.org/docs/features/shell-integration)                     | Upstream shell docs apply; PowerShell injection is added on Windows, `cmd.exe` stays a plain fallback. See [shell integration notes](#shell-integration).                                                                                                                             |
 | [Action reference](https://ghostty.org/docs/config/keybind/reference)                        | Shared action grammar is intact, but upstream mixes in macOS/Linux behavior. For Windows truth, prefer `+show-config --default --docs` plus `+list-keybinds`.                                                                                                                         |
 | [Action reference: `toggle_secure_input`](https://ghostty.org/docs/config/keybind/reference) | A local sensitive-input indicator only; no Windows equivalent of macOS Secure Keyboard Entry, and system-wide keyboard hooks are not blocked.                                                                                                                                         |
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
-| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\winghostty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
+| [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\noctty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
 | [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                           |
 | [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial. See [accessibility notes](#accessibility).                                                                                                                                                                                                                  |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                              |
 
 ## Windows-Specific
 
-| Ghostty docs surface                                                              | winghostty note                                                                                                            |
+| Ghostty docs surface                                                              | noctty note                                                                                                            |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. winghostty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
+| [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. noctty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
-| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\winghostty\...`, not the macOS/Linux paths documented upstream.      |
+| [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\noctty\...`, not the macOS/Linux paths documented upstream.      |
 | Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
 | Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
@@ -63,7 +63,7 @@ that:
 
 - Automatic PowerShell injection (`powershell.exe`, `pwsh.exe`), with a
   manual fallback at
-  `%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`.
+  `%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`.
 - PowerShell emits OSC 7 cwd URIs, OSC 133 prompt marks, command-finish
   status, and PSReadLine command metadata when available.
 - PowerShell wraps `ssh` for `ssh-env` and cache-aware `ssh-terminfo`, but
@@ -92,7 +92,8 @@ Configurable actions, live tabs, panes, Windows profiles, installed themes,
 native settings, reviewed help destinations, and keyboard tab-to-pane moves
 share one typed, fuzzy-ranked list with:
 
-- category prefixes (`>`, `@`, `/`, `~`, `:`) and keyboard navigation
+- category prefixes (`>`, `@`, `/`, `~`, `:`, `%`, `!`, `?`) and keyboard
+  navigation
 - stable dispatch IDs and destructive/disabled semantics
 - UI Automation selection announcements
 - reversible live theme preview before commit (High Contrast suppresses

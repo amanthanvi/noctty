@@ -4,7 +4,6 @@ param(
     [string] $CliAction = '+help',
     [string] $CommandText = '',
     [string] $ExePathOverride = '',
-    [switch] $RunBooFirst,
     [int] $SeedTabs = 1,
     [int] $TimeoutSeconds = 20
 )
@@ -24,7 +23,7 @@ if ([string]::IsNullOrWhiteSpace($CliAction)) {
 }
 
 $typedCommandText = if ([string]::IsNullOrWhiteSpace($CommandText)) {
-    "winghostty $CliAction"
+    "noctty $CliAction"
 }
 else {
     $CommandText
@@ -35,7 +34,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
     $forwardedArgs = @('-CliAction', $CliAction, '-SeedTabs', $SeedTabs.ToString(), '-TimeoutSeconds', $TimeoutSeconds.ToString())
     if (-not [string]::IsNullOrWhiteSpace($CommandText)) {
         $forwardedArgs += @('-CommandText', $CommandText)
@@ -43,7 +42,6 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
     if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
         $forwardedArgs += @('-ExePathOverride', $ExePathOverride)
     }
-    if ($RunBooFirst) { $forwardedArgs += '-RunBooFirst' }
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
 
@@ -51,7 +49,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHELL_COMMAND_LIVE_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -105,6 +103,18 @@ public static class Win11ShellCommandLiveNative {
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
     public static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -115,6 +125,27 @@ public static class Win11ShellCommandLiveNative {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern short VkKeyScanW(char ch);
+
+    public static bool ForceForeground(IntPtr hWnd) {
+        keybd_event(0x12, 0, 0, UIntPtr.Zero);
+        keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
+        uint ignored;
+        uint targetThread = GetWindowThreadProcessId(hWnd, out ignored);
+        IntPtr foreground = GetForegroundWindow();
+        uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+        uint currentThread = GetCurrentThreadId();
+        bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread && AttachThreadInput(currentThread, foregroundThread, true);
+        bool attachedTarget = targetThread != 0 && targetThread != currentThread && AttachThreadInput(currentThread, targetThread, true);
+        try {
+            BringWindowToTop(hWnd);
+            SetForegroundWindow(hWnd);
+            return GetForegroundWindow() == hWnd;
+        }
+        finally {
+            if (attachedTarget) AttachThreadInput(currentThread, targetThread, false);
+            if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+        }
+    }
 }
 '@
 }
@@ -131,7 +162,6 @@ $SWP_SHOWWINDOW = 0x0040
 $VISIBLE_TAB_MIN_ID = 1000
 $VISIBLE_TAB_MAX_ID_EXCLUSIVE = 1900
 $HOST_COMMAND_NEW_TAB_ID = 1904
-$BOO_AUTO_EXIT_MS = 1000
 $KEY_STROKE_DELAY_MS = 15
 $CAPTURE_PROMOTION_DELAY_MS = 150
 $CAPTURE_SETTLE_MS = 300
@@ -184,7 +214,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
             $script:Win11ShellCommandLiveHost = $hwnd
             return $false
         }
@@ -205,7 +235,7 @@ function Find-SurfaceWindow {
     $callback = [Win11ShellCommandLiveNative+EnumWindowsProc] {
         param([IntPtr] $hwnd, [IntPtr] $lParam)
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -ne 'winghostty.win32') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -ne 'noctty.win32') {
             return $true
         }
 
@@ -507,7 +537,7 @@ function Promote-WindowForCapture {
         0,
         [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW)
     )
-    [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
+    [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
 
     $captureDeadline = (Get-Date).AddMilliseconds($CAPTURE_PROMOTION_DELAY_MS * 4)
     while ((Get-Date) -lt $captureDeadline) {
@@ -517,7 +547,7 @@ function Promote-WindowForCapture {
         }
 
         Start-Sleep -Milliseconds $CAPTURE_PROMOTION_DELAY_MS
-        [void] [Win11ShellCommandLiveNative]::SetForegroundWindow($Hwnd)
+        [void] [Win11ShellCommandLiveNative]::ForceForeground($Hwnd)
     }
 
     throw "Failed to foreground capture target hwnd=$Hwnd before screenshot sampling"
@@ -614,9 +644,6 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $co
 @(
     '@echo off'
     "cd /d `"$($layout.Temp)`""
-    if ($RunBooFirst) { "set WINGHOSTTY_BOO_AUTO_EXIT_MS=$BOO_AUTO_EXIT_MS" }
-    if ($RunBooFirst) { 'winghostty +boo' }
-    if ($RunBooFirst) { 'set WINGHOSTTY_BOO_AUTO_EXIT_MS=' }
     'echo READY>interactive-win11-shell-command-live-ready.txt'
 ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
 
@@ -678,7 +705,7 @@ try {
     }
     Start-Sleep -Milliseconds $CAPTURE_SETTLE_MS
 
-    Send-Line -Hwnd $surfaceHwnd -Text 'where winghostty>interactive-win11-shell-command-live-resolved.txt' -Deadline $deadline -Process $process
+    Send-Line -Hwnd $surfaceHwnd -Text 'where noctty>interactive-win11-shell-command-live-resolved.txt' -Deadline $deadline -Process $process
     Wait-InteractiveWin11Until -Deadline $deadline -Description 'command resolution file' -Process $process -Condition {
         Test-Path -LiteralPath $resolvedPath
     }
@@ -693,9 +720,9 @@ try {
     }
     if (
         (-not $resolvedFirstDir.Equals($expectedCommandDir, [System.StringComparison]::OrdinalIgnoreCase)) -or
-        ($resolvedFirstName -notin @('winghostty.com', 'winghostty.exe'))
+        ($resolvedFirstName -notin @('noctty.com', 'noctty.exe'))
     ) {
-        throw "live shell resolved unexpected first winghostty command: $($resolved[0]) (expected same install dir as $exePath)"
+        throw "live shell resolved unexpected first noctty command: $($resolved[0]) (expected same install dir as $exePath)"
     }
 
     Send-Line -Hwnd $surfaceHwnd -Text ("{0} & echo POST>interactive-win11-shell-command-live-post.txt" -f $typedCommandText) -Deadline $deadline -Process $process
@@ -713,10 +740,10 @@ try {
 
     $stderr = Get-InteractiveWin11TextFile -Path $stderrPath
     if ($stderr -match 'error starting IO thread:|panic: reached unreachable code') {
-        throw 'winghostty live shell command run reported a runtime failure'
+        throw 'noctty live shell command run reported a runtime failure'
     }
 
-    Write-Host ("interactive-win11 shell command live validation: PASS (command={0}, action={1}, run_boo_first={2}, seed_tabs={3}, changed={4}, sampled={5}, stdout={6}, stderr={7}, ready={8}, control={9}, resolved={10}, post={11}, before={12}, after={13})" -f $typedCommandText, $CliAction, $RunBooFirst, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
+    Write-Host ("interactive-win11 shell command live validation: PASS (command={0}, action={1}, seed_tabs={2}, changed={3}, sampled={4}, stdout={5}, stderr={6}, ready={7}, control={8}, resolved={9}, post={10}, before={11}, after={12})" -f $typedCommandText, $CliAction, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
 }
 finally {
     if ($hostHwnd -ne [IntPtr]::Zero) {

@@ -1,4 +1,4 @@
-//! Geometric GDI icon primitives for the winghostty Windows apprt.
+//! Geometric GDI icon primitives for the noctty Windows apprt.
 //!
 //! Provides a palette of small (16-24 px) geometric icons rendered via
 //! Win32 GDI pens, brushes, and polygon calls.  No raster assets -- every

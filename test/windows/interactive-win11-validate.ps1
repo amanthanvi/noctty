@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$suiteLogDir = Join-Path $env:TEMP ("winghostty-interactive-win11-suite-{0}" -f $PID)
+$suiteLogDir = Join-Path $env:TEMP ("noctty-interactive-win11-suite-{0}" -f $PID)
 New-Item -ItemType Directory -Force -Path $suiteLogDir | Out-Null
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
@@ -57,7 +57,8 @@ function Get-HarnessArguments {
     param(
         [Parameter(Mandatory)] [string] $ScriptName,
         [int] $TimeoutSeconds = 0,
-        [switch] $IncludeResetState
+        [switch] $IncludeResetState,
+        [string[]] $AdditionalArguments = @()
     )
 
     $scriptPath = Join-Path $PSScriptRoot $ScriptName
@@ -76,6 +77,7 @@ function Get-HarnessArguments {
         )
     }
     if ($ResetState -and $IncludeResetState) { $argumentList += '-ResetState' }
+    if ($AdditionalArguments.Count -ne 0) { $argumentList += $AdditionalArguments }
 
     return $argumentList
 }
@@ -98,15 +100,17 @@ function Invoke-Harness {
 function Invoke-HarnessWithPassSentinel {
     param(
         [Parameter(Mandatory)] [string] $ScriptName,
-        [Parameter(Mandatory)] [int] $TimeoutSeconds
+        [Parameter(Mandatory)] [int] $TimeoutSeconds,
+        [string[]] $AdditionalArguments = @(),
+        [string] $ScenarioSlug = ''
     )
 
-    $run = Start-Harness -ScriptName $ScriptName -TimeoutSeconds $TimeoutSeconds
+    $run = Start-Harness -ScriptName $ScriptName -TimeoutSeconds $TimeoutSeconds -AdditionalArguments $AdditionalArguments -ScenarioSlug $ScenarioSlug
     $waitMilliseconds = [int][Math]::Ceiling(($TimeoutSeconds + 5) * 1000)
     if (-not $run.Process.WaitForExit($waitMilliseconds)) {
-        Stop-InteractiveWin11Process -Process $run.Process
+        Stop-InteractiveWin11Process -Process $run.Process -RequireLiveRoot
         throw @"
-$ScriptName timed out after ${TimeoutSeconds}s
+$($run.Script) timed out after ${TimeoutSeconds}s
 stdout ($($run.Stdout)):
 $(Get-HarnessLog -Path $run.Stdout)
 
@@ -122,7 +126,7 @@ $(Get-HarnessLog -Path $run.Stderr)
 
     if (($null -ne $exitCode) -and ($exitCode -ne 0)) {
         throw @"
-$ScriptName exited with code $exitCode
+$($run.Script) exited with code $exitCode
 stdout:
 $stdout
 
@@ -133,7 +137,7 @@ $stderr
 
     if ($summary -notlike '*PASS*') {
         throw @"
-$ScriptName did not report PASS
+$($run.Script) did not report PASS
 stdout:
 $stdout
 
@@ -150,12 +154,20 @@ $stderr
 function Start-Harness {
     param(
         [Parameter(Mandatory)] [string] $ScriptName,
-        [Parameter(Mandatory)] [int] $TimeoutSeconds
+        [Parameter(Mandatory)] [int] $TimeoutSeconds,
+        [string[]] $AdditionalArguments = @(),
+        [string] $ScenarioSlug = ''
     )
 
-    $stdoutPath = Join-Path $suiteLogDir ("{0}.stdout.log" -f $ScriptName)
-    $stderrPath = Join-Path $suiteLogDir ("{0}.stderr.log" -f $ScriptName)
-    $argumentList = Get-HarnessArguments -ScriptName $ScriptName -TimeoutSeconds $TimeoutSeconds -IncludeResetState
+    $runName = if ([string]::IsNullOrWhiteSpace($ScenarioSlug)) {
+        $ScriptName
+    }
+    else {
+        "{0}-{1}" -f [System.IO.Path]::GetFileNameWithoutExtension($ScriptName), $ScenarioSlug
+    }
+    $stdoutPath = Join-Path $suiteLogDir ("{0}.stdout.log" -f $runName)
+    $stderrPath = Join-Path $suiteLogDir ("{0}.stderr.log" -f $runName)
+    $argumentList = Get-HarnessArguments -ScriptName $ScriptName -TimeoutSeconds $TimeoutSeconds -IncludeResetState -AdditionalArguments $AdditionalArguments
 
     $process = Start-Process `
         -FilePath 'powershell.exe' `
@@ -165,7 +177,7 @@ function Start-Harness {
         -RedirectStandardError $stderrPath `
         -PassThru
 
-    return [InteractiveWin11HarnessRun]::new($ScriptName, $process, $stdoutPath, $stderrPath, $TimeoutSeconds)
+    return [InteractiveWin11HarnessRun]::new($runName, $process, $stdoutPath, $stderrPath, $TimeoutSeconds)
 }
 
 function Get-HarnessLog {
@@ -202,16 +214,22 @@ Invoke-SuiteBuildIfNeeded
 Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-configured-size.ps1' -TimeoutSeconds 15
-Invoke-Harness -ScriptName 'interactive-win11-boo-performance.ps1' -TimeoutSeconds 25
-Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-boo-multitab.ps1' -TimeoutSeconds 25
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
-if ($env:WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
+if ($env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
     Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
 }
 else {
-    Write-Host 'interactive-win11 shell command live validation: SKIP (set WINGHOSTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS=1 to require the foreground-sensitive harness in the composite suite)'
+    Write-Host 'interactive-win11 shell command live validation: SKIP (set NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS=1 to require the foreground-sensitive harness in the composite suite)'
 }
-Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -ScenarioSlug 'classic-a'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-bmp') -ScenarioSlug 'bmp'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-supplementary') -ScenarioSlug 'supplementary'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 25 -AdditionalArguments @('-Key', 'unicode-burst') -ScenarioSlug 'burst'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-cr') -ScenarioSlug 'control-cr'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-lf') -ScenarioSlug 'control-lf'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-tab') -ScenarioSlug 'control-tab'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-backspace') -ScenarioSlug 'control-backspace'
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-key-input.ps1' -TimeoutSeconds 20 -AdditionalArguments @('-Key', 'unicode-escape') -ScenarioSlug 'control-escape'
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-ime-candidate.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-new-tab.ps1' -TimeoutSeconds 20
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-resize.ps1' -TimeoutSeconds 15
@@ -232,7 +250,7 @@ foreach ($run in $parallelRuns) {
     if (-not $run.Process.WaitForExit($remainingMilliseconds)) {
         foreach ($other in $parallelRuns) {
             if (-not $other.Process.HasExited) {
-                Stop-InteractiveWin11Process -Process $other.Process
+                Stop-InteractiveWin11Process -Process $other.Process -RequireLiveRoot
             }
         }
         throw @"

@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and discussion
-    url: https://github.com/amanthanvi/winghostty/discussions
+    url: https://github.com/amanthanvi/noctty/discussions
     about: Use Discussions for usage questions, design discussion, or support requests that are not actionable bugs.

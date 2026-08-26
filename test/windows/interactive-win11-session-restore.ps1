@@ -5,11 +5,11 @@ if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 $launcher = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1')
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED) {
     $args = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $args += '-Rebuild' }; if ($ResetState) { $args += '-ResetState' }
     $code = 0
-    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
+    Invoke-InteractiveWin11Bootstrap -RepoRoot $repoRoot -LauncherPath $launcher -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED' -ArgumentList $args -ExitCode ([ref]$code)
     exit $code
 }
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
@@ -18,15 +18,15 @@ $layout = $harness.Layout
 $exe = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
 if ((Get-InteractiveWin11LaunchAction -ExePath $exe -Rebuild:$Rebuild -BuildInputs (Get-InteractiveWin11DefaultBuildInputs -RepoRoot $repoRoot)) -eq 'build') { Invoke-InteractiveWin11Build -RepoRoot $repoRoot }
 Assert-InteractiveWin11ExeExists -ExePath $exe
-$stateDir = Join-Path $layout.LocalAppData 'winghostty'; New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+$stateDir = Join-Path $layout.LocalAppData 'noctty'; New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $configPath = Join-Path $stateDir 'config.ghostty'
 $config = "window-save-state = always`r`nconfirm-close-surface = false`r`n"
 [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
 $statePath = Join-Path $stateDir 'session-state.json'
 $runs = [Collections.Generic.List[object]]::new()
-$instanceClass = "winghostty-interactive-$($layout.SandboxId)"
+$instanceClass = "noctty-interactive-$($layout.SandboxId)"
 function Get-SessionAutomationSnapshot([string]$Name, [DateTime]$Deadline) {
-    $cli = Join-Path (Split-Path -Parent $exe) 'winghostty.com'
+    $cli = Join-Path (Split-Path -Parent $exe) 'noctty.com'
     if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }
     $lastError = ''
     foreach ($attempt in 1..3) {

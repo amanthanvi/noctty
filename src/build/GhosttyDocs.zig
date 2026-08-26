@@ -15,12 +15,15 @@ pub fn init(
     var steps: std.ArrayList(*std.Build.Step) = .empty;
     errdefer steps.deinit(b.allocator);
 
+    // `name` drives internal mdgen entrypoints/filenames (upstream layout);
+    // `install_name` is the user-facing installed man page name.
     const manpages = [_]struct {
         name: []const u8,
+        install_name: []const u8,
         section: []const u8,
     }{
-        .{ .name = "ghostty", .section = "1" },
-        .{ .name = "ghostty", .section = "5" },
+        .{ .name = "ghostty", .install_name = "noctty", .section = "1" },
+        .{ .name = "ghostty", .install_name = "noctty", .section = "5" },
     };
 
     inline for (manpages) |manpage| {
@@ -54,7 +57,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             markdown_output,
-            "share/ghostty/doc/" ++ manpage.name ++ "." ++ manpage.section ++ ".md",
+            "share/ghostty/doc/" ++ manpage.install_name ++ "." ++ manpage.section ++ ".md",
         ).step);
 
         const generate_html = b.addSystemCommand(&.{"pandoc"});
@@ -69,7 +72,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             generate_html.captureStdOut(),
-            "share/ghostty/doc/" ++ manpage.name ++ "." ++ manpage.section ++ ".html",
+            "share/ghostty/doc/" ++ manpage.install_name ++ "." ++ manpage.section ++ ".html",
         ).step);
 
         const generate_manpage = b.addSystemCommand(&.{"pandoc"});
@@ -84,7 +87,7 @@ pub fn init(
 
         try steps.append(b.allocator, &b.addInstallFile(
             generate_manpage.captureStdOut(),
-            "share/man/man" ++ manpage.section ++ "/" ++ manpage.name ++ "." ++ manpage.section,
+            "share/man/man" ++ manpage.section ++ "/" ++ manpage.install_name ++ "." ++ manpage.section,
         ).step);
     }
 

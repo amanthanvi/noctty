@@ -12,13 +12,13 @@ pub const Options = struct {
     /// This is set by the CLI parser for deinit.
     _arena: ?ArenaAllocator = null,
 
-    /// If set, open up a new window in a custom instance of winghostty.
+    /// If set, open up a new window in a custom instance of noctty.
     class: ?[:0]const u8 = null,
 
     /// Did the user specify a `--working-directory` argument on the command line?
     _working_directory_seen: bool = false,
 
-    /// All of the arguments after `+new-window`. They will be sent to winghostty
+    /// All of the arguments after `+new-window`. They will be sent to noctty
     /// for processing.
     _arguments: std.ArrayList([:0]const u8) = .empty,
 
@@ -85,16 +85,16 @@ pub const Options = struct {
 };
 
 /// The `new-window` will use native platform IPC to open up a new window in a
-/// running instance of winghostty.
+/// running instance of noctty.
 ///
 /// If the `--class` flag is not set, the `new-window` command will try and
-/// connect to a running instance of winghostty based on what optimizations the
-/// winghostty CLI was compiled with. Otherwise the `new-window` command will try
-/// and contact a running winghostty instance that was configured with the same
+/// connect to a running instance of noctty based on what optimizations the
+/// noctty CLI was compiled with. Otherwise the `new-window` command will try
+/// and contact a running noctty instance that was configured with the same
 /// `class` as was given on the command line.
 ///
 /// All of the arguments after the `+new-window` argument (except for the
-/// `--class` flag) will be sent to the remote winghostty instance and will be
+/// `--class` flag) will be sent to the remote noctty instance and will be
 /// parsed as command line flags. These flags will override certain settings
 /// when creating the first surface in the new window. Currently, only
 /// `--working-directory`, `--command`, and `--title` are supported. `-e` will
@@ -104,28 +104,28 @@ pub const Options = struct {
 ///
 /// If `--working-directory` is found on the command line and is a relative
 /// path (i.e. doesn't start with `/`) it will be resolved to an absolute path
-/// relative to the current working directory that the `winghostty +new-window`
+/// relative to the current working directory that the `noctty +new-window`
 /// command is run from. `~/` prefixes will also be expanded to the user's home
 /// directory.
 ///
 /// If `--working-directory` is _not_ found on the command line, the working
-/// directory that `winghostty +new-window` is run from will be passed to winghostty.
+/// directory that `noctty +new-window` is run from will be passed to noctty.
 ///
 /// On Win32, `+new-window` uses a native named-pipe IPC channel to forward the
-/// collected command-line arguments into an already-running `winghostty.exe`
-/// instance. If no matching instance is available, winghostty falls back to
-/// launching a new `winghostty.exe` process. If `--class` is provided, that value
+/// collected command-line arguments into an already-running `noctty.exe`
+/// instance. If no matching instance is available, noctty falls back to
+/// launching a new `noctty.exe` process. If `--class` is provided, that value
 /// is used as the instance namespace for both IPC lookup and process fallback.
 ///
 /// Flags:
 ///
 ///   * `--class=<class>`: If set, open up a new window in a custom instance of
-///     winghostty. On Win32 this selects the IPC namespace and is also forwarded
+///     noctty. On Win32 this selects the IPC namespace and is also forwarded
 ///     to the fallback process launch path.
 ///
 ///   * `--command`: The command to be executed in the first surface of the new window.
 ///
-///   * `--working-directory=<directory>`: The working directory to pass to winghostty.
+///   * `--working-directory=<directory>`: The working directory to pass to noctty.
 ///
 ///   * `--title`: A title that will override the title of the first surface in
 ///     the new window. The title override may be edited or removed later.
@@ -214,6 +214,6 @@ fn runArgs(
         },
     }) return 0;
 
-    try stderr.print("+new-window could not find or start a matching winghostty instance.\n", .{});
+    try stderr.print("+new-window could not find or start a matching noctty instance.\n", .{});
     return 1;
 }

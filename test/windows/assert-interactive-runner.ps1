@@ -31,7 +31,7 @@ using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class WinghosttyRunnerNative {
+public static class NocttyRunnerNative {
     [DllImport("kernel32.dll")]
     public static extern uint WTSGetActiveConsoleSessionId();
 
@@ -65,9 +65,9 @@ public static class WinghosttyRunnerNative {
 '@
 
 $processSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-$activeSessionRaw = [WinghosttyRunnerNative]::WTSGetActiveConsoleSessionId()
+$activeSessionRaw = [NocttyRunnerNative]::WTSGetActiveConsoleSessionId()
 $activeSession = if ($activeSessionRaw -eq [uint32]::MaxValue) { -1 } else { [int]$activeSessionRaw }
-$inputDesktop = [WinghosttyRunnerNative]::GetInputDesktopName()
+$inputDesktop = [NocttyRunnerNative]::GetInputDesktopName()
 $windowsBuild = [Environment]::OSVersion.Version.Build
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 try {
@@ -79,10 +79,10 @@ try {
     if ($identity.IsSystem) { throw 'Interactive runner must not run as LocalSystem.' }
     if ($inputDesktop -ne 'Default') { throw "Interactive runner input desktop must be Default; got '$inputDesktop'." }
 
-    $expectedCommit = if ([string]::IsNullOrWhiteSpace($env:WINGHOSTTY_EXPECTED_CHECKOUT_SHA)) {
+    $expectedCommit = if ([string]::IsNullOrWhiteSpace($env:NOCTTY_EXPECTED_CHECKOUT_SHA)) {
         $env:GITHUB_SHA
     } else {
-        $env:WINGHOSTTY_EXPECTED_CHECKOUT_SHA
+        $env:NOCTTY_EXPECTED_CHECKOUT_SHA
     }
     $checkedOutCommit = (& git -C $env:GITHUB_WORKSPACE rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $checkedOutCommit -ne $expectedCommit) {
@@ -93,7 +93,7 @@ try {
     if ($explorer.Count -eq 0) { throw "No Explorer shell is running in interactive session $processSession." }
 
     $evidence = [ordered]@{
-        schema_version = 'winghostty.interactive-runner-provenance.v1'
+        schema_version = 'noctty.interactive-runner-provenance.v1'
         captured_at = [DateTimeOffset]::UtcNow.ToString('o')
         runner_name = $env:RUNNER_NAME
         runner_os = $env:RUNNER_OS

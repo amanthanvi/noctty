@@ -15,7 +15,7 @@ if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
 }
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_UNDO_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -146,7 +146,7 @@ function Find-HostWindow {
             return $true
         }
 
-        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'winghostty.win32.host') {
+        if ((Get-WindowClassName -Hwnd $hwnd) -eq 'noctty.win32.host') {
             $script:Win11UndoFoundHost = $hwnd
             return $false
         }
@@ -217,7 +217,7 @@ function Get-VisibleSurfaceCount {
     )
 
     return @(Get-VisibleChildControls -Parent $Parent |
-        Where-Object { (Get-WindowClassName -Hwnd $_.Hwnd) -eq 'winghostty.win32' }).Count
+        Where-Object { (Get-WindowClassName -Hwnd $_.Hwnd) -eq 'noctty.win32' }).Count
 }
 
 function Get-LogPatternCount {
@@ -325,7 +325,7 @@ function Invoke-DragFirstTabIntoActiveSurface {
         Where-Object { $_.Id -eq 1000 } |
         Select-Object -First 1
     $targetSurface = Get-VisibleChildControls -Parent $HostHwnd |
-        Where-Object { (Get-WindowClassName -Hwnd $_.Hwnd) -eq 'winghostty.win32' } |
+        Where-Object { (Get-WindowClassName -Hwnd $_.Hwnd) -eq 'noctty.win32' } |
         Select-Object -First 1
     if ($null -eq $sourceTab -or $null -eq $targetSurface) {
         throw 'drag source tab or active target surface was not visible'
@@ -355,7 +355,7 @@ function Invoke-DragFirstTabIntoActiveSurface {
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'undo' -ResetState:$ResetState
 $repoRoot = $harness.RepoRoot
 $layout = $harness.Layout
-$configDir = Join-Path $layout.LocalAppData 'winghostty'
+$configDir = Join-Path $layout.LocalAppData 'noctty'
 $configPath = Join-Path $configDir 'config.ghostty'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 [System.IO.File]::WriteAllText(
@@ -394,7 +394,7 @@ $hostHwnd = [IntPtr]::Zero
 try {
     Wait-Until -Deadline $deadline -Description 'host window' -Process $process -Condition {
         if ($process.HasExited) {
-            throw "winghostty exited before host creation (exit code $($process.ExitCode))"
+            throw "noctty exited before host creation (exit code $($process.ExitCode))"
         }
 
         $script:Win11UndoHostHwnd = Find-HostWindow -ProcessId $process.Id
@@ -504,7 +504,7 @@ try {
 
     Start-Sleep -Milliseconds 500
     if ($process.HasExited) {
-        throw 'winghostty exited after last-tab close'
+        throw 'noctty exited after last-tab close'
     }
 }
 catch {

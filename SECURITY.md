@@ -1,15 +1,16 @@
-# Security Policy
+# Security policy
 
-## Reporting A Vulnerability
+## Reporting a vulnerability
 
-Please do not open a public issue for suspected security vulnerabilities.
+Please do not open a public issue for suspected security
+vulnerabilities.
 
 Report them privately through GitHub's security advisory flow for this
-repository if it is enabled. If private reporting is unavailable, contact the
-maintainer directly before publishing details.
+repository if it is enabled. If private reporting is unavailable, contact
+the maintainer directly before publishing details.
 
 If your report involves a crash, note that crash dumps and diagnostic
-bundles stay local and may contain sensitive process memory — see
+bundles stay local and may contain sensitive process memory. See
 [docs/windows.md](docs/windows.md#crash-reports-and-diagnostics) before
 attaching one.
 
@@ -21,8 +22,8 @@ Include:
 - Expected impact
 - Any suggested mitigation if you already have one
 
-## Response Expectations
+## Response expectations
 
-This is a small maintained project, so response time is best-effort. Reports
-that are clear, reproducible, and scoped to this repository will be easier to
-triage quickly.
+This is a small maintained project, so response time is best-effort.
+Reports that are clear, reproducible, and scoped to this repository will
+be easier to triage quickly.

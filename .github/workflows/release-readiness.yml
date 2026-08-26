@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to validate, without a leading v. Use the winghostty fork scheme such as 1.3.100
+        description: Release version to validate, without a leading v. Use the noctty fork scheme such as 1.3.100
         required: true
         type: string
       require_package_managers:
@@ -47,9 +47,10 @@ jobs:
           REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}
         shell: pwsh
         run: |
-          $scriptArgs = @('-Version', $env:RELEASE_VERSION, '-RequireSigning', '-RequireAccessibilityEvidence')
-          if ($env:REQUIRE_PACKAGE_MANAGERS -eq "true") {
-            $scriptArgs += "-RequirePackageManagers"
+          $scriptArgs = @{
+            Version = $env:RELEASE_VERSION
+            RequireSigning = $true
+            RequirePackageManagers = $env:REQUIRE_PACKAGE_MANAGERS -eq 'true'
           }
           ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

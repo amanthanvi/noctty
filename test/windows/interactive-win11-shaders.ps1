@@ -15,7 +15,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED) {
+if (-not $env:NOCTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED) {
     $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
     if ($Rebuild) { $forwardedArgs += '-Rebuild' }
     if ($ResetState) { $forwardedArgs += '-ResetState' }
@@ -24,7 +24,7 @@ if (-not $env:WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED) {
     Invoke-InteractiveWin11Bootstrap `
         -RepoRoot $repoRoot `
         -LauncherPath $launcherPath `
-        -EnvironmentVariable 'WINGHOSTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
+        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_SHADERS_BOOTSTRAPPED' `
         -ArgumentList $forwardedArgs `
         -ExitCode ([ref] $bootstrapExitCode)
     exit $bootstrapExitCode
@@ -54,7 +54,7 @@ $layout = $harness.Layout
 . (Join-Path $PSScriptRoot 'interactive-win11-stateful-lib.ps1')
 
 $exePath = Get-InteractiveWin11ExePath -RepoRoot $repoRoot
-$commandPath = Join-Path (Split-Path -Parent $exePath) 'winghostty.com'
+$commandPath = Join-Path (Split-Path -Parent $exePath) 'noctty.com'
 $shaderPath = Join-Path $PSScriptRoot 'fixtures\solid-magenta-shader.glsl'
 $configPath = Join-Path $layout.Temp 'interactive-win11-shaders.conf'
 $payloadPath = Join-Path $layout.Temp 'interactive-win11-shaders-payload.ps1'
@@ -93,7 +93,7 @@ Remove-Item -LiteralPath $stdoutPath, $stderrPath, $screenshotPath -ErrorAction 
 $launchArgs = @(
     Get-InteractiveWin11ContainmentArguments
     '--single-instance=false'
-    "--class=winghostty-shaders-$($layout.SandboxId)"
+    "--class=noctty-shaders-$($layout.SandboxId)"
     "--config-file=$configPath"
     "--custom-shader=$shaderPath"
     '-e'
@@ -156,6 +156,7 @@ try {
     try {
         $graphics = [Drawing.Graphics]::FromImage($bitmap)
         try {
+            Show-StatefulHost $hostHwnd
             $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
         }
         finally {
@@ -167,6 +168,7 @@ try {
         $bitmap.Dispose()
     }
 
+    Show-StatefulHost $hostHwnd
     $argb = Get-StatefulPixel $surface.Hwnd
     $color = [Drawing.Color]::FromArgb($argb)
     $isMagenta = $color.R -ge 220 -and $color.G -le 40 -and $color.B -ge 220

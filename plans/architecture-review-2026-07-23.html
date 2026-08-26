@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>winghostty architecture review — terminal accessibility and Settings theme</title>
+  <title>noctty architecture review — terminal accessibility and Settings theme</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script type="module">
     import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -15,7 +15,7 @@
     <header class="rounded-2xl border border-slate-700 bg-slate-900 p-7">
       <p class="text-sm font-semibold uppercase tracking-widest text-sky-400">Architecture review · 2026-07-23</p>
       <h1 class="mt-2 text-3xl font-bold">One terminal accessibility session. One window-theme adapter.</h1>
-      <p class="mt-3 max-w-4xl text-slate-300">Top recommendation: replace split lifecycle ownership with two deep modules whose small interfaces preserve semantic correctness across focus, repaint, preview, rollback, and High Contrast.</p>
+      <p class="mt-3 max-w-4xl text-slate-300">Follow-up in progress. The output-architecture redesign is source-complete: committed terminal output is emitted at the authoritative <code>StreamHandler</code>/parser seam and the raw Win32 VT re-parser is deleted. Focused tests, independent source implementation and semantic/deslop audits, the final semantic-interest contract refresh, unified executable build, full Zig suite, and final automated live accessibility/theme/High-Contrast/scaling/idle harness all pass. Release workflow gates and human Narrator/NVDA acceptance remain pending.</p>
     </header>
 
     <section class="grid gap-5 md:grid-cols-3">
@@ -58,7 +58,16 @@ flowchart LR
       <h2 class="text-xl font-semibold">After: deep modules, explicit interfaces</h2>
       <div class="mermaid mt-5">
 flowchart LR
-  R[Terminal mutation/repaint signal] --> TAS
+  O[Committed semantic output from StreamHandler/parser seam] --> ST
+  subgraph ST[Surface TerminalOutputTransport]
+    B[8 × 1000-byte fixed chunks]
+    G[Interest gate + nonblocking tryLock]
+    X[Ordered reset + omission barriers]
+    G --> B --> X
+  end
+  ST --> DRAIN[Win32 UI-thread drain]
+  DRAIN --> TAS
+  R[Renderer repaint signal] --> TAS
   F[Focus/activation] --> TAS
   Q[WM_GETOBJECT/query] --> TAS
   Z[Timer/detach] --> TAS
@@ -66,42 +75,59 @@ flowchart LR
     C[Snapshot cache + refresh policy]
     K[Canonical caret]
     P[UIA provider adapter]
-    V[Text/caret events + spoken-output queue]
+    V[Echo suppression + ordered 1000-byte speech FIFO]
     C --> K --> P
     C --> V
   end
   T[Typed theme preview/revert] --> WTA
   HC[High Contrast state] --> WTA
   subgraph WTA[WindowThemeAdapter]
-    D[DWM attributes]
-    B[Semantic brushes/control theme]
-    I[Complete invalidation]
+    DWM[DWM attributes]
+    N[Native control theme]
   end
   WTA --> H[Terminal host]
-  WTA --> S[Settings window + controls]
+  WTA --> S[Settings window]
+  S --> STA[SettingsThemeAdapter: brushes + reentry + teardown + invalidation]
       </div>
-      <p class="mt-4 text-sm text-slate-400">Renderer repaint is an input, not the accessibility ownership boundary. High Contrast is an explicit branch, not an incidental color source.</p>
+      <p class="mt-4 text-sm text-slate-400">The authoritative parser emits committed semantic output; its producer never allocates, blocks, or enters the global app mailbox. Win32 drains retained data plus ordered silent-reset and omission markers into the session, but does not re-parse VT/control syntax. DWM/native theming is centralized, while Settings retains local GDI resource ownership.</p>
     </section>
 
     <section class="grid gap-5 md:grid-cols-2">
       <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 class="font-semibold text-sky-300">TerminalAccessibilitySession interface</h2>
         <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
-          <li><code>getObject</code> — provider acquisition and initial snapshot</li>
-          <li><code>onTerminalMutation</code> — coalesced semantic refresh and bounded new-output speech</li>
-          <li><code>onFocus</code> — refresh before focus publication</li>
-          <li><code>onTimer</code> / <code>detach</code> — scheduling and lifetime</li>
+          <li><code>acquireProvider</code> — provider acquisition and current snapshot</li>
+          <li><code>outputInterested</code> — producer-side idle-cost gate</li>
+          <li><code>noteOutput</code> / <code>noteOutputOmitted</code> — committed semantic output, echo suppression, and bounded ordered speech</li>
+          <li><code>focusChanged</code> — refresh before focus publication</li>
+          <li><code>handleTimer</code> / <code>deinit</code> — scheduling and lifetime</li>
         </ul>
       </article>
       <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
         <h2 class="font-semibold text-sky-300">WindowThemeAdapter interface</h2>
         <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
-          <li>resolved theme + window kind + High Contrast input</li>
+          <li><code>applyHost</code>, <code>applySettings</code>, and <code>applyNativeControl</code></li>
           <li>DWM/native-control implementation hidden inside</li>
-          <li>semantic brush cache and teardown ownership</li>
-          <li>known-scope repaint after resource replacement</li>
+          <li>High Contrast actively resets sticky DWM attributes to documented defaults</li>
+          <li>Settings-local adapter owns semantic brushes, reentry guard, teardown, and repaint</li>
         </ul>
       </article>
+    </section>
+
+    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
+      <h2 class="text-xl font-semibold">Validation state</h2>
+      <ul class="mt-4 list-disc space-y-2 pl-5 text-sm text-slate-300">
+        <li>Final-tree PASS: targeted terminal-output/session, <code>TerminalProvider</code>, and <code>win32_settings</code> tests; executable build; flagship contracts; and full Zig suite.</li>
+        <li>PASS: five exact native key-input scenarios with unique artifacts—classic A, classic Space, BMP Unicode, supplementary Unicode, and a 256-unit Unicode burst—plus a pure 256-authorization backlog test.</li>
+        <li>Final-tree PASS: full accessibility harness with <code>-ResetState -TimeoutSeconds 20 -IdleSoakSeconds 60</code>. Evidence: <code>.sandbox/win11/github-noctty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json</code>, <code>outcome=pass</code>, 119.962 seconds. This is not a claim that the broader composite suite ran.</li>
+        <li>Final-tree PASS: UIA notification/TextPattern behavior, inactive-pane silence, 60-second idle with zero TextChanged/resource growth, exact High Contrast restore with backdrop <code>1</code>, and DPI 96/High Contrast off/zero unexpected processes at cleanup.</li>
+        <li>Final-tree PASS: Dark Save and fresh-process relaunch preserve combo index <code>3</code>, exact host/Settings pixels, immersive-dark DWM <code>1</code>, and host/Settings backdrop <code>1</code>; sandbox config bytes are restored.</li>
+        <li>Source closure: committed, charset-mapped semantic print/REP/CR/LF/tab output now originates at the authoritative parser seam; hidden status output is excluded; RIS emits a silent continuity reset; interest epochs reject stale batches; raw Win32 VT parsing and Termio forwarding are deleted. Attached, focused panes with an acquired provider remain capture-interested independently of listener activity, while UIA event emission remains listener-gated. Focused semantic-output, transport, and announcement filters pass.</li>
+        <li>Audit closure: independent source implementation and semantic/deslop audits are clean. Existing flagship verification contracts and the final semantic-interest contract refresh pass.</li>
+        <li>Clean contract: terminal selection mutation support is <code>None</code>; legacy selection exposes one degenerate compatibility caret; mutation methods return the expected invalid-operation result.</li>
+        <li>Native scope: CR, LF, Tab, Backspace, and Escape are proven. Alt+numpad experiments were reverted and remain a human/native residual.</li>
+        <li>Pending: PR/review/merge/release gates and human Narrator/NVDA acceptance.</li>
+      </ul>
     </section>
 
     <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">

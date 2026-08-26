@@ -21,7 +21,7 @@ pub fn reportStateInitError(err: anyerror) !void {
         error.InvalidAction => try stderr.print(
             "Error: unknown CLI action specified. CLI actions are specified with\n" ++
                 "the '+' character.\n\n" ++
-                "All valid CLI actions can be listed with `winghostty +help`\n",
+                "All valid CLI actions can be listed with `noctty +help`\n",
             .{},
         ),
 
@@ -54,24 +54,17 @@ fn formatCliActionFailureMessage(
         if (err == error.ActionHelpOutputUnavailable) {
             return std.fmt.bufPrint(
                 buf,
-                "winghostty +{s} could not write help text. Launch it from Command Prompt, PowerShell, or Windows Terminal, or redirect the output to a file.\n",
+                "noctty +{s} could not write help text. Launch it from Command Prompt, PowerShell, or Windows Terminal, or redirect the output to a file.\n",
                 .{@tagName(action)},
-            ) catch "winghostty CLI action failed.\n";
-        }
-        if (err == error.InvalidHandle and cli.ghostty.requiresTerminalUi(action)) {
-            return std.fmt.bufPrint(
-                buf,
-                "winghostty +{s} needs an interactive terminal. Launch it from Command Prompt, PowerShell, or Windows Terminal instead of starting winghostty.exe detached from a console.\n",
-                .{@tagName(action)},
-            ) catch "winghostty CLI action failed.\n";
+            ) catch "noctty CLI action failed.\n";
         }
     }
 
     return std.fmt.bufPrint(
         buf,
-        "winghostty +{s} failed: {s}\n",
+        "noctty +{s} failed: {s}\n",
         .{ @tagName(action), @errorName(err) },
-    ) catch "winghostty CLI action failed.\n";
+    ) catch "noctty CLI action failed.\n";
 }
 
 fn writePlainStderr(message: []const u8) bool {
@@ -86,8 +79,8 @@ fn writePlainStderr(message: []const u8) bool {
 fn showWindowsCliFailureDialog(message: []const u8) void {
     if (comptime builtin.os.tag != .windows) return;
 
-    const caption = std.unicode.utf8ToUtf16LeStringLiteral("winghostty CLI action failed");
-    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("winghostty CLI action failed.");
+    const caption = std.unicode.utf8ToUtf16LeStringLiteral("noctty CLI action failed");
+    const fallback = std.unicode.utf8ToUtf16LeStringLiteral("noctty CLI action failed.");
 
     const message_w = std.unicode.utf8ToUtf16LeAllocZ(std.heap.page_allocator, message) catch {
         _ = MessageBoxW(null, fallback, caption, MB_OK | MB_ICONERROR);
@@ -137,38 +130,22 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
-test "cli invalid handle errors get a visible terminal hint" {
-    var buffer: [512]u8 = undefined;
-    const message = formatCliActionFailureMessage(&buffer, .boo, error.InvalidHandle);
-
-    if (builtin.os.tag == .windows) {
-        try std.testing.expect(std.mem.indexOf(u8, message, "+boo") != null);
-        try std.testing.expect(std.mem.indexOf(u8, message, "interactive terminal") != null);
-    } else {
-        try std.testing.expectEqualStrings(
-            "winghostty +boo failed: InvalidHandle\n",
-            message,
-        );
-    }
-}
-
 test "cli help output failures get a text output hint" {
     var buffer: [512]u8 = undefined;
-    const message = formatCliActionFailureMessage(&buffer, .boo, error.ActionHelpOutputUnavailable);
+    const message = formatCliActionFailureMessage(&buffer, .version, error.ActionHelpOutputUnavailable);
 
     if (builtin.os.tag == .windows) {
-        try std.testing.expect(std.mem.indexOf(u8, message, "+boo") != null);
+        try std.testing.expect(std.mem.indexOf(u8, message, "+version") != null);
         try std.testing.expect(std.mem.indexOf(u8, message, "write help text") != null);
-        try std.testing.expect(std.mem.indexOf(u8, message, "interactive terminal") == null);
     } else {
         try std.testing.expectEqualStrings(
-            "winghostty +boo failed: ActionHelpOutputUnavailable\n",
+            "noctty +version failed: ActionHelpOutputUnavailable\n",
             message,
         );
     }
 }
 
-test "cli non-terminal invalid handle errors stay generic" {
+test "cli invalid handle errors stay generic" {
     const actions = [_]cli.ghostty.Action{
         .@"list-keybinds",
         .@"list-themes",

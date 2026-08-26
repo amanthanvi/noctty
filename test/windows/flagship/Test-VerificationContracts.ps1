@@ -78,6 +78,38 @@ function Assert-TextContract {
     if ($Content -notmatch $Pattern) { throw "Contract missing: $Description ($Context)" }
 }
 
+function Assert-ZigTestsDiscoveredAndRun {
+    param(
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [Parameter(Mandatory)] [hashtable] $Sources,
+        [Parameter(Mandatory)] [string[]] $ExpectedNames,
+        [Parameter(Mandatory)] [string] $Filter
+    )
+
+    $declarations = [Collections.Generic.List[object]]::new()
+    foreach ($entry in $Sources.GetEnumerator()) {
+        foreach ($match in [regex]::Matches(
+            $entry.Value,
+            '(?m)^test "(?<name>[^"\r\n]+)" \{$'
+        )) {
+            [void]$declarations.Add([pscustomobject]@{
+                Path = $entry.Key
+                Name = $match.Groups['name'].Value
+            })
+        }
+    }
+    foreach ($expectedName in $ExpectedNames) {
+        $declMatches = @($declarations | Where-Object { $_.Name -ceq $expectedName })
+        if ($declMatches.Count -ne 1) {
+            throw "Expected exactly one Zig test declaration '$expectedName'; found $($declMatches.Count)."
+        }
+    }
+
+    Invoke-ZigFixture `
+        -RepoRoot $RepoRoot `
+        -Filter $Filter
+}
+
 function Get-YamlJobText {
     param(
         [Parameter(Mandatory)] [string] $Content,
@@ -91,17 +123,83 @@ function Get-YamlJobText {
     $match.Value
 }
 
-function Get-YamlStepText {
+function Get-YamlStepBlock {
     param(
         [Parameter(Mandatory)] [string] $Content,
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] [string] $Source
     )
 
-    $pattern = '(?ms)^      - name:\s+' + [regex]::Escape($Name) + '\s*\r?\n.*?(?=^      -\s+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
-    $match = [regex]::Match($Content, $pattern)
-    if (-not $match.Success) { throw "Workflow step not found: $Name ($Source)" }
-    $match.Value
+    $pattern = '(?ms)^      - name:[ \t]+' + [regex]::Escape($Name) + '[ \t]*\r?\n.*?(?=^      -[ \t]+|^    \S[^\r\n]*:\s*(?:#.*)?$|^  \S[^\r\n]*:\s*(?:#.*)?$|\z)'
+    $matches = [regex]::Matches($Content, $pattern)
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one workflow step '$Name'; found $($matches.Count): $Source"
+    }
+    $matches[0].Value
+}
+
+function Assert-DeferredZigFixtureExecution {
+    param(
+        [Parameter(Mandatory)] [string] $WorkflowText,
+        [Parameter(Mandatory)] [string] $Source
+    )
+
+    $windowsJob = Get-YamlJobText `
+        -Content $WorkflowText `
+        -Name 'windows' `
+        -Source $Source
+    $flagshipStep = Get-YamlStepBlock `
+        -Content $windowsJob `
+        -Name 'Flagship verification contract checks' `
+        -Source "$Source :: windows"
+    $setupStep = Get-YamlStepBlock `
+        -Content $windowsJob `
+        -Name 'Setup Zig' `
+        -Source "$Source :: windows"
+    $fullSuiteStep = Get-YamlStepBlock `
+        -Content $windowsJob `
+        -Name 'Full Zig test suite' `
+        -Source "$Source :: windows"
+    $conditionalStepPattern = '(?m)^        (?:if|continue-on-error):'
+    $flagshipIndex = $windowsJob.IndexOf($flagshipStep, [StringComparison]::Ordinal)
+    $setupIndex = $windowsJob.IndexOf($setupStep, [StringComparison]::Ordinal)
+    $fullSuiteIndex = $windowsJob.IndexOf($fullSuiteStep, [StringComparison]::Ordinal)
+
+    if ($flagshipStep -notmatch
+            '(?m)^        run: \./test/windows/flagship/Test-VerificationContracts\.ps1\s*$' -or
+        $setupStep -notmatch
+            '(?m)^        uses: mlugg/setup-zig@[^\s]+(?:\s+#.*)?\s*$' -or
+        $setupStep -match $conditionalStepPattern -or
+        $fullSuiteStep -notmatch
+            '(?m)^        run: zig build test -Demit-test-exe=true\s*$' -or
+        $fullSuiteStep -match $conditionalStepPattern -or
+        $flagshipIndex -lt 0 -or
+        $setupIndex -le $flagshipIndex -or
+        $fullSuiteIndex -le $setupIndex) {
+        throw 'The early flagship contract must defer unavailable fixture execution to the same Windows job''s mandatory Setup Zig and full Zig test suite.'
+    }
+}
+
+function Test-FlagshipZigFixtureExecutionEnabled {
+    return $env:GITHUB_ACTIONS -ne 'true'
+}
+
+function Invoke-ZigFixture {
+    param(
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [Parameter(Mandatory)] [string] $Filter
+    )
+
+    if (-not (Test-FlagshipZigFixtureExecutionEnabled)) {
+        Write-Host "ZIG-FIXTURE-EXECUTION-SKIPPED [$Filter]: deferred to mandatory full Zig suite in the same Windows job."
+        return
+    }
+    $filterArgument = "-Dtest-filter=$Filter"
+    & (Join-Path $RepoRoot 'scripts\dev-windows.cmd') `
+        zig build test $filterArgument
+    if ($LASTEXITCODE -ne 0) {
+        throw "Zig semantic fixture '$Filter' failed with exit code $LASTEXITCODE."
+    }
 }
 
 function Get-YamlLiteralRunScript {
@@ -122,6 +220,1279 @@ function Get-YamlLiteralRunScript {
         }
     )
     ($scriptLines -join "`n").TrimEnd([char[]]"`n")
+}
+
+function ConvertTo-CanonicalText {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
+
+    (($Text -replace "`r`n", "`n") -replace "`r", "`n").
+        TrimEnd([char[]]"`n")
+}
+
+function Get-CanonicalTextSha256 {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Text)
+
+    $normalized = ConvertTo-CanonicalText -Text $Text
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($normalized)
+        return (([BitConverter]::ToString($sha256.ComputeHash($bytes))) -replace
+            '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Test-YamlStepEnvelopeDigest {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [string] $ExpectedSha256
+    )
+
+    (Get-CanonicalTextSha256 -Text $StepText) -ceq $ExpectedSha256
+}
+
+function Get-NamedVariableAssignments {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+    }, $true))
+}
+
+function Test-ExactVariableUseSet {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Language.Ast[]] $ExpectedContainers
+    )
+
+    $actualUses = @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+    }, $true))
+    $expectedUses = @(
+        foreach ($container in $ExpectedContainers) {
+            $container.FindAll({
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                    (($node.VariablePath.UserPath -split ':')[-1]) -ceq $Name
+            }, $true)
+        }
+    )
+    if ($actualUses.Count -ne $expectedUses.Count) { return $false }
+    foreach ($expected in $expectedUses) {
+        if (@($actualUses | Where-Object {
+            [object]::ReferenceEquals($_, $expected)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+    if (@($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'New-Item', 'ni',
+                'Get-ChildItem', 'dir', 'gci', 'ls',
+                'Get-Content', 'cat', 'gc', 'type'
+            )
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            (($node.GetCommandName() -replace '\\', '/') -eq
+                './scripts/release-preflight.ps1')
+    }, $true))
+    if ($commands.Count -ne 1 -or $commands[0].CommandElements.Count -ne 2) {
+        return $false
+    }
+    $splat = $commands[0].CommandElements[1]
+    if ($splat -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        -not $splat.Splatted) {
+        return $false
+    }
+    $splatName = ($splat.VariablePath.UserPath -split ':')[-1]
+
+    $assignments = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.Left.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    if ($assignments.Count -ne 1 -or
+        $assignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $assignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.HashtableAst]) {
+        return $false
+    }
+
+    $actualExpressions = @{}
+    foreach ($pair in $assignments[0].Right.Expression.KeyValuePairs) {
+        if ($pair.Item1 -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            return $false
+        }
+        $key = [string]$pair.Item1.Value
+        if ($actualExpressions.ContainsKey($key)) { return $false }
+        $actualExpressions[$key] = $pair.Item2.Extent.Text.Trim()
+    }
+    if ($actualExpressions.Count -ne $ExpectedExpressions.Count) {
+        return $false
+    }
+    foreach ($key in $ExpectedExpressions.Keys) {
+        if (-not $actualExpressions.ContainsKey($key) -or
+            $actualExpressions[$key] -cne $ExpectedExpressions[$key]) {
+            return $false
+        }
+    }
+
+    $variableUses = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            (($node.VariablePath.UserPath -split ':')[-1]) -eq $splatName
+    }, $true))
+    $assignmentUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $assignments[0].Left)
+    })
+    $invocationUses = @($variableUses | Where-Object {
+        [object]::ReferenceEquals($_, $splat)
+    })
+    $allSplats = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
+    }, $true))
+    return $variableUses.Count -eq 2 -and
+        $assignmentUses.Count -eq 1 -and
+        $invocationUses.Count -eq 1 -and
+        $allSplats.Count -eq 1 -and
+        [object]::ReferenceEquals($allSplats[0], $splat) -and
+        (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
+            $ExpectedScriptSha256
+}
+
+function Assert-NamedReleasePreflightSplat {
+    param(
+        [Parameter(Mandatory)] [string] $StepText,
+        [Parameter(Mandatory)] [hashtable] $ExpectedExpressions,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $scriptText = Get-YamlLiteralRunScript `
+        -Content $StepText `
+        -Source $Context
+    if (-not (Test-NamedReleasePreflightSplat `
+        -ScriptText $scriptText `
+        -ExpectedExpressions $ExpectedExpressions `
+        -ExpectedScriptSha256 $ExpectedScriptSha256)) {
+        throw "Release preflight workflow must use one immutable exact named splat: $Context"
+    }
+}
+
+function Test-ReleaseInteractiveResultSelectionContract {
+    param([Parameter(Mandatory)] [string] $ScriptText)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+
+    $runLoops = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$run' -and
+                $node.Condition.Extent.Text.Trim() -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($runLoops.Count -ne 1) { return $false }
+    $runBody = $runLoops[0].Body
+
+    $resultFileAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultFiles'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($resultFileAssignments.Count -ne 1 -or
+        $resultFileAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $resultFileAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $resultFileAssignment = $resultFileAssignments[0]
+    $getChildCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-ChildItem'
+    }, $true))
+    $whereCommands = @($resultFileAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($getChildCommands.Count -ne 1 -or $whereCommands.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent,
+            $whereCommands[0].Parent
+        ) -or
+        $getChildCommands[0].Parent -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+        $getChildCommands[0].Parent.PipelineElements.Count -ne 2 -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[0],
+            $getChildCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $getChildCommands[0].Parent.PipelineElements[1],
+            $whereCommands[0]
+        )) {
+        return $false
+    }
+    $getChildElements = @(
+        $getChildCommands[0].CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    if (-not (Test-CommandArgumentPair `
+        -Elements $getChildElements `
+        -Name '-LiteralPath' `
+        -Value '$artifactRoot') -or
+        -not (Test-CommandArgumentPair `
+            -Elements $getChildElements `
+            -Name '-Filter' `
+            -Value 'result.json') -or
+        @($getChildElements | Where-Object { $_ -ceq '-File' }).Count -ne 1 -or
+        @($getChildElements | Where-Object { $_ -ceq '-Recurse' }).Count -ne 1 -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        $filterStatements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $filterTry = $filterStatements[0]
+    if ($filterTry.Body.Statements.Count -ne 1 -or
+        $filterTry.CatchClauses.Count -ne 1 -or
+        $null -ne $filterTry.Finally -or
+        $filterTry.CatchClauses[0].Body.Statements.Count -ne 1) {
+        return $false
+    }
+    $filterExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.Body.Statements[0]
+    $catchExpression = Get-SinglePipelineExpression `
+        -Node $filterTry.CatchClauses[0].Body.Statements[0]
+    if ($null -eq $filterExpression -or
+        (($filterExpression.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq ''windows.interactive-win11.composite''' -or
+        $null -eq $catchExpression -or
+        $catchExpression.Extent.Text.Trim() -cne '$false') {
+        return $false
+    }
+
+    $countGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultPathAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$resultPath' -and
+                $node.Right.Extent.Text.Trim() -ceq '$resultFiles[0].FullName'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $resultAssignments = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -ceq '$result' -and
+                (($node.Right.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $arbitraryFirst = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Select-Object' -and
+            @($node.CommandElements | Where-Object {
+                $_.Extent.Text -ceq '-First'
+            }).Count -gt 0
+    }, $true))
+    return $countGates.Count -eq 1 -and
+        $resultPathAssignments.Count -eq 1 -and
+        $resultAssignments.Count -eq 1 -and
+        $arbitraryFirst.Count -eq 0 -and
+        $resultFileAssignment.Extent.EndOffset -lt
+            $countGates[0].Extent.StartOffset -and
+        $countGates[0].Extent.EndOffset -lt
+            $resultPathAssignments[0].Extent.StartOffset -and
+        $resultPathAssignments[0].Extent.EndOffset -lt
+            $resultAssignments[0].Extent.StartOffset
+}
+
+function Get-LogicalAndLeaves {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $Node.Operator -eq [System.Management.Automation.Language.TokenKind]::And) {
+        Get-LogicalAndLeaves -Node $Node.Left
+        Get-LogicalAndLeaves -Node $Node.Right
+        return
+    }
+    return ,$Node
+}
+
+function Get-SinglePipelineExpression {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $Node.PipelineElements.Count -ne 1 -or
+        $Node.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $null
+    }
+    return $Node.PipelineElements[0].Expression
+}
+
+function Test-ExactExpressionSet {
+    param(
+        [System.Management.Automation.Language.Ast] $Root,
+        [Parameter(Mandatory)] [string[]] $Expected
+    )
+
+    if ($null -eq $Root) { return $false }
+    $actual = @(
+        Get-LogicalAndLeaves -Node $Root |
+            ForEach-Object { ($_.Extent.Text -replace '\s+', ' ').Trim() }
+    )
+    return $actual.Count -eq $Expected.Count -and
+        @($Expected | Where-Object { $actual -cnotcontains $_ }).Count -eq 0
+}
+
+function Test-CommandArgumentPair {
+    param(
+        [Parameter(Mandatory)] [string[]] $Elements,
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    $matchCount = 0
+    for ($index = 0; $index -lt ($Elements.Count - 1); $index++) {
+        if ($Elements[$index] -ceq $Name -and
+            $Elements[$index + 1] -ceq $Value) {
+            $matchCount++
+        }
+    }
+    return $matchCount -eq 1 -and
+        @($Elements | Where-Object { $_ -ceq $Name }).Count -eq 1
+}
+
+function Test-ReleaseInteractiveSuccessPredicates {
+    param(
+        [Parameter(Mandatory)] [string] $ScriptText,
+        [Parameter(Mandatory)] [string] $ExpectedScriptSha256
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $ScriptText,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) { return $false }
+    if (@($ast.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+    if (@($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Splatted
+    }, $true)).Count -ne 0) {
+        return $false
+    }
+
+    $shaAssignments = @(Get-NamedVariableAssignments -Ast $ast -Name 'sha')
+    if ($shaAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $shaAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        (($shaAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '(git rev-parse HEAD).Trim()') {
+        return $false
+    }
+    $shaAssignment = $shaAssignments[0]
+
+    $runListCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst] -or
+            $node.GetCommandName() -ne 'gh' -or
+            $node.CommandElements.Count -lt 3) {
+            return $false
+        }
+        return $node.CommandElements[1].Extent.Text -ceq 'run' -and
+            $node.CommandElements[2].Extent.Text -ceq 'list'
+    }, $true))
+    if ($runListCommands.Count -ne 1) { return $false }
+    $runList = $runListCommands[0]
+    $runListAssignment = $runList
+    while ($null -ne $runListAssignment -and
+        $runListAssignment -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst]) {
+        $runListAssignment = $runListAssignment.Parent
+    }
+    if ($null -eq $runListAssignment -or
+        $runListAssignment.Left -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        (($runListAssignment.Left.VariablePath.UserPath -split ':')[-1]) -cne
+            'runsJson' -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runListAssignment `
+            -NamedBlock $ast.EndBlock)) {
+        return $false
+    }
+    $runsJsonAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'runsJson'
+        }, $true)
+    )
+    if ($runsJsonAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $runsJsonAssignments[0],
+            $runListAssignment
+        )) {
+        return $false
+    }
+    $runListElements = @(
+        $runList.CommandElements |
+            ForEach-Object { $_.Extent.Text.Trim() }
+    )
+    foreach ($pair in @(
+        @('--workflow', 'Test'),
+        @('--commit', '$sha'),
+        @('--status', 'success')
+    )) {
+        if (-not (Test-CommandArgumentPair `
+            -Elements $runListElements `
+            -Name $pair[0] `
+            -Value $pair[1])) {
+            return $false
+        }
+    }
+
+    $runsAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq 'runs'
+        }, $true)
+    )
+    if ($runsAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $runsAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        $runsAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $runsAssignment = $runsAssignments[0]
+    $runsStatements = @(
+        $runsAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($runsStatements.Count -ne 1 -or
+        $runsStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $runsPipeline = $runsStatements[0]
+    if ($runsPipeline.PipelineElements.Count -ne 2 -or
+        $runsPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $runsPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runsJson' -or
+        $runsPipeline.PipelineElements[1] -isnot
+            [System.Management.Automation.Language.CommandAst] -or
+        $runsPipeline.PipelineElements[1].GetCommandName() -ne
+            'ConvertFrom-Json' -or
+        $runsPipeline.PipelineElements[1].CommandElements.Count -ne 1) {
+        return $false
+    }
+
+    $matchingAssignments = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.Left.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
+    if ($matchingAssignments.Count -ne 1 -or
+        -not (Test-DirectNamedBlockChild `
+            -Node $matchingAssignments[0] `
+            -NamedBlock $ast.EndBlock) -or
+        $matchingAssignments[0].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingAssignments[0].Right.Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $matchingAssignment = $matchingAssignments[0]
+    $matchingStatements = @(
+        $matchingAssignment.Right.Expression.SubExpression.Statements
+    )
+    if ($matchingStatements.Count -ne 1 -or
+        $matchingStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $matchingPipeline = $matchingStatements[0]
+    $whereCommands = @($matchingAssignment.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Where-Object'
+    }, $true))
+    if ($whereCommands.Count -ne 1 -or
+        $matchingPipeline.PipelineElements.Count -ne 2 -or
+        $matchingPipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.VariableExpressionAst] -or
+        $matchingPipeline.PipelineElements[0].Expression.Extent.Text -cne
+            '$runs' -or
+        -not [object]::ReferenceEquals(
+            $matchingPipeline.PipelineElements[1],
+            $whereCommands[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $whereCommands[0].Parent,
+            $matchingPipeline
+        ) -or
+        $whereCommands[0].CommandElements.Count -ne 2 -or
+        $whereCommands[0].CommandElements[1] -isnot
+            [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        return $false
+    }
+    if ($runListAssignment.Extent.EndOffset -ge
+            $runsAssignment.Extent.StartOffset -or
+        $runsAssignment.Extent.EndOffset -ge
+            $matchingAssignment.Extent.StartOffset) {
+        return $false
+    }
+    $runListToRunsStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge
+                    $runListAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $runsAssignment.Extent.StartOffset
+            }
+    )
+    $runsToMatchingStatements = @(
+        $ast.EndBlock.Statements |
+            Where-Object {
+                $_.Extent.StartOffset -ge $runsAssignment.Extent.EndOffset -and
+                $_.Extent.EndOffset -le
+                    $matchingAssignment.Extent.StartOffset
+            }
+    )
+    if ($runListToRunsStatements.Count -ne 1 -or
+        $runListToRunsStatements[0] -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        $runListToRunsStatements[0].Clauses.Count -ne 1 -or
+        $null -ne $runListToRunsStatements[0].ElseClause -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements.Count -ne 1 -or
+        $runListToRunsStatements[0].Clauses[0].Item2.Statements[0] -isnot
+            [System.Management.Automation.Language.ThrowStatementAst] -or
+        $runsToMatchingStatements.Count -ne 0) {
+        return $false
+    }
+    $runListFailureCondition = Get-SinglePipelineExpression `
+        -Node $runListToRunsStatements[0].Clauses[0].Item1
+    if ($null -eq $runListFailureCondition -or
+        (($runListFailureCondition.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            '$LASTEXITCODE -ne 0') {
+        return $false
+    }
+    $filterBlock = $whereCommands[0].CommandElements[1].ScriptBlock
+    $filterStatements = @($filterBlock.EndBlock.Statements)
+    if ($filterStatements.Count -ne 1 -or
+        -not (Test-ExactExpressionSet `
+            -Root (Get-SinglePipelineExpression -Node $filterStatements[0]) `
+            -Expected @(
+                '$_.headSha -eq $sha',
+                '$_.status -eq "completed"',
+                '$_.conclusion -eq "success"'
+            ))) {
+        return $false
+    }
+
+    $matchingCountIfs = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '$matching.Count -eq 0'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingCountIfs.Count -ne 1) { return $false }
+    $matchingCountUses = @(
+        $matchingCountIfs[0].Clauses[0].Item1.FindAll({
+            param($node)
+            $node -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+                (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                    'matching'
+        }, $true)
+    )
+    if ($matchingCountUses.Count -ne 1) { return $false }
+
+    $matchingLoops = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.ForEachStatementAst] -or
+                $node.Variable.Extent.Text -cne '$run') {
+                return $false
+            }
+            $source = Get-SinglePipelineExpression -Node $node.Condition
+            return $source -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                $source.Extent.Text -ceq '$matching'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($matchingLoops.Count -ne 1) { return $false }
+    $runBody = $matchingLoops[0].Body
+    $matchingLoopSource = Get-SinglePipelineExpression `
+        -Node $matchingLoops[0].Condition
+    $newItemCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @('New-Item', 'ni')
+    }, $true))
+    if ($newItemCommands.Count -ne 1 -or
+        $newItemCommands[0].GetCommandName() -cne 'New-Item' -or
+        (($newItemCommands[0].Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'New-Item -ItemType Directory -Force -Path $artifactRoot' -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $newItemCommands[0].Parent `
+            -StatementBlock $runBody)) {
+        return $false
+    }
+
+    $chainVariableContracts = @(
+        [pscustomobject]@{
+            Name = 'runsJson'
+            Expected = @(
+                $runListAssignment.Left,
+                $runsPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'runs'
+            Expected = @(
+                $runsAssignment.Left,
+                $matchingPipeline.PipelineElements[0].Expression
+            )
+        },
+        [pscustomobject]@{
+            Name = 'matching'
+            Expected = @(
+                $matchingAssignment.Left,
+                $matchingCountUses[0],
+                $matchingLoopSource
+            )
+        }
+    )
+    foreach ($contract in $chainVariableContracts) {
+        $uses = @(
+            $ast.FindAll({
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                    (($node.VariablePath.UserPath -split ':')[-1]) -ceq
+                        $contract.Name
+            }, $true)
+        )
+        if ($uses.Count -ne $contract.Expected.Count) { return $false }
+        foreach ($expected in $contract.Expected) {
+            if (@($uses | Where-Object {
+                [object]::ReferenceEquals($_, $expected)
+            }).Count -ne 1) {
+                return $false
+            }
+        }
+    }
+
+    $evidenceIfs = @(
+        $runBody.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $body = $node.Clauses[0].Item2
+            return @($body.FindAll({
+                param($child)
+                $child -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $child.Left.Extent.Text -ceq '$evidenceRun' -and
+                    $child.Right.Extent.Text -ceq '$run'
+            }, $true) | Where-Object {
+                Test-DirectStatementBlockChild -Node $_ -StatementBlock $body
+            }).Count -eq 1
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($evidenceIfs.Count -ne 1) { return $false }
+    $evidenceIf = $evidenceIfs[0]
+    if (-not (Test-ExactExpressionSet `
+        -Root (Get-SinglePipelineExpression -Node $evidenceIf.Clauses[0].Item1) `
+        -Expected @(
+            '$result.status -eq ''pass''',
+            '$result.implementation_commit -eq $sha',
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId',
+            '$hashesBound'
+        ))) {
+        return $false
+    }
+    $evidenceBodyStatements = @($evidenceIf.Clauses[0].Item2.Statements)
+    if ($evidenceBodyStatements.Count -ne 2 -or
+        $evidenceBodyStatements[0] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        $evidenceBodyStatements[0].Left.Extent.Text -cne '$evidenceRun' -or
+        $evidenceBodyStatements[0].Right.Extent.Text -cne '$run' -or
+        $evidenceBodyStatements[1] -isnot
+            [System.Management.Automation.Language.BreakStatementAst]) {
+        return $false
+    }
+    $evidenceSuccessAssignment = $evidenceBodyStatements[0]
+
+    $resultFilesAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultFiles'
+    )
+    $resultPathAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultPath'
+    )
+    $resultAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'result'
+    )
+    $resultDirAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'resultDir'
+    )
+    if ($resultFilesAssignments.Count -ne 1 -or
+        $resultPathAssignments.Count -ne 1 -or
+        $resultAssignments.Count -ne 1 -or
+        $resultDirAssignments.Count -ne 1 -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultFilesAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultPathAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultAssignments[0] `
+            -StatementBlock $runBody) -or
+        -not (Test-DirectStatementBlockChild `
+            -Node $resultDirAssignments[0] `
+            -StatementBlock $runBody) -or
+        $resultPathAssignments[0].Right.Extent.Text.Trim() -cne
+            '$resultFiles[0].FullName' -or
+        (($resultAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json' -or
+        (($resultDirAssignments[0].Right.Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Split-Path -Parent $resultPath') {
+        return $false
+    }
+    $resultFilesAssignment = $resultFilesAssignments[0]
+    $resultPathAssignment = $resultPathAssignments[0]
+    $resultAssignment = $resultAssignments[0]
+    $resultDirAssignment = $resultDirAssignments[0]
+    $getChildItemCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-ChildItem', 'dir', 'gci', 'ls'
+            )
+    }, $true))
+    if ($getChildItemCommands.Count -ne 1 -or
+        $getChildItemCommands[0].GetCommandName() -cne 'Get-ChildItem' -or
+        (($getChildItemCommands[0].Extent.Text -replace '\s+', ' ').Trim()) -cne
+            'Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse' -or
+        $getChildItemCommands[0].Extent.StartOffset -le
+            $resultFilesAssignment.Extent.StartOffset -or
+        $getChildItemCommands[0].Extent.EndOffset -ge
+            $resultFilesAssignment.Extent.EndOffset) {
+        return $false
+    }
+    $getContentCommands = @($ast.FindAll({
+        param($node)
+        if ($node -isnot [System.Management.Automation.Language.CommandAst]) {
+            return $false
+        }
+        $name = $node.GetCommandName()
+        return $null -ne $name -and
+            ($name -split '\\')[-1] -in @(
+                'Get-Content', 'cat', 'gc', 'type'
+            )
+    }, $true))
+    $resultFileContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $_.FullName -Raw' -and
+            $_.Extent.StartOffset -gt
+                $resultFilesAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt
+                $resultFilesAssignment.Extent.EndOffset
+    })
+    $resultContentCommands = @($getContentCommands | Where-Object {
+        $_.GetCommandName() -ceq 'Get-Content' -and
+            (($_.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                'Get-Content -LiteralPath $resultPath -Raw' -and
+            $_.Extent.StartOffset -gt $resultAssignment.Extent.StartOffset -and
+            $_.Extent.EndOffset -lt $resultAssignment.Extent.EndOffset
+    })
+    if ($getContentCommands.Count -ne 2 -or
+        $resultFileContentCommands.Count -ne 1 -or
+        $resultContentCommands.Count -ne 1) {
+        return $false
+    }
+    foreach ($command in @(
+        $resultFileContentCommands[0],
+        $resultContentCommands[0]
+    )) {
+        if (@($getContentCommands | Where-Object {
+            [object]::ReferenceEquals($_, $command)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+
+    $resultFilesCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if ($resultFiles.Count -ne 1) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactCountGates = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'if (@($result.artifacts).Count -eq 0) { continue }'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    $artifactLoops = @(
+        $runBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -ceq '$artifact' -and
+                (($node.Condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '@($result.artifacts)'
+        }, $true) |
+            Where-Object {
+                Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody
+            }
+    )
+    if ($resultFilesCountGates.Count -ne 1 -or
+        $artifactCountGates.Count -ne 1 -or
+        $artifactLoops.Count -ne 1 -or
+        $resultFilesAssignment.Extent.EndOffset -ge
+            $resultFilesCountGates[0].Extent.StartOffset -or
+        $resultFilesCountGates[0].Extent.EndOffset -ge
+            $resultPathAssignment.Extent.StartOffset -or
+        $resultPathAssignment.Extent.EndOffset -ge
+            $resultAssignment.Extent.StartOffset -or
+        $resultAssignment.Extent.EndOffset -ge
+            $artifactCountGates[0].Extent.StartOffset -or
+        $artifactCountGates[0].Extent.EndOffset -ge
+            $artifactLoops[0].Extent.StartOffset) {
+        return $false
+    }
+    $artifactLoop = $artifactLoops[0]
+    $resultDirJoinCommands = @(
+        $artifactLoop.Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Join-Path' -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Join-Path $resultDir ([string]$artifact.path)'
+        }, $true) |
+            Where-Object {
+                $_.Extent.StartOffset -ge
+                    $artifactLoop.Body.Extent.StartOffset -and
+                $_.Extent.EndOffset -le
+                    $artifactLoop.Body.Extent.EndOffset
+            }
+    )
+    if ($resultDirJoinCommands.Count -ne 1) { return $false }
+
+    $hashesBoundAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'hashesBound'
+    )
+    $hashesBoundInitializers = @(
+        $hashesBoundAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$true' -and
+                (Test-DirectStatementBlockChild `
+                    -Node $_ `
+                    -StatementBlock $runBody)
+            }
+    )
+    $hashesBoundFailures = @()
+    foreach ($conditionText in @(
+        '-not $artifact.sha256 -or -not $artifact.path',
+        '-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)',
+        '$actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()'
+    )) {
+        $failureGuards = @(
+            $artifactLoop.Body.FindAll({
+                param($node)
+                if ($node -isnot
+                        [System.Management.Automation.Language.IfStatementAst] -or
+                    $node.Clauses.Count -ne 1 -or
+                    $null -ne $node.ElseClause) {
+                    return $false
+                }
+                $condition = Get-SinglePipelineExpression `
+                    -Node $node.Clauses[0].Item1
+                return $null -ne $condition -and
+                    (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                        $conditionText
+            }, $true) |
+                Where-Object {
+                    Test-DirectStatementBlockChild `
+                        -Node $_ `
+                        -StatementBlock $artifactLoop.Body
+                }
+        )
+        if ($failureGuards.Count -ne 1) { return $false }
+        $failureStatements = @($failureGuards[0].Clauses[0].Item2.Statements)
+        if ($failureStatements.Count -ne 2 -or
+            $failureStatements[0] -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -or
+            $failureStatements[0].Left.Extent.Text -cne '$hashesBound' -or
+            $failureStatements[0].Right.Extent.Text -cne '$false' -or
+            $failureStatements[1] -isnot
+                [System.Management.Automation.Language.BreakStatementAst]) {
+            return $false
+        }
+        $hashesBoundFailures += $failureStatements[0]
+    }
+    if ($hashesBoundAssignments.Count -ne 4 -or
+        $hashesBoundInitializers.Count -ne 1 -or
+        $hashesBoundFailures.Count -ne 3) {
+        return $false
+    }
+    foreach ($assignment in @($hashesBoundInitializers) + $hashesBoundFailures) {
+        if (@($hashesBoundAssignments | Where-Object {
+            [object]::ReferenceEquals($_, $assignment)
+        }).Count -ne 1) {
+            return $false
+        }
+    }
+
+    $evidenceRunAssignments = @(
+        Get-NamedVariableAssignments -Ast $ast -Name 'evidenceRun'
+    )
+    $evidenceInitializers = @(
+        $evidenceRunAssignments |
+            Where-Object {
+                $_.Right.Extent.Text -ceq '$null' -and
+                (Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock)
+            }
+    )
+    $evidenceSuccessAssignments = @(
+        $evidenceRunAssignments |
+            Where-Object { $_.Right.Extent.Text -ceq '$run' }
+    )
+    if ($evidenceRunAssignments.Count -ne 2 -or
+        $evidenceInitializers.Count -ne 1 -or
+        $evidenceSuccessAssignments.Count -ne 1 -or
+        -not [object]::ReferenceEquals(
+            $evidenceSuccessAssignments[0],
+            $evidenceSuccessAssignment
+        )) {
+        return $false
+    }
+    $evidenceGuards = @(
+        $ast.FindAll({
+            param($node)
+            if ($node -isnot
+                    [System.Management.Automation.Language.IfStatementAst] -or
+                $node.Clauses.Count -ne 1) {
+                return $false
+            }
+            $condition = Get-SinglePipelineExpression `
+                -Node $node.Clauses[0].Item1
+            return $null -ne $condition -and
+                (($condition.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    '-not $evidenceRun' -and
+                $node.Clauses[0].Item2.Statements.Count -eq 1 -and
+                $node.Clauses[0].Item2.Statements[0] -is
+                    [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($evidenceGuards.Count -ne 1 -or
+        $evidenceInitializers[0].Extent.EndOffset -ge
+            $matchingLoops[0].Extent.StartOffset -or
+        $matchingLoops[0].Extent.EndOffset -ge
+            $evidenceGuards[0].Extent.StartOffset) {
+        return $false
+    }
+    $evidenceWriteHosts = @(
+        $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -ceq 'Write-Host' -and
+                (($node.Extent.Text -replace '\s+', ' ').Trim()) -ceq
+                    'Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."'
+        }, $true) |
+            Where-Object {
+                Test-DirectNamedBlockChild `
+                    -Node $_ `
+                    -NamedBlock $ast.EndBlock
+            }
+    )
+    if ($evidenceWriteHosts.Count -ne 1 -or
+        $evidenceGuards[0].Extent.EndOffset -ge
+            $evidenceWriteHosts[0].Extent.StartOffset) {
+        return $false
+    }
+
+    $criticalVariableContracts = @(
+        [pscustomobject]@{
+            Name = 'sha'
+            Containers = @(
+                $shaAssignment,
+                $runList,
+                $runListToRunsStatements[0],
+                $matchingAssignment,
+                $matchingCountIfs[0],
+                $evidenceIf,
+                $evidenceGuards[0],
+                $evidenceWriteHosts[0]
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultFiles'
+            Containers = @(
+                $resultFilesAssignment,
+                $resultFilesCountGates[0],
+                $resultPathAssignment
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultPath'
+            Containers = @(
+                $resultPathAssignment,
+                $resultAssignment,
+                $resultDirAssignment
+            )
+        },
+        [pscustomobject]@{
+            Name = 'result'
+            Containers = @(
+                $resultAssignment,
+                $artifactCountGates[0],
+                $artifactLoop.Condition,
+                $evidenceIf
+            )
+        },
+        [pscustomobject]@{
+            Name = 'resultDir'
+            Containers = @(
+                $resultDirAssignment,
+                $resultDirJoinCommands[0]
+            )
+        },
+        [pscustomobject]@{
+            Name = 'hashesBound'
+            Containers = @(
+                $hashesBoundInitializers[0],
+                $hashesBoundFailures[0],
+                $hashesBoundFailures[1],
+                $hashesBoundFailures[2],
+                $evidenceIf
+            )
+        },
+        [pscustomobject]@{
+            Name = 'evidenceRun'
+            Containers = @(
+                $evidenceInitializers[0],
+                $evidenceSuccessAssignment,
+                $evidenceGuards[0],
+                $evidenceWriteHosts[0]
+            )
+        }
+    )
+    foreach ($contract in $criticalVariableContracts) {
+        if (-not (Test-ExactVariableUseSet `
+            -Ast $ast `
+            -Name $contract.Name `
+            -ExpectedContainers $contract.Containers)) {
+            return $false
+        }
+    }
+    return (Get-CanonicalTextSha256 -Text $ScriptText) -ceq
+        $ExpectedScriptSha256
 }
 
 function Get-PowerShellBlockText {
@@ -187,10 +1558,352 @@ function Get-DirectStatementBlockChild {
     return $statement
 }
 
+function Test-DirectNamedBlockChild {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [System.Management.Automation.Language.NamedBlockAst] $NamedBlock
+    )
+
+    $ancestor = $Node.Parent
+    while ($null -ne $ancestor -and
+        $ancestor -isnot [System.Management.Automation.Language.NamedBlockAst]) {
+        if ($ancestor -isnot [System.Management.Automation.Language.PipelineAst] -and
+            $ancestor -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $ancestor -isnot
+                [System.Management.Automation.Language.CommandExpressionAst]) {
+            return $false
+        }
+        $ancestor = $ancestor.Parent
+    }
+    [object]::ReferenceEquals($ancestor, $NamedBlock)
+}
+
 function Get-MemberExpressionName {
     param([Parameter(Mandatory)] [System.Management.Automation.Language.MemberExpressionAst] $Node)
 
     return ([string] $Node.Member.Value).Trim()
+}
+
+function Get-NamedFunctionDefinitions {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $Name
+    }, $true))
+}
+
+function Get-NamedCommands {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq $Name
+    }, $true))
+}
+
+function Get-NamedMemberExpressions {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Name,
+        [switch] $InvocationOnly
+    )
+
+    return @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+            (-not $InvocationOnly -or
+                $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]) -and
+            (Get-MemberExpressionName -Node $node) -eq $Name
+    }, $true))
+}
+
+function Get-ExpressionRootVariableName {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    while ($Node -is [System.Management.Automation.Language.MemberExpressionAst] -or
+        $Node -is [System.Management.Automation.Language.ParenExpressionAst]) {
+        if ($Node -is [System.Management.Automation.Language.MemberExpressionAst]) {
+            $Node = $Node.Expression
+        } else {
+            $pipelineElements = @($Node.Pipeline.PipelineElements)
+            if ($pipelineElements.Count -ne 1 -or
+                $pipelineElements[0] -isnot
+                    [System.Management.Automation.Language.CommandExpressionAst]) {
+                return ''
+            }
+            $Node = $pipelineElements[0].Expression
+        }
+    }
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+        return ''
+    }
+    return ($Node.VariablePath.UserPath -split ':')[-1]
+}
+
+function Test-CommandHasStringArgument {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.CommandAst] $Command,
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    return @($Command.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $node.Value -eq $Value
+    }, $true)).Count -gt 0
+}
+
+function Get-CommandParameterArgument {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.CommandAst] $Command,
+        [Parameter(Mandatory)] [string] $Name
+    )
+
+    $elements = @($Command.CommandElements)
+    for ($index = 0; $index -lt $elements.Count; $index++) {
+        $element = $elements[$index]
+        if ($element -isnot [System.Management.Automation.Language.CommandParameterAst] -or
+            $element.ParameterName -ne $Name) {
+            continue
+        }
+        if ($null -ne $element.Argument) { return $element.Argument }
+        if (($index + 1) -lt $elements.Count -and
+            $elements[$index + 1] -isnot
+                [System.Management.Automation.Language.CommandParameterAst]) {
+            return $elements[$index + 1]
+        }
+        return $null
+    }
+    return $null
+}
+
+function Get-ContainingStatementBlock {
+    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+
+    while ($null -ne $Node -and
+        $Node -isnot [System.Management.Automation.Language.StatementBlockAst]) {
+        $Node = $Node.Parent
+    }
+    return $Node
+}
+
+function Get-VariableExpressionName {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+        return ''
+    }
+    return ($Node.VariablePath.UserPath -split ':')[-1]
+}
+
+function Test-StaticMemberReference {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [string] $TypeName,
+        [Parameter(Mandatory)] [string] $MemberName
+    )
+
+    return $Node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $Node.Static -and
+        (Get-MemberExpressionName -Node $Node) -eq $MemberName -and
+        $Node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $Node.Expression.TypeName.FullName -eq $TypeName
+}
+
+function Test-DirectJoinPathNameExpression {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [string] $ParentVariable,
+        [AllowEmptyString()] [string] $ParentMember = '',
+        [Parameter(Mandatory)] [string] $ChildVariable,
+        [Parameter(Mandatory)] [string] $ChildSuffix,
+        [Parameter(Mandatory)] [ValidateSet('Expandable', 'Format')] [string] $Style
+    )
+
+    if ($Node -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $Node.PipelineElements.Count -ne 1 -or
+        $Node.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandAst]) {
+        return $false
+    }
+    $command = $Node.PipelineElements[0]
+    $elements = @($command.CommandElements)
+    if ($command.GetCommandName() -ne 'Join-Path' -or $elements.Count -ne 3) {
+        return $false
+    }
+    $parent = $elements[1]
+    if ([string]::IsNullOrEmpty($ParentMember)) {
+        if ((Get-VariableExpressionName -Node $parent) -ne $ParentVariable) {
+            return $false
+        }
+    } elseif ($parent -isnot
+            [System.Management.Automation.Language.MemberExpressionAst] -or
+        (Get-ExpressionRootVariableName -Node $parent) -ne $ParentVariable -or
+        (Get-MemberExpressionName -Node $parent) -ne $ParentMember) {
+        return $false
+    }
+
+    $child = $elements[2]
+    if ($Style -eq 'Expandable') {
+        return $child -is
+                [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+            $child.Value -ceq ('$' + $ChildVariable + $ChildSuffix) -and
+            $child.NestedExpressions.Count -eq 1 -and
+            (Get-VariableExpressionName -Node $child.NestedExpressions[0]) -eq
+                $ChildVariable
+    }
+    if ($child -isnot [System.Management.Automation.Language.ParenExpressionAst] -or
+        $child.Pipeline.PipelineElements.Count -ne 1 -or
+        $child.Pipeline.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $false
+    }
+    $format = $child.Pipeline.PipelineElements[0].Expression
+    return $format -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $format.Operator -eq [System.Management.Automation.Language.TokenKind]::Format -and
+        $format.Left -is
+            [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $format.Left.Value -ceq ('{0}' + $ChildSuffix) -and
+        (Get-VariableExpressionName -Node $format.Right) -eq $ChildVariable
+}
+
+function Test-InjectiveHarnessRunNameExpression {
+    param([System.Management.Automation.Language.Ast] $Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.IfStatementAst] -or
+        $Node.Clauses.Count -ne 1 -or $null -eq $Node.ElseClause) {
+        return $false
+    }
+    $conditionElements = @($Node.Clauses[0].Item1.PipelineElements)
+    $thenStatements = @($Node.Clauses[0].Item2.Statements)
+    $elseStatements = @($Node.ElseClause.Statements)
+    if ($conditionElements.Count -ne 1 -or
+        $conditionElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $thenStatements.Count -ne 1 -or $elseStatements.Count -ne 1) {
+        return $false
+    }
+    $condition = $conditionElements[0].Expression
+    if ($condition -isnot
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not $condition.Static -or
+        $condition.Expression -isnot
+            [System.Management.Automation.Language.TypeExpressionAst] -or
+        $condition.Expression.TypeName.FullName -ne 'string' -or
+        (Get-MemberExpressionName -Node $condition) -ne 'IsNullOrWhiteSpace' -or
+        $condition.Arguments.Count -ne 1 -or
+        (Get-VariableExpressionName -Node $condition.Arguments[0]) -ne
+            'ScenarioSlug') {
+        return $false
+    }
+    $thenElements = @($thenStatements[0].PipelineElements)
+    $elseElements = @($elseStatements[0].PipelineElements)
+    if ($thenElements.Count -ne 1 -or $elseElements.Count -ne 1 -or
+        $thenElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $elseElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        (Get-VariableExpressionName -Node $thenElements[0].Expression) -ne
+            'ScriptName') {
+        return $false
+    }
+    $format = $elseElements[0].Expression
+    if ($format -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+        $format.Operator -ne [System.Management.Automation.Language.TokenKind]::Format -or
+        $format.Left -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $format.Left.Value -cne '{0}-{1}' -or
+        $format.Right -isnot [System.Management.Automation.Language.ArrayLiteralAst] -or
+        $format.Right.Elements.Count -ne 2) {
+        return $false
+    }
+    $scriptName = $format.Right.Elements[0]
+    return $scriptName -is
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $scriptName.Static -and
+        $scriptName.Expression -is
+            [System.Management.Automation.Language.TypeExpressionAst] -and
+        $scriptName.Expression.TypeName.FullName -eq 'System.IO.Path' -and
+        (Get-MemberExpressionName -Node $scriptName) -eq
+            'GetFileNameWithoutExtension' -and
+        $scriptName.Arguments.Count -eq 1 -and
+        (Get-VariableExpressionName -Node $scriptName.Arguments[0]) -eq
+            'ScriptName' -and
+        (Get-VariableExpressionName -Node $format.Right.Elements[1]) -eq
+            'ScenarioSlug'
+}
+
+function Test-TextChangedHandlerOperation {
+    param(
+        [System.Management.Automation.Language.Ast] $Node,
+        [Parameter(Mandatory)] [ValidateSet('Add', 'Remove')] [string] $Operation
+    )
+
+    if ($Node -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not $Node.Static -or
+        $Node.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst] -or
+        $Node.Expression.TypeName.FullName -ne
+            'System.Windows.Automation.Automation' -or
+        (Get-MemberExpressionName -Node $Node) -ne
+            "${Operation}AutomationEventHandler") {
+        return $false
+    }
+    $arguments = @($Node.Arguments)
+    $expectedCount = if ($Operation -eq 'Add') { 4 } else { 3 }
+    if ($arguments.Count -ne $expectedCount -or
+        -not (Test-StaticMemberReference `
+            -Node $arguments[0] `
+            -TypeName 'System.Windows.Automation.TextPattern' `
+            -MemberName 'TextChangedEvent') -or
+        (Get-VariableExpressionName -Node $arguments[1]) -eq '' -or
+        (Get-VariableExpressionName -Node $arguments[-1]) -eq '') {
+        return $false
+    }
+    if ($Operation -eq 'Add' -and
+        -not (Test-StaticMemberReference `
+            -Node $arguments[2] `
+            -TypeName 'System.Windows.Automation.TreeScope' `
+            -MemberName 'Element')) {
+        return $false
+    }
+    return $true
+}
+
+function Assert-NoUnreachableStatements {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Ast,
+        [Parameter(Mandatory)] [string] $Context
+    )
+
+    $terminatorTypes = @(
+        [System.Management.Automation.Language.ReturnStatementAst],
+        [System.Management.Automation.Language.ThrowStatementAst],
+        [System.Management.Automation.Language.ExitStatementAst],
+        [System.Management.Automation.Language.BreakStatementAst],
+        [System.Management.Automation.Language.ContinueStatementAst]
+    )
+    foreach ($block in @($Ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StatementBlockAst]
+    }, $true))) {
+        $statements = @($block.Statements)
+        for ($index = 0; $index -lt ($statements.Count - 1); $index++) {
+            $statementType = $statements[$index].GetType()
+            if ($terminatorTypes -contains $statementType) {
+                throw "Unreachable statement after $($statementType.Name): $Context"
+            }
+        }
+    }
 }
 
 function Test-DynamicScriptTypeName {
@@ -214,6 +1927,60 @@ function Test-DynamicScriptTypeExpression {
 
     return $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
         (Test-DynamicScriptTypeName -TypeName $Node.TypeName.FullName)
+}
+
+function Test-StrictReleaseForbiddenTypeName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $TypeName)
+
+    $typeName = ((($TypeName -split ',', 2)[0] -replace '\s', '')).ToLowerInvariant()
+    return $typeName -in @(
+        'powershell',
+        'system.management.automation.powershell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'system.management.automation.runspaces.runspace',
+        'system.management.automation.runspaces.runspacefactory',
+        'system.management.automation.runspaces.initialsessionstate',
+        'microsoft.csharp.csharpcodeprovider',
+        'system.codedom.compiler.codedomprovider',
+        'system.codedom.compiler.compilerparameters',
+        'microsoft.codeanalysis.compilation',
+        'microsoft.codeanalysis.csharp.csharpcompilation',
+        'assembly',
+        'reflection.assembly',
+        'system.reflection.assembly',
+        'system.reflection.emit.assemblybuilder',
+        'system.reflection.emit.modulebuilder',
+        'system.reflection.emit.typebuilder',
+        'system.reflection.emit.methodbuilder',
+        'system.reflection.emit.dynamicmethod'
+    )
+}
+
+function Test-StrictReleaseForbiddenParameterName {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $ParameterName)
+
+    if ($ParameterName.Length -eq 0) { return $false }
+    if ($ParameterName -in @('ov', 'pv', 'ev', 'wv', 'iv')) {
+        return $true
+    }
+    foreach ($canonicalName in @(
+        'OutVariable',
+        'PipelineVariable',
+        'ErrorVariable',
+        'WarningVariable',
+        'InformationVariable',
+        'MemberName'
+    )) {
+        if ($canonicalName.StartsWith(
+            $ParameterName,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Test-ExecutionContextRoot {
@@ -255,9 +2022,28 @@ function Test-ExecutionContextMemberChain {
     return Test-ExecutionContextMemberChain -Node $Node.Expression -Members @($Members[0..($Members.Count - 2)])
 }
 
-function Test-CommandResolutionMutationNode {
-    param([Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node)
+function Test-ForbiddenScriptMutationNode {
+    param(
+        [Parameter(Mandatory)] [System.Management.Automation.Language.Ast] $Node,
+        [switch] $StrictReleaseContract
+    )
 
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.CommandParameterAst] -and
+        (Test-StrictReleaseForbiddenParameterName `
+            -ParameterName $Node.ParameterName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.TypeName.FullName)) {
+        return $true
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        (Test-StrictReleaseForbiddenTypeName -TypeName $Node.Value)) {
+        return $true
+    }
     if ($Node -is [System.Management.Automation.Language.ConvertExpressionAst] -and
         (($Node.Type.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Child -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
@@ -269,6 +2055,13 @@ function Test-CommandResolutionMutationNode {
         (($Node.Right.TypeName.FullName -replace '\s', '').ToLowerInvariant() -in @('type', 'system.type'))) {
         return $Node.Left -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
             (Test-DynamicScriptTypeName -TypeName $Node.Left.Value)
+    }
+    if ($StrictReleaseContract -and
+        $Node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        (($Node.VariablePath.UserPath -split ':')[-1]) -in @(
+            'ExecutionContext', 'PSCmdlet', 'Host', 'MyInvocation'
+        )) {
+        return $true
     }
     if ($Node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
         (Test-DynamicScriptTypeName -TypeName $Node.Value)) {
@@ -304,6 +2097,41 @@ function Test-CommandResolutionMutationNode {
         }
         $memberName = Get-MemberExpressionName -Node $Node
         if ($Node.Extent.Text -match '(?is)TypeAccelerators.*(?:Add|Remove)\b') { return $true }
+        if ($StrictReleaseContract -and
+            $memberName -in @(
+                'DefaultRunspace', 'SessionStateProxy',
+                'SetVariable', 'GetVariable', 'RemoveVariable',
+                'SessionState', 'PSVariable',
+                'PSObject', 'PSBase', 'PSAdapted',
+                'Members', 'Methods', 'Properties',
+                'CompileAssemblyFromSource',
+                'CompileAssemblyFromFile',
+                'CompileAssemblyFromDom',
+                'CreateCompiler', 'CreateProvider',
+                'DefineDynamicAssembly', 'DefineDynamicModule',
+                'DefineType', 'DefineMethod',
+                'CreateType', 'CreateTypeInfo',
+                'BakeByteArray', 'Emit',
+                'Load', 'LoadFile', 'LoadFrom', 'UnsafeLoadFrom', 'LoadModule'
+            )) {
+            return $true
+        }
+        if ($StrictReleaseContract -and
+            $Node -is
+                [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $memberName -in @(
+                'GetType',
+                'GetMethod', 'GetMethods',
+                'GetConstructor', 'GetConstructors',
+                'GetField', 'GetFields',
+                'GetProperty', 'GetProperties',
+                'GetMember', 'GetMembers',
+                'Invoke', 'InvokeMember', 'DynamicInvoke',
+                'CreateDelegate', 'CreateInstance',
+                'MakeGenericMethod', 'MakeGenericType'
+            )) {
+            return $true
+        }
         if ($Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
             $memberName -eq 'GetType' -and $Node.Arguments.Count -ne 0) {
             return $true
@@ -331,8 +2159,43 @@ function Test-CommandResolutionMutationNode {
     }
     if ($Node -is [System.Management.Automation.Language.CommandAst]) {
         $name = $Node.GetCommandName()
+        if ($StrictReleaseContract -and
+            $Node.InvocationOperator -in @(
+                [System.Management.Automation.Language.TokenKind]::Ampersand,
+                [System.Management.Automation.Language.TokenKind]::Dot
+            )) {
+            return $true
+        }
         $leafName = if ($null -eq $name) { '' } else { ($name -split '\\')[-1] }
-        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex', 'Get-Variable', 'gv') -or
+        return $leafName -in @('Set-Alias', 'sal', 'New-Alias', 'nal', 'Remove-Alias', 'ral', 'Import-Alias', 'ipal', 'Import-Module', 'ipmo', 'Import-PSSession', 'Add-PSSnapin', 'asnp', 'Remove-PSSnapin', 'rsnp', 'Invoke-Expression', 'iex') -or
+            ($StrictReleaseContract -and
+                $leafName -in @(
+                    'Get-Command', 'gcm',
+                    'Add-Type',
+                    'Tee-Object', 'tee',
+                    'Get-Member', 'gm',
+                    'Get-Variable', 'gv',
+                    'Set-Variable', 'sv', 'set',
+                    'New-Variable', 'nv',
+                    'Remove-Variable', 'rv',
+                    'Clear-Variable', 'clv',
+                    'Set-Item', 'si', 'Clear-Item', 'cli',
+                    'Remove-Item', 'del', 'erase', 'rd', 'ri', 'rm', 'rmdir',
+                    'Copy-Item', 'copy', 'cp', 'cpi',
+                    'Move-Item', 'mi', 'move', 'mv',
+                    'Rename-Item', 'ren', 'rni', 'Get-Item', 'gi',
+                    'Set-ItemProperty', 'sp',
+                    'New-ItemProperty',
+                    'Clear-ItemProperty', 'clp',
+                    'Remove-ItemProperty', 'rp',
+                    'Copy-ItemProperty', 'cpp',
+                    'Move-ItemProperty', 'mp',
+                    'Rename-ItemProperty', 'rnp',
+                    'Get-ItemProperty', 'gp',
+                    'Get-ItemPropertyValue', 'gpv',
+                    'Set-Content', 'sc', 'Add-Content', 'ac',
+                    'Clear-Content', 'clc'
+                )) -or
             $Node.Extent.Text -match '(?i)(?:alias|function|variable):'
     }
     if ($Node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
@@ -350,7 +2213,7 @@ function Assert-CommandResolutionContract {
         [string[]] $ExpectedAmpersandCommands = @()
     )
 
-    $mutators = @($Ast.FindAll({ param($node) Test-CommandResolutionMutationNode -Node $node }, $true))
+    $mutators = @($Ast.FindAll({ param($node) Test-ForbiddenScriptMutationNode -Node $node }, $true))
     if ($mutators.Count -ne 0) { throw "Command resolution mutation is forbidden: $Context" }
     if (Test-CommandLoadingRequirement -Ast $Ast -Tokens $Tokens) {
         throw "Command-loading #requires directive is forbidden: $Context"
@@ -421,7 +2284,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$global:ExecutionContext.InvokeCommand.NewScriptBlock("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = $ExecutionContext.InvokeCommand; $ic.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ic = ${ExecutionContext}.SessionState.InvokeCommand; $ic.NewScriptBlock("1+1")' }
-    [pscustomobject]@{ Reject = $true; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
+    [pscustomobject]@{ Reject = $false; Text = '$ec = Get-Variable ExecutionContext -ValueOnly; $ec.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$(Get-Item variable:ExecutionContext).Value.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$ss = $ExecutionContext.SessionState; $ss.InvokeCommand.InvokeScript("1+1")' }
     [pscustomobject]@{ Reject = $true; Text = '$member = "Create"; [ScriptBlock]::$member("1+1")' }
@@ -437,7 +2300,7 @@ $commandResolutionProbes = @(
     [pscustomobject]@{ Reject = $true; Text = '$factory = [type]("System.Management.Automation." + "ScriptBlock")' }
     [pscustomobject]@{ Reject = $true; Text = '$factory = "System.Management.Automation.ScriptBlock" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '$typeName = "System.Management.Automation.ScriptBlock"; $factory = $typeName -as [type]' }
-    [pscustomobject]@{ Reject = $false; Text = '$factory = "WinghosttyStatefulNative" -as [type]' }
+    [pscustomobject]@{ Reject = $false; Text = '$factory = "NocttyStatefulNative" -as [type]' }
     [pscustomobject]@{ Reject = $true; Text = '[runspacefactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $true; Text = '[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()' }
     [pscustomobject]@{ Reject = $false; Text = '[ScriptBlock]::CreateDelegate("x")' }
@@ -480,6 +2343,120 @@ foreach ($probe in $commandResolutionProbes) {
     }
 }
 
+$strictOnlyCommandProbes = @(
+    'Get-Variable value',
+    'gv value',
+    'Set-Variable value 1',
+    'sv value 1',
+    'set value 1',
+    'New-Variable value 1',
+    'nv value 1',
+    'Remove-Variable value',
+    'rv value',
+    'Clear-Variable value',
+    'clv value',
+    '. ./scripts/replace-release-evidence.ps1',
+    '& Write-Output harmless'
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'GetType',
+        'GetMethod', 'GetMethods',
+        'GetConstructor', 'GetConstructors',
+        'GetField', 'GetFields',
+        'GetProperty', 'GetProperties',
+        'GetMember', 'GetMembers',
+        'Invoke', 'InvokeMember', 'DynamicInvoke',
+        'CreateDelegate', 'CreateInstance',
+        'MakeGenericMethod', 'MakeGenericType'
+    ) | ForEach-Object { '$value.' + $_ + '()' }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'powershell',
+        'System.Management.Automation.PowerShell',
+        'runspace',
+        'runspacefactory',
+        'initialsessionstate',
+        'System.Management.Automation.Runspaces.Runspace',
+        'System.Management.Automation.Runspaces.RunspaceFactory',
+        'System.Management.Automation.Runspaces.InitialSessionState',
+        'Microsoft.CSharp.CSharpCodeProvider',
+        'Reflection.Assembly',
+        'System.Reflection.Emit.AssemblyBuilder'
+    ) | ForEach-Object {
+        "'$_'"
+        "[$_]::Name"
+    }
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'DefaultRunspace',
+        'SessionStateProxy',
+        'SetVariable',
+        'GetVariable',
+        'RemoveVariable'
+    ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    'Tee-Object -Variable value',
+    'tee -Variable value',
+    'Write-Output x -OutVariable value',
+    'Write-Output x -ov value',
+    'Write-Output x -OutV value',
+    'Write-Output x -PipelineV value',
+    'Write-Output x -ev value',
+    'Write-Output x -wv value',
+    'Write-Output x -iv value',
+    'Write-Output x | ForEach-Object -MemberName ToString',
+    'Write-Output x | % -M ToString',
+    'gm -InputObject value',
+    'Add-Type -TypeDefinition ''public class StrictProbe {}''',
+    'Microsoft.PowerShell.Utility\Add-Type -TypeDefinition ''public class StrictProbe {}'''
+)
+$strictOnlyCommandProbes += @(
+    @(
+        'PSObject',
+        'Properties',
+        'CompileAssemblyFromSource',
+        'DefineDynamicAssembly',
+        'Load'
+    ) | ForEach-Object { '$value.' + $_ }
+)
+$strictOnlyCommandProbes += @(
+    '$PSCmdlet',
+    '$Host',
+    '$MyInvocation',
+    '$value.SessionState',
+    '$value.PSVariable'
+)
+foreach ($probeText in $strictOnlyCommandProbes) {
+    $probeTokens = $null
+    $probeErrors = $null
+    $probeAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        $probeText,
+        [ref]$probeTokens,
+        [ref]$probeErrors
+    )
+    if ($probeErrors.Count -ne 0) {
+        throw "Strict command probe does not parse: $probeText"
+    }
+    $generalRejections = @($probeAst.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode -Node $node
+    }, $true))
+    $strictRejections = @($probeAst.FindAll({
+        param($node)
+        Test-ForbiddenScriptMutationNode `
+            -Node $node `
+            -StrictReleaseContract
+    }, $true))
+    if ($generalRejections.Count -ne 0 -or
+        $strictRejections.Count -ne 1) {
+        throw "Strict command mode contract failed: $probeText"
+    }
+}
+
 $directStatementTokens = $null
 $directStatementErrors = $null
 $directStatementAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -507,11 +2484,31 @@ $stepBoundaryProbe = @'
       - name: Other
         run: outside-step
 '@
-if ((Get-YamlStepText -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepBoundaryProbe -Name 'Target' -Source 'step boundary probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a step boundary.'
 }
+$duplicateStepProbe = @'
+      - name: Target
+        run: first
+      - name: Target
+        run: second
+'@
+$duplicateStepRejected = $false
+try {
+    Get-YamlStepBlock `
+        -Content $duplicateStepProbe `
+        -Name 'Target' `
+        -Source 'duplicate step probe' |
+        Out-Null
+}
+catch {
+    $duplicateStepRejected = $true
+}
+if (-not $duplicateStepRejected) {
+    throw 'Workflow step extraction accepted an ambiguous duplicate name.'
+}
 $stepTailProbe = "      - name: Target`n        run: inside-step`n    env: # job-level tail`n      VALUE: outside-step"
-if ((Get-YamlStepText -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
+if ((Get-YamlStepBlock -Content $stepTailProbe -Name 'Target' -Source 'step tail probe') -match 'outside-step') {
     throw 'Workflow step extraction crossed a job-level key boundary.'
 }
 $jobBoundaryProbe = "  target:`n    value: inside-job`n  `"other.job`": # annotated`n    value: outside-job"
@@ -568,6 +2565,17 @@ Assert-JsonDocument `
 $releaseWorkflow = Join-Path $repoRoot '.github\workflows\release.yml'
 $readinessWorkflow = Join-Path $repoRoot '.github\workflows\release-readiness.yml'
 $testWorkflow = Join-Path $repoRoot '.github\workflows\test.yml'
+$siteDeployWorkflow = Join-Path $repoRoot '.github\workflows\deploy-site.yml'
+$siteAssetBuilder = Join-Path $repoRoot 'scripts\build-site-assets.mjs'
+$sitePayloadBuilder = Join-Path $repoRoot 'scripts\build-site-payload.ps1'
+$siteHeaderContract = Join-Path $repoRoot 'scripts\get-site-header-contract.ps1'
+$siteDeploymentHeadGate = Join-Path $repoRoot 'scripts\require-site-deployment-head.ps1'
+$cloudflarePagesVerifier = Join-Path $repoRoot 'scripts\verify-cloudflare-pages.ps1'
+$siteHeaders = Join-Path $repoRoot 'site\_headers'
+$siteReadme = Join-Path $repoRoot 'site\README.md'
+$site404 = Join-Path $repoRoot 'site\404.html'
+$siteIndex = Join-Path $repoRoot 'site\index.html'
+$siteGitattributes = Join-Path $repoRoot '.gitattributes'
 $accessibilityChecker = Join-Path $repoRoot 'scripts\check-accessibility-evidence.ps1'
 $runnerProvenanceChecker = Join-Path $repoRoot 'test\windows\assert-interactive-runner.ps1'
 $interactiveWin11Lib = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
@@ -579,20 +2587,39 @@ $paletteThemeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-palet
 $newTabHarness = Join-Path $repoRoot 'test\windows\interactive-win11-new-tab.ps1'
 $undoHarness = Join-Path $repoRoot 'test\windows\interactive-win11-undo.ps1'
 $resizeHarness = Join-Path $repoRoot 'test\windows\interactive-win11-resize.ps1'
+$keyInputHarness = Join-Path $repoRoot 'test\windows\interactive-win11-key-input.ps1'
+$interactiveValidator = Join-Path $repoRoot 'test\windows\interactive-win11-validate.ps1'
 $shaderHarness = Join-Path $repoRoot 'test\windows\interactive-win11-shaders.ps1'
 $win32Runtime = Join-Path $repoRoot 'src\apprt\win32.zig'
 $win32Settings = Join-Path $repoRoot 'src\apprt\win32_settings.zig'
+$win32Theme = Join-Path $repoRoot 'src\apprt\win32_theme.zig'
 $win32UiaWidgets = Join-Path $repoRoot 'src\apprt\win32_uia\widgets.zig'
+$terminalOutputCapture = Join-Path $repoRoot 'src\termio\semantic_output_capture.zig'
+$terminalStreamHandler = Join-Path $repoRoot 'src\termio\stream_handler.zig'
+$terminalSemanticOutput = Join-Path $repoRoot 'src\terminal\semantic_output.zig'
+$termioRuntime = Join-Path $repoRoot 'src\termio\Termio.zig'
+$surfaceRuntime = Join-Path $repoRoot 'src\apprt\surface.zig'
+$terminalAccessibility = Join-Path $repoRoot 'src\apprt\win32_terminal_accessibility.zig'
 $interactivePrSmoke = Join-Path $repoRoot 'test\windows\interactive-win11-pr-smoke.ps1'
 $releaseCopyChecker = Join-Path $repoRoot 'scripts\check-release-copy.ps1'
 $releasePreflight = Join-Path $repoRoot 'scripts\release-preflight.ps1'
 $publishedReleaseVerifier = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
 $windowsPackager = Join-Path $repoRoot 'scripts\package-windows.ps1'
+$windowsBuildCapabilities = Join-Path $repoRoot 'scripts\windows-build-capabilities.ps1'
 $signingTrust = Join-Path $repoRoot 'scripts\signing-trust.ps1'
 $signingTrustTest = Join-Path $repoRoot 'scripts\test-signing-trust.ps1'
 $releaseWorkflowText = Get-Content -LiteralPath $releaseWorkflow -Raw
 $readinessWorkflowText = Get-Content -LiteralPath $readinessWorkflow -Raw
 $testWorkflowText = Get-Content -LiteralPath $testWorkflow -Raw
+$siteDeployWorkflowText = Get-Content -LiteralPath $siteDeployWorkflow -Raw
+$siteAssetBuilderText = Get-Content -LiteralPath $siteAssetBuilder -Raw
+$sitePayloadBuilderText = Get-Content -LiteralPath $sitePayloadBuilder -Raw
+$cloudflarePagesVerifierText = Get-Content -LiteralPath $cloudflarePagesVerifier -Raw
+$siteHeadersText = Get-Content -LiteralPath $siteHeaders -Raw
+$siteReadmeText = Get-Content -LiteralPath $siteReadme -Raw
+$site404Text = Get-Content -LiteralPath $site404 -Raw
+$siteIndexText = Get-Content -LiteralPath $siteIndex -Raw
+$siteGitattributesText = Get-Content -LiteralPath $siteGitattributes -Raw
 $interactiveWin11LibText = Get-Content -LiteralPath $interactiveWin11Lib -Raw
 $cliShellHarnessText = Get-Content -LiteralPath $cliShellHarness -Raw
 $statefulWin11LibText = Get-Content -LiteralPath $statefulWin11Lib -Raw
@@ -603,9 +2630,18 @@ $signingTrustText = Get-Content -LiteralPath $signingTrust -Raw
 $signingTrustTestText = Get-Content -LiteralPath $signingTrustTest -Raw
 $win32RuntimeText = Get-Content -LiteralPath $win32Runtime -Raw
 $win32SettingsText = Get-Content -LiteralPath $win32Settings -Raw
+$win32ThemeText = Get-Content -LiteralPath $win32Theme -Raw
 $win32UiaWidgetsText = Get-Content -LiteralPath $win32UiaWidgets -Raw
+$terminalOutputCaptureText = Get-Content -LiteralPath $terminalOutputCapture -Raw
+$terminalStreamHandlerText = Get-Content -LiteralPath $terminalStreamHandler -Raw
+$terminalSemanticOutputText = Get-Content -LiteralPath $terminalSemanticOutput -Raw
+$termioRuntimeText = Get-Content -LiteralPath $termioRuntime -Raw
+$surfaceRuntimeText = Get-Content -LiteralPath $surfaceRuntime -Raw
+$terminalAccessibilityText = Get-Content -LiteralPath $terminalAccessibility -Raw
 $sessionRestoreHarnessText = Get-Content -LiteralPath $sessionRestoreHarness -Raw
 $paletteThemeHarnessText = Get-Content -LiteralPath $paletteThemeHarness -Raw
+$keyInputHarnessText = Get-Content -LiteralPath $keyInputHarness -Raw
+$interactiveValidatorText = Get-Content -LiteralPath $interactiveValidator -Raw
 $accessibilityHarnessTokens = $null
 $accessibilityHarnessErrors = $null
 $accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::ParseInput(
@@ -616,6 +2652,552 @@ $accessibilityHarnessAst = [System.Management.Automation.Language.Parser]::Parse
 if ($accessibilityHarnessErrors.Count -ne 0) {
     throw "Accessibility harness does not parse: $($accessibilityHarnessErrors[0].Message)"
 }
+foreach ($source in @(
+    [pscustomobject]@{ Name = 'key-input harness'; Text = $keyInputHarnessText },
+    [pscustomobject]@{ Name = 'interactive validator'; Text = $interactiveValidatorText }
+)) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $source.Text,
+        [ref]$tokens,
+        [ref]$errors
+    )
+    if ($errors.Count -ne 0) {
+        throw "$($source.Name) does not parse: $($errors[0].Message)"
+    }
+    if ($source.Name -eq 'key-input harness') { $keyInputHarnessAst = $ast }
+    else { $interactiveValidatorAst = $ast }
+}
+
+$injectiveMutationTokens = $null
+$injectiveMutationErrors = $null
+$injectiveMutationAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    @'
+$stdoutPath = Join-Path $layout.Logs "constant.log"
+$runName = if ([string]::IsNullOrWhiteSpace($ScenarioSlug)) {
+    $ScriptName
+} else {
+    $ScriptName
+}
+'@,
+    [ref] $injectiveMutationTokens,
+    [ref] $injectiveMutationErrors
+)
+$injectiveMutationAssignments = @($injectiveMutationAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+}, $true))
+if ($injectiveMutationErrors.Count -ne 0 -or
+    $injectiveMutationAssignments.Count -ne 2 -or
+    (Test-DirectJoinPathNameExpression `
+        -Node $injectiveMutationAssignments[0].Right `
+        -ParentVariable 'layout' `
+        -ParentMember 'Logs' `
+        -ChildVariable 'artifactPrefix' `
+        -ChildSuffix '-stdout.log' `
+        -Style Expandable) -or
+    (Test-InjectiveHarnessRunNameExpression `
+        -Node $injectiveMutationAssignments[1].Right)) {
+    throw 'Injective artifact-name contracts must reject constant-path mutations.'
+}
+
+$keyInputParameterNames = @($keyInputHarnessAst.ParamBlock.Parameters | ForEach-Object {
+    $_.Name.VariablePath.UserPath
+})
+if ($keyInputParameterNames -contains 'Route') {
+    throw 'Key-input harness must always target the surface directly; Route is not a valid public option.'
+}
+$keyInputKeyParameters = @($keyInputHarnessAst.ParamBlock.Parameters | Where-Object {
+    $_.Name.VariablePath.UserPath -eq 'Key'
+})
+$keyInputKeyValidateSets = if ($keyInputKeyParameters.Count -eq 1) {
+    @($keyInputKeyParameters[0].Attributes | Where-Object {
+        $_ -is [System.Management.Automation.Language.AttributeAst] -and
+            $_.TypeName.FullName -eq 'ValidateSet'
+    })
+} else {
+    @()
+}
+$keyInputKeyValues = if ($keyInputKeyValidateSets.Count -eq 1) {
+    @($keyInputKeyValidateSets[0].PositionalArguments | ForEach-Object {
+        if ($_ -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            throw 'Key-input Key ValidateSet values must be static strings.'
+        }
+        $_.Value
+    })
+} else {
+    @()
+}
+$requiredKeyInputValues = @(
+    'a',
+    'space',
+    'unicode-bmp',
+    'unicode-supplementary',
+    'unicode-burst',
+    'unicode-cr',
+    'unicode-lf',
+    'unicode-tab',
+    'unicode-backspace',
+    'unicode-escape'
+)
+if ($keyInputKeyValues.Count -ne $requiredKeyInputValues.Count -or
+    @(Compare-Object `
+        -ReferenceObject $requiredKeyInputValues `
+        -DifferenceObject $keyInputKeyValues `
+        -SyncWindow 0 `
+        -CaseSensitive).Count -ne 0 -or
+    @($keyInputKeyValues | Sort-Object -Unique).Count -ne
+        $keyInputKeyValues.Count) {
+    throw 'Key-input harness must expose the exact ten-key input ValidateSet.'
+}
+if (@($keyInputKeyValues | Where-Object {
+    $_ -match '(?i)alt|numpad'
+}).Count -ne 0) {
+    throw 'Key-input harness cannot expose Alt+numpad input synthesis.'
+}
+$slugFunctions = @(Get-NamedFunctionDefinitions -Ast $keyInputHarnessAst -Name 'Get-KeyInputScenarioSlug')
+if ($slugFunctions.Count -ne 1) {
+    throw 'Key-input harness must own exactly one scenario-slug function.'
+}
+try {
+    . ([scriptblock]::Create($slugFunctions[0].Extent.Text))
+    $slugFixtures = @(
+        foreach ($keyValue in $keyInputKeyValues) {
+            Get-KeyInputScenarioSlug -Key $keyValue
+        }
+    )
+    if (@($slugFixtures | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+        $slugFixtures.Count -ne 10 -or
+        @($slugFixtures | Sort-Object -Unique).Count -ne
+            $slugFixtures.Count) {
+        throw 'The ten-key set must produce exactly ten unique artifact slugs.'
+    }
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-KeyInputScenarioSlug -ErrorAction SilentlyContinue
+}
+$sandboxCalls = @(Get-NamedCommands -Ast $keyInputHarnessAst -Name 'Initialize-InteractiveWin11Sandbox')
+$scenarioSlugAssignments = @($keyInputHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        (Get-VariableExpressionName -Node $node.Left) -eq 'scenarioSlug'
+}, $true))
+$artifactAssignments = @($keyInputHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        (Get-VariableExpressionName -Node $node.Left) -in @(
+            'artifactPrefix', 'stdoutPath', 'stderrPath', 'resultPath'
+        )
+}, $true))
+$sandboxName = if ($sandboxCalls.Count -eq 1) {
+    Get-CommandParameterArgument -Command $sandboxCalls[0] -Name 'SandboxName'
+}
+$scenarioSlugCalls = if ($scenarioSlugAssignments.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $scenarioSlugAssignments[0].Right `
+        -Name 'Get-KeyInputScenarioSlug')
+} else {
+    @()
+}
+$scenarioSlugKey = if ($scenarioSlugCalls.Count -eq 1) {
+    Get-CommandParameterArgument -Command $scenarioSlugCalls[0] -Name 'Key'
+}
+$artifactVariableNames = @(
+    'artifactPrefix', 'stdoutPath', 'stderrPath', 'resultPath'
+)
+$artifactAssignmentContract = @(
+    foreach ($artifactVariableName in $artifactVariableNames) {
+        $assignments = @($artifactAssignments | Where-Object {
+            (Get-VariableExpressionName -Node $_.Left) -eq
+                $artifactVariableName
+        })
+        if ($assignments.Count -ne 1) { $false; continue }
+        if ($artifactVariableName -eq 'artifactPrefix') {
+            $expression = $assignments[0].Right
+            $expression -is
+                    [System.Management.Automation.Language.CommandExpressionAst] -and
+                $expression.Expression -is
+                    [System.Management.Automation.Language.ExpandableStringExpressionAst] -and
+                $expression.Expression.Value -ceq
+                    'interactive-win11-key-input-$scenarioSlug' -and
+                $expression.Expression.NestedExpressions.Count -eq 1 -and
+                (Get-VariableExpressionName `
+                    -Node $expression.Expression.NestedExpressions[0]) -eq
+                        'scenarioSlug'
+            continue
+        }
+        $spec = switch ($artifactVariableName) {
+            'stdoutPath' { @('layout', 'Logs', 'artifactPrefix', '-stdout.log') }
+            'stderrPath' { @('layout', 'Logs', 'artifactPrefix', '-stderr.log') }
+            'resultPath' { @('layout', 'Temp', 'artifactPrefix', '-result.json') }
+        }
+        Test-DirectJoinPathNameExpression `
+            -Node $assignments[0].Right `
+            -ParentVariable $spec[0] `
+            -ParentMember $spec[1] `
+            -ChildVariable $spec[2] `
+            -ChildSuffix $spec[3] `
+            -Style Expandable
+    }
+)
+if ($sandboxCalls.Count -ne 1 -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $sandboxCalls[0] `
+        -NamedBlock $keyInputHarnessAst.EndBlock) -or
+    $sandboxName -isnot
+        [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+    $sandboxName.Value -cne 'key-input-$scenarioSlug' -or
+    $sandboxName.NestedExpressions.Count -ne 1 -or
+    (Get-VariableExpressionName -Node $sandboxName.NestedExpressions[0]) -ne
+        'scenarioSlug' -or
+    $scenarioSlugAssignments.Count -ne 1 -or
+    -not [object]::ReferenceEquals(
+        $scenarioSlugAssignments[0].Parent,
+        $keyInputHarnessAst.EndBlock
+    ) -or
+    $scenarioSlugAssignments[0].Right -isnot
+        [System.Management.Automation.Language.PipelineAst] -or
+    $scenarioSlugAssignments[0].Right.PipelineElements.Count -ne 1 -or
+    -not [object]::ReferenceEquals(
+        $scenarioSlugAssignments[0].Right.PipelineElements[0],
+        $scenarioSlugCalls[0]
+    ) -or
+    $scenarioSlugCalls.Count -ne 1 -or
+    (Get-VariableExpressionName -Node $scenarioSlugKey) -ne 'Key' -or
+    @($artifactAssignments | Where-Object {
+        -not [object]::ReferenceEquals($_.Parent, $keyInputHarnessAst.EndBlock)
+    }).Count -ne 0 -or
+    $artifactAssignmentContract.Count -ne $artifactVariableNames.Count -or
+    @($artifactAssignmentContract | Where-Object { -not $_ }).Count -ne 0) {
+    throw 'Key-input scenario slug must flow into its sandbox, result, and log artifact names.'
+}
+
+$keyInputCompositeCalls = @(Get-NamedCommands -Ast $interactiveValidatorAst -Name 'Invoke-HarnessWithPassSentinel' |
+    Where-Object {
+        $scriptName = Get-CommandParameterArgument -Command $_ -Name 'ScriptName'
+        $scriptName -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $scriptName.Value -eq 'interactive-win11-key-input.ps1'
+    })
+$coveredKeyScenarios = [Collections.Generic.List[string]]::new()
+$compositeSlugs = [Collections.Generic.List[string]]::new()
+foreach ($command in $keyInputCompositeCalls) {
+    $slug = Get-CommandParameterArgument -Command $command -Name 'ScenarioSlug'
+    if ($slug -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        [string]::IsNullOrWhiteSpace($slug.Value)) {
+        throw 'Every composite key-input run must provide a nonempty static scenario slug.'
+    }
+    [void]$compositeSlugs.Add($slug.Value)
+    $additional = Get-CommandParameterArgument -Command $command -Name 'AdditionalArguments'
+    if ($null -eq $additional) {
+        [void]$coveredKeyScenarios.Add('a')
+        continue
+    }
+    $keyValues = @($additional.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $node.Value -in @(
+                'unicode-bmp',
+                'unicode-supplementary',
+                'unicode-burst',
+                'unicode-cr',
+                'unicode-lf',
+                'unicode-tab',
+                'unicode-backspace',
+                'unicode-escape'
+            )
+    }, $true))
+    if ($keyValues.Count -ne 1) { throw 'Composite key-input run has an ambiguous Unicode scenario.' }
+    [void]$coveredKeyScenarios.Add($keyValues[0].Value)
+}
+$expectedKeyScenarios = @(
+    'a',
+    'unicode-bmp',
+    'unicode-supplementary',
+    'unicode-burst',
+    'unicode-cr',
+    'unicode-lf',
+    'unicode-tab',
+    'unicode-backspace',
+    'unicode-escape'
+)
+if ($keyInputCompositeCalls.Count -ne 9 -or
+    @($compositeSlugs | Sort-Object -Unique).Count -ne 9 -or
+    (Compare-Object $expectedKeyScenarios @($coveredKeyScenarios) -SyncWindow 0)) {
+    throw 'Composite validator must isolate every key-input scenario except space.'
+}
+$invokeHarnessFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $interactiveValidatorAst `
+        -Name 'Invoke-HarnessWithPassSentinel'
+)
+$startHarnessFunctions = @(Get-NamedFunctionDefinitions -Ast $interactiveValidatorAst -Name 'Start-Harness')
+$getHarnessArgumentsFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $interactiveValidatorAst `
+        -Name 'Get-HarnessArguments'
+)
+$invokeStartHarnessCalls = if ($invokeHarnessFunctions.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $invokeHarnessFunctions[0].Body `
+        -Name 'Start-Harness')
+} else {
+    @()
+}
+$startGetHarnessArgumentsCalls = if ($startHarnessFunctions.Count -eq 1) {
+    @(Get-NamedCommands `
+        -Ast $startHarnessFunctions[0].Body `
+        -Name 'Get-HarnessArguments')
+} else {
+    @()
+}
+$invokeAdditionalArguments =
+    if ($invokeStartHarnessCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $invokeStartHarnessCalls[0] `
+            -Name 'AdditionalArguments'
+    }
+$invokeScenarioSlug =
+    if ($invokeStartHarnessCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $invokeStartHarnessCalls[0] `
+            -Name 'ScenarioSlug'
+    }
+$startAdditionalArguments =
+    if ($startGetHarnessArgumentsCalls.Count -eq 1) {
+        Get-CommandParameterArgument `
+            -Command $startGetHarnessArgumentsCalls[0] `
+            -Name 'AdditionalArguments'
+    }
+$startHarnessAssignments = if ($startHarnessFunctions.Count -eq 1) {
+    @($startHarnessFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            (Get-VariableExpressionName -Node $node.Left) -in @('runName', 'stdoutPath', 'stderrPath')
+    }, $true))
+} else {
+    @()
+}
+$startHarnessVariableNames = @('runName', 'stdoutPath', 'stderrPath')
+$startHarnessAssignmentContract = @(
+    foreach ($startHarnessVariableName in $startHarnessVariableNames) {
+        $assignments = @($startHarnessAssignments | Where-Object {
+            (Get-VariableExpressionName -Node $_.Left) -eq
+                $startHarnessVariableName
+        })
+        if ($assignments.Count -ne 1) { $false; continue }
+        if ($startHarnessVariableName -eq 'runName') {
+            Test-InjectiveHarnessRunNameExpression -Node $assignments[0].Right
+            continue
+        }
+        $suffix = if ($startHarnessVariableName -eq 'stdoutPath') {
+            '.stdout.log'
+        } else {
+            '.stderr.log'
+        }
+        Test-DirectJoinPathNameExpression `
+            -Node $assignments[0].Right `
+            -ParentVariable 'suiteLogDir' `
+            -ChildVariable 'runName' `
+            -ChildSuffix $suffix `
+            -Style Format
+    }
+)
+if ($invokeHarnessFunctions.Count -ne 1 -or
+    $startHarnessFunctions.Count -ne 1 -or
+    $getHarnessArgumentsFunctions.Count -ne 1 -or
+    $invokeStartHarnessCalls.Count -ne 1 -or
+    $startGetHarnessArgumentsCalls.Count -ne 1 -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $invokeStartHarnessCalls[0] `
+        -NamedBlock $invokeHarnessFunctions[0].Body.EndBlock) -or
+    -not (Test-DirectNamedBlockChild `
+        -Node $startGetHarnessArgumentsCalls[0] `
+        -NamedBlock $startHarnessFunctions[0].Body.EndBlock) -or
+    (Get-VariableExpressionName -Node $invokeAdditionalArguments) -ne
+        'AdditionalArguments' -or
+    (Get-VariableExpressionName -Node $invokeScenarioSlug) -ne
+        'ScenarioSlug' -or
+    (Get-VariableExpressionName -Node $startAdditionalArguments) -ne
+        'AdditionalArguments' -or
+    @($startHarnessAssignments | Where-Object {
+        -not [object]::ReferenceEquals(
+            $_.Parent,
+            $startHarnessFunctions[0].Body.EndBlock
+        )
+    }).Count -ne 0 -or
+    $startHarnessAssignmentContract.Count -ne
+        $startHarnessVariableNames.Count -or
+    @($startHarnessAssignmentContract | Where-Object { -not $_ }).Count -ne
+        0) {
+    throw 'Composite log paths must derive from each run scenario slug.'
+}
+
+Assert-DeferredZigFixtureExecution `
+    -WorkflowText $testWorkflowText `
+    -Source $testWorkflow
+
+$nativeKeyFilters = @('VK_PACKET', 'deferred char')
+foreach ($nativeKeyFilter in $nativeKeyFilters) {
+    # Zig accepts a zero-match test filter. A narrow declaration check is
+    # appropriate here only to prove that the semantic runner below is nonempty.
+    $nativeKeyDeclarations = [regex]::Matches(
+        $win32RuntimeText,
+        '(?m)^test "win32 ' + [regex]::Escape($nativeKeyFilter) +
+            '[^"\r\n]*" \{$'
+    )
+    if ($nativeKeyDeclarations.Count -lt 1) {
+        throw "$nativeKeyFilter semantic fixture has no matching Zig test declaration."
+    }
+    Invoke-ZigFixture `
+        -RepoRoot $repoRoot `
+        -Filter $nativeKeyFilter
+}
+
+if ($termioRuntimeText.Contains('self.surface_mailbox.pushTerminalOutput(buf)') -or
+    -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.begin(') -or
+    -not $termioRuntimeText.Contains('self.terminal_stream.handler.semantic_output.finish()') -or
+    -not $termioRuntimeText.Contains('self.terminal_output_transport.captureEpoch()') -or
+    -not $termioRuntimeText.Contains('self.terminal_output_transport.pushSemanticBatchForEpoch(') -or
+    -not $termioRuntimeText.Contains('decision.semantic_output.slice()')) {
+    throw 'Termio must publish parser-derived semantic batches instead of forwarding raw PTY bytes.'
+}
+if ($terminalAccessibilityText.Contains('OutputSanitizer') -or
+    $terminalAccessibilityText.Contains('sanitizeAnnouncementByte') -or
+    $surfaceRuntimeText.Contains('terminal output transport drains inactive split controls without speech')) {
+    throw 'Win32 accessibility cannot retain a second terminal parser or its fake transport parser fixture.'
+}
+$semanticOutputInterestPolicyMatches = [regex]::Matches(
+    $terminalAccessibilityText,
+    '(?ms)^fn semanticOutputInterestPolicy\(\r?\n\s+attached: bool,\r?\n\s+provider_ready: bool,\r?\n\s+focused: bool,\r?\n\) bool \{\r?\n(?<body>.*?)^\}'
+)
+if ($semanticOutputInterestPolicyMatches.Count -ne 1 -or
+    -not $semanticOutputInterestPolicyMatches[0].Groups['body'].Value.Contains(
+        'return attached and provider_ready and focused;'
+    ) -or
+    -not $terminalAccessibilityText.Contains('.emit_events = clients_listening,') -or
+    -not $terminalAccessibilityText.Contains('win32_uia.events.clientsAreListening(),')) {
+    throw 'Semantic output interest must require attachment, provider readiness, and focus while event emission remains listener-gated.'
+}
+
+$semanticPolicyTestMatch = [regex]::Match(
+    $terminalAccessibilityText,
+    '(?ms)^test "terminal accessibility refresh and query policies" \{\r?\n(?<body>.*?)^\}'
+)
+$semanticPolicyAssertions = @(
+    'try std.testing.expect(semanticOutputInterestPolicy(true, true, true));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(true, true, false));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(true, false, true));',
+    'try std.testing.expect(!semanticOutputInterestPolicy(false, true, true));',
+    'try std.testing.expect(!query_only.emit_events);',
+    'try std.testing.expect(subscribed.emit_events);'
+)
+if (-not $semanticPolicyTestMatch.Success) {
+    throw 'Semantic output interest policy has no exact Zig test declaration.'
+}
+foreach ($assertion in $semanticPolicyAssertions) {
+    if (-not $semanticPolicyTestMatch.Groups['body'].Value.Contains($assertion)) {
+        throw "Semantic output interest policy test is missing assertion: $assertion"
+    }
+}
+if (-not $terminalSemanticOutputText.Contains('pub const transport_chunk_bytes = 1_000;') -or
+    -not $terminalSemanticOutputText.Contains('pub const transport_max_chunks = 8;') -or
+    -not $terminalSemanticOutputText.Contains('pub const capacity = transport_chunk_bytes * transport_max_chunks;') -or
+    -not $terminalOutputCaptureText.Contains('pub const capacity = semantic_output.capacity;') -or
+    -not $surfaceRuntimeText.Contains('pub const capacity = semantic_output.capacity;') -or
+    $terminalOutputCaptureText.Contains('recordRepeat') -or
+    $terminalStreamHandlerText.Contains('recordRepeat')) {
+    throw 'Semantic capture and transport must share one 8000-byte capacity and no duplicate REP interface.'
+}
+
+$realParserSemanticFragments = @(
+    'stream.nextSlice("\x1b[3b");',
+    '\x1b[31mright',
+    '\x1b]8;;https://secret.example',
+    '\x1bPqDCS-SECRET',
+    '\x1b[1$}\r\n\thidden\x1b[0$}visible',
+    '\x1b(0`\x1b(B',
+    'before\x1bcafter',
+    'stream.nextSlice("\xcc\x81");'
+)
+foreach ($fragment in $realParserSemanticFragments) {
+    if (-not $terminalStreamHandlerText.Contains($fragment)) {
+        throw "Real-parser semantic fixture is missing executable coverage fragment: $fragment"
+    }
+}
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{
+        $terminalOutputCapture = $terminalOutputCaptureText
+        $terminalStreamHandler = $terminalStreamHandlerText
+    } `
+    -ExpectedNames @(
+        'semantic output capture uninterested fast path',
+        'semantic output capture preserves utf8 and control order',
+        'semantic output finished batch owns bytes across capture reuse',
+        'semantic output full reset discards prior bytes and omission',
+        'semantic output capture retains codepoint-aligned prefix before omission',
+        'semantic output capture explicit partial error omission retains prefix',
+        'semantic output capture follows real stream handler parser'
+    ) `
+    -Filter 'semantic output capture'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $surfaceRuntime = $surfaceRuntimeText } `
+    -ExpectedNames @(
+        'terminal output transport saturation is nonblocking and ordered',
+        'terminal output transport keeps utf8 chunks before batch omission marker',
+        'terminal output transport reentrant callbacks preserve epochs and contention marker',
+        'terminal output transport rejects stale interest epoch without poisoning new epoch',
+        'terminal output transport orders silent reset before post reset data'
+    ) `
+    -Filter 'terminal output transport'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $terminalAccessibility = $terminalAccessibilityText } `
+    -ExpectedNames @(
+        'terminal accessibility refresh and query policies'
+    ) `
+    -Filter 'terminal accessibility refresh and query policies'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $terminalAccessibility = $terminalAccessibilityText } `
+    -ExpectedNames @(
+        'terminal output announcement normalization allocation failure becomes ordered omission'
+    ) `
+    -Filter 'normalization allocation failure becomes ordered omission'
+
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
+    -ExpectedNames @(
+        'TerminalProvider legacy caret compatibility reports no mutable selection'
+    ) `
+    -Filter 'legacy caret compatibility reports no mutable selection'
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
+    -ExpectedNames @(
+        'TerminalTextRangeProvider reports unsupported mutation and scrolling honestly'
+    ) `
+    -Filter 'unsupported mutation and scrolling honestly'
+
+if (-not $win32ThemeText.Contains('const DWMSBT_NONE: u32 = 1;')) {
+    throw 'Win32 theme policy must use the documented DWMSBT_NONE value 1.'
+}
+Assert-ZigTestsDiscoveredAndRun `
+    -RepoRoot $repoRoot `
+    -Sources @{ $win32Theme = $win32ThemeText } `
+    -ExpectedNames @(
+        'settings window policy explicitly disables system backdrop',
+        'DWM system backdrop constants match Win32 ABI'
+    ) `
+    -Filter 'system backdrop'
+
 $publishedReleaseVerifierTokens = $null
 $publishedReleaseVerifierErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseInput(
@@ -1035,11 +3617,7 @@ foreach ($file in $cleanupScriptFiles) {
             $text -match '(?i)(?:^|\s)-RequireLiveRoot(?:\s|$)'
             $text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)'
         ).Where({ $_ }).Count
-        # The composite validator is a byte-for-byte frozen baseline artifact.
-        # Mode omission uses Stop-InteractiveWin11Process's fail-closed live-root
-        # default; every mutable caller must state exactly one lifecycle mode.
-        $frozenValidatorDefault = $file.Name -eq 'interactive-win11-validate.ps1' -and $modeCount -eq 0
-        if ((-not $frozenValidatorDefault -and $modeCount -ne 1) -or
+        if ($modeCount -ne 1 -or
             ($text -match '(?i)(?:^|\s)-AllowAlreadyExited(?:\s|$)' -and $file.Name -ne 'vt-probe-win32-conformance.ps1')) {
             [void]$cleanupContractViolations.Add("$($file.Name):$($command.Extent.StartLineNumber): $text")
         }
@@ -1143,14 +3721,14 @@ function Format-PowerShellLiteral {
 }
 
 $binDir = [System.IO.Path]::GetFullPath($(if ($BinDir) { $BinDir } else { Join-Path $repoRoot 'zig-out\bin' }))
-$guiExe = Join-Path $binDir 'winghostty.exe'
-$commandExe = Join-Path $binDir 'winghostty.com'
+$guiExe = Join-Path $binDir 'noctty.exe'
+$commandExe = Join-Path $binDir 'noctty.com'
 $cmdExe = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
 $powershellExe = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 
 foreach ($requiredExecutable in @($guiExe, $commandExe, $cmdExe, $powershellExe)) {
     if (-not (Test-Path -LiteralPath $requiredExecutable -PathType Leaf)) {
-        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the winghostty binaries are absent."
+        throw "Missing required executable: $requiredExecutable. Run `zig build -Demit-exe=true` if the noctty binaries are absent."
     }
 }
 
@@ -1160,21 +3738,21 @@ $shellLauncherTimeoutSeconds = 30
 
 switch ($Shell) {
     'cmd' {
-        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"
+        $resolved = & $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"
         if ($LASTEXITCODE -ne 0) {
-            throw "cmd could not resolve winghostty from PATH."
+            throw "cmd could not resolve noctty from PATH."
         }
         $resolvedPath = [System.IO.Path]::GetFullPath(($resolved | Select-Object -First 1))
         if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "cmd resolved winghostty to the wrong artifact: $resolvedPath"
+            throw "cmd resolved noctty to the wrong artifact: $resolvedPath"
         }
 
-        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
+        $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+        $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+        $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".cmd")
         try {
             $cmdArgs = [string]::Join(' ', ($Arguments | ForEach-Object { Format-CmdArgument $_ }))
-            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'winghostty' } else { "winghostty $cmdArgs" }
+            $cmdCommand = if ([string]::IsNullOrEmpty($cmdArgs)) { 'noctty' } else { "noctty $cmdArgs" }
             @(
                 '@echo off'
                 "set `"PATH=$envPath`""
@@ -1216,24 +3794,24 @@ switch ($Shell) {
         $oldPath = $env:PATH
         $env:PATH = $envPath
         try {
-            $resolved = & $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"
+            $resolved = & $powershellExe -NoProfile -Command "(Get-Command noctty).Source"
             if ($LASTEXITCODE -ne 0) {
-                throw "PowerShell could not resolve winghostty from PATH."
+                throw "PowerShell could not resolve noctty from PATH."
             }
             $resolvedPath = [System.IO.Path]::GetFullPath($resolved)
             if (-not [string]::Equals($resolvedPath, $commandExe, [StringComparison]::OrdinalIgnoreCase)) {
-                throw "PowerShell resolved winghostty to the wrong artifact: $resolvedPath"
+                throw "PowerShell resolved noctty to the wrong artifact: $resolvedPath"
             }
 
-            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
-            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
-            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("winghostty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
+            $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stdout.txt")
+            $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + "-stderr.txt")
+            $payloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("noctty-cli-shell-" + [System.Guid]::NewGuid().ToString("N") + ".ps1")
             try {
                 $env:PATH = $envPath
                 $argLiterals = [string]::Join(', ', ($Arguments | ForEach-Object { Format-PowerShellLiteral $_ }))
                 @(
                     '$argsList = @(' + $argLiterals + ')'
-                    '$output = & winghostty @argsList | Out-String'
+                    '$output = & noctty @argsList | Out-String'
                     '$exitCode = $LASTEXITCODE'
                     '[Console]::Out.Write($output)'
                     'exit $exitCode'
@@ -1301,8 +3879,8 @@ if ($cliShellErrors.Count -ne 0) { throw 'CLI shell harness must parse without e
 Assert-CommandResolutionContract -Ast $cliShellAst -Tokens $cliShellTokens -Context $cliShellHarness -ExpectedDotSources @(
     ". (Join-Path `$repoRoot 'scripts\interactive-win11-lib.ps1')"
 ) -ExpectedAmpersandCommands @(
-    '& $cmdExe /d /c "set ""PATH=$envPath""&& where winghostty"'
-    '& $powershellExe -NoProfile -Command "(Get-Command winghostty).Source"'
+    '& $cmdExe /d /c "set ""PATH=$envPath""&& where noctty"'
+    '& $powershellExe -NoProfile -Command "(Get-Command noctty).Source"'
 )
 $accessibilityTokens = $null
 $accessibilityErrors = $null
@@ -1319,12 +3897,27 @@ $accessibilityUIntPtrConversions = @($accessibilityAst.FindAll({
 if ($accessibilityErrors.Count -ne 0 -or $accessibilityUIntPtrConversions.Count -ne 0) {
     throw 'Accessibility harness must parse and construct nonzero WPARAM values through UIntPtr::new([uint64] ...).'
 }
-$textRangeEndpointReferences = [regex]::Matches(
-    $accessibilityHarnessText,
-    '\[System\.Windows\.Automation\.Text\.TextPatternRangeEndpoint\]::(?:Start|End)'
-)
-if ($textRangeEndpointReferences.Count -ne 4 -or
-    $accessibilityHarnessText -match '\[System\.Windows\.Automation\.TextPatternRangeEndpoint\]') {
+$textRangeEndpointReferences = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $node.Static -and
+        (Get-MemberExpressionName -Node $node) -in @('Start', 'End') -and
+        $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $node.Expression.TypeName.FullName -eq
+            'System.Windows.Automation.Text.TextPatternRangeEndpoint'
+}, $true))
+$wrongTextRangeEndpointReferences = @($accessibilityHarnessAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $node.Static -and
+        (Get-MemberExpressionName -Node $node) -in @('Start', 'End') -and
+        $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+        $node.Expression.TypeName.Name -eq 'TextPatternRangeEndpoint' -and
+        $node.Expression.TypeName.FullName -ne
+            'System.Windows.Automation.Text.TextPatternRangeEndpoint'
+}, $true))
+if ($textRangeEndpointReferences.Count -ne 6 -or
+    $wrongTextRangeEndpointReferences.Count -ne 0) {
     throw 'Accessibility caret assertions must use the installed UIAutomation Text.TextPatternRangeEndpoint type.'
 }
 if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
@@ -1332,56 +3925,1149 @@ if ($accessibilityHarnessText -match 'VkKeyScanW|SendAsciiText' -or
     ([regex]::Matches($accessibilityHarnessText, 'inputs\.Add\(Key\(0, value, KEYEVENTF_UNICODE(?: \| KEYEVENTF_KEYUP)?\)\);')).Count -ne 2) {
     throw 'Accessibility text injection must use layout-independent KEYEVENTF_UNICODE key down/up pairs.'
 }
-$queryOnlyTextPatternContract = [regex]::Match(
-    $accessibilityHarnessText,
-    '(?s)\$queryOnlyPreviousRange = \$textPattern\.DocumentRange.*?RemoveAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent.*?Send-AccessibilityOutputMarker .*?-TextPattern \$textPattern .*?-Marker \$queryOnlyMarker.*?\$script:queryOnlyTextProbe = \$textPattern\.DocumentRange\.GetText\(-1\).*?\$queryOnlyPreviousRange\.GetText\(-1\)\.Contains\(\$queryOnlyMarker\).*?AddAutomationEventHandler\(.*?TextPattern\]::TextChangedEvent'
+$highContrastFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityHighContrastProof'
 )
-if (-not $queryOnlyTextPatternContract.Success) {
-    throw 'Accessibility query-only contract must remove this client handler, request fresh ranges through the retained TextPattern, preserve the prior immutable range, and restore the handler.'
-}
-if ($accessibilityHarnessText -notmatch '\$queryOnlyMarker = "whq\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"' -or
-    $accessibilityHarnessText -notmatch '\$coldQueryMarker = "whc\$\(\[Guid\]::NewGuid\(\)\.ToString\(''N''\)\.Substring\(0, 12\)\)"') {
-    throw 'Accessibility query-only markers must remain short enough to avoid viewport soft-wrap false negatives.'
-}
-$outputMarkerInputDrainContract = [regex]::Match(
-    $accessibilityHarnessText,
-    '(?s)function Send-AccessibilityOutputMarker\(.*?SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?\$preEnterText = \$TextPattern\.DocumentRange\.GetText\(-1\).*?Send-AccessibilityChord .*?Enter'
+$highContrastCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityHighContrastProof'
 )
-if (-not $outputMarkerInputDrainContract.Success) {
-    throw 'Accessibility output markers must drain queued Unicode input and reassert focus before the pre-Enter UIA check and Enter.'
+if ($highContrastFunctions.Count -ne 1 -or $highContrastCalls.Count -ne 2) {
+    throw 'Targeted and full accessibility evidence must share one High Contrast proof helper.'
 }
-if ($win32RuntimeText -notmatch 'WM_WINHOSTTY_UIA_QUERY_REFRESH = WM_APP \+ 6' -or
-    $win32RuntimeText -notmatch 'SendMessageTimeoutW\(\s*hwnd\.\?,\s*WM_WINHOSTTY_UIA_QUERY_REFRESH,\s*1,' -or
-    $win32RuntimeText -notmatch 'refreshTerminalUiaTextWithMode\(wParam != 0\)' -or
-    $win32RuntimeText -notmatch 'if \(!force and !terminalUiaRefreshDue' -or
-    $win32RuntimeText -notmatch 'query_refresh_post_pending\.cmpxchgStrong\(false, true' -or
-    $win32RuntimeText -notmatch 'PostMessageW\(hwnd\.\?, WM_WINHOSTTY_UIA_QUERY_REFRESH' -or
-    $win32RuntimeText -notmatch 'refresh_snapshot = clients_listening_for_events or query_recently_active') {
-    throw 'Terminal UIA polling must use a coalesced query-driven UI-thread refresh and stop snapshots when clients are idle.'
+$highContrastFunctionText = $highContrastFunctions[0].Extent.Text
+if ($highContrastFunctionText -notmatch [regex]::Escape('$compoundRestoreBudgetSeconds = 20') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('[DateTime]::UtcNow.AddSeconds($compoundRestoreBudgetSeconds)') -or
+    $highContrastFunctionText -notmatch [regex]::Escape('budget_seconds = $compoundRestoreBudgetSeconds')) {
+    throw 'Compound High Contrast restoration must reserve a diagnostic-consistent 20-second convergence budget.'
 }
-if ($accessibilityHarnessText -notmatch 'Send-AccessibilityBlindOutputMarker' -or
-    $accessibilityHarnessText -notmatch 'Start-Sleep -Milliseconds 1200' -or
-    $accessibilityHarnessText -notmatch '\$coldQueryFirstText = \$textPattern\.DocumentRange\.GetText\(-1\)' -or
-    $accessibilityHarnessText -notmatch 'cold_query_first_document_range_fresh') {
-    throw 'Accessibility evidence must prove the first TextPattern range after a cold query is fresh without pre-querying.'
-}
-$blindMarkerFunctions = @($accessibilityHarnessAst.FindAll({
+Assert-NoUnreachableStatements `
+    -Ast $highContrastFunctions[0].Body `
+    -Context 'Invoke-AccessibilityHighContrastProof'
+$highContrastRecoveryTries = @($highContrastFunctions[0].Body.FindAll({
     param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq 'Send-AccessibilityBlindOutputMarker'
+    if ($node -isnot [System.Management.Automation.Language.TryStatementAst] -or
+        $null -eq $node.Finally) {
+        return $false
+    }
+    $commands = @($node.Finally.FindAll({
+        param($child)
+        $child -is [System.Management.Automation.Language.CommandAst]
+    }, $true) | ForEach-Object { $_.GetCommandName() })
+    return $commands -contains 'Set-HighContrastState' -and
+        $commands -contains 'Get-HighContrastState' -and
+        $commands -contains 'Write-HighContrastRestoreDiagnostic' -and
+        $commands -contains 'Wait-AccessibilityCondition'
 }, $true))
-if ($blindMarkerFunctions.Count -ne 1) {
-    throw 'Accessibility harness must define exactly one blind output-marker helper.'
+if ($highContrastRecoveryTries.Count -ne 1) {
+    throw 'High Contrast proof must have one fail-closed finally block that restores exact SPI state, verifies recovery boundedly, and writes diagnostics.'
 }
-$blindMarkerBody = $blindMarkerFunctions[0].Body.Extent.Text
-$blindTextPatternReads = @($blindMarkerFunctions[0].Body.FindAll({
+$dwmHighContrastDiagnosticFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $highContrastFunctions[0].Body `
+        -Name 'Get-DwmHighContrastResetDiagnostic'
+)
+if ($dwmHighContrastDiagnosticFunctions.Count -ne 1) {
+    throw 'High Contrast proof must define one pure DWM reset diagnostic.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $dwmHighContrastDiagnosticFunctions[0].Body `
+    -Context 'Get-DwmHighContrastResetDiagnostic'
+. ([scriptblock]::Create($dwmHighContrastDiagnosticFunctions[0].Extent.Text))
+$dwmNames = @(
+    'immersive_dark_20',
+    'immersive_dark_19',
+    'caption_color',
+    'text_color',
+    'backdrop_type'
+)
+$dwmBeforeFixture = [ordered]@{}
+$dwmDuringSuccessFixture = [ordered]@{}
+$dwmDuringFailureFixture = [ordered]@{}
+for ($dwmIndex = 0; $dwmIndex -lt $dwmNames.Count; $dwmIndex++) {
+    $dwmName = $dwmNames[$dwmIndex]
+    $dwmExpected = [uint32]($dwmIndex + 10)
+    $dwmBeforeFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = [uint32]0
+        expected_high_contrast = $dwmExpected
+    }
+    $dwmDuringSuccessFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = $dwmExpected
+        expected_high_contrast = $dwmExpected
+    }
+    $dwmDuringFailureFixture[$dwmName] = [pscustomobject]@{
+        attribute = $dwmIndex + 19
+        supported = $true
+        hresult = '0x00000000'
+        value = if ($dwmName -eq 'caption_color') {
+            [uint32]($dwmExpected + 1)
+        } else {
+            $dwmExpected
+        }
+        expected_high_contrast = $dwmExpected
+    }
+}
+$dwmSuccessOutputs = @(
+    Get-DwmHighContrastResetDiagnostic `
+        -Before $dwmBeforeFixture `
+        -During $dwmDuringSuccessFixture
+)
+$dwmFailureOutputs = @(
+    Get-DwmHighContrastResetDiagnostic `
+        -Before $dwmBeforeFixture `
+        -During $dwmDuringFailureFixture
+)
+if ($dwmSuccessOutputs.Count -ne 1 -or
+    $dwmSuccessOutputs[0].exact -ne $true -or
+    @($dwmSuccessOutputs[0].failures).Count -ne 0 -or
+    $dwmFailureOutputs.Count -ne 1 -or
+    $dwmFailureOutputs[0].exact -ne $false -or
+    @($dwmFailureOutputs[0].failures).Count -ne 1 -or
+    [string]::IsNullOrWhiteSpace([string]$dwmFailureOutputs[0].failures[0])) {
+    throw 'High Contrast DWM diagnostic must emit one exact success or one shaped failure without stray output.'
+}
+$openSettingsLoops = @($accessibilityHarnessAst.FindAll({
     param($node)
-    $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        $node.VariablePath.UserPath -eq 'TextPattern'
+    if ($node -isnot [System.Management.Automation.Language.DoWhileStatementAst]) {
+        return $false
+    }
+    $settingsClassReferences = @($node.Body.FindAll({
+        param($child)
+        $child -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $child.Value -eq 'noctty.win32.settings'
+    }, $true))
+    return $settingsClassReferences.Count -gt 0 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'TopLevelWindowsForProcess' `
+            -InvocationOnly).Count -ge 2 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'VisibleTerminalChildren' `
+            -InvocationOnly).Count -ge 1 -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'SendChord' `
+            -InvocationOnly).Count -ge 1
 }, $true))
-if ($blindTextPatternReads.Count -ne 0 -or
-    $blindMarkerBody -notmatch '(?s)SendUnicodeText\(\$command\).*?Start-Sleep -Milliseconds 250.*?Assert-AccessibilityInputOwner .*?pre-Enter.*?Send-AccessibilityChord .*?Enter') {
-    throw 'Blind output validation must drain queued Unicode before Enter without warming TextPattern.'
+if ($openSettingsLoops.Count -ne 1) {
+    throw 'Settings open recovery must have one owned bounded discovery/recovery loop.'
+}
+$openSettingsLoop = $openSettingsLoops[0]
+$openSettingsFunction = $openSettingsLoop
+while ($null -ne $openSettingsFunction -and
+    $openSettingsFunction -isnot
+        [System.Management.Automation.Language.FunctionDefinitionAst]) {
+    $openSettingsFunction = $openSettingsFunction.Parent
+}
+if ($null -eq $openSettingsFunction) {
+    throw 'Settings open recovery loop must be owned by a function.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $openSettingsFunction.Body `
+    -Context 'Settings open recovery'
+$openSettingsTopLevelQueries = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'TopLevelWindowsForProcess' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$openSettingsIsWindowCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'IsWindow' `
+        -InvocationOnly
+)
+$openSettingsSendChordCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'SendChord' `
+        -InvocationOnly
+)
+$openSettingsSetFocusCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $openSettingsLoop.Body `
+        -Name 'SetFocus' `
+        -InvocationOnly
+)
+$openSettingsReturns = @($openSettingsLoop.Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.ReturnStatementAst]
+}, $true))
+$openSettingsRecoveryBranches = @($openSettingsLoop.Body.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) {
+        return $false
+    }
+    return (Get-NamedMemberExpressions `
+        -Ast $node `
+        -Name 'VisibleTerminalChildren' `
+        -InvocationOnly).Count -ge 1 -and
+        (Get-NamedMemberExpressions `
+        -Ast $node `
+        -Name 'SendChord' `
+        -InvocationOnly).Count -ge 1
+}, $true))
+if ($openSettingsTopLevelQueries.Count -lt 2 -or
+    $openSettingsIsWindowCalls.Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $openSettingsLoop.Body -Name 'FindAll' -InvocationOnly).Count -lt 1 -or
+    (Get-NamedMemberExpressions -Ast $openSettingsLoop.Body -Name 'FocusedWindowFor' -InvocationOnly).Count -lt 2 -or
+    $openSettingsSetFocusCalls.Count -lt 1 -or
+    $openSettingsSendChordCalls.Count -lt 1 -or
+    $openSettingsReturns.Count -lt 1 -or
+    $openSettingsRecoveryBranches.Count -lt 1 -or
+    (Get-NamedCommands -Ast $openSettingsLoop.Body -Name 'Start-Sleep').Count -lt 1 -or
+    $openSettingsSetFocusCalls[0].Extent.StartOffset -gt
+        $openSettingsSendChordCalls[0].Extent.StartOffset) {
+    throw 'Settings open recovery must use one deadline, one chord per zero-window state, terminal focus restoration, and an atomic stable HWND/UIA/section return.'
+}
+$forbiddenThemeApiPattern = '\b(?:DwmSetWindowAttribute|SetWindowTheme)\s*\('
+$themeApiLeaks = @(
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src\apprt') -Filter '*.zig' -File -Recurse |
+        Where-Object { $_.FullName -ne $win32Theme } |
+        ForEach-Object {
+            if ((Get-Content -LiteralPath $_.FullName -Raw) -match $forbiddenThemeApiPattern) {
+                $_.FullName
+            }
+        }
+)
+if ($themeApiLeaks.Count -ne 0) {
+    throw "DWM and native-control theme APIs must remain private to win32_theme.zig: $($themeApiLeaks -join ', ')"
+}
+if ($win32RuntimeText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applyHost\s*\(' -or
+    $win32SettingsText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applySettings\s*\(' -or
+    $win32SettingsText -notmatch '\bwin32_theme\.WindowThemeAdapter\.applyNativeControl\s*\(') {
+    throw 'Win32 host and Settings callers must use the shared WindowThemeAdapter interface.'
+}
+$queryOnlyMarkerCommands = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Send-AccessibilityOutputMarker' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'query-only TextPattern marker'
+        }
+)
+if ($queryOnlyMarkerCommands.Count -ne 1) {
+    throw 'Accessibility query-only contract must have one marker command.'
+}
+$queryOnlyMarkerCommand = $queryOnlyMarkerCommands[0]
+$queryOnlyOwner = Get-ContainingStatementBlock -Node $queryOnlyMarkerCommand
+$queryOnlyTextPatternName = Get-VariableExpressionName -Node (
+    Get-CommandParameterArgument `
+        -Command $queryOnlyMarkerCommand `
+        -Name 'TextPattern'
+)
+$queryOnlyRemoveHandlers = @($queryOnlyOwner.FindAll({
+    param($node)
+    Test-TextChangedHandlerOperation -Node $node -Operation 'Remove'
+}, $true) |
+        Where-Object {
+            $_.Extent.StartOffset -lt $queryOnlyMarkerCommand.Extent.StartOffset -and
+                [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $_),
+                    $queryOnlyOwner
+                )
+        } |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$queryOnlyColdCalls = @(
+    Get-NamedCommands `
+        -Ast $queryOnlyOwner `
+        -Name 'Invoke-AccessibilityColdFirstReadProof' |
+        Where-Object {
+            $_.Extent.StartOffset -gt $queryOnlyMarkerCommand.Extent.StartOffset -and
+                [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $_),
+                    $queryOnlyOwner
+                ) -and
+                (Test-CommandHasStringArgument `
+                    -Command $_ `
+                    -Value 'cold first-read TextPattern marker')
+        } |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$queryOnlyInactiveCalls = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedCommands `
+            -Ast $queryOnlyOwner `
+            -Name 'Invoke-AccessibilityInactiveTabFirstReadProof' |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $queryOnlyOwner
+                    )
+            } |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+} else {
+    @()
+}
+$queryOnlyAddHandlers = if ($queryOnlyInactiveCalls.Count -eq 1) {
+    @($queryOnlyOwner.FindAll({
+        param($node)
+        Test-TextChangedHandlerOperation -Node $node -Operation 'Add'
+    }, $true) |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyInactiveCalls[0].Extent.StartOffset -and
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $queryOnlyOwner
+                    )
+            } |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+} else {
+    @()
+}
+$queryOnlyHandlerPairs = @(
+    foreach ($removeHandler in $queryOnlyRemoveHandlers) {
+        foreach ($addHandler in $queryOnlyAddHandlers) {
+            $removeArguments = @($removeHandler.Arguments)
+            $addArguments = @($addHandler.Arguments)
+            if ((Get-VariableExpressionName -Node $removeArguments[1]) -eq
+                    (Get-VariableExpressionName -Node $addArguments[1]) -and
+                (Get-VariableExpressionName -Node $removeArguments[-1]) -eq
+                    (Get-VariableExpressionName -Node $addArguments[-1])) {
+                [pscustomobject]@{
+                    Remove = $removeHandler
+                    Add = $addHandler
+                }
+            }
+        }
+    }
+)
+$queryOnlyPreviousRangeAssignments = if ($queryOnlyHandlerPairs.Count -eq 1) {
+    @(
+        $queryOnlyOwner.FindAll({
+            param($node)
+            if ($node -isnot
+                [System.Management.Automation.Language.AssignmentStatementAst] -or
+                $node.Extent.StartOffset -ge
+                    $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -or
+                -not [object]::ReferenceEquals(
+                    (Get-ContainingStatementBlock -Node $node),
+                    $queryOnlyOwner
+                )) {
+                return $false
+            }
+            return (Get-VariableExpressionName -Node $node.Left) -ne '' -and
+                @(
+                    Get-NamedMemberExpressions `
+                        -Ast $node.Right `
+                        -Name 'DocumentRange' |
+                        Where-Object {
+                            (Get-ExpressionRootVariableName -Node $_) -eq
+                                $queryOnlyTextPatternName
+                        }
+                ).Count -eq 1
+        }, $true) |
+            Sort-Object { $_.Extent.StartOffset } |
+            Select-Object -Last 1
+    )
+} else {
+    @()
+}
+$queryOnlyPreviousRangeName =
+    if ($queryOnlyPreviousRangeAssignments.Count -eq 1) {
+        Get-VariableExpressionName `
+            -Node $queryOnlyPreviousRangeAssignments[0].Left
+    } else {
+        ''
+    }
+$queryOnlyCurrentReads = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $queryOnlyOwner `
+            -Name 'GetText' `
+            -InvocationOnly |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyMarkerCommand.Extent.StartOffset -and
+                $_.Extent.StartOffset -lt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                (Get-ExpressionRootVariableName -Node $_.Expression) -eq
+                    $queryOnlyTextPatternName -and
+                (Get-NamedMemberExpressions `
+                    -Ast $_.Expression `
+                    -Name 'DocumentRange').Count -eq 1
+            }
+    )
+} else {
+    @()
+}
+$queryOnlyPreviousReads = if ($queryOnlyColdCalls.Count -eq 1) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $queryOnlyOwner `
+            -Name 'GetText' `
+            -InvocationOnly |
+            Where-Object {
+                $_.Extent.StartOffset -gt
+                    $queryOnlyMarkerCommand.Extent.StartOffset -and
+                $_.Extent.StartOffset -lt
+                    $queryOnlyColdCalls[0].Extent.StartOffset -and
+                (Get-ExpressionRootVariableName -Node $_.Expression) -eq
+                    $queryOnlyPreviousRangeName
+            }
+    )
+} else {
+    @()
+}
+if ($null -ne $queryOnlyOwner) {
+    Assert-NoUnreachableStatements `
+        -Ast $queryOnlyOwner `
+        -Context 'query-only TextChanged handler ownership'
+}
+if ($null -eq $queryOnlyOwner -or
+    [string]::IsNullOrWhiteSpace($queryOnlyTextPatternName) -or
+    $queryOnlyColdCalls.Count -ne 1 -or
+    $queryOnlyInactiveCalls.Count -ne 1 -or
+    $queryOnlyHandlerPairs.Count -ne 1 -or
+    $queryOnlyPreviousRangeAssignments.Count -ne 1 -or
+    $queryOnlyCurrentReads.Count -ne 1 -or
+    $queryOnlyPreviousReads.Count -ne 1 -or
+    -not (
+        $queryOnlyPreviousRangeAssignments[0].Extent.StartOffset -lt
+            $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -and
+        $queryOnlyHandlerPairs[0].Remove.Extent.StartOffset -lt
+            $queryOnlyMarkerCommand.Extent.StartOffset -and
+        $queryOnlyMarkerCommand.Extent.StartOffset -lt
+            $queryOnlyCurrentReads[0].Extent.StartOffset -and
+        $queryOnlyCurrentReads[0].Extent.StartOffset -lt
+            $queryOnlyPreviousReads[0].Extent.StartOffset -and
+        $queryOnlyPreviousReads[0].Extent.StartOffset -lt
+            $queryOnlyColdCalls[0].Extent.StartOffset -and
+        $queryOnlyColdCalls[0].Extent.StartOffset -lt
+            $queryOnlyInactiveCalls[0].Extent.StartOffset -and
+        $queryOnlyInactiveCalls[0].Extent.StartOffset -lt
+            $queryOnlyHandlerPairs[0].Add.Extent.StartOffset
+    )) {
+    throw 'Accessibility query-only contract must own one ordered proof, remove and restore the identical TextChanged event/document/handler triple, refresh the retained TextPattern, and preserve the prior immutable range.'
+}
+$outputMarkerFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Send-AccessibilityOutputMarker'
+)
+if ($outputMarkerFunctions.Count -ne 1) {
+    throw 'Accessibility evidence must define exactly one output-marker input helper.'
+}
+$outputMarkerFunction = $outputMarkerFunctions[0]
+Assert-NoUnreachableStatements `
+    -Ast $outputMarkerFunction.Body `
+    -Context 'Send-AccessibilityOutputMarker'
+$outputMarkerLaunchers = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+$outputMarkerOwnerAssertions = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Assert-AccessibilityInputOwner' |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$outputMarkerUnicodeSends = @(
+    Get-NamedMemberExpressions `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'SendUnicodeText' `
+        -InvocationOnly
+)
+$outputMarkerEchoWaits = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Wait-AccessibilityTerminalCommandEcho'
+)
+$outputMarkerTextReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'GetText' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$outputMarkerEnterSends = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Send-AccessibilityChord'
+)
+$outputMarkerOutputWaits = @(
+    Get-NamedCommands `
+        -Ast $outputMarkerFunction.Body `
+        -Name 'Wait-AccessibilityCondition'
+)
+$outputMarkerCleanupTries = @($outputMarkerFunction.Body.FindAll({
+    param($node)
+    if ($node -isnot [System.Management.Automation.Language.TryStatementAst] -or
+        $null -eq $node.Finally) {
+        return $false
+    }
+    return (Get-NamedMemberExpressions `
+        -Ast $node.Finally `
+        -Name 'Delete' `
+        -InvocationOnly).Count -eq 1
+}, $true))
+if ($outputMarkerLaunchers.Count -ne 1 -or
+    $outputMarkerOwnerAssertions.Count -ne 2 -or
+    $outputMarkerUnicodeSends.Count -ne 1 -or
+    $outputMarkerEchoWaits.Count -ne 1 -or
+    $outputMarkerTextReads.Count -ne 2 -or
+    $outputMarkerEnterSends.Count -ne 1 -or
+    $outputMarkerOutputWaits.Count -ne 1 -or
+    $outputMarkerCleanupTries.Count -ne 1 -or
+    -not (
+        $outputMarkerLaunchers[0].Extent.StartOffset -lt
+            $outputMarkerOwnerAssertions[0].Extent.StartOffset -and
+        $outputMarkerOwnerAssertions[0].Extent.StartOffset -lt
+            $outputMarkerUnicodeSends[0].Extent.StartOffset -and
+        $outputMarkerUnicodeSends[0].Extent.StartOffset -lt
+            $outputMarkerEchoWaits[0].Extent.StartOffset -and
+        $outputMarkerEchoWaits[0].Extent.StartOffset -lt
+            $outputMarkerTextReads[0].Extent.StartOffset -and
+        $outputMarkerTextReads[0].Extent.StartOffset -lt
+            $outputMarkerOwnerAssertions[1].Extent.StartOffset -and
+        $outputMarkerOwnerAssertions[1].Extent.StartOffset -lt
+            $outputMarkerEnterSends[0].Extent.StartOffset -and
+        $outputMarkerEnterSends[0].Extent.StartOffset -lt
+            $outputMarkerOutputWaits[0].Extent.StartOffset -and
+        $outputMarkerOutputWaits[0].Extent.StartOffset -lt
+            $outputMarkerTextReads[1].Extent.StartOffset
+    )) {
+    throw 'Accessibility output markers must observe the full command, record/recover exact owner immediately before one Enter, and retain diagnostics.'
+}
+$notificationDiagnosticFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityOutputNotificationDiagnostic'
+)
+if ($notificationDiagnosticFunctions.Count -ne 1) {
+    throw 'Accessibility output notification evidence must define one pure diagnostic.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $notificationDiagnosticFunctions[0].Body `
+    -Context 'Get-AccessibilityOutputNotificationDiagnostic'
+. ([scriptblock]::Create($notificationDiagnosticFunctions[0].Extent.Text))
+$notificationRawSuccessFixture = @()
+$notificationRawSuccessFixture += ,([object[]]@(
+    'Other',
+    'ignored',
+    0,
+    'OtherActivity'
+))
+$notificationRawSuccessFixture += ,([object[]]@(
+    'ActionCompleted',
+    'prefix-',
+    2,
+    'TerminalTextOutput'
+))
+$notificationRawSuccessFixture += ,([object[]]@(
+    'ActionCompleted',
+    'MARKER',
+    2,
+    'TerminalTextOutput'
+))
+$notificationSuccessOutputs = @(
+    Get-AccessibilityOutputNotificationDiagnostic `
+        -RawNotificationHistory $notificationRawSuccessFixture `
+        -Marker 'MARKER' `
+        -FocusMismatchPolls 2 `
+        -FocusRecoveryCount 1 `
+        -StolenForegroundHwnds @(41, 42) `
+        -LastForegroundHwnd 43 `
+        -LastFocusedHwnd 44
+)
+$notificationRawFailureFixture = @()
+$notificationRawFailureFixture += ,([object[]]@(
+    'ActionCompleted',
+    'different',
+    2,
+    'TerminalTextOutput'
+))
+$notificationRawFailureFixture += ,([object[]]@(
+    'Other',
+    'MARKER',
+    0,
+    'OtherActivity'
+))
+$notificationFailureOutputs = @(
+    Get-AccessibilityOutputNotificationDiagnostic `
+        -RawNotificationHistory $notificationRawFailureFixture `
+        -Marker 'MARKER'
+)
+$notificationRequiredProperties = @(
+    'raw_notification_history',
+    'notification_history',
+    'notification_text',
+    'matched',
+    'history',
+    'text',
+    'count',
+    'focus_mismatch_polls',
+    'focus_recovery_count',
+    'stolen_foreground_hwnds',
+    'last_foreground_hwnd',
+    'last_focused_hwnd'
+)
+if ($notificationSuccessOutputs.Count -ne 1 -or
+    @($notificationRequiredProperties | Where-Object {
+        $notificationSuccessOutputs[0].PSObject.Properties.Name -notcontains $_
+    }).Count -ne 0 -or
+    @($notificationSuccessOutputs[0].raw_notification_history).Count -ne 3 -or
+    @($notificationSuccessOutputs[0].notification_history).Count -ne 2 -or
+    $notificationSuccessOutputs[0].notification_text -cne 'prefix-MARKER' -or
+    $notificationSuccessOutputs[0].matched -ne $true -or
+    @($notificationSuccessOutputs[0].history).Count -ne 2 -or
+    $notificationSuccessOutputs[0].text -cne 'prefix-MARKER' -or
+    $notificationSuccessOutputs[0].count -ne 2 -or
+    $notificationSuccessOutputs[0].focus_mismatch_polls -ne 2 -or
+    $notificationSuccessOutputs[0].focus_recovery_count -ne 1 -or
+    @($notificationSuccessOutputs[0].stolen_foreground_hwnds).Count -ne 2 -or
+    $notificationSuccessOutputs[0].last_foreground_hwnd -ne 43 -or
+    $notificationSuccessOutputs[0].last_focused_hwnd -ne 44 -or
+    $notificationFailureOutputs.Count -ne 1 -or
+    @($notificationFailureOutputs[0].raw_notification_history).Count -ne 2 -or
+    @($notificationFailureOutputs[0].notification_history).Count -ne 1 -or
+    $notificationFailureOutputs[0].notification_text -cne 'different' -or
+    $notificationFailureOutputs[0].matched -ne $false) {
+    throw 'Accessibility output notification diagnostic must atomically shape raw, matching, text, focus, success, and failure evidence without stray output.'
+}
+$ownedWarmNotificationFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityOwnedOutputNotification'
+)
+$ownedWarmNotificationCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityOwnedOutputNotification'
+)
+$coldFirstReadFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadProof'
+)
+$coldFirstReadCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityColdFirstReadProof'
+)
+$coldOwnedNotificationCalls = if ($coldFirstReadFunctions.Count -eq 1) {
+    @($coldFirstReadFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Wait-AccessibilityOwnedOutputNotification'
+    }, $true))
+} else {
+    @()
+}
+$coldCleanupTries = if ($coldFirstReadFunctions.Count -eq 1) {
+    @($coldFirstReadFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally
+    }, $true))
+} else {
+    @()
+}
+if ($ownedWarmNotificationFunctions.Count -ne 1 -or
+    $ownedWarmNotificationCalls.Count -ne 3 -or
+    $coldFirstReadFunctions.Count -ne 1 -or
+    $coldFirstReadCalls.Count -ne 2 -or
+    $coldOwnedNotificationCalls.Count -ne 1 -or
+    $coldCleanupTries.Count -lt 1) {
+    throw 'Warm and cold accessibility evidence must share one owner-aware notification wait, one cold proof, and fail-closed cleanup.'
+}
+. ([scriptblock]::Create($ownedWarmNotificationFunctions[0].Extent.Text))
+function Wait-AccessibilityCondition {
+    param(
+        $Deadline,
+        [string] $Description,
+        [scriptblock] $Condition
+    )
+}
+try {
+    $notificationWaitFixtureProcess =
+        [System.Diagnostics.Process]::GetCurrentProcess()
+    $notificationWaitWithoutDiagnostic = @(
+        Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'optional diagnostic omitted fixture'
+    )
+    $notificationWaitDiagnosticValue = $null
+    $notificationWaitWithDiagnostic = @(
+        Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'optional diagnostic reference fixture' `
+            -Diagnostic ([ref] $notificationWaitDiagnosticValue)
+    )
+    $notificationWaitRejectedScalar = $false
+    try {
+        $null = Wait-AccessibilityOwnedOutputNotification `
+            -Process $notificationWaitFixtureProcess `
+            -ExpectedFocusedHwnd ([IntPtr]::Zero) `
+            -Marker 'MARKER' `
+            -Description 'invalid diagnostic scalar fixture' `
+            -Diagnostic 'not-a-reference'
+    }
+    catch {
+        if ($_.Exception.Message -cne
+            'Diagnostic must be a [ref] value when supplied.') {
+            throw
+        }
+        $notificationWaitRejectedScalar = $true
+    }
+    if ($notificationWaitWithoutDiagnostic.Count -ne 1 -or
+        $notificationWaitWithoutDiagnostic[0].matched -ne $false -or
+        $notificationWaitWithDiagnostic.Count -ne 1 -or
+        $notificationWaitWithDiagnostic[0].matched -ne $false -or
+        $null -eq $notificationWaitDiagnosticValue -or
+        $notificationWaitDiagnosticValue.matched -ne $false -or
+        -not $notificationWaitRejectedScalar) {
+        throw 'Owner-aware notification wait must support omitted and [ref] diagnostics while rejecting scalar diagnostics.'
+    }
+}
+finally {
+    Remove-Item `
+        -LiteralPath Function:\Wait-AccessibilityOwnedOutputNotification `
+        -ErrorAction SilentlyContinue
+    Remove-Item `
+        -LiteralPath Function:\Wait-AccessibilityCondition `
+        -ErrorAction SilentlyContinue
+}
+Assert-NoUnreachableStatements `
+    -Ast $ownedWarmNotificationFunctions[0].Body `
+    -Context 'Wait-AccessibilityOwnedOutputNotification'
+Assert-NoUnreachableStatements `
+    -Ast $coldFirstReadFunctions[0].Body `
+    -Context 'Invoke-AccessibilityColdFirstReadProof'
+$coldReadyWaits = @(
+    Get-NamedCommands `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'Wait-AccessibilityCondition'
+)
+$coldInactivitySleeps = @(
+    Get-NamedCommands `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'Start-Sleep'
+)
+$coldStartCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'StartNotificationCapture' `
+        -InvocationOnly
+)
+$coldStopCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'StopNotificationCapture' `
+        -InvocationOnly
+)
+$coldFinalReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'GetText' `
+        -InvocationOnly
+)
+$coldTriggerWrites = @(
+    Get-NamedMemberExpressions `
+        -Ast $coldFirstReadFunctions[0].Body `
+        -Name 'WriteAllText' `
+        -InvocationOnly |
+        Where-Object {
+            $_.Arguments.Count -gt 0 -and
+            $_.Arguments[0] -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            ($_.Arguments[0].VariablePath.UserPath -split ':')[-1] -eq
+                'triggerPath' -and
+            $_.Extent.StartOffset -lt
+                $coldOwnedNotificationCalls[0].Extent.StartOffset
+        }
+)
+$coldFailClosedCleanupTries = @(
+    $coldCleanupTries |
+        Where-Object {
+            (Get-NamedMemberExpressions `
+                -Ast $_.Finally `
+                -Name 'StopNotificationCapture' `
+                -InvocationOnly).Count -eq 1 -and
+            (Get-NamedMemberExpressions `
+                -Ast $_.Finally `
+                -Name 'Delete' `
+                -InvocationOnly).Count -eq 1
+        }
+)
+if ($coldReadyWaits.Count -ne 1 -or
+    $coldInactivitySleeps.Count -ne 1 -or
+    $coldStartCaptures.Count -ne 1 -or
+    $coldStopCaptures.Count -ne 1 -or
+    $coldFinalReads.Count -ne 1 -or
+    (Get-ExpressionRootVariableName -Node $coldFinalReads[0].Expression) -ne
+        'TextPattern' -or
+    (Get-NamedMemberExpressions -Ast $coldFinalReads[0].Expression -Name 'DocumentRange').Count -ne 1 -or
+    $coldTriggerWrites.Count -ne 1 -or
+    $coldFailClosedCleanupTries.Count -ne 1 -or
+    -not (
+        $coldStartCaptures[0].Extent.StartOffset -lt
+            $coldReadyWaits[0].Extent.StartOffset -and
+        $coldReadyWaits[0].Extent.StartOffset -lt
+            $coldInactivitySleeps[0].Extent.StartOffset -and
+        $coldInactivitySleeps[0].Extent.StartOffset -lt
+            $coldTriggerWrites[0].Extent.StartOffset -and
+        $coldTriggerWrites[0].Extent.StartOffset -lt
+            $coldOwnedNotificationCalls[0].Extent.StartOffset -and
+        $coldOwnedNotificationCalls[0].Extent.StartOffset -lt
+            $coldFinalReads[0].Extent.StartOffset
+    )) {
+    throw 'Cold first-read proof must establish readiness and query inactivity, trigger output, observe owned notification evidence, then perform its sole TextPattern read with fail-closed capture cleanup.'
+}
+$ownedDiagnosticCalls = @(
+    Get-NamedCommands `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'Get-AccessibilityOutputNotificationDiagnostic'
+)
+$ownedRawHistorySnapshots = @(
+    Get-NamedMemberExpressions `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'NotificationHistorySnapshot'
+)
+$ownedDiagnosticValueAssignments = @(
+    Get-NamedMemberExpressions `
+        -Ast $ownedWarmNotificationFunctions[0].Body `
+        -Name 'Value' |
+        Where-Object {
+            (Get-ExpressionRootVariableName -Node $_) -eq 'diagnosticState' -and
+            $_.Parent -is
+                [System.Management.Automation.Language.AssignmentStatementAst] -and
+            [object]::ReferenceEquals($_.Parent.Left, $_)
+        }
+)
+if ($ownedDiagnosticCalls.Count -ne 3 -or
+    $ownedRawHistorySnapshots.Count -ne 2 -or
+    $ownedDiagnosticValueAssignments.Count -ne 2 -or
+    (Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Wait-AccessibilityCondition').Count -ne 1 -or
+    (Get-NamedCommands -Ast $ownedWarmNotificationFunctions[0].Body -Name 'Where-Object').Count -ne 0) {
+    throw 'Owner-aware output notification wait must recompute one atomic diagnostic from raw capture history on every poll and failure.'
+}
+$inactiveTabFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityInactiveTabFirstReadProof'
+)
+$inactiveTabCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Invoke-AccessibilityInactiveTabFirstReadProof'
+)
+$inactiveCleanupTries = if ($inactiveTabFunctions.Count -eq 1) {
+    @($inactiveTabFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.TryStatementAst] -and
+            $null -ne $node.Finally
+    }, $true))
+} else {
+    @()
+}
+if ($inactiveTabFunctions.Count -ne 1 -or
+    $inactiveTabCalls.Count -ne 2 -or
+    $inactiveCleanupTries.Count -lt 1) {
+    throw 'Targeted and full evidence must share one inactive-tab proof with fail-closed cleanup.'
+}
+Assert-NoUnreachableStatements `
+    -Ast $inactiveTabFunctions[0].Body `
+    -Context 'Invoke-AccessibilityInactiveTabFirstReadProof'
+$inactiveAckWaits = @(
+    Get-NamedCommands `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'Wait-AccessibilityCondition' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'inactive-output external ack'
+        }
+)
+$inactiveQuietLoops = @($inactiveTabFunctions[0].Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.DoWhileStatementAst] -and
+        (Get-NamedMemberExpressions `
+            -Ast $node.Body `
+            -Name 'IsWindowResponsive' `
+            -InvocationOnly).Count -eq 1 -and
+        (Get-NamedCommands `
+            -Ast $node.Body `
+            -Name 'Get-AccessibilityOutputNotificationDiagnostic').Count -eq 1
+}, $true))
+$inactiveStartCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'StartNotificationCapture' `
+        -InvocationOnly
+)
+$inactiveStopCaptures = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'StopNotificationCapture' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+$inactiveFirstReads = @(
+    Get-NamedMemberExpressions `
+        -Ast $inactiveTabFunctions[0].Body `
+        -Name 'GetText' `
+        -InvocationOnly |
+        Sort-Object { $_.Extent.StartOffset }
+)
+if ($inactiveAckWaits.Count -ne 1 -or
+    $inactiveQuietLoops.Count -ne 1 -or
+    $inactiveStartCaptures.Count -ne 1 -or
+    $inactiveStopCaptures.Count -ne 2 -or
+    $inactiveFirstReads.Count -ne 1) {
+    throw 'Inactive-tab proof must define one ACK, quiet loop, capture lifetime, and first refocused TextPattern read.'
+}
+$inactiveNormalStop = @(
+    $inactiveStopCaptures |
+        Where-Object {
+            $_.Extent.StartOffset -gt $inactiveQuietLoops[0].Extent.EndOffset -and
+            $_.Extent.StartOffset -lt $inactiveFirstReads[0].Extent.StartOffset
+        }
+)
+$inactiveQuietBody = $inactiveQuietLoops[0].Body
+$inactiveFinalDiagnosticAssignments = if ($inactiveNormalStop.Count -eq 1) {
+    @($inactiveTabFunctions[0].Body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Extent.StartOffset -gt $inactiveQuietLoops[0].Extent.EndOffset -and
+            $node.Extent.StartOffset -lt $inactiveNormalStop[0].Extent.StartOffset -and
+            (Get-NamedCommands `
+                -Ast $node.Right `
+                -Name 'Get-AccessibilityOutputNotificationDiagnostic').Count -eq 1 -and
+            (Get-NamedMemberExpressions `
+                -Ast $node.Right `
+                -Name 'NotificationHistorySnapshot').Count -eq 1
+    }, $true))
+} else {
+    @()
+}
+$inactiveFinalDiagnosticName =
+    if ($inactiveFinalDiagnosticAssignments.Count -eq 1) {
+        Get-VariableExpressionName `
+            -Node $inactiveFinalDiagnosticAssignments[0].Left
+    } else {
+        ''
+    }
+$inactiveFinalMatchedGuards = if ($inactiveNormalStop.Count -eq 1 -and
+    -not [string]::IsNullOrWhiteSpace($inactiveFinalDiagnosticName)) {
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $inactiveTabFunctions[0].Body `
+            -Name 'matched' |
+            Where-Object {
+                if ((Get-ExpressionRootVariableName -Node $_) -ne
+                    $inactiveFinalDiagnosticName -or
+                    $_.Extent.StartOffset -le
+                        $inactiveFinalDiagnosticAssignments[0].Extent.EndOffset -or
+                    $_.Extent.StartOffset -ge
+                        $inactiveNormalStop[0].Extent.StartOffset) {
+                    return $false
+                }
+                $guard = $_
+                while ($null -ne $guard -and
+                    $guard -isnot
+                        [System.Management.Automation.Language.IfStatementAst]) {
+                    $guard = $guard.Parent
+                }
+                return $null -ne $guard -and
+                    @($guard.FindAll({
+                        param($node)
+                        $node -is
+                            [System.Management.Automation.Language.ThrowStatementAst]
+                    }, $true)).Count -ge 1
+            }
+    )
+} else {
+    @()
+}
+$inactiveBoundaryConsecutive = $false
+if ($inactiveFinalDiagnosticAssignments.Count -eq 1 -and
+    $inactiveFinalMatchedGuards.Count -eq 1 -and
+    $inactiveNormalStop.Count -eq 1) {
+    $inactiveBoundaryOwner =
+        Get-ContainingStatementBlock `
+            -Node $inactiveFinalDiagnosticAssignments[0]
+    $inactiveBoundaryAssignmentStatement =
+        Get-DirectStatementBlockChild `
+            -Node $inactiveFinalDiagnosticAssignments[0] `
+            -StatementBlock $inactiveBoundaryOwner
+    $inactiveBoundaryGuardStatement =
+        $inactiveFinalMatchedGuards[0]
+    while ($null -ne $inactiveBoundaryGuardStatement -and
+        $inactiveBoundaryGuardStatement -isnot
+            [System.Management.Automation.Language.IfStatementAst]) {
+        $inactiveBoundaryGuardStatement =
+            $inactiveBoundaryGuardStatement.Parent
+    }
+    $inactiveBoundaryStopStatement =
+        Get-DirectStatementBlockChild `
+            -Node $inactiveNormalStop[0] `
+            -StatementBlock $inactiveBoundaryOwner
+    $inactiveBoundaryStatements = @($inactiveBoundaryOwner.Statements)
+    $inactiveBoundaryAssignmentIndex = -1
+    $inactiveBoundaryGuardIndex = -1
+    $inactiveBoundaryStopIndex = -1
+    for ($index = 0; $index -lt $inactiveBoundaryStatements.Count; $index++) {
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryAssignmentStatement
+        )) {
+            $inactiveBoundaryAssignmentIndex = $index
+        }
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryGuardStatement
+        )) {
+            $inactiveBoundaryGuardIndex = $index
+        }
+        if ([object]::ReferenceEquals(
+            $inactiveBoundaryStatements[$index],
+            $inactiveBoundaryStopStatement
+        )) {
+            $inactiveBoundaryStopIndex = $index
+        }
+    }
+    $inactiveBoundaryConsecutive =
+        $inactiveBoundaryAssignmentIndex -ge 0 -and
+        $inactiveBoundaryGuardIndex -eq
+            ($inactiveBoundaryAssignmentIndex + 1) -and
+        $inactiveBoundaryStopIndex -eq
+            ($inactiveBoundaryGuardIndex + 1)
+}
+if ($inactiveNormalStop.Count -ne 1 -or
+    $inactiveFinalDiagnosticAssignments.Count -ne 1 -or
+    $inactiveFinalMatchedGuards.Count -ne 1 -or
+    -not $inactiveBoundaryConsecutive -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'Refresh' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'IsWindowResponsive' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'NotificationHistorySnapshot').Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'FocusedWindowFor' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'matched').Count -ne 1 -or
+    (Get-NamedCommands -Ast $inactiveQuietBody -Name 'Start-Sleep').Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'GetText' -InvocationOnly).Count -ne 0 -or
+    (Get-NamedMemberExpressions -Ast $inactiveQuietBody -Name 'DocumentRange').Count -ne 0 -or
+    -not (
+        $inactiveStartCaptures[0].Extent.StartOffset -lt
+            $inactiveAckWaits[0].Extent.StartOffset -and
+        $inactiveAckWaits[0].Extent.StartOffset -lt
+            $inactiveQuietLoops[0].Extent.StartOffset -and
+        $inactiveQuietLoops[0].Extent.EndOffset -lt
+            $inactiveFinalDiagnosticAssignments[0].Extent.StartOffset -and
+        $inactiveFinalDiagnosticAssignments[0].Extent.StartOffset -lt
+            $inactiveFinalMatchedGuards[0].Extent.StartOffset -and
+        $inactiveFinalMatchedGuards[0].Extent.StartOffset -lt
+            $inactiveNormalStop[0].Extent.StartOffset -and
+        $inactiveNormalStop[0].Extent.StartOffset -lt
+            $inactiveFirstReads[0].Extent.StartOffset
+    )) {
+    throw 'Inactive-tab proof must keep capture active through a bounded marker-free responsive quiet interval, reject one final fresh snapshot immediately before capture stop, and perform zero TextPattern reads before the first refocused read.'
+}
+$tempLauncherFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+$tempLauncherCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'New-AccessibilityTempCmdLauncher'
+)
+if ($tempLauncherFunctions.Count -ne 1 -or $tempLauncherCalls.Count -ne 3) {
+    throw 'Warm, cold, and inactive evidence must share one temporary CMD launcher factory.'
+}
+$commandEchoFunctions = @(
+    Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityTerminalCommandEcho'
+)
+if ($commandEchoFunctions.Count -ne 1) {
+    throw 'Terminal command echo gating must define one helper.'
+}
+$commandEchoFunction = $commandEchoFunctions[0]
+Assert-NoUnreachableStatements `
+    -Ast $commandEchoFunction.Body `
+    -Context 'Wait-AccessibilityTerminalCommandEcho'
+$commandEchoLoops = @($commandEchoFunction.Body.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.DoWhileStatementAst]
+}, $true))
+$commandEchoGetTextCalls = @(
+    Get-NamedMemberExpressions `
+        -Ast $commandEchoFunction.Body `
+        -Name 'GetText' `
+        -InvocationOnly
+)
+$commandEchoFullCommandContains = @(
+    Get-NamedMemberExpressions `
+        -Ast $commandEchoFunction.Body `
+        -Name 'Contains' `
+        -InvocationOnly |
+        Where-Object {
+            @($_.Arguments | Where-Object {
+                $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    ($_.VariablePath.UserPath -split ':')[-1] -eq 'Command'
+            }).Count -eq 1
+        }
+)
+$commandEchoForbiddenInputCalls = @(
+    @(
+        Get-NamedMemberExpressions `
+            -Ast $commandEchoFunction.Body `
+            -Name 'SendUnicodeText' `
+            -InvocationOnly
+    ) + @(
+        Get-NamedMemberExpressions `
+            -Ast $commandEchoFunction.Body `
+            -Name 'SendChord' `
+            -InvocationOnly
+    ) + @(
+        Get-NamedCommands `
+            -Ast $commandEchoFunction.Body `
+            -Name 'Send-AccessibilityChord'
+    )
+)
+if ($commandEchoLoops.Count -ne 1 -or
+    $commandEchoGetTextCalls.Count -ne 1 -or
+    $commandEchoGetTextCalls[0].Extent.StartOffset -lt
+        $commandEchoLoops[0].Extent.StartOffset -or
+    $commandEchoGetTextCalls[0].Extent.EndOffset -gt
+        $commandEchoLoops[0].Extent.EndOffset -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'GetForegroundWindow' -InvocationOnly).Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'FocusedWindowFor' -InvocationOnly).Count -lt 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'ForceForeground' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'FromHandle' -InvocationOnly).Count -ne 2 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'SetFocus' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'TryGetCurrentPattern' -InvocationOnly).Count -ne 1 -or
+    (Get-NamedMemberExpressions -Ast $commandEchoFunction.Body -Name 'Replace' -InvocationOnly).Count -lt 4 -or
+    $commandEchoFullCommandContains.Count -ne 1 -or
+    (Get-NamedCommands -Ast $commandEchoFunction.Body -Name 'Get-AccessibilityExceptionHResults').Count -ne 1 -or
+    (Get-NamedCommands -Ast $commandEchoFunction.Body -Name 'Test-AccessibilityTransientHResult').Count -ne 1 -or
+    $commandEchoForbiddenInputCalls.Count -ne 0) {
+    throw 'Terminal command echo gating must require the full normalized command, recover exact host/terminal focus without resending input, poll TextPattern, and reacquire transient providers.'
 }
 $stressBoundaryContract = [regex]::Match(
     $accessibilityHarnessText,
@@ -1390,7 +5076,7 @@ $stressBoundaryContract = [regex]::Match(
 if (-not $stressBoundaryContract.Success -or $accessibilityHarnessText -match 'echo \$stressFirstMarker') {
     throw 'Accessibility sustained-output boundaries must be generated only by command execution, never echoed literally in the typed command.'
 }
-if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''winghostty settings''' -or
+if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''noctty settings''' -or
     $accessibilityHarnessText -notmatch '\$settingsExpectedControls = \[ordered\]@\{' -or
     $accessibilityHarnessText -notmatch 'settingsControlOverlapComparisons' -or
     $accessibilityHarnessText -notmatch 'settingsContainmentChecks' -or
@@ -1398,7 +5084,7 @@ if ($accessibilityHarnessText -notmatch '\$settingsElement\.Current\.Name -ne ''
     $accessibilityHarnessText -notmatch 'Automation\]::Compare\(\s*\$settingsSharedSectionContainer' -or
     $accessibilityHarnessText -notmatch '\$containerSelection\.Current\.GetSelection\(\)' -or
     $accessibilityHarnessText -notmatch '\$focusSection\.SetFocus\(\)\s*\$focusSectionSelection\.Select\(\)' -or
-    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds = @\(\[WinghosttyAccessibilityNative\]::VisibleTerminalChildren' -or
+    $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds = @\(\[NocttyAccessibilityNative\]::VisibleTerminalChildren' -or
     $accessibilityHarnessText -notmatch '\$settingsOpenTerminalHwnds -notcontains \$settingsOpenFocusedHwnd') {
     throw 'Accessibility settings evidence must assert root identity, named roles, shared selection semantics, peer overlap, and client containment.'
 }
@@ -1418,11 +5104,147 @@ if ($accessibilityHarnessText -notmatch 'docked search query UIA focus''[\s\S]*?
     $accessibilityHarnessText -match 'docked search query UIA focus''[\s\S]{0,1200}?\$searchQueryEdit\.SetFocus\(\)') {
     throw 'Accessibility docked-search recovery must prove native query focus before restoring only foreground ownership.'
 }
-if ($accessibilityHarnessText -notmatch 'settings section focus and selection ownership''[\s\S]*?\$sectionNativeFocusBeforeRecovery -ne \$focusSectionHwnd[\s\S]*?ForceForeground\(\$settingsHwnd\)' -or
-    $accessibilityHarnessText -match 'settings section focus and selection ownership''[\s\S]{0,1200}?\$focusSection\.SetFocus\(\)' -or
+$settingsFocusWaits = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Wait-AccessibilityCondition' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings section focus and selection ownership'
+        }
+)
+$settingsFocusContract = $false
+if ($settingsFocusWaits.Count -eq 1) {
+    $settingsFocusCondition =
+        Get-CommandParameterArgument `
+            -Command $settingsFocusWaits[0] `
+            -Name 'Condition'
+    if ($settingsFocusCondition -is
+        [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+        $settingsFocusBody = $settingsFocusCondition.ScriptBlock.EndBlock
+        $settingsFocusWaitOwner =
+            Get-ContainingStatementBlock -Node $settingsFocusWaits[0]
+        $settingsFocusForegroundBranches = @($settingsFocusBody.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.IfStatementAst] -and
+                (Get-NamedMemberExpressions `
+                    -Ast $node.Clauses[0].Item1 `
+                    -Name 'GetForegroundWindow' `
+                    -InvocationOnly).Count -ge 1 -and
+                (Get-NamedMemberExpressions `
+                    -Ast $node.Clauses[0].Item2 `
+                    -Name 'ForceForeground' `
+                    -InvocationOnly).Count -ge 1
+        }, $true))
+        $settingsFocusSetFocusCalls = @(
+            Get-NamedMemberExpressions `
+                -Ast $settingsFocusBody `
+                -Name 'SetFocus' `
+                -InvocationOnly |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $settingsFocusWaitOwner
+                    )
+                }
+        )
+        $settingsFocusSelectCalls = @(
+            Get-NamedMemberExpressions `
+                -Ast $settingsFocusBody `
+                -Name 'Select' `
+                -InvocationOnly |
+                Where-Object {
+                    [object]::ReferenceEquals(
+                        (Get-ContainingStatementBlock -Node $_),
+                        $settingsFocusWaitOwner
+                    )
+                }
+        )
+        if ($settingsFocusForegroundBranches.Count -eq 1 -and
+            $settingsFocusSetFocusCalls.Count -eq 1 -and
+            $settingsFocusSelectCalls.Count -eq 1) {
+            $settingsFocusForegroundBranch =
+                $settingsFocusForegroundBranches[0]
+            $settingsFocusForceCalls = @(
+                Get-NamedMemberExpressions `
+                    -Ast $settingsFocusForegroundBranch.Clauses[0].Item2 `
+                    -Name 'ForceForeground' `
+                    -InvocationOnly
+            )
+            $settingsFocusFalseReturns =
+                @($settingsFocusForegroundBranch.Clauses[0].Item2.FindAll({
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.ReturnStatementAst] -and
+                        @($node.FindAll({
+                            param($child)
+                            $child -is
+                                [System.Management.Automation.Language.VariableExpressionAst] -and
+                                (Get-VariableExpressionName -Node $child) -eq
+                                    'false'
+                        }, $true)).Count -eq 1
+                }, $true))
+            $settingsFocusPostconditions = @(
+                Get-NamedMemberExpressions `
+                    -Ast $settingsFocusBody `
+                    -Name 'FocusedWindowFor' `
+                    -InvocationOnly |
+                    Where-Object {
+                        $_.Extent.StartOffset -gt
+                            $settingsFocusSelectCalls[0].Extent.StartOffset -and
+                            [object]::ReferenceEquals(
+                                (Get-ContainingStatementBlock -Node $_),
+                                $settingsFocusWaitOwner
+                            )
+                    }
+            )
+            $settingsFocusHwndName =
+                if ($settingsFocusForceCalls.Count -eq 1 -and
+                    $settingsFocusForceCalls[0].Arguments.Count -eq 1) {
+                    Get-VariableExpressionName `
+                        -Node $settingsFocusForceCalls[0].Arguments[0]
+                } else {
+                    ''
+                }
+            $settingsFocusConditionVariableNames = @(
+                $settingsFocusForegroundBranch.Clauses[0].Item1.FindAll({
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.VariableExpressionAst]
+                }, $true) |
+                    ForEach-Object { Get-VariableExpressionName -Node $_ }
+            )
+            $settingsFocusPostconditionHwndName =
+                if ($settingsFocusPostconditions.Count -eq 1 -and
+                    $settingsFocusPostconditions[0].Arguments.Count -eq 1) {
+                    Get-VariableExpressionName `
+                        -Node $settingsFocusPostconditions[0].Arguments[0]
+                } else {
+                    ''
+                }
+            $settingsFocusContract =
+                $settingsFocusFalseReturns.Count -eq 1 -and
+                -not [string]::IsNullOrWhiteSpace($settingsFocusHwndName) -and
+                $settingsFocusConditionVariableNames -contains
+                    $settingsFocusHwndName -and
+                $settingsFocusPostconditionHwndName -eq
+                    $settingsFocusHwndName -and
+                $settingsFocusForceCalls[0].Extent.StartOffset -lt
+                    $settingsFocusFalseReturns[0].Extent.StartOffset -and
+                $settingsFocusForegroundBranch.Extent.EndOffset -lt
+                    $settingsFocusSetFocusCalls[0].Extent.StartOffset -and
+                $settingsFocusSetFocusCalls[0].Extent.StartOffset -lt
+                    $settingsFocusSelectCalls[0].Extent.StartOffset -and
+                $settingsFocusSelectCalls[0].Extent.StartOffset -lt
+                    $settingsFocusPostconditions[0].Extent.StartOffset
+        }
+    }
+}
+if (-not $settingsFocusContract -or
     $accessibilityHarnessText -notmatch 'ForceForeground\(\$ownerSettingsHwnd\)[\s\S]*?PostMessageW\(\s*\$ownerSettingsHwnd[\s\S]*?settings conservative dirty-close focus' -or
     $accessibilityHarnessText -match 'settings conservative dirty-close focus''[\s\S]{0,900}?(ForceForeground|SetFocus)\(') {
-    throw 'Accessibility settings evidence must validate focus without repairing the exact target under test.'
+    throw 'Accessibility settings focus evidence must restore only foreground ownership before retrying UIA target focus and selection.'
 }
 if ($accessibilityHarnessText -notmatch 'settings destruction and terminal focus restoration after idle soak''[\s\S]*?\$script:idleRestoreForegroundHwnd -eq \$idleTerminalHostHwnd[\s\S]*?\$script:idleRestoreFocusedHwnd -eq \$leftPane\.Hwnd' -or
     $accessibilityHarnessText -match 'settings destruction and terminal focus restoration after idle soak''[\s\S]{0,1000}?ForceForeground\(') {
@@ -1453,6 +5275,21 @@ Assert-TextContract `
     -Pattern '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(.*?SMTO_BLOCK \| SMTO_ABORTIFHUNG.*?settings_selection_timeout_ms.*?UIA_E_ELEMENTNOTAVAILABLE.*?fn Select\(p: \*com\.ISelectionItemProvider\).*?const result = sendButtonClicked\(self\.hwnd\).*?if \(!self\.available\(\)\).*?self\.isSelected\(\)' `
     -Description 'settings section selection is synchronous, bounded, and postcondition checked' `
     -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32UiaWidgetsText `
+    -Pattern '(?s)fn sendButtonClicked\(hwnd: com\.HWND\).*?SendMessageTimeoutW\(.*?WM_COMMAND.*?@bitCast\(@intFromPtr\(hwnd\)\).*?fn Select\(p: \*com\.ISelectionItemProvider\).*?sendButtonClicked\(self\.hwnd\)' `
+    -Description 'settings SelectionItem Select routes the real child source HWND synchronously to the UI thread' `
+    -Context $win32UiaWidgets
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn validatedSectionClickFocusTarget\(source: \?HWND, expected: \?HWND\).*?source_hwnd == expected_hwnd.*?if \(clickedSection\(id, notify\)\) \|section\|.*?validatedSectionClickFocusTarget\(.*?o\.sectionButton\(section\).*?_ = SetFocus\(button\);.*?o\.setActiveSection\(section\);' `
+    -Description 'validated section clicks focus the real child on the UI thread before activation' `
+    -Context $win32Settings
+Assert-TextContract `
+    -Content $win32SettingsText `
+    -Pattern '(?s)fn settingsSectionButtonProc.*?if \(msg == WM_SETFOCUS\).*?provider\.raiseFocusChanged\(\)' `
+    -Description 'real section child WM_SETFOCUS publishes the matching UIA focus event' `
+    -Context $win32Settings
 Assert-TextContract `
     -Content $win32UiaWidgetsText `
     -Pattern '(?s)fn hwndHasKeyboardFocus\(hwnd: com\.HWND\).*?GetWindowThreadProcessId\(hwnd, null\).*?GetGUIThreadInfo\(thread_id, &info\).*?IsChild\(hwnd, focused\).*?pub fn raiseFocusChanged\(self: \*SettingsControlProvider\).*?events\.raiseFocusChanged\(&self\.base\).*?UIA_HasKeyboardFocusPropertyId.*?hwndHasKeyboardFocus\(self\.hwnd\).*?pub fn raiseFocusChanged\(self: \*SettingsSectionProvider\)' `
@@ -1533,6 +5370,103 @@ Assert-TextContract `
     -Pattern '(?s)Invoke-AccessibilitySettingsCloseAction.*?-ActionName ''Save and close''.*?settings save-and-close completion.*?settings persisted config bytes.*?settings persistence verifier.*?Save and close did not survive a same-sandbox process relaunch.*?settings persistence baseline restoration.*?save_and_close_invoked.*?persisted_after_process_relaunch.*?original_value_restored' `
     -Description 'accessibility evidence invokes Save and close, proves same-sandbox process persistence, and restores the baseline' `
     -Context $accessibilityHarness
+$themePersistenceFunctionNames = @(
+    'Get-AccessibilityThemeProbe',
+    'Set-AccessibilityThemeIndex',
+    'Get-AccessibilityDwmUInt'
+)
+foreach ($functionName in $themePersistenceFunctionNames) {
+    if (@(Get-NamedFunctionDefinitions `
+        -Ast $accessibilityHarnessAst `
+        -Name $functionName).Count -ne 1) {
+        throw "Theme persistence evidence must define exactly one $functionName helper."
+    }
+}
+$themePersistenceVerifierCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityThemeProbe' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings persistence verifier'
+        }
+)
+$themePersistenceSelectionCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Set-AccessibilityThemeIndex' |
+        Where-Object {
+            Test-CommandHasStringArgument `
+                -Command $_ `
+                -Value 'settings save probe Dark selection'
+        }
+)
+$themePersistenceDwmCalls = @(
+    Get-NamedCommands `
+        -Ast $accessibilityHarnessAst `
+        -Name 'Get-AccessibilityDwmUInt' |
+        Where-Object {
+            $description = Get-CommandParameterArgument `
+                -Command $_ `
+                -Name 'Description'
+            $description -is
+                    [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $description.Value -in @('fresh Dark host', 'fresh Dark Settings')
+        }
+)
+$themePersistenceDwmAttributes = @(
+    $themePersistenceDwmCalls |
+        ForEach-Object {
+            $argument = Get-CommandParameterArgument -Command $_ -Name 'Attribute'
+            if ($argument -isnot
+                [System.Management.Automation.Language.ConstantExpressionAst]) {
+                throw 'Fresh Dark DWM persistence attributes must be static integers.'
+            }
+            [int]$argument.Value
+        } |
+        Sort-Object
+)
+$themePersistenceStringValues = @(
+    $accessibilityHarnessAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.StringConstantExpressionAst]
+    }, $true) |
+        ForEach-Object { $_.Value }
+)
+$themePersistenceEvidenceKeys = @(
+    'persistence_theme_config_dark',
+    'persistence_theme_fresh_process_index',
+    'persistence_theme_dark_settings_pixel',
+    'persistence_theme_dark_host_pixel',
+    'persistence_theme_host_dwm_dark',
+    'persistence_theme_settings_dwm_dark',
+    'persistence_theme_host_backdrop',
+    'persistence_theme_settings_backdrop',
+    'persistence_theme_restored'
+)
+$themeSelectionIndex = if ($themePersistenceSelectionCalls.Count -eq 1) {
+    Get-CommandParameterArgument `
+        -Command $themePersistenceSelectionCalls[0] `
+        -Name 'Index'
+}
+if ($themePersistenceVerifierCalls.Count -ne 1 -or
+    $themePersistenceSelectionCalls.Count -ne 1 -or
+    $themeSelectionIndex -isnot
+        [System.Management.Automation.Language.ConstantExpressionAst] -or
+    [int]$themeSelectionIndex.Value -ne 3 -or
+    $themePersistenceDwmCalls.Count -ne 4 -or
+    (Compare-Object `
+        -ReferenceObject @(20, 20, 38, 38) `
+        -DifferenceObject $themePersistenceDwmAttributes `
+        -SyncWindow 0).Count -ne 0 -or
+    $themePersistenceStringValues -notcontains
+        '(?m)^window-theme\s*=\s*dark\s*$' -or
+    @($themePersistenceEvidenceKeys | Where-Object {
+        $themePersistenceStringValues -notcontains $_
+    }).Count -ne 0) {
+    throw 'Theme persistence evidence must save Dark, relaunch, verify exact visual/DWM state, and restore its baseline.'
+}
 Assert-TextContract `
     -Content $accessibilityHarnessText `
     -Pattern '(?s)function Start-AccessibilityProcessWithEnvironment.*?\$baseline = \[ordered\]@\{\}.*?SetEnvironmentVariable\(.*?try \{.*?Start-Process.*?finally \{.*?\$baseline\.GetEnumerator\(\).*?SetEnvironmentVariable\(.*?settingsPersistenceLayout = Get-InteractiveWin11SandboxLayout.*?settingsProbeEnvironment = Get-InteractiveWin11Environment.*?sandboxConfigPath = Join-Path \$settingsPersistenceLayout\.LocalAppData.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveProbeArguments.*?-EnvironmentVariables \$settingsProbeEnvironment.*?Start-AccessibilityProcessWithEnvironment.*?-ArgumentList \$saveVerifyArguments.*?-EnvironmentVariables \$settingsProbeEnvironment' `
@@ -1561,7 +5495,7 @@ if ($restoreBaselineFunctions.Count -ne 1) {
     throw "Expected exactly one Restore-AccessibilityConfigBaseline definition; found $($restoreBaselineFunctions.Count)."
 }
 . ([scriptblock]::Create($restoreBaselineFunctions[0].Extent.Text))
-$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winghostty-config-restore-' + [Guid]::NewGuid().ToString('N'))
+$restoreProbeDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('noctty-config-restore-' + [Guid]::NewGuid().ToString('N'))
 $restoreProbePath = Join-Path $restoreProbeDirectory 'config.ghostty'
 [System.IO.Directory]::CreateDirectory($restoreProbeDirectory) | Out-Null
 try {
@@ -1628,7 +5562,7 @@ if ($accessibilityHarnessText -notmatch '\$script:palette = \$palette' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query''' -or
     $accessibilityHarnessText -notmatch '\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus' -or
     $accessibilityHarnessText -notmatch '(?s)\$script:paletteUnavailableItems = @\(\$script:palette\.FindAll.*?\$script:paletteUnavailableFocused = \[System\.Windows\.Automation\.AutomationElement\]::FocusedElement.*?\$queryStillFocused = \$null -ne \$script:paletteUnavailableFocused -and\s*\$script:paletteUnavailableFocused\.Current\.ProcessId -eq \$process\.Id -and\s*\$script:paletteUnavailableFocused\.Current\.ControlType -eq \[System\.Windows\.Automation\.ControlType\]::Edit -and\s*\$script:paletteUnavailableFocused\.Current\.Name -eq ''Command palette query'' -and\s*\$script:paletteUnavailableFocused\.Current\.HasKeyboardFocus.*?return \$script:paletteUnavailableItems\.Count -eq 0 -and\s*\$queryStillFocused -and' -or
-    $accessibilityHarnessText -notmatch '-not \[WinghosttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
+    $accessibilityHarnessText -notmatch '-not \[NocttyAccessibilityNative\]::IsWindowVisible\(\$paletteNativeHwnd\)' -or
     $accessibilityHarnessText -notmatch "-Description 'command palette native List recovery after zero matches'" -or
     $accessibilityHarnessText -notmatch '\$paletteRecoveredSelectionPattern\.Current\.GetSelection\(\)' -or
     $accessibilityHarnessText -notmatch '\$script:paletteRecoveredFocus\.Current\.HasKeyboardFocus' -or
@@ -1751,7 +5685,7 @@ if ($postWrapperParameters.Count -ne 7 -or
     $null -ne $postWrapperFunction.Body.ProcessBlock -or $null -ne $postWrapperFunction.Body.CleanBlock -or
     $postWrapperTraps.Count -ne 0 -or $postWrapperStatements.Count -ne 6 -or
     $postWrapperStatements[0].Extent.Text.Trim() -ne '$Process.Refresh()' -or
-    $postWrapperStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$Process\.HasExited\) \{\s*throw "Refusing to post \$Description because winghostty already exited \(exit code \$\(\$Process\.ExitCode\)\)\."\s*\}$' -or
+    $postWrapperStatements[1].Extent.Text.Trim() -notmatch '(?s)^if \(\$Process\.HasExited\) \{\s*throw "Refusing to post \$Description because noctty already exited \(exit code \$\(\$Process\.ExitCode\)\)\."\s*\}$' -or
     $postWrapperStatements[2].Extent.Text.Trim() -ne '[void](Assert-InteractiveWin11WindowOwner -Hwnd $Hwnd -Process $Process -Description $Description -Verb ''post'')' -or
     $postWrapperStatements[3].Extent.Text.Trim() -ne '$lastError = 0' -or
     $postWrapperStatements[4].Extent.Text.Trim() -ne 'if ($Deadline -le [DateTime]::UtcNow) { throw "Timed out waiting for $Description." }' -or
@@ -1810,9 +5744,11 @@ $paletteThemeFunctions = @($paletteThemeAst.FindAll({
 $openThemeQueryFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Open-ThemeQuery')
 $themePaletteDismissedFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Test-ThemePaletteDismissed')
 $postHighContrastFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Invoke-PostHighContrastPresentationCanary')
-if ($paletteThemeFunctions.Count -ne 3 -or $openThemeQueryFunctions.Count -ne 1 -or
-    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1) {
-    throw 'Palette theme harness must define only its exact query, dismissal, and post-High-Contrast presentation functions.'
+$suppressedPreviewDiagnosticFunctions = @($paletteThemeFunctions | Where-Object Name -eq 'Write-SuppressedPreviewDiagnostic')
+if ($paletteThemeFunctions.Count -ne 4 -or $openThemeQueryFunctions.Count -ne 1 -or
+    $themePaletteDismissedFunctions.Count -ne 1 -or $postHighContrastFunctions.Count -ne 1 -or
+    $suppressedPreviewDiagnosticFunctions.Count -ne 1) {
+    throw 'Palette theme harness must define only its exact query, dismissal, diagnostic, and post-High-Contrast presentation functions.'
 }
 $openThemeQueryParameters = @($openThemeQueryFunctions[0].Parameters)
 if ($openThemeQueryParameters.Count -ne 4 -or
@@ -2151,11 +6087,16 @@ if ($highContrastStabilityWaits.Count -ne 2 -or
         $_.Extent.Text -match [regex]::Escape('$hcPresentation.Stable.Restart()')
     }).Count -ne 1 -or
     @($highContrastStabilityWaits | Where-Object {
-        $_.Extent.Text -match [regex]::Escape("throw 'Theme preview changed terminal colors while High Contrast was active.'") -and
-            $_.Extent.Text -match [regex]::Escape('$suppressedPreviewStable.Reset()') -and
-            $_.Extent.Text -match [regex]::Escape('$previewPixel -band 0xFFFFFF) -eq $draculaRgb')
-    }).Count -ne 1) {
-    throw 'High Contrast theme preview must reject Dracula immediately and prove the original framebuffer stable for two seconds.'
+        $_.Extent.Text -match [regex]::Escape('$previewRgb -eq $draculaRgb') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.Stable.Restart()') -and
+            $_.Extent.Text -match [regex]::Escape('$suppressedPreview.TransitionCount++')
+    }).Count -ne 1 -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('SystemParametersInfo(0x42, $activeHc.cbSize, [ref]$activeHc, 0)') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('($activeHc.dwFlags -band 1) -eq 0') -or
+    $paletteThemeHarnessText -notmatch [regex]::Escape('High Contrast preview framebuffer: baseline={0:x6}, settled-or-last={1:x6}, transitions={2}') -or
+    ([regex]::Matches($paletteThemeHarnessText, '(?m)^\s*Write-SuppressedPreviewDiagnostic \$hcPixel \$suppressedPreview\s*$')).Count -ne 4 -or
+    $paletteThemeHarnessText -notmatch '(?s)catch\s*\{\s*Write-SuppressedPreviewDiagnostic \$hcPixel \$suppressedPreview\s+throw\s*\}') {
+    throw 'High Contrast theme preview must reject Dracula, prove a stable settled framebuffer, verify active High Contrast, and report transitions before success or failure.'
 }
 $highContrastCloseCalls = @($paletteThemeAst.FindAll({
     param($node)
@@ -2442,7 +6383,7 @@ if ($sessionPassCommands.Count -ne 1) {
 $sessionBootstrapIfs = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
-        $node.Extent.Text -match '^if \(-not \$env:WINGHOSTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED\)'
+        $node.Extent.Text -match '^if \(-not \$env:NOCTTY_INTERACTIVE_WIN11_SESSION_RESTORE_BOOTSTRAPPED\)'
 }, $true))
 if ($sessionBootstrapIfs.Count -ne 1) {
     throw 'Session restore story must contain one exact bootstrap guard.'
@@ -2486,7 +6427,7 @@ if ($sessionSnapshotRetryLoops.Count -ne 1 -or $sessionSnapshotWaitIfs.Count -ne
 }
 $sessionSnapshotFunctionStatements = @($sessionSnapshotFunctions[0].Body.EndBlock.Statements)
 if ($sessionSnapshotFunctionStatements.Count -ne 5 -or
-    $sessionSnapshotFunctionStatements[0].Extent.Text.Trim() -ne '$cli = Join-Path (Split-Path -Parent $exe) ''winghostty.com''' -or
+    $sessionSnapshotFunctionStatements[0].Extent.Text.Trim() -ne '$cli = Join-Path (Split-Path -Parent $exe) ''noctty.com''' -or
     $sessionSnapshotFunctionStatements[1].Extent.Text.Trim() -ne 'if (-not (Test-Path -LiteralPath $cli)) { throw "Missing automation CLI shim: $cli" }' -or
     $sessionSnapshotFunctionStatements[2].Extent.Text.Trim() -ne '$lastError = ''''' -or
     -not [object]::ReferenceEquals($sessionSnapshotFunctionStatements[3], $sessionSnapshotRetryLoops[0]) -or
@@ -2531,7 +6472,7 @@ $sessionRunsAssignments = @($sessionHarnessAst.FindAll({
 $sessionInstanceClassAssignments = @($sessionHarnessAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Extent.Text.Trim() -eq '$instanceClass = "winghostty-interactive-$($layout.SandboxId)"'
+        $node.Extent.Text.Trim() -eq '$instanceClass = "noctty-interactive-$($layout.SandboxId)"'
 }, $true))
 $sessionTopLevelStatements = @($sessionHarnessAst.EndBlock.Statements)
 $sessionRunsInitializationIndex = -1
@@ -2733,27 +6674,1192 @@ for ($i = 1; $i -lt $sessionBurstStatementIndices.Count; $i++) {
         throw 'Session restore burst deadline, posts, proof barriers, and close must remain adjacent statements.'
     }
 }
+$releasePreflightStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Release preflight' `
+    -Source $releaseWorkflow
+$readinessPreflightStep = Get-YamlStepBlock `
+    -Content $readinessWorkflowText `
+    -Name 'Validate release configuration' `
+    -Source $readinessWorkflow
+$releaseInteractiveEvidenceStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Require successful Test workflow for release SHA' `
+    -Source $releaseWorkflow
+$releasePreflightExpected = @{
+    Version = '$env:RELEASE_VERSION'
+    RequireSigning = '$true'
+    RequirePackageManagers = '$true'
+}
+$releasePreflightScriptSha256 =
+    '11cef0f8ad78ad165cb61aa6a06a74cca36e523a84a2d2162a6d9b940c426065'
+$readinessPreflightScriptSha256 =
+    '9e08d1fca871d8eb340ee88057e66b4472cef074eb0cab4ff728537ed439c7dc'
+$releaseInteractiveEvidenceScriptSha256 =
+    '2bc265c1052c000e5f8ea599d2f5e2002dec3d3dc893bff0b8ecd72da739bb92'
+$releaseInteractiveEvidenceStepSha256 =
+    '88a9d8d525eca9bb31327fdad515af39488a63b418222036b82edf94db945b6f'
+$releasePreflightStepSha256 =
+    '0535add72682e9ee85894835766355e537d5a5a03174ed656e6365954d7f16eb'
+$readinessPreflightStepSha256 =
+    '021214f70c1b21adcc770f9e96f66daf1ada2f9eae4180daf3958236941b05c9'
+$releaseWorkflowSha256 =
+    '48322e91a5f0b006f1f01a427dd5abb92e714e230379431514393d50c90c81d9'
+$readinessWorkflowSha256 =
+    '01cd56ba5049d3b74e89f329e3111de1161ab56bdfbfabf835536510139221cc'
+# Full-file pins deliberately make every workflow edit a semantic-review event,
+# including triggers, permissions, inherited job metadata, and unprotected steps.
+$commonWorkflowBoundaryMutations = @(
+    @{
+        Label = 'WinGet package redirect'
+        Target = '      WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}'
+        Replacement = '      WINGET_PACKAGE_IDENTIFIER: attacker.forged.package'
+    },
+    @{
+        Label = 'Scoop repository redirect'
+        Target = '      SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}'
+        Replacement = '      SCOOP_BUCKET_REPO: attacker/forged-bucket'
+    },
+    @{
+        Label = 'Scoop branch redirect'
+        Target = '      SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}'
+        Replacement = '      SCOOP_BUCKET_BRANCH: forged-release'
+    },
+    @{
+        Label = 'runner redirect'
+        Target = '    runs-on: windows-latest'
+        Replacement = '    runs-on: [self-hosted, forged-release]'
+    },
+    @{
+        Label = 'environment redirect'
+        Target = '    environment: release'
+        Replacement = '    environment: forged-release'
+    }
+)
+$protectedWorkflowSpecs = @(
+    [pscustomobject]@{
+        Context = $releaseWorkflow
+        Content = $releaseWorkflowText
+        ExpectedSha256 = $releaseWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Require successful Test workflow for release SHA'
+                StepSha256 = $releaseInteractiveEvidenceStepSha256
+                BodySha256 = $releaseInteractiveEvidenceScriptSha256
+            },
+            @{
+                Name = 'Release preflight'
+                StepSha256 = $releasePreflightStepSha256
+                BodySha256 = $releasePreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'release permission reduction'
+                Target = '  contents: write'
+                Replacement = '  contents: read'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Context = $readinessWorkflow
+        Content = $readinessWorkflowText
+        ExpectedSha256 = $readinessWorkflowSha256
+        ProtectedSteps = @(
+            @{
+                Name = 'Validate release configuration'
+                StepSha256 = $readinessPreflightStepSha256
+                BodySha256 = $readinessPreflightScriptSha256
+            }
+        )
+        Mutations = @($commonWorkflowBoundaryMutations) + @(
+            @{
+                Label = 'readiness permission escalation'
+                Target = '  contents: read'
+                Replacement = '  contents: write'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedWorkflowSpecs) {
+    if ((Get-CanonicalTextSha256 -Text $spec.Content) -cne
+        $spec.ExpectedSha256) {
+        throw "Protected workflow changed: $($spec.Context)"
+    }
+    $canonicalWorkflow = ConvertTo-CanonicalText -Text $spec.Content
+    foreach ($mutation in $spec.Mutations) {
+        if (@([regex]::Matches(
+            $canonicalWorkflow,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected workflow mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantWorkflow = $canonicalWorkflow.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        if ((Get-CanonicalTextSha256 -Text $mutantWorkflow) -ceq
+            $spec.ExpectedSha256) {
+            throw "Protected workflow accepted full-file mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+        foreach ($protectedStep in $spec.ProtectedSteps) {
+            $mutantStep = Get-YamlStepBlock `
+                -Content $mutantWorkflow `
+                -Name $protectedStep.Name `
+                -Source "$($spec.Context) :: $($mutation.Label)"
+            $mutantBody = Get-YamlLiteralRunScript `
+                -Content $mutantStep `
+                -Source "$($spec.Context) :: $($mutation.Label) :: $($protectedStep.Name)"
+            if ((Get-CanonicalTextSha256 -Text $mutantStep) -cne
+                    $protectedStep.StepSha256 -or
+                (Get-CanonicalTextSha256 -Text $mutantBody) -cne
+                    $protectedStep.BodySha256) {
+                throw "Full-file mutation unexpectedly changed a protected step: $($spec.Context) :: $($mutation.Label)"
+            }
+        }
+    }
+}
+$protectedStepEnvelopeSpecs = @(
+    [pscustomobject]@{
+        Name = 'Require successful Test workflow for release SHA'
+        Context = "$releaseWorkflow :: Require successful Test workflow for release SHA"
+        StepText = $releaseInteractiveEvidenceStep
+        ExpectedSha256 = $releaseInteractiveEvidenceStepSha256
+        Mutations = @(
+            @{
+                Label = 'GH_REPOSITORY redirect'
+                Target = '          GH_REPOSITORY: ${{ github.repository }}'
+                Replacement = '          GH_REPOSITORY: attacker/forged-evidence'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Release preflight'
+        Context = "$releaseWorkflow :: Release preflight"
+        StepText = $releasePreflightStep
+        ExpectedSha256 = $releasePreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'release prerelease override'
+                Target = '          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}'
+                Replacement = '          RELEASE_PRERELEASE: true'
+            },
+            @{
+                Label = 'release version override'
+                Target = '          RELEASE_VERSION: ${{ steps.meta.outputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            }
+        )
+    },
+    [pscustomobject]@{
+        Name = 'Validate release configuration'
+        Context = "$readinessWorkflow :: Validate release configuration"
+        StepText = $readinessPreflightStep
+        ExpectedSha256 = $readinessPreflightStepSha256
+        Mutations = @(
+            @{
+                Label = 'readiness version override'
+                Target = '          RELEASE_VERSION: ${{ inputs.version }}'
+                Replacement = '          RELEASE_VERSION: 0.0.0'
+            },
+            @{
+                Label = 'readiness package-manager override'
+                Target = '          REQUIRE_PACKAGE_MANAGERS: ${{ inputs.require_package_managers }}'
+                Replacement = '          REQUIRE_PACKAGE_MANAGERS: false'
+            }
+        )
+    }
+)
+foreach ($spec in $protectedStepEnvelopeSpecs) {
+    if (-not (Test-YamlStepEnvelopeDigest `
+        -StepText $spec.StepText `
+        -ExpectedSha256 $spec.ExpectedSha256)) {
+        throw "Protected workflow step envelope changed: $($spec.Context)"
+    }
+    $canonicalStep = ConvertTo-CanonicalText -Text $spec.StepText
+    $canonicalBody = Get-YamlLiteralRunScript `
+        -Content $canonicalStep `
+        -Source $spec.Context
+    $nameLine = "      - name: $($spec.Name)"
+    $mutations = @(
+        @{
+            Label = 'continue-on-error'
+            Target = $nameLine
+            Replacement = "$nameLine`n        continue-on-error: true"
+        },
+        @{
+            Label = 'if false'
+            Target = $nameLine
+            Replacement = "$nameLine`n        if: `${{ false }}"
+        },
+        @{
+            Label = 'GH_TOKEN redirect'
+            Target = '          GH_TOKEN: ${{ github.token }}'
+            Replacement = '          GH_TOKEN: ${{ secrets.FORGED_GH_TOKEN }}'
+        }
+    ) + @($spec.Mutations)
+    foreach ($mutation in $mutations) {
+        if (@([regex]::Matches(
+            $canonicalStep,
+            [regex]::Escape($mutation.Target)
+        )).Count -ne 1) {
+            throw "Protected step envelope mutation target is not unique: $($spec.Context) :: $($mutation.Label)"
+        }
+        $mutantStep = $canonicalStep.Replace(
+            $mutation.Target,
+            $mutation.Replacement
+        )
+        $mutantBody = Get-YamlLiteralRunScript `
+            -Content $mutantStep `
+            -Source "$($spec.Context) :: $($mutation.Label)"
+        if ($mutantBody -cne $canonicalBody -or
+            (Test-YamlStepEnvelopeDigest `
+                -StepText $mutantStep `
+                -ExpectedSha256 $spec.ExpectedSha256)) {
+            throw "Protected workflow step envelope accepted metadata mutation: $($spec.Context) :: $($mutation.Label)"
+        }
+    }
+}
+Assert-NamedReleasePreflightSplat `
+    -StepText $releasePreflightStep `
+    -ExpectedExpressions $releasePreflightExpected `
+    -ExpectedScriptSha256 $releasePreflightScriptSha256 `
+    -Context "$releaseWorkflow :: Release preflight"
+Assert-NamedReleasePreflightSplat `
+    -StepText $readinessPreflightStep `
+    -ExpectedExpressions @{
+        Version = '$env:RELEASE_VERSION'
+        RequireSigning = '$true'
+        RequirePackageManagers =
+            '$env:REQUIRE_PACKAGE_MANAGERS -eq ''true'''
+    } `
+    -ExpectedScriptSha256 $readinessPreflightScriptSha256 `
+    -Context "$readinessWorkflow :: Validate release configuration"
+
+$releasePreflightScript = Get-YamlLiteralRunScript `
+    -Content $releasePreflightStep `
+    -Source "$releaseWorkflow :: Release preflight"
+# Intentional protected-step edits require semantic review plus body/envelope
+# digest updates; formatting changes are contract changes too.
+$releasePreflightWhitespaceMutant = $releasePreflightScript.Replace(
+    '$preflightArgs = @{',
+    '$preflightArgs  = @{'
+)
+if ($releasePreflightWhitespaceMutant -ceq $releasePreflightScript -or
+    (Test-NamedReleasePreflightSplat `
+        -ScriptText $releasePreflightWhitespaceMutant `
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256)) {
+    throw 'Release-preflight script digest accepted a whitespace mutation.'
+}
+$releasePreflightInvocationTarget =
+    './scripts/release-preflight.ps1 @preflightArgs'
+if (-not $releasePreflightScript.Contains($releasePreflightInvocationTarget)) {
+    throw 'Release-preflight mutation insertion target is missing.'
+}
+$invalidSplatMutants = @{
+    'later signing mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$preflightArgs.RequireSigning = $false
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'flat argument array' = @'
+$preflightArgs = @('-Version', $env:RELEASE_VERSION, '-RequireSigning', '-RequirePackageManagers')
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra invocation argument' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs -RequireSigning
+'@
+    'missing key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'extra key' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+    RequireAccessibilityEvidence = $true
+}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Set-Variable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+Set-Variable -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'stored provider path Set-Item mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+Set-Item -Path $providerPath -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Set-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+si -Path variable:preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Copy-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+cpi -Path variable:preflightArgs -Destination variable:shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Move-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+mv -Path variable:preflightArgs -Destination variable:shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Rename-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+rni -Path variable:preflightArgs -NewName shadow
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'New-Item alias mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+ni -Path variable:preflightArgs -Value @{} -Force
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'module-qualified New-Item stored provider path' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+Microsoft.PowerShell.Management\New-Item -Path $providerPath -Value @{} -Force
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-ChildItem alias stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = gci -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Get-Content stored provider mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$providerPath = 'variable:preflightArgs'
+$providerItem = Get-Content -Path $providerPath
+$providerItem.Value = @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'wrapped ExecutionContext mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ec = @($ExecutionContext)[0]
+$ec.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'SessionState PSVariable mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$ExecutionContext.SessionState.PSVariable.Set('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Invoke-Expression mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+iex '$preflightArgs = @{}'
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'dynamic call mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$mutator = 'Set-Variable'
+& $mutator -Name preflightArgs -Value @{}
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'static dot-source mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+. ./scripts/replace-release-evidence.ps1
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'static call-operator mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+& Write-Output harmless
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'stored reflection mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+$scriptBlockType = {}.GetType()
+$createMethod = $scriptBlockType.GetMethod('Create', [type[]]@([string]))
+$payload = $createMethod.Invoke($null, @('Set-Variable -Scope 1 -Name preflightArgs -Value @{}'))
+$payload.Invoke()
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'DefaultRunspace state proxy mutation' = @'
+$preflightArgs = @{
+    Version = $env:RELEASE_VERSION
+    RequireSigning = $true
+    RequirePackageManagers = $true
+}
+[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('preflightArgs', @{})
+./scripts/release-preflight.ps1 @preflightArgs
+'@
+    'Tee-Object variable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} | Tee-Object -Variable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'OutVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -OutV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineVariable preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'PipelineVariable prefix mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Output @{} -PipelineV preflightArgs | Out-Null`n$releasePreflightInvocationTarget"
+    )
+    'ErrorVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Write-Error forged -ErrorVariable preflightArgs -ErrorAction SilentlyContinue`n$releasePreflightInvocationTarget"
+    )
+    'PSObject member dispatch mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name preflightArgs -Value @{} } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$releasePreflightInvocationTarget"
+    )
+    'Add-Type static method mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "Add-Type -TypeDefinition 'public static class PreflightMutator { public static void Set() {} }'`n[PreflightMutator]::Set()`n$releasePreflightInvocationTarget"
+    )
+    'Assembly Load mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$releasePreflightInvocationTarget"
+    )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releasePreflightScript.Replace(
+            $releasePreflightInvocationTarget,
+            "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'`n$releasePreflightInvocationTarget"
+        )
+    'PSCmdlet session-state mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "function Invoke-PreflightMutation { [CmdletBinding()] param(); `$PSCmdlet.SessionState.PSVariable.Set('script:preflightArgs', @{}) }; Invoke-PreflightMutation`n$releasePreflightInvocationTarget"
+    )
+    'splatted PipelineVariable mutation' = $releasePreflightScript.Replace(
+        $releasePreflightInvocationTarget,
+        "`$writeParams = @{ PipelineVariable = 'preflightArgs' }; Write-Output @{} @writeParams`n$releasePreflightInvocationTarget"
+    )
+}
+foreach ($mutant in $invalidSplatMutants.GetEnumerator()) {
+    if (Test-NamedReleasePreflightSplat `
+        -ScriptText $mutant.Value `
+        -ExpectedExpressions $releasePreflightExpected `
+        -ExpectedScriptSha256 $releasePreflightScriptSha256) {
+        throw "Named release-preflight splat contract accepted mutant: $($mutant.Key)"
+    }
+}
+
+$releaseInteractiveEvidenceScript = Get-YamlLiteralRunScript `
+    -Content $releaseInteractiveEvidenceStep `
+    -Source "$releaseWorkflow :: Require successful Test workflow for release SHA"
+if (-not (Test-ReleaseInteractiveResultSelectionContract `
+    -ScriptText $releaseInteractiveEvidenceScript)) {
+    throw 'Release interactive evidence must select one composite result without arbitrary first-match fallback.'
+}
+$countGateText = 'if ($resultFiles.Count -ne 1) { continue }'
+$countGateIndex = $releaseInteractiveEvidenceScript.IndexOf(
+    $countGateText,
+    [StringComparison]::Ordinal
+)
+if ($countGateIndex -lt 0) {
+    throw 'Release result-selection count gate mutation target is missing.'
+}
+$countBeforeFilterScript = $releaseInteractiveEvidenceScript.Remove(
+    $countGateIndex,
+    $countGateText.Length
+)
+$resultFilterIndex = $countBeforeFilterScript.IndexOf(
+    '$resultFiles = @(',
+    [StringComparison]::Ordinal
+)
+if ($resultFilterIndex -lt 0) {
+    throw 'Release result-selection filter mutation target is missing.'
+}
+$countBeforeFilterScript = $countBeforeFilterScript.Insert(
+    $resultFilterIndex,
+    "$countGateText`n"
+)
+$filterAfterCountScript = @'
+$resultFiles = @(
+    Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse
+)
+if ($resultFiles.Count -ne 1) { continue }
+$resultFiles = @(
+    $resultFiles | Where-Object {
+        try {
+            (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
+        }
+        catch { $false }
+    }
+)
+$resultPath = $resultFiles[0].FullName
+$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+'@
+$noCatchScript = [regex]::Replace(
+    $releaseInteractiveEvidenceScript,
+    '(?ms)try\s*\{\s*(?<predicate>\(Get-Content -LiteralPath \$_\.FullName -Raw \| ConvertFrom-Json\)\.scenario_id -eq ''windows\.interactive-win11\.composite'')\s*\}\s*catch\s*\{\s*\$false\s*\}',
+    '${predicate}'
+)
+$invalidResultSelectionMutants = @{
+    'zero-only count' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultFiles.Count -ne 1',
+        '$resultFiles.Count -eq 0'
+    )
+    'wrong scenario' = $releaseInteractiveEvidenceScript.Replace(
+        'windows.interactive-win11.composite',
+        'windows.interactive-win11.other'
+    )
+    'arbitrary first match' =
+        $releaseInteractiveEvidenceScript + "`nSelect-Object -First 1"
+    'count before filter' = $countBeforeFilterScript
+    'filter after count' = $filterAfterCountScript
+    'missing catch' = $noCatchScript
+    'fail-open catch' = $releaseInteractiveEvidenceScript.Replace(
+        'catch { $false }',
+        'catch { $true }'
+    )
+    'nested count gate' = $releaseInteractiveEvidenceScript.Replace(
+        'if ($resultFiles.Count -ne 1) { continue }',
+        'if ($false) { if ($resultFiles.Count -ne 1) { continue } }'
+    )
+    'nested result path' = $releaseInteractiveEvidenceScript.Replace(
+        '$resultPath = $resultFiles[0].FullName',
+        'if ($false) { $resultPath = $resultFiles[0].FullName }'
+    )
+    'nested result parse' = $releaseInteractiveEvidenceScript.Replace(
+        '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json',
+        'if ($false) { $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }'
+    )
+}
+foreach ($mutant in $invalidResultSelectionMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveResultSelectionContract -ScriptText $mutant.Value) {
+        throw "Release result-selection contract accepted mutant: $($mutant.Key)"
+    }
+}
+if (-not (Test-ReleaseInteractiveSuccessPredicates `
+    -ScriptText $releaseInteractiveEvidenceScript `
+    -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256)) {
+    throw 'Release interactive evidence must require successful exact-head candidates and a passing result.'
+}
+$runsSourceTarget = '$runs = @($runsJson | ConvertFrom-Json)'
+$otherJsonSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $runsSourceTarget,
+    '$runs = @($otherJson | ConvertFrom-Json)'
+)
+$matchingSourceTarget = '$matching = @($runs | Where-Object {'
+$otherRunsSourceScript = $releaseInteractiveEvidenceScript.Replace(
+    $matchingSourceTarget,
+    '$matching = @($otherRuns | Where-Object {'
+)
+$matchingCountTarget = 'if ($matching.Count -eq 0) {'
+$shaAssignmentTarget = '$sha = (git rev-parse HEAD).Trim()'
+$resultAssignmentTarget =
+    '$result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json'
+$artifactFloorTarget =
+    'if (@($result.artifacts).Count -eq 0) { continue }'
+$hashAcceptanceTarget = 'if ($result.status -eq ''pass'' -and'
+$evidenceGuardTarget = 'if (-not $evidenceRun) {'
+$resultDirAssignmentTarget =
+    '$resultDir = Split-Path -Parent $resultPath'
+$resultDirJoinTarget =
+    'Join-Path $resultDir ([string]$artifact.path)'
+$evidenceWriteTarget =
+    'Write-Host "Release SHA $sha is covered by interactive Test run $($evidenceRun.databaseId)."'
+$missingMetadataGuardTarget =
+    'if (-not $artifact.sha256 -or -not $artifact.path) {'
+$containmentGuardTarget =
+    'if (-not $artifactPath.StartsWith($artifactRootFull, [StringComparison]::OrdinalIgnoreCase) -or' +
+        "`n" +
+        '        -not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {'
+$hashMismatchGuardTarget =
+    'if ($actualHash -ne ([string]$artifact.sha256).ToLowerInvariant()) {'
+if ($otherJsonSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    $otherRunsSourceScript -ceq $releaseInteractiveEvidenceScript -or
+    -not $releaseInteractiveEvidenceScript.Contains($matchingCountTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($shaAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($artifactFloorTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($hashAcceptanceTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($evidenceGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultDirAssignmentTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($resultDirJoinTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($evidenceWriteTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($missingMetadataGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($containmentGuardTarget) -or
+    -not $releaseInteractiveEvidenceScript.Contains($hashMismatchGuardTarget)) {
+    throw 'Release success-predicate source-binding mutation target is missing.'
+}
+$addTypeEvidenceMutation =
+    "Add-Type -TypeDefinition 'public static class EvidenceMutator { public static void Set() {} }'`n[EvidenceMutator]::Set()"
+$memberDispatchEvidenceMutation =
+    "[PSObject].Assembly | ForEach-Object -MemberName ('Get' + 'Type') -ArgumentList 'System.Management.Automation.ScriptBlock'"
+$invalidSuccessSourceMutants = @{
+    'runs JSON source substitution' = $otherJsonSourceScript
+    'runs JSON source comment decoy' =
+        $otherJsonSourceScript + "`n# $runsSourceTarget"
+    'runs JSON source dead-code decoy' =
+        $otherJsonSourceScript +
+            "`n" +
+            'if ($false) { $runs = @($runsJson | ConvertFrom-Json) }'
+    'matching source substitution' = $otherRunsSourceScript
+    'matching source comment decoy' =
+        $otherRunsSourceScript + "`n# $matchingSourceTarget"
+    'matching source dead-code decoy' =
+        $otherRunsSourceScript +
+            "`n" +
+            'if ($false) { $matching = @($runs | Where-Object { $_.headSha -eq $sha -and $_.status -eq "completed" -and $_.conclusion -eq "success" }) }'
+    'live nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$true) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'dead nested runs JSON reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "if (`$false) { `$runsJson = `$otherJson }`n$runsSourceTarget"
+        )
+    'live nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$true) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'dead nested runs reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nif (`$false) { `$runs = @(`$otherJson | ConvertFrom-Json) }"
+        )
+    'live nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$true) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'dead nested matching reassignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "if (`$false) { `$matching = @(`$otherRuns) }`n$matchingCountTarget"
+        )
+    'indexed runs JSON mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$runsJson[0] = 'x'`n$runsSourceTarget"
+        )
+    'indexed runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs[0] = `$otherRun"
+        )
+    'indexed matching mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$matching[0] = `$otherRun`n$matchingCountTarget"
+        )
+    'runs method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$runs.Clear()"
+        )
+    'matching member decoy' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$null = `$matching.Count`n$matchingCountTarget"
+        )
+    'runs JSON unexpected read' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "`$null = `$runsJson`n$runsSourceTarget"
+        )
+    'Set-Variable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`nSet-Variable -Name runs -Value @(`$otherRun)"
+        )
+    'SessionState PSVariable runs mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $runsSourceTarget,
+            "$runsSourceTarget`n`$ExecutionContext.SessionState.PSVariable.Set('runs', @(`$otherRun))"
+        )
+    'qualified Set-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nMicrosoft.PowerShell.Utility\Set-Variable -Name runs -Value @(`$otherRun)"
+    'Set-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nsv -Name runs -Value @(`$otherRun)"
+    'Set-Variable set alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nset -Name runs -Value @(`$otherRun)"
+    'New-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nNew-Variable -Name runs -Value @(`$otherRun)"
+    'New-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nnv -Name runs -Value @(`$otherRun)"
+    'Remove-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nRemove-Variable -Name runs"
+    'Remove-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nrv -Name runs"
+    'Clear-Variable mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nClear-Variable -Name runs"
+    'Clear-Variable alias mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`nclv -Name runs"
+    'Invoke-Expression mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`niex '`$runs = @(`$otherRun)'"
+    'ScriptBlock Create mutation' =
+        $releaseInteractiveEvidenceScript +
+            "`n[ScriptBlock]::Create('`$runs = @(`$otherRun)').Invoke()"
+    'dynamic Set-Variable call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Command call mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& (Get-Command Set-Variable) -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'module-qualified stored command mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$mutator = 'Microsoft.PowerShell.Utility\Set-Variable'`n& `$mutator -Name matching -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'static dot-source mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            ". ./scripts/replace-release-evidence.ps1`n$matchingCountTarget"
+        )
+    'static call-operator mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "& Write-Output harmless`n$matchingCountTarget"
+        )
+    'stored reflection mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$scriptBlockType = {}.GetType()`n`$createMethod = `$scriptBlockType.GetMethod('Create', [type[]]@([string]))`n`$payload = `$createMethod.Invoke(`$null, @('Set-Variable -Scope 1 -Name matching -Value @()'))`n`$payload.Invoke()`n$matchingCountTarget"
+        )
+    'DefaultRunspace state proxy mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[runspace]::DefaultRunspace.SessionStateProxy.SetVariable('matching', @(`$otherRun))`n$matchingCountTarget"
+        )
+    'Tee-Object variable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) | Tee-Object -Variable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'OutVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -OutV matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineVariable matching | Out-Null`n$matchingCountTarget"
+        )
+    'PipelineVariable prefix mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Output ([pscustomobject]@{ databaseId = 4242 }) -PipelineV matching | Out-Null`n$matchingCountTarget"
+        )
+    'ErrorVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "Write-Error forged -ErrorVariable matching -ErrorAction SilentlyContinue`n$matchingCountTarget"
+        )
+    'PSObject member dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$dispatch = [pscustomobject]@{ mutate = { Set-Variable -Scope 1 -Name matching -Value @() } }`n`$dispatch.PSObject.Properties['mutate'].Value.Invoke()`n$matchingCountTarget"
+        )
+    'Add-Type static method mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $addTypeEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'Assembly Load mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "[Reflection.Assembly]::Load([Convert]::FromBase64String('AA=='))`n$matchingCountTarget"
+        )
+    'ForEach-Object MemberName dispatch mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            $memberDispatchEvidenceMutation + "`n" + $matchingCountTarget
+        )
+    'PSCmdlet session-state mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "function Invoke-EvidenceMutation {`n    [CmdletBinding()]`n    param()`n    `$PSCmdlet.SessionState.PSVariable.Set('script:matching', @())`n}`nInvoke-EvidenceMutation`n$matchingCountTarget"
+        )
+    'splatted OutVariable mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$writeParams = @{ OutVariable = 'matching' }`nWrite-Output ([pscustomobject]@{ databaseId = 4242 }) @writeParams`n$matchingCountTarget"
+        )
+    'stored provider path Set-Item mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`nSet-Item -Path `$providerPath -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'stored provider path Get-Item access' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Item -Path `$providerPath`n$matchingCountTarget"
+        )
+    'Clear-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "cli -Path variable:matching`n$matchingCountTarget"
+        )
+    'Remove-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "ri -Path variable:matching`n$matchingCountTarget"
+        )
+    'Copy-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "cpi -Path variable:matching -Destination variable:other`n$matchingCountTarget"
+        )
+    'Move-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "mv -Path variable:matching -Destination variable:other`n$matchingCountTarget"
+        )
+    'Rename-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "rni -Path variable:matching -NewName other`n$matchingCountTarget"
+        )
+    'ItemProperty alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "sp -Path variable:matching -Name Value -Value @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Content alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "sc -Path variable:matching -Value 'forged'`n$matchingCountTarget"
+        )
+    'extra New-Item alias mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "ni -Path variable:matching -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'module-qualified New-Item stored provider path' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`nMicrosoft.PowerShell.Management\New-Item -Path `$providerPath -Value @(`$otherRun) -Force`n$matchingCountTarget"
+        )
+    'Get-ChildItem alias stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = gci -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'Get-Content stored provider mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$providerPath = 'variable:matching'`n`$providerItem = Get-Content -Path `$providerPath`n`$providerItem.Value = @(`$otherRun)`n$matchingCountTarget"
+        )
+    'wrapped ExecutionContext mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $matchingCountTarget,
+            "`$ec = @(`$ExecutionContext)[0]`n`$ec.SessionState.PSVariable.Set('matching', @(`$otherRun))`n$matchingCountTarget"
+        )
+    'count-preserving evidenceRun ref substitution' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $evidenceWriteTarget,
+            "`$evidenceRunRef = [ref]`$evidenceRun`nWrite-Host `"Release SHA `$sha is covered by an interactive Test run.`""
+        )
+    'count-preserving resultDir ref substitution' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultDirAssignmentTarget,
+            "$resultDirAssignmentTarget`n`$resultDirRef = [ref]`$resultDir"
+        ).Replace(
+            $resultDirJoinTarget,
+            'Join-Path $artifactRoot ([string]$artifact.path)'
+        )
+    'missing metadata guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $missingMetadataGuardTarget,
+            'if ($false) {'
+        )
+    'containment guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $containmentGuardTarget,
+            'if ($false) {'
+        )
+    'hash mismatch guard neutralized' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $hashMismatchGuardTarget,
+            'if ($false) {'
+        )
+    'forged result assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`nif (`$true) { `$result = [pscustomobject]@{ status = 'pass'; implementation_commit = `$sha; workflow_run_id = `$run.databaseId; artifacts = @() } }"
+        )
+    'forged SHA assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $shaAssignmentTarget,
+            "$shaAssignmentTarget`nif (`$true) { `$sha = 'forged' }"
+        )
+    'forged hashes-bound assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $hashAcceptanceTarget,
+            "if (`$true) { `$hashesBound = `$true }`n$hashAcceptanceTarget"
+        )
+    'forged evidence-run assignment' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $evidenceGuardTarget,
+            "if (`$true) { `$evidenceRun = [pscustomobject]@{ databaseId = 1 } }`n$evidenceGuardTarget"
+        )
+    'result member mutation' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $resultAssignmentTarget,
+            "$resultAssignmentTarget`n`$result.status = 'pass'"
+        )
+    'vacuous artifact floor' =
+        $releaseInteractiveEvidenceScript.Replace(
+            $artifactFloorTarget,
+            'if (@($result.artifacts).Count -lt 0) { continue }'
+        )
+}
+foreach ($mutant in $invalidSuccessSourceMutants.GetEnumerator()) {
+    if (Test-ReleaseInteractiveSuccessPredicates `
+        -ScriptText $mutant.Value `
+        -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
+        throw "Release success-predicate contract accepted source mutant: $($mutant.Key)"
+    }
+}
+$successPredicateMutationSpecs = @(
+    [pscustomobject]@{
+        Label = 'GitHub success filter'
+        Active = '--status success'
+        Removed = '--status queued'
+        Inverted = '--status failure'
+        Dead = 'if ($false) { ''--status success'' }'
+    },
+    [pscustomobject]@{
+        Label = 'exact candidate head'
+        Active = '$_.headSha -eq $sha'
+        Removed = '$true'
+        Inverted = '$_.headSha -ne $sha'
+        Dead = 'if ($false) { $_.headSha -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'completed candidate'
+        Active = '$_.status -eq "completed"'
+        Removed = '$true'
+        Inverted = '$_.status -ne "completed"'
+        Dead = 'if ($false) { $_.status -eq "completed" }'
+    },
+    [pscustomobject]@{
+        Label = 'successful candidate'
+        Active = '$_.conclusion -eq "success"'
+        Removed = '$true'
+        Inverted = '$_.conclusion -ne "success"'
+        Dead = 'if ($false) { $_.conclusion -eq "success" }'
+    },
+    [pscustomobject]@{
+        Label = 'passing result'
+        Active = '$result.status -eq ''pass'''
+        Removed = '$true'
+        Inverted = '$result.status -ne ''pass'''
+        Dead = 'if ($false) { $result.status -eq ''pass'' }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence implementation SHA'
+        Active = '$result.implementation_commit -eq $sha'
+        Removed = '$true'
+        Inverted = '$result.implementation_commit -ne $sha'
+        Dead = 'if ($false) { $result.implementation_commit -eq $sha }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence workflow run'
+        Active =
+            '[string]$result.workflow_run_id -eq [string]$run.databaseId'
+        Removed = '$true'
+        Inverted =
+            '[string]$result.workflow_run_id -ne [string]$run.databaseId'
+        Dead =
+            'if ($false) { [string]$result.workflow_run_id -eq [string]$run.databaseId }'
+    },
+    [pscustomobject]@{
+        Label = 'evidence artifact hashes'
+        Active = '$hashesBound'
+        Removed = '$true'
+        Inverted = '-not $hashesBound'
+        Dead = 'if ($false) { $hashesBound }'
+    }
+)
+foreach ($spec in $successPredicateMutationSpecs) {
+    $targetIndex = $releaseInteractiveEvidenceScript.LastIndexOf(
+        $spec.Active,
+        [StringComparison]::Ordinal
+    )
+    if ($targetIndex -lt 0) {
+        throw "Release success-predicate mutation target is missing: $($spec.Label)"
+    }
+    $prefix = $releaseInteractiveEvidenceScript.Substring(0, $targetIndex)
+    $suffix = $releaseInteractiveEvidenceScript.Substring(
+        $targetIndex + $spec.Active.Length
+    )
+    $removedScript = $prefix + $spec.Removed + $suffix
+    $invertedScript = $prefix + $spec.Inverted + $suffix
+    $mutants = @(
+        [pscustomobject]@{
+            Label = "$($spec.Label) inversion"
+            Script = $invertedScript
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) comment decoy"
+            Script = $removedScript + "`n# $($spec.Active)"
+        },
+        [pscustomobject]@{
+            Label = "$($spec.Label) dead-code decoy"
+            Script = $removedScript + "`n$($spec.Dead)"
+        }
+    )
+    foreach ($mutant in $mutants) {
+        if (Test-ReleaseInteractiveSuccessPredicates `
+            -ScriptText $mutant.Script `
+            -ExpectedScriptSha256 $releaseInteractiveEvidenceScriptSha256) {
+            throw "Release success-predicate contract accepted mutant: $($mutant.Label)"
+        }
+    }
+}
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Release preflight' -Source $releaseWorkflow) `
+    -Content $releaseInteractiveEvidenceStep `
+    -Pattern '(?ms)gh run list.*?--workflow Test.*?--commit \$sha.*?\$_\.name -eq ''Windows 11 Interactive Composite''.*?\$_\.conclusion -eq ''success''.*?\$artifact\.sha256.*?\$artifact\.path.*?Get-FileHash.*?\$result\.implementation_commit -eq \$sha.*?\$result\.workflow_run_id.*?\$hashesBound.*?exact-SHA, hash-bound evidence' `
+    -Description 'release remains gated on successful exact-SHA hash-bound interactive evidence' `
+    -Context "$releaseWorkflow :: Require successful Test workflow for release SHA"
+Assert-TextContract `
+    -Content $releasePreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release preflight propagates release-copy failures' `
     -Context "$releaseWorkflow :: Release preflight"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $readinessWorkflowText -Name 'Validate release configuration' -Source $readinessWorkflow) `
+    -Content $readinessPreflightStep `
     -Pattern '(?ms)check-release-copy\.ps1 -ExpectedVersion.*?\r?\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'release readiness propagates release-copy failures' `
     -Context "$readinessWorkflow :: Validate release configuration"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Verify published release copy and assets' -Source $releaseWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}.*?verify-published-release\.ps1 -Version \$env:RELEASE_VERSION.*?if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}' `
     -Description 'post-publish remote verification authenticates gh and fails closed on copy and byte/signature checks' `
     -Context "$releaseWorkflow :: Verify published release copy and assets"
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
+    -Content (Get-YamlStepBlock -Content $releaseWorkflowText -Name 'Publish GitHub Release' -Source $releaseWorkflow) `
     -Pattern '(?ms)GH_REPO: \$\{\{ github\.repository \}\}.*?gh release view \$tag --repo \$env:GH_REPO.*?gh release create \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release edit \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\).*?gh release upload \$tag --repo \$env:GH_REPO.*?if \(\$LASTEXITCODE -ne 0\)' `
     -Description 'GitHub release commands pin the fork and mutations fail closed' `
     -Context "$releaseWorkflow :: Publish GitHub Release"
-$signedArtifactStep = Get-YamlStepText `
+$defenderScanStep = Get-YamlStepBlock `
+    -Content $releaseWorkflowText `
+    -Name 'Scan Windows release artifacts with Microsoft Defender' `
+    -Source $releaseWorkflow
+Assert-TextContract `
+    -Content $defenderScanStep `
+    -Pattern '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne "Normal".*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?Get-WindowsPackageArchitectures.*?-Kind setup.*?noctty-release-verify-\$arch.*?scanPaths\.Count -ne 8.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)' `
+    -Description 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed' `
+    -Context "$releaseWorkflow :: Scan Windows release artifacts with Microsoft Defender"
+$signedArtifactStepIndex = $releaseWorkflowText.IndexOf('      - name: Verify signed release artifacts')
+$defenderScanStepIndex = $releaseWorkflowText.IndexOf('      - name: Scan Windows release artifacts with Microsoft Defender')
+$publishReleaseStepIndex = $releaseWorkflowText.IndexOf('      - name: Publish GitHub Release')
+if ($signedArtifactStepIndex -lt 0 -or
+    $defenderScanStepIndex -le $signedArtifactStepIndex -or
+    $publishReleaseStepIndex -le $defenderScanStepIndex) {
+    throw 'Microsoft Defender scanning must run after artifact verification and before release publication.'
+}
+$signedArtifactStep = Get-YamlStepBlock `
     -Content $releaseWorkflowText `
     -Name 'Verify signed release artifacts' `
     -Source $releaseWorkflow
@@ -2878,10 +7984,10 @@ $signingTestAst = [System.Management.Automation.Language.Parser]::ParseInput(
 $signingTestInitializers = @($signingTestAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.GetCommandName() -eq 'Initialize-WinghosttyAuthenticodeVerifier'
+        $node.GetCommandName() -eq 'Initialize-NocttyAuthenticodeVerifier'
 }, $true))
 $firstDirectVerifierIndex = $signingTrustTestText.IndexOf(
-    '[WinghosttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)'
+    '[NocttyAuthenticodeVerifier]::VerifyEmbeddedSignatureAndFileHash($signedPath)'
 )
 if ($signingTestErrors.Count -ne 0 -or
     $signingTestInitializers.Count -ne 1 -or
@@ -2922,7 +8028,7 @@ foreach ($contract in @(
     @{ Pattern = '(?s)\$checksums\.Count -ne \$expectedChecksumNames\.Count.*?\$checksums\.Contains\(\$_\).*?\$checksums\[\$name\] -ne \$actualHash'; Description = 'published verifier enforces exact checksum names, count, and hashes' },
     @{ Pattern = '(?s)\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?Setup \$architecture.*?foreach \(\$relativePath.*?\$signatureEvidence\.Add\(\(Assert-PublishedSignature.*?\$signatureEvidence\.Count -ne 8'; Description = 'published verifier validates exactly eight downloaded Authenticode signatures' },
     @{ Pattern = '(?s)Get-CertificateSpkiSha256.*?\$AllowedPins -notcontains \$pin.*?\$thumbprints\.Count -ne 1 -or \$pins\.Count -ne 1'; Description = 'published verifier binds every downloaded signer to one updater SPKI' },
-    @{ Pattern = "winghostty/winghostty\.com'.*?winghostty/winghostty\.exe'.*?winghostty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
+    @{ Pattern = "noctty/noctty\.com'.*?noctty/noctty\.exe'.*?noctty/ghostty-vt\.dll'"; Description = 'published verifier checks every packaged runtime PE for both architectures' }
     @{ Pattern = '(?s)finally \{.*?\$createdTempDirectory.*?\$DownloadDirectory\.StartsWith\(\$tempRoot.*?for \(\$attempt = 1; \$attempt -le 3; \$attempt\+\+\).*?Remove-Item .*?-ErrorAction Stop.*?Write-Warning'; Description = 'published verifier guards, retries, and reports temporary cleanup' }
 )) {
     Assert-TextContract `
@@ -2932,12 +8038,12 @@ foreach ($contract in @(
         -Context $publishedReleaseVerifier
 }
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Remote release copy checks' -Source $testWorkflow) `
     -Pattern '(?ms)env:\s+GH_TOKEN: \$\{\{ github\.token \}\}.*?CheckRemoteLatest' `
     -Description 'scheduled remote verification authenticates gh' `
     -Context "$testWorkflow :: Remote release copy checks"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows") `
@@ -2945,7 +8051,7 @@ Assert-TextContract `
     -Description 'hosted Windows tests cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-portable-smoke' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-portable-smoke") `
@@ -2953,7 +8059,7 @@ Assert-TextContract `
     -Description 'portable smoke cannot restore failed Zig build caches' `
     -Context "$testWorkflow :: windows-portable-smoke :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $releaseWorkflowText -Name 'windows-release' -Source $releaseWorkflow) `
         -Name 'Setup Zig' `
         -Source "$releaseWorkflow :: windows-release") `
@@ -2961,7 +8067,7 @@ Assert-TextContract `
     -Description 'release builds cannot restore failed Zig build caches' `
     -Context "$releaseWorkflow :: windows-release :: Setup Zig"
 Assert-TextContract `
-    -Content (Get-YamlStepText `
+    -Content (Get-YamlStepBlock `
         -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
         -Name 'Setup Zig' `
         -Source "$testWorkflow :: windows-interactive") `
@@ -2973,7 +8079,7 @@ Assert-TextContract `
     -Pattern '(?m)^\s*timeout-minutes:\s+60\s*$' `
     -Description 'full interactive validation has enough job budget for the accessibility soak' `
     -Context "$testWorkflow :: windows-interactive"
-$interactiveRunStep = Get-YamlStepText `
+$interactiveRunStep = Get-YamlStepBlock `
     -Content (Get-YamlJobText -Content $testWorkflowText -Name 'windows-interactive' -Source $testWorkflow) `
     -Name 'Run interactive Win11 composite' `
     -Source "$testWorkflow :: windows-interactive"
@@ -2990,6 +8096,8 @@ $ErrorActionPreference = 'Stop'
 $quick = '${{ github.event_name }}' -eq 'pull_request'
 if ($quick) {
   ./test/windows/interactive-win11-pr-smoke.ps1 -Rebuild -ResetState
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  ./test/windows/interactive-win11-shaders.ps1 -Rebuild -ResetState
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } else {
   ./test/windows/flagship/Invoke-InteractiveWin11.ps1 -Rebuild -ResetState -IncludeForegroundHarness
@@ -3017,6 +8125,15 @@ Assert-WorkflowContract `
     -Pattern "(?s)custom shaders: enabled.*?R -ge 220.*?G -le 40.*?B -ge 220" `
     -Description 'shader harness verifies both the compiled capability and visible magenta output'
 Assert-WorkflowContract `
+    -Path $shaderHarness `
+    -Pattern '(?ms)Show-StatefulHost \$hostHwnd\r?\n\s+\$graphics\.CopyFromScreen.*?Show-StatefulHost \$hostHwnd\r?\n\s+\$argb = Get-StatefulPixel' `
+    -Description 'shader harness refocuses the host immediately before both screen-pixel captures'
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Verify default source-build shader mode' -Source $testWorkflow) `
+    -Pattern '(?ms)noctty\.com \+version.*?Build Config.*?custom shaders: disabled' `
+    -Description 'default source build executes the CLI and reports custom shaders disabled' `
+    -Context "$testWorkflow :: Verify default source-build shader mode"
+Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\dev-windows.cmd') `
     -Pattern '(?s)if "%ZIG_GLOBAL_CACHE_DIR%"=="" set "ZIG_GLOBAL_CACHE_DIR=.*?if "%ZIG_LOCAL_CACHE_DIR%"=="" set "ZIG_LOCAL_CACHE_DIR=' `
     -Description 'Windows bootstrap preserves caller-provided Zig cache isolation'
@@ -3025,7 +8142,7 @@ Assert-WorkflowContract `
     -Pattern '(?s)IsNullOrWhiteSpace\(\$env:ZIG_GLOBAL_CACHE_DIR\).*?IsNullOrWhiteSpace\(\$env:ZIG_LOCAL_CACHE_DIR\)' `
     -Description 'PowerShell Windows bootstrap preserves caller-provided Zig cache isolation'
 Assert-TextContract `
-    -Content (Get-YamlStepText -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
+    -Content (Get-YamlStepBlock -Content $testWorkflowText -Name 'Upload interactive evidence' -Source $testWorkflow) `
     -Pattern '(?ms)include-hidden-files: true.*?github\.workspace.*?\.sandbox/win11/\*\*/logs/\*\*' `
     -Description 'interactive evidence upload includes the actual hidden sandbox log tree' `
     -Context "$testWorkflow :: Upload interactive evidence"
@@ -3143,11 +8260,11 @@ Assert-WorkflowContract `
     -Description 'accessibility evidence requires runner provenance to be a JSON object'
 Assert-WorkflowContract `
     -Path $accessibilityChecker `
-    -Pattern "schema_version -ne 'winghostty\.interactive-runner-provenance\.v1'" `
+    -Pattern "schema_version -ne 'noctty\.interactive-runner-provenance\.v1'" `
     -Description 'accessibility evidence rejects unsupported runner provenance schemas'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
-    -Pattern 'WINGHOSTTY_EXPECTED_CHECKOUT_SHA' `
+    -Pattern 'NOCTTY_EXPECTED_CHECKOUT_SHA' `
     -Description 'interactive provenance can verify an exact PR head checkout instead of only GITHUB_SHA'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
@@ -3161,6 +8278,10 @@ Assert-WorkflowContract `
     -Path (Join-Path $repoRoot '.github\workflows\windows-arm64.yml') `
     -Pattern "ref: \\\$\\{\\{ github\\.event_name == 'pull_request' && github\\.event\\.pull_request\\.head\\.sha \\|\\| github\\.sha \\}\\}" `
     -Description 'ARM64 workflow checkout uses the immutable PR head SHA for pull requests'
+Assert-WorkflowContract `
+    -Path (Join-Path $repoRoot '.github\workflows\windows-arm64.yml') `
+    -Pattern '(?ms)Run ARM64 CLI smoke.*?Build Config.*?custom shaders: enabled.*?Run packaged ARM64 CLI smoke.*?Build Config.*?custom shaders: enabled' `
+    -Description 'native and packaged ARM64 CLI smokes retain version output and shader capability coverage'
 Assert-WorkflowContract `
     -Path $runnerProvenanceChecker `
     -Pattern '\$runnerVersion -lt \$minimumRunnerVersion' `
@@ -3193,8 +8314,12 @@ Assert-WorkflowContract `
     -Description 'Windows packaging checks every x64 runtime PE for baseline compatibility'
 Assert-WorkflowContract `
     -Path $windowsPackager `
-    -Pattern '(?ms)\$hostArchitecture -eq \$Architecture.*?winghostty\.com.*?\+version.*?custom shaders: enabled.*?defer custom shader capability check to native \$Architecture smoke' `
-    -Description 'Windows packaging verifies shader capability natively and defers cross-target execution explicitly'
+    -Pattern '(?ms)Assert-WindowsBuildCapabilitiesManifest.*?Packaging arch.*?\$hostArchitecture -eq \$Architecture.*?noctty\.com.*?\+version.*?custom shaders: enabled.*?hash-bound \$Architecture build manifest' `
+    -Description 'Windows packaging verifies hash-bound shader capability for every target and executes native packages'
+Assert-WorkflowContract `
+    -Path $windowsBuildCapabilities `
+    -Pattern '(?ms)Get-FileHash.*?custom_shaders = \$true.*?custom_shaders -ne \$true.*?Get-FileHash.*?\$actualHash -cne \[string\] \$hashProperty\.Value' `
+    -Description 'build capability manifests bind shader support to every runtime artifact hash'
 Assert-WorkflowContract `
     -Path (Join-Path $repoRoot 'scripts\check-windows-x64-baseline.ps1') `
     -Pattern '(?ms)Get-Command llvm-objdump\.exe.*?\$objdumpTimeoutMs = 120000.*?\$objdumpKillTimeoutMs = 5000.*?\$streamCopyTimeoutMs = 30000.*?WaitForExit\(\$objdumpTimeoutMs\).*?\$objdumpProcess\.Kill\(\).*?WaitForExit\(\$objdumpKillTimeoutMs\).*?llvm-objdump did not exit after termination.*?WaitAll\(.*?\$streamCopyTimeoutMs.*?llvm-objdump stream cleanup timed out' `
@@ -3209,6 +8334,938 @@ Assert-TextContract `
     -Pattern '(?ms)Assert-WingetArchitectureCoverage\s+`\r?\n\s+-ManifestPath' `
     -Description 'package-manager preflight invokes the WinGet architecture gate' `
     -Context "$releasePreflight :: RequirePackageManagers"
+
+foreach ($siteScript in @(
+    $sitePayloadBuilder,
+    $siteHeaderContract,
+    $siteDeploymentHeadGate,
+    $cloudflarePagesVerifier
+)) {
+    $siteScriptTokens = $null
+    $siteScriptErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        $siteScript,
+        [ref]$siteScriptTokens,
+        [ref]$siteScriptErrors
+    )
+    if ($siteScriptErrors.Count -ne 0) {
+        throw "Site deployment script does not parse: $siteScript ($($siteScriptErrors[0].Message))"
+    }
+    Assert-TextContract `
+        -Content (Get-Content -LiteralPath $siteScript -Raw) `
+        -Pattern '(?m)^#requires -Version 7\.3\s*$' `
+        -Description 'workflow-owned site deployment scripts declare their PowerShell 7.3 floor' `
+        -Context $siteScript
+}
+
+Assert-TextContract `
+    -Content $siteDeployWorkflowText `
+    -Pattern '(?ms)^on:\s+push:\s+branches:\s+- main\s+release:\s+types:\s+- published\s+workflow_dispatch:\s*$' `
+    -Description 'site deployment catches every main advance plus published releases and manual dispatch' `
+    -Context $siteDeployWorkflow
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s+paths(?:-ignore)?:' `
+    -Description 'site deployment cannot strand a site change behind a later path-filtered main advance'
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s*(?:pull_request|pull_request_target):' `
+    -Description 'site deployment never runs for pull requests'
+Assert-TextContract `
+    -Content $siteDeployWorkflowText `
+    -Pattern '(?ms)^permissions:\s+contents: read\s+deployments: write\s+.*?^concurrency:\s+group: cloudflare-pages-production\s+cancel-in-progress: false\s*$' `
+    -Description 'site deployment uses minimum repository permissions and serialized non-canceling production concurrency' `
+    -Context $siteDeployWorkflow
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $siteDeployWorkflowText -Name 'deploy' -Source $siteDeployWorkflow) `
+    -Pattern '(?m)^\s+environment: cloudflare-pages-production\s*$' `
+    -Description 'site deployment is protected by the production environment' `
+    -Context "$siteDeployWorkflow :: deploy"
+Assert-TextContract `
+    -Content (Get-YamlJobText -Content $siteDeployWorkflowText -Name 'deploy' -Source $siteDeployWorkflow) `
+    -Pattern "(?m)^\s+if: github\.event_name != 'release' \|\| github\.event\.release\.prerelease == false\s*$" `
+    -Description 'stable site publication ignores prerelease events' `
+    -Context "$siteDeployWorkflow :: deploy"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Checkout exact event commit' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd.*?ref: \$\{\{ github\.event_name == ''release'' && github\.event\.repository\.default_branch \|\| github\.sha \}\}.*?persist-credentials: false' `
+    -Description 'site checkout uses exact event commits for pushes and current main for release publication' `
+    -Context "$siteDeployWorkflow :: checkout"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Resolve exact deployment commit' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)id: source.*?\$sha = git rev-parse HEAD.*?\$LASTEXITCODE -ne 0.*?\$sha = \(\[string\]\(\$sha -join "`n"\)\)\.Trim\(\).*?\^\[0-9a-f\]\{40\}\$.*?"sha=\$sha" >> \$env:GITHUB_OUTPUT' `
+    -Description 'site deployment fails closed before recording the full resolved source SHA' `
+    -Context "$siteDeployWorkflow :: source"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Validate committed site bundle and copy' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)GH_TOKEN:.*?github\.token.*?RELEASE_TAG:.*?github\.event\.release\.tag_name.*?check-site-copy\.ps1.*?node scripts/build-site-assets\.mjs --check.*?get-site-header-contract\.ps1.*?GITHUB_EVENT_NAME -eq ''release''.*?RELEASE_TAG -cnotmatch ''\^v\(\?<version>\\d\+\\\.\\d\+\\\.\\d\+\)\$''.*?check-release-copy\.ps1.*?-ExpectedVersion \$Matches\.version.*?-CheckRemoteLatest.*?else \{.*?check-release-copy\.ps1 -CheckRemoteLatest.*?LASTEXITCODE' `
+    -Description 'site copy is checked before the deterministic asset gate and release copy binds to the published semver tag' `
+    -Context "$siteDeployWorkflow :: site validation"
+$siteActionUses = [regex]::Matches(
+    $siteDeployWorkflowText,
+    '(?m)^\s*uses:\s+(?<action>[^\s@]+)@(?<ref>[^\s#]+)'
+)
+if ($siteActionUses.Count -ne 4 -or
+    @($siteActionUses | Where-Object {
+        $_.Groups['ref'].Value -cnotmatch '^[0-9a-f]{40}$'
+    }).Count -ne 0) {
+    throw 'Every site deployment action must use a full immutable commit SHA.'
+}
+$wranglerUses = @($siteActionUses | Where-Object {
+    $_.Groups['action'].Value -ceq 'cloudflare/wrangler-action'
+})
+if ($wranglerUses.Count -ne 2 -or
+    @($wranglerUses | Where-Object {
+        $_.Groups['ref'].Value -cne 'ebbaa1584979971c8614a24965b4405ff95890e0'
+    }).Count -ne 0) {
+    throw 'Canary and production must use the pinned official Wrangler action v4 commit.'
+}
+foreach ($deployStepName in @(
+    'Deploy exact payload to canary',
+    'Deploy identical payload to production'
+)) {
+    $deployStep = Get-YamlStepBlock `
+        -Content $siteDeployWorkflowText `
+        -Name $deployStepName `
+        -Source $siteDeployWorkflow
+    Assert-TextContract `
+        -Content $deployStep `
+        -Pattern '(?ms)wranglerVersion: 4\.114\.0.*?workingDirectory: \$\{\{ steps\.payload\.outputs\.wrangler_directory \}\}.*?pages deploy "\$\{\{ steps\.payload\.outputs\.directory \}\}".*?--project-name=noctty.*?--commit-hash="\$\{\{ steps\.source\.outputs\.sha \}\}".*?--commit-dirty=false' `
+        -Description 'isolated Wrangler deploys the same clean exact-commit payload with the required version and visible diagnostics' `
+        -Context "$siteDeployWorkflow :: $deployStepName"
+    if ($deployStep -match '(?m)^\s*quiet:') {
+        throw "Cloudflare deployment diagnostics must remain visible ($siteDeployWorkflow :: $deployStepName)"
+    }
+}
+foreach ($phase in @('canary', 'production')) {
+    Assert-TextContract `
+        -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name "Require exact origin main before $phase" -Source $siteDeployWorkflow) `
+        -Pattern "(?ms)require-site-deployment-head\.ps1.*?-ExpectedSha \`$env:DEPLOY_SHA.*?-DefaultBranch \`$env:DEFAULT_BRANCH.*?-Phase $phase" `
+        -Description "site deployment invokes the shared exact-main gate before $phase" `
+        -Context "$siteDeployWorkflow :: $phase head gate"
+}
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw) `
+    -Pattern '(?ms)GITHUB_REPOSITORY -cne ''amanthanvi/noctty''.*?git remote get-url origin.*?git fetch --force --no-tags origin.*?git rev-parse HEAD.*?refs/remotes/origin/\$DefaultBranch.*?\$head -cne \$ExpectedSha.*?git status --porcelain=v1 --untracked-files=all' `
+    -Description 'the shared site gate binds both phases to a clean exact fork-local main head' `
+    -Context $siteDeploymentHeadGate
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteDeploymentHeadGate -Raw) `
+    -Pattern '(?ms)\$originOutput = git remote get-url origin.*?\$LASTEXITCODE -ne 0.*?\$headOutput = git rev-parse HEAD.*?\$LASTEXITCODE -ne 0.*?\$originHeadOutput = git rev-parse.*?\$LASTEXITCODE -ne 0.*?\$status = @\(git status.*?\$LASTEXITCODE -ne 0.*?\$status\.Count -ne 0' `
+    -Description 'every deployment gate git query checks its own exit status before consuming output' `
+    -Context $siteDeploymentHeadGate
+$sitePayloadStep = Get-YamlStepBlock `
+    -Content $siteDeployWorkflowText `
+    -Name 'Build deterministic deploy payload twice' `
+    -Source $siteDeployWorkflow
+Assert-TextContract `
+    -Content $sitePayloadStep `
+    -Pattern '(?ms)build-site-payload\.ps1.*?build-site-payload\.ps1.*?SequenceEqual\[byte\].*?different sorted SHA-256 manifests' `
+    -Description 'site payload is built twice and compared by its sorted SHA-256 manifest' `
+    -Context "$siteDeployWorkflow :: payload"
+Assert-TextContract `
+    -Content $sitePayloadStep `
+    -Pattern '(?ms)noctty-wrangler-.*?New-Item -ItemType Directory -Path \$wrangler.*?wrangler_directory=' `
+    -Description 'Wrangler installs in a runner-temporary directory outside the checkout' `
+    -Context "$siteDeployWorkflow :: payload"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify canary provenance and bytes' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment preview.*?-ExpectedBranch \$env:CANARY_BRANCH.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-ManifestPath \$env:PAYLOAD_MANIFEST' `
+    -Description 'canary verification binds API provenance and payload bytes to the exact commit' `
+    -Context "$siteDeployWorkflow :: canary verification"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Require the zone-owned www redirect before production' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-Mode Redirect.*?-DeploymentId \$env:DEPLOYMENT_ID.*?-ExpectedCommit \$env:DEPLOY_SHA' `
+    -Description 'the zone-owned www redirect is verified before the production write' `
+    -Context "$siteDeployWorkflow :: redirect preflight"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Verify production provenance, domain, and bytes' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?-ExpectedEnvironment production.*?-ExpectedBranch main.*?-ExpectedCommit \$env:DEPLOY_SHA.*?-CanonicalBaseUrl ''https://noctty\.com/''.*?-RequireCanonical.*?-VerifyWwwRedirect' `
+    -Description 'production verification binds the canonical domain and zone redirect' `
+    -Context "$siteDeployWorkflow :: production verification"
+Assert-TextContract `
+    -Content (Get-YamlStepBlock -Content $siteDeployWorkflowText -Name 'Resolve canary branch' -Source $siteDeployWorkflow) `
+    -Pattern '(?ms)DEPLOY_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}.*?\$sha = \$env:DEPLOY_SHA' `
+    -Description 'canary metadata receives the validated SHA through the environment' `
+    -Context "$siteDeployWorkflow :: canary metadata"
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?m)^\s+(?:\$sha\s*=\s*''\$\{\{ steps\.source\.outputs\.sha \}\}''|-ExpectedCommit\s+''\$\{\{ steps\.source\.outputs\.sha \}\}'')' `
+    -Description 'validated action outputs are never interpolated directly into PowerShell source'
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?i)rollback|previous\.outputs\.deployment_id' `
+    -Description 'production verification cannot race an automatic Pages rollback'
+Assert-WorkflowContractAbsent `
+    -Path $cloudflarePagesVerifier `
+    -Pattern '(?i)/rollback|Mode Rollback|RollbackDeploymentId' `
+    -Description 'the verifier exposes no non-atomic automatic rollback path'
+Assert-TextContract `
+    -Content $site404Text `
+    -Pattern '(?ms)href="/assets/favicon\.svg".*?href="/styles\.css\?v=[0-9a-f]{64}".*?src="/app\.js\?v=[0-9a-f]{64}"' `
+    -Description 'the nested 404 fallback resolves all local assets from the site root' `
+    -Context $site404
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '"/__noctty_missing_\$\(\$Commit\.Substring\(0, 12\)\)/nested/page"' `
+    -Description 'deployment verification exercises the 404 fallback below a multi-segment path' `
+    -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content $siteIndexText `
+    -Pattern '(?ms)property="og:image" content="https://noctty\.com/assets/noctty-social\.jpg".*?property="og:image:type" content="image/jpeg".*?property="og:image:width" content="1200".*?property="og:image:height" content="630".*?name="twitter:card" content="summary_large_image".*?name="twitter:image" content="https://noctty\.com/assets/noctty-social\.jpg"' `
+    -Description 'social previews use a current raster large-image card with explicit dimensions' `
+    -Context $siteIndex
+Assert-TextContract `
+    -Content $sitePayloadBuilderText `
+    -Pattern "'assets/noctty-social\.jpg'" `
+    -Description 'the deterministic Cloudflare payload includes the social preview image' `
+    -Context $sitePayloadBuilder
+Assert-TextContract `
+    -Content $siteGitattributesText `
+    -Pattern '(?ms)^site/\*\.html text eol=lf\r?$.*?^site/\*\.css text eol=lf\r?$.*?^site/\*\.js text eol=lf\r?$.*?^site/_headers text eol=lf\r?$.*?^site/assets/\*\.svg text eol=lf\r?$.*?^site/tests/\*\.mjs text eol=lf\r?$.*?^scripts/build-site-assets\.mjs text eol=lf\r?$' `
+    -Description 'every text file in the site payload and its source graph has a deterministic LF checkout rule' `
+    -Context $siteGitattributes
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)const checkOnly = process\.argv\.includes\("--check"\).*?if \(/\\r/\.test\(text\)\) \{.*?must be LF-normalized' `
+    -Description 'the asset builder has a --check mode and rejects CR bytes so hashes bind to clean LF checkouts' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)const inlineScriptPattern = /<script>\(\[\\s\\S\]\*\?\)<\\/script>/g.*?if \(indexScript !== notFoundScript\) \{.*?must be byte-identical' `
+    -Description 'both pages must carry one byte-identical inline bootstrap so the CSP pins exactly one script hash' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)must not contain inline event handler attributes.*?const scriptHash = sha256Base64\(indexScript\).*?script-src ''self'' ''sha256-\$\{scriptHash\}''.*?script-src-attr ''none''' `
+    -Description 'the asset builder derives the CSP script hash from the live HTML and refuses inline event handlers' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)for \(const asset of \["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)' `
+    -Description 'SHA-256 cache keys cover every local script and stylesheet referenced by each page' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $siteAssetBuilderText `
+    -Pattern '(?ms)if \(failures\.length > 0\) \{\s*throw new Error\(`Deterministic site asset check failed' `
+    -Description 'the deterministic asset check fails closed when committed hashes or cache keys are stale' `
+    -Context $siteAssetBuilder
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '(?ms)latest_stage\.status.*?commit_hash -cne \$Commit.*?commit_dirty -ne \$false.*?Get-ManifestEntries.*?Get-Sha256 -Bytes.*?get-site-header-contract\.ps1.*?Assert-PublicHeaderContract' `
+    -Description 'Pages verification checks exact clean commit provenance, manifest bytes, and response controls' `
+    -Context $cloudflarePagesVerifier
+$cloudflareApiTokens = $null
+$cloudflareApiErrors = $null
+$cloudflareApiAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    (Get-PowerShellBlockText `
+        -Content $cloudflarePagesVerifierText `
+        -HeaderPattern '^function\s+Invoke-CloudflareApi(?=\s|\{)'),
+    [ref] $cloudflareApiTokens,
+    [ref] $cloudflareApiErrors
+)
+if ($cloudflareApiErrors.Count -ne 0) {
+    throw 'Cloudflare API verifier function must parse for semantic contract checks.'
+}
+$cloudflareApiFunctions = @(
+    Get-NamedFunctionDefinitions -Ast $cloudflareApiAst -Name 'Invoke-CloudflareApi'
+)
+if ($cloudflareApiFunctions.Count -ne 1) {
+    throw 'Pages verifier must define exactly one Invoke-CloudflareApi function.'
+}
+$cloudflareApiFunction = $cloudflareApiFunctions[0]
+$relativePathParameters = @(
+    $cloudflareApiFunction.Body.ParamBlock.Parameters |
+        Where-Object { $_.Name.VariablePath.UserPath -ceq 'RelativePath' }
+)
+$relativePathAttributes = @(
+    $relativePathParameters.Attributes |
+        Where-Object { $_ -is [System.Management.Automation.Language.AttributeAst] }
+)
+if ($relativePathParameters.Count -ne 1 -or
+    $relativePathAttributes.Count -ne 2 -or
+    @($relativePathAttributes | Where-Object {
+            $_.TypeName.FullName -cin @('Parameter', 'AllowEmptyString')
+        }).Count -ne 2) {
+    throw 'Pages project-root relative path must be mandatory, allow empty input, and have no conflicting validation.'
+}
+$requestConstructors = @(
+    $cloudflareApiFunction.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            $node.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+            $node.Expression.TypeName.FullName -ceq 'Net.Http.HttpRequestMessage' -and
+            $node.Member.Value -ceq 'new'
+    }, $true)
+)
+$sendRequests = @(
+    Get-NamedMemberExpressions `
+        -Ast $cloudflareApiFunction `
+        -Name 'SendAsync' `
+        -InvocationOnly
+)
+if ($requestConstructors.Count -ne 1 -or
+    $requestConstructors[0].Arguments.Count -ne 2 -or
+    $requestConstructors[0].Arguments[0] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $requestConstructors[0].Arguments[0].VariablePath.UserPath -cne 'Method' -or
+    $requestConstructors[0].Arguments[1] -isnot
+        [System.Management.Automation.Language.ExpandableStringExpressionAst] -or
+    $requestConstructors[0].Arguments[1].Value -cne '$apiRoot$RelativePath' -or
+    @($requestConstructors[0].Arguments[1].NestedExpressions).Count -ne 2 -or
+    $requestConstructors[0].Arguments[1].NestedExpressions[0].VariablePath.UserPath -cne 'apiRoot' -or
+    $requestConstructors[0].Arguments[1].NestedExpressions[1].VariablePath.UserPath -cne 'RelativePath' -or
+    $requestConstructors[0].Parent.Parent -isnot
+        [System.Management.Automation.Language.AssignmentStatementAst] -or
+    $requestConstructors[0].Parent.Parent.Left.VariablePath.UserPath -cne 'request' -or
+    $sendRequests.Count -ne 1 -or
+    $sendRequests[0].Expression.VariablePath.UserPath -cne 'apiClient' -or
+    $sendRequests[0].Arguments.Count -ne 1 -or
+    $sendRequests[0].Arguments[0].VariablePath.UserPath -cne 'request') {
+    throw 'Pages project-root URI must be the exact API root plus relative path used by the sent HTTP request.'
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Wait-CanonicalDeployment(?=\s|\{)') `
+    -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\).*?try \{\s*\$project = Get-Project.*?catch \{.*?\$attempt -eq 10.*?failed after bounded retries.*?Start-Sleep -Seconds 2.*?continue.*?Assert-ProjectContract.*?Get-CanonicalDeploymentId' `
+    -Description 'canonical promotion tolerates bounded transient project API failures but still validates project identity' `
+    -Context "$cloudflarePagesVerifier :: Wait-CanonicalDeployment"
+Assert-WorkflowContractAbsent `
+    -Path $cloudflarePagesVerifier `
+    -Pattern '(?i)cf-mitigated|AllowMitigatedHtml|mitigated-challenge|challenged_hosts|canonical_html_status' `
+    -Description 'custom-domain verification cannot accept substituted challenge HTML'
+$publicBaseUriFunctionText = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+ConvertTo-PublicBaseUri(?=\s|\{)'
+. ([scriptblock]::Create($publicBaseUriFunctionText))
+$immutablePagesOrigin = ConvertTo-PublicBaseUri `
+    -Value 'https://69cd5628.noctty.pages.dev/' `
+    -Kind pages
+if ($immutablePagesOrigin.DnsSafeHost -cne
+    '69cd5628.noctty.pages.dev') {
+    throw 'Immutable Pages deployment origin was not preserved.'
+}
+foreach ($mutablePagesUrl in @(
+    'https://noctty.pages.dev/',
+    'https://main.noctty.pages.dev/'
+)) {
+    $mutablePagesOriginRejected = $false
+    try {
+        [void](ConvertTo-PublicBaseUri `
+            -Value $mutablePagesUrl `
+            -Kind pages)
+    } catch {
+        $mutablePagesOriginRejected = $true
+    }
+    if (-not $mutablePagesOriginRejected) {
+        throw "Mutable Pages origin passed immutable validation: $mutablePagesUrl"
+    }
+}
+$immutableOriginBindingFunctionText = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+Assert-ImmutablePagesDeploymentOrigin(?=\s|\{)'
+. ([scriptblock]::Create($immutableOriginBindingFunctionText))
+Assert-ImmutablePagesDeploymentOrigin `
+    -Origin $immutablePagesOrigin `
+    -DeploymentId '69cd5628-1d01-4095-9774-6f8cfe7d7d1e'
+$mismatchedDeploymentIdRejected = $false
+try {
+    Assert-ImmutablePagesDeploymentOrigin `
+        -Origin $immutablePagesOrigin `
+        -DeploymentId 'deadbeef-1d01-4095-9774-6f8cfe7d7d1e'
+} catch {
+    $mismatchedDeploymentIdRejected = $true
+}
+if (-not $mismatchedDeploymentIdRejected) {
+    throw 'Immutable Pages origin was not bound to its deployment ID.'
+}
+$cloudflareVerifierTokens = $null
+$cloudflareVerifierErrors = $null
+$cloudflareVerifierAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $cloudflarePagesVerifierText,
+    [ref]$cloudflareVerifierTokens,
+    [ref]$cloudflareVerifierErrors
+)
+if ($cloudflareVerifierErrors.Count -ne 0) {
+    throw 'Cloudflare verifier must parse for public-verification call checks.'
+}
+$immutableOriginBindingCalls = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -ceq 'Assert-ImmutablePagesDeploymentOrigin'
+}, $true))
+$urlIdentityChecks = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+        $node.Extent.Text.Contains(
+            'Wrangler deployment URL does not match Cloudflare API provenance.'
+        )
+}, $true))
+if ($immutableOriginBindingCalls.Count -ne 1 -or
+    $urlIdentityChecks.Count -ne 1) {
+    throw 'Deployment flow must contain one URL identity check and origin binding.'
+}
+$originBindingElements = @(
+    $immutableOriginBindingCalls[0].CommandElements
+)
+if ($originBindingElements.Count -ne 5 -or
+    $originBindingElements[1] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[1].ParameterName -cne 'Origin' -or
+    $originBindingElements[2] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[2].VariablePath.UserPath -cne 'pagesOrigin' -or
+    $originBindingElements[3] -isnot
+        [System.Management.Automation.Language.CommandParameterAst] -or
+    $originBindingElements[3].ParameterName -cne 'DeploymentId' -or
+    $originBindingElements[4] -isnot
+        [System.Management.Automation.Language.VariableExpressionAst] -or
+    $originBindingElements[4].VariablePath.UserPath -cne 'DeploymentId' -or
+    $immutableOriginBindingCalls[0].Extent.StartOffset -le
+        $urlIdentityChecks[0].Extent.EndOffset) {
+    throw 'Deployment flow must bind pagesOrigin to DeploymentId after URL identity.'
+}
+$publicVerificationCalls = @($cloudflareVerifierAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -cin @(
+            'Assert-PublicPayload',
+            'Assert-PublicHeaderContract'
+        )
+}, $true))
+$expectedPublicVerificationCalls = @(
+    [pscustomobject]@{
+        Command = 'Assert-PublicPayload'
+        Origin = 'pagesOrigin'
+        StaticOnly = $false
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicHeaderContract'
+        Origin = 'pagesOrigin'
+        StaticOnly = $false
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicPayload'
+        Origin = 'canonicalOrigin'
+        StaticOnly = $true
+    }
+    [pscustomobject]@{
+        Command = 'Assert-PublicHeaderContract'
+        Origin = 'canonicalOrigin'
+        StaticOnly = $true
+    }
+)
+foreach ($expectedCall in $expectedPublicVerificationCalls) {
+    $matchingCalls = @($publicVerificationCalls | Where-Object {
+        $elements = @($_.CommandElements)
+        $originIndex = [Array]::FindIndex(
+            [object[]]$elements,
+            [Predicate[object]] { param($element) $element.Extent.Text -ceq '-Origin' }
+        )
+        $originIndex -ge 0 -and
+            $originIndex + 1 -lt $elements.Count -and
+            $elements[$originIndex + 1] -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            $elements[$originIndex + 1].VariablePath.UserPath -ceq
+                $expectedCall.Origin -and
+            $_.GetCommandName() -ceq $expectedCall.Command -and
+            (@($elements | Where-Object {
+                $_.Extent.Text -ceq '-StaticOnly'
+            }).Count -eq 1) -eq $expectedCall.StaticOnly
+    })
+    if ($matchingCalls.Count -ne 1) {
+        throw "Expected exactly one $($expectedCall.Command) call for " +
+            "$($expectedCall.Origin) with StaticOnly=$($expectedCall.StaticOnly)."
+    }
+}
+if ($publicVerificationCalls.Count -ne $expectedPublicVerificationCalls.Count) {
+    throw 'Unexpected public-verification call bypasses the immutable/canonical policy.'
+}
+$expectedPublicVerificationWrappers = @(
+    [pscustomobject]@{
+        Wrapper = 'Assert-PublicPayload'
+        Inner = 'Test-PublicPayloadOnce'
+    }
+    [pscustomobject]@{
+        Wrapper = 'Assert-PublicHeaderContract'
+        Inner = 'Test-PublicHeaderContractOnce'
+    }
+)
+foreach ($expectedWrapper in $expectedPublicVerificationWrappers) {
+    $wrapperDefinitions = @(
+        Get-NamedFunctionDefinitions `
+            -Ast $cloudflareVerifierAst `
+            -Name $expectedWrapper.Wrapper
+    )
+    if ($wrapperDefinitions.Count -ne 1) {
+        throw "Expected exactly one $($expectedWrapper.Wrapper) function."
+    }
+    $staticOnlyParameters = @(
+        $wrapperDefinitions[0].Body.ParamBlock.Parameters |
+            Where-Object {
+                $_.Name.VariablePath.UserPath -ceq 'StaticOnly'
+            }
+    )
+    $innerCalls = @($wrapperDefinitions[0].FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -ceq $expectedWrapper.Inner
+    }, $true))
+    $forwardedSwitches = @(
+        if ($innerCalls.Count -eq 1) {
+            $innerCalls[0].CommandElements |
+                Where-Object {
+                    $_ -is
+                        [System.Management.Automation.Language.CommandParameterAst] -and
+                    $_.ParameterName -ceq 'StaticOnly' -and
+                    $_.Argument -is
+                        [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $_.Argument.VariablePath.UserPath -ceq 'StaticOnly'
+                }
+        }
+    )
+    if ($staticOnlyParameters.Count -ne 1 -or
+        $staticOnlyParameters[0].StaticType -ne [switch] -or
+        $innerCalls.Count -ne 1 -or
+        $forwardedSwitches.Count -ne 1) {
+        throw "$($expectedWrapper.Wrapper) must forward exactly " +
+            "-StaticOnly:`$StaticOnly to $($expectedWrapper.Inner)."
+    }
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicPayloadOnce(?=\s|\{)') `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and \$entry\.Path -cin @\(''index\.html'', ''404\.html''\).*?continue.*?New-PublicAssetUri' `
+    -Description 'static-only payload verification excludes only Pages control and HTML documents before hashing remaining assets' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicPayloadOnce"
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
+    -Pattern '(?ms)\[switch\]\s+\$StaticOnly.*?if \(-not \$StaticOnly\) \{.*?Path = ''/''.*?\}.*?Path = ''/styles\.css''.*?if \(-not \$StaticOnly\) \{.*?Path = ''/__noctty_header_contract_''' `
+    -Description 'static-only response verification always checks stylesheet asset controls and excludes HTML route probes' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '(?ms)schema_version\s*=\s*''noctty\.cloudflare-pages-provenance\.v2''.*?immutable_html_verified\s*=\s*\$true.*?canonical_static_assets_verified\s*=\s*-not \[string\]::IsNullOrWhiteSpace\(\$CanonicalBaseUrl\).*?canonical_html_verified\s*=\s*\$false' `
+    -Description 'deployment provenance distinguishes immutable HTML, canonical static assets, and unverified canonical HTML' `
+    -Context $cloudflarePagesVerifier
+Assert-TextContract `
+    -Content $cloudflarePagesVerifierText `
+    -Pattern '(?ms)\$json\.Contains\(\$ApiToken.*?\$json\.Contains\(\$AccountId.*?Refusing to write provenance containing Cloudflare credentials' `
+    -Description 'deployment provenance fails closed if credentials or account identifiers enter the artifact' `
+    -Context $cloudflarePagesVerifier
+Assert-WorkflowContractAbsent `
+    -Path $siteDeployWorkflow `
+    -Pattern '(?i)wrangler\.(?:toml|json|jsonc)' `
+    -Description 'Direct Upload does not introduce Wrangler configuration'
+if (Test-Path -LiteralPath (Join-Path $repoRoot 'site\_redirects')) {
+    throw 'Unsupported domain-level Pages _redirects file must remain absent.'
+}
+Assert-TextContract `
+    -Content $siteReadmeText `
+    -Pattern '(?ms)Direct Upload.*?every\s+push to `main`.*?pull requests do not deploy.*?zone-owned `www` redirect\s+is preflighted.*?does not automatically roll back.*?zone level.*?workflow verifies the zone-level 301.*?deployment-only scripts require PowerShell 7\.3 or newer.*?outside the Windows PowerShell 5\.1 harness compatibility scope' `
+    -Description 'site operations document deployment triggers, Direct Upload scope, runtime floor, and the zone-owned redirect' `
+    -Context $siteReadme
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern '(?ms)^/\*\s+Content-Security-Policy:.*?X-Content-Type-Options: nosniff.*?X-Frame-Options: DENY.*?Referrer-Policy: strict-origin-when-cross-origin.*?Permissions-Policy:.*?Cache-Control: public, max-age=0, must-revalidate\s*$' `
+    -Description 'Pages uses one catch-all browser security and revalidation policy' `
+    -Context $siteHeaders
+Assert-WorkflowContractAbsent `
+    -Path $siteHeaders `
+    -Pattern '(?m)^/(?!\*)' `
+    -Description 'path-specific cache rules cannot overlap the catch-all response policy'
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern "(?ms)script-src 'self' 'sha256-[^']+'; script-src-attr 'none';" `
+    -Description 'the single shared inline bootstrap uses one narrow CSP hash and inline event handlers are forbidden outright' `
+    -Context $siteHeaders
+Assert-TextContract `
+    -Content $siteHeadersText `
+    -Pattern "style-src 'self'; font-src 'self';" `
+    -Description 'stylesheet and font sources are pinned to self, so no third-party origin can serve either' `
+    -Context $siteHeaders
+Assert-WorkflowContractAbsent `
+    -Path $siteHeaders `
+    -Pattern "(?i)'unsafe-inline'|style-src-attr" `
+    -Description 'the site CSP declares no unsafe-inline source and no style-src-attr directive'
+$siteHeaderContractJson = & $siteHeaderContract `
+    -SiteDirectory (Join-Path $repoRoot 'site')
+$siteHeaderContractObject = $siteHeaderContractJson | ConvertFrom-Json -Depth 6
+if ([string]$siteHeaderContractObject.root.content_security_policy -cne
+        [string](
+            [regex]::Match(
+                $siteHeadersText,
+                '(?m)^\s+Content-Security-Policy:\s*(?<value>.+)$'
+            ).Groups['value'].Value.Trim()
+        )) {
+    throw 'Central site header contract did not return the tracked CSP.'
+}
+if ([string]$siteHeaderContractObject.not_found.cache_control -cne 'no-store') {
+    throw 'Central site header contract must require generated 404 responses not to be cached.'
+}
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern '(?ms)expectedScriptHashes.*?expectedScriptAttributeHashes.*?eventAttributeCount.*?no inline event handler attributes.*?function Assert-ExactCspDirectiveSources.*?declaredTokens.*?declared\.Add.*?Expected\.Count' `
+    -Description 'one catch-all contract binds exact complete source sets to both script directives, refuses inline handlers, and emits live expectations' `
+    -Context $siteHeaderContract
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern '(?ms)expectedPermissions.*?accelerometer=\(\).*?autoplay=\(\).*?gyroscope=\(\).*?magnetometer=\(\).*?declaredPermissionTokens.*?declaredPermissions.*?expectedPermissions\.Count.*?denylist contract' `
+    -Description 'permissions policy uses an exact duplicate-free directive denylist' `
+    -Context $siteHeaderContract
+Assert-TextContract `
+    -Content (Get-Content -LiteralPath $siteHeaderContract -Raw) `
+    -Pattern "(?ms)expectedScriptSources.*?'self'.*?expectedScriptAttributeSources.*?'none'.*?expectedCspDirectives.*?default-src.*?script-src.*?script-src-attr.*?upgrade-insecure-requests.*?declaredDirectiveNames.*?exact expected directive set.*?Assert-ExactCspDirectiveSources.*?expectedHashes\.UnionWith.*?declaredHashes\.Add.*?ConvertTo-Json" `
+    -Description 'every CSP directive and source is exact before the global hash allowlist check' `
+    -Context $siteHeaderContract
+
+$siteCspFixtureRoot = Join-Path (
+    [IO.Path]::GetTempPath()
+) "noctty-site-csp-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+$siteCspFixtureRoot = [IO.Path]::GetFullPath($siteCspFixtureRoot)
+$siteCspTempPrefix = [IO.Path]::GetFullPath(
+    [IO.Path]::GetTempPath()
+).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+if (-not $siteCspFixtureRoot.StartsWith(
+        $siteCspTempPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw "Refusing unsafe CSP fixture path: $siteCspFixtureRoot"
+}
+[IO.Directory]::CreateDirectory($siteCspFixtureRoot) | Out-Null
+try {
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'site') |
+        Copy-Item `
+            -Destination $siteCspFixtureRoot `
+            -Recurse `
+            -Force
+    $fixtureHeadersPath = Join-Path $siteCspFixtureRoot '_headers'
+    $fixtureHeadersText = [IO.File]::ReadAllText($fixtureHeadersPath)
+    $scriptHash = [regex]::Match(
+        $fixtureHeadersText,
+        "script-src 'self' '(?<hash>sha256-[^']+)'"
+    ).Groups['hash'].Value
+    if ([string]::IsNullOrWhiteSpace($scriptHash)) {
+        throw 'Could not identify the CSP script hash for the directive-swap regression.'
+    }
+    # script-src-attr is pinned to 'none', so the equivalent of the old
+    # hash-swap is migrating the inline-bootstrap hash out of script-src and
+    # into script-src-attr. Both directives must reject it.
+    $swappedHeaders = $fixtureHeadersText.Replace(
+        "script-src 'self' '$scriptHash'",
+        "script-src 'self'"
+    ).Replace(
+        "script-src-attr 'none'",
+        "script-src-attr 'unsafe-hashes' '$scriptHash'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $swappedHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $directiveSwapRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'script-src sources do not exactly match') {
+            throw
+        }
+        $directiveSwapRejected = $true
+    }
+    if (-not $directiveSwapRejected) {
+        throw 'Site CSP contract accepted hashes swapped between script directives.'
+    }
+
+    $reusedHashHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem '$scriptHash'; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $reusedHashHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $unvalidatedDirectiveRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'exact expected directive set') {
+            throw
+        }
+        $unvalidatedDirectiveRejected = $true
+    }
+    if (-not $unvalidatedDirectiveRejected) {
+        throw 'Site CSP contract accepted a reused hash in script-src-elem.'
+    }
+
+    $unsafeOverrideHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem 'unsafe-inline'; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $unsafeOverrideHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $unsafeOverrideRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'exact expected directive set') {
+            throw
+        }
+        $unsafeOverrideRejected = $true
+    }
+    if (-not $unsafeOverrideRejected) {
+        throw 'Site CSP contract accepted an unsafe script-src-elem override.'
+    }
+
+    $sha384OverrideHeaders = $fixtureHeadersText.Replace(
+        "style-src 'self'",
+        "script-src-elem 'sha384-YWJjZA=='; style-src 'self'"
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $sha384OverrideHeaders,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $sha384OverrideRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'exact expected directive set') {
+            throw
+        }
+        $sha384OverrideRejected = $true
+    }
+    if (-not $sha384OverrideRejected) {
+        throw 'Site CSP contract accepted a SHA-384 script-src-elem override.'
+    }
+
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $fixtureHeadersText,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $fixtureIndexPath = Join-Path $siteCspFixtureRoot 'index.html'
+    $fixtureIndexText = [IO.File]::ReadAllText($fixtureIndexPath)
+    if ($fixtureIndexText -notmatch '(?m)^<body>$') {
+        throw 'CSP handler-injection regression lost its <body> anchor.'
+    }
+    # Fonts are self-hosted and script-src-attr is 'none', so no inline handler
+    # may exist at all. Injecting one must be rejected outright.
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText.Replace(
+            '<body>',
+            '<body onload="this.dataset.x = 1">'
+        ),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $injectedHandlerRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'no inline event handler attributes') {
+            throw
+        }
+        $injectedHandlerRejected = $true
+    }
+    if (-not $injectedHandlerRejected) {
+        throw 'Site CSP contract accepted an injected inline event handler.'
+    }
+
+    # Entity-encoding the handler value must not smuggle it past the detector.
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText.Replace(
+            '<body>',
+            '<body onload="this.dataset.x =&#32;1">'
+        ),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $encodedHandlerRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'no inline event handler attributes') {
+            throw
+        }
+        $encodedHandlerRejected = $true
+    }
+    if (-not $encodedHandlerRejected) {
+        throw 'Site CSP contract accepted an entity-encoded inline event handler.'
+    }
+
+    [IO.File]::WriteAllText(
+        $fixtureIndexPath,
+        $fixtureIndexText,
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        $fixtureHeadersPath,
+        $fixtureHeadersText.Replace('accelerometer=()', 'accelerometer=(self)'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $weakenedPermissionRejected = $false
+    try {
+        & $siteHeaderContract -SiteDirectory $siteCspFixtureRoot | Out-Null
+    }
+    catch {
+        if ($_.Exception.Message -notmatch
+            'permissions policy does not exactly match') {
+            throw
+        }
+        $weakenedPermissionRejected = $true
+    }
+    if (-not $weakenedPermissionRejected) {
+        throw 'Site header contract accepted a weakened permissions policy.'
+    }
+}
+finally {
+    if ([IO.Directory]::Exists($siteCspFixtureRoot)) {
+        [IO.Directory]::Delete($siteCspFixtureRoot, $true)
+    }
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
+    -Pattern "(?ms)Path = '/'.*?ExpectedStatus = 200.*?Path = '/styles\.css'.*?ExpectedStatus = 200.*?__noctty_header_contract_.*?nested/page'.*?ExpectedStatus = 404.*?Cache-Control" `
+    -Description 'public header verification covers canonical HTML, an asset, and a nested 404 fallback' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
+$cacheControlContract = Get-PowerShellBlockText `
+    -Content $cloudflarePagesVerifierText `
+    -HeaderPattern '^function\s+Test-EquivalentCacheControl(?=\s|\{)'
+. ([scriptblock]::Create($cacheControlContract))
+if (-not (Test-EquivalentCacheControl `
+        -Actual 'PUBLIC, must-revalidate, max-age=0' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    -not (Test-EquivalentCacheControl -Actual 'no-store' -Expected 'no-store') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, max-age=0' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, max-age=0, must-revalidate, immutable' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual 'public, public, max-age=0, must-revalidate' `
+        -Expected 'public, max-age=0, must-revalidate') -or
+    (Test-EquivalentCacheControl `
+        -Actual '' `
+        -Expected 'public, max-age=0, must-revalidate')) {
+    throw 'Published cache-control verification must ignore order and case but reject missing, extra, or duplicate directives.'
+}
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicHeaderContractOnce(?=\s|\{)') `
+    -Pattern '(?ms)ExpectedStatus = 404.*?ExpectedCache = \[string\]\$Contract\.not_found\.cache_control.*?Test-EquivalentCacheControl.*?-Actual \$cacheControl.*?-Expected \$probe\.ExpectedCache' `
+    -Description 'published headers compare exact cache directive sets and require no-store for generated 404 responses' `
+    -Context "$cloudflarePagesVerifier :: Test-PublicHeaderContractOnce"
+Assert-TextContract `
+    -Content (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Assert-PublicHeaderContract(?=\s|\{)') `
+    -Pattern '(?ms)for \(\$attempt = 1; \$attempt -le 6; \$attempt\+\+\).*?Test-PublicHeaderContractOnce.*?Start-Sleep -Seconds 2.*?did not converge' `
+    -Description 'public header verification tolerates bounded edge propagation before failing closed' `
+    -Context "$cloudflarePagesVerifier :: Assert-PublicHeaderContract"
+
+$sitePayloadFixtureRoot = Join-Path (
+    [IO.Path]::GetTempPath()
+) "noctty-site-payload-contract-$PID-$([Guid]::NewGuid().ToString('N'))"
+$sitePayloadFixtureRoot = [IO.Path]::GetFullPath($sitePayloadFixtureRoot)
+$tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') +
+    [IO.Path]::DirectorySeparatorChar
+if (-not $sitePayloadFixtureRoot.StartsWith(
+        $tempPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+    throw 'Site payload contract fixture escaped the system temp directory.'
+}
+try {
+    $firstPayload = Join-Path $sitePayloadFixtureRoot 'first'
+    $secondPayload = Join-Path $sitePayloadFixtureRoot 'second'
+    $firstManifest = Join-Path $sitePayloadFixtureRoot 'first.sha256'
+    $secondManifest = Join-Path $sitePayloadFixtureRoot 'second.sha256'
+    & $sitePayloadBuilder `
+        -OutputDirectory $firstPayload `
+        -ManifestPath $firstManifest
+    & $sitePayloadBuilder `
+        -OutputDirectory $secondPayload `
+        -ManifestPath $secondManifest
+    $firstManifestBytes = [IO.File]::ReadAllBytes($firstManifest)
+    $secondManifestBytes = [IO.File]::ReadAllBytes($secondManifest)
+    if (-not [Linq.Enumerable]::SequenceEqual[byte](
+            $firstManifestBytes,
+            $secondManifestBytes
+        )) {
+        throw 'Site payload builder is not byte-for-byte deterministic.'
+    }
+    $manifestPaths = @(
+        [IO.File]::ReadAllLines($firstManifest) |
+            ForEach-Object {
+                $match = [regex]::Match(
+                    $_,
+                    '^[0-9a-f]{64}  (?<path>_headers|[A-Za-z0-9][A-Za-z0-9._/-]*)$'
+                )
+                if (-not $match.Success) {
+                    throw 'Site payload manifest line does not use the strict SHA-256 format.'
+                }
+                $match.Groups['path'].Value
+            }
+    )
+    $sortedManifestPaths = [string[]]$manifestPaths.Clone()
+    [Array]::Sort($sortedManifestPaths, [StringComparer]::Ordinal)
+    if (-not [Linq.Enumerable]::SequenceEqual[string](
+            [string[]]$manifestPaths,
+            $sortedManifestPaths
+        ) -or
+        $manifestPaths -notcontains '_headers' -or
+        $manifestPaths -contains '_redirects' -or
+        $manifestPaths -contains 'README.md' -or
+        @($manifestPaths | Where-Object { $_ -like 'tests/*' }).Count -ne 0) {
+        throw 'Site deploy manifest escaped the clean sorted static allowlist.'
+    }
+    foreach ($requiredPayloadPath in @(
+        'index.html',
+        '404.html',
+        'styles.css',
+        'app.js',
+        'version.js',
+        'install.js',
+        'terminal.js'
+    )) {
+        if ($manifestPaths -cnotcontains $requiredPayloadPath) {
+            throw "Site deploy manifest is missing $requiredPayloadPath."
+        }
+    }
+    $expectedPayloadAssets = @(
+        'assets/app-window.webp'
+        'assets/favicon.svg'
+        'assets/fonts/OFL-JetBrainsMono.txt'
+        'assets/fonts/OFL-SpaceGrotesk.txt'
+        'assets/fonts/jetbrains-mono.woff2'
+        'assets/fonts/space-grotesk.woff2'
+        'assets/hero-sky.webp'
+        'assets/noctty-social.jpg'
+    )
+    $payloadAssetPaths = @($manifestPaths | Where-Object { $_ -like 'assets/*' })
+    if ($payloadAssetPaths.Count -ne $expectedPayloadAssets.Count -or
+        @($expectedPayloadAssets | Where-Object {
+            $payloadAssetPaths -cnotcontains $_
+        }).Count -ne 0) {
+        throw 'Site deploy manifest assets escaped the site asset allowlist.'
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $sitePayloadFixtureRoot) {
+        Remove-Item -LiteralPath $sitePayloadFixtureRoot -Recurse -Force
+    }
+}
 
 & (Join-Path $root 'Test-WindowsX64Baseline.ps1')
 

@@ -87,7 +87,7 @@ pub fn raiseNotification(
     const message_bstr = allocNotificationBstr(std.heap.page_allocator, message) catch return;
     defer com.SysFreeString(message_bstr);
     const activity_id = com.SysAllocString(
-        std.unicode.utf8ToUtf16LeStringLiteral("winghostty.command-palette"),
+        std.unicode.utf8ToUtf16LeStringLiteral("noctty.command-palette"),
     ) orelse return;
     defer com.SysFreeString(activity_id);
     const hr = com.UiaRaiseNotificationEvent(
@@ -98,6 +98,30 @@ pub fn raiseNotification(
         activity_id,
     );
     logIfFailed("UiaRaiseNotificationEvent", hr);
+}
+
+/// Announce only newly appended, already-sanitized terminal output. TextChanged
+/// remains the semantic document-change signal; this notification is the
+/// Windows Terminal-compatible speech path for screen readers.
+pub fn raiseTerminalOutputNotification(
+    provider: *com.IRawElementProviderSimple,
+    message: []const u8,
+) void {
+    if (!clientsAreListening() or message.len == 0) return;
+    const message_bstr = allocNotificationBstr(std.heap.page_allocator, message) catch return;
+    defer com.SysFreeString(message_bstr);
+    const activity_id = com.SysAllocString(
+        std.unicode.utf8ToUtf16LeStringLiteral("TerminalTextOutput"),
+    ) orelse return;
+    defer com.SysFreeString(activity_id);
+    const hr = com.UiaRaiseNotificationEvent(
+        provider,
+        com.NotificationKind_ActionCompleted,
+        com.NotificationProcessing_All,
+        message_bstr,
+        activity_id,
+    );
+    logIfFailed("UiaRaiseNotificationEvent(TerminalTextOutput)", hr);
 }
 
 fn allocNotificationBstr(

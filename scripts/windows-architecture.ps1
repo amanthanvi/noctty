@@ -47,8 +47,8 @@ function New-WindowsPackageArtifactName {
 
     $arch = (Get-WindowsPackageArchitecture -Architecture $Architecture).Name
     switch ($Kind) {
-        "portable" { return "winghostty-$Version-windows-$arch-portable.zip" }
-        "setup" { return "winghostty-$Version-windows-$arch-setup.exe" }
+        "portable" { return "noctty-$Version-windows-$arch-portable.zip" }
+        "setup" { return "noctty-$Version-windows-$arch-setup.exe" }
         "checksums" { return "SHA256SUMS-windows-$arch.txt" }
         "legacy-checksums" { return "SHA256SUMS.txt" }
     }

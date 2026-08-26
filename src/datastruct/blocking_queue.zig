@@ -20,11 +20,14 @@ const Allocator = std.mem.Allocator;
 ///     the full queue so we can get rid of the overhead of a ton of
 ///     locks and bounds checking and do a one-time drain.
 ///
-/// One key usage pattern is that our blocking queues are single producer
-/// single consumer (SPSC). This should let us do some interesting optimizations
-/// in the future. At the time of writing this, the blocking queue implementation
-/// is purposely naive to build something quickly, but we should benchmark
-/// and make this more optimized as necessary.
+/// These queues were originally written for single producer, single consumer
+/// (SPSC) use, but that is no longer accurate: the renderer mailbox in
+/// particular is written by both the app thread and the IO thread. Blocking
+/// operations must therefore assume another producer can take a freed slot
+/// before a woken waiter reacquires the mutex. At the time of writing this,
+/// the blocking queue implementation is purposely naive to build something
+/// quickly, but we should benchmark and make this more optimized as
+/// necessary.
 pub fn BlockingQueue(
     comptime T: type,
     comptime capacity: usize,
@@ -111,7 +114,16 @@ pub fn BlockingQueue(
                     .forever => {
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        self.cond_not_full.wait(&self.mutex);
+
+                        // Wait in a loop, as condition variables require.
+                        // A single wait is not enough: the wake can be
+                        // spurious, and this queue is multi-producer, so
+                        // another producer can claim the freed slot before
+                        // we reacquire the mutex. Falling through in either
+                        // case would report a failed push to callers who
+                        // asked to wait indefinitely, silently dropping
+                        // messages that carry ownership or state.
+                        while (self.full()) self.cond_not_full.wait(&self.mutex);
                     },
 
                     .ns => |ns| {
@@ -121,8 +133,8 @@ pub fn BlockingQueue(
                     },
                 }
 
-                // If we're still full, then we failed to write. This can
-                // happen in situations where we are interrupted.
+                // A timed wait can expire, or be interrupted, with the
+                // queue still full. `.forever` cannot reach here full.
                 if (self.full()) return 0;
             }
 
@@ -245,4 +257,61 @@ test "timed push" {
 
     // Timed push should fail
     try testing.expectEqual(@as(Q.Size, 0), q.push(2, .{ .ns = 1000 }));
+}
+
+test "forever push waits again when a wake leaves the queue full" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    try testing.expectEqual(@as(Q.Size, 1), q.push(1, .{ .instant = {} }));
+    try testing.expectEqual(@as(Q.Size, 0), q.push(2, .{ .instant = {} }));
+
+    const Pusher = struct {
+        q: *Q,
+        result: Q.Size = 0,
+
+        fn run(self: *@This()) void {
+            self.result = self.q.push(99, .{ .forever = {} });
+        }
+    };
+
+    var pusher: Pusher = .{ .q = q };
+    const thread = try std.Thread.spawn(.{}, Pusher.run, .{&pusher});
+
+    // Wait until the pusher is parked on the condition variable.
+    while (true) {
+        q.mutex.lock();
+        const waiting = q.not_full_waiters;
+        q.mutex.unlock();
+        if (waiting == 1) break;
+        std.Thread.yield() catch {};
+    }
+
+    // The interleaving that loses messages: a consumer frees the slot and
+    // signals, but another producer refills it before the waiter can
+    // reacquire the mutex. Doing both under the lock makes that
+    // deterministic -- the waiter cannot observe the opening. A single-wait
+    // `.forever` gives up here and returns 0.
+    q.mutex.lock();
+    q.len -= 1;
+    q.cond_not_full.signal();
+    q.len += 1;
+    q.mutex.unlock();
+
+    // Let the woken pusher reacquire the mutex and observe the still-full
+    // queue before we free a slot for real. Without this the pusher races
+    // the pop below and a single-wait `.forever` can pass by luck.
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+
+    // Now genuinely make room for it.
+    try testing.expectEqual(@as(u64, 1), q.pop().?);
+    thread.join();
+
+    // The push waited rather than reporting failure, and the value landed.
+    try testing.expect(pusher.result != 0);
+    try testing.expectEqual(@as(u64, 99), q.pop().?);
 }

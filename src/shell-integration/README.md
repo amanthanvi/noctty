@@ -1,12 +1,12 @@
 # Shell Integration Code
 
 This is the shell-specific shell-integration code that is
-used for the shell-integration feature set that winghostty
+used for the shell-integration feature set that noctty
 supports.
 
 This README is meant as developer documentation and not as
 user documentation. For user documentation, see the main
-README or the public winghostty repository documentation
+README or the public noctty repository documentation
 
 ## Implementation Details
 
@@ -14,12 +14,12 @@ README or the public winghostty repository documentation
 
 | Shell | Automatic injection | Prompt / cwd marks | `ssh-env` | `ssh-terminfo` |
 | --- | --- | --- | --- | --- |
-| Bash | Yes, via POSIX `ENV` wrapper | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
-| Zsh | Yes, via temporary `ZDOTDIR` | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
-| Fish | Yes, via `XDG_DATA_DIRS` vendor config | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
-| Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
-| Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `winghostty +ssh-cache` |
-| PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `winghostty +ssh-cache`, otherwise falls back to `xterm-256color` |
+| Bash | Yes, via POSIX `ENV` wrapper | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
+| Zsh | Yes, via temporary `ZDOTDIR` | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
+| Fish | Yes, via `XDG_DATA_DIRS` vendor config | Yes | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
+| Nushell | Yes, via `XDG_DATA_DIRS` vendor autoload plus `use ghostty *` | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
+| Elvish | Available as distributed module | Shell-native where available | Yes | Installs remote `xterm-ghostty` terminfo with local `infocmp`, remote `tic`, and `noctty +ssh-cache` |
+| PowerShell | Yes on Windows for interactive `powershell.exe` / `pwsh.exe` | OSC 7 + OSC 133 | Yes | Cache-aware only: uses `xterm-ghostty` for hosts already present in `noctty +ssh-cache`, otherwise falls back to `xterm-256color` |
 | cmd.exe | No | No | No | No |
 
 ### Bash
@@ -34,7 +34,7 @@ Bash shell integration can also be sourced manually from `bash/ghostty.bash`.
 This also works for older versions of Bash.
 
 ```bash
-# winghostty shell integration for Bash. This must be at the top of your bashrc!
+# noctty shell integration for Bash. This must be at the top of your bashrc!
 if [ -n "${GHOSTTY_RESOURCES_DIR}" ]; then
     builtin source "${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash"
 fi
@@ -56,7 +56,7 @@ Elvish, on startup, searches for paths defined in `XDG_DATA_DIRS`
 variable for `./elvish/lib/*.elv` files and imports them. They are thus
 made available for use as modules by way of `use <filename>`.
 
-winghostty launches Elvish, passing the environment with `XDG_DATA_DIRS` prepended
+noctty launches Elvish, passing the environment with `XDG_DATA_DIRS` prepended
 with `$GHOSTTY_RESOURCES_DIR/src/shell-integration`. It contains
 `./elvish/lib/ghostty-integration.elv`. The user can then import it
 by `use ghostty-integration` every time after shell startup or
@@ -64,7 +64,7 @@ autostart integration in `$XDG_CONFIG_HOME/elvish/rc.elv`,
 which will run the integration routines.
 
 If you decide to autostart `ghostty-integration` with `rc.elv`, you should
-detect whether the terminal is winghostty or not. To do this, add this to the end
+detect whether the terminal is noctty or not. To do this, add this to the end
 of your `rc.elv` file:
 
 ```elvish
@@ -74,14 +74,14 @@ if (eq $E:TERM "xterm-ghostty") {
 ```
 
 The [Elvish](https://elv.sh) shell integration is supported by
-the community and is not officially supported by winghostty. We distribute
+the community and is not officially supported by noctty. We distribute
 it for ease of access and use but do not provide support for it.
 If you experience issues with the Elvish shell integration, I welcome
 any contributions to fix them. Thank you!
 
 ### Fish
 
-For [Fish](https://fishshell.com/), winghostty prepends to the
+For [Fish](https://fishshell.com/), noctty prepends to the
 `XDG_DATA_DIRS` directory. Fish automatically loads configuration
 files in `<XDG_DATA_DIR>/fish/vendor_conf.d/*.fish` on startup,
 allowing us to automatically integrate with the shell. For details
@@ -90,16 +90,16 @@ on the Fish startup process, see the
 
 ### Nushell
 
-For [Nushell](https://www.nushell.sh/), winghostty prepends to the
+For [Nushell](https://www.nushell.sh/), noctty prepends to the
 `XDG_DATA_DIRS` directory, making the `ghostty` module available through
-Nushell's vendor autoload mechanism. winghostty then automatically imports
+Nushell's vendor autoload mechanism. noctty then automatically imports
 the module using the `-e "use ghostty *"` flag when starting Nushell.
 
 Nushell provides many shell features itself, such as `title` and `cursor`,
-so our integration focuses on winghostty-specific features like `sudo`,
+so our integration focuses on noctty-specific features like `sudo`,
 `ssh-env`, and `ssh-terminfo`.
 
-The shell integration is automatically enabled when running Nushell in winghostty,
+The shell integration is automatically enabled when running Nushell in noctty,
 but you can also load it manually is shell integration is disabled:
 
 ```nushell
@@ -115,7 +115,7 @@ value will be retained and restored after our shell integration scripts are
 run.
 
 However, if `ZDOTDIR` is set in a system-wide file like `/etc/zshenv`, it will
-override winghostty's `ZDOTDIR` value, preventing the shell integration from being
+override noctty's `ZDOTDIR` value, preventing the shell integration from being
 loaded. In this case, the shell integration needs to be loaded manually.
 
 To load the Zsh shell integration manually:
@@ -143,7 +143,7 @@ own `-Command` would change exit behavior or corrupt the user payload.
 
 For the manual fallback, the Win32 runtime also installs a copy of
 `integration.ps1` to
-`%LOCALAPPDATA%\winghostty\shell-integration\powershell\integration.ps1`
+`%LOCALAPPDATA%\noctty\shell-integration\powershell\integration.ps1`
 so users can source it from `$PROFILE` if automatic injection is
 disabled or the command shape is unsupported.
 
@@ -156,7 +156,7 @@ When `GHOSTTY_SHELL_FEATURES` contains `ssh-env` or `ssh-terminfo`, PowerShell
 wraps `ssh` and runs the remote session with `TERM=xterm-256color` by default.
 `ssh-env` also sends `COLORTERM`, `TERM_PROGRAM`, and `TERM_PROGRAM_VERSION`
 and sets `COLORTERM=truecolor` for the SSH process. When `ssh-terminfo` is
-enabled, the wrapper checks `winghostty +ssh-cache` for the resolved
+enabled, the wrapper checks `noctty +ssh-cache` for the resolved
 `user@hostname` from `ssh -G`; cached hosts use `TERM=xterm-ghostty`.
 
 PowerShell intentionally does not auto-install remote terminfo. The POSIX
@@ -175,6 +175,6 @@ notifications.
 When `shell-integration-features` includes `ssh-terminfo`, the Bash integration
 wraps `ssh` to install the `xterm-ghostty` terminfo entry on remote hosts using
 local `infocmp` plus remote `tic`. Successful installs are cached through
-`winghostty +ssh-cache`, preferring `$GHOSTTY_BIN_DIR/winghostty` and falling
-back to a `winghostty` found on `PATH`. If the cache helper is unavailable, SSH
+`noctty +ssh-cache`, preferring `$GHOSTTY_BIN_DIR/noctty` and falling
+back to a `noctty` found on `PATH`. If the cache helper is unavailable, SSH
 still attempts installation but may repeat it on later connections.

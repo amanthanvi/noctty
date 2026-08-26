@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "windows-architecture.ps1")
+. (Join-Path $PSScriptRoot "release-copy-date.ps1")
 
 $copyPaths = @(
     "README.md",
@@ -19,11 +20,10 @@ $copyPaths = @(
     "docs/windows.md",
     "docs/windows-capability-matrix.md",
     "site/README.md",
-    "site/components/terminal.jsx",
-    "site/components/hero/version-chip-color.jsx",
-    "site/components/why/why-fork.jsx",
-    "site/components/features/feature-grid.jsx",
-    "site/bundle.js"
+    "site/index.html",
+    "site/terminal.js",
+    "site/version.js",
+    "site/install.js"
 )
 
 $failures = New-Object System.Collections.Generic.List[string]
@@ -134,7 +134,7 @@ $readme = Get-Text -RelativePath "README.md"
 $latestVersion = $null
 if ($null -eq $readme) {
     # Get-Text already recorded the missing-file failure.
-} elseif ($readme -match 'winghostty\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/winghostty/releases/tag/v\1\)') {
+} elseif ($readme -match 'noctty\s+([0-9]+\.[0-9]+\.[0-9]+)\]\(https://github\.com/amanthanvi/noctty/releases/tag/v\1\)') {
     $latestVersion = $Matches[1]
 } else {
     Add-Failure "README.md: could not find a self-consistent latest stable release link."
@@ -144,7 +144,7 @@ $forbiddenRules = @(
     @{ Text = "1.3.111"; Reason = "README/docs/site release copy should not point at the stale May 12 release." },
     @{ Text = "1.3.113"; Reason = "README/docs/site release copy should not point at the stale May 24 release." },
     @{ Text = "ARM64 builds are added by the next release"; Reason = "Current releases already publish ARM64 assets." },
-    @{ Text = "winghostty publishes two Windows artifacts"; Reason = "Current releases publish installer, portable, and checksum assets for both x64 and ARM64." },
+    @{ Text = "noctty publishes two Windows artifacts"; Reason = "Current releases publish installer, portable, and checksum assets for both x64 and ARM64." },
     @{ Text = "Releases are currently unsigned"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "Current releases are unsigned"; Reason = "Public releases require signed installers and signed Windows binaries." },
     @{ Text = "Unsigned releases are expected"; Reason = "Public releases require signed installers and signed Windows binaries." },
@@ -153,7 +153,7 @@ $forbiddenRules = @(
     @{ Text = "notify-only GitHub Releases updater"; Reason = "Download mode stages verified installers for user-initiated apply." },
     @{ Text = "updates stay notify-only"; Reason = "Download mode stages verified installers for user-initiated apply." },
     @{ Text = "updater only checks GitHub"; Reason = "Download mode can stage a verified installer after checking GitHub Releases." },
-    @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the winghostty package identity." }
+    @{ Text = "The Zig package is still declared"; Reason = "build.zig.zon already uses the noctty package identity." }
 )
 
 foreach ($rule in $forbiddenRules) {
@@ -174,8 +174,8 @@ Require-Contains -RelativePath "PACKAGING.md" -Needle "legacy alias for existing
 Require-Contains -RelativePath "PACKAGING.md" -Needle "Release workflow requires signing" -Reason "Packaging docs must distinguish local unsigned smoke packaging from public signed releases."
 
 foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
-    Require-Contains -RelativePath $docsPath -Needle "winghostty-<version>-windows-<arch>-setup.exe" -Reason "Install docs should describe both x64 and ARM64 setup artifacts."
-    Require-Contains -RelativePath $docsPath -Needle "winghostty-<version>-windows-<arch>-portable.zip" -Reason "Install docs should describe both x64 and ARM64 portable artifacts."
+    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-setup.exe" -Reason "Install docs should describe both x64 and ARM64 setup artifacts."
+    Require-Contains -RelativePath $docsPath -Needle "noctty-<version>-windows-<arch>-portable.zip" -Reason "Install docs should describe both x64 and ARM64 portable artifacts."
     Require-Contains -RelativePath $docsPath -Needle "SHA256SUMS-windows-<arch>.txt" -Reason "Checksum guidance should use architecture-specific checksum files."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\bx64\b" -Reason "Install docs should name the supported release architectures."
     Require-Regex -RelativePath $docsPath -Pattern "(?i)\barm64\b" -Reason "Install docs should name the supported release architectures."
@@ -184,7 +184,7 @@ foreach ($docsPath in @("docs/getting-started.md", "docs/windows.md")) {
 Require-Contains -RelativePath "docs/status.md" -Needle "x64 and ARM64" -Reason "Status docs should match the supported public release architectures."
 Require-Contains -RelativePath "docs/status.md" -Needle "checksum metadata" -Reason "Updater docs should mention checksum-gated release metadata."
 
-foreach ($sitePath in @("site/components/terminal.jsx", "site/bundle.js")) {
+foreach ($sitePath in @("site/terminal.js")) {
     Require-Contains -RelativePath $sitePath -Needle 'PROCESSOR_ARCHITEW6432' -Reason "The public site terminal copy should detect the native OS architecture from WOW64 shells."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-setup.exe' -Reason "The public site terminal copy should not hard-code x64 download URLs."
     Require-Contains -RelativePath $sitePath -Needle 'windows-$arch-portable.zip' -Reason "The public site terminal copy should not hard-code x64 download URLs."
@@ -206,9 +206,9 @@ if ($latestVersion) {
     Require-Contains -RelativePath "README.md" -Needle $legacyName -Reason "README should document the legacy x64 checksum alias."
 
     $escapedVersion = [regex]::Escape($latestVersion)
-    Require-Regex -RelativePath "site/components/hero/version-chip-color.jsx" -Pattern "DEFAULT_WG_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
-    Require-Regex -RelativePath "site/components/terminal.jsx" -Pattern "WG_VERSION\s*=\s*window\.WG_VERSION\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
-    Require-Regex -RelativePath "site/bundle.js" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "Generated site bundle should contain the current README release version."
+    Require-Regex -RelativePath "site/version.js" -Pattern "DEFAULT_NC_VERSION\s*=\s*'$escapedVersion'" -Reason "Site source default release version should match README."
+    Require-Regex -RelativePath "site/terminal.js" -Pattern "NC_VERSION\s*=\s*\(typeof window !== 'undefined' && window\.NC_VERSION\)\s*\|\|\s*'$escapedVersion'" -Reason "Site terminal default release version should match README."
+    Require-Regex -RelativePath "site/index.html" -Pattern "(?<![\d.])$escapedVersion(?![\d.])" -Reason "The landing page should ship the current README release version as its compiled default."
     Require-Regex -RelativePath "docs/getting-started.md" -Pattern ('current stable release is\s+`?' + $escapedVersion + '`?(?![\d.])') -Reason "Getting-started stable version should match README."
 }
 
@@ -218,7 +218,7 @@ if ($CheckRemoteLatest) {
     } elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Add-Failure "Cannot check remote latest release because gh is not installed."
     } else {
-        $ghOutput = & gh release view --repo amanthanvi/winghostty --json tagName,publishedAt,assets
+        $ghOutput = & gh release view --repo amanthanvi/noctty --json tagName,publishedAt,assets
         if ($LASTEXITCODE -ne 0) {
             Add-Failure "gh release view failed: $ghOutput"
         } else {
@@ -232,10 +232,7 @@ if ($CheckRemoteLatest) {
             if ($release) {
                 $publishedDate = $null
                 try {
-                    $publishedDate = [DateTimeOffset]::Parse([string]$release.publishedAt).UtcDateTime.ToString(
-                        "yyyy-MM-dd",
-                        [System.Globalization.CultureInfo]::InvariantCulture
-                    )
+                    $publishedDate = ConvertTo-UtcReleaseDate -PublishedAt $release.publishedAt
                 } catch {
                     Add-Failure "Could not parse GitHub latest-release publishedAt date: $($release.publishedAt)"
                 }

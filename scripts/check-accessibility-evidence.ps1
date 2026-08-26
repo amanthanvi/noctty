@@ -71,31 +71,31 @@ $runId = [regex]::Match($evidence.workflow_run_url, '/actions/runs/(?<id>[0-9]+)
 if ([string]::IsNullOrWhiteSpace($runId) -or -not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'Accessibility evidence requires a valid GitHub Actions run URL and the gh CLI.'
 }
-$repo = & gh api 'repos/amanthanvi/winghostty' | ConvertFrom-Json
+$repo = & gh api 'repos/amanthanvi/noctty' | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Could not load repository metadata for accessibility evidence validation.' }
 $defaultBranch = $repo.default_branch
-$run = & gh api "repos/amanthanvi/winghostty/actions/runs/$runId" | ConvertFrom-Json
+$run = & gh api "repos/amanthanvi/noctty/actions/runs/$runId" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow run $runId." }
 if ($run.name -ne 'Test' -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or
     $run.head_sha -ne $evidence.tested_commit -or $run.head_branch -ne $defaultBranch -or
     $run.event -notin @('push', 'workflow_dispatch', 'schedule')) {
     throw "Accessibility workflow run $runId is not a successful Test run for $($evidence.tested_commit) on default branch '$defaultBranch'."
 }
-$jobs = & gh api "repos/amanthanvi/winghostty/actions/runs/$runId/jobs?per_page=100" | ConvertFrom-Json
+$jobs = & gh api "repos/amanthanvi/noctty/actions/runs/$runId/jobs?per_page=100" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow jobs for run $runId." }
 $interactiveJob = @($jobs.jobs | Where-Object { $_.name -eq 'Windows 11 Interactive Composite' -and $_.conclusion -eq 'success' })
 if ($interactiveJob.Count -ne 1) { throw "Workflow run $runId lacks one successful Windows 11 Interactive Composite job." }
-$artifacts = & gh api "repos/amanthanvi/winghostty/actions/runs/$runId/artifacts?per_page=100" | ConvertFrom-Json
+$artifacts = & gh api "repos/amanthanvi/noctty/actions/runs/$runId/artifacts?per_page=100" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "Could not load accessibility workflow artifacts for run $runId." }
 $evidenceArtifact = @($artifacts.artifacts | Where-Object {
     $_.name -eq "flagship-interactive-win11-$runId" -and -not $_.expired
 })
 if ($evidenceArtifact.Count -ne 1) { throw "Workflow run $runId lacks one unexpired interactive evidence artifact." }
 
-$downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) "winghostty-accessibility-evidence-$([Guid]::NewGuid().ToString('N'))"
+$downloadRoot = Join-Path ([System.IO.Path]::GetTempPath()) "noctty-accessibility-evidence-$([Guid]::NewGuid().ToString('N'))"
 try {
     & gh run download $runId `
-        --repo amanthanvi/winghostty `
+        --repo amanthanvi/noctty `
         --name "flagship-interactive-win11-$runId" `
         --dir $downloadRoot
     if ($LASTEXITCODE -ne 0) { throw "Could not download interactive evidence artifact for run $runId." }
@@ -111,7 +111,7 @@ try {
     }
     $uiaTrees = @(Get-ChildItem -LiteralPath $downloadRoot -Filter uia-tree.json -Recurse)
     if ($uiaTrees.Count -lt 1) { throw "Interactive artifact for run $runId lacks automated UIA evidence." }
-    $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter winghostty-runner-provenance.json -Recurse)
+    $provenancePaths = @(Get-ChildItem -LiteralPath $downloadRoot -Filter noctty-runner-provenance.json -Recurse)
     if ($provenancePaths.Count -ne 1) { throw "Interactive artifact for run $runId lacks exactly one runner provenance file." }
     try {
         $provenance = Get-Content -LiteralPath $provenancePaths[0].FullName -Raw | ConvertFrom-Json -NoEnumerate
@@ -123,7 +123,7 @@ try {
         $provenance.GetType() -ne [System.Management.Automation.PSCustomObject]) {
         throw "Interactive runner provenance for run $runId must be a JSON object."
     }
-    if ($provenance.schema_version -ne 'winghostty.interactive-runner-provenance.v1') {
+    if ($provenance.schema_version -ne 'noctty.interactive-runner-provenance.v1') {
         throw "Interactive runner provenance for run $runId has unsupported schema '$($provenance.schema_version)'."
     }
     $minimumRunnerVersion = [version]'2.327.1'
@@ -153,7 +153,7 @@ try {
         $provenanceWindowsBuild -lt 22000 -or
         $provenanceProcessSession -le 0 -or
         $provenanceProcessSession -ne $provenanceActiveSession -or
-        $provenance.repository -ne 'amanthanvi/winghostty' -or
+        $provenance.repository -ne 'amanthanvi/noctty' -or
         $provenance.workflow -ne 'Test' -or
         [string]$provenance.run_id -ne [string]$runId -or
         $provenanceRunAttempt -lt 1 -or

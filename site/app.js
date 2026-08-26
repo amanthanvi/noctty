@@ -1,14 +1,10 @@
 (function () {
   var root = document.documentElement;
   var toggle = document.getElementById("theme-toggle");
-  var storageKey = "wg-theme";
+  var storageKey = "nc-theme";
 
   function applyTheme(theme) {
     root.setAttribute("data-theme", theme);
-
-    if (document.body) {
-      document.body.dataset.theme = theme;
-    }
 
     if (toggle) {
       var nextTheme = theme === "dark" ? "light" : "dark";

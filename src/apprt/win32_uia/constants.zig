@@ -43,6 +43,11 @@ pub const UIA_ValueIsReadOnlyPropertyId: i32 = 30046;
 pub const UIA_IsControlElementPropertyId: i32 = 30016;
 pub const UIA_IsContentElementPropertyId: i32 = 30017;
 pub const UIA_SelectionItemIsSelectedPropertyId: i32 = 30079;
+pub const UIA_LiveSettingPropertyId: i32 = 30135;
+
+pub const LiveSetting_Off: i32 = 0;
+pub const LiveSetting_Polite: i32 = 1;
+pub const LiveSetting_Assertive: i32 = 2;
 
 // ── Event IDs ──────────────────────────────────────────────────────────
 

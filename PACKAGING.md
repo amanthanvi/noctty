@@ -1,12 +1,12 @@
-# Packaging winghostty for Distribution
+# Packaging noctty for distribution
 
 This repository publishes Windows user artifacts directly from GitHub
 Releases. The public packaging targets are:
 
-- `winghostty-<version>-windows-x64-setup.exe`
-- `winghostty-<version>-windows-x64-portable.zip`
-- `winghostty-<version>-windows-arm64-setup.exe`
-- `winghostty-<version>-windows-arm64-portable.zip`
+- `noctty-<version>-windows-x64-setup.exe`
+- `noctty-<version>-windows-x64-portable.zip`
+- `noctty-<version>-windows-arm64-setup.exe`
+- `noctty-<version>-windows-arm64-portable.zip`
 - `SHA256SUMS-windows-x64.txt`
 - `SHA256SUMS-windows-arm64.txt`
 - `SHA256SUMS.txt` legacy alias for existing x64 auto-update clients
@@ -14,15 +14,15 @@ Releases. The public packaging targets are:
 Primary distribution URL:
 
 ```text
-https://github.com/amanthanvi/winghostty/releases
+https://github.com/amanthanvi/noctty/releases
 ```
 
-## Release Inputs
+## Release inputs
 
-winghostty releases use plain semver tags such as `v1.3.100`:
+noctty releases use plain semver tags such as `v1.3.100`:
 
 - `major.minor` track the Ghostty upstream compatibility line
-- `patch` is the winghostty release number on that line
+- `patch` is the noctty release number on that line
 - fork releases start at patch `100` for a new upstream line
 
 The exact upstream base release is stored in
@@ -44,7 +44,15 @@ The release installer and Windows PE files inside the portable ZIP are
 Authenticode-signed; the ZIP container itself is checksummed, not
 Authenticode-signed.
 
-## Local Packaging
+Before publication, the Release workflow updates Microsoft Defender
+signatures and scans both setup artifacts plus the six PE files extracted from
+the portable ZIPs, with remediation disabled. A missing or inactive scanner,
+update or scan error, or detection fails the release. This is a current-engine
+regression gate for the published Windows executable bytes; it does not replace
+a publicly trusted signing identity or reproduce every enterprise security
+policy.
+
+## Local packaging
 
 Build the app first:
 
@@ -85,7 +93,7 @@ To exercise the local signing path, export these environment variables
 first:
 
 ```powershell
-$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\winghostty-signing.pfx"
+$env:WINDOWS_CODESIGN_PFX_PATH = "C:\secure\noctty-signing.pfx"
 $env:WINDOWS_CODESIGN_PFX_PASSWORD = "<pfx-password>"
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true" # only for internal/self-signed PFXs
 powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1 `
@@ -106,10 +114,10 @@ powershell -ExecutionPolicy Bypass -File scripts/package-package-managers.ps1 `
 
 This emits:
 
-- `dist/artifacts/winghostty-<version>-windows-x64/package-managers/scoop/`
-- `dist/artifacts/winghostty-<version>-windows-x64/package-managers/metadata.json`
+- `dist/artifacts/noctty-<version>-windows-x64/package-managers/scoop/`
+- `dist/artifacts/noctty-<version>-windows-x64/package-managers/metadata.json`
 
-## Release Automation
+## Release automation
 
 The release workflow publishes to the official Windows package-manager
 tracks after the GitHub Release is live. The preflight fails closed unless
@@ -124,7 +132,7 @@ Automated releases should use a dedicated GitHub Actions environment named
 the repo default secret scope and runs `scripts/release-preflight.ps1`
 before build/test/package work starts.
 
-### Authenticode Signing
+### Authenticode signing
 
 Required for the GitHub `Release` workflow:
 
@@ -149,8 +157,8 @@ Recommended setup:
 Example `gh` commands:
 
 ```powershell
-$repo = "amanthanvi/winghostty"
-$pfxPath = "C:\secure\winghostty-signing.pfx"
+$repo = "amanthanvi/noctty"
+$pfxPath = "C:\secure\noctty-signing.pfx"
 $pfxBase64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfxPath))
 
 $pfxBase64 | gh secret set WINDOWS_CODESIGN_PFX_BASE64 --repo $repo --env release
@@ -165,19 +173,19 @@ to DigiCert when the variable is absent.
 
 > **Security note:** set `WINDOWS_CODESIGN_TRUST_SELF_SIGNED` in the
 > `release` environment only while the release identity is intentionally
-> self-signed, and remove it as soon as a publicly trusted certificate is in
-> use — with the variable unset, signature validation fails closed on
+> self-signed, and remove it as soon as a publicly trusted certificate is
+> in use. With the variable unset, signature validation fails closed on
 > untrusted roots instead of accepting them.
 
 When `WINDOWS_CODESIGN_TRUST_SELF_SIGNED=true`, signature validation accepts
 the expected self-signed signer thumbprint plus the narrow untrusted-root
 statuses reported by `Get-AuthenticodeSignature`. This keeps
-internal/self-signed release probes green on the current runner — but it
-does not create public publisher trust on other machines. Until winghostty
+internal/self-signed release probes green on the current runner, but it
+does not create public publisher trust on other machines. Until noctty
 moves from internal/self-signed signing to a publicly trusted certificate,
 treat SmartScreen and publisher trust as incomplete.
 
-### Release Runbook
+### Release runbook
 
 Recommended order:
 
@@ -186,16 +194,21 @@ Recommended order:
 2. Configure or rotate the `release` environment signing secrets.
 3. Run the **Release Readiness** workflow with the target plain semver
    version, for example `1.3.107`.
-4. After readiness passes, either:
+4. Produce interactive evidence for the release SHA: register the
+   self-hosted interactive runner ephemerally, then dispatch the **Test**
+   workflow with `run_interactive_win11=true`. The interactive job runs
+   only on this opted-in dispatch, and the **Release** workflow refuses
+   to publish without its hash-bound evidence at the exact release SHA.
+5. After readiness passes, either:
    - push tag `v<version>`, or
    - manually dispatch the **Release** workflow with `version=<version>`.
-5. Confirm the workflow published artifacts for both x64 and ARM64:
+6. Confirm the workflow published artifacts for both x64 and ARM64:
    - installer
    - portable ZIP
    - `SHA256SUMS-windows-<arch>.txt`
    - legacy x64 `SHA256SUMS.txt`
    - GitHub Release notes/assets
-6. Confirm follow-on publishes:
+7. Confirm follow-on publishes:
    - Scoop manifest update
    - WinGet submission
 
@@ -211,9 +224,9 @@ on first publish and `gh release upload --clobber` on reruns.
 - Repo variable: `WINGET_PACKAGE_IDENTIFIER`
 - Current automation path: `wingetcreate update ... --submit`
 
-The official WinGet package is bootstrapped as `AmanThanvi.winghostty`.
+The official WinGet package is bootstrapped as `AmanThanvi.noctty`.
 Release preflight verifies that
-`microsoft/winget-pkgs/manifests/a/AmanThanvi/winghostty` exists before the
+`microsoft/winget-pkgs/manifests/a/AmanThanvi/noctty` exists before the
 release workflow can claim package-manager readiness. Keep CI on the
 truthful `update` path; do not switch to `wingetcreate new` for automated
 releases.
@@ -231,22 +244,22 @@ is review-driven and should stay explicit.
 The official Scoop track is the fork-owned bucket:
 
 ```powershell
-scoop bucket add winghostty https://github.com/amanthanvi/scoop-winghostty
-scoop install winghostty/winghostty
+scoop bucket add noctty https://github.com/amanthanvi/scoop-noctty
+scoop install noctty/noctty
 ```
 
 Release preflight verifies that the configured manifest exists, defaulting
-to `bucket/winghostty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
+to `bucket/noctty.json` when `SCOOP_BUCKET_MANIFEST_PATH` is unset.
 
-## Zig Version
+## Zig version
 
 This repo is pinned to Zig `0.15.2` in CI, and packaging should use the same
 Zig version unless the repo is intentionally updated to a newer one. The
 full toolchain rules live in [HACKING.md](HACKING.md#toolchain).
 
-## Library Consumers
+## Library consumers
 
 `libghostty-vt` remains intentionally retained and keeps its existing public
-name. The app binary and Windows packaging are rebranded to `winghostty`,
+name. The app binary and Windows packaging are rebranded to `noctty`,
 but the library surface is not being renamed as part of this packaging
 cleanup.

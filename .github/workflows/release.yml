@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to package, without a leading v. Use the winghostty fork scheme such as 1.3.100
+        description: Release version to package, without a leading v. Use the noctty fork scheme such as 1.3.100
         required: true
         type: string
       prerelease:
@@ -107,10 +107,19 @@ jobs:
             New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
             gh run download $run.databaseId --repo $env:GH_REPOSITORY --name $artifactName --dir $artifactRoot
             if ($LASTEXITCODE -ne 0) { continue }
-            $resultPath = Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -Recurse |
-              Select-Object -First 1 -ExpandProperty FullName
-            if (-not $resultPath) { continue }
+            $resultFiles = @(
+              Get-ChildItem -LiteralPath $artifactRoot -Filter result.json -File -Recurse |
+                Where-Object {
+                  try {
+                    (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).scenario_id -eq 'windows.interactive-win11.composite'
+                  }
+                  catch { $false }
+                }
+            )
+            if ($resultFiles.Count -ne 1) { continue }
+            $resultPath = $resultFiles[0].FullName
             $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+            if (@($result.artifacts).Count -eq 0) { continue }
             $artifactRootFull = [IO.Path]::GetFullPath($artifactRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
             $resultDir = Split-Path -Parent $resultPath
             $hashesBound = $true
@@ -165,7 +174,7 @@ jobs:
 
           $versionMatch = [regex]::Match($version, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$')
           if (-not $versionMatch.Success) {
-            throw "Unsupported release version format '$version'. winghostty releases must use plain semver <major>.<minor>.<patch>."
+            throw "Unsupported release version format '$version'. noctty releases must use plain semver <major>.<minor>.<patch>."
           }
 
           $releaseMetaPath = Join-Path $PWD "dist/windows/release-metadata.json"
@@ -189,13 +198,13 @@ jobs:
 
           $patch = [int]$versionMatch.Groups['patch'].Value
           if ($patch -lt $firstForkPatch) {
-            throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. winghostty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
+            throw "Release patch '$patch' is below the configured firstForkPatch '$firstForkPatch'. noctty fork releases on line $versionLine must start at $versionLine.$firstForkPatch or later."
           }
 
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
-          "title=winghostty $version" >> $env:GITHUB_OUTPUT
+          "title=noctty $version" >> $env:GITHUB_OUTPUT
           "version_line=$versionLine" >> $env:GITHUB_OUTPUT
           "upstream_base_version=$upstreamBaseVersion" >> $env:GITHUB_OUTPUT
           "first_fork_patch=$firstForkPatch" >> $env:GITHUB_OUTPUT
@@ -209,16 +218,14 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         shell: pwsh
         run: |
-          $preflightArgs = @(
-            '-Version'
-            $env:RELEASE_VERSION
-            '-RequireSigning'
-            '-RequirePackageManagers'
-          )
+          $preflightArgs = @{
+            Version = $env:RELEASE_VERSION
+            RequireSigning = $true
+            RequirePackageManagers = $true
+          }
           if ($env:RELEASE_PRERELEASE -ne 'true') {
             ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            $preflightArgs += '-RequireAccessibilityEvidence'
           }
           ./scripts/release-preflight.ps1 @preflightArgs
 
@@ -301,7 +308,7 @@ jobs:
           }
 
           foreach ($arch in (Get-WindowsPackageArchitectures)) {
-            $artifactDir = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
+            $artifactDir = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
             $setup = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup)
             $zip = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind portable)
             $checksums = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind checksums)
@@ -322,14 +329,95 @@ jobs:
 
             Assert-ReleaseSignature -Path $setup -Label "Setup $arch"
 
-            $extractDir = Join-Path $env:RUNNER_TEMP "winghostty-release-verify-$arch"
+            $extractDir = Join-Path $env:RUNNER_TEMP "noctty-release-verify-$arch"
             if (Test-Path -LiteralPath $extractDir) {
               Remove-Item -LiteralPath $extractDir -Recurse -Force
             }
             Expand-Archive -LiteralPath $zip -DestinationPath $extractDir
-            foreach ($relative in @("winghostty/winghostty.com", "winghostty/winghostty.exe", "winghostty/ghostty-vt.dll")) {
+            foreach ($relative in @("noctty/noctty.com", "noctty/noctty.exe", "noctty/ghostty-vt.dll")) {
               $path = Join-Path $extractDir $relative
               Assert-ReleaseSignature -Path $path -Label "$relative $arch"
+            }
+          }
+
+      - name: Scan Windows release artifacts with Microsoft Defender
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          . (Join-Path $PWD "scripts/windows-architecture.ps1")
+          $status = Get-MpComputerStatus -ErrorAction Stop
+          if (-not $status.AMServiceEnabled -or
+              -not $status.AntivirusEnabled -or
+              $status.AMRunningMode -ne "Normal") {
+            throw "Microsoft Defender Antivirus must be active in Normal mode before release publication."
+          }
+
+          $scannerCandidates = @(
+            (Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe")
+          )
+          $platformRoot = Join-Path $env:ProgramData "Microsoft/Windows Defender/Platform"
+          if (Test-Path -LiteralPath $platformRoot) {
+            $scannerCandidates = @(
+              Get-ChildItem -LiteralPath $platformRoot -Directory |
+                ForEach-Object {
+                  $platformVersion = ($_.Name -replace '-\d+$', '') -as [version]
+                  if ($null -ne $platformVersion) {
+                    [pscustomobject]@{
+                      Version = $platformVersion
+                      Path = Join-Path $_.FullName "MpCmdRun.exe"
+                    }
+                  }
+                } |
+                Sort-Object Version -Descending |
+                ForEach-Object { $_.Path }
+            ) + $scannerCandidates
+          }
+          $scanner = $scannerCandidates |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            Select-Object -First 1
+          if (-not $scanner) {
+            throw "MpCmdRun.exe was not found."
+          }
+
+          & $scanner -SignatureUpdate
+          if ($LASTEXITCODE -ne 0) {
+            throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
+          }
+
+          $version = "${{ steps.meta.outputs.version }}"
+          $portablePayloads = @(
+            "noctty/noctty.com",
+            "noctty/noctty.exe",
+            "noctty/ghostty-vt.dll"
+          )
+          $scanPaths = @(
+            foreach ($arch in (Get-WindowsPackageArchitectures)) {
+              $artifactDir = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
+              $setupName = New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup
+              $setupPath = Join-Path $artifactDir $setupName
+              if (-not (Test-Path -LiteralPath $setupPath)) {
+                throw "Missing Defender scan input: $setupPath"
+              }
+              $setupPath
+
+              $extractDir = Join-Path $env:RUNNER_TEMP "noctty-release-verify-$arch"
+              foreach ($relative in $portablePayloads) {
+                $payloadPath = Join-Path $extractDir $relative
+                if (-not (Test-Path -LiteralPath $payloadPath)) {
+                  throw "Missing Defender scan input: $payloadPath"
+                }
+                $payloadPath
+              }
+            }
+          )
+          if ($scanPaths.Count -ne 8) {
+            throw "Expected exactly eight release artifacts for Defender scanning; found $($scanPaths.Count)."
+          }
+
+          foreach ($scanPath in $scanPaths) {
+            & $scanner -Scan -ScanType 3 -File $scanPath -DisableRemediation -ReturnHR
+            if ($LASTEXITCODE -ne 0) {
+              throw "Microsoft Defender rejected $scanPath with exit code $LASTEXITCODE."
             }
           }
 
@@ -359,7 +447,7 @@ jobs:
           $architectures = Get-WindowsPackageArchitectures
           $artifactDirs = @{}
           foreach ($arch in $architectures) {
-            $artifactDirs[$arch] = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-$arch"
+            $artifactDirs[$arch] = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
           }
           $artifactDirX64 = $artifactDirs["x64"]
           $legacyChecksumsPath = Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $version -Architecture x64 -Kind legacy-checksums)
@@ -375,12 +463,12 @@ jobs:
           }
           $assets += @(
             $legacyChecksumsPath,
-            (Join-Path $artifactDirX64 "winghostty-icon.svg")
+            (Join-Path $artifactDirX64 "noctty-icon.svg")
           )
           $notesPrefix = @"
           Compatibility line: Ghostty $versionLine
           Base upstream release: $upstreamBaseVersion
-          Versioning: major.minor follow the Ghostty upstream line; patch is the winghostty release number on that line.
+          Versioning: major.minor follow the Ghostty upstream line; patch is the noctty release number on that line.
           "@
 
           & gh release view $tag --repo $env:GH_REPO *> $null
@@ -426,16 +514,16 @@ jobs:
           }
 
           $version = "${{ steps.meta.outputs.version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$version-windows-x64"
           $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
           $manifestRelPath = if ($env:SCOOP_BUCKET_MANIFEST_PATH) {
             $env:SCOOP_BUCKET_MANIFEST_PATH
           } else {
-            "bucket/winghostty.json"
+            "bucket/noctty.json"
           }
 
-          $bucketDir = Join-Path $env:RUNNER_TEMP "winghostty-scoop-bucket"
+          $bucketDir = Join-Path $env:RUNNER_TEMP "noctty-scoop-bucket"
           if (Test-Path -LiteralPath $bucketDir) {
             Remove-Item -LiteralPath $bucketDir -Recurse -Force
           }
@@ -473,7 +561,7 @@ jobs:
               throw "git diff --cached failed with exit code $LASTEXITCODE"
             }
 
-            & git commit -m "winghostty: update to $version"
+            & git commit -m "noctty: update to $version"
             if ($LASTEXITCODE -ne 0) {
               throw "git commit failed with exit code $LASTEXITCODE"
             }
@@ -503,7 +591,7 @@ jobs:
           }
 
           $version = "${{ steps.meta.outputs.version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/winghostty-$version-windows-x64"
+          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$version-windows-x64"
           $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
           $packageIdSegments = $env:WINGET_PACKAGE_IDENTIFIER.Split('.')
@@ -515,7 +603,7 @@ jobs:
           try {
             Invoke-WebRequest `
               -Uri $manifestApiUrl `
-              -Headers @{ "User-Agent" = "winghostty-release-workflow" } `
+              -Headers @{ "User-Agent" = "noctty-release-workflow" } `
               -ErrorAction Stop | Out-Null
           }
           catch {
