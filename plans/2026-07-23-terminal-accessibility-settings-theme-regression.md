@@ -163,9 +163,10 @@ Settings transaction code only emits typed live-preview effects.
   malformed-sequence, and parser resynchronization behavior belongs to the
   authoritative terminal parser, not a second accessibility state machine.
 - Suppress matching echoed key input and control-only/unreadable output.
-- Raise `UiaRaiseNotificationEvent` with an activity identifier dedicated to
-  terminal output and a processing mode that preserves command output order
-  while allowing keyboard input to interrupt speech.
+- Raise `UiaRaiseNotificationEvent` with the dedicated `TerminalTextOutput`
+  activity identifier and `NotificationProcessing_All` (`2`) so rapid terminal
+  chunks remain ordered. Sparse command-palette/status notifications continue
+  to use `NotificationProcessing_MostRecent` (`3`).
 - Never announce the full retained snapshot for each change.
 - Coalesce chunks without merging unrelated command boundaries or allowing an
   unbounded backlog.
@@ -198,8 +199,8 @@ Unit/provider tests:
 - SupportedTextSelection is Single;
 - selection calls are safe and detached providers fail correctly;
 - session focus refresh decision and event coalescing;
-- terminal LiveSetting, notification metadata, key-echo suppression,
-  readability filtering, chunk bounds, and ordering;
+- terminal LiveSetting, notification metadata, rapid ordered delivery,
+  key-echo suppression, readability filtering, and chunk bounds;
 - semantic Settings color mapping for light, dark, system, and High Contrast;
 - theme-resource replacement implies invalidation.
 
@@ -221,6 +222,7 @@ Manual acceptance:
 
 - Narrator reads existing terminal content after entering a pane;
 - Narrator announces new output at a usable cadence without duplicate speech;
+- keyboard input can interrupt ongoing speech without dropping queued output;
 - Narrator/NVDA can navigate current and prior terminal lines;
 - background pane/tab output is current on first focus;
 - NVDA review cursor works;

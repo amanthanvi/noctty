@@ -3,99 +3,136 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
   <title>noctty architecture review — terminal accessibility and Settings theme</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script type="module">
-    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-    mermaid.initialize({ startOnLoad: true, theme: "dark" });
-  </script>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #020617; color: #f1f5f9; }
+    main { max-width: 72rem; margin: 0 auto; padding: 2rem; }
+    main > * + * { margin-top: 2rem; }
+    header, .panel { border: 1px solid #334155; background: #0f172a; border-radius: 1rem; padding: 1.5rem; }
+    header { padding: 1.75rem; }
+    header .eyebrow { margin: 0; color: #38bdf8; font-size: .875rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: .5rem 0 0; font-size: 1.875rem; line-height: 2.25rem; }
+    h2 { margin: 0; font-size: 1.25rem; }
+    p { line-height: 1.6; }
+    header .summary { max-width: 56rem; margin: .75rem 0 0; color: #cbd5e1; }
+    .summary-grid, .interfaces { display: grid; gap: 1.25rem; }
+    .summary-card { border: 1px solid; border-radius: .75rem; padding: 1.25rem; }
+    .summary-card h2 { font-size: 1rem; }
+    .summary-card p { margin: .5rem 0 0; color: #cbd5e1; font-size: .875rem; }
+    .summary-card.drift { border-color: #9f1239; background: rgb(76 5 25 / .4); }
+    .summary-card.drift h2 { color: #fda4af; }
+    .summary-card.theme { border-color: #92400e; background: rgb(69 26 3 / .4); }
+    .summary-card.theme h2 { color: #fcd34d; }
+    .summary-card.seam { border-color: #065f46; background: rgb(2 44 34 / .4); }
+    .summary-card.seam h2 { color: #6ee7b7; }
+    .diagram { margin-top: 1.25rem; overflow-x: auto; }
+    .caption { margin: 1rem 0 0; color: #94a3b8; font-size: .875rem; }
+    .interfaces article h2 { color: #7dd3fc; font-size: 1rem; }
+    .bullets { margin: .75rem 0 0; padding-left: 1.25rem; color: #cbd5e1; font-size: .875rem; }
+    .bullets li + li { margin-top: .5rem; }
+    code { color: #bae6fd; }
+    .table-wrap { margin-top: 1rem; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: .875rem; }
+    th, td { padding: .5rem; }
+    th { color: #94a3b8; }
+    tbody tr { border-top: 1px solid #1e293b; }
+    @media (min-width: 768px) {
+      .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .interfaces { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11.16.1/dist/mermaid.min.js" integrity="sha384-aBQXj4hK6Jm05i7aQAsUV3bLdSUrHX1BGYfMB0166TtWt/RRaw+h0Eelme9OCOvy" crossorigin="anonymous"></script>
+  <script defer src="architecture-review-init.js"></script>
 </head>
-<body class="bg-slate-950 text-slate-100">
-  <main class="mx-auto max-w-6xl space-y-8 p-8">
-    <header class="rounded-2xl border border-slate-700 bg-slate-900 p-7">
-      <p class="text-sm font-semibold uppercase tracking-widest text-sky-400">Architecture review · 2026-07-23</p>
-      <h1 class="mt-2 text-3xl font-bold">One terminal accessibility session. One window-theme adapter.</h1>
-      <p class="mt-3 max-w-4xl text-slate-300">Follow-up in progress. The output-architecture redesign is source-complete: committed terminal output is emitted at the authoritative <code>StreamHandler</code>/parser seam and the raw Win32 VT re-parser is deleted. Focused tests, independent source implementation and semantic/deslop audits, the final semantic-interest contract refresh, unified executable build, full Zig suite, and final automated live accessibility/theme/High-Contrast/scaling/idle harness all pass. Release workflow gates and human Narrator/NVDA acceptance remain pending.</p>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Architecture review · 2026-07-23</p>
+      <h1>One terminal accessibility session. One window-theme adapter.</h1>
+      <p class="summary">Follow-up in progress. The output-architecture redesign is source-complete: committed terminal output is emitted at the authoritative <code>StreamHandler</code>/parser seam and the raw Win32 VT re-parser is deleted. Focused tests, independent source implementation and semantic/deslop audits, the final semantic-interest contract refresh, unified executable build, full Zig suite, and final automated live accessibility/theme/High-Contrast/scaling/idle harness all pass. Release workflow gates and human Narrator/NVDA acceptance remain pending.</p>
     </header>
 
-    <section class="grid gap-5 md:grid-cols-3">
-      <article class="rounded-xl border border-rose-800 bg-rose-950/40 p-5">
-        <h2 class="font-semibold text-rose-300">Terminal contract drift</h2>
-        <p class="mt-2 text-sm text-slate-300">TextPattern2 exposes a caret while legacy TextPattern advertises no selection. Snapshot freshness is coupled to repaint/listener policy.</p>
+    <section class="summary-grid">
+      <article class="summary-card drift">
+        <h2>Terminal contract drift</h2>
+        <p>TextPattern2 exposes a caret while legacy TextPattern advertises no selection. Snapshot freshness is coupled to repaint/listener policy.</p>
       </article>
-      <article class="rounded-xl border border-amber-800 bg-amber-950/40 p-5">
-        <h2 class="font-semibold text-amber-300">Theme ownership gap</h2>
-        <p class="mt-2 text-sm text-slate-300">The model previews Dark, but host invalidation is conditional and Settings paints unconditional system colors.</p>
+      <article class="summary-card theme">
+        <h2>Theme ownership gap</h2>
+        <p>The model previews Dark, but host invalidation is conditional and Settings paints unconditional system colors.</p>
       </article>
-      <article class="rounded-xl border border-emerald-800 bg-emerald-950/40 p-5">
-        <h2 class="font-semibold text-emerald-300">High-leverage seam</h2>
-        <p class="mt-2 text-sm text-slate-300">Both defects cross stable boundaries with multiple callers and sensitive policy: real candidates for module depth and locality.</p>
+      <article class="summary-card seam">
+        <h2>High-leverage seam</h2>
+        <p>Both defects cross stable boundaries with multiple callers and sensitive policy: real candidates for module depth and locality.</p>
       </article>
     </section>
 
-    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-      <h2 class="text-xl font-semibold">Before: shallow ownership, hidden coupling</h2>
-      <div class="mermaid mt-5">
+    <section class="panel">
+      <h2>Before: shallow ownership, hidden coupling</h2>
+      <div class="mermaid diagram">
 flowchart LR
-  R[Renderer .render] --> S[Surface.refreshTerminalUiaText]
-  Q[UIA query] --> P[TerminalProvider]
-  P --> C[TerminalUiaContext]
-  C --> M[Posted HWND message]
-  M --> S
-  F[Surface focus] --> E[FocusChanged event]
-  S --> C
-  C --> P
-  T[Settings combo] --> X[Generic preview callback]
-  X --> A[App.reconfigureTheme]
-  A --> H[Host DWM + brushes]
-  A --> I[Settings invalidate]
-  I --> G[GetSysColor paint]
+  R[Renderer .render] --&gt; S[Surface.refreshTerminalUiaText]
+  Q[UIA query] --&gt; P[TerminalProvider]
+  P --&gt; C[TerminalUiaContext]
+  C --&gt; M[Posted HWND message]
+  M --&gt; S
+  F[Surface focus] --&gt; E[FocusChanged event]
+  S --&gt; C
+  C --&gt; P
+  T[Settings combo] --&gt; X[Generic preview callback]
+  X --&gt; A[App.reconfigureTheme]
+  A --&gt; H[Host DWM + brushes]
+  A --&gt; I[Settings invalidate]
+  I --&gt; G[GetSysColor paint]
       </div>
-      <p class="mt-4 text-sm text-slate-400">The focus path bypasses snapshot refresh. The Settings path invalidates pixels that are recomputed from unchanged system colors.</p>
+      <p class="caption">The focus path bypasses snapshot refresh. The Settings path invalidates pixels that are recomputed from unchanged system colors.</p>
     </section>
 
-    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-      <h2 class="text-xl font-semibold">After: deep modules, explicit interfaces</h2>
-      <div class="mermaid mt-5">
+    <section class="panel">
+      <h2>After: deep modules, explicit interfaces</h2>
+      <div class="mermaid diagram">
 flowchart LR
-  O[Committed semantic output from StreamHandler/parser seam] --> ST
+  O[Committed semantic output from StreamHandler/parser seam] --&gt; ST
   subgraph ST[Surface TerminalOutputTransport]
     B[8 × 1000-byte fixed chunks]
     G[Interest gate + nonblocking tryLock]
     X[Ordered reset + omission barriers]
-    G --> B --> X
+    G --&gt; B --&gt; X
   end
-  ST --> DRAIN[Win32 UI-thread drain]
-  DRAIN --> TAS
-  R[Renderer repaint signal] --> TAS
-  F[Focus/activation] --> TAS
-  Q[WM_GETOBJECT/query] --> TAS
-  Z[Timer/detach] --> TAS
+  ST --&gt; DRAIN[Win32 UI-thread drain]
+  DRAIN --&gt; TAS
+  R[Renderer repaint signal] --&gt; TAS
+  F[Focus/activation] --&gt; TAS
+  Q[WM_GETOBJECT/query] --&gt; TAS
+  Z[Timer/detach] --&gt; TAS
   subgraph TAS[TerminalAccessibilitySession]
     C[Snapshot cache + refresh policy]
     K[Canonical caret]
     P[UIA provider adapter]
     V[Echo suppression + ordered 1000-byte speech FIFO]
-    C --> K --> P
-    C --> V
+    C --&gt; K --&gt; P
+    C --&gt; V
   end
-  T[Typed theme preview/revert] --> WTA
-  HC[High Contrast state] --> WTA
+  T[Typed theme preview/revert] --&gt; WTA
+  HC[High Contrast state] --&gt; WTA
   subgraph WTA[WindowThemeAdapter]
     DWM[DWM attributes]
     N[Native control theme]
   end
-  WTA --> H[Terminal host]
-  WTA --> S[Settings window]
-  S --> STA[SettingsThemeAdapter: brushes + reentry + teardown + invalidation]
+  WTA --&gt; H[Terminal host]
+  WTA --&gt; S[Settings window]
+  S --&gt; STA[SettingsThemeAdapter: brushes + reentry + teardown + invalidation]
       </div>
-      <p class="mt-4 text-sm text-slate-400">The authoritative parser emits committed semantic output; its producer never allocates, blocks, or enters the global app mailbox. Win32 drains retained data plus ordered silent-reset and omission markers into the session, but does not re-parse VT/control syntax. DWM/native theming is centralized, while Settings retains local GDI resource ownership.</p>
+      <p class="caption">The authoritative parser emits committed semantic output; its producer never allocates, blocks, or enters the global app mailbox. Win32 drains retained data plus ordered silent-reset and omission markers into the session, but does not re-parse VT/control syntax. DWM/native theming is centralized, while Settings retains local GDI resource ownership.</p>
     </section>
 
-    <section class="grid gap-5 md:grid-cols-2">
-      <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
-        <h2 class="font-semibold text-sky-300">TerminalAccessibilitySession interface</h2>
-        <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
+    <section class="interfaces">
+      <article class="panel">
+        <h2>TerminalAccessibilitySession interface</h2>
+        <ul class="bullets">
           <li><code>acquireProvider</code> — provider acquisition and current snapshot</li>
           <li><code>outputInterested</code> — producer-side idle-cost gate</li>
           <li><code>noteOutput</code> / <code>noteOutputOmitted</code> — committed semantic output, echo suppression, and bounded ordered speech</li>
@@ -103,9 +140,9 @@ flowchart LR
           <li><code>handleTimer</code> / <code>deinit</code> — scheduling and lifetime</li>
         </ul>
       </article>
-      <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
-        <h2 class="font-semibold text-sky-300">WindowThemeAdapter interface</h2>
-        <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
+      <article class="panel">
+        <h2>WindowThemeAdapter interface</h2>
+        <ul class="bullets">
           <li><code>applyHost</code>, <code>applySettings</code>, and <code>applyNativeControl</code></li>
           <li>DWM/native-control implementation hidden inside</li>
           <li>High Contrast actively resets sticky DWM attributes to documented defaults</li>
@@ -114,9 +151,9 @@ flowchart LR
       </article>
     </section>
 
-    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-      <h2 class="text-xl font-semibold">Validation state</h2>
-      <ul class="mt-4 list-disc space-y-2 pl-5 text-sm text-slate-300">
+    <section class="panel">
+      <h2>Validation state</h2>
+      <ul class="bullets">
         <li>Final-tree PASS: targeted terminal-output/session, <code>TerminalProvider</code>, and <code>win32_settings</code> tests; executable build; flagship contracts; and full Zig suite.</li>
         <li>PASS: five exact native key-input scenarios with unique artifacts—classic A, classic Space, BMP Unicode, supplementary Unicode, and a 256-unit Unicode burst—plus a pure 256-authorization backlog test.</li>
         <li>Final-tree PASS: full accessibility harness with <code>-ResetState -TimeoutSeconds 20 -IdleSoakSeconds 60</code>. Evidence: <code>.sandbox/win11/github-noctty-accessibility-6d522bd7417b/accessibility/logs/uia-tree.json</code>, <code>outcome=pass</code>, 119.962 seconds. This is not a claim that the broader composite suite ran.</li>
@@ -130,16 +167,16 @@ flowchart LR
       </ul>
     </section>
 
-    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
-      <h2 class="text-xl font-semibold">Decision and risk</h2>
-      <div class="mt-4 overflow-x-auto">
-        <table class="w-full text-left text-sm">
-          <thead class="text-slate-400"><tr><th class="p-2">Change</th><th class="p-2">Leverage</th><th class="p-2">Risk</th><th class="p-2">Guardrail</th></tr></thead>
-          <tbody class="divide-y divide-slate-800">
-            <tr><td class="p-2">Canonical legacy/TextPattern2 caret</td><td class="p-2">Very high</td><td class="p-2">Medium</td><td class="p-2">Microsoft Terminal parity + human Narrator/NVDA</td></tr>
-            <tr><td class="p-2">Accessibility session extraction</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">Replace old code; preserve lock order and teardown tests</td></tr>
-            <tr><td class="p-2">Complete host theme repaint</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">Known repaint scope; retain live-resize coalescing</td></tr>
-            <tr><td class="p-2">Settings theme adapter</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">High Contrast system-color override</td></tr>
+    <section class="panel">
+      <h2>Decision and risk</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Change</th><th>Leverage</th><th>Risk</th><th>Guardrail</th></tr></thead>
+          <tbody>
+            <tr><td>Canonical legacy/TextPattern2 caret</td><td>Very high</td><td>Medium</td><td>Microsoft Terminal parity + human Narrator/NVDA</td></tr>
+            <tr><td>Accessibility session extraction</td><td>High</td><td>Medium</td><td>Replace old code; preserve lock order and teardown tests</td></tr>
+            <tr><td>Complete host theme repaint</td><td>High</td><td>Medium</td><td>Known repaint scope; retain live-resize coalescing</td></tr>
+            <tr><td>Settings theme adapter</td><td>High</td><td>Medium</td><td>High Contrast system-color override</td></tr>
           </tbody>
         </table>
       </div>

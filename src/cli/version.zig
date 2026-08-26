@@ -10,6 +10,10 @@ const platform_label = "  - platform      : ";
 const event_backend_label = "  - event backend : ";
 const custom_shaders_label = "  - custom shaders: ";
 
+fn customShadersStatus(comptime enabled: bool) []const u8 {
+    return if (enabled) "enabled" else "disabled";
+}
+
 pub const Options = struct {};
 
 /// The `version` command is used to display information about noctty. Recognized as
@@ -46,7 +50,7 @@ pub fn run(alloc: Allocator) !u8 {
     try stdout.print("{s}{t}\n", .{ event_backend_label, xev.backend });
     try stdout.print("{s}{s}\n", .{
         custom_shaders_label,
-        if (build_config.custom_shaders) "enabled" else "disabled",
+        customShadersStatus(build_config.custom_shaders),
     });
 
     // Don't forget to flush!
@@ -60,4 +64,9 @@ test "version output labels are Windows-facing" {
     try std.testing.expect(std.mem.indexOf(u8, event_backend_label, "event backend") != null);
     try std.testing.expect(std.mem.indexOf(u8, event_backend_label, "libxev") == null);
     try std.testing.expect(std.mem.indexOf(u8, custom_shaders_label, "custom shaders") != null);
+}
+
+test "version custom shader status selection" {
+    try std.testing.expectEqualStrings("enabled", customShadersStatus(true));
+    try std.testing.expectEqualStrings("disabled", customShadersStatus(false));
 }
