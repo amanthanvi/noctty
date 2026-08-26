@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>winghostty architecture review — terminal accessibility and Settings theme</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "dark" });
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <main class="mx-auto max-w-6xl space-y-8 p-8">
+    <header class="rounded-2xl border border-slate-700 bg-slate-900 p-7">
+      <p class="text-sm font-semibold uppercase tracking-widest text-sky-400">Architecture review · 2026-07-23</p>
+      <h1 class="mt-2 text-3xl font-bold">One terminal accessibility session. One window-theme adapter.</h1>
+      <p class="mt-3 max-w-4xl text-slate-300">Top recommendation: replace split lifecycle ownership with two deep modules whose small interfaces preserve semantic correctness across focus, repaint, preview, rollback, and High Contrast.</p>
+    </header>
+
+    <section class="grid gap-5 md:grid-cols-3">
+      <article class="rounded-xl border border-rose-800 bg-rose-950/40 p-5">
+        <h2 class="font-semibold text-rose-300">Terminal contract drift</h2>
+        <p class="mt-2 text-sm text-slate-300">TextPattern2 exposes a caret while legacy TextPattern advertises no selection. Snapshot freshness is coupled to repaint/listener policy.</p>
+      </article>
+      <article class="rounded-xl border border-amber-800 bg-amber-950/40 p-5">
+        <h2 class="font-semibold text-amber-300">Theme ownership gap</h2>
+        <p class="mt-2 text-sm text-slate-300">The model previews Dark, but host invalidation is conditional and Settings paints unconditional system colors.</p>
+      </article>
+      <article class="rounded-xl border border-emerald-800 bg-emerald-950/40 p-5">
+        <h2 class="font-semibold text-emerald-300">High-leverage seam</h2>
+        <p class="mt-2 text-sm text-slate-300">Both defects cross stable boundaries with multiple callers and sensitive policy: real candidates for module depth and locality.</p>
+      </article>
+    </section>
+
+    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
+      <h2 class="text-xl font-semibold">Before: shallow ownership, hidden coupling</h2>
+      <div class="mermaid mt-5">
+flowchart LR
+  R[Renderer .render] --> S[Surface.refreshTerminalUiaText]
+  Q[UIA query] --> P[TerminalProvider]
+  P --> C[TerminalUiaContext]
+  C --> M[Posted HWND message]
+  M --> S
+  F[Surface focus] --> E[FocusChanged event]
+  S --> C
+  C --> P
+  T[Settings combo] --> X[Generic preview callback]
+  X --> A[App.reconfigureTheme]
+  A --> H[Host DWM + brushes]
+  A --> I[Settings invalidate]
+  I --> G[GetSysColor paint]
+      </div>
+      <p class="mt-4 text-sm text-slate-400">The focus path bypasses snapshot refresh. The Settings path invalidates pixels that are recomputed from unchanged system colors.</p>
+    </section>
+
+    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
+      <h2 class="text-xl font-semibold">After: deep modules, explicit interfaces</h2>
+      <div class="mermaid mt-5">
+flowchart LR
+  R[Terminal mutation/repaint signal] --> TAS
+  F[Focus/activation] --> TAS
+  Q[WM_GETOBJECT/query] --> TAS
+  Z[Timer/detach] --> TAS
+  subgraph TAS[TerminalAccessibilitySession]
+    C[Snapshot cache + refresh policy]
+    K[Canonical caret]
+    P[UIA provider adapter]
+    V[Text/caret events + spoken-output queue]
+    C --> K --> P
+    C --> V
+  end
+  T[Typed theme preview/revert] --> WTA
+  HC[High Contrast state] --> WTA
+  subgraph WTA[WindowThemeAdapter]
+    D[DWM attributes]
+    B[Semantic brushes/control theme]
+    I[Complete invalidation]
+  end
+  WTA --> H[Terminal host]
+  WTA --> S[Settings window + controls]
+      </div>
+      <p class="mt-4 text-sm text-slate-400">Renderer repaint is an input, not the accessibility ownership boundary. High Contrast is an explicit branch, not an incidental color source.</p>
+    </section>
+
+    <section class="grid gap-5 md:grid-cols-2">
+      <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
+        <h2 class="font-semibold text-sky-300">TerminalAccessibilitySession interface</h2>
+        <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
+          <li><code>getObject</code> — provider acquisition and initial snapshot</li>
+          <li><code>onTerminalMutation</code> — coalesced semantic refresh and bounded new-output speech</li>
+          <li><code>onFocus</code> — refresh before focus publication</li>
+          <li><code>onTimer</code> / <code>detach</code> — scheduling and lifetime</li>
+        </ul>
+      </article>
+      <article class="rounded-xl border border-slate-700 bg-slate-900 p-5">
+        <h2 class="font-semibold text-sky-300">WindowThemeAdapter interface</h2>
+        <ul class="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-300">
+          <li>resolved theme + window kind + High Contrast input</li>
+          <li>DWM/native-control implementation hidden inside</li>
+          <li>semantic brush cache and teardown ownership</li>
+          <li>known-scope repaint after resource replacement</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="rounded-2xl border border-slate-700 bg-slate-900 p-6">
+      <h2 class="text-xl font-semibold">Decision and risk</h2>
+      <div class="mt-4 overflow-x-auto">
+        <table class="w-full text-left text-sm">
+          <thead class="text-slate-400"><tr><th class="p-2">Change</th><th class="p-2">Leverage</th><th class="p-2">Risk</th><th class="p-2">Guardrail</th></tr></thead>
+          <tbody class="divide-y divide-slate-800">
+            <tr><td class="p-2">Canonical legacy/TextPattern2 caret</td><td class="p-2">Very high</td><td class="p-2">Medium</td><td class="p-2">Microsoft Terminal parity + human Narrator/NVDA</td></tr>
+            <tr><td class="p-2">Accessibility session extraction</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">Replace old code; preserve lock order and teardown tests</td></tr>
+            <tr><td class="p-2">Complete host theme repaint</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">Known repaint scope; retain live-resize coalescing</td></tr>
+            <tr><td class="p-2">Settings theme adapter</td><td class="p-2">High</td><td class="p-2">Medium</td><td class="p-2">High Contrast system-color override</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
