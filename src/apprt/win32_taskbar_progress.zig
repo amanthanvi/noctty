@@ -2,6 +2,7 @@ const std = @import("std");
 const windows = std.os.windows;
 const progress_report = @import("../progress_report.zig");
 const win32_types = @import("win32_types.zig");
+const sys = @import("win32/sys.zig");
 
 const HRESULT = windows.HRESULT;
 const GUID = windows.GUID;
@@ -30,14 +31,6 @@ pub const TBPF_PAUSED: TBPFLAG = .paused;
 const CLSID_TaskbarList = GUID.parse("{56FDF344-FD6D-11d0-958A-006097C9A090}");
 const IID_ITaskbarList3 = GUID.parse("{EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF}");
 const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));
-
-extern "ole32" fn CoCreateInstance(
-    rclsid: *const GUID,
-    pUnkOuter: ?*anyopaque,
-    dwClsContext: DWORD,
-    riid: *const GUID,
-    ppv: *?*anyopaque,
-) callconv(.winapi) HRESULT;
 
 const ITaskbarList3Vtbl = extern struct {
     QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
@@ -138,7 +131,7 @@ pub const TaskbarProgress = struct {
 
     pub fn init() InitError!TaskbarProgress {
         var raw: ?*anyopaque = null;
-        const create_hr = CoCreateInstance(
+        const create_hr = sys.CoCreateInstance(
             &CLSID_TaskbarList,
             null,
             CLSCTX_INPROC_SERVER,

@@ -5,6 +5,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Poll cadence while waiting for progress-window evidence.
+$script:PROGRESS_POLL_MS = 100
+# Settling delay before the taskbar progress capture.
+$script:PROGRESS_CAPTURE_SETTLE_MS = 500
 
 if ($TimeoutSeconds -le 0) {
     throw 'TimeoutSeconds must be greater than 0.'
@@ -15,20 +19,14 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $libPath = Join-Path $repoRoot 'scripts\interactive-win11-lib.ps1'
 . $libPath
 
-if (-not $env:NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED) {
-    $forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
-    if ($Rebuild) { $forwardedArgs += '-Rebuild' }
-    if ($ResetState) { $forwardedArgs += '-ResetState' }
-
-    $bootstrapExitCode = 0
-    Invoke-InteractiveWin11Bootstrap `
-        -RepoRoot $repoRoot `
-        -LauncherPath $launcherPath `
-        -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
-        -ArgumentList $forwardedArgs `
-        -ExitCode ([ref] $bootstrapExitCode)
-    exit $bootstrapExitCode
-}
+$forwardedArgs = @('-TimeoutSeconds', $TimeoutSeconds.ToString())
+if ($Rebuild) { $forwardedArgs += '-Rebuild' }
+if ($ResetState) { $forwardedArgs += '-ResetState' }
+Invoke-InteractiveWin11HarnessMain `
+    -RepoRoot $repoRoot `
+    -LauncherPath $launcherPath `
+    -EnvironmentVariable 'NOCTTY_INTERACTIVE_WIN11_PROGRESS_BOOTSTRAPPED' `
+    -ArgumentList $forwardedArgs
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -320,7 +318,7 @@ try {
             Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
             break
         }
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $script:PROGRESS_POLL_MS
     }
 
     if ($process.MainWindowHandle -eq 0) {
@@ -333,7 +331,7 @@ try {
         while ([DateTime]::UtcNow -lt $stateDeadline) {
             if (Test-Path -LiteralPath $state.Marker) {
                 Show-ProgressHarnessWindow -Hwnd $process.MainWindowHandle
-                Start-Sleep -Milliseconds 500
+                Start-Sleep -Milliseconds $script:PROGRESS_CAPTURE_SETTLE_MS
                 Capture-WindowImage -Hwnd $process.MainWindowHandle -Path $state.Screenshot
                 Capture-PrimaryScreenBottomStrip -Path $state.BottomStrip
                 break
@@ -348,7 +346,7 @@ try {
                 throw "noctty exited before state '$stateName' was captured (exit code $($process.ExitCode))"
             }
 
-            Start-Sleep -Milliseconds 100
+            Start-Sleep -Milliseconds $script:PROGRESS_POLL_MS
         }
 
         if (-not (Test-Path -LiteralPath $state.Screenshot)) {

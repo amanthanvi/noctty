@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const win32_types = @import("win32_types.zig");
+const sys = @import("win32/sys.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 
 const Allocator = std.mem.Allocator;
@@ -30,20 +31,6 @@ const AnnouncementNormalizer = struct {
     pending_space: bool = false,
     has_text: bool = false,
 };
-
-extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
-extern "user32" fn PostMessageW(HWND, UINT, WPARAM, LPARAM) callconv(.winapi) BOOL;
-extern "user32" fn SendMessageTimeoutW(
-    HWND,
-    UINT,
-    WPARAM,
-    LPARAM,
-    UINT,
-    UINT,
-    *usize,
-) callconv(.winapi) isize;
-extern "user32" fn SetTimer(?HWND, usize, UINT, ?*const anyopaque) callconv(.winapi) usize;
-extern "user32" fn KillTimer(?HWND, usize) callconv(.winapi) BOOL;
 
 pub const Capture = struct {
     snapshot: win32_uia.AccessibleTextSnapshot,
@@ -236,7 +223,7 @@ pub const TerminalAccessibilitySession = struct {
             &self.recent_input_complete,
             input,
         )) {
-            self.recent_input_ms = GetTickCount64();
+            self.recent_input_ms = sys.GetTickCount64();
         }
     }
 
@@ -247,7 +234,7 @@ pub const TerminalAccessibilitySession = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.attached) return;
-        const without_echo = self.stripRecentInputEcho(output, GetTickCount64());
+        const without_echo = self.stripRecentInputEcho(output, sys.GetTickCount64());
         const candidate = self.normalizeSemanticOutputLocked(
             without_echo.held_prefix,
             without_echo.output,
@@ -329,7 +316,7 @@ pub const TerminalAccessibilitySession = struct {
         requested_speech_mode: SpeechMode,
     ) void {
         const provider = self.provider orelse return;
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         const policy = publishPolicy(
             win32_uia.events.clientsAreListening(),
             queryRecentlyActive(self.last_query_ms.load(.acquire), now_ms),
@@ -338,7 +325,7 @@ pub const TerminalAccessibilitySession = struct {
         if (!force and !refreshDue(self.last_refresh_ms, now_ms)) {
             if (!self.refresh_timer_active) {
                 const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
-                if (SetTimer(hwnd, self.timer_id, refreshDelay(self.last_refresh_ms, now_ms), null) != 0) {
+                if (sys.SetTimer(hwnd, self.timer_id, refreshDelay(self.last_refresh_ms, now_ms), null) != 0) {
                     self.refresh_timer_active = true;
                 }
             }
@@ -356,7 +343,7 @@ pub const TerminalAccessibilitySession = struct {
         else
             .discard;
         const result = self.refresh(speech_mode, true);
-        const completed_ms = GetTickCount64();
+        const completed_ms = sys.GetTickCount64();
         self.last_refresh_ms = completed_ms;
         if (snapshotWasSlow(started_ms, completed_ms)) {
             std.log.warn("win32 terminal UIA snapshot slow elapsed_ms={d}", .{completed_ms -| started_ms});
@@ -382,7 +369,7 @@ pub const TerminalAccessibilitySession = struct {
         }
         if (refresh_result.announcement_pending and !self.refresh_timer_active) {
             const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
-            if (SetTimer(hwnd, self.timer_id, refresh_interval_ms, null) != 0) {
+            if (sys.SetTimer(hwnd, self.timer_id, refresh_interval_ms, null) != 0) {
                 self.refresh_timer_active = true;
             }
         }
@@ -448,7 +435,7 @@ pub const TerminalAccessibilitySession = struct {
             self.alloc.free(visible_text);
             self.alloc.free(cells);
             self.alloc.free(text);
-            if (update_refresh_time) self.last_refresh_ms = GetTickCount64();
+            if (update_refresh_time) self.last_refresh_ms = sys.GetTickCount64();
             return .{
                 .change = .unchanged,
                 .announcement = announcement,
@@ -476,7 +463,7 @@ pub const TerminalAccessibilitySession = struct {
         self.cell_height = capture.cell_height;
         self.origin_x = capture.origin_x;
         self.origin_y = capture.origin_y;
-        if (update_refresh_time) self.last_refresh_ms = GetTickCount64();
+        if (update_refresh_time) self.last_refresh_ms = sys.GetTickCount64();
         return .{
             .change = if (text_changed and caret_changed)
                 .text_and_caret
@@ -561,7 +548,7 @@ pub const TerminalAccessibilitySession = struct {
     fn armAnnouncementTimer(self: *TerminalAccessibilitySession) void {
         if (!self.hasPendingAnnouncement() or self.refresh_timer_active) return;
         const hwnd = self.ops.hwnd(self.ops.ctx) orelse return;
-        if (SetTimer(hwnd, self.timer_id, 1, null) != 0) self.refresh_timer_active = true;
+        if (sys.SetTimer(hwnd, self.timer_id, 1, null) != 0) self.refresh_timer_active = true;
     }
 
     fn enqueuePendingAnnouncements(
@@ -593,7 +580,7 @@ pub const TerminalAccessibilitySession = struct {
 
     fn cancelTimer(self: *TerminalAccessibilitySession) void {
         if (!self.refresh_timer_active) return;
-        if (self.ops.hwnd(self.ops.ctx)) |hwnd| _ = KillTimer(hwnd, self.timer_id);
+        if (self.ops.hwnd(self.ops.ctx)) |hwnd| _ = sys.KillTimer(hwnd, self.timer_id);
         self.refresh_timer_active = false;
     }
 
@@ -679,7 +666,7 @@ pub const TerminalAccessibilitySession = struct {
     }
 
     fn noteTextQuery(self: *TerminalAccessibilitySession) void {
-        const now_ms = GetTickCount64();
+        const now_ms = sys.GetTickCount64();
         const previous_query_ms = self.last_query_ms.swap(now_ms, .acq_rel);
         self.mutex.lock();
         const hwnd = if (self.attached) self.ops.hwnd(self.ops.ctx) else null;
@@ -687,7 +674,7 @@ pub const TerminalAccessibilitySession = struct {
         if (hwnd == null) return;
         if (queryNeedsSynchronousRefresh(previous_query_ms, now_ms)) {
             var ignored: usize = 0;
-            if (SendMessageTimeoutW(
+            if (sys.SendMessageTimeoutW(
                 hwnd.?,
                 self.query_message,
                 1,
@@ -698,7 +685,7 @@ pub const TerminalAccessibilitySession = struct {
             ) != 0) return;
         }
         if (self.query_refresh_post_pending.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
-        if (PostMessageW(hwnd.?, self.query_message, 0, 0) == 0) {
+        if (sys.PostMessageW(hwnd.?, self.query_message, 0, 0) == 0) {
             self.query_refresh_post_pending.store(false, .release);
         }
     }

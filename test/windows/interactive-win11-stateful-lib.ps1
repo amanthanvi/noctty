@@ -1,29 +1,10 @@
-if (-not ('NocttyStatefulNative' -as [type])) {
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'scripts\interactive-win11-window-lib.ps1')
+
+# Settling delay after promoting a stateful host window.
+$script:STATEFUL_HOST_SETTLE_MS = 200
+
+if (-not ('System.Drawing.Bitmap' -as [type])) {
     Add-Type -AssemblyName System.Drawing
-    Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class NocttyStatefulNative {
-    public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
-    [StructLayout(LayoutKind.Sequential)] public struct RECT {
-        public int Left; public int Top; public int Right; public int Bottom;
-    }
-    [StructLayout(LayoutKind.Sequential)] public struct HIGHCONTRAST {
-        public uint cbSize; public uint dwFlags; public IntPtr lpszDefaultScheme;
-    }
-    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr data);
-    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr data);
-    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hwnd, StringBuilder value, int capacity);
-    [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
-    [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
-    [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint action, uint parameter, ref HIGHCONTRAST value, uint flags);
-}
-'@
 }
 
 function Send-StatefulMessage(
@@ -40,14 +21,14 @@ function Send-StatefulMessage(
 
 function Get-StatefulClassName([IntPtr] $Hwnd) {
     $value = [Text.StringBuilder]::new(128)
-    [void][NocttyStatefulNative]::GetClassNameW($Hwnd, $value, $value.Capacity)
+    [void][InteractiveWin11WindowNative]::GetClassNameW($Hwnd, $value, $value.Capacity)
     return $value.ToString()
 }
 
 function Find-StatefulHost([int] $ProcessId) {
     $script:StatefulPid = [uint32]$ProcessId
     $script:StatefulHost = [IntPtr]::Zero
-    $callback = [NocttyStatefulNative+EnumProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
         $windowProcessId = [uint32]0
         [void][InteractiveWin11MessageNativeV2]::GetWindowThreadProcessId($hwnd, [ref]$windowProcessId)
@@ -57,24 +38,24 @@ function Find-StatefulHost([int] $ProcessId) {
         }
         return $true
     }
-    [void][NocttyStatefulNative]::EnumWindows($callback, [IntPtr]::Zero)
+    [void][InteractiveWin11WindowNative]::EnumWindows($callback, [IntPtr]::Zero)
     return $script:StatefulHost
 }
 
 function Get-StatefulChildren([IntPtr] $Parent) {
     $script:StatefulChildren = [Collections.Generic.List[object]]::new()
-    $callback = [NocttyStatefulNative+EnumProc] {
+    $callback = [InteractiveWin11WindowNative+EnumWindowsProc] {
         param([IntPtr]$hwnd, [IntPtr]$data)
-        if ([NocttyStatefulNative]::IsWindowVisible($hwnd)) {
+        if ([InteractiveWin11WindowNative]::IsWindowVisible($hwnd)) {
             $script:StatefulChildren.Add([pscustomobject]@{
                 Hwnd = $hwnd
-                Id = [NocttyStatefulNative]::GetDlgCtrlID($hwnd)
+                Id = [InteractiveWin11WindowNative]::GetDlgCtrlID($hwnd)
                 Class = Get-StatefulClassName $hwnd
             })
         }
         return $true
     }
-    [void][NocttyStatefulNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
+    [void][InteractiveWin11WindowNative]::EnumChildWindows($Parent, $callback, [IntPtr]::Zero)
     return @($script:StatefulChildren)
 }
 
@@ -87,13 +68,9 @@ function Get-StatefulSurface([IntPtr] $HostHwnd) {
 }
 
 function Get-StatefulWindowRect([IntPtr] $Hwnd) {
-    $rect = [NocttyStatefulNative+RECT]::new()
-    if (-not [NocttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) { return $null }
+    $rect = [InteractiveWin11WindowNative+RECT]::new()
+    if (-not [InteractiveWin11WindowNative]::GetWindowRect($Hwnd, [ref]$rect)) { return $null }
     return $rect
-}
-
-function Invoke-StatefulCommand([IntPtr] $HostHwnd, [int] $CommandId, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
-    [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]([uint64]$CommandId)) ([IntPtr]::Zero) $Deadline $Process "WM_COMMAND id=$CommandId")
 }
 
 function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text, [DateTime] $Deadline, [Parameter(Mandatory)] [System.Diagnostics.Process] $Process) {
@@ -106,21 +83,21 @@ function Set-StatefulEditText([IntPtr] $HostHwnd, [IntPtr] $Hwnd, [string] $Text
         [Runtime.InteropServices.Marshal]::FreeHGlobal($textPointer)
     }
     $enChange = 0x0300
-    $controlId = [NocttyStatefulNative]::GetDlgCtrlID($Hwnd)
+    $controlId = [InteractiveWin11WindowNative]::GetDlgCtrlID($Hwnd)
     $command = [uint64]([uint32]$controlId -bor ([uint32]$enChange -shl 16))
     [void](Send-StatefulMessage $HostHwnd 0x0111 ([UIntPtr]$command) $Hwnd $Deadline $Process "WM_COMMAND EN_CHANGE id=$controlId")
 }
 
 function Show-StatefulHost([IntPtr] $HostHwnd) {
-    [void][NocttyStatefulNative]::ShowWindow($HostHwnd, 9)
-    [void][NocttyStatefulNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
-    [void][NocttyStatefulNative]::SetForegroundWindow($HostHwnd)
-    Start-Sleep -Milliseconds 200
+    [void][InteractiveWin11WindowNative]::ShowWindow($HostHwnd, 9)
+    [void][InteractiveWin11WindowNative]::SetWindowPos($HostHwnd, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    [void][InteractiveWin11WindowNative]::SetForegroundWindow($HostHwnd)
+    Start-Sleep -Milliseconds $script:STATEFUL_HOST_SETTLE_MS
 }
 
 function Get-StatefulPixel([IntPtr] $Hwnd) {
-    $rect = [NocttyStatefulNative+RECT]::new()
-    if (-not [NocttyStatefulNative]::GetWindowRect($Hwnd, [ref]$rect)) {
+    $rect = [InteractiveWin11WindowNative+RECT]::new()
+    if (-not [InteractiveWin11WindowNative]::GetWindowRect($Hwnd, [ref]$rect)) {
         throw "GetWindowRect failed for hwnd=$Hwnd"
     }
     $bitmap = [Drawing.Bitmap]::new(1, 1)

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sys = @import("win32/sys.zig");
 
 const windows = std.os.windows;
 const GUID = windows.GUID;
@@ -142,10 +143,6 @@ const D3D11CreateDeviceFn = *const fn (
     immediate_context: ?*?*anyopaque,
 ) callconv(.winapi) HRESULT;
 
-extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) HMODULE;
-extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) i32;
-
 pub const ResourceError = error{
     Unavailable,
     InitializationFailed,
@@ -176,9 +173,9 @@ const Api = struct {
 
         var self: Api = .{};
         errdefer self.unload();
-        self.d2d1_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d2d1.dll")) orelse
+        self.d2d1_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d2d1.dll")) orelse
             return error.Unavailable;
-        self.dwrite_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dwrite.dll")) orelse
+        self.dwrite_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dwrite.dll")) orelse
             return error.Unavailable;
         self.d2d1_create_factory = loadProc(D2D1CreateFactoryFn, self.d2d1_module, "D2D1CreateFactory") orelse
             return error.Unavailable;
@@ -194,8 +191,8 @@ const Api = struct {
         self.d2d1_create_device = null;
         self.dwrite_create_factory = null;
         if (comptime builtin.os.tag == .windows) {
-            if (self.dwrite_module) |module| _ = FreeLibrary(module);
-            if (self.d2d1_module) |module| _ = FreeLibrary(module);
+            if (self.dwrite_module) |module| _ = sys.FreeLibrary(module);
+            if (self.d2d1_module) |module| _ = sys.FreeLibrary(module);
         }
         self.* = .{};
     }
@@ -346,7 +343,7 @@ pub const ResourceGraph = struct {
 };
 
 fn loadProc(comptime T: type, module: HMODULE, comptime name: [:0]const u8) ?T {
-    const raw = GetProcAddress(module, name.ptr) orelse return null;
+    const raw = sys.GetProcAddress(module, name.ptr) orelse return null;
     return @ptrCast(@alignCast(raw));
 }
 
@@ -408,9 +405,9 @@ test "shell content stop and loss notification are idempotent" {
 test "native shell content resources recover against a live DXGI device" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const d3d11_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
+    const d3d11_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
         return error.SkipZigTest;
-    defer _ = FreeLibrary(d3d11_module);
+    defer _ = sys.FreeLibrary(d3d11_module);
     const create_device = loadProc(D3D11CreateDeviceFn, d3d11_module, "D3D11CreateDevice") orelse
         return error.SkipZigTest;
 

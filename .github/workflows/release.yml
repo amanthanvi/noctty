@@ -30,13 +30,10 @@ jobs:
     runs-on: windows-latest
     environment: release
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
       SCOOP_BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
       SCOOP_BUCKET_BRANCH: ${{ vars.SCOOP_BUCKET_BRANCH }}
       SCOOP_BUCKET_MANIFEST_PATH: ${{ vars.SCOOP_BUCKET_MANIFEST_PATH }}
-      WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
-      WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
       WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_CODESIGN_TIMESTAMP_URL }}
       WINDOWS_CODESIGN_TRUST_SELF_SIGNED: ${{ vars.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}
       WINDOWS_CODESIGN_MIN_VALIDITY_DAYS: ${{ vars.WINDOWS_CODESIGN_MIN_VALIDITY_DAYS }}
@@ -46,6 +43,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require remote default-branch head
         env:
@@ -210,24 +208,17 @@ jobs:
           "first_fork_patch=$firstForkPatch" >> $env:GITHUB_OUTPUT
 
       - name: Release preflight
+        uses: ./.github/actions/release-preflight
         env:
-          GH_TOKEN: ${{ github.token }}
-          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
-          WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
-          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
-          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-        shell: pwsh
-        run: |
-          $preflightArgs = @{
-            Version = $env:RELEASE_VERSION
-            RequireSigning = $true
-            RequirePackageManagers = $true
-          }
-          if ($env:RELEASE_PRERELEASE -ne 'true') {
-            ./scripts/check-release-copy.ps1 -ExpectedVersion $env:RELEASE_VERSION
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          ./scripts/release-preflight.ps1 @preflightArgs
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        with:
+          version: ${{ steps.meta.outputs.version }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          require-package-managers: "true"
+          github-token: ${{ github.token }}
+          scoop-bucket-token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          wingetcreate-token: ${{ secrets.WINGETCREATE_TOKEN }}
 
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -250,9 +241,13 @@ jobs:
       - name: Build and package x64 release artifacts
         shell: pwsh
         timeout-minutes: 35
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         run: >
           ./scripts/build-package-windows.ps1
-          -Version ${{ steps.meta.outputs.version }}
+          -Version $env:RELEASE_VERSION
           -Architecture x64
           -Optimize ReleaseFast
           -RequireInstaller
@@ -262,10 +257,13 @@ jobs:
         shell: pwsh
         timeout-minutes: 35
         env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
         run: >
           ./scripts/build-package-windows.ps1
-          -Version ${{ steps.meta.outputs.version }}
+          -Version $env:RELEASE_VERSION
           -Architecture arm64
           -Optimize ReleaseFast
           -RequireInstaller
@@ -273,218 +271,53 @@ jobs:
 
       - name: Verify signed release artifacts
         shell: pwsh
-        run: |
-          . (Join-Path $PWD "scripts/windows-architecture.ps1")
-          . (Join-Path $PWD "scripts/signing-trust.ps1")
-          $version = "${{ steps.meta.outputs.version }}"
-          $trustSelfSigned = "${{ env.WINDOWS_CODESIGN_TRUST_SELF_SIGNED }}".Trim().ToLowerInvariant() -in @("true", "1", "yes", "on")
-          $allowedPins = @(Get-UpdaterPublisherSpkiPins -SourcePath (Join-Path $PWD "src/update/github_releases.zig"))
-          if ($allowedPins.Count -eq 0) { throw "Updater publisher-pin allowlist is empty." }
-
-          function Assert-ReleaseSignature {
-            param(
-              [string]$Path,
-              [string]$Label
-            )
-
-            $sig = Get-AuthenticodeSignature -LiteralPath $Path
-            $statusAccepted = $sig.Status -eq [System.Management.Automation.SignatureStatus]::Valid
-            if (-not $statusAccepted -and $trustSelfSigned -and
-                $sig.SignerCertificate -and
-                $sig.SignerCertificate.Subject -eq $sig.SignerCertificate.Issuer -and
-                (Test-SelfSignedTrustStatus -Signature $sig -Path $Path)) {
-              $statusAccepted = $true
-            }
-            if (-not $statusAccepted) {
-              throw "$Label Authenticode signature is not valid: $($sig.Status) $($sig.StatusMessage)"
-            }
-            if (-not $sig.SignerCertificate) {
-              throw "$Label has no Authenticode signer certificate: $Path"
-            }
-            $pin = Get-CertificateSpkiSha256 -Certificate $sig.SignerCertificate
-            if ($allowedPins -notcontains $pin) {
-              throw "$Label signer SPKI SHA-256 is not allowed: $pin"
-            }
-          }
-
-          foreach ($arch in (Get-WindowsPackageArchitectures)) {
-            $artifactDir = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
-            $setup = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup)
-            $zip = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind portable)
-            $checksums = Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind checksums)
-            foreach ($path in @($setup, $zip, $checksums)) {
-              if (-not (Test-Path -LiteralPath $path)) {
-                throw "Missing required release asset: $path"
-              }
-            }
-
-            $checksumText = Get-Content -LiteralPath $checksums
-            foreach ($path in @($setup, $zip)) {
-              $name = [System.IO.Path]::GetFileName($path)
-              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-              if ($checksumText -notcontains "$hash *$name") {
-                throw "$([System.IO.Path]::GetFileName($checksums)) does not contain the expected hash line for $name."
-              }
-            }
-
-            Assert-ReleaseSignature -Path $setup -Label "Setup $arch"
-
-            $extractDir = Join-Path $env:RUNNER_TEMP "noctty-release-verify-$arch"
-            if (Test-Path -LiteralPath $extractDir) {
-              Remove-Item -LiteralPath $extractDir -Recurse -Force
-            }
-            Expand-Archive -LiteralPath $zip -DestinationPath $extractDir
-            foreach ($relative in @("noctty/noctty.com", "noctty/noctty.exe", "noctty/ghostty-vt.dll")) {
-              $path = Join-Path $extractDir $relative
-              Assert-ReleaseSignature -Path $path -Label "$relative $arch"
-            }
-          }
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/release-verify-artifacts.ps1 -Version $env:RELEASE_VERSION
 
       - name: Scan Windows release artifacts with Microsoft Defender
         shell: pwsh
         timeout-minutes: 10
-        run: |
-          . (Join-Path $PWD "scripts/windows-architecture.ps1")
-          $status = Get-MpComputerStatus -ErrorAction Stop
-          if (-not $status.AMServiceEnabled -or
-              -not $status.AntivirusEnabled -or
-              $status.AMRunningMode -ne "Normal") {
-            throw "Microsoft Defender Antivirus must be active in Normal mode before release publication."
-          }
-
-          $scannerCandidates = @(
-            (Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe")
-          )
-          $platformRoot = Join-Path $env:ProgramData "Microsoft/Windows Defender/Platform"
-          if (Test-Path -LiteralPath $platformRoot) {
-            $scannerCandidates = @(
-              Get-ChildItem -LiteralPath $platformRoot -Directory |
-                ForEach-Object {
-                  $platformVersion = ($_.Name -replace '-\d+$', '') -as [version]
-                  if ($null -ne $platformVersion) {
-                    [pscustomobject]@{
-                      Version = $platformVersion
-                      Path = Join-Path $_.FullName "MpCmdRun.exe"
-                    }
-                  }
-                } |
-                Sort-Object Version -Descending |
-                ForEach-Object { $_.Path }
-            ) + $scannerCandidates
-          }
-          $scanner = $scannerCandidates |
-            Where-Object { Test-Path -LiteralPath $_ } |
-            Select-Object -First 1
-          if (-not $scanner) {
-            throw "MpCmdRun.exe was not found."
-          }
-
-          & $scanner -SignatureUpdate
-          if ($LASTEXITCODE -ne 0) {
-            throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
-          }
-
-          $version = "${{ steps.meta.outputs.version }}"
-          $portablePayloads = @(
-            "noctty/noctty.com",
-            "noctty/noctty.exe",
-            "noctty/ghostty-vt.dll"
-          )
-          $scanPaths = @(
-            foreach ($arch in (Get-WindowsPackageArchitectures)) {
-              $artifactDir = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
-              $setupName = New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup
-              $setupPath = Join-Path $artifactDir $setupName
-              if (-not (Test-Path -LiteralPath $setupPath)) {
-                throw "Missing Defender scan input: $setupPath"
-              }
-              $setupPath
-
-              $extractDir = Join-Path $env:RUNNER_TEMP "noctty-release-verify-$arch"
-              foreach ($relative in $portablePayloads) {
-                $payloadPath = Join-Path $extractDir $relative
-                if (-not (Test-Path -LiteralPath $payloadPath)) {
-                  throw "Missing Defender scan input: $payloadPath"
-                }
-                $payloadPath
-              }
-            }
-          )
-          if ($scanPaths.Count -ne 8) {
-            throw "Expected exactly eight release artifacts for Defender scanning; found $($scanPaths.Count)."
-          }
-
-          foreach ($scanPath in $scanPaths) {
-            & $scanner -Scan -ScanType 3 -File $scanPath -DisableRemediation -ReturnHR
-            if ($LASTEXITCODE -ne 0) {
-              throw "Microsoft Defender rejected $scanPath with exit code $LASTEXITCODE."
-            }
-          }
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/release-scan-defender.ps1 -Version $env:RELEASE_VERSION
 
       - name: Generate package manager metadata
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_UPSTREAM_BASE_VERSION: ${{ steps.meta.outputs.upstream_base_version }}
+          RELEASE_FIRST_FORK_PATCH: ${{ steps.meta.outputs.first_fork_patch }}
         run: >
           ./scripts/package-package-managers.ps1
-          -Version ${{ steps.meta.outputs.version }}
-          -Tag ${{ steps.meta.outputs.tag }}
-          -Repo ${{ github.repository }}
+          -Version $env:RELEASE_VERSION
+          -Tag $env:RELEASE_TAG
+          -Repo $env:RELEASE_REPOSITORY
           -Architectures @("x64", "arm64")
-          -UpstreamBaseVersion ${{ steps.meta.outputs.upstream_base_version }}
-          -FirstForkPatch ${{ steps.meta.outputs.first_fork_patch }}
+          -UpstreamBaseVersion $env:RELEASE_UPSTREAM_BASE_VERSION
+          -FirstForkPatch $env:RELEASE_FIRST_FORK_PATCH
 
       - name: Publish GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.title }}
+          RELEASE_VERSION_LINE: ${{ steps.meta.outputs.version_line }}
+          RELEASE_UPSTREAM_BASE_VERSION: ${{ steps.meta.outputs.upstream_base_version }}
+          RELEASE_PRERELEASE: ${{ steps.meta.outputs.prerelease }}
         shell: pwsh
         run: |
-          . (Join-Path $PWD "scripts/windows-architecture.ps1")
-          $tag = "${{ steps.meta.outputs.tag }}"
-          $version = "${{ steps.meta.outputs.version }}"
-          $title = "${{ steps.meta.outputs.title }}"
-          $versionLine = "${{ steps.meta.outputs.version_line }}"
-          $upstreamBaseVersion = "${{ steps.meta.outputs.upstream_base_version }}"
-          $architectures = Get-WindowsPackageArchitectures
-          $artifactDirs = @{}
-          foreach ($arch in $architectures) {
-            $artifactDirs[$arch] = Join-Path $PWD "dist/artifacts/noctty-$version-windows-$arch"
-          }
-          $artifactDirX64 = $artifactDirs["x64"]
-          $legacyChecksumsPath = Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $version -Architecture x64 -Kind legacy-checksums)
-          Copy-Item -LiteralPath (Join-Path $artifactDirX64 (New-WindowsPackageArtifactName -Version $version -Architecture x64 -Kind checksums)) -Destination $legacyChecksumsPath -Force
-          $assets = @()
-          foreach ($arch in $architectures) {
-            $artifactDir = $artifactDirs[$arch]
-            $assets += @(
-              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind setup)),
-              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind portable)),
-              (Join-Path $artifactDir (New-WindowsPackageArtifactName -Version $version -Architecture $arch -Kind checksums))
-            )
-          }
-          $assets += @(
-            $legacyChecksumsPath,
-            (Join-Path $artifactDirX64 "noctty-icon.svg")
-          )
-          $notesPrefix = @"
-          Compatibility line: Ghostty $versionLine
-          Base upstream release: $upstreamBaseVersion
-          Versioning: major.minor follow the Ghostty upstream line; patch is the noctty release number on that line.
-          "@
-
-          & gh release view $tag --repo $env:GH_REPO *> $null
-          if ($LASTEXITCODE -ne 0) {
-            $extra = @()
-            if ("${{ steps.meta.outputs.prerelease }}" -eq "true") {
-              $extra += "--prerelease"
-            }
-            & gh release create $tag --repo $env:GH_REPO --title $title --generate-notes --notes $notesPrefix @extra @assets
-            if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release $tag." }
-          } else {
-            & gh release edit $tag --repo $env:GH_REPO --title $title
-            if ($LASTEXITCODE -ne 0) { throw "Failed to edit GitHub release $tag." }
-            & gh release upload $tag --repo $env:GH_REPO @assets --clobber
-            if ($LASTEXITCODE -ne 0) { throw "Failed to upload assets for GitHub release $tag." }
-          }
+          ./scripts/release-publish-github.ps1 `
+            -Tag $env:RELEASE_TAG `
+            -Version $env:RELEASE_VERSION `
+            -Title $env:RELEASE_TITLE `
+            -VersionLine $env:RELEASE_VERSION_LINE `
+            -UpstreamBaseVersion $env:RELEASE_UPSTREAM_BASE_VERSION `
+            -Prerelease $env:RELEASE_PRERELEASE
 
       - name: Verify published release copy and assets
         if: steps.meta.outputs.prerelease != 'true'
@@ -499,190 +332,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish Scoop manifest
+        if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
-        run: |
-          if (-not $env:GH_TOKEN) {
-            Write-Host "Skipping Scoop publish: SCOOP_BUCKET_TOKEN is not configured."
-            return
-          }
-
-          if (-not $env:SCOOP_BUCKET_REPO) {
-            Write-Host "Skipping Scoop publish: SCOOP_BUCKET_REPO is not configured."
-            return
-          }
-
-          $version = "${{ steps.meta.outputs.version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$version-windows-x64"
-          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
-          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-          $manifestRelPath = if ($env:SCOOP_BUCKET_MANIFEST_PATH) {
-            $env:SCOOP_BUCKET_MANIFEST_PATH
-          } else {
-            "bucket/noctty.json"
-          }
-
-          $bucketDir = Join-Path $env:RUNNER_TEMP "noctty-scoop-bucket"
-          if (Test-Path -LiteralPath $bucketDir) {
-            Remove-Item -LiteralPath $bucketDir -Recurse -Force
-          }
-
-          $cloneArgs = @("repo", "clone", $env:SCOOP_BUCKET_REPO, $bucketDir, "--", "--depth", "1")
-          if ($env:SCOOP_BUCKET_BRANCH) {
-            $cloneArgs += @("--branch", $env:SCOOP_BUCKET_BRANCH)
-          }
-          & gh @cloneArgs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Failed to clone Scoop bucket repo $($env:SCOOP_BUCKET_REPO)."
-          }
-
-          $destManifestPath = Join-Path $bucketDir $manifestRelPath
-          $destManifestDir = Split-Path -Parent $destManifestPath
-          New-Item -ItemType Directory -Path $destManifestDir -Force | Out-Null
-          Copy-Item -LiteralPath $metadata.scoop.manifestPath -Destination $destManifestPath -Force
-
-          Push-Location $bucketDir
-          try {
-            & git remote set-url origin "https://x-access-token:$env:GH_TOKEN@github.com/$($env:SCOOP_BUCKET_REPO).git"
-            if ($LASTEXITCODE -ne 0) {
-              throw "git remote set-url failed with exit code $LASTEXITCODE"
-            }
-
-            & git config user.name "github-actions[bot]"
-            & git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            & git add -- $manifestRelPath
-            & git diff --cached --quiet --exit-code
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "Scoop manifest is unchanged; skipping push."
-              return
-            }
-            if ($LASTEXITCODE -ne 1) {
-              throw "git diff --cached failed with exit code $LASTEXITCODE"
-            }
-
-            & git commit -m "noctty: update to $version"
-            if ($LASTEXITCODE -ne 0) {
-              throw "git commit failed with exit code $LASTEXITCODE"
-            }
-
-            & git push origin HEAD
-            if ($LASTEXITCODE -ne 0) {
-              throw "git push failed with exit code $LASTEXITCODE"
-            }
-          }
-          finally {
-            Pop-Location
-          }
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/release-publish-scoop.ps1 -Version $env:RELEASE_VERSION
 
       - name: Submit WinGet manifest update
+        if: steps.meta.outputs.prerelease != 'true'
         shell: pwsh
+        timeout-minutes: 15
         env:
-          WINGETCREATE_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
-        run: |
-          if (-not $env:WINGETCREATE_TOKEN) {
-            Write-Host "Skipping WinGet submit: WINGETCREATE_TOKEN is not configured."
-            return
-          }
-
-          if (-not $env:WINGET_PACKAGE_IDENTIFIER) {
-            Write-Host "Skipping WinGet submit: WINGET_PACKAGE_IDENTIFIER is not configured. Initial WinGet bootstrap is still manual."
-            return
-          }
-
-          $version = "${{ steps.meta.outputs.version }}"
-          $artifactDirX64 = Join-Path $PWD "dist/artifacts/noctty-$version-windows-x64"
-          $metadataPath = Join-Path $artifactDirX64 "package-managers/metadata.json"
-          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
-          $packageIdSegments = $env:WINGET_PACKAGE_IDENTIFIER.Split('.')
-          $manifestPath = "manifests/{0}/{1}" -f `
-            $packageIdSegments[0].Substring(0, 1).ToLowerInvariant(), `
-            ($packageIdSegments -join '/')
-          $manifestApiUrl = "https://api.github.com/repos/microsoft/winget-pkgs/contents/$manifestPath"
-
-          try {
-            Invoke-WebRequest `
-              -Uri $manifestApiUrl `
-              -Headers @{ "User-Agent" = "noctty-release-workflow" } `
-              -ErrorAction Stop | Out-Null
-          }
-          catch {
-            $statusCode = if ($_.Exception.Response) {
-              [int]$_.Exception.Response.StatusCode
-            } else {
-              $null
-            }
-
-            if ($statusCode -eq 404) {
-              Write-Host "Skipping WinGet submit: $($env:WINGET_PACKAGE_IDENTIFIER) is not bootstrapped in microsoft/winget-pkgs ($manifestPath)."
-              return
-            }
-
-            throw
-          }
-
-          $vcLibsPath = Join-Path $env:TEMP "Microsoft.VCLibs.x64.14.00.Desktop.appx"
-          $bundlePath = Join-Path $env:TEMP "wingetcreate.msixbundle"
-          Import-Module Appx -UseWindowsPowerShell -ErrorAction Stop
-          function Install-AppxPackageIfNeeded {
-            param(
-              [string]$Path,
-              [string]$Label
-            )
-
-            try {
-              Add-AppxPackage -Path $Path -ErrorAction Stop
-            }
-            catch {
-              $message = $_.Exception.Message
-              if ($message -match "0x80073D06" -or $message -match "higher version of this package is already installed") {
-                Write-Host "$Label already satisfied on this runner; skipping package install."
-                return
-              }
-
-              throw
-            }
-          }
-
-          Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -OutFile $vcLibsPath -ErrorAction Stop
-          Install-AppxPackageIfNeeded -Path $vcLibsPath -Label "Microsoft.VCLibs.x64.14.00.Desktop"
-          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest/msixbundle" -OutFile $bundlePath -ErrorAction Stop
-          Install-AppxPackageIfNeeded -Path $bundlePath -Label "wingetcreate bundle"
-
-          # wingetcreate update documents URL architecture overrides as "<url>|<arch>".
-          $installerUrlArgs = @($metadata.winget.installerUrlArgs | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-          $installerArchitectures = @($installerUrlArgs | ForEach-Object {
-            if ($_ -cnotmatch '\|(?<architecture>x64|arm64)$') {
-              throw "WinGet installer URL must end with an explicit |x64 or |arm64 architecture: $_"
-            }
-            $Matches.architecture
-          })
-          $expectedInstallerArchitectures = @('arm64', 'x64')
-          if ($installerUrlArgs.Count -ne 2 -or
-              (($installerArchitectures | Sort-Object -Unique) -join ',') -ne ($expectedInstallerArchitectures -join ',')) {
-            throw "WinGet publishing requires exactly one x64 and one arm64 installer URL."
-          }
-
-          function Invoke-WinGetCreateUpdate {
-            param([string[]]$InstallerUrlArgs)
-
-            $output = & wingetcreate update $env:WINGET_PACKAGE_IDENTIFIER `
-              --version $version `
-              --urls $InstallerUrlArgs `
-              --release-notes-url $metadata.release.releaseUrl `
-              --submit `
-              --no-open `
-              --token $env:WINGETCREATE_TOKEN 2>&1
-            $exitCode = $LASTEXITCODE
-            $output | ForEach-Object { Write-Host $_ }
-
-            return @{
-              ExitCode = $exitCode
-              Output = (@($output) -join "`n")
-            }
-          }
-
-          $result = Invoke-WinGetCreateUpdate -InstallerUrlArgs $installerUrlArgs
-          if ($result.ExitCode -ne 0) {
-            throw "wingetcreate update failed with exit code $($result.ExitCode)"
-          }
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGETCREATE_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: ./scripts/release-submit-winget.ps1 -Version $env:RELEASE_VERSION

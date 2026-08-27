@@ -1,7 +1,8 @@
 name: Test
 
 on:
-  push: {}
+  push:
+    branches: [main]
   pull_request: {}
   schedule:
     - cron: "17 6 * * *"
@@ -12,6 +13,9 @@ on:
         required: false
         default: false
         type: boolean
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name != 'main' && github.ref || github.run_id }}
@@ -56,6 +60,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-release-copy.ps1 -CheckRemoteLatest
 
+      - name: Setup Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
       - name: Deterministic site asset check
         shell: pwsh
         run: |
@@ -65,7 +74,7 @@ jobs:
       - name: Site unit tests
         shell: pwsh
         run: |
-          node --test site/tests/terminal.test.mjs site/tests/build-site-assets.test.mjs
+          node --test "site/tests/**/*.test.mjs"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Signing trust policy tests

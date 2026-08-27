@@ -30,6 +30,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
 
 if ([string]::IsNullOrWhiteSpace($ApiToken)) {
     throw 'CLOUDFLARE_API_TOKEN is required.'
@@ -257,8 +258,7 @@ function Get-ManifestEntries {
             -not (Test-Path -LiteralPath $localPath -PathType Leaf)) {
             throw 'Site payload manifest references a missing or unsafe local file.'
         }
-        $actualHash = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).
-            Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256Lower -Path $localPath
         if ($actualHash -cne $match.Groups['hash'].Value) {
             throw 'Local site payload does not match its SHA-256 manifest.'
         }
@@ -711,9 +711,8 @@ try {
                 [void]$verifiedHosts.Add('www.noctty.com')
             }
 
-            $manifestHash = (Get-FileHash `
-                    -LiteralPath ([IO.Path]::GetFullPath($ManifestPath)) `
-                    -Algorithm SHA256).Hash.ToLowerInvariant()
+            $manifestHash = Get-FileSha256Lower `
+                -Path ([IO.Path]::GetFullPath($ManifestPath))
             Write-RedactedJson -Path $ProvenancePath -Value ([ordered]@{
                 schema_version = 'noctty.cloudflare-pages-provenance.v2'
                 verified_at = [DateTimeOffset]::UtcNow.ToString('o')

@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sys = @import("win32/sys.zig");
 
 const windows = std.os.windows;
 const GUID = windows.GUID;
@@ -624,40 +625,20 @@ const QueryInterfaceFn = *const fn (
     *?*anyopaque,
 ) callconv(.winapi) HRESULT;
 
-extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) HMODULE;
-extern "kernel32" fn GetProcAddress(module: HMODULE, name: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
-extern "kernel32" fn FreeLibrary(module: HMODULE) callconv(.winapi) i32;
-extern "user32" fn CreateWindowExW(
-    u32,
-    [*:0]const u16,
-    [*:0]const u16,
-    u32,
-    i32,
-    i32,
-    i32,
-    i32,
-    HWND,
-    ?*anyopaque,
-    HMODULE,
-    ?*anyopaque,
-) callconv(.winapi) HWND;
-extern "user32" fn DestroyWindow(hwnd: HWND) callconv(.winapi) i32;
-extern "user32" fn GetAncestor(hwnd: HWND, flags: u32) callconv(.winapi) HWND;
-
 fn loadProc(comptime T: type, module: HMODULE, comptime name: [:0]const u8) ?T {
-    const raw = GetProcAddress(module, name.ptr) orelse return null;
+    const raw = sys.GetProcAddress(module, name.ptr) orelse return null;
     return @ptrCast(@alignCast(raw));
 }
 
 test "native hidden HWND renders and resizes DirectComposition shell content" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const d3d_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
+    const d3d_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("d3d11.dll")) orelse
         return error.SkipZigTest;
-    defer _ = FreeLibrary(d3d_module);
-    const dcomp_module = LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dcomp.dll")) orelse
+    defer _ = sys.FreeLibrary(d3d_module);
+    const dcomp_module = sys.LoadLibraryW(std.unicode.utf8ToUtf16LeStringLiteral("dcomp.dll")) orelse
         return error.SkipZigTest;
-    defer _ = FreeLibrary(dcomp_module);
+    defer _ = sys.FreeLibrary(dcomp_module);
     const create_d3d = loadProc(D3D11CreateDeviceFn, d3d_module, "D3D11CreateDevice") orelse
         return error.SkipZigTest;
     const create_dcomp = loadProc(DCompositionCreateDeviceFn, dcomp_module, "DCompositionCreateDevice") orelse
@@ -683,7 +664,7 @@ test "native hidden HWND renders and resizes DirectComposition shell content" {
     if (failed(hr) or dcomp_device == null) return error.SkipZigTest;
     defer releaseCom(dcomp_device);
 
-    const hwnd = CreateWindowExW(
+    const hwnd = sys.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
         std.unicode.utf8ToUtf16LeStringLiteral("noctty dcomp content smoke"),
@@ -697,8 +678,9 @@ test "native hidden HWND renders and resizes DirectComposition shell content" {
         null,
         null,
     ) orelse return error.SkipZigTest;
-    defer _ = DestroyWindow(hwnd);
-    try std.testing.expectEqual(hwnd, GetAncestor(hwnd, GA_ROOT));
+    defer _ = sys.DestroyWindow(hwnd);
+    const ancestor = sys.GetAncestor(hwnd, GA_ROOT) orelse return error.SkipZigTest;
+    try std.testing.expectEqual(hwnd, ancestor);
 
     var target: ?*anyopaque = null;
     hr = call(DeviceCreateTargetFn, dcomp_device.?, 6)(dcomp_device.?, hwnd, 0, &target);

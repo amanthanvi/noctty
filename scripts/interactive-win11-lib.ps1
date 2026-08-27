@@ -352,6 +352,32 @@ function Invoke-InteractiveWin11Bootstrap {
     }
 }
 
+function Invoke-InteractiveWin11HarnessMain {
+    param(
+        [Parameter(Mandatory)] [string] $RepoRoot,
+        [Parameter(Mandatory)] [string] $LauncherPath,
+        [Parameter(Mandatory)] [string] $EnvironmentVariable,
+        [string[]] $ArgumentList = @()
+    )
+
+    $bootstrapSentinel = [System.Environment]::GetEnvironmentVariable(
+        $EnvironmentVariable,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    if (-not [string]::IsNullOrEmpty($bootstrapSentinel)) {
+        return
+    }
+
+    $bootstrapExitCode = 0
+    Invoke-InteractiveWin11Bootstrap `
+        -RepoRoot $RepoRoot `
+        -LauncherPath $LauncherPath `
+        -EnvironmentVariable $EnvironmentVariable `
+        -ArgumentList $ArgumentList `
+        -ExitCode ([ref] $bootstrapExitCode)
+    exit $bootstrapExitCode
+}
+
 function Set-InteractiveWin11Environment {
     param(
         [Parameter(Mandatory)] [System.Collections.IDictionary] $Layout,
@@ -584,12 +610,32 @@ function Wait-InteractiveWin11Until {
         [Parameter(Mandatory)] [scriptblock] $Condition,
         [Parameter(Mandatory)] [string] $Description,
         [Parameter(Mandatory)] [DateTime] $Deadline,
-        [System.Diagnostics.Process] $Process
+        [Alias('Process')] [System.Diagnostics.Process] $WatchProcess,
+        [ValidateRange(1, [int]::MaxValue)] [int] $PollMilliseconds = 100,
+        [string] $TimeoutMessage,
+        [switch] $ConditionFirst
     )
 
+    if ($ConditionFirst) {
+        while ($true) {
+            if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
+                throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
+            }
+
+            if (& $Condition) {
+                return
+            }
+
+            Start-Sleep -Milliseconds $PollMilliseconds
+            if ([DateTime]::UtcNow -ge $Deadline) {
+                break
+            }
+        }
+    }
+    else {
     while ($true) {
-        if ($null -ne $Process -and $Process.HasExited) {
-            throw "noctty exited while waiting for ${Description} (exit code $($Process.ExitCode))"
+        if ($null -ne $WatchProcess -and $WatchProcess.HasExited) {
+            throw "noctty exited while waiting for ${Description} (exit code $($WatchProcess.ExitCode))"
         }
 
         if ([DateTime]::UtcNow -ge $Deadline) {
@@ -600,10 +646,14 @@ function Wait-InteractiveWin11Until {
             return
         }
 
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
     }
 
-    throw "Timed out waiting for $Description"
+    if ([string]::IsNullOrEmpty($TimeoutMessage)) {
+        throw "Timed out waiting for $Description"
+    }
+    throw $TimeoutMessage
 }
 
 function Get-InteractiveWin11ProcessTreeSnapshot {

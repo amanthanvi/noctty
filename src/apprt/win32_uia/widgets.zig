@@ -5677,6 +5677,788 @@ test "SettingsControlProvider exposes InvokeProvider only for buttons" {
     try std.testing.expect(invoke == null);
 }
 
+test "settings provider behavior invoke dispatch is asynchronous and source preserving" {
+    const win32 = struct {
+        const MSG = extern struct {
+            hwnd: ?com.HWND,
+            message: u32,
+            wParam: com.WPARAM,
+            lParam: com.LPARAM,
+            time: u32,
+            pt: POINT,
+            lPrivate: u32,
+        };
+
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DefWindowProcW(
+            hWnd: com.HWND,
+            Msg: u32,
+            wParam: com.WPARAM,
+            lParam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn SetWindowLongPtrW(
+            hWnd: com.HWND,
+            nIndex: i32,
+            dwNewLong: isize,
+        ) callconv(.winapi) isize;
+        extern "user32" fn PeekMessageW(
+            lpMsg: *MSG,
+            hWnd: ?com.HWND,
+            wMsgFilterMin: u32,
+            wMsgFilterMax: u32,
+            wRemoveMsg: u32,
+        ) callconv(.winapi) com.BOOL;
+        extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) com.LRESULT;
+    };
+    const fixture = struct {
+        var command_calls: usize = 0;
+        var last_wparam: com.WPARAM = 0;
+        var last_lparam: com.LPARAM = 0;
+
+        fn wndProc(
+            hwnd: com.HWND,
+            message: u32,
+            wparam: com.WPARAM,
+            lparam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT {
+            if (message == WM_COMMAND) {
+                command_calls += 1;
+                last_wparam = wparam;
+                last_lparam = lparam;
+                return 1;
+            }
+            return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+    };
+
+    fixture.command_calls = 0;
+    fixture.last_wparam = 0;
+    fixture.last_lparam = 0;
+
+    const static_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+    const empty_title = std.unicode.utf8ToUtf16LeStringLiteral("");
+    const parent = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(parent);
+    try std.testing.expect(win32.SetWindowLongPtrW(
+        parent,
+        -4,
+        @intCast(@intFromPtr(&fixture.wndProc)),
+    ) != 0);
+
+    const child = win32.CreateWindowExW(
+        0,
+        button_class,
+        empty_title,
+        0x40000000,
+        0,
+        0,
+        80,
+        24,
+        parent,
+        @ptrFromInt(41),
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(child);
+    const provider = try SettingsControlProvider.create(
+        std.testing.allocator,
+        child,
+        .button,
+        "Save",
+    );
+    defer _ = SettingsControlProvider.Release(&provider.base);
+
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsControlProvider.Invoke(&provider.invoke_iface),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixture.command_calls);
+
+    var message: win32.MSG = undefined;
+    try std.testing.expect(win32.PeekMessageW(
+        &message,
+        parent,
+        WM_COMMAND,
+        WM_COMMAND,
+        1,
+    ) != 0);
+    _ = win32.DispatchMessageW(&message);
+    try std.testing.expectEqual(@as(usize, 1), fixture.command_calls);
+    try std.testing.expectEqual(@as(com.WPARAM, 41), fixture.last_wparam);
+    try std.testing.expectEqual(
+        @as(com.LPARAM, @bitCast(@intFromPtr(child))),
+        fixture.last_lparam,
+    );
+}
+
+test "settings provider behavior selection dispatch is synchronous and postcondition checked" {
+    const win32 = struct {
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DefWindowProcW(
+            hWnd: com.HWND,
+            Msg: u32,
+            wParam: com.WPARAM,
+            lParam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn SetWindowLongPtrW(
+            hWnd: com.HWND,
+            nIndex: i32,
+            dwNewLong: isize,
+        ) callconv(.winapi) isize;
+    };
+    const fixture = struct {
+        var group: ?*SettingsSectionGroupProvider = null;
+        var update_selection = false;
+        var command_calls: usize = 0;
+        var last_wparam: com.WPARAM = 0;
+        var last_lparam: com.LPARAM = 0;
+
+        fn wndProc(
+            hwnd: com.HWND,
+            message: u32,
+            wparam: com.WPARAM,
+            lparam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT {
+            if (message == WM_COMMAND) {
+                command_calls += 1;
+                last_wparam = wparam;
+                last_lparam = lparam;
+                if (update_selection) group.?.setSelected(0);
+                return 1;
+            }
+            return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+    };
+
+    fixture.group = null;
+    fixture.update_selection = false;
+    fixture.command_calls = 0;
+    fixture.last_wparam = 0;
+    fixture.last_lparam = 0;
+
+    const static_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+    const empty_title = std.unicode.utf8ToUtf16LeStringLiteral("");
+    const parent = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(parent);
+    try std.testing.expect(win32.SetWindowLongPtrW(
+        parent,
+        -4,
+        @intCast(@intFromPtr(&fixture.wndProc)),
+    ) != 0);
+
+    const child = win32.CreateWindowExW(
+        0,
+        button_class,
+        empty_title,
+        0x40000000,
+        0,
+        0,
+        80,
+        24,
+        parent,
+        @ptrFromInt(42),
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(child);
+
+    const group = try SettingsSectionGroupProvider.create(std.testing.allocator, parent);
+    const section = try SettingsSectionProvider.create(
+        std.testing.allocator,
+        child,
+        "Appearance",
+        0,
+        group,
+    );
+    group.setSection(0, section);
+    fixture.group = group;
+    defer {
+        fixture.group = null;
+        group.detach();
+        section.detach();
+        _ = SettingsSectionProvider.Release(&section.base);
+        _ = SettingsSectionGroupProvider.Release(&group.base);
+    }
+
+    fixture.update_selection = true;
+    try std.testing.expectEqual(
+        com.S_OK,
+        SettingsSectionProvider.Select(&section.selection_iface),
+    );
+    try std.testing.expect(section.isSelected());
+    try std.testing.expectEqual(@as(usize, 1), fixture.command_calls);
+    try std.testing.expectEqual(@as(com.WPARAM, 42), fixture.last_wparam);
+    try std.testing.expectEqual(
+        @as(com.LPARAM, @bitCast(@intFromPtr(child))),
+        fixture.last_lparam,
+    );
+
+    group.setSelected(1);
+    fixture.update_selection = false;
+    try std.testing.expectEqual(
+        com.UIA_E_INVALIDOPERATION,
+        SettingsSectionProvider.Select(&section.selection_iface),
+    );
+    try std.testing.expect(!section.isSelected());
+    try std.testing.expectEqual(@as(usize, 2), fixture.command_calls);
+}
+
+test "settings provider behavior selection dispatch is bounded for a hung owner thread" {
+    const win32 = struct {
+        const MSG = extern struct {
+            hwnd: ?com.HWND,
+            message: u32,
+            wParam: com.WPARAM,
+            lParam: com.LPARAM,
+            time: u32,
+            pt: POINT,
+            lPrivate: u32,
+        };
+
+        const WAIT_OBJECT_0: u32 = 0;
+        const WAIT_TIMEOUT: u32 = 258;
+        const INFINITE: u32 = 0xFFFFFFFF;
+        const PM_REMOVE: u32 = 0x0001;
+
+        extern "kernel32" fn CreateEventW(
+            lpEventAttributes: ?*anyopaque,
+            bManualReset: com.BOOL,
+            bInitialState: com.BOOL,
+            lpName: ?[*:0]const u16,
+        ) callconv(.winapi) ?*anyopaque;
+        extern "kernel32" fn SetEvent(hEvent: *anyopaque) callconv(.winapi) com.BOOL;
+        extern "kernel32" fn WaitForSingleObject(
+            hHandle: *anyopaque,
+            dwMilliseconds: u32,
+        ) callconv(.winapi) u32;
+        extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) com.BOOL;
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DefWindowProcW(
+            hWnd: com.HWND,
+            Msg: u32,
+            wParam: com.WPARAM,
+            lParam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn SetWindowLongPtrW(
+            hWnd: com.HWND,
+            nIndex: i32,
+            dwNewLong: isize,
+        ) callconv(.winapi) isize;
+        extern "user32" fn PeekMessageW(
+            lpMsg: *MSG,
+            hWnd: ?com.HWND,
+            wMsgFilterMin: u32,
+            wMsgFilterMax: u32,
+            wRemoveMsg: u32,
+        ) callconv(.winapi) com.BOOL;
+    };
+    const Fixture = struct {
+        var active: ?*@This() = null;
+
+        ready_event: *anyopaque,
+        release_event: *anyopaque,
+        owner_released_event: *anyopaque,
+        destroy_event: *anyopaque,
+        select_done_event: *anyopaque,
+        parent: ?com.HWND,
+        child: ?com.HWND,
+        section: ?*SettingsSectionProvider,
+        owner_setup_ok: std.atomic.Value(bool),
+        owner_thread_calls: std.atomic.Value(usize),
+        select_calls: std.atomic.Value(usize),
+        command_calls: std.atomic.Value(usize),
+        select_result: std.atomic.Value(com.HRESULT),
+
+        fn wndProc(
+            hwnd: com.HWND,
+            message: u32,
+            wparam: com.WPARAM,
+            lparam: com.LPARAM,
+        ) callconv(.winapi) com.LRESULT {
+            const self = active orelse return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+            if (message == WM_COMMAND) {
+                _ = self.command_calls.fetchAdd(1, .acq_rel);
+                return 1;
+            }
+            return win32.DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+
+        fn ownerMain(self: *@This()) void {
+            _ = self.owner_thread_calls.fetchAdd(1, .acq_rel);
+            const static_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+            const button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+            const empty_title = std.unicode.utf8ToUtf16LeStringLiteral("");
+            const parent = win32.CreateWindowExW(
+                0,
+                static_class,
+                empty_title,
+                0,
+                0,
+                0,
+                100,
+                100,
+                null,
+                null,
+                null,
+                null,
+            ) orelse {
+                _ = win32.SetEvent(self.ready_event);
+                return;
+            };
+            self.parent = parent;
+            if (win32.SetWindowLongPtrW(
+                parent,
+                -4,
+                @intCast(@intFromPtr(&wndProc)),
+            ) == 0) {
+                _ = win32.DestroyWindow(parent);
+                self.parent = null;
+                _ = win32.SetEvent(self.ready_event);
+                return;
+            }
+            const child = win32.CreateWindowExW(
+                0,
+                button_class,
+                empty_title,
+                0x40000000,
+                0,
+                0,
+                80,
+                24,
+                parent,
+                @ptrFromInt(44),
+                null,
+                null,
+            ) orelse {
+                _ = win32.DestroyWindow(parent);
+                self.parent = null;
+                _ = win32.SetEvent(self.ready_event);
+                return;
+            };
+            self.child = child;
+            self.owner_setup_ok.store(true, .release);
+            _ = win32.SetEvent(self.ready_event);
+
+            // Deliberately do not pump this owner thread until the watchdog
+            // releases it. PeekMessage then drains any mutation-induced
+            // unbounded synchronous send so the fixture can shut down safely.
+            _ = win32.WaitForSingleObject(self.release_event, win32.INFINITE);
+            var message: win32.MSG = undefined;
+            _ = win32.PeekMessageW(&message, parent, WM_COMMAND, WM_COMMAND, win32.PM_REMOVE);
+            _ = win32.SetEvent(self.owner_released_event);
+            _ = win32.WaitForSingleObject(self.destroy_event, win32.INFINITE);
+            _ = win32.DestroyWindow(child);
+            _ = win32.DestroyWindow(parent);
+        }
+
+        fn selectMain(self: *@This()) void {
+            _ = self.select_calls.fetchAdd(1, .acq_rel);
+            const result = SettingsSectionProvider.Select(&self.section.?.selection_iface);
+            self.select_result.store(result, .release);
+            _ = win32.SetEvent(self.select_done_event);
+        }
+    };
+
+    const ready_event = win32.CreateEventW(null, 1, 0, null) orelse return error.TestUnexpectedResult;
+    defer _ = win32.CloseHandle(ready_event);
+    const release_event = win32.CreateEventW(null, 1, 0, null) orelse return error.TestUnexpectedResult;
+    defer _ = win32.CloseHandle(release_event);
+    const owner_released_event = win32.CreateEventW(null, 1, 0, null) orelse return error.TestUnexpectedResult;
+    defer _ = win32.CloseHandle(owner_released_event);
+    const destroy_event = win32.CreateEventW(null, 1, 0, null) orelse return error.TestUnexpectedResult;
+    defer _ = win32.CloseHandle(destroy_event);
+    const select_done_event = win32.CreateEventW(null, 1, 0, null) orelse return error.TestUnexpectedResult;
+    defer _ = win32.CloseHandle(select_done_event);
+
+    var fixture: Fixture = .{
+        .ready_event = ready_event,
+        .release_event = release_event,
+        .owner_released_event = owner_released_event,
+        .destroy_event = destroy_event,
+        .select_done_event = select_done_event,
+        .parent = null,
+        .child = null,
+        .section = null,
+        .owner_setup_ok = std.atomic.Value(bool).init(false),
+        .owner_thread_calls = std.atomic.Value(usize).init(0),
+        .select_calls = std.atomic.Value(usize).init(0),
+        .command_calls = std.atomic.Value(usize).init(0),
+        .select_result = std.atomic.Value(com.HRESULT).init(com.E_NOTIMPL),
+    };
+    Fixture.active = &fixture;
+    defer Fixture.active = null;
+    const owner_thread = try std.Thread.spawn(.{}, Fixture.ownerMain, .{&fixture});
+    var owner_joined = false;
+    defer if (!owner_joined) {
+        _ = win32.SetEvent(release_event);
+        _ = win32.SetEvent(destroy_event);
+        owner_thread.join();
+    };
+
+    try std.testing.expectEqual(
+        win32.WAIT_OBJECT_0,
+        win32.WaitForSingleObject(ready_event, win32.INFINITE),
+    );
+    try std.testing.expect(fixture.owner_setup_ok.load(.acquire));
+    const parent = fixture.parent orelse return error.TestUnexpectedResult;
+    const child = fixture.child orelse return error.TestUnexpectedResult;
+    const group = try SettingsSectionGroupProvider.create(std.testing.allocator, parent);
+    const section = try SettingsSectionProvider.create(
+        std.testing.allocator,
+        child,
+        "Keyboard shortcuts",
+        0,
+        group,
+    );
+    group.setSection(0, section);
+    fixture.section = section;
+    defer {
+        fixture.section = null;
+        group.detach();
+        section.detach();
+        _ = SettingsSectionProvider.Release(&section.base);
+        _ = SettingsSectionGroupProvider.Release(&group.base);
+    }
+
+    const select_thread = try std.Thread.spawn(.{}, Fixture.selectMain, .{&fixture});
+    defer select_thread.join();
+    const select_wait = win32.WaitForSingleObject(select_done_event, 4000);
+    try std.testing.expect(select_wait == win32.WAIT_OBJECT_0 or select_wait == win32.WAIT_TIMEOUT);
+
+    _ = win32.SetEvent(release_event);
+    try std.testing.expectEqual(
+        win32.WAIT_OBJECT_0,
+        win32.WaitForSingleObject(owner_released_event, win32.INFINITE),
+    );
+    if (select_wait == win32.WAIT_TIMEOUT) {
+        _ = win32.WaitForSingleObject(select_done_event, win32.INFINITE);
+    }
+    _ = win32.SetEvent(destroy_event);
+    owner_thread.join();
+    owner_joined = true;
+
+    try std.testing.expectEqual(win32.WAIT_OBJECT_0, select_wait);
+    try std.testing.expectEqual(com.UIA_E_ELEMENTNOTAVAILABLE, fixture.select_result.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fixture.owner_thread_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), fixture.select_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.command_calls.load(.acquire));
+}
+
+test "settings provider behavior keyboard focus includes descendants" {
+    const win32 = struct {
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn SetFocus(hWnd: com.HWND) callconv(.winapi) ?com.HWND;
+    };
+
+    const static_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
+    const empty_title = std.unicode.utf8ToUtf16LeStringLiteral("");
+    const parent = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(parent);
+    const child = win32.CreateWindowExW(
+        0,
+        edit_class,
+        empty_title,
+        0x40000000,
+        0,
+        0,
+        80,
+        24,
+        parent,
+        @ptrFromInt(43),
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(child);
+    const peer = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(peer);
+
+    _ = win32.SetFocus(child);
+    try std.testing.expect(hwndHasKeyboardFocus(child));
+    try std.testing.expect(hwndHasKeyboardFocus(parent));
+    try std.testing.expect(!hwndHasKeyboardFocus(peer));
+
+    _ = win32.SetFocus(peer);
+    try std.testing.expect(hwndHasKeyboardFocus(peer));
+    try std.testing.expect(!hwndHasKeyboardFocus(child));
+    try std.testing.expect(!hwndHasKeyboardFocus(parent));
+}
+
+test "settings provider behavior focus properties are provider routed and thread correct" {
+    const win32 = struct {
+        extern "user32" fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?com.HWND,
+            hMenu: ?*anyopaque,
+            hInstance: ?*anyopaque,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?com.HWND;
+        extern "user32" fn DestroyWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
+        extern "user32" fn SetFocus(hWnd: com.HWND) callconv(.winapi) ?com.HWND;
+    };
+    const fixture = struct {
+        var control_property_queries: usize = 0;
+        var section_property_queries: usize = 0;
+        var focus_event_calls: usize = 0;
+
+        fn queryControl(provider: *SettingsControlProvider) !bool {
+            control_property_queries += 1;
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(
+                com.S_OK,
+                provider.base.vtbl.GetPropertyValue(
+                    &provider.base,
+                    constants.UIA_HasKeyboardFocusPropertyId,
+                    &value,
+                ),
+            );
+            try std.testing.expectEqual(com.VT_BOOL, value.vt);
+            return value.value.bool_val == com.VARIANT_TRUE;
+        }
+
+        fn querySection(provider: *SettingsSectionProvider) !bool {
+            section_property_queries += 1;
+            var value = com.VARIANT.empty();
+            try std.testing.expectEqual(
+                com.S_OK,
+                provider.base.vtbl.GetPropertyValue(
+                    &provider.base,
+                    constants.UIA_HasKeyboardFocusPropertyId,
+                    &value,
+                ),
+            );
+            try std.testing.expectEqual(com.VT_BOOL, value.vt);
+            return value.value.bool_val == com.VARIANT_TRUE;
+        }
+
+        fn raiseControl(provider: *SettingsControlProvider) void {
+            focus_event_calls += 1;
+            provider.raiseFocusChanged();
+        }
+
+        fn raiseSection(provider: *SettingsSectionProvider) void {
+            focus_event_calls += 1;
+            provider.raiseFocusChanged();
+        }
+    };
+
+    fixture.control_property_queries = 0;
+    fixture.section_property_queries = 0;
+    fixture.focus_event_calls = 0;
+
+    const static_class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const button_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
+    const empty_title = std.unicode.utf8ToUtf16LeStringLiteral("");
+    const parent = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(parent);
+    const child = win32.CreateWindowExW(
+        0,
+        button_class,
+        empty_title,
+        0x40000000,
+        0,
+        0,
+        80,
+        24,
+        parent,
+        @ptrFromInt(45),
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(child);
+    const peer = win32.CreateWindowExW(
+        0,
+        static_class,
+        empty_title,
+        0,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        null,
+        null,
+    ) orelse return error.TestUnexpectedResult;
+    defer _ = win32.DestroyWindow(peer);
+
+    const control = try SettingsControlProvider.create(
+        std.testing.allocator,
+        parent,
+        .button,
+        "Settings",
+    );
+    defer {
+        _ = control.disconnect();
+        _ = SettingsControlProvider.Release(&control.base);
+    }
+    const group = try SettingsSectionGroupProvider.create(std.testing.allocator, parent);
+    const section = try SettingsSectionProvider.create(
+        std.testing.allocator,
+        child,
+        "Appearance",
+        0,
+        group,
+    );
+    group.setSection(0, section);
+    defer {
+        _ = section.disconnect();
+        _ = group.disconnect();
+        _ = SettingsSectionProvider.Release(&section.base);
+        _ = SettingsSectionGroupProvider.Release(&group.base);
+    }
+
+    var disconnected_all = false;
+    defer if (!disconnected_all) {
+        _ = com.UiaDisconnectAllProviders();
+    };
+    _ = win32.SetFocus(child);
+    try std.testing.expect(try fixture.queryControl(control));
+    try std.testing.expect(try fixture.querySection(section));
+    fixture.raiseControl(control);
+    fixture.raiseSection(section);
+
+    _ = win32.SetFocus(peer);
+    try std.testing.expect(!try fixture.queryControl(control));
+    try std.testing.expect(!try fixture.querySection(section));
+    try std.testing.expectEqual(com.S_OK, com.UiaDisconnectAllProviders());
+    disconnected_all = true;
+
+    try std.testing.expectEqual(@as(usize, 2), fixture.control_property_queries);
+    try std.testing.expectEqual(@as(usize, 2), fixture.section_property_queries);
+    try std.testing.expectEqual(@as(usize, 2), fixture.focus_event_calls);
+}
+
 test "SettingsSectionProvider preserves required single-selection semantics" {
     try std.testing.expectEqual(com.S_OK, settingsSectionAddToSelectionResult(true));
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, settingsSectionAddToSelectionResult(false));
