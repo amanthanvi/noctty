@@ -5,7 +5,76 @@ const windows = std.os.windows;
 const cli = @import("cli.zig");
 const state = &@import("global.zig").state;
 
+/// Give CLI output somewhere to go.
+///
+/// noctty.exe is a Windows-subsystem binary, so a shell that launches it
+/// directly (`noctty.exe +version`) hands it no console and no standard
+/// handles: every write fails and the action reports `WriteFailed` without
+/// printing anything. Attaching to the launching process's console and binding
+/// the missing handles to it makes CLI actions behave like a console program.
+///
+/// Handles that already work (a real console via noctty.com, or a redirection
+/// such as `noctty.exe +version > out.txt`) are left exactly as they are.
+pub fn attachParentConsole() void {
+    if (comptime builtin.os.tag != .windows) return;
+
+    const std_in = -10;
+    const std_out = -11;
+    const std_err = -12;
+
+    if (stdHandleUsable(std_in) and
+        stdHandleUsable(std_out) and
+        stdHandleUsable(std_err)) return;
+
+    // ATTACH_PARENT_PROCESS. Fails when the launcher has no console (started
+    // from Explorer, a service, or a detached process), which is fine.
+    if (AttachConsole(0xFFFFFFFF) == 0) return;
+
+    if (!stdHandleUsable(std_in)) bindStdHandleToConsole(std_in, "CONIN$");
+    if (!stdHandleUsable(std_out)) bindStdHandleToConsole(std_out, "CONOUT$");
+    if (!stdHandleUsable(std_err)) bindStdHandleToConsole(std_err, "CONOUT$");
+}
+
+fn stdHandleUsable(id: i32) bool {
+    if (comptime builtin.os.tag != .windows) return true;
+    const handle = GetStdHandle(id);
+    if (handle == null or handle == windows.INVALID_HANDLE_VALUE) return false;
+    // A stale inherited handle reports FILE_TYPE_UNKNOWN.
+    return GetFileType(handle.?) != 0;
+}
+
+fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
+    if (comptime builtin.os.tag != .windows) return;
+    const path = std.unicode.utf8ToUtf16LeStringLiteral(name);
+    const handle = CreateFileW(
+        path,
+        0x80000000 | 0x40000000, // GENERIC_READ | GENERIC_WRITE
+        0x00000001 | 0x00000002, // FILE_SHARE_READ | FILE_SHARE_WRITE
+        null,
+        3, // OPEN_EXISTING
+        0,
+        null,
+    );
+    if (handle == windows.INVALID_HANDLE_VALUE) return;
+    _ = SetStdHandle(id, handle);
+}
+
+extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
+extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
+extern "kernel32" fn CreateFileW(
+    lpFileName: [*:0]const u16,
+    dwDesiredAccess: u32,
+    dwShareMode: u32,
+    lpSecurityAttributes: ?*anyopaque,
+    dwCreationDisposition: u32,
+    dwFlagsAndAttributes: u32,
+    hTemplateFile: ?windows.HANDLE,
+) callconv(.winapi) windows.HANDLE;
+
 pub fn reportStateInitError(err: anyerror) !void {
+    attachParentConsole();
     var buffer: [1024]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&buffer);
     const stderr = &stderr_writer.interface;
@@ -32,6 +101,7 @@ pub fn reportStateInitError(err: anyerror) !void {
 }
 
 pub fn runCliAction(action: cli.ghostty.Action, alloc: std.mem.Allocator) u8 {
+    attachParentConsole();
     return cli.ghostty.run(action, alloc) catch |err| err: {
         reportCliActionFailure(action, err);
         break :err 1;
