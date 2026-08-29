@@ -179,6 +179,19 @@ test "fuzz paste sanitizer" {
     } });
 }
 
+test "bounded fuzz campaign paste sanitizer" {
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run({}, fuzzPasteEncoding, .{
+        .random_seed = 0x6B3A_581D_D3E9_2471,
+        .corpus = &.{
+            "plain text",
+            "line one\nline two",
+            "submit\r",
+            "\x00\x03\x1b[201~\x7f",
+        },
+    });
+}
+
 test "encode bracketed" {
     const testing = std.testing;
     const result = try encode(

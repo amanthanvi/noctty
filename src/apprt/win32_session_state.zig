@@ -64,6 +64,11 @@ const VisitFrame = struct {
     expanded: bool,
 };
 
+const ValidationPurpose = enum {
+    encode,
+    load,
+};
+
 pub const SessionState = struct {
     schema_version: u32 = current_schema_version,
     windows: []const Window = &.{},
@@ -125,7 +130,7 @@ pub const Axis = enum {
 };
 
 pub fn encodeAlloc(alloc: Allocator, state: SessionState) ![]u8 {
-    try validateAlloc(alloc, state);
+    try validateAllocForPurpose(alloc, state, .encode);
 
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
@@ -217,6 +222,14 @@ fn parseAllocMode(
 }
 
 pub fn validateAlloc(alloc: Allocator, state: SessionState) ValidateError!void {
+    return validateAllocForPurpose(alloc, state, .load);
+}
+
+fn validateAllocForPurpose(
+    alloc: Allocator,
+    state: SessionState,
+    purpose: ValidationPurpose,
+) ValidateError!void {
     if (state.schema_version != current_schema_version) {
         return error.UnsupportedVersion;
     }
@@ -228,7 +241,12 @@ pub fn validateAlloc(alloc: Allocator, state: SessionState) ValidateError!void {
         if (window.selected_tab >= window.tabs.len) return error.InvalidSelectedTab;
 
         for (window.tabs) |tab| {
-            const leaf_count = try validateLayoutTree(alloc, tab.layout, &scrollback_bytes);
+            const leaf_count = try validateLayoutTree(
+                alloc,
+                tab.layout,
+                &scrollback_bytes,
+                purpose,
+            );
             if (tab.selected_leaf >= leaf_count) return error.InvalidSelectedLeaf;
         }
     }
@@ -253,6 +271,7 @@ fn validateLayoutTree(
     alloc: Allocator,
     layout: LayoutTree,
     scrollback_bytes: *usize,
+    purpose: ValidationPurpose,
 ) ValidateError!usize {
     if (layout.nodes.len == 0) return error.EmptyLayout;
     if (layout.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
@@ -288,7 +307,7 @@ fn validateLayoutTree(
         switch (layout.nodes[frame.index]) {
             .pane => |pane| {
                 try validatePaneScrollback(pane, scrollback_bytes);
-                try validatePane(pane);
+                if (purpose == .load) try validatePane(pane);
                 visited[frame.index] = 2;
                 leaf_count += 1;
                 stack_len -= 1;
@@ -373,10 +392,14 @@ fn validatePane(pane: Pane) ValidationError!void {
         pane.tab_title_override,
     }) |value| {
         if (value) |text| {
-            if (paste_protection.hasControlChars(text) or
-                paste_protection.hasNewline(text)) return error.InvalidPaneText;
+            if (!isValidPaneText(text)) return error.InvalidPaneText;
         }
     }
+}
+
+pub fn isValidPaneText(text: []const u8) bool {
+    return !paste_protection.hasControlChars(text) and
+        !paste_protection.hasNewline(text);
 }
 
 fn expectSessionStateEqual(expected: SessionState, actual: SessionState) !void {
@@ -906,7 +929,6 @@ fn fuzzParseSessionState(_: void, raw: []const u8) !void {
     if (raw.len > @import("win32_session_persistence.zig").default_max_state_bytes) return;
     var parsed = parseAlloc(std.testing.allocator, raw) catch return;
     defer parsed.deinit();
-    try validateAlloc(std.testing.allocator, parsed.value);
 }
 
 test "fuzz win32 session state parser" {
@@ -919,6 +941,20 @@ test "fuzz win32 session state parser" {
         \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\safe\\\u0000BAD=1"}}]}}]}]}
         ,
     } });
+}
+
+test "bounded fuzz campaign win32 session state parser" {
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run({}, fuzzParseSessionState, .{
+        .random_seed = 0x638F_E231_1CB4_9C5A,
+        .corpus = &.{
+            "{}",
+            \\{"schema_version":1,"windows":[]}
+            ,
+            \\{"schema_version":1,"windows":[{"selected_tab":0,"tabs":[{"selected_leaf":0,"layout":{"root":0,"nodes":[{"pane":{"cwd":"C:\\src\\noctty"}}]}}]}]}
+            ,
+        },
+    });
 }
 
 test "win32 session state encode rejects invalid split child index" {

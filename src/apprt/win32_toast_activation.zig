@@ -296,3 +296,15 @@ test "fuzz win32 toast activation parser" {
         "wgh://other?surface=1",
     } });
 }
+
+test "bounded fuzz campaign win32 toast activation parser" {
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run({}, fuzzActivationParser, .{
+        .random_seed = 0x93B8_A2D4_480C_12F7,
+        .corpus = &.{
+            "wgh://activate?surface=42&window=7&action=focus",
+            "wgh://activate?surface=not-a-number",
+            "wgh://other?surface=1",
+        },
+    });
+}

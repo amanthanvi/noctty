@@ -1331,3 +1331,290 @@ test "win32 encodeNewWindowRequest rejects oversized forwarded arguments" {
         encodeNewWindowRequest(std.testing.allocator, &.{oversized}),
     );
 }
+
+/// A seekable file standing in for the pipe handle the wire decoders read
+/// from. The decoders take a `windows.HANDLE` and never seek, so a temp file
+/// exercises the same `readExactUntil` path without a live named pipe, and
+/// one file is reused across a whole campaign instead of one per iteration.
+const FuzzTransport = struct {
+    file: std.fs.File,
+
+    fn load(self: *FuzzTransport, bytes: []const u8) !void {
+        try self.file.seekTo(0);
+        try self.file.setEndPos(0);
+        try self.file.writeAll(bytes);
+        try self.file.seekTo(0);
+    }
+
+    /// Overwrite the transport with filler so any decoded value that still
+    /// aliased the read buffer shows up as a re-encode mismatch.
+    fn scrub(self: *FuzzTransport, len: usize) !void {
+        var filler: [256]u8 = undefined;
+        @memset(&filler, 0xA5);
+        try self.file.seekTo(0);
+        try self.file.setEndPos(0);
+        var remaining = len;
+        while (remaining > 0) {
+            const chunk = @min(remaining, filler.len);
+            try self.file.writeAll(filler[0..chunk]);
+            remaining -= chunk;
+        }
+        try self.file.seekTo(0);
+    }
+};
+
+fn expectArgumentsEqual(
+    expected: ?[]const [:0]const u8,
+    actual: ?[]const [:0]const u8,
+) !void {
+    if (expected == null or actual == null) {
+        return std.testing.expect(expected == null and actual == null);
+    }
+
+    try std.testing.expectEqual(expected.?.len, actual.?.len);
+    for (expected.?, actual.?) |expected_arg, actual_arg| {
+        try std.testing.expectEqualStrings(expected_arg, actual_arg);
+    }
+}
+
+fn fuzzDecodeNewWindowPayload(transport: *FuzzTransport, input: []const u8) !void {
+    const max_input_len: usize = @as(usize, max_new_window_args_bytes) +
+        (@as(usize, max_new_window_argc) + 1) * @sizeOf(u32);
+    if (input.len > max_input_len) return;
+
+    try transport.load(input);
+    const arguments = decodeNewWindowPayload(
+        std.testing.allocator,
+        transport.file.handle,
+    ) catch |err| switch (err) {
+        error.EndOfStream, error.InvalidIpcRequest, error.IpcTimeout => return,
+        else => return err,
+    };
+    defer freeOwnedArguments(std.testing.allocator, arguments);
+
+    const encoded_before = try encodeNewWindowRequest(
+        std.testing.allocator,
+        arguments,
+    );
+    defer std.testing.allocator.free(encoded_before);
+
+    try transport.scrub(input.len);
+    const encoded_after = try encodeNewWindowRequest(
+        std.testing.allocator,
+        arguments,
+    );
+    defer std.testing.allocator.free(encoded_after);
+    try std.testing.expectEqualSlices(u8, encoded_before, encoded_after);
+
+    try transport.load(encoded_before[5..]);
+    const round_trip = try decodeNewWindowPayload(
+        std.testing.allocator,
+        transport.file.handle,
+    );
+    defer freeOwnedArguments(std.testing.allocator, round_trip);
+    try expectArgumentsEqual(arguments, round_trip);
+}
+
+const new_window_fuzz_corpus = [_][]const u8{
+    "\x00\x00\x00\x00",
+    "\x01\x00\x00\x00\x03\x00\x00\x00cmd",
+    "\x02\x00\x00\x00\x01\x00\x00\x00x\x01\x00\x00\x00y",
+    "\x01",
+    "\x01\x10\x00\x00",
+};
+
+test "win32 IPC new-window decoder rejects every truncated payload" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-fuzz-new-window-truncated.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    const payload = "\x01\x00\x00\x00\x03\x00\x00\x00cmd";
+    for (0..payload.len) |len| {
+        try transport.load(payload[0..len]);
+        try std.testing.expectError(
+            error.EndOfStream,
+            decodeNewWindowPayload(std.testing.allocator, transport.file.handle),
+        );
+    }
+}
+
+test "fuzz win32 IPC new-window payload decoder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-fuzz-new-window.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    try std.testing.fuzz(&transport, fuzzDecodeNewWindowPayload, .{
+        .corpus = &new_window_fuzz_corpus,
+    });
+}
+
+test "bounded fuzz campaign win32 IPC new-window payload decoder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-bounded-fuzz-new-window.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run(&transport, fuzzDecodeNewWindowPayload, .{
+        .iterations = 256,
+        .random_seed = 0x6C21_C45E_83B7_2D91,
+        .corpus = &.{
+            "\x00\x00\x00\x00",
+            "\x01\x00\x00\x00\x03\x00\x00\x00cmd",
+            "\x02\x00\x00\x00\x01\x00\x00\x00x\x01\x00\x00\x00y",
+            "\x01",
+        },
+    });
+}
+
+fn fuzzDecodePerformActionPayload(transport: *FuzzTransport, input: []const u8) !void {
+    const max_input_len: usize = 13 + @as(usize, max_action_text_len);
+    if (input.len > max_input_len) return;
+
+    try transport.load(input);
+    const payload = decodePerformActionPayload(
+        std.testing.allocator,
+        transport.file.handle,
+        false,
+    ) catch |err| switch (err) {
+        error.EndOfStream,
+        error.InvalidIpcRequest,
+        error.InvalidAutomationAction,
+        error.IpcTimeout,
+        => return,
+        else => return err,
+    };
+    defer std.testing.allocator.free(payload.action_text);
+
+    const encoded_before = try encodePerformActionRequest(
+        std.testing.allocator,
+        payload.target,
+        payload.action_text,
+        test_deadline_ms,
+    );
+    defer std.testing.allocator.free(encoded_before);
+
+    try transport.scrub(input.len);
+    const encoded_after = try encodePerformActionRequest(
+        std.testing.allocator,
+        payload.target,
+        payload.action_text,
+        test_deadline_ms,
+    );
+    defer std.testing.allocator.free(encoded_after);
+    try std.testing.expectEqualSlices(u8, encoded_before, encoded_after);
+
+    try transport.load(encoded_before[5..]);
+    const round_trip = try decodePerformActionPayload(
+        std.testing.allocator,
+        transport.file.handle,
+        true,
+    );
+    defer std.testing.allocator.free(round_trip.action_text);
+    try std.testing.expectEqual(test_deadline_ms, round_trip.deadline_ms);
+    try std.testing.expect(std.meta.eql(payload.target, round_trip.target));
+    try std.testing.expectEqualSlices(
+        u8,
+        payload.action_text,
+        round_trip.action_text,
+    );
+}
+
+test "win32 IPC perform-action decoder rejects every truncated payload" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-fuzz-perform-action-truncated.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    const payload =
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x07\x00\x00\x00new_tab";
+    for (0..payload.len) |len| {
+        try transport.load(payload[0..len]);
+        try std.testing.expectError(
+            error.EndOfStream,
+            decodePerformActionPayload(
+                std.testing.allocator,
+                transport.file.handle,
+                false,
+            ),
+        );
+    }
+}
+
+test "fuzz win32 IPC perform-action payload decoder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-fuzz-perform-action.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    try std.testing.fuzz(&transport, fuzzDecodePerformActionPayload, .{ .corpus = &.{
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+            "\x07\x00\x00\x00new_tab",
+        "\x01\x2A\x00\x00\x00\x00\x00\x00\x00" ++
+            "\x07\x00\x00\x00new_tab",
+        "\x00",
+        "\x02\x00\x00\x00\x00\x00\x00\x00\x00" ++
+            "\x07\x00\x00\x00new_tab",
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+            "\x00\x00\x00\x00",
+    } });
+}
+
+test "bounded fuzz campaign win32 IPC perform-action payload decoder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("ipc-bounded-fuzz-perform-action.bin", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+    var transport: FuzzTransport = .{ .file = file };
+
+    const bounded_fuzz = @import("../testing/bounded_fuzz.zig");
+    try bounded_fuzz.run(&transport, fuzzDecodePerformActionPayload, .{
+        .iterations = 256,
+        .random_seed = 0xBC18_5FE2_43D7_096A,
+        .corpus = &.{
+            "\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+                "\x07\x00\x00\x00new_tab",
+            "\x01\x2A\x00\x00\x00\x00\x00\x00\x00" ++
+                "\x07\x00\x00\x00new_tab",
+            "\x00",
+        },
+    });
+}

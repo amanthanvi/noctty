@@ -1238,7 +1238,13 @@ pub const StreamHandler = struct {
         var stack_alloc = std.heap.stackFallback(1024, arena_alloc.allocator());
         defer arena_alloc.deinit();
         const scratch = stack_alloc.get();
-        const path = try decodeOsc7PathForPwd(scratch, uri);
+        const path = decodeOsc7PathForPwd(scratch, uri) catch |err| switch (err) {
+            error.InvalidOsc7Path => {
+                log.warn("OSC 7 path contains unsafe Windows path bytes", .{});
+                return;
+            },
+            else => return err,
+        };
 
         log.debug("terminal pwd: {s}", .{path});
         try self.terminal.setPwd(path);
@@ -1263,10 +1269,11 @@ pub const StreamHandler = struct {
         uri: std.Uri,
     ) ![]const u8 {
         const raw_path = try uri.path.toRawMaybeAlloc(alloc);
-        return if (builtin.os.tag == .windows)
-            try configpkg.windows_shell.osc7PathToLocal(alloc, raw_path)
-        else
-            raw_path;
+        if (builtin.os.tag != .windows) return raw_path;
+
+        const path = try configpkg.windows_shell.osc7PathToLocal(alloc, raw_path);
+        if (!configpkg.windows_shell.isSafeWindowsPath(path)) return error.InvalidOsc7Path;
+        return path;
     }
 
     fn colorOperation(
@@ -1748,4 +1755,19 @@ test "decodeOsc7PathForPwd handles Windows file URI with a single fallback alloc
     } else {
         try std.testing.expectEqualStrings("/C:/Users/test/project", path);
     }
+}
+
+test "security regression OSC 7 pwd rejects percent-decoded Windows controls" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const uri = try internal_os.uri.parse("file://localhost/C:/evil%00INJ=1%0Ab", .{
+        .mac_address = false,
+        .raw_path = false,
+    });
+    try std.testing.expectError(
+        error.InvalidOsc7Path,
+        StreamHandler.decodeOsc7PathForPwd(arena.allocator(), uri),
+    );
 }

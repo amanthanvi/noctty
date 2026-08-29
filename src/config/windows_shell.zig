@@ -248,13 +248,23 @@ pub fn shellPwd(
 ) !?[]const u8 {
     const value = cwd orelse return null;
 
-    if (isWindowsUriPath(value)) return try uriPathToWindows(alloc, value);
-    if (isDriveAbsolutePath(value)) return try alloc.dupe(u8, value);
-    if (!is_wsl) return null;
-    if (std.mem.eql(u8, value, "~")) return try alloc.dupe(u8, value);
-    if (isWslPath(value)) return try normalizeWslPath(alloc, value);
-    log.warn("dropping unsupported windows shell pwd cwd={s} is_wsl={}", .{ value, is_wsl });
-    return null;
+    const result: ?[]const u8 = result: {
+        if (isWindowsUriPath(value)) break :result try uriPathToWindows(alloc, value);
+        if (isDriveAbsolutePath(value)) break :result try alloc.dupe(u8, value);
+        if (!is_wsl) break :result null;
+        if (std.mem.eql(u8, value, "~")) break :result try alloc.dupe(u8, value);
+        if (isWslPath(value)) break :result try normalizeWslPath(alloc, value);
+        log.warn("dropping unsupported windows shell pwd cwd={s} is_wsl={}", .{ value, is_wsl });
+        break :result null;
+    };
+    if (result) |path| {
+        if (!isSafeWindowsPath(path)) {
+            log.warn("dropping windows shell pwd with unsafe path bytes len={}", .{path.len});
+            alloc.free(path);
+            return null;
+        }
+    }
+    return result;
 }
 
 /// Determine a safe CreateProcess cwd for Windows launches while preserving
@@ -267,13 +277,21 @@ pub fn safeCurrentDirectory(
 ) !?[]const u8 {
     const current = try currentWindowsDirectory(alloc);
 
-    return try safeCurrentDirectoryWithCurrent(
+    const result = try safeCurrentDirectoryWithCurrent(
         alloc,
         cwd,
         working_directory_home,
         is_wsl,
         current,
     );
+    if (result) |path| {
+        if (!isSafeWindowsPath(path)) {
+            log.warn("dropping windows current directory with unsafe path bytes len={}", .{path.len});
+            alloc.free(path);
+            return null;
+        }
+    }
+    return result;
 }
 
 /// Takes ownership of `current` and frees it on every path.
@@ -1130,11 +1148,20 @@ fn isWindowsUriPath(path: []const u8) bool {
         isSeparator(path[3]);
 }
 
-fn isDriveAbsolutePath(path: []const u8) bool {
+pub fn isDriveAbsolutePath(path: []const u8) bool {
     return path.len >= 3 and
         std.ascii.isAlphabetic(path[0]) and
         path[1] == ':' and
         isSeparator(path[2]);
+}
+
+/// Return true when a Windows path contains no bytes that can terminate or
+/// split a CreateProcess environment/current-directory value or a window title.
+pub fn isSafeWindowsPath(path: []const u8) bool {
+    for (path) |byte| {
+        if (std.ascii.isControl(byte)) return false;
+    }
+    return true;
 }
 
 fn isObviouslyInvalidWindowsCurrentDirectory(path: []const u8) bool {
@@ -1651,6 +1678,37 @@ test "shellPwd preserves normalized wsl pwd for wsl launches" {
     defer alloc.free(result);
 
     try testing.expectEqualStrings("/home/aman", result);
+}
+
+test "security regression windows shell pwd rejects control-bearing paths" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    for ([_][]const u8{
+        "C:\\evil\x00INJ=1\x0Ab",
+        "C:\\evil\x01child",
+        "C:\\evil\tchild",
+        "C:\\evil\rchild",
+        "C:\\evil\nchild",
+        "C:\\evil\x1Fchild",
+        "C:\\evil\x7Fchild",
+    }) |path| {
+        try testing.expectEqual(@as(?[]const u8, null), try shellPwd(alloc, path, false));
+    }
+
+    const ordinary = (try shellPwd(alloc, "C:\\Users\\aman\\src", false)).?;
+    defer alloc.free(ordinary);
+    try testing.expectEqualStrings("C:\\Users\\aman\\src", ordinary);
+}
+
+test "security regression windows current directory rejects control-bearing paths" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    try testing.expectEqual(
+        @as(?[]const u8, null),
+        try safeCurrentDirectory(alloc, "C:\\evil\x00INJ=1\x0Ab", false, false),
+    );
 }
 
 test "safeCurrentDirectory keeps inherit semantics for non-wsl shells" {

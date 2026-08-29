@@ -394,6 +394,7 @@ pub const WHEEL_PAGESCROLL = 0xFFFF_FFFF;
 pub const ERROR_FILE_NOT_FOUND = 2;
 pub const PIPE_READMODE_BYTE = 0x00000000;
 pub const PIPE_ACCESS_DUPLEX = 0x00000003;
+pub const FILE_FLAG_FIRST_PIPE_INSTANCE = 0x0008_0000;
 pub const PIPE_UNLIMITED_INSTANCES = 255;
 
 /// Refuse pipe clients that arrive over SMB from another machine. Named

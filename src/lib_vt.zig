@@ -95,6 +95,8 @@ pub const input = struct {
     // Paste-related APIs
     pub const PasteError = paste.Error;
     pub const PasteOptions = paste.Options;
+    // Noctty fork delta: a lone CR is unsafe because it submits input in
+    // non-bracketed mode.
     pub const isSafePaste = paste.isSafe;
     pub const encodePaste = paste.encode;
 
