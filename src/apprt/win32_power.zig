@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const configpkg = @import("../config.zig");
+const sys = @import("win32/sys.zig");
 
 const log = std.log.scoped(.win32_power);
 const windows = std.os.windows;
@@ -50,15 +51,12 @@ comptime {
 }
 
 extern "kernel32" fn GetSystemPowerStatus(status: *SYSTEM_POWER_STATUS) callconv(.winapi) BOOL;
-extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 extern "user32" fn RegisterPowerSettingNotification(
     recipient: HANDLE,
     power_setting_guid: *const GUID,
     flags: DWORD,
 ) callconv(.winapi) ?HANDLE;
 extern "user32" fn UnregisterPowerSettingNotification(handle: HANDLE) callconv(.winapi) BOOL;
-extern "user32" fn IsWindowVisible(hwnd: HWND) callconv(.winapi) BOOL;
-extern "user32" fn IsIconic(hwnd: HWND) callconv(.winapi) BOOL;
 extern "dwmapi" fn DwmGetWindowAttribute(
     hwnd: HWND,
     attribute: DWORD,
@@ -144,8 +142,12 @@ pub const Notifications = struct {
 pub fn parseSystemPowerStatus(raw: SYSTEM_POWER_STATUS, previous: Snapshot) Snapshot {
     return .{
         .on_battery = switch (raw.ACLineStatus) {
-            0, 2 => true,
+            0 => true,
             1 => false,
+            // 255 is "unknown"; anything else is undocumented. Keep the last
+            // known source rather than guessing. (The value 2 means
+            // "short term / UPS" in the GUID_ACDC_POWER_SOURCE notification
+            // payload, not here — see parsePowerSettingNotification.)
             else => previous.on_battery,
         },
         .is_saver = raw.SystemStatusFlag == 1,
@@ -201,7 +203,7 @@ pub fn snapshot() Snapshot {
 /// missed. The atomic claim ensures calls cannot query more often than once per
 /// 30 seconds across all renderer threads.
 pub fn pollIfStale() void {
-    const now = GetTickCount64();
+    const now = sys.GetTickCount64();
     var previous = last_poll_tick_ms.load(.acquire);
     if (previous != 0 and now -| previous < POLL_INTERVAL_MS) return;
     while (true) {
@@ -221,7 +223,7 @@ pub fn pollIfStale() void {
 /// Monotonic millisecond clock shared with Win32 notification and visibility
 /// code. Renderer pacing uses this only when throttling is active.
 pub fn tickCountMs() u64 {
-    return GetTickCount64();
+    return sys.GetTickCount64();
 }
 
 /// Whether saver-specific pacing is active for the current configuration.
@@ -275,8 +277,8 @@ pub fn queryHostVisibility(hwnd: HWND, previous_cloaked: bool) HostVisibility {
     const cloaked = if (result >= 0) cloak_reason != 0 else previous_cloaked;
     return .{
         .visible = hostVisible(
-            IsWindowVisible(hwnd) != 0,
-            IsIconic(hwnd) != 0,
+            sys.IsWindowVisible(hwnd) != 0,
+            sys.IsIconic(hwnd) != 0,
             cloaked,
         ),
         .cloaked = cloaked,

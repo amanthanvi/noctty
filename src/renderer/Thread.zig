@@ -461,10 +461,16 @@ fn drainMailbox(self: *Thread) !bool {
                 // Visibility affects our QoS class
                 self.setQosClass();
 
-                // If we became visible then we immediately trigger a draw.
-                // `drawFrame` applies the present-pacing policy itself, so a
-                // throttled surface still draws as soon as its interval is up.
-                if (v) self.drawFrame(false);
+                // Becoming visible used to draw immediately here, on the
+                // assumption that frame data kept updating while hidden.
+                // It no longer does — hidden surfaces skip `updateFrame`
+                // entirely — so drawing now would present a stale frame AND
+                // start the throttle clock, deferring the real repaint by a
+                // full interval. `drainMailbox` is only ever called from
+                // `renderOnce`, which does `updateFrame` + `drawFrame` right
+                // after this, so the first visible frame is both fresh and
+                // immediate.
+                if (v) self.last_present_request_ms = 0;
 
                 // Notify the renderer so it can update any state.
                 self.renderer.setVisible(v);
