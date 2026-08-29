@@ -70,29 +70,32 @@ function Get-DetachedCliWindowTitle {
     return $builder.ToString()
 }
 
-$oldResourcesDir = $env:GHOSTTY_RESOURCES_DIR
-$hadResourcesDir = $null -ne (Get-Item Env:GHOSTTY_RESOURCES_DIR -ErrorAction SilentlyContinue)
-
-if ($ResourcesDir) {
-    $env:GHOSTTY_RESOURCES_DIR = $ResourcesDir
+# The process under test has to be genuinely console-less. CLI actions now
+# attach to the console of the process that launched them, so `Start-Process`
+# from a shell that has a console would hand the action a working console and
+# it would succeed instead of surfacing the dialog this harness exists to check.
+# WMI creates the process from the console-less WMI provider, which is the only
+# reliable way to reproduce an Explorer/scheduled-task style launch from a
+# script that is itself running in a console.
+#
+# WMI does not carry the caller's environment into the new process, so
+# GHOSTTY_RESOURCES_DIR cannot be propagated on this path.
+if ($ResourcesDir -and $Action -eq '+list-themes') {
+    throw 'Detached +list-themes cannot receive GHOSTTY_RESOURCES_DIR through a console-less launch.'
 }
 
-try {
-    $argumentList = @($Action) + $ExtraArgs
-    $process = Start-Process `
-        -FilePath $exePath `
-        -ArgumentList $argumentList `
-        -WindowStyle Hidden `
-        -PassThru
+$quotedExe = '"' + $exePath + '"'
+$commandLine = (@($quotedExe, $Action) + $ExtraArgs) -join ' '
+$creation = Invoke-CimMethod `
+    -ClassName Win32_Process `
+    -MethodName Create `
+    -Arguments @{ CommandLine = $commandLine }
+
+if ($creation.ReturnValue -ne 0) {
+    throw "Console-less launch of the CLI action failed (Win32_Process::Create returned $($creation.ReturnValue))."
 }
-finally {
-    if ($hadResourcesDir) {
-        $env:GHOSTTY_RESOURCES_DIR = $oldResourcesDir
-    }
-    else {
-        Remove-Item Env:GHOSTTY_RESOURCES_DIR -ErrorAction SilentlyContinue
-    }
-}
+
+$process = Get-Process -Id $creation.ProcessId -ErrorAction Stop
 $processHandle = $process.Handle
 
 $dialogHandle = [IntPtr]::Zero

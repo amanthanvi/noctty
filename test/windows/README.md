@@ -95,8 +95,11 @@ pwsh -NoProfile -File .\cli-redirected-text-action.ps1 -Action +help -ExpectedTe
 
 ## cli-detached-action.ps1
 
-Validates a detached CLI action, its resource discovery, timeout behavior, and
-absence of the native CLI-failure dialog.
+Validates that a CLI action launched with no console at all surfaces the native
+CLI-failure dialog and exits 1 rather than failing silently, plus its resource
+discovery and timeout behavior. The process under test is created through WMI so
+that it has no console and no console-owning ancestor; a plain `Start-Process`
+would let the action attach to the calling shell's console and succeed.
 
 ```powershell
 pwsh -NoProfile -File .\cli-detached-action.ps1 -Action +version
