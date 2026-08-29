@@ -1,0 +1,1376 @@
+//! Windows default-terminal registration and the ITerminalHandoff3 local
+//! server. noctty intentionally implements only the terminal half; the
+//! console half remains a compatible Windows Terminal OpenConsole process.
+
+const std = @import("std");
+const windows = std.os.windows;
+const ptypkg = @import("../pty.zig");
+const com = @import("win32_uia/com.zig");
+
+const log = std.log.scoped(.win32_terminal_handoff);
+const Allocator = std.mem.Allocator;
+const HRESULT = com.HRESULT;
+const GUID = com.GUID;
+const HANDLE = windows.HANDLE;
+const DWORD = windows.DWORD;
+const BOOL = windows.BOOL;
+const LPCWSTR = ?[*:0]const u16;
+const HKEY = *opaque {};
+const LSTATUS = i32;
+
+pub const clsid_text = "{33368C6F-D328-410C-B225-26DC9F12C728}";
+pub const proxy_clsid_text = "{1D349824-21FB-46C7-ACF3-746EDC991D52}";
+pub const proxy_filename = "noctty-terminal-handoff-proxy.dll";
+const iid_terminal_handoff1_text = "{59D55CCE-FC8A-48B4-ACE8-0A9286C6557F}";
+const iid_terminal_handoff2_text = "{AA6B364F-4A50-4176-9002-0AE755E7B5EF}";
+const iid_terminal_handoff3_text = "{6F23DA90-15C5-4203-9DB0-64E73F1B1B00}";
+pub const CLSID_NOCTTY_TERMINAL = GUID.parse(clsid_text);
+pub const CLSID_NOCTTY_TERMINAL_PROXY = GUID.parse(proxy_clsid_text);
+pub const IID_ITerminalHandoff1 = GUID.parse(iid_terminal_handoff1_text);
+pub const IID_ITerminalHandoff2 = GUID.parse(iid_terminal_handoff2_text);
+pub const IID_ITerminalHandoff3 = GUID.parse(iid_terminal_handoff3_text);
+const IID_IClassFactory = GUID.parse("{00000001-0000-0000-C000-000000000046}");
+
+const CLSCTX_LOCAL_SERVER: DWORD = 0x4;
+const REGCLS_MULTIPLEUSE: DWORD = 1;
+const CLASS_E_NOAGGREGATION: HRESULT = @bitCast(@as(u32, 0x80040110));
+const E_FAIL: HRESULT = @bitCast(@as(u32, 0x80004005));
+const E_ACCESSDENIED: HRESULT = @bitCast(@as(u32, 0x80070005));
+
+const HKEY_CURRENT_USER: HKEY = @ptrFromInt(0x80000001);
+const KEY_QUERY_VALUE: DWORD = 0x0001;
+const KEY_SET_VALUE: DWORD = 0x0002;
+const KEY_CREATE_SUB_KEY: DWORD = 0x0004;
+const KEY_READ: DWORD = 0x20019;
+const KEY_WRITE: DWORD = 0x20006;
+const REG_OPTION_NON_VOLATILE: DWORD = 0;
+const REG_SZ: DWORD = 1;
+const REG_BINARY: DWORD = 3;
+const REG_DWORD: DWORD = 4;
+const ERROR_SUCCESS: LSTATUS = 0;
+const ERROR_FILE_NOT_FOUND: LSTATUS = 2;
+const ERROR_PATH_NOT_FOUND: LSTATUS = 3;
+const ERROR_MORE_DATA: LSTATUS = 234;
+
+const class_key_utf8 = "Software\\Classes\\CLSID\\" ++ clsid_text;
+const local_server_key_utf8 = class_key_utf8 ++ "\\LocalServer32";
+const proxy_class_key_utf8 = "Software\\Classes\\CLSID\\" ++ proxy_clsid_text;
+const proxy_inproc_server_key_utf8 = proxy_class_key_utf8 ++ "\\InprocServer32";
+const saved_state_key_utf8 = class_key_utf8 ++ "\\noctty.default-terminal";
+const startup_key_utf8 = "Console\\%%Startup";
+const InterfaceProxyRegistration = struct {
+    key_utf8: []const u8,
+    saved_key_utf8: []const u8,
+};
+const interface_proxy_registrations = [_]InterfaceProxyRegistration{
+    .{
+        .key_utf8 = "Software\\Classes\\Interface\\" ++ iid_terminal_handoff1_text ++ "\\ProxyStubClsid32",
+        .saved_key_utf8 = saved_state_key_utf8 ++ "\\Interface\\" ++ iid_terminal_handoff1_text,
+    },
+    .{
+        .key_utf8 = "Software\\Classes\\Interface\\" ++ iid_terminal_handoff2_text ++ "\\ProxyStubClsid32",
+        .saved_key_utf8 = saved_state_key_utf8 ++ "\\Interface\\" ++ iid_terminal_handoff2_text,
+    },
+    .{
+        .key_utf8 = "Software\\Classes\\Interface\\" ++ iid_terminal_handoff3_text ++ "\\ProxyStubClsid32",
+        .saved_key_utf8 = saved_state_key_utf8 ++ "\\Interface\\" ++ iid_terminal_handoff3_text,
+    },
+};
+const delegation_console_name = "DelegationConsole";
+const delegation_terminal_name = "DelegationTerminal";
+const inbox_console_sentinel = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}";
+const null_guid = "{00000000-0000-0000-0000-000000000000}";
+
+extern "ole32" fn CoRegisterClassObject(
+    rclsid: *const GUID,
+    object: *com.IUnknown,
+    cls_context: DWORD,
+    flags: DWORD,
+    cookie: *DWORD,
+) callconv(.winapi) HRESULT;
+extern "ole32" fn CoRevokeClassObject(cookie: DWORD) callconv(.winapi) HRESULT;
+extern "ole32" fn CoImpersonateClient() callconv(.winapi) HRESULT;
+extern "ole32" fn CoRevertToSelf() callconv(.winapi) HRESULT;
+
+extern "advapi32" fn RegCreateKeyExW(
+    hKey: HKEY,
+    lpSubKey: [*:0]const u16,
+    Reserved: DWORD,
+    lpClass: LPCWSTR,
+    dwOptions: DWORD,
+    samDesired: DWORD,
+    lpSecurityAttributes: ?*anyopaque,
+    phkResult: *HKEY,
+    lpdwDisposition: ?*DWORD,
+) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegOpenKeyExW(
+    hKey: HKEY,
+    lpSubKey: [*:0]const u16,
+    ulOptions: DWORD,
+    samDesired: DWORD,
+    phkResult: *HKEY,
+) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegQueryValueExW(
+    hKey: HKEY,
+    lpValueName: LPCWSTR,
+    lpReserved: ?*DWORD,
+    lpType: ?*DWORD,
+    lpData: ?[*]u8,
+    lpcbData: ?*DWORD,
+) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegSetValueExW(
+    hKey: HKEY,
+    lpValueName: LPCWSTR,
+    Reserved: DWORD,
+    dwType: DWORD,
+    lpData: ?[*]const u8,
+    cbData: DWORD,
+) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegDeleteValueW(hKey: HKEY, lpValueName: LPCWSTR) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegDeleteTreeW(hKey: HKEY, lpSubKey: [*:0]const u16) callconv(.winapi) LSTATUS;
+extern "advapi32" fn RegCloseKey(hKey: HKEY) callconv(.winapi) LSTATUS;
+
+extern "advapi32" fn OpenProcessToken(
+    ProcessHandle: HANDLE,
+    DesiredAccess: DWORD,
+    TokenHandle: *HANDLE,
+) callconv(.winapi) BOOL;
+extern "advapi32" fn OpenThreadToken(
+    ThreadHandle: HANDLE,
+    DesiredAccess: DWORD,
+    OpenAsSelf: BOOL,
+    TokenHandle: *HANDLE,
+) callconv(.winapi) BOOL;
+extern "advapi32" fn GetTokenInformation(
+    TokenHandle: HANDLE,
+    TokenInformationClass: i32,
+    TokenInformation: *anyopaque,
+    TokenInformationLength: DWORD,
+    ReturnLength: *DWORD,
+) callconv(.winapi) BOOL;
+extern "advapi32" fn GetSidSubAuthorityCount(Sid: *anyopaque) callconv(.winapi) *u8;
+extern "advapi32" fn GetSidSubAuthority(Sid: *anyopaque, SubAuthority: DWORD) callconv(.winapi) *DWORD;
+
+pub const TERMINAL_STARTUP_INFO = extern struct {
+    pszTitle: com.BSTR,
+    pszIconPath: com.BSTR,
+    iconIndex: i32,
+    dwX: DWORD,
+    dwY: DWORD,
+    dwXSize: DWORD,
+    dwYSize: DWORD,
+    dwXCountChars: DWORD,
+    dwYCountChars: DWORD,
+    dwFillAttribute: DWORD,
+    dwFlags: DWORD,
+    wShowWindow: u16,
+};
+
+pub const ITerminalHandoff3 = extern struct {
+    vtbl: *const ITerminalHandoff3Vtbl,
+};
+
+pub const ITerminalHandoff3Vtbl = extern struct {
+    QueryInterface: *const fn (*ITerminalHandoff3, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*ITerminalHandoff3) callconv(.winapi) u32,
+    Release: *const fn (*ITerminalHandoff3) callconv(.winapi) u32,
+    EstablishPtyHandoff: *const fn (
+        *ITerminalHandoff3,
+        *?HANDLE,
+        *?HANDLE,
+        ?HANDLE,
+        ?HANDLE,
+        ?HANDLE,
+        ?HANDLE,
+        ?*const TERMINAL_STARTUP_INFO,
+    ) callconv(.winapi) HRESULT,
+};
+
+const IClassFactory = extern struct {
+    vtbl: *const IClassFactoryVtbl,
+};
+
+const IClassFactoryVtbl = extern struct {
+    QueryInterface: *const fn (*IClassFactory, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*IClassFactory) callconv(.winapi) u32,
+    Release: *const fn (*IClassFactory) callconv(.winapi) u32,
+    CreateInstance: *const fn (*IClassFactory, ?*com.IUnknown, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    LockServer: *const fn (*IClassFactory, BOOL) callconv(.winapi) HRESULT,
+};
+
+comptime {
+    if (@sizeOf(TERMINAL_STARTUP_INFO) != 56 or @alignOf(TERMINAL_STARTUP_INFO) != 8)
+        @compileError("TERMINAL_STARTUP_INFO ABI mismatch");
+    const startup_offsets = .{
+        .{ "pszTitle", 0 },         .{ "pszIconPath", 8 },    .{ "iconIndex", 16 },
+        .{ "dwX", 20 },             .{ "dwY", 24 },           .{ "dwXSize", 28 },
+        .{ "dwYSize", 32 },         .{ "dwXCountChars", 36 }, .{ "dwYCountChars", 40 },
+        .{ "dwFillAttribute", 44 }, .{ "dwFlags", 48 },       .{ "wShowWindow", 52 },
+    };
+    for (startup_offsets) |expected| {
+        if (@offsetOf(TERMINAL_STARTUP_INFO, expected[0]) != expected[1])
+            @compileError("TERMINAL_STARTUP_INFO field offset mismatch");
+    }
+    if (@sizeOf(ITerminalHandoff3Vtbl) != 4 * @sizeOf(*anyopaque))
+        @compileError("ITerminalHandoff3 vtable slot mismatch");
+    if (@offsetOf(ITerminalHandoff3Vtbl, "QueryInterface") != 0 or
+        @offsetOf(ITerminalHandoff3Vtbl, "AddRef") != @sizeOf(*anyopaque) or
+        @offsetOf(ITerminalHandoff3Vtbl, "Release") != 2 * @sizeOf(*anyopaque) or
+        @offsetOf(ITerminalHandoff3Vtbl, "EstablishPtyHandoff") != 3 * @sizeOf(*anyopaque))
+        @compileError("ITerminalHandoff3 vtable order mismatch");
+}
+
+pub const PendingSession = struct {
+    alloc: Allocator,
+    adopted: ?ptypkg.AdoptedSession,
+    title: []u8,
+
+    pub fn closeMarshaledPipeCopies(self: *PendingSession) void {
+        if (self.adopted) |*session| session.pty.closeHandoffPipeCopies();
+    }
+
+    pub fn takeAdopted(self: *PendingSession) ptypkg.AdoptedSession {
+        const result = self.adopted.?;
+        self.adopted = null;
+        return result;
+    }
+
+    pub fn deinit(self: *PendingSession) void {
+        if (self.adopted) |*session| {
+            session.pty.deinit();
+            _ = windows.CloseHandle(session.client_process);
+        }
+        self.alloc.free(self.title);
+        self.* = undefined;
+    }
+};
+
+pub const QueueSessionFn = *const fn (ctx: *anyopaque, pending: *PendingSession) bool;
+
+pub const Server = struct {
+    alloc: Allocator,
+    queue_ctx: *anyopaque,
+    queue_session: QueueSessionFn,
+    factory: ClassFactory,
+    cookie: ?DWORD = null,
+    lock_count: std.atomic.Value(u32) = .init(0),
+
+    pub fn init(alloc: Allocator, queue_ctx: *anyopaque, queue_session: QueueSessionFn) Server {
+        return .{
+            .alloc = alloc,
+            .queue_ctx = queue_ctx,
+            .queue_session = queue_session,
+            .factory = undefined,
+        };
+    }
+
+    pub fn register(self: *Server) !void {
+        self.factory = ClassFactory.init(self);
+        var cookie: DWORD = 0;
+        const hr = CoRegisterClassObject(
+            &CLSID_NOCTTY_TERMINAL,
+            @ptrCast(&self.factory.base),
+            CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE,
+            &cookie,
+        );
+        if (hr < 0) {
+            log.err("CoRegisterClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
+            return error.ComRegistrationFailed;
+        }
+        self.cookie = cookie;
+    }
+
+    pub fn revoke(self: *Server) void {
+        const cookie = self.cookie orelse return;
+        self.cookie = null;
+        const hr = CoRevokeClassObject(cookie);
+        if (hr < 0) log.warn("CoRevokeClassObject failed hr=0x{x:0>8}", .{@as(u32, @bitCast(hr))});
+    }
+
+    /// True while a COM client holds the class object alive through
+    /// IClassFactory::LockServer. An activation that is slower than the idle
+    /// timeout sits in exactly this state between CoGetClassObject and
+    /// CreateInstance, so the idle path must not exit while it is set.
+    pub fn isLocked(self: *const Server) bool {
+        return self.lock_count.load(.acquire) > 0;
+    }
+};
+
+const ClassFactory = struct {
+    base: IClassFactory,
+    refcount: std.atomic.Value(u32),
+    server: *Server,
+
+    const vtbl: IClassFactoryVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .CreateInstance = CreateInstance,
+        .LockServer = LockServer,
+    };
+
+    fn init(server: *Server) ClassFactory {
+        return .{
+            .base = .{ .vtbl = &vtbl },
+            .refcount = .init(1),
+            .server = server,
+        };
+    }
+
+    fn fromBase(base: *IClassFactory) *ClassFactory {
+        return @fieldParentPtr("base", base);
+    }
+
+    fn QueryInterface(base: *IClassFactory, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+        out.* = null;
+        if (!iidEqual(iid, &com.IID_IUnknown) and !iidEqual(iid, &IID_IClassFactory)) return com.E_NOINTERFACE;
+        out.* = base;
+        _ = AddRef(base);
+        return com.S_OK;
+    }
+
+    fn AddRef(base: *IClassFactory) callconv(.winapi) u32 {
+        return fromBase(base).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn Release(base: *IClassFactory) callconv(.winapi) u32 {
+        const self = fromBase(base);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        return previous - 1;
+    }
+
+    fn CreateInstance(
+        base: *IClassFactory,
+        outer: ?*com.IUnknown,
+        iid: *const GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) HRESULT {
+        out.* = null;
+        if (outer != null) return CLASS_E_NOAGGREGATION;
+        const self = fromBase(base);
+        const handoff = TerminalHandoff.create(self.server) catch return com.E_OUTOFMEMORY;
+        const hr = handoff.base.vtbl.QueryInterface(&handoff.base, iid, out);
+        _ = handoff.base.vtbl.Release(&handoff.base);
+        return hr;
+    }
+
+    fn LockServer(base: *IClassFactory, lock: BOOL) callconv(.winapi) HRESULT {
+        const count = &fromBase(base).server.lock_count;
+        if (lock != 0) {
+            _ = count.fetchAdd(1, .monotonic);
+        } else if (count.load(.acquire) > 0) {
+            _ = count.fetchSub(1, .acq_rel);
+        }
+        return com.S_OK;
+    }
+};
+
+const TerminalHandoff = struct {
+    base: ITerminalHandoff3,
+    refcount: std.atomic.Value(u32),
+    server: *Server,
+
+    var legacy_qi_logged = std.atomic.Value(bool).init(false);
+    var integrity_failure_logged = std.atomic.Value(bool).init(false);
+
+    const vtbl: ITerminalHandoff3Vtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .EstablishPtyHandoff = EstablishPtyHandoff,
+    };
+
+    fn create(server: *Server) Allocator.Error!*TerminalHandoff {
+        const self = try server.alloc.create(TerminalHandoff);
+        self.* = .{
+            .base = .{ .vtbl = &vtbl },
+            .refcount = .init(1),
+            .server = server,
+        };
+        return self;
+    }
+
+    fn fromBase(base: *ITerminalHandoff3) *TerminalHandoff {
+        return @fieldParentPtr("base", base);
+    }
+
+    fn QueryInterface(base: *ITerminalHandoff3, iid: *const GUID, out: *?*anyopaque) callconv(.winapi) HRESULT {
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &IID_ITerminalHandoff3)) {
+            out.* = base;
+            _ = AddRef(base);
+            return com.S_OK;
+        }
+        if (iidEqual(iid, &IID_ITerminalHandoff1) or iidEqual(iid, &IID_ITerminalHandoff2)) {
+            if (!legacy_qi_logged.swap(true, .acq_rel)) {
+                log.warn("ITerminalHandoff v1/v2 rejected; noctty requires ITerminalHandoff3 from Windows Terminal/OpenConsole 1.24 or newer", .{});
+            }
+        }
+        return com.E_NOINTERFACE;
+    }
+
+    fn AddRef(base: *ITerminalHandoff3) callconv(.winapi) u32 {
+        return fromBase(base).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    fn Release(base: *ITerminalHandoff3) callconv(.winapi) u32 {
+        const self = fromBase(base);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            self.server.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn EstablishPtyHandoff(
+        base: *ITerminalHandoff3,
+        input: *?HANDLE,
+        output: *?HANDLE,
+        signal_in: ?HANDLE,
+        reference_in: ?HANDLE,
+        server_process_in: ?HANDLE,
+        client_process_in: ?HANDLE,
+        startup_info: ?*const TERMINAL_STARTUP_INFO,
+    ) callconv(.winapi) HRESULT {
+        input.* = null;
+        output.* = null;
+        const self = fromBase(base);
+        const signal = signal_in orelse return self.fail("missing_signal_handle", com.E_INVALIDARG);
+        const reference = reference_in orelse return self.fail("missing_reference_handle", com.E_INVALIDARG);
+        const server_process = server_process_in orelse return self.fail("missing_server_process_handle", com.E_INVALIDARG);
+        const client_process = client_process_in orelse return self.fail("missing_client_process_handle", com.E_INVALIDARG);
+
+        const authorization = authorizeHandoffIntegrity();
+        if (authorization != .accepted) {
+            const reason = handoffIntegrityFailureReason(authorization);
+            if (!integrity_failure_logged.swap(true, .acq_rel)) {
+                log.err("terminal handoff rejected: {s}; Windows will fall back to a console window", .{reason});
+            }
+            return self.fail(reason, E_ACCESSDENIED);
+        }
+
+        const signal_copy = duplicateLocalHandle(signal) catch return self.fail("duplicate_signal_handle_failed", E_FAIL);
+        var signal_owned = true;
+        defer {
+            if (signal_owned) _ = windows.CloseHandle(signal_copy);
+        }
+        const reference_copy = duplicateLocalHandle(reference) catch return self.fail("duplicate_reference_handle_failed", E_FAIL);
+        var reference_owned = true;
+        defer {
+            if (reference_owned) _ = windows.CloseHandle(reference_copy);
+        }
+        const server_copy = duplicateLocalHandle(server_process) catch return self.fail("duplicate_server_process_handle_failed", E_FAIL);
+        var server_owned = true;
+        defer {
+            if (server_owned) _ = windows.CloseHandle(server_copy);
+        }
+        const client_copy = duplicateLocalHandle(client_process) catch return self.fail("duplicate_client_process_handle_failed", E_FAIL);
+        var client_owned = true;
+        defer {
+            if (client_owned) _ = windows.CloseHandle(client_copy);
+        }
+
+        var pty = ptypkg.Pty.openAdopted(.{}, signal_copy, server_copy, reference_copy) catch return self.fail("open_adopted_pty_failed", E_FAIL);
+        signal_owned = false;
+        server_owned = false;
+        reference_owned = false;
+        var pty_owned = true;
+        defer if (pty_owned) pty.deinit();
+
+        const title = cloneStartupTitle(self.server.alloc, startup_info) catch return self.fail("clone_startup_title_failed", com.E_OUTOFMEMORY);
+        var title_owned = true;
+        defer if (title_owned) self.server.alloc.free(title);
+        const pending = self.server.alloc.create(PendingSession) catch return self.fail("allocate_pending_session_failed", com.E_OUTOFMEMORY);
+        pending.* = .{
+            .alloc = self.server.alloc,
+            .adopted = .{ .pty = pty, .client_process = client_copy },
+            .title = title,
+        };
+        title_owned = false;
+        pty_owned = false;
+        client_owned = false;
+
+        const handles = pending.adopted.?.pty.handoffHandles() orelse {
+            pending.deinit();
+            self.server.alloc.destroy(pending);
+            return self.fail("adopted_pty_handles_unavailable", E_FAIL);
+        };
+        if (!self.server.queue_session(self.server.queue_ctx, pending)) {
+            pending.deinit();
+            self.server.alloc.destroy(pending);
+            return self.fail("queue_pending_session_failed", E_FAIL);
+        }
+
+        input.* = handles.input;
+        output.* = handles.output;
+        return com.S_OK;
+    }
+
+    fn fail(self: *TerminalHandoff, reason: []const u8, hr: HRESULT) HRESULT {
+        appendHandoffFailureTrace(self.server.alloc, reason, hr);
+        return hr;
+    }
+};
+
+fn iidEqual(a: *const GUID, b: *const GUID) bool {
+    return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
+}
+
+fn duplicateLocalHandle(source: HANDLE) !HANDLE {
+    var duplicate: HANDLE = undefined;
+    const process = windows.GetCurrentProcess();
+    if (windows.kernel32.DuplicateHandle(
+        process,
+        source,
+        process,
+        &duplicate,
+        0,
+        windows.FALSE,
+        windows.DUPLICATE_SAME_ACCESS,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    return duplicate;
+}
+
+fn cloneStartupTitle(alloc: Allocator, startup_info: ?*const TERMINAL_STARTUP_INFO) ![]u8 {
+    const bstr = if (startup_info) |info| info.pszTitle else null;
+    const title = bstr orelse return alloc.dupe(u8, "noctty");
+    const len: usize = com.SysStringLen(title);
+    if (len == 0) return alloc.dupe(u8, "noctty");
+    return std.unicode.utf16LeToUtf8Alloc(alloc, title[0..len]);
+}
+
+const TOKEN_QUERY: DWORD = 0x0008;
+const TOKEN_INTEGRITY_LEVEL: i32 = 25;
+const SID_AND_ATTRIBUTES = extern struct {
+    Sid: ?*anyopaque,
+    Attributes: DWORD,
+};
+const TOKEN_MANDATORY_LABEL = extern struct {
+    Label: SID_AND_ATTRIBUTES,
+};
+
+fn tokenIntegrityRid(token: HANDLE) ?DWORD {
+    var buffer: [256]u8 align(8) = undefined;
+    var needed: DWORD = 0;
+    if (GetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, &buffer, buffer.len, &needed) == 0) return null;
+    const label: *const TOKEN_MANDATORY_LABEL = @ptrCast(@alignCast(&buffer));
+    const sid = label.Label.Sid orelse return null;
+    const count = GetSidSubAuthorityCount(sid).*;
+    if (count == 0) return null;
+    return GetSidSubAuthority(sid, count - 1).*;
+}
+
+fn currentProcessIntegrityRid() ?DWORD {
+    var token: HANDLE = undefined;
+    if (OpenProcessToken(windows.GetCurrentProcess(), TOKEN_QUERY, &token) == 0) return null;
+    defer _ = windows.CloseHandle(token);
+    return tokenIntegrityRid(token);
+}
+
+const ComCallerIntegrity = union(enum) {
+    rid: DWORD,
+    com_impersonation_failed,
+    com_caller_token_unavailable,
+    com_caller_integrity_unavailable,
+    com_revert_failed,
+};
+
+const Win32ComCallerIntegrityOps = struct {
+    fn impersonate(_: *@This()) HRESULT {
+        return CoImpersonateClient();
+    }
+
+    fn openThreadToken(_: *@This()) ?HANDLE {
+        var token: HANDLE = undefined;
+        if (OpenThreadToken(windows.GetCurrentThread(), TOKEN_QUERY, windows.TRUE, &token) == 0)
+            return null;
+        return token;
+    }
+
+    fn integrityRid(_: *@This(), token: HANDLE) ?DWORD {
+        return tokenIntegrityRid(token);
+    }
+
+    fn closeToken(_: *@This(), token: HANDLE) void {
+        _ = windows.CloseHandle(token);
+    }
+
+    fn revert(_: *@This()) HRESULT {
+        return CoRevertToSelf();
+    }
+};
+
+fn comCallerIntegrityRidWithOps(ops: anytype) ComCallerIntegrity {
+    if (ops.impersonate() < 0) return .com_impersonation_failed;
+
+    const result: ComCallerIntegrity = result: {
+        const token = ops.openThreadToken() orelse break :result .com_caller_token_unavailable;
+        defer ops.closeToken(token);
+        break :result if (ops.integrityRid(token)) |rid|
+            .{ .rid = rid }
+        else
+            .com_caller_integrity_unavailable;
+    };
+
+    if (ops.revert() < 0) return .com_revert_failed;
+    return result;
+}
+
+fn comCallerIntegrityRid() ComCallerIntegrity {
+    var ops: Win32ComCallerIntegrityOps = .{};
+    return comCallerIntegrityRidWithOps(&ops);
+}
+
+const HandoffIntegrityAuthorization = enum {
+    accepted,
+    current_process_unavailable,
+    com_impersonation_failed,
+    com_caller_token_unavailable,
+    com_caller_integrity_unavailable,
+    com_revert_failed,
+    mismatch,
+};
+
+fn decideHandoffIntegrityAuthorization(
+    current_process_rid: ?DWORD,
+    com_caller: ComCallerIntegrity,
+) HandoffIntegrityAuthorization {
+    const current = current_process_rid orelse return .current_process_unavailable;
+    return switch (com_caller) {
+        .rid => |caller| if (caller == current) .accepted else .mismatch,
+        .com_impersonation_failed => .com_impersonation_failed,
+        .com_caller_token_unavailable => .com_caller_token_unavailable,
+        .com_caller_integrity_unavailable => .com_caller_integrity_unavailable,
+        .com_revert_failed => .com_revert_failed,
+    };
+}
+
+fn authorizeHandoffIntegrity() HandoffIntegrityAuthorization {
+    return decideHandoffIntegrityAuthorization(
+        currentProcessIntegrityRid(),
+        comCallerIntegrityRid(),
+    );
+}
+
+fn handoffIntegrityFailureReason(authorization: HandoffIntegrityAuthorization) []const u8 {
+    return switch (authorization) {
+        .accepted => unreachable,
+        .current_process_unavailable => "current_process_integrity_unavailable",
+        .com_impersonation_failed => "com_caller_impersonation_failed",
+        .com_caller_token_unavailable => "com_caller_token_unavailable",
+        .com_caller_integrity_unavailable => "com_caller_integrity_unavailable",
+        .com_revert_failed => "com_caller_revert_failed",
+        .mismatch => "com_caller_integrity_mismatch",
+    };
+}
+
+const handoff_trace_max_bytes: u64 = 1024 * 1024;
+
+fn appendHandoffFailureTrace(alloc: Allocator, reason: []const u8, hr: HRESULT) void {
+    if (!std.process.hasNonEmptyEnvVarConstant("NOCTTY_HANDOFF_TRACE")) return;
+
+    const local_app_data = std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch return;
+    defer alloc.free(local_app_data);
+    const dir_path = std.fs.path.join(alloc, &.{ local_app_data, "noctty" }) catch return;
+    defer alloc.free(dir_path);
+    std.fs.cwd().makePath(dir_path) catch return;
+    const log_path = std.fs.path.join(alloc, &.{ dir_path, "handoff.log" }) catch return;
+    defer alloc.free(log_path);
+
+    appendHandoffFailureTraceAtPath(log_path, reason, hr) catch return;
+}
+
+fn appendHandoffFailureTraceAtPath(log_path: []const u8, reason: []const u8, hr: HRESULT) !void {
+    const file = try std.fs.createFileAbsolute(log_path, .{ .truncate = false });
+    defer file.close();
+    var line_buffer: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(
+        &line_buffer,
+        "reason={s} hr=0x{x:0>8}\r\n",
+        .{ reason, @as(u32, @bitCast(hr)) },
+    );
+    const current_size = try file.getEndPos();
+    if (current_size + line.len > handoff_trace_max_bytes) {
+        try file.setEndPos(0);
+        try file.seekTo(0);
+    } else {
+        try file.seekTo(current_size);
+    }
+    try file.writeAll(line);
+    try file.sync();
+}
+
+pub fn isEmbeddingArgs(argv: []const []const u8) bool {
+    for (argv[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "-e")) return false;
+        if (std.ascii.eqlIgnoreCase(arg, "-Embedding")) return true;
+    }
+    return false;
+}
+
+pub fn isEmbeddingProcess(alloc: Allocator) bool {
+    const argv = std.process.argsAlloc(alloc) catch return false;
+    defer std.process.argsFree(alloc, argv);
+    return isEmbeddingArgs(argv);
+}
+
+const RawRegistryValue = struct {
+    value_type: DWORD,
+    data: []u8,
+
+    fn deinit(self: RawRegistryValue, alloc: Allocator) void {
+        alloc.free(self.data);
+    }
+};
+
+const SavedRegistryValue = struct {
+    value: ?RawRegistryValue,
+
+    fn deinit(self: SavedRegistryValue, alloc: Allocator) void {
+        if (self.value) |value| value.deinit(alloc);
+    }
+};
+
+pub const RegisterResult = struct {
+    selection_changed: bool,
+};
+
+pub const UnregisterResult = struct {
+    selection_restored: bool,
+    newer_selection_preserved: bool,
+    class_removed: bool,
+};
+
+pub const RegistrationError = error{
+    CompatibleConsoleHandoffMissing,
+    InvalidUtf8,
+    InvalidConsoleHandoff,
+    MissingRestoreState,
+    MissingProxyRestoreState,
+    ProxyDllMissing,
+    RegistryFailure,
+    InvalidRegistryValue,
+};
+
+const ConsoleHalf = enum { compatible, missing, null_guid, inbox, invalid };
+
+fn classifyConsoleHalf(value: ?[]const u8) ConsoleHalf {
+    const text = value orelse return .missing;
+    if (std.ascii.eqlIgnoreCase(text, null_guid)) return .null_guid;
+    if (std.ascii.eqlIgnoreCase(text, inbox_console_sentinel)) return .inbox;
+    if (text.len != 38 or text[0] != '{' or text[37] != '}') return .invalid;
+    // std's parseNoBraces asserts the dash positions rather than returning an
+    // error, so a same-length braced value without dashes would panic (and is
+    // UB in ReleaseFast) instead of landing in the .invalid arm below. Check
+    // the shape ourselves before handing the text over.
+    for ([_]usize{ 9, 14, 19, 24 }) |dash_index| {
+        if (text[dash_index] != '-') return .invalid;
+    }
+    _ = GUID.parseNoBraces(text[1..37]) catch return .invalid;
+    return .compatible;
+}
+
+fn requireCompatibleConsoleHalf(value: ?[]const u8) RegistrationError!void {
+    switch (classifyConsoleHalf(value)) {
+        .compatible => {},
+        .missing, .null_guid, .inbox => return error.CompatibleConsoleHandoffMissing,
+        .invalid => return error.InvalidConsoleHandoff,
+    }
+}
+
+pub fn nocttyExePathForLauncher(alloc: Allocator, launcher_path: []const u8) ![]u8 {
+    const dir = std.fs.path.dirname(launcher_path) orelse return error.InvalidExecutablePath;
+    const candidate = try std.fs.path.join(alloc, &.{ dir, "noctty.exe" });
+    defer alloc.free(candidate);
+    return std.fs.path.resolve(alloc, &.{candidate});
+}
+
+pub fn currentNocttyExePath(alloc: Allocator) ![]u8 {
+    const launcher = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(launcher);
+    return nocttyExePathForLauncher(alloc, launcher);
+}
+
+pub fn localServerCommand(alloc: Allocator, exe_path: []const u8) ![]u8 {
+    if (!std.fs.path.isAbsolute(exe_path)) return error.InvalidExecutablePath;
+    return std.fmt.allocPrint(alloc, "\"{s}\"", .{exe_path});
+}
+
+pub fn proxyDllPathForExe(alloc: Allocator, exe_path: []const u8) ![]u8 {
+    if (!std.fs.path.isAbsolute(exe_path)) return error.InvalidExecutablePath;
+    const dir = std.fs.path.dirname(exe_path) orelse return error.InvalidExecutablePath;
+    const candidate = try std.fs.path.join(alloc, &.{ dir, proxy_filename });
+    defer alloc.free(candidate);
+    return std.fs.path.resolve(alloc, &.{candidate});
+}
+
+pub fn registerDefaultTerminal(alloc: Allocator, exe_path: []const u8) (Allocator.Error || RegistrationError || error{InvalidExecutablePath})!RegisterResult {
+    const proxy_path = try proxyDllPathForExe(alloc, exe_path);
+    defer alloc.free(proxy_path);
+    const proxy_file = std.fs.openFileAbsolute(proxy_path, .{}) catch return error.ProxyDllMissing;
+    proxy_file.close();
+
+    const console_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_console_name);
+    defer if (console_raw) |value| value.deinit(alloc);
+    const console_text = if (console_raw) |value| try registrySzToUtf8Alloc(alloc, value) else null;
+    defer if (console_text) |value| alloc.free(value);
+    try requireCompatibleConsoleHalf(console_text);
+
+    const terminal_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
+    defer if (terminal_raw) |value| value.deinit(alloc);
+    const terminal_is_noctty = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+    if (terminal_is_noctty) {
+        const saved = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
+        saved.deinit(alloc);
+    }
+
+    const command = try localServerCommand(alloc, exe_path);
+    defer alloc.free(command);
+    // Ordering is load-bearing: every shared Interface value is snapshotted
+    // before anything is written, and the user's terminal selection is
+    // switched last, so a failure part way through leaves the previous
+    // terminal selected with its restore state intact.
+    for (interface_proxy_registrations) |registration| {
+        try savePreviousInterfaceProxy(alloc, registration);
+    }
+    try writeRegistrySz(alloc, class_key_utf8, null, "noctty Terminal Handoff");
+    try writeRegistrySz(alloc, local_server_key_utf8, null, command);
+    try writeRegistrySz(alloc, proxy_class_key_utf8, null, "noctty Terminal Handoff Proxy/Stub");
+    try writeRegistrySz(alloc, proxy_inproc_server_key_utf8, null, proxy_path);
+    try writeRegistrySz(alloc, proxy_inproc_server_key_utf8, "ThreadingModel", "Both");
+    for (interface_proxy_registrations) |registration| {
+        try writeRegistrySz(alloc, registration.key_utf8, null, proxy_clsid_text);
+    }
+    return .{ .selection_changed = try selectTerminal(alloc) };
+}
+
+pub fn unregisterDefaultTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!UnregisterResult {
+    const terminal_raw = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
+    defer if (terminal_raw) |value| value.deinit(alloc);
+    const terminal_is_noctty = if (terminal_raw) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+
+    var terminal_restore: ?SavedRegistryValue = null;
+    if (terminal_is_noctty) terminal_restore = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
+    defer if (terminal_restore) |value| value.deinit(alloc);
+
+    var interface_restores: [interface_proxy_registrations.len]?SavedRegistryValue = @splat(null);
+    defer for (&interface_restores) |*restore| {
+        if (restore.*) |value| value.deinit(alloc);
+    };
+    for (interface_proxy_registrations, 0..) |registration, index| {
+        const current = try queryValueAlloc(alloc, registration.key_utf8, null);
+        defer if (current) |value| value.deinit(alloc);
+        if (try interfaceProxyIsOursAlloc(alloc, current)) {
+            interface_restores[index] = loadSavedRegistryValue(alloc, registration.saved_key_utf8) catch |err| switch (err) {
+                error.MissingRestoreState => return error.MissingProxyRestoreState,
+                else => return err,
+            };
+        }
+    }
+
+    // Mirror of the registration order: hand the selection back first, then
+    // the shared Interface values, and only then delete noctty's own classes,
+    // so no window of time has the selection pointing at a removed class.
+    const selection_result = try restoreSelectionIfOwned(alloc, terminal_restore);
+    for (interface_proxy_registrations, 0..) |registration, index| {
+        try restoreInterfaceProxyIfOwned(alloc, registration, interface_restores[index]);
+    }
+    var class_removed = try deleteRegistryTree(alloc, proxy_class_key_utf8);
+    class_removed = (try deleteRegistryTree(alloc, class_key_utf8)) or class_removed;
+    return .{
+        .selection_restored = selection_result.restored,
+        .newer_selection_preserved = selection_result.newer_selection_preserved,
+        .class_removed = class_removed,
+    };
+}
+
+fn savePreviousTerminal(alloc: Allocator, previous: ?RawRegistryValue) (Allocator.Error || RegistrationError)!void {
+    try saveRegistryValue(alloc, saved_state_key_utf8, previous);
+}
+
+fn selectTerminal(alloc: Allocator) (Allocator.Error || RegistrationError)!bool {
+    const current = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
+    defer if (current) |value| value.deinit(alloc);
+    const is_ours = if (current) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+    if (is_ours) {
+        const saved = try loadSavedRegistryValue(alloc, saved_state_key_utf8);
+        saved.deinit(alloc);
+        return false;
+    }
+    try savePreviousTerminal(alloc, current);
+    try writeRegistrySz(alloc, startup_key_utf8, delegation_terminal_name, clsid_text);
+    return true;
+}
+
+fn savePreviousInterfaceProxy(alloc: Allocator, registration: InterfaceProxyRegistration) (Allocator.Error || RegistrationError)!void {
+    const current = try queryValueAlloc(alloc, registration.key_utf8, null);
+    defer if (current) |value| value.deinit(alloc);
+    if (try interfaceProxyIsOursAlloc(alloc, current)) {
+        const saved = loadSavedRegistryValue(alloc, registration.saved_key_utf8) catch |err| switch (err) {
+            error.MissingRestoreState => return error.MissingProxyRestoreState,
+            else => return err,
+        };
+        saved.deinit(alloc);
+        return;
+    }
+    try saveRegistryValue(alloc, registration.saved_key_utf8, current);
+}
+
+fn saveRegistryValue(alloc: Allocator, saved_key: []const u8, previous: ?RawRegistryValue) (Allocator.Error || RegistrationError)!void {
+    try deleteRegistryValue(alloc, saved_key, "Present");
+    if (previous) |value| {
+        try writeRegistryDword(alloc, saved_key, "Type", value.value_type);
+        try writeRegistryBytes(alloc, saved_key, "Data", REG_BINARY, value.data);
+        try writeRegistryDword(alloc, saved_key, "Present", 1);
+    } else {
+        try deleteRegistryValue(alloc, saved_key, "Type");
+        try deleteRegistryValue(alloc, saved_key, "Data");
+        try writeRegistryDword(alloc, saved_key, "Present", 0);
+    }
+}
+
+fn loadSavedRegistryValue(alloc: Allocator, saved_key: []const u8) (Allocator.Error || RegistrationError)!SavedRegistryValue {
+    const present_raw = (try queryValueAlloc(alloc, saved_key, "Present")) orelse
+        return error.MissingRestoreState;
+    defer present_raw.deinit(alloc);
+    const was_present = try registryDword(present_raw);
+    if (was_present == 0) return .{ .value = null };
+    if (was_present != 1) return error.InvalidRegistryValue;
+
+    const type_raw = (try queryValueAlloc(alloc, saved_key, "Type")) orelse
+        return error.MissingRestoreState;
+    defer type_raw.deinit(alloc);
+    var data_raw = (try queryValueAlloc(alloc, saved_key, "Data")) orelse
+        return error.MissingRestoreState;
+    errdefer data_raw.deinit(alloc);
+    const value_type = try registryDword(type_raw);
+    return .{ .value = .{ .value_type = value_type, .data = data_raw.data } };
+}
+
+fn restoreSavedRegistryValue(
+    alloc: Allocator,
+    key_utf8: []const u8,
+    name_utf8: ?[]const u8,
+    saved: SavedRegistryValue,
+) (Allocator.Error || RegistrationError)!void {
+    if (saved.value) |value| {
+        try writeRegistryRaw(alloc, key_utf8, name_utf8, value);
+    } else {
+        try deleteRegistryValue(alloc, key_utf8, name_utf8);
+    }
+}
+
+const SelectionRestoreResult = struct {
+    restored: bool,
+    newer_selection_preserved: bool,
+};
+
+fn restoreSelectionIfOwned(
+    alloc: Allocator,
+    saved: ?SavedRegistryValue,
+) (Allocator.Error || RegistrationError)!SelectionRestoreResult {
+    const current = try queryValueAlloc(alloc, startup_key_utf8, delegation_terminal_name);
+    defer if (current) |value| value.deinit(alloc);
+    const is_ours = if (current) |value| try registryValueEqualsGuidAlloc(alloc, value, clsid_text) else false;
+    if (!is_ours) return .{ .restored = false, .newer_selection_preserved = current != null };
+    try restoreSavedRegistryValue(
+        alloc,
+        startup_key_utf8,
+        delegation_terminal_name,
+        saved orelse return error.MissingRestoreState,
+    );
+    return .{ .restored = true, .newer_selection_preserved = false };
+}
+
+fn restoreInterfaceProxyIfOwned(
+    alloc: Allocator,
+    registration: InterfaceProxyRegistration,
+    saved: ?SavedRegistryValue,
+) (Allocator.Error || RegistrationError)!void {
+    const current = try queryValueAlloc(alloc, registration.key_utf8, null);
+    defer if (current) |value| value.deinit(alloc);
+    if (!try interfaceProxyIsOursAlloc(alloc, current)) return;
+    try restoreSavedRegistryValue(
+        alloc,
+        registration.key_utf8,
+        null,
+        saved orelse return error.MissingProxyRestoreState,
+    );
+}
+
+fn shouldRestoreInterfaceProxyText(current: ?[]const u8) bool {
+    const text_value = current orelse return false;
+    return std.ascii.eqlIgnoreCase(text_value, proxy_clsid_text);
+}
+
+fn interfaceProxyIsOursAlloc(alloc: Allocator, current: ?RawRegistryValue) Allocator.Error!bool {
+    const value = current orelse return false;
+    const text_value = registrySzToUtf8Alloc(alloc, value) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer alloc.free(text_value);
+    return shouldRestoreInterfaceProxyText(text_value);
+}
+
+fn registryDword(value: RawRegistryValue) RegistrationError!DWORD {
+    if (value.value_type != REG_DWORD or value.data.len != @sizeOf(DWORD)) return error.InvalidRegistryValue;
+    return std.mem.readInt(DWORD, value.data[0..4], .little);
+}
+
+fn registryValueEqualsGuidAlloc(alloc: Allocator, value: RawRegistryValue, expected: []const u8) (Allocator.Error || RegistrationError)!bool {
+    const text = try registrySzToUtf8Alloc(alloc, value);
+    defer alloc.free(text);
+    return std.ascii.eqlIgnoreCase(text, expected);
+}
+
+fn registrySzToUtf8Alloc(alloc: Allocator, value: RawRegistryValue) (Allocator.Error || RegistrationError)![]u8 {
+    if (value.value_type != REG_SZ or value.data.len < 2 or value.data.len % 2 != 0) return error.InvalidRegistryValue;
+    const wide = try alloc.alloc(u16, value.data.len / @sizeOf(u16));
+    defer alloc.free(wide);
+    for (wide, 0..) |*unit, i| {
+        unit.* = std.mem.readInt(u16, value.data[i * 2 ..][0..2], .little);
+    }
+    if (wide[wide.len - 1] != 0) return error.InvalidRegistryValue;
+    return std.unicode.utf16LeToUtf8Alloc(alloc, wide[0 .. wide.len - 1]) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidRegistryValue,
+    };
+}
+
+fn queryValueAlloc(alloc: Allocator, key_utf8: []const u8, name_utf8: ?[]const u8) (Allocator.Error || RegistrationError)!?RawRegistryValue {
+    const key_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_utf8);
+    defer alloc.free(key_w);
+    var key: HKEY = undefined;
+    const open_rc = RegOpenKeyExW(HKEY_CURRENT_USER, key_w.ptr, 0, KEY_READ, &key);
+    if (open_rc == ERROR_FILE_NOT_FOUND or open_rc == ERROR_PATH_NOT_FOUND) return null;
+    if (open_rc != ERROR_SUCCESS) return registryFailure("RegOpenKeyExW", open_rc);
+    defer _ = RegCloseKey(key);
+
+    const name_w = if (name_utf8) |name| try std.unicode.utf8ToUtf16LeAllocZ(alloc, name) else null;
+    defer if (name_w) |name| alloc.free(name);
+    var value_type: DWORD = 0;
+    var size: DWORD = 0;
+    const size_rc = RegQueryValueExW(key, if (name_w) |name| name.ptr else null, null, &value_type, null, &size);
+    if (size_rc == ERROR_FILE_NOT_FOUND) return null;
+    if (size_rc != ERROR_SUCCESS) return registryFailure("RegQueryValueExW(size)", size_rc);
+
+    var data = try alloc.alloc(u8, size);
+    errdefer alloc.free(data);
+    var actual_size = size;
+    const read_rc = RegQueryValueExW(key, if (name_w) |name| name.ptr else null, null, &value_type, if (data.len == 0) null else data.ptr, &actual_size);
+    if (read_rc == ERROR_MORE_DATA) return error.RegistryFailure;
+    if (read_rc != ERROR_SUCCESS) return registryFailure("RegQueryValueExW(data)", read_rc);
+    if (actual_size != data.len) {
+        const exact = try alloc.dupe(u8, data[0..actual_size]);
+        alloc.free(data);
+        data = exact;
+    }
+    return .{ .value_type = value_type, .data = data };
+}
+
+fn writeRegistrySz(alloc: Allocator, key: []const u8, name: ?[]const u8, value: []const u8) (Allocator.Error || RegistrationError)!void {
+    const value_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, value);
+    defer alloc.free(value_w);
+    const with_nul = value_w.ptr[0 .. value_w.len + 1];
+    try writeRegistryBytes(alloc, key, name, REG_SZ, std.mem.sliceAsBytes(with_nul));
+}
+
+fn writeRegistryDword(alloc: Allocator, key: []const u8, name: []const u8, value: DWORD) (Allocator.Error || RegistrationError)!void {
+    var bytes: [4]u8 = undefined;
+    std.mem.writeInt(DWORD, &bytes, value, .little);
+    try writeRegistryBytes(alloc, key, name, REG_DWORD, &bytes);
+}
+
+fn writeRegistryRaw(alloc: Allocator, key: []const u8, name: ?[]const u8, value: RawRegistryValue) (Allocator.Error || RegistrationError)!void {
+    try writeRegistryBytes(alloc, key, name, value.value_type, value.data);
+}
+
+fn writeRegistryBytes(
+    alloc: Allocator,
+    key_utf8: []const u8,
+    name_utf8: ?[]const u8,
+    value_type: DWORD,
+    data: []const u8,
+) (Allocator.Error || RegistrationError)!void {
+    const key_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_utf8);
+    defer alloc.free(key_w);
+    const name_w = if (name_utf8) |name| try std.unicode.utf8ToUtf16LeAllocZ(alloc, name) else null;
+    defer if (name_w) |name| alloc.free(name);
+
+    var key: HKEY = undefined;
+    const open_rc = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        key_w.ptr,
+        0,
+        null,
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE | KEY_QUERY_VALUE | KEY_CREATE_SUB_KEY | KEY_SET_VALUE,
+        null,
+        &key,
+        null,
+    );
+    if (open_rc != ERROR_SUCCESS) return registryFailure("RegCreateKeyExW", open_rc);
+    defer _ = RegCloseKey(key);
+    const set_rc = RegSetValueExW(
+        key,
+        if (name_w) |name| name.ptr else null,
+        0,
+        value_type,
+        if (data.len == 0) null else data.ptr,
+        @intCast(data.len),
+    );
+    if (set_rc != ERROR_SUCCESS) return registryFailure("RegSetValueExW", set_rc);
+}
+
+fn deleteRegistryValue(alloc: Allocator, key_utf8: []const u8, name_utf8: ?[]const u8) (Allocator.Error || RegistrationError)!void {
+    const key_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_utf8);
+    defer alloc.free(key_w);
+    const name_w = if (name_utf8) |name| try std.unicode.utf8ToUtf16LeAllocZ(alloc, name) else null;
+    defer if (name_w) |name| alloc.free(name);
+    var key: HKEY = undefined;
+    const open_rc = RegOpenKeyExW(HKEY_CURRENT_USER, key_w.ptr, 0, KEY_SET_VALUE, &key);
+    if (open_rc == ERROR_FILE_NOT_FOUND or open_rc == ERROR_PATH_NOT_FOUND) return;
+    if (open_rc != ERROR_SUCCESS) return registryFailure("RegOpenKeyExW(delete value)", open_rc);
+    defer _ = RegCloseKey(key);
+    const rc = RegDeleteValueW(key, if (name_w) |name| name.ptr else null);
+    if (rc != ERROR_SUCCESS and rc != ERROR_FILE_NOT_FOUND) return registryFailure("RegDeleteValueW", rc);
+}
+
+fn deleteRegistryTree(alloc: Allocator, key_utf8: []const u8) (Allocator.Error || RegistrationError)!bool {
+    const existing = try queryKeyExists(alloc, key_utf8);
+    if (!existing) return false;
+    const key_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_utf8);
+    defer alloc.free(key_w);
+    const rc = RegDeleteTreeW(HKEY_CURRENT_USER, key_w.ptr);
+    if (rc != ERROR_SUCCESS and rc != ERROR_FILE_NOT_FOUND and rc != ERROR_PATH_NOT_FOUND)
+        return registryFailure("RegDeleteTreeW", rc);
+    return rc == ERROR_SUCCESS;
+}
+
+fn queryKeyExists(alloc: Allocator, key_utf8: []const u8) (Allocator.Error || RegistrationError)!bool {
+    const key_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, key_utf8);
+    defer alloc.free(key_w);
+    var key: HKEY = undefined;
+    const rc = RegOpenKeyExW(HKEY_CURRENT_USER, key_w.ptr, 0, KEY_READ, &key);
+    if (rc == ERROR_FILE_NOT_FOUND or rc == ERROR_PATH_NOT_FOUND) return false;
+    if (rc != ERROR_SUCCESS) return registryFailure("RegOpenKeyExW(exists)", rc);
+    _ = RegCloseKey(key);
+    return true;
+}
+
+fn registryFailure(comptime operation: []const u8, rc: LSTATUS) RegistrationError {
+    log.err("{s} failed rc={d}", .{ operation, rc });
+    return error.RegistryFailure;
+}
+
+test "handoff permanent CLSID and IIDs have pinned bytes" {
+    try std.testing.expectEqualSlices(u8, &.{ 0x6f, 0x8c, 0x36, 0x33, 0x28, 0xd3, 0x0c, 0x41, 0xb2, 0x25, 0x26, 0xdc, 0x9f, 0x12, 0xc7, 0x28 }, std.mem.asBytes(&CLSID_NOCTTY_TERMINAL));
+    try std.testing.expectEqualSlices(u8, &.{ 0x24, 0x98, 0x34, 0x1d, 0xfb, 0x21, 0xc7, 0x46, 0xac, 0xf3, 0x74, 0x6e, 0xdc, 0x99, 0x1d, 0x52 }, std.mem.asBytes(&CLSID_NOCTTY_TERMINAL_PROXY));
+    try std.testing.expectEqualSlices(u8, &.{ 0x90, 0xda, 0x23, 0x6f, 0xc5, 0x15, 0x03, 0x42, 0x9d, 0xb0, 0x64, 0xe7, 0x3f, 0x1b, 0x1b, 0x00 }, std.mem.asBytes(&IID_ITerminalHandoff3));
+    try std.testing.expectEqualSlices(u8, &.{ 0xce, 0x5c, 0xd5, 0x59, 0x8a, 0xfc, 0xb4, 0x48, 0xac, 0xe8, 0x0a, 0x92, 0x86, 0xc6, 0x55, 0x7f }, std.mem.asBytes(&IID_ITerminalHandoff1));
+    try std.testing.expectEqualSlices(u8, &.{ 0x4f, 0x36, 0x6b, 0xaa, 0x50, 0x4a, 0x76, 0x41, 0x90, 0x02, 0x0a, 0xe7, 0x55, 0xe7, 0xb5, 0xef }, std.mem.asBytes(&IID_ITerminalHandoff2));
+}
+
+test "handoff startup info and vtable ABI" {
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(TERMINAL_STARTUP_INFO));
+    try std.testing.expectEqual(@as(usize, 8), @alignOf(TERMINAL_STARTUP_INFO));
+    try std.testing.expectEqual(@as(usize, 4 * @sizeOf(*anyopaque)), @sizeOf(ITerminalHandoff3Vtbl));
+    try std.testing.expectEqual(@as(usize, 3 * @sizeOf(*anyopaque)), @offsetOf(ITerminalHandoff3Vtbl, "EstablishPtyHandoff"));
+}
+
+test "handoff QueryInterface AddRef Release and legacy rejection" {
+    const Queue = struct {
+        fn call(_: *anyopaque, _: *PendingSession) bool {
+            return false;
+        }
+    };
+    var context: u8 = 0;
+    var server = Server.init(std.testing.allocator, &context, Queue.call);
+    const handoff = try TerminalHandoff.create(&server);
+    try std.testing.expectEqual(@as(u32, 2), handoff.base.vtbl.AddRef(&handoff.base));
+    try std.testing.expectEqual(@as(u32, 1), handoff.base.vtbl.Release(&handoff.base));
+    var out: ?*anyopaque = null;
+    try std.testing.expectEqual(com.S_OK, handoff.base.vtbl.QueryInterface(&handoff.base, &IID_ITerminalHandoff3, &out));
+    try std.testing.expect(out != null);
+    try std.testing.expectEqual(@as(u32, 1), handoff.base.vtbl.Release(&handoff.base));
+    try std.testing.expectEqual(com.E_NOINTERFACE, handoff.base.vtbl.QueryInterface(&handoff.base, &IID_ITerminalHandoff1, &out));
+    try std.testing.expect(out == null);
+    try std.testing.expectEqual(com.E_NOINTERFACE, handoff.base.vtbl.QueryInterface(&handoff.base, &IID_ITerminalHandoff2, &out));
+    try std.testing.expectEqual(@as(u32, 0), handoff.base.vtbl.Release(&handoff.base));
+}
+
+test "handoff authorization uses COM caller integrity and distinguishes unavailable evidence" {
+    try std.testing.expectEqual(
+        HandoffIntegrityAuthorization.accepted,
+        decideHandoffIntegrityAuthorization(0x2000, .{ .rid = 0x2000 }),
+    );
+    try std.testing.expectEqual(
+        HandoffIntegrityAuthorization.mismatch,
+        decideHandoffIntegrityAuthorization(0x2000, .{ .rid = 0x3000 }),
+    );
+    try std.testing.expectEqual(
+        HandoffIntegrityAuthorization.current_process_unavailable,
+        decideHandoffIntegrityAuthorization(null, .{ .rid = 0x2000 }),
+    );
+    try std.testing.expectEqual(
+        HandoffIntegrityAuthorization.com_caller_token_unavailable,
+        decideHandoffIntegrityAuthorization(0x2000, .com_caller_token_unavailable),
+    );
+}
+
+test "handoff COM caller inspection always reverts successful impersonation" {
+    const State = struct {
+        token_available: bool = true,
+        integrity_available: bool = true,
+        revert_hr: HRESULT = com.S_OK,
+        revert_count: usize = 0,
+        close_count: usize = 0,
+
+        fn impersonate(_: *@This()) HRESULT {
+            return com.S_OK;
+        }
+
+        fn openThreadToken(self: *@This()) ?HANDLE {
+            return if (self.token_available) @ptrFromInt(1) else null;
+        }
+
+        fn integrityRid(self: *@This(), _: HANDLE) ?DWORD {
+            return if (self.integrity_available) 0x2000 else null;
+        }
+
+        fn closeToken(self: *@This(), _: HANDLE) void {
+            self.close_count += 1;
+        }
+
+        fn revert(self: *@This()) HRESULT {
+            self.revert_count += 1;
+            return self.revert_hr;
+        }
+    };
+
+    var success: State = .{};
+    try std.testing.expectEqual(
+        ComCallerIntegrity{ .rid = 0x2000 },
+        comCallerIntegrityRidWithOps(&success),
+    );
+    try std.testing.expectEqual(@as(usize, 1), success.revert_count);
+    try std.testing.expectEqual(@as(usize, 1), success.close_count);
+
+    var no_token: State = .{ .token_available = false };
+    try std.testing.expectEqual(
+        ComCallerIntegrity.com_caller_token_unavailable,
+        comCallerIntegrityRidWithOps(&no_token),
+    );
+    try std.testing.expectEqual(@as(usize, 1), no_token.revert_count);
+    try std.testing.expectEqual(@as(usize, 0), no_token.close_count);
+
+    var no_integrity: State = .{ .integrity_available = false };
+    try std.testing.expectEqual(
+        ComCallerIntegrity.com_caller_integrity_unavailable,
+        comCallerIntegrityRidWithOps(&no_integrity),
+    );
+    try std.testing.expectEqual(@as(usize, 1), no_integrity.revert_count);
+    try std.testing.expectEqual(@as(usize, 1), no_integrity.close_count);
+
+    var revert_failed: State = .{ .revert_hr = E_FAIL };
+    try std.testing.expectEqual(
+        ComCallerIntegrity.com_revert_failed,
+        comCallerIntegrityRidWithOps(&revert_failed),
+    );
+    try std.testing.expectEqual(@as(usize, 1), revert_failed.revert_count);
+    try std.testing.expectEqual(@as(usize, 1), revert_failed.close_count);
+}
+
+test "handoff failure trace stays within its byte budget" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var file = try tmp.dir.createFile("handoff.log", .{});
+        defer file.close();
+        try file.setEndPos(handoff_trace_max_bytes);
+    }
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "handoff.log");
+    defer std.testing.allocator.free(path);
+
+    try appendHandoffFailureTraceAtPath(path, "bounded_failure", E_FAIL);
+    const stat = try std.fs.cwd().statFile(path);
+    try std.testing.expect(stat.size <= handoff_trace_max_bytes);
+    const contents = try std.fs.cwd().readFileAlloc(
+        std.testing.allocator,
+        path,
+        handoff_trace_max_bytes,
+    );
+    defer std.testing.allocator.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "reason=bounded_failure") != null);
+}
+
+test "handoff embedding argument detection respects command boundary" {
+    try std.testing.expect(isEmbeddingArgs(&.{ "noctty.exe", "-Embedding" }));
+    try std.testing.expect(isEmbeddingArgs(&.{ "noctty.exe", "-embedding" }));
+    try std.testing.expect(!isEmbeddingArgs(&.{"noctty.exe"}));
+    try std.testing.expect(!isEmbeddingArgs(&.{ "noctty.exe", "-e", "cmd.exe", "-Embedding" }));
+}
+
+test "handoff registry builders target sibling GUI executable and quote once" {
+    const path = try nocttyExePathForLauncher(std.testing.allocator, "C:\\Apps\\noctty\\noctty.com");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("C:\\Apps\\noctty\\noctty.exe", path);
+    const command = try localServerCommand(std.testing.allocator, path);
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("\"C:\\Apps\\noctty\\noctty.exe\"", command);
+    try std.testing.expect(std.mem.indexOf(u8, command, "-Embedding") == null);
+    const proxy_path = try proxyDllPathForExe(std.testing.allocator, path);
+    defer std.testing.allocator.free(proxy_path);
+    try std.testing.expectEqualStrings("C:\\Apps\\noctty\\" ++ proxy_filename, proxy_path);
+}
+
+test "handoff shared interface proxy ownership is exact and case insensitive" {
+    try std.testing.expectEqual(@as(usize, 3), interface_proxy_registrations.len);
+    try std.testing.expect(shouldRestoreInterfaceProxyText(proxy_clsid_text));
+    try std.testing.expect(shouldRestoreInterfaceProxyText("{1d349824-21fb-46c7-acf3-746edc991d52}"));
+    try std.testing.expect(!shouldRestoreInterfaceProxyText(null));
+    try std.testing.expect(!shouldRestoreInterfaceProxyText("{3171DE52-6EFA-4AEF-8A9F-D02BD67E7A4F}"));
+    for (interface_proxy_registrations) |registration| {
+        try std.testing.expect(std.mem.startsWith(u8, registration.key_utf8, "Software\\Classes\\Interface\\"));
+        try std.testing.expect(std.mem.endsWith(u8, registration.key_utf8, "\\ProxyStubClsid32"));
+        try std.testing.expect(std.mem.startsWith(u8, registration.saved_key_utf8, saved_state_key_utf8));
+    }
+}
+
+test "handoff registration refuses without compatible console half" {
+    try std.testing.expectError(error.CompatibleConsoleHandoffMissing, requireCompatibleConsoleHalf(null));
+    try std.testing.expectError(error.CompatibleConsoleHandoffMissing, requireCompatibleConsoleHalf(null_guid));
+    try std.testing.expectError(error.CompatibleConsoleHandoffMissing, requireCompatibleConsoleHalf(inbox_console_sentinel));
+    try std.testing.expectError(error.InvalidConsoleHandoff, requireCompatibleConsoleHalf("not-a-guid"));
+    try requireCompatibleConsoleHalf("{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}");
+}
+
+test "handoff console classification rejects braced values with wrong dash shape" {
+    // Exactly 38 chars and braced, so the length/brace guard passes and the
+    // value reaches the parser. std's parseNoBraces asserts the dash positions
+    // instead of erroring, so these must be rejected before it is called.
+    try std.testing.expectEqual(
+        ConsoleHalf.invalid,
+        classifyConsoleHalf("{0123456789ABCDEF0123456789ABCDEF0123}"),
+    );
+    try std.testing.expectEqual(
+        ConsoleHalf.invalid,
+        classifyConsoleHalf("{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE6-}"),
+    );
+    try std.testing.expectEqual(
+        ConsoleHalf.invalid,
+        classifyConsoleHalf("{2EACA9477F5F--4CFA-BA87-8F7FBEEFBE69}"),
+    );
+    try std.testing.expectEqual(
+        ConsoleHalf.invalid,
+        classifyConsoleHalf("{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBEZZ}"),
+    );
+    try std.testing.expectEqual(
+        ConsoleHalf.compatible,
+        classifyConsoleHalf("{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}"),
+    );
+}

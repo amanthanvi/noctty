@@ -22,6 +22,8 @@ const show_face = @import("show_face.zig");
 const new_window = @import("new_window.zig");
 const list_windows = @import("list_windows.zig");
 const perform_action = @import("perform_action.zig");
+const register_default_terminal = @import("register_default_terminal.zig");
+const unregister_default_terminal = @import("unregister_default_terminal.zig");
 
 pub const Action = @import("ghostty_action.zig").Action;
 
@@ -73,6 +75,8 @@ fn runMain(self: Action, alloc: Allocator) !u8 {
         .@"new-window" => try new_window.run(alloc),
         .@"list-windows" => try list_windows.run(alloc),
         .@"perform-action" => try perform_action.run(alloc),
+        .@"register-default-terminal" => try register_default_terminal.run(alloc),
+        .@"unregister-default-terminal" => try unregister_default_terminal.run(alloc),
     };
 }
 
@@ -101,6 +105,8 @@ pub fn options(comptime self: Action) type {
             .@"new-window" => new_window.Options,
             .@"list-windows" => list_windows.Options,
             .@"perform-action" => perform_action.Options,
+            .@"register-default-terminal" => register_default_terminal.Options,
+            .@"unregister-default-terminal" => unregister_default_terminal.Options,
         };
     }
 }

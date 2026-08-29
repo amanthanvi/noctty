@@ -142,6 +142,11 @@ pub fn build(b: *std.Build) !void {
     if (config.emit_exe and config.app_runtime != .none) {
         exe.?.install();
         if (resources) |r| r.install();
+        if (config.target.result.os.tag == .windows) {
+            const TerminalHandoffProxy = @import("src/build/TerminalHandoffProxy.zig");
+            const handoff_proxy = try TerminalHandoffProxy.init(b, &config);
+            handoff_proxy.install();
+        }
     }
 
     // Run step

@@ -6,7 +6,8 @@ $manifestPath = Join-Path $fixtureRoot "noctty-build-capabilities.json"
 $runtimeFiles = @(
     "noctty.com",
     "noctty.exe",
-    "ghostty-vt.dll"
+    "ghostty-vt.dll",
+    "noctty-terminal-handoff-proxy.dll"
 )
 
 try {

@@ -22,6 +22,14 @@ pub const Pty = switch (builtin.os.tag) {
     else => PosixPty,
 };
 
+/// A Windows pseudo-terminal session whose console process already exists.
+/// The client handle is retained only for its eventual exit code; output-pipe
+/// EOF remains authoritative because descendants can outlive the root client.
+pub const AdoptedSession = if (builtin.os.tag == .windows) struct {
+    pty: Pty,
+    client_process: windows.HANDLE,
+} else void;
+
 /// The modes of a pty. Not all of these modes are supported on
 /// all platforms but all platforms share the same mode struct.
 ///
@@ -332,15 +340,33 @@ const WindowsPty = struct {
 
     out_pipe: windows.HANDLE,
     in_pipe: windows.HANDLE,
-    out_pipe_pty: windows.HANDLE,
-    in_pipe_pty: windows.HANDLE,
-    pseudo_console: windows.exp.HPCON,
+    out_pipe_pty: ?windows.HANDLE,
+    in_pipe_pty: ?windows.HANDLE,
+    control: Control,
     size: winsize,
+
+    const Control = union(enum) {
+        pseudo_console: windows.exp.HPCON,
+        handoff: HandoffControl,
+    };
+
+    const HandoffControl = struct {
+        signal: ?windows.HANDLE,
+        server_process: windows.HANDLE,
+        reference: windows.HANDLE,
+        signal_write_mutex: std.Thread.Mutex = .{},
+    };
+
+    pub const HandoffHandles = struct {
+        /// Read by OpenConsole; noctty writes keystrokes to `in_pipe`.
+        input: windows.HANDLE,
+        /// Written by OpenConsole; noctty reads application output here.
+        output: windows.HANDLE,
+    };
 
     pub const OpenError = error{Unexpected};
 
-    /// Open a new PTY with the given initial size.
-    pub fn open(size: winsize) OpenError!Pty {
+    fn openPipes(size: winsize) OpenError!Pty {
         var pty: Pty = undefined;
 
         var pipe_path_buf: [128]u8 = undefined;
@@ -385,7 +411,7 @@ const WindowsPty = struct {
         errdefer _ = windows.CloseHandle(pty.in_pipe);
 
         var security_attributes_read = security_attributes;
-        pty.in_pipe_pty = windows.kernel32.CreateFileW(
+        const in_pipe_pty = windows.kernel32.CreateFileW(
             pipe_path_w.ptr,
             windows.GENERIC_READ,
             0,
@@ -394,10 +420,11 @@ const WindowsPty = struct {
             windows.FILE_ATTRIBUTE_NORMAL,
             null,
         );
-        if (pty.in_pipe_pty == windows.INVALID_HANDLE_VALUE) {
+        if (in_pipe_pty == windows.INVALID_HANDLE_VALUE) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
         }
-        errdefer _ = windows.CloseHandle(pty.in_pipe_pty);
+        pty.in_pipe_pty = in_pipe_pty;
+        errdefer _ = windows.CloseHandle(in_pipe_pty);
 
         // The in_pipe needs to be created as a named pipe, since anonymous
         // pipes created with CreatePipe do not support overlapped operations,
@@ -414,38 +441,126 @@ const WindowsPty = struct {
         //     _ = windows.CloseHandle(pty.in_pipe);
         // }
 
-        if (windows.exp.kernel32.CreatePipe(&pty.out_pipe, &pty.out_pipe_pty, null, 0) == 0) {
+        var out_pipe_pty: windows.HANDLE = undefined;
+        if (windows.exp.kernel32.CreatePipe(&pty.out_pipe, &out_pipe_pty, null, 0) == 0) {
             return windows.unexpectedError(windows.kernel32.GetLastError());
         }
+        pty.out_pipe_pty = out_pipe_pty;
         errdefer {
             _ = windows.CloseHandle(pty.out_pipe);
-            _ = windows.CloseHandle(pty.out_pipe_pty);
+            _ = windows.CloseHandle(out_pipe_pty);
         }
 
         try windows.SetHandleInformation(pty.in_pipe, windows.HANDLE_FLAG_INHERIT, 0);
-        try windows.SetHandleInformation(pty.in_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
+        try windows.SetHandleInformation(in_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
         try windows.SetHandleInformation(pty.out_pipe, windows.HANDLE_FLAG_INHERIT, 0);
-        try windows.SetHandleInformation(pty.out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
-
-        const result = windows.exp.kernel32.CreatePseudoConsole(
-            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-            pty.in_pipe_pty,
-            pty.out_pipe_pty,
-            0,
-            &pty.pseudo_console,
-        );
-        if (result != windows.S_OK) return error.Unexpected;
+        try windows.SetHandleInformation(out_pipe_pty, windows.HANDLE_FLAG_INHERIT, 0);
 
         pty.size = size;
         return pty;
     }
 
-    pub fn deinit(self: *Pty) void {
-        _ = windows.CloseHandle(self.in_pipe_pty);
+    /// Open a new PTY with the given initial size.
+    pub fn open(size: winsize) OpenError!Pty {
+        var pty = try openPipes(size);
+        errdefer pty.closePipes();
+
+        var pseudo_console: windows.exp.HPCON = undefined;
+        const result = windows.exp.kernel32.CreatePseudoConsole(
+            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+            pty.in_pipe_pty.?,
+            pty.out_pipe_pty.?,
+            0,
+            &pseudo_console,
+        );
+        if (result != windows.S_OK) return error.Unexpected;
+
+        pty.control = .{ .pseudo_console = pseudo_console };
+        return pty;
+    }
+
+    /// Build the terminal-owned pipes for an existing OpenConsole session.
+    /// All three control handles must already be durable duplicates owned by
+    /// the caller. No HPCON exists in this mode.
+    pub fn openAdopted(
+        size: winsize,
+        signal: windows.HANDLE,
+        server_process: windows.HANDLE,
+        reference: windows.HANDLE,
+    ) OpenError!Pty {
+        var pty = try openPipes(size);
+        pty.control = .{ .handoff = .{
+            .signal = signal,
+            .server_process = server_process,
+            .reference = reference,
+        } };
+        return pty;
+    }
+
+    pub fn pseudoConsole(self: *const Pty) ?windows.exp.HPCON {
+        return switch (self.control) {
+            .pseudo_console => |handle| handle,
+            .handoff => null,
+        };
+    }
+
+    pub fn isAdopted(self: *const Pty) bool {
+        return self.control == .handoff;
+    }
+
+    pub fn handoffHandles(self: *const Pty) ?HandoffHandles {
+        if (!self.isAdopted()) return null;
+        return .{
+            .input = self.in_pipe_pty orelse return null,
+            .output = self.out_pipe_pty orelse return null,
+        };
+    }
+
+    /// The COM proxy duplicates these into OpenConsole after the handoff
+    /// method returns. The embedding UI posts session adoption to itself, so
+    /// this runs only after COM has finished marshaling the returned handles.
+    pub fn closeHandoffPipeCopies(self: *Pty) void {
+        if (!self.isAdopted()) return;
+        if (self.in_pipe_pty) |handle| {
+            _ = windows.CloseHandle(handle);
+            self.in_pipe_pty = null;
+        }
+        if (self.out_pipe_pty) |handle| {
+            _ = windows.CloseHandle(handle);
+            self.out_pipe_pty = null;
+        }
+    }
+
+    /// Closing the signal pipe asks OpenConsole to begin orderly shutdown.
+    pub fn closeAdoptedSignal(self: *Pty) void {
+        switch (self.control) {
+            .pseudo_console => {},
+            .handoff => |*handoff| if (handoff.signal) |handle| {
+                _ = windows.CloseHandle(handle);
+                handoff.signal = null;
+            },
+        }
+    }
+
+    fn closePipes(self: *Pty) void {
+        if (self.in_pipe_pty) |handle| _ = windows.CloseHandle(handle);
         _ = windows.CloseHandle(self.in_pipe);
-        _ = windows.CloseHandle(self.out_pipe_pty);
+        if (self.out_pipe_pty) |handle| _ = windows.CloseHandle(handle);
         _ = windows.CloseHandle(self.out_pipe);
-        _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
+        self.in_pipe_pty = null;
+        self.out_pipe_pty = null;
+    }
+
+    pub fn deinit(self: *Pty) void {
+        self.closeAdoptedSignal();
+        self.closePipes();
+        switch (self.control) {
+            .pseudo_console => |handle| windows.exp.kernel32.ClosePseudoConsole(handle),
+            .handoff => |handoff| {
+                _ = windows.CloseHandle(handoff.server_process);
+                _ = windows.CloseHandle(handoff.reference);
+            },
+        }
         self.* = undefined;
     }
 
@@ -458,14 +573,37 @@ const WindowsPty = struct {
 
     pub const SetSizeError = error{ResizeFailed};
 
+    pub fn encodeHandoffResize(columns: u16, rows: u16) [6]u8 {
+        var packet: [6]u8 = undefined;
+        std.mem.writeInt(u16, packet[0..2], 8, .little);
+        std.mem.writeInt(u16, packet[2..4], columns, .little);
+        std.mem.writeInt(u16, packet[4..6], rows, .little);
+        return packet;
+    }
+
     /// Set the size of the pty.
     pub fn setSize(self: *Pty, size: winsize) SetSizeError!void {
-        const result = windows.exp.kernel32.ResizePseudoConsole(
-            self.pseudo_console,
-            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-        );
-
-        if (result != windows.S_OK) return error.ResizeFailed;
+        switch (self.control) {
+            .pseudo_console => |handle| {
+                const result = windows.exp.kernel32.ResizePseudoConsole(
+                    handle,
+                    .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
+                );
+                if (result != windows.S_OK) return error.ResizeFailed;
+            },
+            .handoff => |*handoff| {
+                const signal = handoff.signal orelse return error.ResizeFailed;
+                const packet = encodeHandoffResize(size.ws_col, size.ws_row);
+                handoff.signal_write_mutex.lock();
+                defer handoff.signal_write_mutex.unlock();
+                var written: windows.DWORD = 0;
+                if (windows.kernel32.WriteFile(signal, &packet, packet.len, &written, null) == 0 or
+                    written != packet.len)
+                {
+                    return error.ResizeFailed;
+                }
+            },
+        }
         self.size = size;
     }
 
@@ -476,6 +614,36 @@ const WindowsPty = struct {
         return null;
     }
 };
+
+test "handoff resize writes one exact signal packet" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var signal_read: windows.HANDLE = undefined;
+    var signal_write: windows.HANDLE = undefined;
+    try std.testing.expect(windows.exp.kernel32.CreatePipe(&signal_read, &signal_write, null, 0) != 0);
+    defer _ = windows.CloseHandle(signal_read);
+    defer _ = windows.CloseHandle(signal_write);
+
+    var pty: WindowsPty = .{
+        .out_pipe = undefined,
+        .in_pipe = undefined,
+        .out_pipe_pty = null,
+        .in_pipe_pty = null,
+        .control = .{ .handoff = .{
+            .signal = signal_write,
+            .server_process = windows.INVALID_HANDLE_VALUE,
+            .reference = windows.INVALID_HANDLE_VALUE,
+        } },
+        .size = .{},
+    };
+    try pty.setSize(.{ .ws_col = 80, .ws_row = 24 });
+
+    var packet: [6]u8 = undefined;
+    var read: windows.DWORD = 0;
+    try std.testing.expect(windows.kernel32.ReadFile(signal_read, &packet, packet.len, &read, null) != 0);
+    try std.testing.expectEqual(@as(windows.DWORD, packet.len), read);
+    try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x00, 0x50, 0x00, 0x18, 0x00 }, &packet);
+}
 
 test {
     const testing = std.testing;

@@ -730,6 +730,9 @@ pub fn init(
                     return err;
                 }
             else {},
+            .adopted_session = if (builtin.os.tag == .windows)
+                rt_surface.takeAdoptedSession()
+            else {},
         });
         errdefer io_exec.deinit();
 

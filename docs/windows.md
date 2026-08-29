@@ -48,8 +48,8 @@ the fallback used by the normal packaged app environment.
 
 Important files and directories:
 
-| Path                                           | Purpose                                                                                        |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Path                                       | Purpose                                                                                        |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | `%LOCALAPPDATA%\noctty\config.ghostty`     | User config written on first launch.                                                           |
 | `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
 | `%LOCALAPPDATA%\noctty\layouts\`          | Named layouts, stored as one-window session-state JSON documents.                             |
@@ -146,6 +146,91 @@ less stable.
 If Windows shows a stale icon after upgrading or switching between
 installed and portable builds, restart Explorer or clear the icon cache
 before assuming the build is broken.
+
+## Default terminal
+
+Register and select noctty as the current user's default terminal with:
+
+```powershell
+noctty +register-default-terminal
+```
+
+This writes only per-user (`HKCU`) selection and COM proxy state. The installer
+registers noctty's owned COM local-server and proxy classes machine-wide, but
+does not change any user's default terminal. Portable builds can register the
+absolute paths of the current `noctty.exe` and its sibling
+`noctty-terminal-handoff-proxy.dll`; moving either file afterward requires
+registering again. Registration refuses to proceed when the proxy DLL is
+missing.
+
+The three shared Microsoft `ITerminalHandoff` Interface mappings are
+snapshotted before noctty changes them. Unregistration restores each prior raw
+value only while that mapping still points to noctty's proxy, so a newer
+terminal's registration is preserved.
+
+noctty implements the terminal half of Windows console delegation. It requires
+a Windows Terminal OpenConsole installation to remain selected as the console
+half. Registration refuses to proceed when `DelegationConsole` is missing,
+empty, or set to the inbox console host, rather than leaving console launches
+broken. It does not verify that the selected console CLSID still resolves to an
+installed application, so a value left behind by an uninstalled Windows
+Terminal is accepted and console launches will degrade until a working console
+half is selected again. The handoff supports `ITerminalHandoff3` only, as used
+by Windows Terminal 1.24 or newer; older OpenConsole versions that request v1
+or v2 are not supported and Windows falls back to a normal console window.
+
+Because noctty is an unpackaged application, it does not appear in the Windows
+Settings default-terminal picker. Use the registration command above to select
+it. Console applications launched without an existing console, such as
+`cmd.exe` from the Run dialog, then open in a noctty window.
+
+For a one-run handoff failure trace, set `NOCTTY_HANDOFF_TRACE=1` before
+launching the delegated console application. Noctty appends the rejection
+reason and HRESULT to `%LOCALAPPDATA%\noctty\handoff.log`; the opt-in file is
+truncated before an append would exceed 1 MiB.
+
+### Security properties of registration
+
+Registering noctty as the default terminal creates a same-user activation
+surface, and that is inherent to how Windows console delegation works rather
+than something noctty can close. Once registered, any local process running as
+the same user at the same integrity level can activate noctty's handoff class
+directly and call `EstablishPtyHandoff` with pipes and a window title it
+controls. The result is a genuine noctty window rendering that process's
+content, with the user's keystrokes flowing back to it — a phishing shape, for
+example a window titled `Administrator: Windows PowerShell`. No privilege
+boundary is crossed: a process that can do this already runs as the user and
+could impersonate a terminal in other ways.
+
+Two properties bound the exposure and should be preserved:
+
+- The handoff is gated on the per-user `Interface\{IID}\ProxyStubClsid32`
+  mappings that only `+register-default-terminal` writes. A machine where no
+  user has registered noctty is not exposed, even though the installer
+  registers the machine-wide local-server class.
+- The handoff rejects callers whose integrity level does not match noctty's
+  own. That rejection is correct by design, not a bug to be relaxed later: it
+  is what stops an elevated console session from being rendered inside a
+  medium-integrity terminal the user's other processes can drive.
+
+The handoff class is registered in a single-threaded apartment, and that is
+load-bearing. `EstablishPtyHandoff` returns raw pty-side handles and the UI
+thread closes noctty's copies later, which is safe only because the STA stub
+marshals the `[out]` handles on the same thread before returning to the message
+pump. Moving the class to an MTA, or running a nested modal loop while a
+handoff message is dispatched, would close the handles before conhost
+duplicates them and would silently break every console launch.
+
+Undo the selection with:
+
+```powershell
+noctty +unregister-default-terminal
+```
+
+The unregister command restores the `DelegationTerminal` value saved at
+registration time only when noctty is still selected, then removes noctty's
+per-user COM registration. It does not overwrite a default-terminal choice
+made after noctty was registered. Both commands are idempotent.
 
 ## Notifications and progress
 
