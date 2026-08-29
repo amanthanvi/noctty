@@ -386,6 +386,20 @@ pub const PIPE_READMODE_BYTE = 0x00000000;
 pub const PIPE_ACCESS_DUPLEX = 0x00000003;
 pub const PIPE_UNLIMITED_INSTANCES = 255;
 
+/// Refuse pipe clients that arrive over SMB from another machine. Named
+/// pipes are reachable as `\\<host>\pipe\<name>` by default, so the
+/// single-instance IPC pipe must opt out explicitly.
+pub const PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
+
+/// Token access and info class used to resolve the current user's SID for
+/// the IPC pipe DACL.
+pub const TOKEN_QUERY = 0x0008;
+pub const TokenUser = 1;
+
+/// SDDL string revision accepted by
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+pub const SDDL_REVISION_1 = 1;
+
 /// Main-thread COM apartment for in-process STA clients (settings path
 /// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means
 /// the desired STA already exists. `RPC_E_CHANGED_MODE` means the thread

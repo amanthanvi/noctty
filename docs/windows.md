@@ -316,6 +316,11 @@ on Windows. Global keyboard capture is intentionally not implemented.
 noctty exposes a local Windows automation surface over the same
 single-instance IPC path used by `+new-window`.
 
+The named pipe behind it is local-only and user-private: it is created
+with `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL whose single ACE
+grants access to the SID that owns the running noctty process. Other
+local accounts and remote SMB clients cannot open it.
+
 List windows, tabs, and panes:
 
 ```powershell
@@ -338,9 +343,9 @@ Actions use the same names as `keybind` values. `--surface-id` is only
 valid for surface-scoped actions; app-scoped actions such as `quit`
 always target the app. The running instance rejects terminal-input and
 arbitrary file helper actions (`text`, `csi`, `esc`,
-`paste_from_clipboard`, `write_screen_file`, and `crash`), and new
-keybinding action variants stay disabled for automation until they are
-reviewed and allowlisted.
+`paste_from_clipboard`, `write_screen_file`, `end_key_sequence`, and
+`crash`), and new keybinding action variants stay disabled for automation
+until they are reviewed and allowlisted.
 
 ## Crash reports and diagnostics
 

@@ -236,6 +236,18 @@ test "automation-action safety rejects terminal input and crash actions" {
     try std.testing.expect(!isSafeAutomationAction(.paste_from_clipboard));
     try std.testing.expect(!isSafeAutomationAction(.{ .write_screen_file = .copy }));
     try std.testing.expect(!isSafeAutomationAction(.{ .crash = .main }));
+
+    // end_key_sequence flushes the queued key-sequence writes to the pty,
+    // so it is terminal input even though it takes no argument.
+    try std.testing.expect(!isSafeAutomationAction(.end_key_sequence));
+
+    // Key table actions only move the binding stack and stay allowed.
+    try std.testing.expect(isSafeAutomationAction(.deactivate_all_key_tables));
+}
+
+test "automation-action safety rejects end_key_sequence parsed from IPC text" {
+    const action = try input.Binding.Action.parse("end_key_sequence");
+    try std.testing.expect(!isSafeAutomationAction(action));
 }
 
 test "automation-action surface id targets reject app scoped actions" {
@@ -595,6 +607,11 @@ fn automationActionTargetError(
     };
 }
 
+/// Actions that `+perform-action` may invoke over IPC. Anything that can
+/// put bytes on the pty is excluded, including `end_key_sequence`: it
+/// resolves to `endKeySequence(.flush, ...)`, which writes the pending
+/// key-sequence queue to the terminal. New action variants default to
+/// unsafe until they are reviewed.
 fn isSafeAutomationAction(action: input.Binding.Action) bool {
     return switch (action) {
         .ignore,
@@ -665,7 +682,6 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .check_for_updates,
         .undo,
         .redo,
-        .end_key_sequence,
         .activate_key_table,
         .activate_key_table_once,
         .deactivate_key_table,

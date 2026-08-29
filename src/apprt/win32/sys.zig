@@ -445,6 +445,46 @@ pub extern "kernel32" fn ConnectNamedPipe(
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 
+/// `SID_AND_ATTRIBUTES`/`TOKEN_USER` as returned by `GetTokenInformation`
+/// with `TokenUser`. Only the SID pointer is used; the SID itself lives in
+/// the caller-provided buffer.
+pub const SID_AND_ATTRIBUTES = extern struct {
+    Sid: *anyopaque,
+    Attributes: DWORD,
+};
+
+pub const TOKEN_USER = extern struct {
+    User: SID_AND_ATTRIBUTES,
+};
+
+pub extern "advapi32" fn OpenProcessToken(
+    ProcessHandle: HANDLE,
+    DesiredAccess: DWORD,
+    TokenHandle: *HANDLE,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn GetTokenInformation(
+    TokenHandle: HANDLE,
+    TokenInformationClass: DWORD,
+    TokenInformation: ?*anyopaque,
+    TokenInformationLength: DWORD,
+    ReturnLength: *DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertSidToStringSidW(
+    Sid: *anyopaque,
+    StringSid: *?[*:0]u16,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    StringSecurityDescriptor: [*:0]const u16,
+    StringSDRevision: DWORD,
+    SecurityDescriptor: *?*anyopaque,
+    SecurityDescriptorSize: ?*u32,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+
 pub extern "kernel32" fn GetProcAddress(hModule: HMODULE, lpProcName: [*:0]const u8) callconv(.winapi) ?*const anyopaque;
 
 pub extern "kernel32" fn LoadLibraryA(lpLibFileName: [*:0]const u8) callconv(.winapi) HMODULE;

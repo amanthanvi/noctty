@@ -967,19 +967,102 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
     return try argv.toOwnedSlice(alloc);
 }
 
+/// Build the security descriptor for the single-instance IPC pipe: a
+/// protected DACL whose only ACE grants full access to the SID that owns
+/// this process. Without it the pipe gets the default DACL, which is wider
+/// than the same-user contract the IPC verbs assume.
+///
+/// The current user's SID is resolved from the process token rather than
+/// using the `OW` (owner rights) SDDL alias, because an elevated token's
+/// default object owner is the Administrators group, not the user.
+///
+/// Returns a descriptor allocated by the OS; free it with `sys.LocalFree`.
+fn allocIpcPipeSecurityDescriptor() !*anyopaque {
+    var token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    defer _ = windows.CloseHandle(token);
+
+    // A TOKEN_USER plus the largest well-formed SID fits comfortably here;
+    // SECURITY_MAX_SID_SIZE is 68 bytes.
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(
+        token_user.User.Sid,
+        &sid_string,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
+    defer _ = sys.LocalFree(@ptrCast(sid));
+
+    // "D:P" is a protected DACL (no inherited ACEs) containing exactly one
+    // ACE: GENERIC_ALL for the current user. Nothing is granted to
+    // Administrators, SYSTEM, NETWORK, or ANONYMOUS.
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("D:P(A;;GA;;;");
+    const sid_len = std.mem.len(sid);
+    var sddl: [256]u16 = undefined;
+    if (prefix.len + sid_len + 2 > sddl.len) {
+        return error.IpcSecurityDescriptorFailed;
+    }
+    @memcpy(sddl[0..prefix.len], prefix);
+    @memcpy(sddl[prefix.len..][0..sid_len], sid[0..sid_len]);
+    sddl[prefix.len + sid_len] = ')';
+    sddl[prefix.len + sid_len + 1] = 0;
+
+    var descriptor: ?*anyopaque = null;
+    if (sys.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        @ptrCast(&sddl),
+        c.SDDL_REVISION_1,
+        &descriptor,
+        null,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+
+    return descriptor orelse error.IpcSecurityDescriptorFailed;
+}
+
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
+
+    // Fail closed: an unrestricted single-instance pipe would accept
+    // requests from any local account, so refuse to listen at all if the
+    // DACL cannot be built.
+    const descriptor = allocIpcPipeSecurityDescriptor() catch |err| {
+        log.warn("failed to build win32 IPC pipe security descriptor err={}", .{err});
+        return;
+    };
+    defer _ = sys.LocalFree(descriptor);
+
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
 
     server: while (!app.ipc_stop_requested.load(.acquire)) {
         const pipe = sys.CreateNamedPipeW(
             pipe_name.ptr,
             c.PIPE_ACCESS_DUPLEX,
-            windows.PIPE_TYPE_BYTE | c.PIPE_READMODE_BYTE | win32_ipc.pipe_nowait,
+            windows.PIPE_TYPE_BYTE |
+                c.PIPE_READMODE_BYTE |
+                win32_ipc.pipe_nowait |
+                c.PIPE_REJECT_REMOTE_CLIENTS,
             c.PIPE_UNLIMITED_INSTANCES,
             16 * 1024,
             16 * 1024,
             0,
-            null,
+            &security_attributes,
         );
         if (pipe == windows.INVALID_HANDLE_VALUE) {
             log.warn("failed to create win32 IPC pipe err={}", .{
@@ -27652,6 +27735,62 @@ test "win32 timed out automation request remains owned until consumption" {
     try std.testing.expectEqualStrings("new_tab", request.action_text);
     request.completed.store(true, .release);
     request.release(); // Delayed mailbox consumer owns the final reference.
+}
+
+test "win32 IPC pipe DACL still admits a same-user client" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = descriptor,
+        .bInheritHandle = windows.FALSE,
+    };
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        std.testing.allocator,
+        "\\\\.\\pipe\\noctty-ipc-dacl-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer std.testing.allocator.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(
+        std.testing.allocator,
+        pipe_name_utf8,
+    );
+    defer std.testing.allocator.free(pipe_name);
+
+    const server = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        &security_attributes,
+    );
+    try std.testing.expect(server != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(server);
+
+    // The CLI verbs reach the server through this same CreateFileW path,
+    // so the restrictive DACL must not lock the owning user out.
+    const client = windows.kernel32.CreateFileW(
+        pipe_name.ptr,
+        windows.GENERIC_READ | windows.GENERIC_WRITE,
+        0,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(client);
 }
 
 test "win32 IPC silent client read is bounded" {
