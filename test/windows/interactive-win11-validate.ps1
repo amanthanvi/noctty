@@ -215,6 +215,7 @@ Invoke-Harness -ScriptName 'vt-probe-win32-conformance.ps1' -TimeoutSeconds 10 -
 Invoke-Harness -ScriptName 'interactive-win11-smoke.ps1' -TimeoutSeconds 10 -PassResetState
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-configured-size.ps1' -TimeoutSeconds 15
 Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command.ps1' -TimeoutSeconds 20
+Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 30 -AdditionalArguments @('-ConfiguredScenariosOnly') -ScenarioSlug 'configured'
 if ($env:NOCTTY_INTERACTIVE_RUN_FOREGROUND_HARNESS -eq '1') {
     Invoke-HarnessWithPassSentinel -ScriptName 'interactive-win11-shell-command-live.ps1' -TimeoutSeconds 25
 }

@@ -111,6 +111,9 @@ const FlatpakHostCommand = if (!flatpak_support) struct {
 /// The subprocess state for our exec backend.
 subprocess: Subprocess,
 
+/// The original error that was classified as ProcessNotStarted.
+process_start_error: ?anyerror = null,
+
 /// Initialize the exec state. This will NOT start it, this only sets
 /// up the internal state necessary to start it later.
 pub fn init(
@@ -158,16 +161,25 @@ pub fn threadEnter(
     td: *termio.Termio.ThreadData,
 ) !void {
     // Start our subprocess
+    self.process_start_error = null;
     const pty_fds = self.subprocess.start(alloc) catch |err| {
-        // If we specifically got this error then we are in the forked
-        // process and our child failed to execute. If we DIDN'T
-        // get this specific error then we're in the parent and
-        // we need to bubble it up.
-        if (err != error.ExecFailedInChild) return err;
+        const StartError = @TypeOf(err) || error{ OpenptyFailed, ExecFailedInChild };
+        switch (@as(StartError, @errorCast(err))) {
+            // We're in the child. Nothing more we can do but abnormal exit.
+            // The Command will output some additional information.
+            error.ExecFailedInChild => posix.exit(1),
 
-        // We're in the child. Nothing more we can do but abnormal exit.
-        // The Command will output some additional information.
-        posix.exit(1);
+            // Keep the tailored pty exhaustion message in Thread.
+            error.OpenptyFailed => return error.OpenptyFailed,
+
+            // Only errors from the subprocess start boundary use the
+            // confirmed no-child wording in Thread.
+            else => {
+                self.process_start_error = err;
+                log.warn("failed to start subprocess err={}", .{err});
+                return error.ProcessNotStarted;
+            },
+        }
     };
     errdefer self.subprocess.stop();
 
@@ -675,6 +687,7 @@ const Subprocess = struct {
     cwd: ?[:0]const u8,
     env: ?EnvMap,
     args: []const [:0]const u8,
+    windows_cmd_shell: bool,
     grid_size: renderer.GridSize,
     screen_size: renderer.ScreenSize,
     pty: ?Pty = null,
@@ -720,6 +733,9 @@ const Subprocess = struct {
                 .env = cfg.env,
                 .cwd = null,
                 .args = &.{},
+                // An adopted session never spawns anything, so there is no
+                // command line to wrap in `cmd.exe /C`.
+                .windows_cmd_shell = false,
                 .grid_size = .{},
                 .screen_size = .{ .width = 1, .height = 1 },
                 .pty = session.pty,
@@ -917,7 +933,7 @@ const Subprocess = struct {
         }
 
         // Build our args list
-        const args: []const [:0]const u8 = execCommand(
+        const exec_command = execCommand(
             alloc,
             launch_command,
             internal_os.passwd,
@@ -932,9 +948,12 @@ const Subprocess = struct {
 
                 // The comptime here is important to ensure the full slice
                 // is put into the binary data and not the stack.
-                break :oom comptime switch (builtin.os.tag) {
-                    .windows => &.{"cmd.exe"},
-                    else => &.{"/bin/sh"},
+                break :oom ExecCommand{
+                    .args = comptime switch (builtin.os.tag) {
+                        .windows => &.{"cmd.exe"},
+                        else => &.{"/bin/sh"},
+                    },
+                    .windows_cmd_shell = false,
                 };
             },
 
@@ -990,7 +1009,8 @@ const Subprocess = struct {
             .arena = arena,
             .env = env,
             .cwd = cwd,
-            .args = args,
+            .args = exec_command.args,
+            .windows_cmd_shell = exec_command.windows_cmd_shell,
 
             .rt_pre_exec_info = cfg.rt_pre_exec_info,
             .rt_post_fork_info = cfg.rt_post_fork_info,
@@ -1148,6 +1168,7 @@ const Subprocess = struct {
         var cmd: Command = .{
             .path = self.args[0],
             .args = self.args,
+            .windows_cmd_shell = self.windows_cmd_shell,
             .env = if (self.env) |*env| env else null,
             .cwd = cwd,
             .stdin = if (builtin.os.tag == .windows) null else .{ .handle = pty.slave },
@@ -1703,11 +1724,16 @@ test "handoff adopted execution reuses pipes without spawn job or terminate" {
 /// may not be allocated and args may or may not be allocated (or copied).
 /// Pointers in the return value may point to pointers in the command
 /// struct.
+const ExecCommand = struct {
+    args: []const [:0]const u8,
+    windows_cmd_shell: bool = false,
+};
+
 fn execCommand(
     alloc: Allocator,
     command: configpkg.Command,
     comptime passwdpkg: type,
-) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
+) (Allocator.Error || error{SystemError})!ExecCommand {
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
@@ -1826,12 +1852,12 @@ fn execCommand(
             },
         }
 
-        return try args.toOwnedSlice(alloc);
+        return .{ .args = try args.toOwnedSlice(alloc) };
     }
 
     return switch (command) {
         // We need to clone the command since there's no guarantee the config remains valid.
-        .direct => |_| (try command.clone(alloc)).direct,
+        .direct => |_| .{ .args = (try command.clone(alloc)).direct },
 
         .shell => |v| shell: {
             var args: std.ArrayList([:0]const u8) = try .initCapacity(alloc, 4);
@@ -1872,7 +1898,10 @@ fn execCommand(
             }
 
             try args.append(alloc, v);
-            break :shell try args.toOwnedSlice(alloc);
+            break :shell .{
+                .args = try args.toOwnedSlice(alloc),
+                .windows_cmd_shell = builtin.os.tag == .windows,
+            };
         },
     };
 }
@@ -1882,6 +1911,46 @@ fn execCommand(
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Exec, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.subprocess.getProcessInfo(info);
+}
+
+test "execCommand windows-cmd-shell-command-line builds raw trampoline" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .shell = "cmd.exe /c \"echo a && echo b\"" },
+        internal_os.passwd,
+    );
+
+    try std.testing.expect(result.windows_cmd_shell);
+    try std.testing.expectEqual(@as(usize, 3), result.args.len);
+    try std.testing.expectEqualStrings("cmd.exe", std.fs.path.basename(result.args[0]));
+    try std.testing.expectEqualStrings("/C", result.args[1]);
+    try std.testing.expectEqualStrings("cmd.exe /c \"echo a && echo b\"", result.args[2]);
+}
+
+test "execCommand windows-direct-command-line keeps argv" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try execCommand(
+        arena.allocator(),
+        .{ .direct = &.{
+            "C:\\Program Files\\Noctty Tools\\probe.exe",
+            "--message",
+            "hello world",
+        } },
+        internal_os.passwd,
+    );
+
+    try std.testing.expect(!result.windows_cmd_shell);
+    try std.testing.expectEqual(@as(usize, 3), result.args.len);
+    try std.testing.expectEqualStrings("C:\\Program Files\\Noctty Tools\\probe.exe", result.args[0]);
+    try std.testing.expectEqualStrings("--message", result.args[1]);
+    try std.testing.expectEqualStrings("hello world", result.args[2]);
 }
 
 test "execCommand darwin: shell command" {
@@ -1900,15 +1969,15 @@ test "execCommand darwin: shell command" {
         }
     });
 
-    try testing.expectEqual(8, result.len);
-    try testing.expectEqualStrings(result[0], "/usr/bin/login");
-    try testing.expectEqualStrings(result[1], "-flp");
-    try testing.expectEqualStrings(result[2], "testuser");
-    try testing.expectEqualStrings(result[3], "/bin/bash");
-    try testing.expectEqualStrings(result[4], "--noprofile");
-    try testing.expectEqualStrings(result[5], "--norc");
-    try testing.expectEqualStrings(result[6], "-c");
-    try testing.expectEqualStrings(result[7], "exec -l foo bar baz");
+    try testing.expectEqual(8, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "/usr/bin/login");
+    try testing.expectEqualStrings(result.args[1], "-flp");
+    try testing.expectEqualStrings(result.args[2], "testuser");
+    try testing.expectEqualStrings(result.args[3], "/bin/bash");
+    try testing.expectEqualStrings(result.args[4], "--noprofile");
+    try testing.expectEqualStrings(result.args[5], "--norc");
+    try testing.expectEqualStrings(result.args[6], "-c");
+    try testing.expectEqualStrings(result.args[7], "exec -l foo bar baz");
 }
 
 test "execCommand darwin: direct command" {
@@ -1930,12 +1999,12 @@ test "execCommand darwin: direct command" {
         }
     });
 
-    try testing.expectEqual(5, result.len);
-    try testing.expectEqualStrings(result[0], "/usr/bin/login");
-    try testing.expectEqualStrings(result[1], "-flp");
-    try testing.expectEqualStrings(result[2], "testuser");
-    try testing.expectEqualStrings(result[3], "foo");
-    try testing.expectEqualStrings(result[4], "bar baz");
+    try testing.expectEqual(5, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "/usr/bin/login");
+    try testing.expectEqualStrings(result.args[1], "-flp");
+    try testing.expectEqualStrings(result.args[2], "testuser");
+    try testing.expectEqualStrings(result.args[3], "foo");
+    try testing.expectEqualStrings(result.args[4], "bar baz");
 }
 
 test "execCommand: shell command, empty passwd" {
@@ -1958,10 +2027,10 @@ test "execCommand: shell command, empty passwd" {
         },
     );
 
-    try testing.expectEqual(3, result.len);
-    try testing.expectEqualStrings(result[0], "/bin/sh");
-    try testing.expectEqualStrings(result[1], "-c");
-    try testing.expectEqualStrings(result[2], "foo bar baz");
+    try testing.expectEqual(3, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "/bin/sh");
+    try testing.expectEqualStrings(result.args[1], "-c");
+    try testing.expectEqualStrings(result.args[2], "foo bar baz");
 }
 
 test "execCommand: shell command, error passwd" {
@@ -1984,10 +2053,10 @@ test "execCommand: shell command, error passwd" {
         },
     );
 
-    try testing.expectEqual(3, result.len);
-    try testing.expectEqualStrings(result[0], "/bin/sh");
-    try testing.expectEqualStrings(result[1], "-c");
-    try testing.expectEqualStrings(result[2], "foo bar baz");
+    try testing.expectEqual(3, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "/bin/sh");
+    try testing.expectEqualStrings(result.args[1], "-c");
+    try testing.expectEqualStrings(result.args[2], "foo bar baz");
 }
 
 test "execCommand: direct command, error passwd" {
@@ -2011,9 +2080,9 @@ test "execCommand: direct command, error passwd" {
         }
     });
 
-    try testing.expectEqual(2, result.len);
-    try testing.expectEqualStrings(result[0], "foo");
-    try testing.expectEqualStrings(result[1], "bar baz");
+    try testing.expectEqual(2, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "foo");
+    try testing.expectEqualStrings(result.args[1], "bar baz");
 }
 
 test "execCommand: direct command, config freed" {
@@ -2043,9 +2112,9 @@ test "execCommand: direct command, config freed" {
 
     command_arena.deinit();
 
-    try testing.expectEqual(2, result.len);
-    try testing.expectEqualStrings(result[0], "foo");
-    try testing.expectEqualStrings(result[1], "bar baz");
+    try testing.expectEqual(2, result.args.len);
+    try testing.expectEqualStrings(result.args[0], "foo");
+    try testing.expectEqualStrings(result.args[1], "bar baz");
 }
 
 test "addGhosttyBinToPath prepends on windows" {

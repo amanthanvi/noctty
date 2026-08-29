@@ -5,7 +5,8 @@ param(
     [string] $CommandText = '',
     [string] $ExePathOverride = '',
     [int] $SeedTabs = 1,
-    [int] $TimeoutSeconds = 20
+    [int] $TimeoutSeconds = 20,
+    [switch] $ConfiguredScenariosOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +45,7 @@ if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
 }
 if ($Rebuild) { $forwardedArgs += '-Rebuild' }
 if ($ResetState) { $forwardedArgs += '-ResetState' }
+if ($ConfiguredScenariosOnly) { $forwardedArgs += '-ConfiguredScenariosOnly' }
 Invoke-InteractiveWin11HarnessMain `
     -RepoRoot $repoRoot `
     -LauncherPath $launcherPath `
@@ -89,6 +91,9 @@ public static class Win11ShellCommandLiveNative {
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -127,6 +132,11 @@ public static class Win11ShellCommandLiveNative {
 
 if (-not ('System.Drawing.Bitmap' -as [type])) {
     Add-Type -AssemblyName System.Drawing
+}
+
+if (-not ('System.Windows.Automation.AutomationElement' -as [type])) {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
 }
 
 $MAPVK_VK_TO_VSC = 0
@@ -466,7 +476,8 @@ function Send-Line {
 function Save-WindowCapture {
     param(
         [Parameter(Mandatory)] [IntPtr] $Hwnd,
-        [Parameter(Mandatory)] [string] $Path
+        [Parameter(Mandatory)] [string] $Path,
+        [switch] $Offscreen
     )
 
     $rect = [Win11ShellCommandLiveNative+RECT]::new()
@@ -485,7 +496,21 @@ function Save-WindowCapture {
     try {
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         try {
-            $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+            if ($Offscreen) {
+                $hdc = $graphics.GetHdc()
+                try {
+                    if (-not [Win11ShellCommandLiveNative]::PrintWindow($Hwnd, $hdc, 2)) {
+                        $lastError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        throw "PrintWindow failed for hwnd=$Hwnd (error=$lastError)"
+                    }
+                }
+                finally {
+                    $graphics.ReleaseHdc($hdc)
+                }
+            }
+            else {
+                $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+            }
         }
         finally {
             $graphics.Dispose()
@@ -569,6 +594,138 @@ function Measure-ImageDelta {
     }
 }
 
+function Get-BoundedTerminalTextSnapshot {
+    param(
+        [Parameter(Mandatory)] [IntPtr] $HostHwnd,
+        [Parameter(Mandatory)] [System.Diagnostics.Process] $Process,
+        [int] $TimeoutSeconds = 5
+    )
+
+    $probe = Start-Job -ScriptBlock {
+        param([long] $HwndValue, [int] $TargetProcessId)
+
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr] $HwndValue)
+        if ($null -eq $root) { return $null }
+
+        $documents = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::Text
+            )
+        ) | Where-Object {
+            $_.Current.ProcessId -eq $TargetProcessId -and
+            $_.Current.LocalizedControlType -eq 'terminal'
+        })
+        if ($documents.Count -eq 0) { return $null }
+
+        $textPattern = $null
+        if (-not $documents[0].TryGetCurrentPattern(
+            [System.Windows.Automation.TextPattern]::Pattern,
+            [ref] $textPattern
+        )) {
+            return $null
+        }
+
+        return $textPattern.DocumentRange.GetText(-1)
+    } -ArgumentList $HostHwnd.ToInt64(), $Process.Id
+
+    try {
+        if ($null -eq (Wait-Job -Job $probe -Timeout $TimeoutSeconds)) {
+            return $null
+        }
+        return [string] (Receive-Job -Job $probe -ErrorAction Stop)
+    }
+    catch {
+        return $null
+    }
+    finally {
+        Stop-Job -Job $probe -ErrorAction SilentlyContinue
+        Remove-Job -Job $probe -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ConfiguredShellCommandScenario {
+    param(
+        [Parameter(Mandatory)] [string] $Name,
+        [Parameter(Mandatory)] [string] $ConfigPath,
+        [Parameter(Mandatory)] [string[]] $ExpectedText,
+        [string[]] $RejectedText = @(),
+        [Parameter(Mandatory)] [string] $CapturePath,
+        [Parameter(Mandatory)] [string] $StdoutPath,
+        [Parameter(Mandatory)] [string] $StderrPath
+    )
+
+    Remove-Item -LiteralPath $CapturePath, $StdoutPath, $StderrPath -ErrorAction SilentlyContinue
+    $scenarioArgs = @(
+        Get-InteractiveWin11ContainmentArguments
+        '--single-instance=false'
+        "--class=noctty-shell-config-$Name-$($layout.SandboxId)"
+        '--config-default-files=false'
+        "--config-file=$ConfigPath"
+    )
+    $scenarioProcess = Start-Process -FilePath $exePath `
+        -ArgumentList $scenarioArgs `
+        -WorkingDirectory $repoRoot `
+        -RedirectStandardOutput $StdoutPath `
+        -RedirectStandardError $StderrPath `
+        -PassThru
+    Write-Host "$Name configured shell scenario launched pid=$($scenarioProcess.Id)"
+
+    $scenarioHostHwnd = [IntPtr]::Zero
+    try {
+        $scenarioDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description "$Name host window" -Process $scenarioProcess -Condition {
+            (Find-HostWindow -ProcessId $scenarioProcess.Id) -ne [IntPtr]::Zero
+        }
+        $scenarioHostHwnd = Find-HostWindow -ProcessId $scenarioProcess.Id
+
+        Wait-InteractiveWin11Until -Deadline $scenarioDeadline -Description "$Name terminal output" -Process $scenarioProcess -Condition {
+            $script:Win11ShellCommandScenarioText = Get-BoundedTerminalTextSnapshot -HostHwnd $scenarioHostHwnd -Process $scenarioProcess
+            if ($null -eq $script:Win11ShellCommandScenarioText) { return $false }
+            foreach ($expected in $ExpectedText) {
+                if (-not $script:Win11ShellCommandScenarioText.Contains($expected)) { return $false }
+            }
+            foreach ($rejected in $RejectedText) {
+                if ($script:Win11ShellCommandScenarioText.Contains($rejected)) { return $false }
+            }
+            return $true
+        }
+
+        Save-WindowCapture -Hwnd $scenarioHostHwnd -Path $CapturePath -Offscreen
+
+        $scenarioStderr = Get-InteractiveWin11TextFile -Path $StderrPath
+        if ($scenarioStderr -match 'panic: reached unreachable code') {
+            throw "$Name reported a runtime panic"
+        }
+
+        return [pscustomobject]@{
+            Name = $Name
+            ProcessId = $scenarioProcess.Id
+            Text = $script:Win11ShellCommandScenarioText
+            Capture = $CapturePath
+            Stdout = $StdoutPath
+            Stderr = $StderrPath
+        }
+    }
+    finally {
+        if ($scenarioHostHwnd -ne [IntPtr]::Zero) {
+            [void] [Win11ShellCommandLiveNative]::SetWindowPos(
+                $scenarioHostHwnd,
+                $HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                [uint32] ($SWP_NOMOVE -bor $SWP_NOSIZE)
+            )
+        }
+        Stop-InteractiveWin11Process -Process $scenarioProcess -Contained
+    }
+}
+
 $useRepoResources = [string]::IsNullOrWhiteSpace($ExePathOverride)
 $harness = Initialize-InteractiveWin11Sandbox -RepoRoot $repoRoot -SandboxName 'shell-command-live' -ResetState:$ResetState -IncludeResourcesDir:$useRepoResources
 $repoRoot = $harness.RepoRoot
@@ -596,6 +753,22 @@ $resolvedPath = Join-Path $layout.Temp 'interactive-win11-shell-command-live-res
 $postPath = Join-Path $layout.Temp 'interactive-win11-shell-command-live-post.txt'
 $beforeCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-live-before.png'
 $afterCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-live-after.png'
+$quotedConfigPath = Join-Path $layout.Temp 'interactive-win11-shell-command-quoted.conf'
+$quotedCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-quoted.png'
+$quotedStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-quoted-stdout.log'
+$quotedStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-quoted-stderr.log'
+$abnormalConfigPath = Join-Path $layout.Temp 'interactive-win11-shell-command-abnormal.conf'
+$abnormalCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-abnormal.png'
+$abnormalStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-abnormal-stdout.log'
+$abnormalStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-abnormal-stderr.log'
+$failedStartConfigPath = Join-Path $layout.Temp 'interactive-win11-shell-command-failed-start.conf'
+$failedStartCapturePath = Join-Path $layout.Temp 'interactive-win11-shell-command-failed-start.png'
+$failedStartStdoutPath = Join-Path $layout.Logs 'interactive-win11-shell-command-failed-start-stdout.log'
+$failedStartStderrPath = Join-Path $layout.Logs 'interactive-win11-shell-command-failed-start-stderr.log'
+$missingExecutablePath = "C:\noctty-issue151-missing-$([Guid]::NewGuid().ToString('N')).exe"
+if (Test-Path -LiteralPath $missingExecutablePath) {
+    throw "Failed-start validation path unexpectedly exists: $missingExecutablePath"
+}
 
 if ($launchAction -eq 'build') {
     Invoke-InteractiveWin11Build -RepoRoot $repoRoot
@@ -614,13 +787,77 @@ if (-not [string]::IsNullOrWhiteSpace($ExePathOverride)) {
     }
 }
 
-Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $stdoutPath, $stderrPath, $payloadPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath, $quotedConfigPath, $quotedCapturePath, $quotedStdoutPath, $quotedStderrPath, $abnormalConfigPath, $abnormalCapturePath, $abnormalStdoutPath, $abnormalStderrPath, $failedStartConfigPath, $failedStartCapturePath, $failedStartStdoutPath, $failedStartStderrPath -ErrorAction SilentlyContinue
 
 @(
     '@echo off'
     "cd /d `"$($layout.Temp)`""
     'echo READY>interactive-win11-shell-command-live-ready.txt'
 ) | Set-Content -LiteralPath $payloadPath -Encoding ASCII
+
+@(
+    'command = cmd.exe /d /c "echo CONFIG_QUOTED_^A && echo CONFIG_QUOTED_^B"'
+    'wait-after-command = true'
+    'abnormal-command-exit-runtime = 5000'
+) | Set-Content -LiteralPath $quotedConfigPath -Encoding ASCII
+
+@(
+    'command = cmd.exe /d /c "exit /b 37"'
+    'wait-after-command = true'
+    'abnormal-command-exit-runtime = 5000'
+) | Set-Content -LiteralPath $abnormalConfigPath -Encoding ASCII
+
+@(
+    "command = direct:`"$missingExecutablePath`""
+    'wait-after-command = true'
+) | Set-Content -LiteralPath $failedStartConfigPath -Encoding ASCII
+
+if ($ConfiguredScenariosOnly) {
+    $quotedResult = Invoke-ConfiguredShellCommandScenario `
+        -Name 'quoted' `
+        -ConfigPath $quotedConfigPath `
+        -ExpectedText @('CONFIG_QUOTED_A', 'CONFIG_QUOTED_B') `
+        -RejectedText @('Ghostty failed to launch the requested command:') `
+        -CapturePath $quotedCapturePath `
+        -StdoutPath $quotedStdoutPath `
+        -StderrPath $quotedStderrPath
+
+    $abnormalResult = Invoke-ConfiguredShellCommandScenario `
+        -Name 'abnormal' `
+        -ConfigPath $abnormalConfigPath `
+        -ExpectedText @(
+            'Ghostty failed to launch the requested command:',
+            'cmd.exe /d /c "exit /b 37"',
+            'Exit Code: 37',
+            'Press any key to close the window.'
+        ) `
+        -CapturePath $abnormalCapturePath `
+        -StdoutPath $abnormalStdoutPath `
+        -StderrPath $abnormalStderrPath
+
+    $failedStartResult = Invoke-ConfiguredShellCommandScenario `
+        -Name 'failed-start' `
+        -ConfigPath $failedStartConfigPath `
+        -ExpectedText @(
+            'error starting IO thread: error.ProcessNotStarted (cause: error.FileNotFound)',
+            'noctty failed to launch the requested command:',
+            $missingExecutablePath,
+            'No child process was created, so there is no exit code.',
+            'common causes include a',
+            'missing, inaccessible, or invalid executable.',
+            'This terminal is non-functional. Please close it and try again.'
+        ) `
+        -CapturePath $failedStartCapturePath `
+        -StdoutPath $failedStartStdoutPath `
+        -StderrPath $failedStartStderrPath
+
+    Write-Host (
+        'interactive-win11 configured shell command validation: PASS ' +
+        "(quoted_pid=$($quotedResult.ProcessId), abnormal_pid=$($abnormalResult.ProcessId), " +
+        "failed_start_pid=$($failedStartResult.ProcessId), offscreen_captures=true)"
+    )
+    return
+}
 
 $launchArgs = @(
     (Get-InteractiveWin11LaunchArguments -Layout $layout)
@@ -639,6 +876,7 @@ $process = Start-Process -FilePath $exePath `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -PassThru
+Write-Host "interactive-win11 shell command live launched pid=$($process.Id)"
 
 $hostHwnd = [IntPtr]::Zero
 try {
@@ -718,7 +956,7 @@ try {
         throw 'noctty live shell command run reported a runtime failure'
     }
 
-    Write-Host ("interactive-win11 shell command live validation: PASS (command={0}, action={1}, seed_tabs={2}, changed={3}, sampled={4}, stdout={5}, stderr={6}, ready={7}, control={8}, resolved={9}, post={10}, before={11}, after={12})" -f $typedCommandText, $CliAction, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
+    Write-Host ("interactive-win11 shell command live validation: PASS (pid={0}, command={1}, action={2}, seed_tabs={3}, changed={4}, sampled={5}, stdout={6}, stderr={7}, ready={8}, control={9}, resolved={10}, post={11}, before={12}, after={13})" -f $process.Id, $typedCommandText, $CliAction, $SeedTabs, $imageDelta.ChangedPixels, $imageDelta.SampledPixels, $stdoutPath, $stderrPath, $readyPath, $controlPath, $resolvedPath, $postPath, $beforeCapturePath, $afterCapturePath)
 }
 finally {
     if ($hostHwnd -ne [IntPtr]::Zero) {
