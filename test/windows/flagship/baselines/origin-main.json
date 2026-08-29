@@ -1,7 +1,7 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
   "captured_at": "2026-08-20T22:17:32.0000000Z",
-  "git_commit": "8cc68f5157e2408c49897488f6b2906d122567c5",
+  "git_commit": "5e38a638a9c86a4101afed7e7ea4e185814f7ef7",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
@@ -12,7 +12,7 @@
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "86fe63ff9dc6bc9ed18ac7b04dd202bbdf6236531700bbad39bc2392b54982a2",
+      "sha256": "58d7d1e982e9786555ecf36fdd5143a35b91e494b0f5ea25ff074f1bd1e4d5e1",
       "scenario_id": null
     },
     {
