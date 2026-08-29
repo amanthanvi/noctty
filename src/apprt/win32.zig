@@ -18393,6 +18393,14 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 0;
         },
         c.WM_ACTIVATE => {
+            // Cloak/uncloak (virtual-desktop switches, shell animations)
+            // has NO documented window message -- the documented signal is
+            // the EVENT_OBJECT_CLOAKED/UNCLOAKED WinEvent, which would need
+            // a SetWinEventHook and is the principled fix. Until then, a
+            // cloaked host renders nothing, so refresh on activation and on
+            // show/hide as well to guarantee a self-healing path back to
+            // visible rather than a permanently frozen window.
+            if (host) |v| v.refreshSurfaceVisibility();
             if ((wParam & 0xFFFF) == c.WA_INACTIVE) {
                 if (host) |v| {
                     if (v.app.config.@"quick-terminal-autohide") {
@@ -18923,12 +18931,20 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return 1;
         },
 
+        c.WM_SHOWWINDOW => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (host) |v| v.refreshSurfaceVisibility();
+            return result;
+        },
+
         c.WM_WINDOWPOSCHANGED => {
             const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
-            // This fires once per mouse-move during a drag-move/resize, and
-            // the visibility query costs a DWM round-trip. A window being
-            // dragged is by definition visible, so skip it until the drag
-            // ends; WM_EXITSIZEMOVE produces a final WM_WINDOWPOSCHANGED.
+            // This fires once per mouse-move during a drag-move/resize and
+            // the visibility query costs a DWM round-trip, so skip it while
+            // a drag is in flight -- a window being dragged is by definition
+            // visible. The drag loop emits its last WM_WINDOWPOSCHANGED just
+            // BEFORE WM_EXITSIZEMOVE, so that one is skipped too and the
+            // WM_EXITSIZEMOVE arm does the catch-up refresh.
             if (host) |v| {
                 if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
             }
@@ -18955,6 +18971,9 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.startResizeSettleRepaints();
                 v.forceVisibleSurfaceRepaintsNow();
                 v.forceHostCompositionPaint();
+                // The last WM_WINDOWPOSCHANGED of the drag was skipped by
+                // the live-resize guard, so re-check here.
+                v.refreshSurfaceVisibility();
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -19988,9 +20007,6 @@ pub const Surface = struct {
     live_resize_repaint_deferred: bool = false,
     renderer_repaint_requested: std.atomic.Value(bool) = .init(false),
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
-    presented_frame_count: u64 = 0,
-    presented_fps_last_tick_ms: u64 = 0,
-    presented_fps_last_frame_count: u64 = 0,
     draw_in_progress: bool = false,
     ime_composing: bool = false,
     deferred_char: DeferredCharState = .{},
@@ -21166,36 +21182,7 @@ pub const Surface = struct {
             const err = windows.kernel32.GetLastError();
             return windows.unexpectedError(err);
         }
-        self.notePresentedFrame();
         self.render_trace.noteSwapBuffers();
-    }
-
-    /// Sample presented frames per second for this surface. `RenderTrace`
-    /// carries the same signal for the benchmark suite; this is the
-    /// no-trace-file path, so it compiles away entirely unless debug
-    /// logging is on. `swapGLBuffers` runs on the app thread, so the
-    /// bookkeeping needs no synchronization.
-    fn notePresentedFrame(self: *Surface) void {
-        if (comptime !std.log.logEnabled(.debug, .win32)) return;
-
-        self.presented_frame_count += 1;
-        const now_ms = sys.GetTickCount64();
-        if (self.presented_fps_last_tick_ms == 0) {
-            self.presented_fps_last_tick_ms = now_ms;
-            self.presented_fps_last_frame_count = self.presented_frame_count;
-            return;
-        }
-
-        const elapsed_ms = now_ms -| self.presented_fps_last_tick_ms;
-        if (elapsed_ms < std.time.ms_per_s) return;
-
-        const frames = self.presented_frame_count -| self.presented_fps_last_frame_count;
-        self.presented_fps_last_tick_ms = now_ms;
-        self.presented_fps_last_frame_count = self.presented_frame_count;
-        log.debug(
-            "presented fps surface_id={} fps={} frames={} interval_ms={}",
-            .{ self.core_surface.id, frames *| std.time.ms_per_s / elapsed_ms, frames, elapsed_ms },
-        );
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {

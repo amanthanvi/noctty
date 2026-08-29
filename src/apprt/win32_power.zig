@@ -28,6 +28,18 @@ const SAVER_PRESENT_INTERVAL_MS: u64 = 34;
 
 const GUID_ACDC_POWER_SOURCE = GUID.parse("{5D3E9A59-E9D5-4B00-A6BD-FF34FF516548}");
 const GUID_POWER_SAVING_STATUS = GUID.parse("{E00958C0-C213-4ACE-AC77-FECCED2EEEA5}");
+/// Windows 11 "Energy Saver", which unlike legacy battery saver can engage
+/// while plugged in. Microsoft documents this GUID on the Power Setting GUIDs
+/// (WinNT.h) page with exactly this value -- it happens to coincide with the
+/// RFC 4122 example UUID -- but marks it PRERELEASE, so it may change.
+/// Registration simply fails on builds that predate it, which is why that
+/// failure is logged at debug rather than warn.
+const GUID_ENERGY_SAVER_STATUS = GUID.parse("{550E8400-E29B-41D4-A716-446655440000}");
+
+/// ENERGY_SAVER_STATUS, the Data payload of GUID_ENERGY_SAVER_STATUS.
+const ENERGY_SAVER_OFF: DWORD = 0;
+const ENERGY_SAVER_STANDARD: DWORD = 1;
+const ENERGY_SAVER_HIGH_SAVINGS: DWORD = 2;
 
 pub const SYSTEM_POWER_STATUS = extern struct {
     ACLineStatus: BYTE,
@@ -69,6 +81,9 @@ const saver_bit: u8 = 1 << 1;
 
 var snapshot_bits = std.atomic.Value(u8).init(0);
 var last_poll_tick_ms = std.atomic.Value(u64).init(0);
+/// Bumped by every notification-driven update so a slower poll can detect
+/// that it raced a push and is therefore stale.
+var push_generation = std.atomic.Value(u32).init(0);
 
 /// Process-wide power state. This is packed into one atomic byte so renderer
 /// threads read a coherent, lock-free snapshot.
@@ -96,6 +111,7 @@ pub const HostVisibility = struct {
 pub const Notifications = struct {
     acdc: ?HANDLE = null,
     saver: ?HANDLE = null,
+    energy_saver: ?HANDLE = null,
 
     pub fn init(hwnd: HWND) Notifications {
         pollIfStale();
@@ -115,10 +131,21 @@ pub const Notifications = struct {
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
         if (saver == null) {
-            log.warn("power-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
+            log.warn("battery-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
         }
 
-        return .{ .acdc = acdc, .saver = saver };
+        // Expected to fail on Windows builds without Energy Saver. Battery
+        // saver above still covers those, so this is not a warning.
+        const energy_saver = RegisterPowerSettingNotification(
+            @ptrCast(hwnd),
+            &GUID_ENERGY_SAVER_STATUS,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        );
+        if (energy_saver == null) {
+            log.debug("energy-saver notifications unavailable err={}", .{windows.kernel32.GetLastError()});
+        }
+
+        return .{ .acdc = acdc, .saver = saver, .energy_saver = energy_saver };
     }
 
     pub fn deinit(self: *Notifications) void {
@@ -129,7 +156,12 @@ pub const Notifications = struct {
         }
         if (self.saver) |handle| {
             if (UnregisterPowerSettingNotification(handle) == 0) {
-                log.warn("failed to unregister power-saver notification err={}", .{windows.kernel32.GetLastError()});
+                log.warn("failed to unregister battery-saver notification err={}", .{windows.kernel32.GetLastError()});
+            }
+        }
+        if (self.energy_saver) |handle| {
+            if (UnregisterPowerSettingNotification(handle) == 0) {
+                log.warn("failed to unregister energy-saver notification err={}", .{windows.kernel32.GetLastError()});
             }
         }
         self.* = .{};
@@ -180,6 +212,16 @@ pub fn parsePowerSettingNotification(payload: []const u8) ?SettingUpdate {
             else => return null,
         } };
     }
+    if (std.mem.eql(u8, guid_bytes, std.mem.asBytes(&GUID_ENERGY_SAVER_STATUS))) {
+        // Both saving modes throttle. STANDARD asks for savings where the
+        // user-experience cost is minimal, which capping an unfocused or
+        // idle terminal present rate satisfies.
+        return .{ .is_saver = switch (value) {
+            ENERGY_SAVER_OFF => false,
+            ENERGY_SAVER_STANDARD, ENERGY_SAVER_HIGH_SAVINGS => true,
+            else => return null,
+        } };
+    }
     return null;
 }
 
@@ -215,9 +257,22 @@ pub fn pollIfStale() void {
         break;
     }
 
+    // Claiming the slot up front keeps concurrent renderer threads from
+    // stampeding the syscall, but a failed query should not cost us the
+    // next 30 seconds of fallback, so hand the slot back on failure.
+    const generation = push_generation.load(.acquire);
     var raw: SYSTEM_POWER_STATUS = undefined;
-    if (GetSystemPowerStatus(&raw) == 0) return;
-    publishSnapshot(parseSystemPowerStatus(raw, snapshot()));
+    if (GetSystemPowerStatus(&raw) == 0) {
+        last_poll_tick_ms.store(previous, .release);
+        return;
+    }
+
+    // A WM_POWERBROADCAST push that landed while we were inside the
+    // syscall is strictly fresher than what we just read. Drop the poll
+    // rather than overwrite it; the next poll or push corrects us anyway.
+    const value = parseSystemPowerStatus(raw, snapshot());
+    if (push_generation.load(.acquire) != generation) return;
+    publishSnapshot(value);
 }
 
 /// Monotonic millisecond clock shared with Win32 notification and visibility
@@ -310,6 +365,11 @@ fn publishSnapshot(value: Snapshot) void {
 }
 
 fn publishSetting(update: SettingUpdate) void {
+    // Bump before the store so a poll that started earlier and is about to
+    // publish observes the change and backs off. Bumping after would leave a
+    // window where the poll sees the old generation and clobbers this update.
+    _ = push_generation.fetchAdd(1, .acq_rel);
+
     var current = snapshot_bits.load(.acquire);
     while (true) {
         var next = current;
@@ -390,6 +450,26 @@ test "power notification parsing accepts registered settings" {
         SettingUpdate{ .is_saver = true },
         parsePowerSettingNotification(&saver_on).?,
     );
+
+    // Energy Saver (prerelease GUID) maps its three-state enum onto the same
+    // saver flag: off is off, both savings modes throttle.
+    const energy_off = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_OFF);
+    try std.testing.expectEqual(
+        SettingUpdate{ .is_saver = false },
+        parsePowerSettingNotification(&energy_off).?,
+    );
+    const energy_standard = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_STANDARD);
+    try std.testing.expectEqual(
+        SettingUpdate{ .is_saver = true },
+        parsePowerSettingNotification(&energy_standard).?,
+    );
+    const energy_high = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_HIGH_SAVINGS);
+    try std.testing.expectEqual(
+        SettingUpdate{ .is_saver = true },
+        parsePowerSettingNotification(&energy_high).?,
+    );
+    const energy_bogus = settingPayload(GUID_ENERGY_SAVER_STATUS, 7);
+    try std.testing.expect(parsePowerSettingNotification(&energy_bogus) == null);
 
     var malformed = settingPayload(GUID_POWER_SAVING_STATUS, 1);
     std.mem.writeInt(

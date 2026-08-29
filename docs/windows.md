@@ -111,29 +111,39 @@ in-terminal progress state through Ghostty's shared VT/OSC support.
 
 ## Power and battery
 
-noctty reads AC/battery and saver state from `GetSystemPowerStatus`.
-Windows power-setting notifications cover modern Energy Saver and the
-legacy Battery Saver signal; a fallback query runs at most once every 30
-seconds.
+noctty reads AC/battery and saver state from `GetSystemPowerStatus`, and
+subscribes to Windows power-setting notifications for the power source
+(`GUID_ACDC_POWER_SOURCE`) and Battery Saver (`GUID_POWER_SAVING_STATUS`).
+It additionally registers for Windows 11 Energy Saver
+(`GUID_ENERGY_SAVER_STATUS`), which can engage while plugged in; Microsoft
+currently documents that GUID as prerelease, so registration is best-effort
+and simply does not take effect on Windows builds that lack it. A fallback
+query runs at most once every 30 seconds. This has not yet been verified on
+a machine with a battery -- see the status caveat below.
 
 `unfocused-render-fps` caps presentation for visible, unfocused surfaces
 and defaults to `30`. Values below `1` are treated as `1`; values above
 `125` have no additional effect, since the renderer never presents more
 often than every 8 ms.
 `power-saver-rendering` accepts `auto`, `on`, or `off` and defaults to
-`auto`: `auto` follows Windows battery or energy saver, `on` forces saver pacing,
-and `off` disables it. Focused surfaces retain their normal cadence when
-saver pacing is inactive. Saver pacing caps presentation at about 30
-fps and lengthens draw and cursor-blink timer cadences. Minimized and
-DWM-cloaked host windows do not present until they become visible again.
+`auto`: `auto` follows Windows Battery Saver or Energy Saver, `on` forces
+saver pacing, and `off` disables it. Focused surfaces retain their normal
+cadence when saver pacing is inactive. Saver pacing caps presentation at
+about 30 fps. Minimized and DWM-cloaked host windows do not present until
+they become visible again.
+
+Focus here is **per surface, not per window**. In a split, only the pane
+with keyboard focus presents at the full rate; the other panes are
+"unfocused" even though you can see them, so a split tailing fast output
+side by side with your active pane is capped at `unfocused-render-fps`
+(30 by default). Raise that value if you watch live output in a background
+split.
 
 Set `NOCTTY_RENDER_TRACE_FILE` to an absolute output path to write a JSON
 render trace when the first traced surface is destroyed. Presented fps
 can be derived as
 `(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
 when at least two swaps are present and the time difference is positive.
-Debug builds also log one `presented fps` sample per surface per second,
-with the frame count and sample interval.
 
 ## Windows, tabs, and splits
 

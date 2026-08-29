@@ -312,7 +312,7 @@ fn threadMain_(self: *Thread) !void {
     self.cursor_h.run(
         &self.loop,
         &self.cursor_c,
-        self.cursorBlinkInterval(),
+        cursorBlinkInterval(),
         Thread,
         self,
         cursorTimerCallback,
@@ -506,7 +506,7 @@ fn drainMailbox(self: *Thread) !bool {
                     // active, its callback owns the eventual rearm.
                     self.flags.cursor_blink_visible = true;
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(self.cursorBlinkInterval());
+                    self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
             },
 
@@ -514,7 +514,7 @@ fn drainMailbox(self: *Thread) !bool {
                 self.flags.cursor_blink_visible = true;
                 if (self.flags.focused) {
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(self.cursorBlinkInterval());
+                    self.armCursorTimerIfDead(cursorBlinkInterval());
                 }
             },
 
@@ -642,7 +642,14 @@ fn notePresentRequest(self: *Thread, interval_ms: u64) void {
 /// just trigger a draw/paint.
 fn drawFrame(self: *Thread, now: bool) void {
     const interval_ms = self.minimumPresentIntervalMs() orelse return;
-    if (self.presentWaitMs(interval_ms) > 0) return;
+
+    // `now` is the forced, vsync-bypassing path (`drawNowCallback`): a
+    // resize, a damage event, something the user is looking at right this
+    // moment. Dropping it would leave visible artifacts on screen for up to a
+    // full interval — a whole second at `unfocused-render-fps = 1` — so
+    // pacing does not apply. Forced draws are event-driven, not timer-driven,
+    // so this cannot become a busy loop.
+    if (!now and self.presentWaitMs(interval_ms) > 0) return;
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`.
@@ -887,7 +894,7 @@ fn cursorTimerCallback(
         null;
     switch (cursorBlinkTimerDecision(
         t.flags.focused,
-        t.cursorBlinkInterval(),
+        cursorBlinkInterval(),
         reset_elapsed_ns,
     )) {
         .disarm => {
@@ -907,7 +914,7 @@ fn cursorTimerCallback(
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
     t.wakeup.notify() catch {};
 
-    t.armCursorTimerIfDead(t.cursorBlinkInterval());
+    t.armCursorTimerIfDead(cursorBlinkInterval());
     return .disarm;
 }
 
@@ -929,7 +936,7 @@ fn stopCallback(
 }
 
 /// Returns the interval for the blinking cursor in milliseconds.
-fn cursorBlinkInterval(self: *const Thread) u64 {
+fn cursorBlinkInterval() u64 {
     var interval: u64 = CURSOR_BLINK_INTERVAL;
     if (std.valgrind.runningOnValgrind() > 0) {
         // If we're running under Valgrind, the cursor blink adds enough
@@ -940,13 +947,6 @@ fn cursorBlinkInterval(self: *const Thread) u64 {
         // logic to be more efficient:
         // https://github.com/ghostty-org/ghostty/issues/8003
         interval *= 5;
-    }
-
-    if (apprt.runtime == apprt.win32 and win32_power.saverRenderingActive(
-        self.config.power_saver_rendering,
-        self.powerSnapshot(),
-    )) {
-        interval *= 2;
     }
 
     return interval;

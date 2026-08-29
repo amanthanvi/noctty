@@ -1978,6 +1978,11 @@ keybind: Keybinds = .{},
 /// Limit visible, unfocused terminal surfaces to this many rendered frames
 /// per second while output remains active.
 ///
+/// Focus is per surface, not per window: in a split, every pane except the
+/// one with keyboard focus is "unfocused" even while visible, so a background
+/// split tailing fast output is capped by this value. Raise it if you watch
+/// live output side by side with your active pane.
+///
 /// Lower values reduce CPU, GPU, and power use at the cost of less fluid
 /// background updates. Values below 1 are treated as 1, and values above
 /// 125 have no additional effect because the renderer never presents more
@@ -1990,8 +1995,10 @@ keybind: Keybinds = .{},
 ///
 /// Valid values:
 ///
-/// * `auto` - Enable power-saving behavior when Windows reports that battery
-///   or energy saver is active.
+/// * `auto` - Enable power-saving behavior when Windows reports that Battery
+///   Saver is active, or that Windows 11 Energy Saver is active (the latter
+///   uses a GUID Microsoft still documents as prerelease, so it is
+///   best-effort and inert on Windows builds that lack it).
 /// * `on` - Always enable power-saving behavior.
 /// * `off` - Never enable power-saving behavior.
 ///
