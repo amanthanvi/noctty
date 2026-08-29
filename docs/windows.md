@@ -52,8 +52,9 @@ Important files and directories:
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `%LOCALAPPDATA%\noctty\config.ghostty`     | User config written on first launch.                                                           |
 | `%LOCALAPPDATA%\noctty\session-state.json` | Window, tab, split, profile, cwd, and title restore state when `window-save-state` is enabled. |
-| `%LOCALAPPDATA%\noctty\crash\`             | Local crash dump directory. Nothing here is uploaded automatically.                            |
-| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                     |
+| `%LOCALAPPDATA%\noctty\layouts\`          | Named layouts, stored as one-window session-state JSON documents.                             |
+| `%LOCALAPPDATA%\noctty\crash\`            | Local crash dump directory. Nothing here is uploaded automatically.                           |
+| `%LOCALAPPDATA%\noctty\shell-integration\` | Installed shell-integration payloads and manual fallbacks.                                    |
 
 The portable ZIP carries the bundled resources next to the executable.
 Don't move only `noctty.exe` out of the extracted tree; it needs the
@@ -261,10 +262,10 @@ noctty uses a native Win32 host window with:
 - native right-click context menus
 
 The universal palette puts actions, live tabs, panes, Windows profiles,
-and native settings behind one fuzzy-ranked, keyboard-driven list. Type
-a prefix to filter one category: `>` actions, `@` tabs, `/` panes, `~`
-profiles, `:` settings, `%` themes, `!` recent commands, or `?` for
-help. The native Settings
+named layouts, and native settings behind one fuzzy-ranked, keyboard-driven
+list. Type a prefix to filter one category: `>` actions, `@` tabs, `/` panes,
+`~` profiles, `:` settings, `%` themes, `!` recent commands, `^` layouts, or
+`?` for help. The native Settings
 window stages edits until Save and patches your config without rewriting
 unrelated text. The full feature detail for both lives in the
 [capability matrix notes](windows-capability-matrix.md#notes).
@@ -292,6 +293,28 @@ noctty --safe-mode
 ```
 
 Safe mode never overwrites your config or quarantined state.
+
+## Named layouts
+
+A named layout captures the focused window's tabs, split trees, selected
+profiles, working directories, and explicit pane and tab titles. Saving omits
+window position, size, and state. Each layout is the existing session-state
+JSON schema with exactly one window, stored as
+`%LOCALAPPDATA%\noctty\layouts\<name>.json`. Per-pane commands come from the
+saved profiles; layout files do not contain a separate command field.
+
+Layout names accept ASCII letters, digits, spaces, dots, underscores, and
+hyphens, up to 64 bytes. Leading or trailing spaces and dots are rejected, as
+are Windows reserved device names such as `CON` or `COM1`. An unreadable layout
+file is quarantined with the same `.corrupt` rules as session state.
+
+Bind `save_layout:<name>` to save or atomically replace a layout, and bind
+`launch_layout:<name>` to materialize it in a new window. Saved layouts also
+appear in the command palette as `Launch layout: <name>`. From the command
+line, `noctty +new-window --launch-layout=<name>` forwards the request to a
+running instance or launches it cold when no instance is running. The layout
+module also exposes name enumeration and launch arguments for future Windows
+jump-list integration; noctty does not currently add jump-list layout entries.
 
 ## Updates
 

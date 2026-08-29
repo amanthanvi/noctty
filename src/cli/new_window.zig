@@ -96,11 +96,12 @@ pub const Options = struct {
 /// All of the arguments after the `+new-window` argument (except for the
 /// `--class` flag) will be sent to the remote noctty instance and will be
 /// parsed as command line flags. These flags will override certain settings
-/// when creating the first surface in the new window. Currently, only
-/// `--working-directory`, `--command`, and `--title` are supported. `-e` will
-/// also work as an alias for `--command`, except that if `-e` is found on the
-/// command line all following arguments will become part of the command and no
-/// more arguments will be parsed for configuration settings.
+/// when creating the first surface in the new window. Currently,
+/// `--working-directory`, `--command`, `--title`, and `--launch-layout` are
+/// supported. `-e` will also work as an alias for `--command`, except that if
+/// `-e` is found on the command line all following arguments will become part
+/// of the command and no more arguments will be parsed for configuration
+/// settings.
 ///
 /// If `--working-directory` is found on the command line and is a relative
 /// path (i.e. doesn't start with `/`) it will be resolved to an absolute path
@@ -129,6 +130,9 @@ pub const Options = struct {
 ///
 ///   * `--title`: A title that will override the title of the first surface in
 ///     the new window. The title override may be edited or removed later.
+///
+///   * `--launch-layout=<name>`: Materialize the saved named layout in a new
+///     window instead of creating a default first surface.
 ///
 ///   * `-e`: Any arguments after this will be interpreted as a command to
 ///     execute inside the first surface of the new window instead of the

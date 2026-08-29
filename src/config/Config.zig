@@ -2530,6 +2530,11 @@ keybind: Keybinds = .{},
 /// window is ever created.
 @"initial-window": bool = true,
 
+/// Materialize a saved Windows layout instead of creating the ordinary
+/// initial window. This option is intended for CLI use, including
+/// `noctty +new-window --launch-layout=<name>`.
+@"launch-layout": ?[]const u8 = null,
+
 /// The duration that undo operations remain available. After this
 /// time, the operation will be removed from the undo stack and
 /// cannot be undone.

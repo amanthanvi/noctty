@@ -347,6 +347,9 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// Save the target surface's focused window as a named layout.
+    save_layout: SaveLayout,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -415,6 +418,7 @@ pub const Action = union(Key) {
         search_match_rows,
         readonly,
         copy_title_to_clipboard,
+        save_layout,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -696,6 +700,24 @@ pub const InitialSize = extern struct {
 pub const CellSize = extern struct {
     width: u32,
     height: u32,
+};
+
+pub const SaveLayout = struct {
+    /// Layout name, validated by the apprt before it reaches the filesystem.
+    name: []const u8,
+
+    // Sync with: ghostty_action_save_layout_s
+    pub const C = extern struct {
+        name: [*]const u8,
+        len: usize,
+    };
+
+    pub fn cval(self: SaveLayout) C {
+        return .{
+            .name = self.name.ptr,
+            .len = self.name.len,
+        };
+    }
 };
 
 pub const SetTitle = struct {

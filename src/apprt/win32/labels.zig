@@ -1465,6 +1465,7 @@ pub fn paletteCompletionText(descriptor: win32_palette.catalog.Descriptor) []con
         .profile => |key| key,
         .setting => |key| key,
         .theme => |name| name,
+        .layout => |name| name,
         .tab, .pane, .help => descriptor.item.title,
     };
 }

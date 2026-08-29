@@ -64,13 +64,16 @@ Win32-validated VT protocol coverage is tracked in
 - Session restore via `window-save-state`: windows, tabs, splits,
   profiles, working directories, and explicit titles come back; terminal
   contents and child processes do not.
+- Named layouts (C17): save the focused window's tabs, splits, profiles,
+  working directories, and titles, then launch it in a new window from a
+  keybind, the universal palette, or `+new-window --launch-layout=<name>`.
 - Ctrl-based default keybindings, mostly shared with Ghostty's
   non-macOS defaults; Windows-specific exceptions include `Alt+Arrow`
   pane focus and `Alt+F4` to close the window.
 - Native settings window (Appearance, Terminal, Shell, Privacy, Updates,
   Keybindings, Advanced) that stages edits until Save and patches your
   config without rewriting unrelated text.
-- Universal palette: actions, tabs, panes, profiles, themes, native
+- Universal palette: actions, tabs, panes, profiles, named layouts, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
 

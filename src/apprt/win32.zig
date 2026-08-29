@@ -52,6 +52,7 @@ const win32_status_bar = @import("win32_status_bar.zig");
 const win32_tab_visual = @import("win32_tab_visual.zig");
 const win32_focus_ring = @import("win32_focus_ring.zig");
 const win32_types = @import("win32_types.zig");
+const win32_layouts = @import("win32_layouts.zig");
 const win32_session_state = @import("win32_session_state.zig");
 const win32_session_persistence = @import("win32_session_persistence.zig");
 const win32_structural_history = @import("win32_structural_history.zig");
@@ -2549,7 +2550,20 @@ pub const App = struct {
         // the normal instance nor competes for that instance's IPC endpoint.
         if (!self.safe_mode) try self.startIpcServer();
 
-        if (self.config.@"initial-window") {
+        if (self.config.@"launch-layout") |name| {
+            // An explicit CLI layout request is honored even when
+            // `initial-window` is disabled, because the user asked for this
+            // exact window. It is also one-shot: later ordinary new-window
+            // actions must not inherit and replay it from the app config.
+            const launched = self.launchNamedLayout(name, null);
+            self.config.@"launch-layout" = null;
+            if (!launched) {
+                try self.createWindow(default_title);
+                if (self.primarySurface()) |surface| if (surface.host) |host| {
+                    host.setBanner(.err, "Layout could not be opened.") catch {};
+                };
+            }
+        } else if (self.config.@"initial-window") {
             const restored = if (self.sessionRestoreEligible()) try self.restoreSessionState() else false;
             if (!restored) try self.createWindow(default_title);
             if (!restored and self.startup_profile_picker) {
@@ -2764,6 +2778,16 @@ pub const App = struct {
         return self.localAppDataPath("session-state.json");
     }
 
+    fn namedLayoutPath(self: *const App, name: []const u8) ![]u8 {
+        const relative = try win32_layouts.relativePathAlloc(self.core_app.alloc, name);
+        defer self.core_app.alloc.free(relative);
+        return self.localAppDataPath(relative) orelse error.LocalAppDataUnavailable;
+    }
+
+    fn namedLayoutsDirectoryPath(self: *const App) ?[]u8 {
+        return self.localAppDataPath("layouts");
+    }
+
     fn sessionStateEnabled(self: *const App) bool {
         // Safe mode is deliberately non-destructive. It starts without
         // restoring the saved session and must not replace or delete that
@@ -2867,6 +2891,148 @@ pub const App = struct {
             },
             .loaded => |parsed| parsed,
         };
+    }
+
+    fn launchNamedLayout(self: *App, name: []const u8, preferred_banner_host: ?*Host) bool {
+        const banner_host = preferred_banner_host orelse if (self.primarySurface()) |surface|
+            surface.host
+        else
+            null;
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout launch rejected invalid name name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout launch path resolution failed name={s} err={}", .{ name, err });
+            if (banner_host) |host| host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var loaded = win32_session_persistence.loadAlloc(
+            self.core_app.alloc,
+            path,
+            win32_session_persistence.default_max_state_bytes,
+        );
+        defer loaded.deinit();
+        switch (loaded) {
+            .missing => {
+                log.warn("named layout launch file not found name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout was not found.") catch {};
+                return false;
+            },
+            .oversized => {
+                log.warn("named layout launch file exceeds size limit name={s} path={s}", .{ name, path });
+                if (banner_host) |host| host.setBanner(.err, "Layout file is too large.") catch {};
+                return false;
+            },
+            .transient => |err| {
+                log.warn("named layout launch read failed name={s} path={s} err={}", .{ name, path, err });
+                if (banner_host) |host| host.setBanner(.err, "Layout could not be read.") catch {};
+                return false;
+            },
+            .corrupt => |err| {
+                const quarantined = self.quarantineInvalidNamedLayout(path, name, err);
+                if (banner_host) |host| host.setBanner(
+                    .err,
+                    if (quarantined)
+                        "Invalid layout was quarantined."
+                    else
+                        "Invalid layout could not be quarantined.",
+                ) catch {};
+                return false;
+            },
+            .loaded => |parsed| {
+                if (parsed.value.windows.len != 1) {
+                    const quarantined = self.quarantineInvalidNamedLayout(
+                        path,
+                        name,
+                        error.InvalidWindowCount,
+                    );
+                    if (banner_host) |host| host.setBanner(
+                        .err,
+                        if (quarantined)
+                            "Invalid layout was quarantined."
+                        else
+                            "Invalid layout could not be quarantined.",
+                    ) catch {};
+                    return false;
+                }
+                const surface = self.restoreSessionWindow(parsed.value.windows[0]) catch |err| {
+                    log.warn("named layout materialization failed name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
+                    return false;
+                };
+                self.activateSurface(surface);
+                return true;
+            },
+        }
+    }
+
+    fn quarantineInvalidNamedLayout(
+        self: *App,
+        path: []const u8,
+        name: []const u8,
+        parse_error: anyerror,
+    ) bool {
+        const destination = win32_session_persistence.quarantineCorruptFileAlloc(
+            self.core_app.alloc,
+            path,
+        ) catch |err| {
+            log.warn("named layout quarantine failed name={s} path={s} parse_err={} move_err={}", .{ name, path, parse_error, err });
+            return false;
+        };
+        defer self.core_app.alloc.free(destination);
+        log.warn("named layout quarantined invalid file name={s} path={s} parse_err={}", .{ name, destination, parse_error });
+        return true;
+    }
+
+    fn saveNamedLayout(self: *App, target: apprt.Target, name: []const u8) bool {
+        const surface = self.findSurfaceForTarget(target) orelse {
+            log.warn("named layout save has no target surface name={s}", .{name});
+            return false;
+        };
+        const host = surface.host orelse {
+            log.warn("named layout save target has no host name={s}", .{name});
+            return false;
+        };
+        win32_layouts.validateName(name) catch |err| {
+            log.warn("named layout save rejected invalid name name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Invalid layout name.") catch {};
+            return false;
+        };
+        const path = self.namedLayoutPath(name) catch |err| {
+            log.warn("named layout save path resolution failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout path is unavailable.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(path);
+
+        var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
+        defer arena.deinit();
+        const window = buildNamedLayoutWindow(arena.allocator(), host) catch |err| {
+            log.warn("named layout save snapshot failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        const layout_windows = [_]win32_session_state.Window{window};
+        const encoded = win32_session_state.encodeAlloc(
+            self.core_app.alloc,
+            .{ .windows = &layout_windows },
+        ) catch |err| {
+            log.warn("named layout save encode failed name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        defer self.core_app.alloc.free(encoded);
+        writePersistentFileAlloc(self.core_app.alloc, path, encoded) catch |err| {
+            log.warn("named layout save write failed name={s} path={s} err={}", .{ name, path, err });
+            host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        host.setBanner(.info, "Layout saved.") catch {};
+        return true;
     }
 
     fn restoreSessionState(self: *App) !bool {
@@ -3216,6 +3382,78 @@ pub const App = struct {
             window.state = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         }
         return window;
+    }
+
+    fn buildNamedLayoutWindow(
+        alloc: Allocator,
+        host: *Host,
+    ) !win32_session_state.Window {
+        const tab_count = hostSessionTabCount(host);
+        if (tab_count == 0) return error.EmptyTabs;
+        const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
+        var selected_tab: usize = 0;
+        var built: usize = 0;
+        for (host.tabs.items, 0..) |*tab, i| {
+            if (tabContainsQuickTerminal(tab)) continue;
+            if (i <= host.active_tab) selected_tab = built;
+            tabs[built] = try buildNamedLayoutTab(alloc, tab);
+            built += 1;
+        }
+        return .{
+            .selected_tab = selected_tab,
+            .tabs = tabs,
+        };
+    }
+
+    fn buildNamedLayoutTab(
+        alloc: Allocator,
+        tab: *const Tab,
+    ) !win32_session_state.Tab {
+        var selected_leaf: usize = 0;
+        var leaf_index: usize = 0;
+        for (tab.tree.nodes, 0..) |node, node_index| {
+            switch (node) {
+                .leaf => {},
+                .split => continue,
+            }
+            if (tab.focused.idx() == node_index) selected_leaf = leaf_index;
+            leaf_index += 1;
+        }
+        return .{
+            .selected_leaf = selected_leaf,
+            .layout = try buildNamedLayoutTree(alloc, tab),
+        };
+    }
+
+    fn buildNamedLayoutTree(
+        alloc: Allocator,
+        tab: *const Tab,
+    ) !win32_session_state.LayoutTree {
+        if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
+        const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
+        for (tab.tree.nodes, 0..) |node, index| {
+            nodes[index] = switch (node) {
+                // Intentionally enumerate the layout-safe pane fields. Never
+                // copy a session Pane, because session-only state must not leak
+                // into named layout files as the session schema evolves.
+                .leaf => |pane_surface| .{ .pane = .{
+                    .cwd = pane_surface.pwd,
+                    .profile = pane_surface.launch_profile_key,
+                    .title_override = pane_surface.title_override,
+                    .tab_title_override = pane_surface.tab_title_override,
+                } },
+                .split => |split| .{ .split = .{
+                    .axis = switch (split.layout) {
+                        .horizontal => .horizontal,
+                        .vertical => .vertical,
+                    },
+                    .ratio = @floatCast(split.ratio),
+                    .first = @intFromEnum(split.left),
+                    .second = @intFromEnum(split.right),
+                } },
+            };
+        }
+        return .{ .root = 0, .nodes = nodes };
     }
 
     fn buildSessionTab(
@@ -4080,9 +4318,19 @@ pub const App = struct {
                     },
                     else => return err,
                 };
+                if (config.@"launch-layout") |name| {
+                    const banner_host = if (self.findSurfaceForTarget(target)) |source| source.host else null;
+                    _ = self.launchNamedLayout(name, banner_host);
+                    return true;
+                }
                 _ = try self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = self.findSurfaceForTarget(target),
                 });
+                return true;
+            },
+
+            .save_layout => {
+                _ = self.saveNamedLayout(target, value.name);
                 return true;
             },
 
@@ -4175,9 +4423,13 @@ pub const App = struct {
             .config_change => {
                 switch (target) {
                     .app => {
-                        const config = try value.config.clone(self.core_app.alloc);
+                        var config = try value.config.clone(self.core_app.alloc);
                         const ssh_config_hosts_changed =
                             self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
+                        // CLI launch-layout is a one-shot startup/new-window
+                        // request. Config reload reparses the original argv, so
+                        // strip it before installing the long-lived app config.
+                        config.@"launch-layout" = null;
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
                         // config change supersedes that transaction: dismiss
@@ -7972,6 +8224,8 @@ const Host = struct {
     palette_catalog_label_count: usize = 0,
     /// Owned installed-theme snapshot backing exact catalog payload names.
     palette_installed_themes: ?[]themepkg.Entry = null,
+    /// Owned saved-layout names backing exact catalog payload names.
+    palette_layout_names: ?[][]u8 = null,
     palette_list_ranked: [win32_palette.max_ranked]PaletteRanked = undefined,
     palette_list_ranked_count: usize = 0,
     /// Rows that physically fit in the current palette List HWND. This can be
@@ -9236,6 +9490,7 @@ const Host = struct {
         catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.palette_catalog_label_count = 0;
         const action_batch = if (snap.commands.len > palette_action_capacity)
             error.StorageTooSmall
@@ -9377,6 +9632,9 @@ const Host = struct {
         }
 
         self.appendInstalledThemesToPalette(catalog);
+        // Layouts come last of the dynamic providers so a large layouts
+        // directory can never displace installed-theme rows near capacity.
+        self.appendSavedLayoutsToPalette(catalog);
 
         catalog.appendReviewedHelp() catch |err| {
             log.warn("palette help batch rejected err={}", .{err});
@@ -9710,6 +9968,18 @@ const Host = struct {
                     self.abortPaletteAction("Profile could not be opened; no terminal was changed.");
                 }
             },
+            .layout => |name| {
+                const owned_name = self.app.core_app.alloc.dupe(u8, name) catch |err| {
+                    log.warn("palette layout name copy failed name={s} err={}", .{ name, err });
+                    self.abortPaletteAction("Layout could not be prepared.");
+                    return;
+                };
+                defer self.app.core_app.alloc.free(owned_name);
+                self.hideOverlay();
+                if (!self.app.launchNamedLayout(owned_name, self)) {
+                    self.abortPaletteAction("Layout could not be opened.");
+                }
+            },
             .setting => |key| {
                 const field = std.meta.stringToEnum(win32_settings.SettingField, key) orelse {
                     self.abortPaletteAction("Setting is no longer available; reopen the palette.");
@@ -9790,10 +10060,54 @@ const Host = struct {
         };
     }
 
+    fn appendSavedLayoutsToPalette(self: *Host, catalog: *PaletteCatalog) void {
+        const alloc = self.app.core_app.alloc;
+        const directory = self.app.namedLayoutsDirectoryPath() orelse return;
+        defer alloc.free(directory);
+        // Only help and recent-command rows are still pending at this point;
+        // actions, tabs, panes, profiles, settings, and themes are already in.
+        const reserve_items = win32_palette.catalog.reviewed_help.len +
+            self.app.palette_mru.len;
+        const free_items = (catalog.capacity() -| catalog.items().len) -| reserve_items;
+        const free_labels = self.palette_catalog_labels.len -| self.palette_catalog_label_count;
+        const limit = @min(win32_layouts.max_palette_entries, @min(free_items, free_labels));
+        if (limit == 0) return;
+
+        const names = win32_layouts.listNamesAlloc(alloc, directory, limit) catch |err| {
+            log.warn("palette layout enumeration failed path={s} err={}", .{ directory, err });
+            return;
+        };
+        self.palette_layout_names = names;
+        for (names) |name| {
+            var title_buffer: [palette_catalog_label_bytes]u8 = undefined;
+            const raw_title = std.fmt.bufPrint(
+                &title_buffer,
+                "Launch layout: {s}",
+                .{name},
+            ) catch continue;
+            _ = self.appendPaletteDescriptor(.{
+                .item = .{
+                    .id = win32_palette.catalog.stableStringId(.layout, name),
+                    .title = self.storePaletteCatalogLabel(raw_title),
+                    .subtitle = "Layout",
+                    .keywords = "layout workspace window tabs splits launch",
+                },
+                .payload = .{ .layout = name },
+            });
+        }
+    }
+
     fn clearPaletteInstalledThemes(self: *Host) void {
         const installed = self.palette_installed_themes orelse return;
         self.palette_installed_themes = null;
         themepkg.freeList(self.app.core_app.alloc, installed);
+    }
+
+    fn clearPaletteLayoutNames(self: *Host) void {
+        const names = self.palette_layout_names orelse return;
+        self.palette_layout_names = null;
+        for (names) |name| self.app.core_app.alloc.free(name);
+        self.app.core_app.alloc.free(names);
     }
 
     fn selectedPaletteThemeName(self: *Host) ?[]const u8 {
@@ -10298,6 +10612,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.destroyChildControls();
 
         if (self.banner_text) |value| self.app.core_app.alloc.free(value);
@@ -11647,6 +11962,7 @@ const Host = struct {
         if (self.palette_catalog) |*catalog| catalog.reset();
         self.resetPaletteCatalogConfigOwner();
         self.clearPaletteInstalledThemes();
+        self.clearPaletteLayoutNames();
         self.invalidateOverlayTransitionPlacementCache();
         self.forceHostCompositionPaint();
         if (was_confirm or was_palette) {
@@ -30322,6 +30638,49 @@ test "win32 session state file write replaces through temp file" {
     while (try entries.next()) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "session-state.json.tmp-"));
     }
+}
+
+test "named layout fixture materializes through the session restore split tree builder" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const fixture =
+        \\{ "schema_version": 1, "windows": [ { "selected_tab": 0, "tabs": [ { "selected_leaf": 1, "layout": { "root": 0, "nodes": [
+        \\  { "split": { "axis": "horizontal", "ratio": 0.25, "first": 1, "second": 2 } },
+        \\  { "pane": { "cwd": "C:\\\\left", "profile": "pwsh" } },
+        \\  { "split": { "axis": "vertical", "ratio": 0.75, "first": 3, "second": 4 } },
+        \\  { "pane": { "cwd": "C:\\\\top-right", "title_override": "Top" } },
+        \\  { "pane": { "cwd": "C:\\\\bottom-right", "tab_title_override": "Project" } }
+        \\] } } ] } ] }
+    ;
+    var parsed = try win32_session_state.parseAlloc(std.testing.allocator, fixture);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.windows.len);
+
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var surface_c: Surface = undefined;
+    const node_surfaces = [_]?*Surface{
+        null,
+        &surface_a,
+        null,
+        &surface_b,
+        &surface_c,
+    };
+    var tree = try App.buildRestoredSessionSplitTree(
+        std.testing.allocator,
+        parsed.value.windows[0].tabs[0].layout,
+        &node_surfaces,
+    );
+    defer tree.deinit();
+
+    try std.testing.expectEqual(@as(usize, 5), tree.nodes.len);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.horizontal, tree.nodes[0].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.25), tree.nodes[0].split.ratio);
+    try std.testing.expectEqual(&surface_a, tree.nodes[1].leaf);
+    try std.testing.expectEqual(SplitTreeSurface.Split.Layout.vertical, tree.nodes[2].split.layout);
+    try std.testing.expectEqual(@as(f16, 0.75), tree.nodes[2].split.ratio);
+    try std.testing.expectEqual(&surface_b, tree.nodes[3].leaf);
+    try std.testing.expectEqual(&surface_c, tree.nodes[4].leaf);
 }
 
 test "win32 session restore rebuilds saved split tree shape" {

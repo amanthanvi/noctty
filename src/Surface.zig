@@ -5306,6 +5306,21 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .{ .parent = self },
             ),
 
+            .launch_layout => |name| {
+                const argument = try std.fmt.allocPrintSentinel(
+                    self.alloc,
+                    "--launch-layout={s}",
+                    .{name},
+                    0,
+                );
+                defer self.alloc.free(argument);
+                const arguments = [_][:0]const u8{argument};
+                try self.app.newWindow(
+                    self.rt_app,
+                    .{ .parent = self, .arguments = &arguments },
+                );
+            },
+
             // Undo and redo both support both surface and app targeting.
             // If we are triggering on a surface then we perform the
             // action with the surface target.
@@ -5330,6 +5345,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
     }
 
     switch (action.scoped(.surface).?) {
+        .save_layout => |name| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .save_layout,
+            .{ .name = name },
+        ),
+
         .csi, .esc => |data| {
             // We need to send the CSI/ESC sequence as a single write request.
             // If you split it across two then the shell can interpret it
