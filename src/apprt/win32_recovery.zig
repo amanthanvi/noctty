@@ -28,9 +28,18 @@ pub const Decision = enum {
     quarantine_session,
 };
 
+pub const StartupPhase = enum {
+    init,
+    window_created,
+    ready,
+    ready_persist_failed,
+};
+
 pub const StartupAttempt = struct {
     started_at_unix_ms: u64,
     ready_at_unix_ms: ?u64 = null,
+    phase: StartupPhase = .init,
+    last_win32_error: ?u32 = null,
 };
 
 pub const StartupAttemptRecord = struct {
@@ -206,6 +215,68 @@ pub fn markLatestReady(
         return error.ReadyBeforeStart;
     }
     latest.ready_at_unix_ms = ready_at_unix_ms;
+    latest.phase = .ready;
+    latest.last_win32_error = null;
+}
+
+/// Merge two independently observed histories. Duplicate start markers name
+/// the same attempt; retain the furthest lifecycle phase, any ready marker,
+/// and the raw persistence diagnosis. The newest bounded history is returned.
+pub fn mergeRecords(
+    first: StartupAttemptRecord,
+    second: StartupAttemptRecord,
+    out: []StartupAttempt,
+) (ValidationError || MergeReadyError)!StartupAttemptRecord {
+    try validate(first);
+    try validate(second);
+    if (out.len < max_attempts) return error.OutputBufferTooSmall;
+
+    var merged: [max_attempts * 2]StartupAttempt = undefined;
+    var count: usize = 0;
+    var first_i: usize = 0;
+    var second_i: usize = 0;
+    while (first_i < first.attempts.len or second_i < second.attempts.len) {
+        const next = if (second_i >= second.attempts.len or
+            (first_i < first.attempts.len and
+                first.attempts[first_i].started_at_unix_ms <= second.attempts[second_i].started_at_unix_ms))
+        blk: {
+            const value = first.attempts[first_i];
+            first_i += 1;
+            break :blk value;
+        } else blk: {
+            const value = second.attempts[second_i];
+            second_i += 1;
+            break :blk value;
+        };
+
+        if (count > 0 and merged[count - 1].started_at_unix_ms == next.started_at_unix_ms) {
+            const current = &merged[count - 1];
+            if (next.ready_at_unix_ms) |next_ready| {
+                if (current.ready_at_unix_ms == null or next_ready > current.ready_at_unix_ms.?) {
+                    current.ready_at_unix_ms = next_ready;
+                }
+            }
+            const phase_order = std.math.order(
+                @intFromEnum(next.phase),
+                @intFromEnum(current.phase),
+            );
+            if (phase_order == .gt) {
+                current.phase = next.phase;
+                current.last_win32_error = next.last_win32_error;
+            } else if (phase_order == .eq and current.last_win32_error == null) {
+                current.last_win32_error = next.last_win32_error;
+            }
+            continue;
+        }
+        merged[count] = next;
+        count += 1;
+    }
+
+    const retained_count = @min(count, max_attempts);
+    @memcpy(out[0..retained_count], merged[count - retained_count .. count]);
+    const result: StartupAttemptRecord = .{ .attempts = out[0..retained_count] };
+    try validate(result);
+    return result;
 }
 
 /// Merge the startup snapshot retained by this process with a freshly-read
@@ -220,51 +291,21 @@ pub fn mergeMarkReady(
     ready_at_unix_ms: u64,
     out: []StartupAttempt,
 ) (ValidationError || MergeReadyError)!StartupAttemptRecord {
-    try validate(disk);
-    try validate(memory);
-    if (out.len < max_attempts) return error.OutputBufferTooSmall;
-
-    var merged: [max_attempts * 2]StartupAttempt = undefined;
-    var count: usize = 0;
-    var disk_i: usize = 0;
-    var memory_i: usize = 0;
-    while (disk_i < disk.attempts.len or memory_i < memory.attempts.len) {
-        const next = if (memory_i >= memory.attempts.len or
-            (disk_i < disk.attempts.len and
-                disk.attempts[disk_i].started_at_unix_ms <= memory.attempts[memory_i].started_at_unix_ms))
-        blk: {
-            const value = disk.attempts[disk_i];
-            disk_i += 1;
-            break :blk value;
-        } else blk: {
-            const value = memory.attempts[memory_i];
-            memory_i += 1;
-            break :blk value;
-        };
-
-        if (count > 0 and merged[count - 1].started_at_unix_ms == next.started_at_unix_ms) {
-            if (merged[count - 1].ready_at_unix_ms == null and next.ready_at_unix_ms != null) {
-                merged[count - 1].ready_at_unix_ms = next.ready_at_unix_ms;
-            }
-            continue;
-        }
-        merged[count] = next;
-        count += 1;
-    }
+    const merged = try mergeRecords(disk, memory, out);
 
     var found = false;
-    for (merged[0..count]) |*attempt| {
+    for (out[0..merged.attempts.len]) |*attempt| {
         if (attempt.started_at_unix_ms != target_started_at_unix_ms) continue;
         if (ready_at_unix_ms < attempt.started_at_unix_ms) return error.ReadyBeforeStart;
         attempt.ready_at_unix_ms = ready_at_unix_ms;
+        attempt.phase = .ready;
+        attempt.last_win32_error = null;
         found = true;
         break;
     }
     if (!found) return error.TargetAttemptMissing;
 
-    const retained_count = @min(count, max_attempts);
-    @memcpy(out[0..retained_count], merged[count - retained_count .. count]);
-    const result: StartupAttemptRecord = .{ .attempts = out[0..retained_count] };
+    const result: StartupAttemptRecord = .{ .attempts = out[0..merged.attempts.len] };
     try validate(result);
     return result;
 }
@@ -359,14 +400,18 @@ pub fn quarantinePlanAlloc(
 test "win32 recovery record round trips strict schema v1" {
     const attempts = [_]StartupAttempt{
         .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
-        .{ .started_at_unix_ms = 200 },
+        .{
+            .started_at_unix_ms = 200,
+            .phase = .ready_persist_failed,
+            .last_win32_error = 32,
+        },
     };
     const record: StartupAttemptRecord = .{ .attempts = &attempts };
 
     const encoded = try encodeAlloc(std.testing.allocator, record);
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings(
-        "{\"schema_version\":1,\"attempts\":[{\"started_at_unix_ms\":100,\"ready_at_unix_ms\":120},{\"started_at_unix_ms\":200}]}",
+        "{\"schema_version\":1,\"attempts\":[{\"started_at_unix_ms\":100,\"ready_at_unix_ms\":120,\"phase\":\"init\"},{\"started_at_unix_ms\":200,\"phase\":\"ready_persist_failed\",\"last_win32_error\":32}]}",
         encoded,
     );
 
@@ -375,6 +420,21 @@ test "win32 recovery record round trips strict schema v1" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.attempts.len);
     try std.testing.expectEqual(@as(?u64, 120), parsed.value.attempts[0].ready_at_unix_ms);
     try std.testing.expectEqual(@as(?u64, null), parsed.value.attempts[1].ready_at_unix_ms);
+    try std.testing.expectEqual(StartupPhase.ready_persist_failed, parsed.value.attempts[1].phase);
+    try std.testing.expectEqual(@as(?u32, 32), parsed.value.attempts[1].last_win32_error);
+}
+
+test "win32 recovery schema v1 defaults diagnosis for legacy attempts" {
+    var parsed = try parseAlloc(
+        std.testing.allocator,
+        "{\"schema_version\":1,\"attempts\":[{\"started_at_unix_ms\":100},{\"started_at_unix_ms\":200,\"ready_at_unix_ms\":220}]}",
+    );
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(StartupPhase.init, parsed.value.attempts[0].phase);
+    try std.testing.expectEqual(@as(?u32, null), parsed.value.attempts[0].last_win32_error);
+    try std.testing.expectEqual(StartupPhase.init, parsed.value.attempts[1].phase);
+    try std.testing.expectEqual(@as(?u32, null), parsed.value.attempts[1].last_win32_error);
 }
 
 test "win32 recovery ready merge preserves a concurrent attempt" {
@@ -400,6 +460,62 @@ test "win32 recovery ready merge preserves a concurrent attempt" {
     try std.testing.expectEqual(@as(?u64, 250), merged.attempts[1].ready_at_unix_ms);
     try std.testing.expectEqual(@as(u64, 300), merged.attempts[2].started_at_unix_ms);
     try std.testing.expectEqual(@as(?u64, null), merged.attempts[2].ready_at_unix_ms);
+}
+
+test "win32 recovery merge carries failed persistence diagnosis into next startup" {
+    const disk_attempts = [_]StartupAttempt{
+        .{ .started_at_unix_ms = 100, .phase = .window_created },
+        .{ .started_at_unix_ms = 200, .phase = .window_created },
+    };
+    const pending_attempts = [_]StartupAttempt{
+        .{
+            .started_at_unix_ms = 200,
+            .ready_at_unix_ms = 240,
+            .phase = .ready_persist_failed,
+            .last_win32_error = 32,
+        },
+    };
+    var out: [max_attempts]StartupAttempt = undefined;
+    const merged = try mergeRecords(
+        .{ .attempts = &disk_attempts },
+        .{ .attempts = &pending_attempts },
+        &out,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), merged.attempts.len);
+    try std.testing.expectEqual(@as(?u64, 240), merged.attempts[1].ready_at_unix_ms);
+    try std.testing.expectEqual(StartupPhase.ready_persist_failed, merged.attempts[1].phase);
+    try std.testing.expectEqual(@as(?u32, 32), merged.attempts[1].last_win32_error);
+}
+
+test "win32 recovery merge keeps error coupled to furthest phase" {
+    const window_created = StartupAttempt{
+        .started_at_unix_ms = 200,
+        .phase = .window_created,
+        .last_win32_error = 5,
+    };
+    const ready_failed = StartupAttempt{
+        .started_at_unix_ms = 200,
+        .ready_at_unix_ms = 240,
+        .phase = .ready_persist_failed,
+        .last_win32_error = 32,
+    };
+    var out: [max_attempts]StartupAttempt = undefined;
+    const forward = try mergeRecords(
+        .{ .attempts = &.{window_created} },
+        .{ .attempts = &.{ready_failed} },
+        &out,
+    );
+    try std.testing.expectEqual(StartupPhase.ready_persist_failed, forward.attempts[0].phase);
+    try std.testing.expectEqual(@as(?u32, 32), forward.attempts[0].last_win32_error);
+
+    const reverse = try mergeRecords(
+        .{ .attempts = &.{ready_failed} },
+        .{ .attempts = &.{window_created} },
+        &out,
+    );
+    try std.testing.expectEqual(StartupPhase.ready_persist_failed, reverse.attempts[0].phase);
+    try std.testing.expectEqual(@as(?u32, 32), reverse.attempts[0].last_win32_error);
 }
 
 test "win32 recovery parser rejects unsupported and unknown schema" {

@@ -2563,6 +2563,41 @@ const RecoveryStartup = struct {
     decision: win32_recovery.Decision = .normal,
 };
 
+const recovery_safe_mode_banner =
+    "Safe mode: repeated incomplete startups. Built-in defaults are active; your config and saved session were not loaded. Restart noctty to retry normal startup.";
+const recovery_safe_mode_banner_w = blk: {
+    @setEvalBranchQuota(2_000);
+    break :blk std.unicode.utf8ToUtf16LeStringLiteral(recovery_safe_mode_banner);
+};
+const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
+
+fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
+    return if (decision == .safe_mode) recovery_safe_mode_banner else null;
+}
+
+fn recoverySafeModeNoticeThread() void {
+    _ = sys.MessageBoxW(
+        null,
+        recovery_safe_mode_banner_w,
+        recovery_safe_mode_caption_w,
+        c.MB_OK | c.MB_ICONINFORMATION | c.MB_SETFOREGROUND,
+    );
+}
+
+fn persistMergedRecoveryReadyAtPath(
+    alloc: Allocator,
+    path: []const u8,
+    startup: *RecoveryStartup,
+    merged: win32_recovery.StartupAttemptRecord,
+) !void {
+    var persisted_attempts: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
+    @memcpy(persisted_attempts[0..merged.attempts.len], merged.attempts);
+    const persisted = persisted_attempts[0..merged.attempts.len];
+    try persistRecoveryRecordAtPath(alloc, path, persisted);
+    @memcpy(startup.attempts[0..persisted.len], persisted);
+    startup.count = persisted.len;
+}
+
 fn unixMillis() u64 {
     return @intCast(@max(std.time.milliTimestamp(), 0));
 }
@@ -2645,29 +2680,94 @@ fn localAppDataPathAlloc(alloc: Allocator, name: []const u8) ?[]u8 {
 }
 
 fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
+    const path = localAppDataPathAlloc(alloc, "startup-attempts.json") orelse return .{};
+    defer alloc.free(path);
+    return beginRecoveryStartupAtPath(alloc, path, unixMillis());
+}
+
+fn beginRecoveryStartupAtPath(
+    alloc: Allocator,
+    path: []const u8,
+    now: u64,
+) RecoveryStartup {
     var result: RecoveryStartup = .{};
-    const now = unixMillis();
     var record: win32_recovery.StartupAttemptRecord = .{};
     var parsed_record: ?std.json.Parsed(win32_recovery.StartupAttemptRecord) = null;
     defer if (parsed_record) |*parsed| parsed.deinit();
 
-    if (localAppDataPathAlloc(alloc, "startup-attempts.json")) |path| {
-        defer alloc.free(path);
-        if (std.fs.openFileAbsolute(path, .{})) |file| {
-            defer file.close();
-            if (file.readToEndAlloc(alloc, 64 * 1024)) |raw| {
-                defer alloc.free(raw);
-                parsed_record = win32_recovery.parseAlloc(alloc, raw) catch |err| invalid: {
-                    log.warn("win32 recovery: ignored invalid startup history err={}", .{err});
-                    break :invalid null;
-                };
-                if (parsed_record) |*parsed| record = parsed.value;
-            } else |err| {
-                log.warn("win32 recovery: startup history read failed err={}", .{err});
-            }
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => log.warn("win32 recovery: startup history open failed err={}", .{err}),
+    if (std.fs.openFileAbsolute(path, .{})) |file| {
+        defer file.close();
+        if (file.readToEndAlloc(alloc, 64 * 1024)) |raw| {
+            defer alloc.free(raw);
+            parsed_record = win32_recovery.parseAlloc(alloc, raw) catch |err| invalid: {
+                log.warn("win32 recovery: ignored invalid startup history err={}", .{err});
+                break :invalid null;
+            };
+            if (parsed_record) |*parsed| record = parsed.value;
+        } else |err| {
+            log.warn("win32 recovery: startup history read failed err={}", .{err});
+        }
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => log.warn("win32 recovery: startup history open failed err={}", .{err}),
+    }
+
+    var retained_paths: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (retained_paths.items) |retained_path| alloc.free(retained_path);
+        retained_paths.deinit(alloc);
+    }
+    var retained_merge_buffers: [2][win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
+    var retained_merge_buffer_index: usize = 0;
+    if (std.fs.path.dirname(path)) |dir_path| retained: {
+        var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch |err| {
+            log.warn("win32 recovery: retained history directory open failed err={}", .{err});
+            break :retained;
+        };
+        defer dir.close();
+        const temporary_prefix = std.fmt.allocPrint(
+            alloc,
+            "{s}.tmp-",
+            .{std.fs.path.basename(path)},
+        ) catch break :retained;
+        defer alloc.free(temporary_prefix);
+        var entries = dir.iterate();
+        while (true) {
+            const entry = entries.next() catch |err| {
+                log.warn("win32 recovery: retained history enumeration failed err={}", .{err});
+                break;
+            } orelse break;
+            if (!std.mem.startsWith(u8, entry.name, temporary_prefix)) continue;
+            const retained_path = std.fs.path.join(alloc, &.{ dir_path, entry.name }) catch continue;
+            const retained_file = std.fs.openFileAbsolute(retained_path, .{}) catch {
+                alloc.free(retained_path);
+                continue;
+            };
+            defer retained_file.close();
+            const raw = retained_file.readToEndAlloc(alloc, 64 * 1024) catch {
+                alloc.free(retained_path);
+                continue;
+            };
+            defer alloc.free(raw);
+            var parsed = win32_recovery.parseAlloc(alloc, raw) catch {
+                alloc.free(retained_path);
+                continue;
+            };
+            defer parsed.deinit();
+            const merged = win32_recovery.mergeRecords(
+                record,
+                parsed.value,
+                &retained_merge_buffers[retained_merge_buffer_index],
+            ) catch {
+                alloc.free(retained_path);
+                continue;
+            };
+            retained_paths.append(alloc, retained_path) catch {
+                alloc.free(retained_path);
+                continue;
+            };
+            record = merged;
+            retained_merge_buffer_index = 1 - retained_merge_buffer_index;
         }
     }
 
@@ -2681,21 +2781,93 @@ fn beginRecoveryStartup(alloc: Allocator) RecoveryStartup {
         return result;
     };
     result.count = appended.attempts.len;
-    persistRecoveryRecord(alloc, result.attempts[0..result.count]) catch |err| {
+    persistRecoveryRecordAtPath(alloc, path, result.attempts[0..result.count]) catch |err| {
         log.warn("win32 recovery: startup marker persist failed err={}", .{err});
+        return result;
     };
+    for (retained_paths.items) |retained_path| {
+        win32_session_persistence.deleteFileIfPresent(retained_path) catch |err| {
+            log.warn("win32 recovery: merged retained history cleanup failed path={s} err={}", .{ retained_path, err });
+        };
+    }
     return result;
 }
 
-fn persistRecoveryRecord(
+fn persistRecoveryRecordAtPath(
     alloc: Allocator,
-    attempts: []const win32_recovery.StartupAttempt,
+    path: []const u8,
+    attempts: []win32_recovery.StartupAttempt,
 ) !void {
-    const path = localAppDataPathAlloc(alloc, "startup-attempts.json") orelse return;
-    defer alloc.free(path);
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
     const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
     defer alloc.free(encoded);
-    try writePersistentFileAlloc(alloc, path, encoded);
+    const nonce = unixMillis();
+    const temporary_path = try std.fmt.allocPrint(
+        alloc,
+        "{s}.tmp-{x}-{x}",
+        .{ path, sys.GetCurrentProcessId(), nonce },
+    );
+    defer alloc.free(temporary_path);
+    var atomic_failure: ?win32_session_persistence.AtomicReplaceFailure = null;
+    const disposition = win32_session_persistence.writeFileAtomicOrInPlace(
+        path,
+        temporary_path,
+        encoded,
+        &atomic_failure,
+    ) catch |err| {
+        if (atomic_failure) |failure| {
+            recordRecoveryPersistFailure(attempts, failure.move_error);
+            retainRecoveryPersistDiagnosis(
+                alloc,
+                temporary_path,
+                attempts,
+            );
+        }
+        return err;
+    };
+    switch (disposition) {
+        .atomic => {},
+        .in_place => |failure| {
+            recordRecoveryPersistFailure(attempts, failure.move_error);
+            const diagnosed = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
+            defer alloc.free(diagnosed);
+            win32_session_persistence.writeFileInPlace(path, diagnosed) catch |err| {
+                log.warn("win32 recovery: in-place diagnosis persist failed err={}", .{err});
+                retainRecoveryPersistDiagnosis(
+                    alloc,
+                    temporary_path,
+                    attempts,
+                );
+            };
+        },
+    }
+}
+
+fn recordRecoveryPersistFailure(
+    attempts: []win32_recovery.StartupAttempt,
+    raw_win32_error: u32,
+) void {
+    if (attempts.len == 0) return;
+    const latest = &attempts[attempts.len - 1];
+    if (latest.ready_at_unix_ms != null) latest.phase = .ready_persist_failed;
+    latest.last_win32_error = raw_win32_error;
+}
+
+fn retainRecoveryPersistDiagnosis(
+    alloc: Allocator,
+    temporary_path: []const u8,
+    attempts: []const win32_recovery.StartupAttempt,
+) void {
+    const diagnosed = win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts }) catch return;
+    defer alloc.free(diagnosed);
+    win32_session_persistence.writeFileInPlace(temporary_path, diagnosed) catch |err| {
+        log.warn("win32 recovery: retained diagnosis persist failed err={}", .{err});
+    };
 }
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
@@ -2987,6 +3159,7 @@ pub const App = struct {
     /// never forwarded through the serialized single-instance IPC channel.
     embedding_mode: bool = false,
     recovery_startup: RecoveryStartup = .{},
+    recovery_first_tick_completed: bool = false,
     /// Top-level shell composition only. Terminal child HWNDs retain their
     /// existing WGL/SwapBuffers ownership regardless of this backend state.
     shell_compositor_driver: win32_compositor_native.NativeDriver = undefined,
@@ -3145,6 +3318,15 @@ pub const App = struct {
             @tagName(compositor_status.state),
             if (compositor_status.fallback_reason) |reason| @tagName(reason) else null,
         });
+
+        // Core conditional configuration defaults to light. Synchronize it
+        // with Windows before the first surface is created so conditional
+        // themes and terminal color-scheme reports start on the right branch.
+        // No surfaces or hosts exist yet: the resulting app config-change is
+        // intentionally valid before `run`, and its topology loops are empty.
+        self.syncSystemColorScheme() catch |err| {
+            log.warn("initial win32 color scheme sync failed err={}", .{err});
+        };
     }
 
     /// Bring the STA apartment online for in-process COM consumers
@@ -3176,7 +3358,19 @@ pub const App = struct {
 
         try self.ensureWindowClass();
 
-        if (!self.embedding_mode and !self.safe_mode and try self.tryForwardStartupToExistingInstance()) {
+        const forwarded = if (self.embedding_mode or self.safe_mode)
+            false
+        else
+            self.tryForwardStartupToExistingInstance() catch |err| switch (err) {
+                // A busy or rejecting primary must not turn this launch into
+                // false crash-loop evidence. Continue as a local instance.
+                error.IPCFailed => failed: {
+                    log.warn("win32 startup forwarding failed; continuing locally", .{});
+                    break :failed false;
+                },
+                else => return err,
+            };
+        if (forwarded) {
             // Forwarding is a successful startup outcome for this process.
             // Mark it ready so repeated new-window launches cannot accumulate
             // false crash-loop evidence and trigger automatic safe mode.
@@ -3254,6 +3448,12 @@ pub const App = struct {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
+        if (self.windows.items.len > 0) self.markRecoveryWindowCreated();
+
+        if (recoverySafeModeNotice(self.recovery_startup.decision)) |notice| {
+            self.showRecoverySafeModeNotice(notice);
+        }
+
         if (!self.embedding_mode) self.initializeJumpList();
         if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
         if (!self.embedding_mode and self.global_hotkeys_dirty and self.windows.items.len == 0) {
@@ -3263,8 +3463,6 @@ pub const App = struct {
             };
         }
         if (!self.embedding_mode and self.windows.items.len == 0) self.startQuitTimer();
-
-        self.markRecoveryReady();
 
         var msg: MSG = undefined;
         while (true) {
@@ -3279,7 +3477,7 @@ pub const App = struct {
                         log.err("failed to sync win32 global hotkeys err={}", .{err});
                     };
                 }
-                try self.core_app.tick(self);
+                try self.tickCoreApp();
                 if (!self.running and self.windows.items.len == 0) break;
                 continue;
             }
@@ -3291,7 +3489,7 @@ pub const App = struct {
                     self.core_app.alloc.destroy(completion);
                 }
                 self.handleUpdateCheckCompletion(completion);
-                try self.core_app.tick(self);
+                try self.tickCoreApp();
                 if (!self.running and self.windows.items.len == 0) break;
                 continue;
             }
@@ -3303,7 +3501,7 @@ pub const App = struct {
                 if (!self.handleToastActivation(activation.*)) {
                     self.pending_toast_activation = activation.*;
                 }
-                try self.core_app.tick(self);
+                try self.tickCoreApp();
                 if (!self.running and self.windows.items.len == 0) break;
                 continue;
             }
@@ -3443,7 +3641,7 @@ pub const App = struct {
             // standard Win32 accessibility semantics.
             if (self.settings_window.hwnd) |settings_hwnd| {
                 if (sys.IsDialogMessageW(settings_hwnd, &msg) != 0) {
-                    try self.core_app.tick(self);
+                    try self.tickCoreApp();
                     continue;
                 }
             }
@@ -3458,7 +3656,7 @@ pub const App = struct {
                 };
             }
 
-            try self.core_app.tick(self);
+            try self.tickCoreApp();
 
             if (!self.running and self.windows.items.len == 0) break;
         }
@@ -3897,6 +4095,38 @@ pub const App = struct {
         log.warn("win32 session restore: quarantined unreadable state path={s} parse_err={}", .{ destination, parse_error });
     }
 
+    fn tickCoreApp(self: *App) !void {
+        try self.core_app.tick(self);
+        if (self.recovery_first_tick_completed) return;
+        // A launch is unresolved until the outer Win32 message loop completes
+        // its first core-app tick. Renderer and PTY work that continues on
+        // other threads after this boundary is outside recovery accounting.
+        self.recovery_first_tick_completed = true;
+        self.markRecoveryReady();
+    }
+
+    fn markRecoveryWindowCreated(self: *App) void {
+        if (self.recovery_startup.count == 0) return;
+        const current = self.recovery_startup.attempts[0..self.recovery_startup.count];
+        const latest = &current[current.len - 1];
+        if (latest.ready_at_unix_ms != null or latest.phase != .init) return;
+        const path = localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json") orelse return;
+        defer self.core_app.alloc.free(path);
+
+        var persisted: [win32_recovery.max_attempts]win32_recovery.StartupAttempt = undefined;
+        @memcpy(persisted[0..current.len], current);
+        persisted[current.len - 1].phase = .window_created;
+        persistRecoveryRecordAtPath(
+            self.core_app.alloc,
+            path,
+            persisted[0..current.len],
+        ) catch |err| {
+            log.warn("win32 recovery: window-created marker persist failed err={}", .{err});
+            return;
+        };
+        @memcpy(current, persisted[0..current.len]);
+    }
+
     fn markRecoveryReady(self: *App) void {
         if (self.recovery_startup.count == 0) return;
         const memory_attempts = self.recovery_startup.attempts[0..self.recovery_startup.count];
@@ -3937,11 +4167,13 @@ pub const App = struct {
             log.warn("win32 recovery: ready marker merge failed err={}", .{err});
             return;
         };
-        @memcpy(self.recovery_startup.attempts[0..merged.attempts.len], merged.attempts);
-        self.recovery_startup.count = merged.attempts.len;
-        persistRecoveryRecord(
+        const path = localAppDataPathAlloc(self.core_app.alloc, "startup-attempts.json") orelse return;
+        defer self.core_app.alloc.free(path);
+        persistMergedRecoveryReadyAtPath(
             self.core_app.alloc,
-            self.recovery_startup.attempts[0..self.recovery_startup.count],
+            path,
+            &self.recovery_startup,
+            merged,
         ) catch |err| log.warn("win32 recovery: ready marker persist failed err={}", .{err});
     }
 
@@ -4899,6 +5131,14 @@ pub const App = struct {
         try showInfoMessage(.app, "noctty", message);
     }
 
+    fn showRecoverySafeModeNotice(_: *App, _: []const u8) void {
+        var thread = std.Thread.spawn(.{}, recoverySafeModeNoticeThread, .{}) catch |err| {
+            log.warn("win32 recovery: safe-mode notice thread failed err={}", .{err});
+            return;
+        };
+        thread.detach();
+    }
+
     /// True when any user-facing top-level UI window is still alive —
     /// either a terminal Host or the settings window. The quit timer
     /// and message-loop exit check both use this so the app doesn't
@@ -5291,14 +5531,15 @@ pub const App = struct {
             },
 
             .reload_config => {
-                if (target != .app) return false;
                 if (value.soft) {
-                    try self.core_app.updateConfig(self, &self.config);
-                    if (self.config.@"app-notifications".@"config-reload") {
-                        try self.showDesktopNotification(.app, "noctty", "Configuration reloaded");
+                    switch (target) {
+                        .app => try self.core_app.updateConfig(self, &self.config),
+                        .surface => |core_surface| try core_surface.updateConfig(&self.config),
                     }
                     return true;
                 }
+
+                if (target != .app) return false;
 
                 // Same startup-cwd restoration dance as
                 // `settingsSaveAndReload`: `Config.load` calls
@@ -6591,6 +6832,18 @@ pub const App = struct {
                 log.warn("win32 scrollbar refresh failed err={}", .{err});
             };
         }
+    }
+
+    fn syncSystemColorScheme(self: *App) !void {
+        const scheme: apprt.ColorScheme = if (isSystemDarkMode()) .dark else .light;
+
+        // Surface state must change before the app-wide reload because
+        // App.updateConfig applies each surface's own conditional state and
+        // Termio reports mode 2031 only after installing that derived config.
+        for (self.windows.items) |surface| {
+            surface.core().colorSchemeCallback(scheme);
+        }
+        try self.core_app.colorSchemeEvent(self, scheme);
     }
 
     fn reconfigureTheme(self: *App) void {
@@ -11399,7 +11652,7 @@ const Host = struct {
                 .name = theme.name,
                 .display_name = self.storePaletteCatalogLabel(theme.name),
                 .description = switch (theme.location) {
-                    .user => "User theme",
+                    .user, .legacy_user => "User theme",
                     .resources => "Bundled theme",
                 },
                 .enabled = true,
@@ -18603,6 +18856,27 @@ fn isSystemDarkMode() bool {
     return data == 0; // 0 = dark mode, 1 = light mode
 }
 
+const immersive_color_set_w = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");
+
+fn settingChangeIsImmersiveColorSet(lParam: LPARAM) bool {
+    if (lParam == 0) return false;
+    const raw: usize = @bitCast(lParam);
+    const setting_name: [*:0]const u16 = @ptrFromInt(raw);
+    return std.mem.eql(
+        u16,
+        std.mem.span(setting_name),
+        immersive_color_set_w[0..immersive_color_set_w.len],
+    );
+}
+
+test "issue149 Windows setting change filters terminal color sync" {
+    const immersive = std.unicode.utf8ToUtf16LeStringLiteral("ImmersiveColorSet");
+    const unrelated = std.unicode.utf8ToUtf16LeStringLiteral("Environment");
+    try std.testing.expect(settingChangeIsImmersiveColorSet(@bitCast(@intFromPtr(immersive))));
+    try std.testing.expect(!settingChangeIsImmersiveColorSet(@bitCast(@intFromPtr(unrelated))));
+    try std.testing.expect(!settingChangeIsImmersiveColorSet(0));
+}
+
 fn readDynamicScrollbars(default_value: bool) bool {
     const subkey = std.unicode.utf8ToUtf16LeStringLiteral("Control Panel\\Accessibility");
     const value_name = std.unicode.utf8ToUtf16LeStringLiteral("DynamicScrollbars");
@@ -21931,6 +22205,11 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                 v.app.refreshSystemWheelSettings();
                 v.app.refreshSystemScrollbarPreference();
                 v.app.reconfigureTheme();
+                if (settingChangeIsImmersiveColorSet(lParam)) {
+                    v.app.syncSystemColorScheme() catch |err| {
+                        log.warn("win32 color scheme sync failed err={}", .{err});
+                    };
+                }
             }
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
@@ -34496,6 +34775,130 @@ test "win32 safe mode never mutates saved session state" {
 test "win32 layout action result propagates automation failure" {
     try std.testing.expect(try layoutActionResult(true));
     try std.testing.expectError(error.LayoutActionFailed, layoutActionResult(false));
+}
+
+test "win32 recovery failed ready persistence does not commit memory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("startup-attempts.json");
+    const target = try tmp.dir.realpathAlloc(std.testing.allocator, "startup-attempts.json");
+    defer std.testing.allocator.free(target);
+
+    var startup: RecoveryStartup = .{};
+    startup.attempts[0] = .{ .started_at_unix_ms = 100 };
+    startup.count = 1;
+    const merged_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 120 },
+    };
+
+    if (persistMergedRecoveryReadyAtPath(
+        std.testing.allocator,
+        target,
+        &startup,
+        .{ .attempts = &merged_attempts },
+    )) {
+        return error.TestExpectedError;
+    } else |_| {}
+    try std.testing.expectEqual(@as(?u64, null), startup.attempts[0].ready_at_unix_ms);
+}
+
+test "win32 recovery next startup folds retained diagnosis before append" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+    const pending = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp-dead-beef" });
+    defer std.testing.allocator.free(pending);
+
+    const disk_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .phase = .window_created },
+    };
+    const pending_attempts = [_]win32_recovery.StartupAttempt{
+        .{
+            .started_at_unix_ms = 100,
+            .ready_at_unix_ms = 150,
+            .phase = .ready_persist_failed,
+            .last_win32_error = 32,
+        },
+    };
+    const disk_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &disk_attempts });
+    defer std.testing.allocator.free(disk_json);
+    const pending_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &pending_attempts });
+    defer std.testing.allocator.free(pending_json);
+    try win32_session_persistence.writeFileInPlace(target, disk_json);
+    try win32_session_persistence.writeFileInPlace(pending, pending_json);
+
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    try std.testing.expectEqual(win32_recovery.Decision.normal, startup.decision);
+    try std.testing.expectEqual(@as(usize, 2), startup.count);
+    try std.testing.expectEqual(@as(?u64, 150), startup.attempts[0].ready_at_unix_ms);
+    try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, startup.attempts[0].phase);
+    try std.testing.expectEqual(@as(?u32, 32), startup.attempts[0].last_win32_error);
+    try std.testing.expectEqual(win32_recovery.StartupPhase.init, startup.attempts[1].phase);
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+}
+
+test "win32 recovery fallback failure is consumed by next startup" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+    const disk_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .phase = .window_created },
+    };
+    const disk_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &disk_attempts });
+    defer std.testing.allocator.free(disk_json);
+    try win32_session_persistence.writeFileInPlace(target, disk_json);
+
+    const target_w = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, target);
+    defer std.testing.allocator.free(target_w);
+    const held = windows.kernel32.CreateFileW(
+        target_w.ptr,
+        windows.GENERIC_READ,
+        windows.FILE_SHARE_READ,
+        null,
+        windows.OPEN_EXISTING,
+        windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == windows.INVALID_HANDLE_VALUE) return error.TestUnexpectedResult;
+    var ready_attempts = [_]win32_recovery.StartupAttempt{
+        .{
+            .started_at_unix_ms = 100,
+            .ready_at_unix_ms = 150,
+            .phase = .ready,
+        },
+    };
+    if (persistRecoveryRecordAtPath(std.testing.allocator, target, &ready_attempts)) {
+        _ = windows.CloseHandle(held);
+        return error.TestExpectedError;
+    } else |_| {
+        _ = windows.CloseHandle(held);
+    }
+    try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, ready_attempts[0].phase);
+    try std.testing.expect(ready_attempts[0].last_win32_error != null);
+
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    try std.testing.expectEqual(win32_recovery.Decision.normal, startup.decision);
+    try std.testing.expectEqual(@as(usize, 2), startup.count);
+    try std.testing.expectEqual(@as(?u64, 150), startup.attempts[0].ready_at_unix_ms);
+    try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, startup.attempts[0].phase);
+    try std.testing.expect(startup.attempts[0].last_win32_error != null);
+}
+
+test "win32 recovery safe mode always has a visible notice" {
+    try std.testing.expectEqualStrings(
+        recovery_safe_mode_banner,
+        recoverySafeModeNotice(.safe_mode).?,
+    );
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.normal));
+    try std.testing.expectEqual(@as(?[]const u8, null), recoverySafeModeNotice(.quarantine_session));
 }
 
 test "win32 explicit startup flows bypass session restore" {

@@ -1732,6 +1732,81 @@ test "semantic output capture follows real stream handler parser" {
     try std.testing.expectEqual(@as(usize, 0), combining_noop.len);
 }
 
+fn expectIssue149Write(mailbox: *termio.Mailbox, expected: []const u8) !void {
+    const message = switch (mailbox.*) {
+        .spsc => |*value| value.queue.pop() orelse return error.TestExpectedEqual,
+    };
+    switch (message) {
+        .write_small => |value| try std.testing.expectEqualStrings(
+            expected,
+            value.data[0..value.len],
+        ),
+        .write_alloc => |value| {
+            defer value.alloc.free(value.data);
+            try std.testing.expectEqualStrings(expected, value.data);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "issue149 OSC 10 and 11 queries format replies and preserve terminators" {
+    var term = try terminal.Terminal.init(std.testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .colors = .{
+            .foreground = .init(.{ .r = 0x12, .g = 0x34, .b = 0x56 }),
+            .background = .init(.{ .r = 0xAB, .g = 0xCD, .b = 0xEF }),
+            .cursor = .unset,
+            .palette = .default,
+        },
+    });
+    defer term.deinit(std.testing.allocator);
+
+    var termio_mailbox = try termio.Mailbox.initSPSC(std.testing.allocator);
+    defer termio_mailbox.deinit(std.testing.allocator);
+    var renderer_mutex: std.Thread.Mutex = .{};
+    var renderer_state: renderer.State = undefined;
+    renderer_state.mutex = &renderer_mutex;
+    renderer_state.terminal = &term;
+    var rt_app: apprt.App = undefined;
+    rt_app.windows = .empty;
+    rt_app.ui_thread_id = 0;
+    const AppMailbox = @TypeOf(@as(apprt.surface.Mailbox, undefined).app);
+    const app_queue = try AppMailbox.Queue.create(std.testing.allocator);
+    defer app_queue.destroy(std.testing.allocator);
+    const surface_mailbox: apprt.surface.Mailbox = .{
+        .surface = undefined,
+        .app = .{
+            .rt_app = &rt_app,
+            .mailbox = app_queue,
+        },
+    };
+
+    var stream = StreamHandler.Stream.initAlloc(std.testing.allocator, .{
+        .alloc = std.testing.allocator,
+        .size = undefined,
+        .terminal = &term,
+        .termio_mailbox = &termio_mailbox,
+        .surface_mailbox = surface_mailbox,
+        .renderer_state = &renderer_state,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = .block,
+        .default_cursor_blink = true,
+        .enquiry_response = "",
+        .osc_color_report_format = .@"16-bit",
+        .clipboard_write = .allow,
+    });
+    defer stream.deinit();
+
+    stream.nextSlice("\x1b]10;?\x07");
+    try expectIssue149Write(&termio_mailbox, "\x1b]10;rgb:1212/3434/5656\x07");
+
+    stream.handler.osc_color_report_format = .@"8-bit";
+    stream.nextSlice("\x1b]11;?\x1b\\");
+    try expectIssue149Write(&termio_mailbox, "\x1b]11;rgb:ab/cd/ef\x1b\\");
+}
+
 test "decodeOsc7PathForPwd handles Windows file URI with a single fallback allocator" {
     const uri = try internal_os.uri.parse("file://localhost/C:/Users/test/project", .{
         .mac_address = false,

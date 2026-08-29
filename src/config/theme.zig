@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const build_config = @import("../build_config.zig");
 const global_state = &@import("../global.zig").state;
 const internal_os = @import("../os/main.zig");
 const cli_diags = @import("../cli/diagnostics.zig");
@@ -9,6 +10,7 @@ const cli_diags = @import("../cli/diagnostics.zig");
 /// defines the priority of theme search (from top to bottom).
 pub const Location = enum {
     user, // XDG config dir
+    legacy_user, // Legacy Ghostty XDG config dir
     resources, // Ghostty resources dir
 
     /// Returns the directory for the given theme based on this location type.
@@ -25,9 +27,10 @@ pub const Location = enum {
         arena_alloc: Allocator,
     ) error{OutOfMemory}!?[]const u8 {
         return switch (self) {
-            .user => user: {
+            .user, .legacy_user => user: {
                 const subdir = std.fs.path.join(arena_alloc, &.{
-                    "ghostty", "themes",
+                    if (self == .user) build_config.data_dir_name else "ghostty",
+                    "themes",
                 }) catch return error.OutOfMemory;
 
                 break :user internal_os.xdg.config(
@@ -124,8 +127,8 @@ pub fn list(alloc: Allocator, arena_alloc: Allocator) ![]Entry {
 }
 
 /// Enumerate installed theme files with the same directory priority as
-/// `open`: user themes first, bundled resources second. Duplicate names keep
-/// the first location so user themes shadow bundled themes deterministically.
+/// `open`: current user themes first, legacy user themes second, and bundled
+/// resources last. Duplicate names keep the first location deterministically.
 pub fn listFromDirectories(alloc: Allocator, dirs: []const Directory) ![]Entry {
     var themes: std.ArrayList(Entry) = .empty;
     errdefer {
@@ -370,9 +373,18 @@ test "theme list keeps first duplicate by directory priority" {
     defer tmp.cleanup();
 
     try tmp.dir.makePath("user");
+    try tmp.dir.makePath("legacy-user");
     try tmp.dir.makePath("resources");
     {
         var file = try tmp.dir.createFile("user/Dupe", .{});
+        file.close();
+    }
+    {
+        var file = try tmp.dir.createFile("legacy-user/Dupe", .{});
+        file.close();
+    }
+    {
+        var file = try tmp.dir.createFile("legacy-user/LegacyWins", .{});
         file.close();
     }
     {
@@ -380,26 +392,57 @@ test "theme list keeps first duplicate by directory priority" {
         file.close();
     }
     {
-        var file = try tmp.dir.createFile("resources/Other", .{});
+        var file = try tmp.dir.createFile("resources/LegacyWins", .{});
         file.close();
     }
 
     var user_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var legacy_user_buf: [std.fs.max_path_bytes]u8 = undefined;
     var resources_buf: [std.fs.max_path_bytes]u8 = undefined;
     const user_dir = try tmp.dir.realpath("user", &user_buf);
+    const legacy_user_dir = try tmp.dir.realpath("legacy-user", &legacy_user_buf);
     const resources_dir = try tmp.dir.realpath("resources", &resources_buf);
     const entries = try listFromDirectories(std.testing.allocator, &.{
         .{ .location = .user, .dir = user_dir },
+        .{ .location = .legacy_user, .dir = legacy_user_dir },
         .{ .location = .resources, .dir = resources_dir },
     });
     defer freeList(std.testing.allocator, entries);
 
     try std.testing.expectEqual(@as(usize, 2), entries.len);
+    var found_user = false;
+    var found_legacy_user = false;
     for (entries) |entry| {
         if (std.mem.eql(u8, entry.name, "Dupe")) {
             try std.testing.expectEqual(Location.user, entry.location);
-            return;
+            found_user = true;
+        } else if (std.mem.eql(u8, entry.name, "LegacyWins")) {
+            try std.testing.expectEqual(Location.legacy_user, entry.location);
+            found_legacy_user = true;
         }
     }
-    return error.TestExpectedEqual;
+    try std.testing.expect(found_user);
+    try std.testing.expect(found_legacy_user);
+}
+
+test "issue149 user theme locations prefer noctty before legacy ghostty" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var it: LocationIterator = .{ .arena_alloc = arena.allocator() };
+    const user = (try it.next()).?;
+    try std.testing.expectEqual(Location.user, user.location);
+    try std.testing.expectEqualStrings("themes", std.fs.path.basename(user.dir));
+    try std.testing.expectEqualStrings(
+        build_config.data_dir_name,
+        std.fs.path.basename(std.fs.path.dirname(user.dir).?),
+    );
+
+    const legacy_user = (try it.next()).?;
+    try std.testing.expectEqual(Location.legacy_user, legacy_user.location);
+    try std.testing.expectEqualStrings("themes", std.fs.path.basename(legacy_user.dir));
+    try std.testing.expectEqualStrings(
+        "ghostty",
+        std.fs.path.basename(std.fs.path.dirname(legacy_user.dir).?),
+    );
 }
