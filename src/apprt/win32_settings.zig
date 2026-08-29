@@ -56,6 +56,7 @@ const HMONITOR = sys.HMONITOR;
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 const WS_MAXIMIZEBOX: u32 = 0x00010000;
 const WS_EX_APPWINDOW: u32 = 0x00040000;
+const WS_EX_CLIENTEDGE: u32 = 0x00000200;
 const WS_VSCROLL: u32 = 0x00200000;
 const SW_HIDE: i32 = 0;
 const SW_SHOWNORMAL: i32 = 1;
@@ -63,6 +64,8 @@ const SW_RESTORE: i32 = 9;
 const DT_WORDBREAK: u32 = 0x0010;
 const DT_CALCRECT: u32 = 0x0400;
 const DT_NOPREFIX: u32 = 0x0800;
+const DT_SINGLELINE: u32 = 0x0020;
+const DT_VCENTER: u32 = 0x0004;
 const GWLP_USERDATA: i32 = -21;
 const GWLP_WNDPROC: i32 = -4;
 const GWL_STYLE: i32 = -16;
@@ -80,11 +83,15 @@ const WM_GETOBJECT: UINT = 0x003D;
 const WM_COMMAND: UINT = 0x0111;
 const WM_SIZE: UINT = 0x0005;
 const WM_SETFOCUS: UINT = 0x0007;
+const WM_KILLFOCUS: UINT = 0x0008;
 const WM_VSCROLL: UINT = 0x0115;
 const WM_MOUSEWHEEL: UINT = 0x020A;
+const WM_MOUSEMOVE: UINT = 0x0200;
+const WM_MOUSELEAVE: UINT = 0x02A3;
 const WM_GETMINMAXINFO: UINT = 0x0024;
 const WM_DPICHANGED: UINT = 0x02E0;
 const WM_SETFONT: UINT = 0x0030;
+const WM_GETFONT: UINT = 0x0031;
 const WM_SETTINGCHANGE: UINT = 0x001A;
 const WM_SYSCOLORCHANGE: UINT = 0x0015;
 const WM_THEMECHANGED: UINT = 0x031A;
@@ -98,6 +105,16 @@ const WM_APP: UINT = 0x8000;
 // Keep Settings-private window messages out of the App pump's reserved
 // WM_APP+1..+6 range; the pump consumes those before DispatchMessageW.
 const WM_SETTINGS_CLOSE_NOW: UINT = WM_APP + 0x100;
+const WM_SETTINGS_PROOF_VIEWPORT_TOP: UINT = WM_APP + 0x101;
+const WM_SETTINGS_PROOF_VIEWPORT_BOTTOM: UINT = WM_APP + 0x102;
+const WM_SETTINGS_PROOF_KILLFOCUS_COUNT: UINT = WM_APP + 0x103;
+const WM_SETTINGS_PROOF_REDRAW_SUCCEEDED: UINT = WM_APP + 0x104;
+const WM_SETTINGS_PROOF_UPDATE_PENDING: UINT = WM_APP + 0x105;
+const WM_SETTINGS_PROOF_LIVE_FOCUS_RING: UINT = WM_APP + 0x106;
+const WM_SETTINGS_PROOF_CHILD: UINT = WM_APP + 0x107;
+const WM_SETTINGS_PROOF_SET_FOCUS: UINT = WM_APP + 0x108;
+const WM_SETTINGS_PROOF_PAINT_COUNT: UINT = WM_APP + 0x109;
+const WM_SETTINGS_PROOF_LAYOUT_REDRAW_SUCCEEDED: UINT = WM_APP + 0x10A;
 const WS_CHILD: u32 = 0x40000000;
 const WS_VISIBLE: u32 = 0x10000000;
 const WS_TABSTOP: u32 = 0x00010000;
@@ -165,12 +182,16 @@ const EM_LIMITTEXT: UINT = 0x00C5;
 const BS_AUTOCHECKBOX: u32 = 0x3;
 const BM_SETCHECK: UINT = 0x00F1;
 const BM_GETCHECK: UINT = 0x00F0;
+const BM_GETSTATE: UINT = 0x00F2;
+const BM_SETSTATE: UINT = 0x00F3;
 const BST_CHECKED: usize = 1;
 const BST_UNCHECKED: usize = 0;
+const BST_PUSHED: usize = 0x0004;
 const CB_ADDSTRING: UINT = 0x0143;
 const CB_SETCURSEL: UINT = 0x014E;
 const CB_GETCURSEL: UINT = 0x0147;
 const CB_RESETCONTENT: UINT = 0x014B;
+const CB_SETITEMHEIGHT: UINT = 0x0153;
 const CBS_DROPDOWNLIST: u32 = 0x3;
 const CBS_HASSTRINGS: u32 = 0x200;
 const OBJID_CLIENT: u32 = @bitCast(@as(i32, -4));
@@ -183,6 +204,7 @@ const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
 const SPI_GETWORKAREA: UINT = 0x0030;
 const MONITOR_DEFAULTTONEAREST: u32 = 2;
 const SWP_NOZORDER: UINT = 0x0004;
+const SWP_NOREDRAW: UINT = 0x0008;
 const SWP_NOACTIVATE: UINT = 0x0010;
 const SB_VERT: c_int = 1;
 const SB_LINEUP: usize = 0;
@@ -193,6 +215,15 @@ const SB_THUMBPOSITION: usize = 4;
 const SB_THUMBTRACK: usize = 5;
 const SB_TOP: usize = 6;
 const SB_BOTTOM: usize = 7;
+const SIF_RANGE: u32 = 0x0001;
+const SIF_PAGE: u32 = 0x0002;
+const SIF_POS: u32 = 0x0004;
+const SIF_TRACKPOS: u32 = 0x0010;
+const TME_LEAVE: u32 = 0x00000002;
+const RDW_INVALIDATE: u32 = 0x0001;
+const RDW_ERASE: u32 = 0x0004;
+const RDW_ALLCHILDREN: u32 = 0x0080;
+const RDW_UPDATENOW: u32 = 0x0100;
 
 /// Sections on the left rail. Section-specific controls (e.g. the
 /// "Open in default editor" button in Advanced) are shown / hidden on
@@ -247,7 +278,7 @@ pub const Section = enum(u32) {
     fn placeholderText(self: Section) []const u8 {
         return switch (self) {
             .appearance => "Font family, size, theme, opacity, cursor, padding, and background blur.",
-            .terminal => "Scrollback, close confirmation, copy behavior, OSC 52 clipboard policy, link opening, and notifications.",
+            .terminal => "Scrollback, close confirmation, copy behavior, and clipboard trimming.",
             .shell => "Default shell command and shell integration detection mode.",
             .privacy => "Clipboard access, link handling, and notification privacy controls.",
             .updates => "Automatic update policy and release channel.",
@@ -507,6 +538,76 @@ fn comboIndexFromLinkPreviews(value: Config.LinkPreviews) usize {
     };
 }
 
+// Win32 entry points used by this module. `win32/sys.zig` owns the shared
+// declarations; the few below it does not export stay local.
+
+const RegisterClassExW = sys.RegisterClassExW;
+const CreateWindowExW = sys.CreateWindowExW;
+const DefWindowProcW = sys.DefWindowProcW;
+const CallWindowProcW = sys.CallWindowProcW;
+const ShowWindow = sys.ShowWindow;
+const EnableWindow = sys.EnableWindow;
+const SetForegroundWindow = sys.SetForegroundWindow;
+const GetFocus = sys.GetFocus;
+const GetParent = sys.GetParent;
+const IsChild = sys.IsChild;
+const IsWindowVisible = sys.IsWindowVisible;
+const IsWindowEnabled = sys.IsWindowEnabled;
+const PostMessageW = sys.PostMessageW;
+const DestroyWindow = sys.DestroyWindow;
+const GetClientRect = sys.GetClientRect;
+const GetWindowRect = sys.GetWindowRect;
+const ScreenToClient = sys.ScreenToClient;
+const GetDpiForWindow = sys.GetDpiForWindow;
+const SetWindowPos = sys.SetWindowPos;
+const SystemParametersInfoW = sys.SystemParametersInfoW;
+const MonitorFromWindow = sys.MonitorFromWindow;
+const GetMonitorInfoW = sys.GetMonitorInfoW;
+const LoadCursorW = sys.LoadCursorW;
+const SetWindowLongPtrW = sys.SetWindowLongPtrW;
+const GetWindowLongPtrW = sys.GetWindowLongPtrW;
+const BeginPaint = sys.BeginPaint;
+const EndPaint = sys.EndPaint;
+const GetDC = sys.GetDC;
+const ReleaseDC = sys.ReleaseDC;
+const DrawTextW = sys.DrawTextW;
+const IsWindow = sys.IsWindow;
+const IsIconic = sys.IsIconic;
+const InvalidateRect = sys.InvalidateRect;
+const RedrawWindow = sys.RedrawWindow;
+const GetWindowTextW = sys.GetWindowTextW;
+const SendMessageW = sys.SendMessageW;
+const ShowScrollBar = sys.ShowScrollBar;
+const TrackMouseEvent = sys.TrackMouseEvent;
+const SetWindowRgn = sys.SetWindowRgn;
+const GetSysColor = sys.GetSysColor;
+const NotifyWinEvent = sys.NotifyWinEvent;
+const EnumChildWindows = sys.EnumChildWindows;
+const CreateFontW = sys.CreateFontW;
+const DeleteObject = sys.DeleteObject;
+const SelectObject = sys.SelectObject;
+const CreateRectRgn = sys.CreateRectRgn;
+const FillRect = sys.FillRect;
+const GetStockObject = sys.GetStockObject;
+const SetDCBrushColor = sys.SetDCBrushColor;
+const CreateSolidBrush = sys.CreateSolidBrush;
+const SetBkColor = sys.SetBkColor;
+const SetTextColor = sys.SetTextColor;
+const SetBkMode = sys.SetBkMode;
+const MoveWindow = sys.MoveWindow;
+
+extern "user32" fn AdjustWindowRectExForDpi(lpRect: *RECT, dwStyle: u32, bMenu: BOOL, dwExStyle: u32, dpi: UINT) callconv(.winapi) BOOL;
+extern "user32" fn GetUpdateRect(hWnd: HWND, lpRect: ?*RECT, bErase: BOOL) callconv(.winapi) BOOL;
+extern "user32" fn SetScrollInfo(hWnd: HWND, nBar: c_int, lpsi: *const SCROLLINFO, redraw: BOOL) callconv(.winapi) c_int;
+extern "user32" fn GetScrollInfo(hWnd: HWND, nBar: c_int, lpsi: *SCROLLINFO) callconv(.winapi) BOOL;
+extern "user32" fn FrameRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) callconv(.winapi) i32;
+extern "gdi32" fn EnumFontFamiliesExW(
+    hdc: HDC,
+    logfont: *LOGFONTW,
+    callback: *const fn (*const LOGFONTW, ?*const anyopaque, u32, LPARAM) callconv(.winapi) c_int,
+    lParam: LPARAM,
+    flags: u32,
+) callconv(.winapi) c_int;
 const DC_BRUSH: i32 = 18;
 const TRANSPARENT: c_int = 1;
 const COLOR_WINDOW: c_int = 5;
@@ -514,6 +615,8 @@ const COLOR_WINDOWTEXT: c_int = 8;
 const COLOR_BTNFACE: c_int = 15;
 const COLOR_GRAYTEXT: c_int = 17;
 const COLOR_BTNTEXT: c_int = 18;
+const COLOR_HIGHLIGHT: c_int = 13;
+const COLOR_HIGHLIGHTTEXT: c_int = 14;
 
 const PAINTSTRUCT = win32_types.PAINTSTRUCT;
 const CREATESTRUCTW = win32_types.CREATESTRUCTW;
@@ -527,39 +630,46 @@ const MINMAXINFO = extern struct {
     ptMaxTrackSize: POINT,
 };
 const MONITORINFO = sys.MONITORINFO;
+const TRACKMOUSEEVENT = sys.TRACKMOUSEEVENT;
+const LOGFONTW = sys.LOGFONTW;
+const SCROLLINFO = extern struct {
+    cbSize: u32,
+    fMask: u32,
+    nMin: i32,
+    nMax: i32,
+    nPage: u32,
+    nPos: i32,
+    nTrackPos: i32,
+};
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.settings");
 const edit_text_max_code_units: usize = 4096;
 const edit_text_max_utf8: usize = edit_text_max_code_units * 3;
 
-const settings_label_specs = [_]struct { section: Section, text: []const u8 }{
-    .{ .section = .terminal, .text = "Scrollback limit (rows, 0 = unlimited)" },
-    .{ .section = .terminal, .text = "Close confirmation" },
-    .{ .section = .terminal, .text = "Copy on select" },
-    .{ .section = .terminal, .text = "Clipboard trimming" },
-    .{ .section = .appearance, .text = "Font family fallbacks (comma-separated)" },
-    .{ .section = .appearance, .text = "Font size (pt)" },
-    .{ .section = .appearance, .text = "Terminal theme name, absolute path, or light/dark pair" },
-    .{ .section = .appearance, .text = "Background opacity (0.0 .. 1.0)" },
-    .{ .section = .appearance, .text = "Window theme" },
-    .{ .section = .appearance, .text = "Cursor style" },
-    .{ .section = .appearance, .text = "Window padding X (left/right or single value)" },
-    .{ .section = .appearance, .text = "Window padding Y (top/bottom or single value)" },
-    .{ .section = .appearance, .text = "Window padding balance" },
-    .{ .section = .appearance, .text = "Background blur" },
-    .{ .section = .shell, .text = "Default command (blank = auto-detect)" },
-    .{ .section = .shell, .text = "Shell integration" },
-    .{ .section = .privacy, .text = "OSC 52 clipboard read requests" },
-    .{ .section = .privacy, .text = "OSC 52 clipboard write requests" },
-    .{ .section = .privacy, .text = "Clickable URL opening" },
-    .{ .section = .privacy, .text = "Link preview popups" },
-    .{ .section = .privacy, .text = "Terminal notifications" },
-    .{ .section = .privacy, .text = "Clipboard-copy notification" },
-    .{ .section = .privacy, .text = "Config-reload notification" },
-    .{ .section = .updates, .text = "Auto-update mode" },
-    .{ .section = .updates, .text = "Auto-update channel" },
-    .{ .section = .keybindings, .text = "Keybind configuration" },
-    .{ .section = .advanced, .text = "Full config editor" },
+const settings_label_specs = [_][]const u8{
+    "Scrollback limit (rows, 0 = unlimited)",
+    "Close confirmation",
+    "Copy on select",
+    "Font family fallbacks (comma-separated)",
+    "Font size (pt)",
+    "Terminal theme name, absolute path, or light/dark pair",
+    "Background opacity (0.0 .. 1.0)",
+    "Window theme",
+    "Cursor style",
+    "Window padding X (left/right or single value)",
+    "Window padding Y (top/bottom or single value)",
+    "Window padding balance",
+    "Default command (blank = auto-detect)",
+    "Shell integration",
+    "OSC 52 clipboard read requests",
+    "OSC 52 clipboard write requests",
+    "Clickable URL opening",
+    "Link preview popups",
+    "Notifications",
+    "Auto-update mode",
+    "Auto-update channel",
+    "Keybind configuration",
+    "Full config editor",
 };
 
 const settings_text_count = 5 + settings_label_specs.len;
@@ -602,9 +712,79 @@ const settings_control_specs = [_]struct { role: SettingsControlRole, name: []co
 const settings_control_count = settings_control_specs.len;
 const settings_mutable_control_count = 25;
 // Save, conflict resolution, and dirty-close actions remain fixed in the
-// header; only the leading content controls are clipped to the viewport.
+// action bar; only the leading content controls are clipped to the viewport.
 const settings_header_control_count = 6;
 const settings_clipped_control_count = settings_control_count - settings_header_control_count;
+
+const FormItem = struct {
+    control_index: usize,
+    label_index: ?usize = null,
+    checkbox: bool = false,
+};
+const terminal_form_items = [_]FormItem{
+    .{ .control_index = 0, .label_index = 0 },
+    .{ .control_index = 1, .label_index = 1 },
+    .{ .control_index = 2, .label_index = 2 },
+    .{ .control_index = 3, .checkbox = true },
+};
+const appearance_form_items = [_]FormItem{
+    .{ .control_index = 4, .label_index = 3 },
+    .{ .control_index = 5, .label_index = 4 },
+    .{ .control_index = 6, .label_index = 5 },
+    .{ .control_index = 7, .label_index = 6 },
+    .{ .control_index = 8, .label_index = 7 },
+    .{ .control_index = 9, .label_index = 8 },
+    .{ .control_index = 10, .label_index = 9 },
+    .{ .control_index = 11, .label_index = 10 },
+    .{ .control_index = 12, .label_index = 11 },
+    .{ .control_index = 13, .checkbox = true },
+};
+const shell_form_items = [_]FormItem{
+    .{ .control_index = 14, .label_index = 12 },
+    .{ .control_index = 15, .label_index = 13 },
+};
+const privacy_form_items = [_]FormItem{
+    .{ .control_index = 16, .label_index = 14 },
+    .{ .control_index = 17, .label_index = 15 },
+    .{ .control_index = 18, .label_index = 16 },
+    .{ .control_index = 19, .label_index = 17 },
+    .{ .control_index = 20, .label_index = 18, .checkbox = true },
+    .{ .control_index = 21, .checkbox = true },
+    .{ .control_index = 22, .checkbox = true },
+};
+const updates_form_items = [_]FormItem{
+    .{ .control_index = 23, .label_index = 19 },
+    .{ .control_index = 24, .label_index = 20 },
+};
+const keybindings_form_items = [_]FormItem{.{ .control_index = 25, .label_index = 21 }};
+const advanced_form_items = [_]FormItem{.{ .control_index = 26, .label_index = 22 }};
+fn formItemsForSection(section: Section) []const FormItem {
+    return switch (section) {
+        .terminal => &terminal_form_items,
+        .appearance => &appearance_form_items,
+        .shell => &shell_form_items,
+        .privacy => &privacy_form_items,
+        .updates => &updates_form_items,
+        .keybindings => &keybindings_form_items,
+        .advanced => &advanced_form_items,
+    };
+}
+
+const settings_max_form_items = appearance_form_items.len;
+
+fn controlIndexIsCheckbox(index: usize) bool {
+    for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+        if (item.control_index == index) return item.checkbox;
+    };
+    return false;
+}
+
+fn labelIndexIsCheckbox(index: usize) bool {
+    for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+        if (item.label_index == index) return item.checkbox;
+    };
+    return false;
+}
 
 /// Error set returned from `AppHandle.saveAndReload`. The settings
 /// window surfaces these inline so users can re-try without losing
@@ -649,6 +829,8 @@ const SettingsThemeAdapter = struct {
             .button_face = 0,
             .button_text = 0,
             .gray_text = 0,
+            .highlight = 0,
+            .highlight_text = 0,
         },
         false,
     ),
@@ -828,6 +1010,7 @@ pub const SettingsWindow = struct {
     btn_section_keybindings: ?HWND = null,
     btn_section_advanced: ?HWND = null,
     section_button_prev_proc: ?*const anyopaque = null,
+    section_hovered: ?HWND = null,
     section_uia_group: ?*win32_uia.SettingsSectionGroupProvider = null,
     section_uia_providers: [section_count]?*win32_uia.SettingsSectionProvider = [_]?*win32_uia.SettingsSectionProvider{null} ** section_count,
     btn_save: ?HWND = null,
@@ -848,6 +1031,8 @@ pub const SettingsWindow = struct {
     control_uia_prev_procs: [settings_control_count]?*const anyopaque = [_]?*const anyopaque{null} ** settings_control_count,
     control_uia_providers: [settings_control_count]?*win32_uia.SettingsControlProvider = [_]?*win32_uia.SettingsControlProvider{null} ** settings_control_count,
     ui_font: HGDIOBJ = null,
+    secondary_font: HGDIOBJ = null,
+    emphasis_font: HGDIOBJ = null,
     header_font: HGDIOBJ = null,
     theme_adapter: SettingsThemeAdapter = .{},
     close_prompt_measure_width: i32 = -1,
@@ -922,6 +1107,13 @@ pub const SettingsWindow = struct {
     active_owned_conflict_field: ?OwnedSettingField = null,
     content_scroll_y: i32 = 0,
     content_scroll_max: i32 = 0,
+    proof_viewport_top: i32 = 0,
+    proof_viewport_bottom: i32 = 0,
+    proof_killfocus_count: u32 = 0,
+    proof_redraw_succeeded: bool = false,
+    proof_update_pending: bool = false,
+    proof_paint_count: u32 = 0,
+    proof_layout_redraw_succeeded: bool = false,
     /// Guard flag so the EN_CHANGE handler doesn't fire a cascade
     /// when we programmatically set the EDIT text on open.
     suppress_edit_events: bool = false,
@@ -945,7 +1137,11 @@ pub const SettingsWindow = struct {
     fn deleteUiFont(self: *SettingsWindow) void {
         if (self.ui_font) |font| _ = sys.DeleteObject(font);
         self.ui_font = null;
-        if (self.header_font) |font| _ = sys.DeleteObject(font);
+        if (self.secondary_font) |font| _ = DeleteObject(font);
+        self.secondary_font = null;
+        if (self.emphasis_font) |font| _ = DeleteObject(font);
+        self.emphasis_font = null;
+        if (self.header_font) |font| _ = DeleteObject(font);
         self.header_font = null;
     }
 
@@ -968,6 +1164,7 @@ pub const SettingsWindow = struct {
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.section_button_prev_proc = null;
+        self.section_hovered = null;
         self.text_uia_prev_proc = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
@@ -1195,7 +1392,7 @@ pub const SettingsWindow = struct {
     }
 
     fn surfaceNextValidation(self: *SettingsWindow, focus: bool) void {
-        self.syncConflictControls();
+        const visibility_changed = self.syncConflictControls();
         switch (self.nextStatus()) {
             .raw_validation => |field| {
                 const destination = self.rawScalarDestination(field);
@@ -1204,8 +1401,8 @@ pub const SettingsWindow = struct {
                 self.setStatus(self.raw_scalar_error[@intFromEnum(field)].?);
                 if (focus) if (destination.hwnd) |control| {
                     self.setActiveSection(destination.section);
-                    _ = sys.SetFocus(control);
                     self.ensureControlVisible(control);
+                    _ = SetFocus(control);
                 };
             },
             .owned_validation => |control| {
@@ -1213,8 +1410,11 @@ pub const SettingsWindow = struct {
                 self.validation_control = control;
                 self.setStatus(self.owned_validation_message orelse "A settings value is invalid.");
                 if (focus) {
-                    _ = sys.SetFocus(control);
+                    if (self.controlIndex(control)) |index| {
+                        if (self.controlSection(index)) |section| self.setActiveSection(section);
+                    }
                     self.ensureControlVisible(control);
+                    _ = SetFocus(control);
                 }
             },
             .conflict => |field| {
@@ -1237,6 +1437,8 @@ pub const SettingsWindow = struct {
                 self.setStatus("");
             },
         }
+        self.syncStatusFont();
+        if (visibility_changed) layoutChildren(self);
         self.updateSaveEnabled();
     }
 
@@ -1523,8 +1725,8 @@ pub const SettingsWindow = struct {
         self.surfaceNextValidation(false);
     }
 
-    fn syncConflictControls(self: *SettingsWindow) void {
-        const transaction = &(self.transaction orelse return);
+    fn syncConflictControls(self: *SettingsWindow) bool {
+        const transaction = &(self.transaction orelse return false);
         var next: ?SettingField = null;
         for (transaction.entries) |entry| if (entry.conflict) {
             next = entry.field;
@@ -1543,9 +1745,14 @@ pub const SettingsWindow = struct {
         const conflict_button_focused = focused != null and
             (focused == self.btn_conflict_keep or focused == self.btn_conflict_use_disk);
         const show: i32 = if (!self.close_prompt_visible and (next != null or next_owned != null)) SW_SHOWNORMAL else SW_HIDE;
-        if (self.btn_conflict_keep) |button| _ = sys.ShowWindow(button, show);
-        if (self.btn_conflict_use_disk) |button| _ = sys.ShowWindow(button, show);
+        const visibility_changed = if (self.btn_conflict_keep) |button|
+            (IsWindowVisible(button) != 0) != (show != SW_HIDE)
+        else
+            false;
+        if (self.btn_conflict_keep) |button| _ = ShowWindow(button, show);
+        if (self.btn_conflict_use_disk) |button| _ = ShowWindow(button, show);
         if (show == SW_HIDE and conflict_button_focused) self.focusAfterConflictResolution();
+        return visibility_changed;
     }
 
     fn focusAfterConflictResolution(self: *SettingsWindow) void {
@@ -1628,6 +1835,7 @@ pub const SettingsWindow = struct {
         self.btn_section_keybindings = null;
         self.btn_section_advanced = null;
         self.section_button_prev_proc = null;
+        self.section_hovered = null;
         self.btn_save = null;
         self.btn_keybindings_editor = null;
         self.btn_conflict_keep = null;
@@ -1832,6 +2040,18 @@ pub const SettingsWindow = struct {
         return null;
     }
 
+    fn formItems(self: *const SettingsWindow) []const FormItem {
+        return formItemsForSection(self.active_section);
+    }
+
+    fn controlSection(self: *const SettingsWindow, control_index: usize) ?Section {
+        _ = self;
+        for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+            if (item.control_index == control_index) return section;
+        };
+        return null;
+    }
+
     fn initializeControlUiaProviders(self: *SettingsWindow) void {
         self.releaseControlUiaProviders();
         if (!self.canInitializeCustomUiaProviders()) return;
@@ -1887,7 +2107,6 @@ pub const SettingsWindow = struct {
 
     fn initializeSectionUiaProviders(self: *SettingsWindow) void {
         self.releaseSectionUiaProviders();
-        self.section_button_prev_proc = null;
         if (!self.canInitializeCustomUiaProviders()) return;
         const parent = self.hwnd orelse return;
         const group = win32_uia.SettingsSectionGroupProvider.create(
@@ -1910,29 +2129,32 @@ pub const SettingsWindow = struct {
                 std.log.warn("settings section UIA provider unavailable section={s} err={}", .{ section.headerText(), err });
                 continue;
             };
-            const previous = sys.SetWindowLongPtrW(
+            self.section_uia_providers[@intFromEnum(section)] = provider;
+            group.setSection(@intFromEnum(section), provider);
+        }
+        group.setSelected(@intFromEnum(self.active_section));
+    }
+
+    fn subclassSectionButtons(self: *SettingsWindow) void {
+        self.section_button_prev_proc = null;
+        for (std.enums.values(Section)) |section| {
+            const button = self.sectionButton(section) orelse continue;
+            const previous = SetWindowLongPtrW(
                 button,
                 GWLP_WNDPROC,
                 @as(LONG_PTR, @intCast(@intFromPtr(&settingsSectionButtonProc))),
             );
-            if (previous == 0) {
-                _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
-                continue;
-            }
+            if (previous == 0) continue;
             const proc: *const anyopaque = @ptrFromInt(@as(usize, @intCast(previous)));
             if (self.section_button_prev_proc) |existing| {
                 if (existing != proc) {
-                    _ = sys.SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
-                    _ = win32_uia.SettingsSectionProvider.Release(&provider.base);
+                    _ = SetWindowLongPtrW(button, GWLP_WNDPROC, previous);
                     continue;
                 }
             } else {
                 self.section_button_prev_proc = proc;
             }
-            self.section_uia_providers[@intFromEnum(section)] = provider;
-            group.setSection(@intFromEnum(section), provider);
         }
-        group.setSelected(@intFromEnum(self.active_section));
     }
 
     fn setActiveSection(self: *SettingsWindow, next: Section) void {
@@ -1953,7 +2175,6 @@ pub const SettingsWindow = struct {
         const clamped = std.math.clamp(next, 0, self.content_scroll_max);
         if (clamped == self.content_scroll_y) return;
         self.content_scroll_y = clamped;
-        if (self.hwnd) |hwnd| _ = sys.SetScrollPos(hwnd, SB_VERT, clamped, 1);
         layoutChildren(self);
         if (self.hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 1);
     }
@@ -1978,52 +2199,92 @@ pub const SettingsWindow = struct {
 
     fn recreateUiFont(self: *SettingsWindow) void {
         const hwnd = self.hwnd orelse return;
-        const next = sys.CreateFontW(
-            -sys.MulDiv(9, @intCast(self.dpi), 72),
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            5,
-            0,
-            std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI"),
-        ) orelse return;
-        const next_header = sys.CreateFontW(
-            -sys.MulDiv(12, @intCast(self.dpi), 72),
-            0,
-            0,
-            0,
-            600,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0,
-            5,
-            0,
-            std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI"),
-        );
+        const variable_face = std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI Variable Text");
+        const fallback_face = std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
+        const face = if (fontFaceAvailable(hwnd, variable_face)) variable_face else fallback_face;
+        const next = createSettingsFont(self.dpi, 13, 400, face) orelse return;
+        const next_secondary = createSettingsFont(self.dpi, 12, 400, face) orelse {
+            _ = DeleteObject(next);
+            return;
+        };
+        const next_emphasis = createSettingsFont(self.dpi, 13, 600, face) orelse {
+            _ = DeleteObject(next_secondary);
+            _ = DeleteObject(next);
+            return;
+        };
+        const next_header = createSettingsFont(self.dpi, 16, 600, face) orelse {
+            _ = DeleteObject(next_emphasis);
+            _ = DeleteObject(next_secondary);
+            _ = DeleteObject(next);
+            return;
+        };
         const previous = self.ui_font;
+        const previous_secondary = self.secondary_font;
+        const previous_emphasis = self.emphasis_font;
         const previous_header = self.header_font;
         self.ui_font = next;
+        self.secondary_font = next_secondary;
+        self.emphasis_font = next_emphasis;
         self.header_font = next_header;
         self.close_prompt_measure_width = -1;
         self.close_prompt_measure_height = 0;
-        _ = sys.EnumChildWindows(hwnd, applyChildFont, @bitCast(@intFromPtr(next)));
-        if (next_header) |font| {
-            if (self.text_header) |header| {
-                _ = sys.SendMessageW(header, WM_SETFONT, @intFromPtr(font), 1);
+        _ = EnumChildWindows(hwnd, applyChildFont, @bitCast(@intFromPtr(next)));
+        if (self.text_header) |header| _ = SendMessageW(header, WM_SETFONT, @intFromPtr(next_header), 1);
+        if (self.text_summary) |text| _ = SendMessageW(text, WM_SETFONT, @intFromPtr(next_secondary), 1);
+        for (self.field_labels) |label| {
+            if (label) |control| _ = SendMessageW(control, WM_SETFONT, @intFromPtr(next_secondary), 1);
+        }
+        for (0..settings_clipped_control_count) |index| if (controlIndexIsCheckbox(index)) {
+            if (self.controlHwnd(index)) |control| _ = SendMessageW(control, WM_SETFONT, @intFromPtr(next_secondary), 1);
+        };
+        if (self.text_close_prompt) |prompt| _ = SendMessageW(prompt, WM_SETFONT, @intFromPtr(next_emphasis), 1);
+        self.syncStatusFont();
+        if (previous) |font| _ = DeleteObject(font);
+        if (previous_secondary) |font| _ = DeleteObject(font);
+        if (previous_emphasis) |font| _ = DeleteObject(font);
+        if (previous_header) |font| _ = DeleteObject(font);
+        self.updateComboMetrics();
+    }
+
+    fn syncStatusFont(self: *SettingsWindow) void {
+        const status = self.text_status orelse return;
+        const font = switch (self.nextStatus()) {
+            .conflict, .owned_conflict => self.emphasis_font,
+            .raw_validation, .owned_validation, .none => self.secondary_font,
+        };
+        if (font) |value| {
+            const current: LRESULT = @bitCast(@intFromPtr(value));
+            if (SendMessageW(status, WM_GETFONT, 0, 0) != current) {
+                _ = SendMessageW(status, WM_SETFONT, @intFromPtr(value), 1);
             }
         }
-        if (previous) |font| _ = sys.DeleteObject(font);
-        if (previous_header) |font| _ = sys.DeleteObject(font);
+    }
+
+    fn comboControls(self: *const SettingsWindow) [12]?HWND {
+        return .{
+            self.combo_confirm_close,
+            self.combo_copy_on_select,
+            self.combo_window_theme,
+            self.combo_shell_integ,
+            self.combo_clipboard_read,
+            self.combo_clipboard_write,
+            self.combo_link_url,
+            self.combo_link_previews,
+            self.combo_cursor_style,
+            self.combo_pad_balance,
+            self.combo_auto_update,
+            self.combo_auto_update_channel,
+        };
+    }
+
+    fn updateComboMetrics(self: *SettingsWindow) void {
+        const field_height: LPARAM = self.px(settings_control_height);
+        const item_height: LPARAM = self.px(settings_combo_item_height);
+        for (self.comboControls()) |combo| if (combo) |control| {
+            _ = SendMessageW(control, CB_SETITEMHEIGHT, std.math.maxInt(WPARAM), field_height);
+            _ = SendMessageW(control, CB_SETITEMHEIGHT, 0, item_height);
+            win32_theme.WindowThemeAdapter.applyNativeCombo(control, self.theme_adapter.colors);
+        };
     }
 
     pub fn themeChanged(self: *SettingsWindow) void {
@@ -2051,17 +2312,27 @@ pub const SettingsWindow = struct {
         return win32_theme.settingsColors(
             theme,
             .{
-                .window = sys.GetSysColor(COLOR_WINDOW),
-                .window_text = sys.GetSysColor(COLOR_WINDOWTEXT),
-                .button_face = sys.GetSysColor(COLOR_BTNFACE),
-                .button_text = sys.GetSysColor(COLOR_BTNTEXT),
-                .gray_text = sys.GetSysColor(COLOR_GRAYTEXT),
+                .window = GetSysColor(COLOR_WINDOW),
+                .window_text = GetSysColor(COLOR_WINDOWTEXT),
+                .button_face = GetSysColor(COLOR_BTNFACE),
+                .button_text = GetSysColor(COLOR_BTNTEXT),
+                .gray_text = GetSysColor(COLOR_GRAYTEXT),
+                .highlight = GetSysColor(COLOR_HIGHLIGHT),
+                .highlight_text = GetSysColor(COLOR_HIGHLIGHTTEXT),
             },
             high_contrast,
         );
     }
 
     fn ensureControlVisible(self: *SettingsWindow, control: HWND) void {
+        var is_form_control = false;
+        for (self.formItems()) |item| {
+            if (self.controlHwnd(item.control_index) == control) {
+                is_form_control = true;
+                break;
+            }
+        }
+        if (!is_form_control) return;
         const hwnd = self.hwnd orelse return;
         var child_rect: RECT = undefined;
         var client_rect: RECT = undefined;
@@ -2072,7 +2343,7 @@ pub const SettingsWindow = struct {
         const top = child_origin.y;
         const bottom = top + child_rect.bottom - child_rect.top;
         const viewport_top = settingsContentViewportTop(self, client_rect);
-        const viewport_bottom = client_rect.bottom - self.px(side_pad);
+        const viewport_bottom = settingsContentViewportBottom(self, client_rect);
         if (top < viewport_top) {
             self.setContentScroll(self.content_scroll_y - (viewport_top - top));
         } else if (bottom > viewport_bottom) {
@@ -2081,14 +2352,6 @@ pub const SettingsWindow = struct {
     }
 
     fn applySectionVisibility(self: *SettingsWindow) void {
-        const show_advanced: i32 = if (self.active_section == .advanced) SW_SHOWNORMAL else SW_HIDE;
-        const show_terminal: i32 = if (self.active_section == .terminal) SW_SHOWNORMAL else SW_HIDE;
-        const show_appearance: i32 = if (self.active_section == .appearance) SW_SHOWNORMAL else SW_HIDE;
-        const show_shell: i32 = if (self.active_section == .shell) SW_SHOWNORMAL else SW_HIDE;
-        const show_privacy: i32 = if (self.active_section == .privacy) SW_SHOWNORMAL else SW_HIDE;
-        const show_updates: i32 = if (self.active_section == .updates) SW_SHOWNORMAL else SW_HIDE;
-        const show_keybindings: i32 = if (self.active_section == .keybindings) SW_SHOWNORMAL else SW_HIDE;
-
         for (std.enums.values(Section)) |section| {
             if (self.sectionButton(section)) |button| {
                 _ = sys.SendMessageW(
@@ -2102,36 +2365,17 @@ pub const SettingsWindow = struct {
                 if (next_style != style) _ = sys.SetWindowLongPtrW(button, GWL_STYLE, @intCast(next_style));
             }
         }
-
-        if (self.btn_open_editor) |btn| _ = sys.ShowWindow(btn, show_advanced);
-        if (self.btn_keybindings_editor) |btn| _ = sys.ShowWindow(btn, show_keybindings);
-        if (self.edit_scrollback) |e| _ = sys.ShowWindow(e, show_terminal);
-        if (self.combo_confirm_close) |e| _ = sys.ShowWindow(e, show_terminal);
-        if (self.combo_copy_on_select) |e| _ = sys.ShowWindow(e, show_terminal);
-        if (self.chk_trim_trail) |e| _ = sys.ShowWindow(e, show_terminal);
-        if (self.chk_desktop_notifications) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.chk_app_notify_clipboard) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.chk_app_notify_config) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.combo_clipboard_read) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.combo_clipboard_write) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.combo_link_url) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.combo_link_previews) |e| _ = sys.ShowWindow(e, show_privacy);
-        if (self.edit_font_family) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_font_size) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_theme) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_bg_opacity) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.combo_window_theme) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.combo_cursor_style) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_pad_x) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_pad_y) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.chk_bg_blur) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.combo_pad_balance) |e| _ = sys.ShowWindow(e, show_appearance);
-        if (self.edit_command) |e| _ = sys.ShowWindow(e, show_shell);
-        if (self.combo_shell_integ) |e| _ = sys.ShowWindow(e, show_shell);
-        if (self.combo_auto_update) |e| _ = sys.ShowWindow(e, show_updates);
-        if (self.combo_auto_update_channel) |e| _ = sys.ShowWindow(e, show_updates);
-        for (settings_label_specs, self.field_labels) |spec, label| {
-            if (label) |hwnd| _ = sys.ShowWindow(hwnd, if (spec.section == self.active_section) SW_SHOWNORMAL else SW_HIDE);
+        for (0..settings_clipped_control_count) |index| if (self.controlHwnd(index)) |control| {
+            _ = ShowWindow(control, SW_HIDE);
+        };
+        for (self.field_labels) |label| {
+            if (label) |control| _ = ShowWindow(control, SW_HIDE);
+        }
+        for (self.formItems()) |item| {
+            if (self.controlHwnd(item.control_index)) |control| _ = ShowWindow(control, SW_SHOWNORMAL);
+            if (item.label_index) |index| {
+                if (self.field_labels[index]) |label| _ = ShowWindow(label, SW_SHOWNORMAL);
+            }
         }
     }
 
@@ -2968,13 +3212,13 @@ pub const SettingsWindow = struct {
         self.close_prompt_visible = false;
         self.close_after_save = false;
         self.close_prior_focus = null;
-        if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_HIDE);
-        if (self.btn_close_save) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.btn_close_discard) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.btn_close_keep_editing) |button| _ = sys.ShowWindow(button, SW_HIDE);
-        if (self.text_status) |text| _ = sys.ShowWindow(text, SW_SHOWNORMAL);
-        if (self.btn_save) |button| _ = sys.ShowWindow(button, SW_SHOWNORMAL);
-        self.syncConflictControls();
+        if (self.text_close_prompt) |text| _ = ShowWindow(text, SW_HIDE);
+        if (self.btn_close_save) |button| _ = ShowWindow(button, SW_HIDE);
+        if (self.btn_close_discard) |button| _ = ShowWindow(button, SW_HIDE);
+        if (self.btn_close_keep_editing) |button| _ = ShowWindow(button, SW_HIDE);
+        if (self.text_status) |text| _ = ShowWindow(text, SW_SHOWNORMAL);
+        if (self.btn_save) |button| _ = ShowWindow(button, SW_SHOWNORMAL);
+        _ = self.syncConflictControls();
         self.updateSaveEnabled();
         layoutChildren(self);
 
@@ -3174,7 +3418,10 @@ pub const SettingsWindow = struct {
             .auto_update_channel => .{ .section = .updates, .hwnd = self.combo_auto_update_channel },
         };
         self.setActiveSection(destination.section);
-        if (destination.hwnd) |control| _ = sys.SetFocus(control);
+        if (destination.hwnd) |control| {
+            self.ensureControlVisible(control);
+            _ = SetFocus(control);
+        }
     }
 
     /// Bring the settings window up. Idempotent: a subsequent open
@@ -3234,16 +3481,18 @@ pub const SettingsWindow = struct {
         }
 
         const title = std.unicode.utf8ToUtf16LeStringLiteral("noctty settings");
+        const window_style = (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_VSCROLL;
+        const initial_outer = settingsOuterSizeForClient(960, 640, 96, window_style, WS_EX_APPWINDOW);
         const owner_hwnd = if (self.handle.ownerWindow) |get_owner| get_owner(self.handle.ctx) else null;
         const hwnd = sys.CreateWindowExW(
             WS_EX_APPWINDOW,
             class_name,
             title,
-            (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX) | WS_VSCROLL,
+            window_style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            960,
-            840,
+            initial_outer.x,
+            initial_outer.y,
             // Keep settings independent from terminal lifetime. The owner HWND
             // is used only to choose/center on the originating monitor below;
             // an owned top-level window is destroyed when its owner dies and
@@ -3277,9 +3526,10 @@ pub const SettingsWindow = struct {
         if (have_work_area) {
             const work_width = work_area.right - work_area.left;
             const work_height = work_area.bottom - work_area.top;
-            const width = @min(self.px(960), @divTrunc(work_width * 9, 10));
-            const height = @min(self.px(840), @divTrunc(work_height * 9, 10));
-            _ = sys.SetWindowPos(
+            const intended = settingsOuterSizeForClient(960, 640, self.dpi, window_style, WS_EX_APPWINDOW);
+            const width = @min(intended.x, work_width);
+            const height = @min(intended.y, work_height);
+            _ = SetWindowPos(
                 hwnd,
                 null,
                 work_area.left + @divTrunc(work_width - width, 2),
@@ -3298,7 +3548,7 @@ pub const SettingsWindow = struct {
         if (self.text_close_prompt) |text| _ = sys.ShowWindow(text, SW_HIDE);
         self.text_help = makeStatic(hwnd, self.handle.hinstance, "");
         for (settings_label_specs, 0..) |spec, i| {
-            self.field_labels[i] = makeStatic(hwnd, self.handle.hinstance, spec.text);
+            self.field_labels[i] = makeStatic(hwnd, self.handle.hinstance, spec);
         }
         self.initializeTextUiaProviders();
 
@@ -3312,6 +3562,7 @@ pub const SettingsWindow = struct {
         self.btn_section_updates = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.updates);
         self.btn_section_keybindings = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.keybindings);
         self.btn_section_advanced = makeSectionButton(hwnd, self.handle.hinstance, btn_class, Section.advanced);
+        self.subclassSectionButtons();
         self.initializeSectionUiaProviders();
 
         // "Open in default editor" button — escape hatch for users
@@ -3326,7 +3577,7 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            220,
+            settings_field_max_width,
             32,
             hwnd,
             @ptrFromInt(BTN_OPEN_EDITOR),
@@ -3344,7 +3595,7 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            90,
+            96,
             32,
             hwnd,
             @ptrFromInt(BTN_SAVE),
@@ -3358,8 +3609,8 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            110,
-            28,
+            112,
+            32,
             hwnd,
             @ptrFromInt(BTN_CONFLICT_KEEP),
             self.handle.hinstance,
@@ -3372,8 +3623,8 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            110,
-            28,
+            112,
+            32,
             hwnd,
             @ptrFromInt(BTN_CONFLICT_USE_DISK),
             self.handle.hinstance,
@@ -3400,7 +3651,7 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            130,
+            128,
             32,
             hwnd,
             @ptrFromInt(BTN_CLOSE_DISCARD),
@@ -3414,7 +3665,7 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            110,
+            112,
             32,
             hwnd,
             @ptrFromInt(BTN_CLOSE_KEEP_EDITING),
@@ -3430,7 +3681,7 @@ pub const SettingsWindow = struct {
             WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
             0,
             0,
-            220,
+            settings_field_max_width,
             32,
             hwnd,
             @ptrFromInt(BTN_KEYBINDINGS_EDITOR),
@@ -3440,27 +3691,27 @@ pub const SettingsWindow = struct {
 
         // Scrollback limit EDIT. Lives in the Terminal section. Digit-
         // only input via ES_NUMBER; EN_CHANGE syncs into `pending`.
-        self.edit_scrollback = makeEdit(hwnd, self.handle.hinstance, EDIT_SCROLLBACK, 200, ES_NUMBER);
+        self.edit_scrollback = makeEdit(hwnd, self.handle.hinstance, EDIT_SCROLLBACK, ES_NUMBER);
 
         // font-family EDIT. Comma-separated fallback families.
-        self.edit_font_family = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_FAMILY, 300, 0);
+        self.edit_font_family = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_FAMILY, 0);
 
         // font-size EDIT. Appearance section. We accept floats via a
         // plain EDIT (not ES_NUMBER — which rejects '.') and validate
         // on EN_CHANGE.
-        self.edit_font_size = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_SIZE, 160, 0);
+        self.edit_font_size = makeEdit(hwnd, self.handle.hinstance, EDIT_FONT_SIZE, 0);
 
         // theme EDIT. Accepts a built-in/custom name or light/dark pair.
-        self.edit_theme = makeEdit(hwnd, self.handle.hinstance, EDIT_THEME, 300, 0);
+        self.edit_theme = makeEdit(hwnd, self.handle.hinstance, EDIT_THEME, 0);
 
         // background-opacity EDIT. Appearance section. 0.0..1.0.
-        self.edit_bg_opacity = makeEdit(hwnd, self.handle.hinstance, EDIT_BG_OPACITY, 160, 0);
+        self.edit_bg_opacity = makeEdit(hwnd, self.handle.hinstance, EDIT_BG_OPACITY, 0);
 
-        self.edit_command = makeEdit(hwnd, self.handle.hinstance, EDIT_COMMAND, 360, 0);
+        self.edit_command = makeEdit(hwnd, self.handle.hinstance, EDIT_COMMAND, 0);
 
-        self.edit_pad_x = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_X, 160, 0);
+        self.edit_pad_x = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_X, 0);
 
-        self.edit_pad_y = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_Y, 160, 0);
+        self.edit_pad_y = makeEdit(hwnd, self.handle.hinstance, EDIT_PAD_Y, 0);
 
         // clipboard-trim-trailing-spaces checkbox. Terminal section.
         self.chk_trim_trail = makeCheckbox(
@@ -3468,7 +3719,6 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             CHK_TRIM_TRAIL,
             std.unicode.utf8ToUtf16LeStringLiteral("Trim trailing spaces on copy"),
-            260,
         );
 
         self.chk_desktop_notifications = makeCheckbox(
@@ -3476,7 +3726,6 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             CHK_DESKTOP_NOTIFICATIONS,
             std.unicode.utf8ToUtf16LeStringLiteral("Allow terminal desktop notifications"),
-            320,
         );
 
         self.chk_app_notify_clipboard = makeCheckbox(
@@ -3484,7 +3733,6 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             CHK_APP_NOTIFY_CLIPBOARD,
             std.unicode.utf8ToUtf16LeStringLiteral("Notify when clipboard copy completes"),
-            320,
         );
 
         self.chk_app_notify_config = makeCheckbox(
@@ -3492,7 +3740,6 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             CHK_APP_NOTIFY_CONFIG,
             std.unicode.utf8ToUtf16LeStringLiteral("Notify after config reload"),
-            320,
         );
 
         // Comboboxes for enum fields.
@@ -3500,7 +3747,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_CONFIRM_CLOSE,
-            160,
+            settings_combo_popup_height,
             &.{ "false", "true", "always" },
         );
 
@@ -3508,7 +3755,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_COPY_ON_SELECT,
-            160,
+            settings_combo_popup_height,
             &.{ "false", "true", "clipboard" },
         );
 
@@ -3516,7 +3763,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_CLIPBOARD_READ,
-            160,
+            settings_combo_popup_height,
             &.{ "ask", "allow", "deny" },
         );
 
@@ -3524,7 +3771,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_CLIPBOARD_WRITE,
-            160,
+            settings_combo_popup_height,
             &.{ "ask", "allow", "deny" },
         );
 
@@ -3532,7 +3779,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_LINK_URL,
-            160,
+            settings_combo_popup_height,
             &.{ "enabled", "disabled" },
         );
 
@@ -3540,7 +3787,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_LINK_PREVIEWS,
-            160,
+            settings_combo_popup_height,
             &.{ "all links", "OSC 8 only", "disabled" },
         );
 
@@ -3548,7 +3795,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_WINDOW_THEME,
-            180,
+            settings_combo_popup_height,
             &.{ "auto", "system", "light", "dark", "ghostty" },
         );
 
@@ -3556,7 +3803,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_SHELL_INTEG,
-            200,
+            settings_combo_popup_height,
             &.{ "none", "detect", "bash", "elvish", "fish", "nushell", "zsh" },
         );
 
@@ -3564,7 +3811,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_CURSOR_STYLE,
-            160,
+            settings_combo_popup_height,
             &.{ "bar", "block", "underline", "block_hollow" },
         );
 
@@ -3573,14 +3820,13 @@ pub const SettingsWindow = struct {
             self.handle.hinstance,
             CHK_BG_BLUR,
             std.unicode.utf8ToUtf16LeStringLiteral("Enable background blur"),
-            260,
         );
 
         self.combo_pad_balance = makeCombo(
             hwnd,
             self.handle.hinstance,
             COMBO_PAD_BALANCE,
-            160,
+            settings_combo_popup_height,
             &.{ "false", "true", "equal" },
         );
 
@@ -3588,7 +3834,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_AUTO_UPDATE,
-            160,
+            settings_combo_popup_height,
             &.{ "default", "off", "check", "download" },
         );
 
@@ -3596,7 +3842,7 @@ pub const SettingsWindow = struct {
             hwnd,
             self.handle.hinstance,
             COMBO_AUTO_UPDATE_CHANNEL,
-            140,
+            settings_combo_popup_height,
             &.{ "default", "stable", "tip" },
         );
 
@@ -3767,23 +4013,65 @@ fn applyChildFont(hwnd: HWND, lParam: LPARAM) callconv(.winapi) BOOL {
     return 1;
 }
 
+fn fontProbeCallback(_: *const LOGFONTW, _: ?*const anyopaque, _: u32, lParam: LPARAM) callconv(.winapi) c_int {
+    const found: *bool = @ptrFromInt(@as(usize, @bitCast(lParam)));
+    found.* = true;
+    return 0;
+}
+
+fn fontFaceAvailable(hwnd: HWND, face: [*:0]const u16) bool {
+    const hdc = GetDC(hwnd) orelse return false;
+    defer _ = ReleaseDC(hwnd, hdc);
+    var query: LOGFONTW = .{};
+    const name = std.mem.span(face);
+    const copy_len = @min(name.len, query.lfFaceName.len - 1);
+    @memcpy(query.lfFaceName[0..copy_len], name[0..copy_len]);
+    var found = false;
+    _ = EnumFontFamiliesExW(
+        hdc,
+        &query,
+        &fontProbeCallback,
+        @bitCast(@intFromPtr(&found)),
+        0,
+    );
+    return found;
+}
+
+fn createSettingsFont(dpi: u32, logical_height: i32, weight: i32, face: [*:0]const u16) HGDIOBJ {
+    return CreateFontW(
+        -scaleForDpi(logical_height, dpi),
+        0,
+        0,
+        0,
+        weight,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        5,
+        0,
+        face,
+    );
+}
+
 fn makeEdit(
     parent: HWND,
     hinstance: HINSTANCE,
     id: usize,
-    width: i32,
     extra_style: u32,
 ) ?HWND {
     const edit_class = std.unicode.utf8ToUtf16LeStringLiteral("EDIT");
-    const edit = sys.CreateWindowExW(
-        0,
+    const edit = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
         edit_class,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
         WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | extra_style,
         0,
         0,
-        width,
-        28,
+        settings_field_max_width,
+        settings_control_height,
         parent,
         @ptrFromInt(id),
         hinstance,
@@ -3798,7 +4086,6 @@ fn makeCheckbox(
     hinstance: HINSTANCE,
     id: usize,
     label: LPCWSTR,
-    width: i32,
 ) ?HWND {
     const btn_class = std.unicode.utf8ToUtf16LeStringLiteral("BUTTON");
     return sys.CreateWindowExW(
@@ -3808,8 +4095,8 @@ fn makeCheckbox(
         WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
         0,
         0,
-        width,
-        24,
+        settings_field_max_width,
+        settings_control_height,
         parent,
         @ptrFromInt(id),
         hinstance,
@@ -3832,7 +4119,7 @@ fn makeCombo(
         WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_HASSTRINGS,
         0,
         0,
-        200,
+        settings_field_max_width,
         height,
         parent,
         @ptrFromInt(id),
@@ -3867,7 +4154,7 @@ fn makeSectionButton(
         0,
         0,
         100,
-        36,
+        settings_rail_item_height,
         parent,
         @ptrFromInt(id),
         hinstance,
@@ -3875,23 +4162,38 @@ fn makeSectionButton(
     );
 }
 
-const left_rail_width: i32 = 200;
-const section_btn_height: i32 = 36;
-const section_btn_top_pad: i32 = 16;
-const section_btn_gap: i32 = 4;
+const settings_metrics: win32_theme.ThemeMetrics = .{};
+const settings_rail_width: i32 = 184;
+const settings_rail_padding_x: i32 = settings_metrics.space_4;
+const settings_rail_top_padding: i32 = settings_metrics.space_6;
+const settings_rail_item_height: i32 = settings_metrics.space_9;
+const settings_rail_item_gap: i32 = settings_metrics.space_2;
 const compact_section_btn_height: i32 = 28;
-const compact_section_btn_top_pad: i32 = 8;
-const compact_section_btn_gap: i32 = 2;
-const side_pad: i32 = 16;
-// Keep native controls clear of both the section summary and their painted
-// labels. These values are shared by layout and paint so DPI-scaled system
-// fonts cannot drift into the controls.
-const field_stack_top_offset: i32 = 168;
-const field_row_gap: i32 = 56;
-const field_label_offset: i32 = 24;
-const field_label_height: i32 = 20;
-const settings_column_gap: i32 = 16;
-const settings_min_two_column_width: i32 = 340 * 2 + settings_column_gap;
+const compact_section_btn_top_pad: i32 = settings_metrics.space_4;
+const compact_section_btn_gap: i32 = settings_metrics.space_1;
+const settings_pane_padding: i32 = settings_metrics.space_6;
+const settings_header_title_height: i32 = settings_metrics.space_8;
+const settings_header_summary_top: i32 = settings_header_title_height + settings_metrics.space_2;
+const settings_header_summary_height: i32 = 36;
+const settings_header_separator_y: i32 = settings_header_summary_top + settings_header_summary_height + settings_metrics.space_5;
+const settings_form_viewport_top: i32 = settings_header_separator_y + settings_metrics.space_4;
+const settings_prose_max_width: i32 = 560;
+const settings_action_bar_height: i32 = 64;
+const settings_action_padding: i32 = settings_metrics.space_6;
+const settings_action_gap: i32 = settings_metrics.space_4;
+const settings_field_label_height: i32 = settings_metrics.space_6;
+const settings_label_control_gap: i32 = settings_metrics.space_2;
+const settings_field_label_offset: i32 = settings_metrics.space_7;
+const settings_control_height: i32 = settings_metrics.space_9;
+const settings_combo_item_height: i32 = settings_metrics.space_9;
+const settings_field_group_gap: i32 = settings_metrics.space_5;
+const settings_field_row_pitch: i32 = 64;
+const settings_column_gap: i32 = settings_metrics.space_8;
+const settings_column_min_width: i32 = 320;
+const settings_two_column_min_width: i32 = 664;
+const settings_field_max_width: i32 = 360;
+const settings_combo_popup_height: i32 = 160;
+const settings_content_bottom_padding: i32 = settings_metrics.space_6;
 
 const RailGeometry = struct {
     top_pad: i32,
@@ -3901,9 +4203,9 @@ const RailGeometry = struct {
 
 fn sectionRailGeometry(client_height: i32, dpi: u32) RailGeometry {
     const regular: RailGeometry = .{
-        .top_pad = scaleForDpi(section_btn_top_pad, dpi),
-        .button_height = scaleForDpi(section_btn_height, dpi),
-        .gap = scaleForDpi(section_btn_gap, dpi),
+        .top_pad = scaleForDpi(settings_rail_top_padding, dpi),
+        .button_height = scaleForDpi(settings_rail_item_height, dpi),
+        .gap = scaleForDpi(settings_rail_item_gap, dpi),
     };
     const button_count: i32 = @intCast(section_count);
     const regular_bottom = regular.top_pad + button_count * regular.button_height + (button_count - 1) * regular.gap;
@@ -3934,6 +4236,7 @@ fn sectionRailGeometry(client_height: i32, dpi: u32) RailGeometry {
 }
 
 const ActionRowGeometry = struct {
+    first_x: i32,
     first_width: i32,
     second_x: i32,
     second_y: i32,
@@ -3941,30 +4244,36 @@ const ActionRowGeometry = struct {
     third_x: i32,
     third_y: i32,
     third_width: i32,
+    button_height: i32,
     stacked: bool,
 };
 
-fn closeActionRowGeometry(available_width: i32, dpi: u32) ActionRowGeometry {
-    const gap = scaleForDpi(10, dpi);
+fn closeActionRowGeometry(available_width: i32, available_height: i32, dpi: u32) ActionRowGeometry {
+    const gap = scaleForDpi(settings_action_gap, dpi);
     const preferred_first = scaleForDpi(120, dpi);
-    const preferred_second = scaleForDpi(130, dpi);
-    const preferred_third = scaleForDpi(110, dpi);
+    const preferred_second = scaleForDpi(128, dpi);
+    const preferred_third = scaleForDpi(112, dpi);
+    const preferred_height = scaleForDpi(settings_control_height, dpi);
     const preferred_total = preferred_first + preferred_second + preferred_third + 2 * gap;
     if (available_width >= preferred_total) return .{
+        .first_x = available_width - preferred_total,
         .first_width = preferred_first,
-        .second_x = preferred_first + gap,
+        .second_x = available_width - preferred_total + preferred_first + gap,
         .second_y = 0,
         .second_width = preferred_second,
-        .third_x = preferred_first + gap + preferred_second + gap,
+        .third_x = available_width - preferred_third,
         .third_y = 0,
         .third_width = preferred_third,
+        .button_height = @min(preferred_height, @max(0, available_height)),
         .stacked = false,
     };
 
     const width = @max(0, available_width);
-    const vertical_gap = scaleForDpi(6, dpi);
-    const button_height = scaleForDpi(32, dpi);
+    const height = @max(0, available_height);
+    const vertical_gap = @min(scaleForDpi(6, dpi), @divTrunc(@max(0, height - 3), 2));
+    const button_height = @min(preferred_height, @divTrunc(@max(0, height - 2 * vertical_gap), 3));
     return .{
+        .first_x = 0,
         .first_width = width,
         .second_x = 0,
         .second_y = button_height + vertical_gap,
@@ -3972,21 +4281,89 @@ fn closeActionRowGeometry(available_width: i32, dpi: u32) ActionRowGeometry {
         .third_x = 0,
         .third_y = 2 * (button_height + vertical_gap),
         .third_width = width,
+        .button_height = button_height,
         .stacked = true,
     };
 }
 
-fn closePromptStackTop(
-    base_stack_top: i32,
-    prompt_visible: bool,
-    prompt_top: i32,
-    prompt_height: i32,
-    action_gap: i32,
-    action_height: i32,
-    bottom_gap: i32,
-) i32 {
-    if (!prompt_visible) return base_stack_top;
-    return @max(base_stack_top, prompt_top + prompt_height + action_gap + action_height + bottom_gap);
+const NormalActionRowGeometry = struct {
+    status_right: i32,
+    keep_mine_x: i32,
+    keep_mine_y: i32,
+    keep_mine_width: i32,
+    use_disk_x: i32,
+    use_disk_y: i32,
+    use_disk_width: i32,
+    save_x: i32,
+    save_y: i32,
+    save_width: i32,
+    button_height: i32,
+    stacked: bool,
+};
+
+fn normalActionRowGeometry(pane_width: i32, available_height: i32, conflict: bool, dpi: u32) NormalActionRowGeometry {
+    const gap = scaleForDpi(settings_action_gap, dpi);
+    const preferred_save_width = scaleForDpi(96, dpi);
+    const preferred_conflict_width = scaleForDpi(112, dpi);
+    const preferred_height = scaleForDpi(settings_control_height, dpi);
+    const width = @max(0, pane_width);
+    const height = @max(0, available_height);
+    if (!conflict) {
+        const save_width = @min(preferred_save_width, width);
+        const save_x = width - save_width;
+        return .{
+            .status_right = @max(0, save_x - gap),
+            .keep_mine_x = 0,
+            .keep_mine_y = 0,
+            .keep_mine_width = 0,
+            .use_disk_x = 0,
+            .use_disk_y = 0,
+            .use_disk_width = 0,
+            .save_x = save_x,
+            .save_y = 0,
+            .save_width = save_width,
+            .button_height = @min(preferred_height, height),
+            .stacked = false,
+        };
+    }
+
+    const preferred_total = preferred_save_width + 2 * preferred_conflict_width + 2 * gap;
+    if (width >= preferred_total) {
+        const save_x = width - preferred_save_width;
+        const use_disk_x = save_x - gap - preferred_conflict_width;
+        const keep_mine_x = use_disk_x - gap - preferred_conflict_width;
+        return .{
+            .status_right = @max(0, keep_mine_x - gap),
+            .keep_mine_x = keep_mine_x,
+            .keep_mine_y = 0,
+            .keep_mine_width = preferred_conflict_width,
+            .use_disk_x = use_disk_x,
+            .use_disk_y = 0,
+            .use_disk_width = preferred_conflict_width,
+            .save_x = save_x,
+            .save_y = 0,
+            .save_width = preferred_save_width,
+            .button_height = @min(preferred_height, height),
+            .stacked = false,
+        };
+    }
+
+    const vertical_gap = @min(scaleForDpi(6, dpi), @divTrunc(@max(0, height - 3), 2));
+    const button_height = @min(preferred_height, @divTrunc(@max(0, height - 2 * vertical_gap), 3));
+    return .{
+        .status_right = 0,
+        .keep_mine_x = 0,
+        .keep_mine_y = 0,
+        .keep_mine_width = width,
+        .use_disk_x = 0,
+        .use_disk_y = button_height + vertical_gap,
+        .use_disk_width = width,
+        .save_x = 0,
+        .save_y = 2 * (button_height + vertical_gap),
+        .save_width = width,
+        .button_height = button_height,
+        .stacked = true,
+    };
 }
 
 const ConflictFocusTarget = enum { validation, save, section, none };
@@ -4135,8 +4512,19 @@ fn scaleForDpi(logical: i32, dpi: u32) i32 {
     return @intCast(@divTrunc(@as(i64, logical) * effective + 48, 96));
 }
 
+fn settingsOuterSizeForClient(client_width: i32, client_height: i32, dpi: u32, style: u32, ex_style: u32) POINT {
+    var rect: RECT = .{
+        .left = 0,
+        .top = 0,
+        .right = scaleForDpi(client_width, dpi),
+        .bottom = scaleForDpi(client_height, dpi),
+    };
+    _ = AdjustWindowRectExForDpi(&rect, style, 0, ex_style, normalizedDpi(dpi));
+    return .{ .x = rect.right - rect.left, .y = rect.bottom - rect.top };
+}
+
 fn settingsColumnCount(pane_width: i32, dpi: u32) usize {
-    return if (pane_width >= scaleForDpi(settings_min_two_column_width, dpi)) 2 else 1;
+    return if (pane_width >= scaleForDpi(settings_two_column_min_width, dpi)) 2 else 1;
 }
 
 test "settings logical geometry scales with monitor DPI" {
@@ -4264,75 +4652,226 @@ test "settings minimum track size caps to target monitor work area" {
 }
 
 test "settings field geometry keeps labels clear of adjacent controls" {
-    const edit_height: i32 = 28;
-    const minimum_gap: i32 = 4;
-    try std.testing.expect(field_label_offset - field_label_height >= minimum_gap);
-    try std.testing.expect(field_row_gap - field_label_offset - edit_height >= minimum_gap);
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
+        const field = settingsFieldRects(0, scaleForDpi(664, dpi), dpi);
+        const next = settingsFieldRects(2, scaleForDpi(664, dpi), dpi);
+        try std.testing.expect(field.label.bottom + scaleForDpi(settings_label_control_gap, dpi) <= field.control.top);
+        try std.testing.expect(field.control.bottom + scaleForDpi(settings_field_group_gap, dpi) <= next.label.top);
+        try std.testing.expectEqual(field.control.right, next.control.right);
+    }
 }
 
 test "settings two-column breakpoint preserves readable lane width" {
-    try std.testing.expectEqual(@as(usize, 1), settingsColumnCount(695, 96));
-    try std.testing.expectEqual(@as(usize, 2), settingsColumnCount(696, 96));
-    try std.testing.expectEqual(@as(usize, 1), settingsColumnCount(1043, 144));
-    try std.testing.expectEqual(@as(usize, 2), settingsColumnCount(1044, 144));
-    const lane_width = @divTrunc(settings_min_two_column_width - settings_column_gap, 2);
-    try std.testing.expectEqual(@as(i32, 340), lane_width);
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
+        const breakpoint = scaleForDpi(settings_two_column_min_width, dpi);
+        try std.testing.expectEqual(@as(usize, 1), settingsColumnCount(breakpoint - 1, dpi));
+        try std.testing.expectEqual(@as(usize, 2), settingsColumnCount(breakpoint, dpi));
+        const left = settingsFieldRects(0, breakpoint, dpi).control;
+        const right = settingsFieldRects(1, breakpoint, dpi).control;
+        try std.testing.expect(left.right <= right.left);
+        try std.testing.expectEqual(scaleForDpi(settings_column_min_width, dpi), left.right - left.left);
+        try std.testing.expectEqual(left.right - left.left, right.right - right.left);
+    }
+    const capped = settingsFieldRects(0, 1000, 96).control;
+    const capped_right = settingsFieldRects(1, 1000, 96).control;
+    try std.testing.expectEqual(@as(i32, settings_field_max_width), capped.right - capped.left);
+    try std.testing.expectEqual(@as(i32, settings_column_gap), capped_right.left - capped.right);
 }
 
 test "settings rail compacts before high DPI work areas clip sections" {
-    const regular = sectionRailGeometry(900, 288);
-    try std.testing.expectEqual(@as(i32, 108), regular.button_height);
-    try std.testing.expectEqual(@as(i32, 48), regular.top_pad);
-
-    const compact = sectionRailGeometry(860, 288);
-    try std.testing.expectEqual(@as(i32, 84), compact.button_height);
-    try std.testing.expectEqual(@as(i32, 24), compact.top_pad);
-    const compact_bottom = compact.top_pad + @as(i32, section_count) * compact.button_height +
-        (@as(i32, section_count) - 1) * compact.gap;
-    try std.testing.expect(compact_bottom <= 860);
-
-    const compressed = sectionRailGeometry(610, 288);
-    const compressed_bottom = compressed.top_pad + @as(i32, section_count) * compressed.button_height +
-        (@as(i32, section_count) - 1) * compressed.gap;
-    try std.testing.expect(compressed.button_height > 0);
-    try std.testing.expect(compressed_bottom <= 610);
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
+        const regular_height = scaleForDpi(320, dpi);
+        const regular = sectionRailGeometry(regular_height, dpi);
+        try std.testing.expectEqual(scaleForDpi(settings_rail_item_height, dpi), regular.button_height);
+        const short_height = @max(@as(i32, section_count), scaleForDpi(190, dpi));
+        const compact = sectionRailGeometry(short_height, dpi);
+        const bottom = compact.top_pad + @as(i32, section_count) * compact.button_height +
+            (@as(i32, section_count) - 1) * compact.gap;
+        try std.testing.expect(compact.button_height > 0);
+        try std.testing.expect(bottom <= short_height);
+    }
 }
 
 test "settings close actions stack inside narrow high DPI panes" {
-    for ([_]u32{ 96, 192, 288 }) |dpi| {
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
         const available = scaleForDpi(344, dpi);
-        const geometry = closeActionRowGeometry(available, dpi);
+        const geometry = closeActionRowGeometry(available, scaleForDpi(108, dpi), dpi);
         try std.testing.expect(geometry.stacked);
         try std.testing.expect(geometry.first_width > 0);
         try std.testing.expect(geometry.second_width > 0);
         try std.testing.expect(geometry.third_width > 0);
         try std.testing.expectEqual(available, geometry.first_width);
+        try std.testing.expectEqual(@as(i32, 0), geometry.first_x);
         try std.testing.expectEqual(@as(i32, 0), geometry.second_x);
         try std.testing.expect(geometry.second_y > 0);
         try std.testing.expect(geometry.third_y > geometry.second_y);
     }
 
-    const tiny = closeActionRowGeometry(1, 288);
+    const tiny = closeActionRowGeometry(1, scaleForDpi(108, 288), 288);
     try std.testing.expectEqual(@as(i32, 1), tiny.first_width);
     try std.testing.expectEqual(@as(i32, 1), tiny.third_width);
 
-    try std.testing.expectEqual(@as(i32, 168), closePromptStackTop(168, false, 76, 80, 8, 108, 8));
-    try std.testing.expectEqual(@as(i32, 280), closePromptStackTop(168, true, 76, 80, 8, 108, 8));
-    const cleared_stack_top = closePromptStackTop(168, true, 76, 80, 8, 108, field_label_offset + 8);
-    const action_bottom = 76 + 80 + 8 + 108;
-    try std.testing.expectEqual(@as(i32, 304), cleared_stack_top);
-    try std.testing.expect(cleared_stack_top - field_label_offset >= action_bottom + 8);
+    const wide = closeActionRowGeometry(500, settings_control_height, 96);
+    try std.testing.expect(!wide.stacked);
+    try std.testing.expectEqual(@as(i32, 500), wide.third_x + wide.third_width);
+    try std.testing.expect(wide.first_x >= 0);
 }
 
-fn sectionContentRows(section: Section, columns: usize) i32 {
-    const controls: i32 = switch (section) {
-        .appearance => 10,
-        .terminal => 4,
-        .shell, .updates => 2,
-        .privacy => 7,
-        .keybindings, .advanced => 9,
+test "settings action bar pins normal conflict prompt and stacked actions" {
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
+        const pane_width = scaleForDpi(560, dpi);
+        const action_height = scaleForDpi(settings_control_height, dpi);
+        const stack_height = scaleForDpi(3 * settings_control_height + 2 * 6, dpi);
+        const normal = normalActionRowGeometry(pane_width, action_height, false, dpi);
+        const conflict = normalActionRowGeometry(pane_width, action_height, true, dpi);
+        try std.testing.expectEqual(pane_width, normal.save_x + scaleForDpi(96, dpi));
+        try std.testing.expect(conflict.keep_mine_x >= 0);
+        try std.testing.expect(conflict.keep_mine_x + scaleForDpi(112, dpi) + scaleForDpi(settings_action_gap, dpi) <= conflict.use_disk_x);
+        try std.testing.expect(conflict.use_disk_x + scaleForDpi(112, dpi) + scaleForDpi(settings_action_gap, dpi) <= conflict.save_x);
+
+        const narrow_width = scaleForDpi(320, dpi);
+        const narrow = normalActionRowGeometry(narrow_width, stack_height, true, dpi);
+        try std.testing.expect(narrow.stacked);
+        try std.testing.expect(narrow.keep_mine_x >= 0);
+        try std.testing.expect(narrow.use_disk_x >= 0);
+        try std.testing.expect(narrow.save_x >= 0);
+        try std.testing.expect(narrow.keep_mine_x + narrow.keep_mine_width <= narrow_width);
+        try std.testing.expect(narrow.use_disk_x + narrow.use_disk_width <= narrow_width);
+        try std.testing.expect(narrow.save_x + narrow.save_width <= narrow_width);
+
+        const tiny_normal = normalActionRowGeometry(1, action_height, false, dpi);
+        try std.testing.expect(tiny_normal.save_x >= 0);
+        try std.testing.expect(tiny_normal.save_x + tiny_normal.save_width <= 1);
+
+        var settings: SettingsWindow = .{ .handle = undefined, .dpi = dpi };
+        const client_height = scaleForDpi(520, dpi);
+        const normal_bar = closePromptLayoutGeometry(&settings, pane_width, client_height);
+        try std.testing.expectEqual(scaleForDpi(settings_action_bar_height, dpi), normal_bar.bar_height);
+        settings.close_prompt_visible = true;
+        const prompt_bar = closePromptLayoutGeometry(&settings, pane_width, client_height);
+        try std.testing.expect(!prompt_bar.actions.stacked);
+        try std.testing.expect(prompt_bar.bar_height >= normal_bar.bar_height);
+        const stacked = closePromptLayoutGeometry(&settings, scaleForDpi(320, dpi), client_height);
+        try std.testing.expect(stacked.actions.stacked);
+        try std.testing.expect(stacked.bar_height > prompt_bar.bar_height);
+        try std.testing.expect(stacked.actions_top + stacked.actions.third_y + stacked.actions.button_height <= stacked.bar_height);
+
+        const short_height = scaleForDpi(100, dpi);
+        const short = closePromptLayoutGeometry(&settings, scaleForDpi(320, dpi), short_height);
+        try std.testing.expect(short.bar_height <= short_height);
+        try std.testing.expect(short.actions_top + short.actions.third_y + short.actions.button_height <= short.bar_height);
+    }
+
+    var minimum: SettingsWindow = .{ .handle = undefined, .dpi = 288, .close_prompt_visible = true };
+    const client: RECT = .{ .left = 0, .top = 0, .right = 720, .bottom = 520 };
+    const pane = paneBounds(&minimum, client);
+    try std.testing.expect(closePromptLayoutGeometry(&minimum, pane.width, client.bottom).actions.stacked);
+    try std.testing.expect(settingsContentViewportTop(&minimum, client) <= settingsContentViewportBottom(&minimum, client));
+}
+
+test "settings checkbox and label classification agrees with form model" {
+    var controls = [_]bool{false} ** settings_clipped_control_count;
+    var labels = [_]bool{false} ** settings_label_specs.len;
+    for (std.enums.values(Section)) |section| for (formItemsForSection(section)) |item| {
+        try std.testing.expect(!controls[item.control_index]);
+        controls[item.control_index] = true;
+        try std.testing.expectEqual(settings_control_specs[item.control_index].role == .check_box, item.checkbox);
+        if (item.label_index) |index| {
+            try std.testing.expect(!labels[index]);
+            labels[index] = true;
+            try std.testing.expectEqual(item.checkbox, labelIndexIsCheckbox(index));
+        }
     };
-    return @divTrunc(controls + @as(i32, @intCast(columns)) - 1, @as(i32, @intCast(columns)));
+    for (controls) |seen| try std.testing.expect(seen);
+    for (labels) |seen| try std.testing.expect(seen);
+}
+
+const SettingsFieldRects = struct { label: RECT, control: RECT };
+
+fn settingsFieldRects(index: usize, pane_width: i32, dpi: u32) SettingsFieldRects {
+    const columns = settingsColumnCount(pane_width, dpi);
+    const gap = scaleForDpi(settings_column_gap, dpi);
+    const available_lane_width = @divTrunc(pane_width - (if (columns == 2) gap else 0), @as(i32, @intCast(columns)));
+    const lane_width = @min(available_lane_width, scaleForDpi(settings_field_max_width, dpi));
+    const column: i32 = @intCast(index % columns);
+    const row: i32 = @intCast(index / columns);
+    const left = column * (lane_width + gap);
+    const label_top = row * scaleForDpi(settings_field_row_pitch, dpi);
+    const control_top = label_top + scaleForDpi(settings_field_label_offset, dpi);
+    return .{
+        .label = .{
+            .left = left,
+            .top = label_top,
+            .right = left + lane_width,
+            .bottom = label_top + scaleForDpi(settings_field_label_height, dpi),
+        },
+        .control = .{
+            .left = left,
+            .top = control_top,
+            .right = left + lane_width,
+            .bottom = control_top + scaleForDpi(settings_control_height, dpi),
+        },
+    };
+}
+
+fn settingsFormItemRects(items: []const FormItem, pane_width: i32, dpi: u32, output: []SettingsFieldRects) void {
+    std.debug.assert(output.len >= items.len);
+    const columns = settingsColumnCount(pane_width, dpi);
+    const row_pitch = scaleForDpi(settings_field_row_pitch, dpi);
+    const control_height = scaleForDpi(settings_control_height, dpi);
+    const checkbox_pitch = control_height + scaleForDpi(settings_metrics.space_2, dpi);
+    const group_gap = scaleForDpi(settings_field_group_gap, dpi);
+    var top: i32 = 0;
+    var start: usize = 0;
+    while (start < items.len) {
+        var end = start + 1;
+        while (end < items.len and items[end].checkbox == items[start].checkbox) : (end += 1) {}
+        if (items[start].checkbox) {
+            const lane = settingsFieldRects(0, pane_width, dpi);
+            const control_top = top + if (items[start].label_index != null) scaleForDpi(settings_field_label_offset, dpi) else 0;
+            for (start..end) |index| {
+                const item_top = control_top + @as(i32, @intCast(index - start)) * checkbox_pitch;
+                output[index] = .{
+                    .label = .{ .left = lane.label.left, .top = top, .right = lane.label.right, .bottom = top + scaleForDpi(settings_field_label_height, dpi) },
+                    .control = .{ .left = lane.control.left, .top = item_top, .right = lane.control.right, .bottom = item_top + control_height },
+                };
+            }
+            top = control_top + @as(i32, @intCast(end - start - 1)) * checkbox_pitch + control_height + group_gap;
+        } else {
+            for (start..end) |index| {
+                output[index] = settingsFieldRects(index - start, pane_width, dpi);
+                output[index].label.top += top;
+                output[index].label.bottom += top;
+                output[index].control.top += top;
+                output[index].control.bottom += top;
+            }
+            top += @as(i32, @intCast((end - start + columns - 1) / columns)) * row_pitch;
+        }
+        start = end;
+    }
+}
+
+fn settingsContentExtent(rects: []const RECT, bottom_padding: i32) i32 {
+    var bottom: i32 = 0;
+    for (rects) |rect| bottom = @max(bottom, rect.bottom);
+    return bottom + @max(0, bottom_padding);
+}
+
+const SettingsScrollGeometry = struct {
+    max_position: i32,
+    page: u32,
+    nmax: i32,
+};
+
+fn settingsScrollGeometry(content_extent: i32, viewport_height: i32) SettingsScrollGeometry {
+    const extent = @max(0, content_extent);
+    const viewport = @max(1, viewport_height);
+    const page_i32 = @min(viewport, @max(1, extent));
+    return .{
+        .max_position = if (extent > viewport) extent - viewport else 0,
+        .page = @intCast(page_i32),
+        .nmax = if (extent > 0) extent - 1 else 0,
+    };
 }
 
 fn confirmedStaAllowsCustomUiaProviders(confirmed_sta: bool) bool {
@@ -4366,27 +4905,38 @@ fn clipChildToViewport(parent: HWND, child: ?HWND, viewport_top: i32, viewport_b
     const clip_top = std.math.clamp(viewport_top - origin.y, 0, height);
     const clip_bottom = std.math.clamp(viewport_bottom - origin.y, clip_top, height);
     if (clip_top == 0 and clip_bottom == height) {
-        _ = sys.SetWindowRgn(hwnd, null, 1);
+        _ = SetWindowRgn(hwnd, null, 0);
         return false;
     }
     const fully_clipped = viewportRegionIsFullyClipped(width, clip_top, clip_bottom);
-    const region = sys.CreateRectRgn(0, clip_top, width, clip_bottom) orelse return false;
-    if (sys.SetWindowRgn(hwnd, region, 1) == 0) {
-        _ = sys.DeleteObject(region);
+    const region = CreateRectRgn(0, clip_top, width, clip_bottom) orelse return false;
+    if (SetWindowRgn(hwnd, region, 0) == 0) {
+        _ = DeleteObject(region);
         return false;
     }
     return fully_clipped;
 }
 
-test "settings content extent preserves all rows at narrow and wide widths" {
-    try std.testing.expectEqual(@as(i32, 10), sectionContentRows(.appearance, 1));
-    try std.testing.expectEqual(@as(i32, 5), sectionContentRows(.appearance, 2));
-    try std.testing.expectEqual(@as(i32, 7), sectionContentRows(.privacy, 1));
-    try std.testing.expectEqual(@as(i32, 4), sectionContentRows(.privacy, 2));
+test "settings scrollbar thumb and maximum cover real extents" {
+    const rects = [_]RECT{
+        .{ .left = 0, .top = 0, .right = 320, .bottom = 16 },
+        .{ .left = 0, .top = 20, .right = 320, .bottom = 52 },
+        .{ .left = 0, .top = 84, .right = 320, .bottom = 244 },
+    };
+    const extent = settingsContentExtent(&rects, settings_content_bottom_padding);
+    try std.testing.expectEqual(@as(i32, 260), extent);
+    for ([_]i32{ 0, 1, 64, extent, 1024 }) |content| for ([_]i32{ 1, 32, 128, 512, 2048 }) |viewport| {
+        const scroll = settingsScrollGeometry(content, viewport);
+        const page: i32 = @intCast(scroll.page);
+        try std.testing.expectEqual(@max(0, content - 1), scroll.nmax);
+        try std.testing.expectEqual(@min(viewport, @max(1, content)), page);
+        try std.testing.expectEqual(@max(0, content - viewport), scroll.max_position);
+        try std.testing.expect(scroll.max_position + page >= content);
+    };
 }
 
 fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
-    const minimum = self.px(44);
+    const minimum = self.px(20);
     if (!self.close_prompt_visible) return minimum;
     if (self.close_prompt_measure_width == pane_width and
         self.close_prompt_measure_dpi == self.dpi and
@@ -4396,9 +4946,9 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
         return self.close_prompt_measure_height;
     }
     const hwnd = self.hwnd orelse return minimum;
-    const hdc = sys.GetDC(hwnd) orelse return minimum;
-    defer _ = sys.ReleaseDC(hwnd, hdc);
-    const previous_font = if (self.ui_font) |font| sys.SelectObject(hdc, font) else null;
+    const hdc = GetDC(hwnd) orelse return minimum;
+    defer _ = ReleaseDC(hwnd, hdc);
+    const previous_font = if (self.emphasis_font) |font| SelectObject(hdc, font) else null;
     defer {
         if (previous_font) |font| _ = sys.SelectObject(hdc, font);
     }
@@ -4418,7 +4968,7 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
         &measure,
         DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
     );
-    const height = @max(minimum, measure.bottom - measure.top + self.px(4));
+    const height = @max(minimum, measure.bottom - measure.top);
     self.close_prompt_measure_width = pane_width;
     self.close_prompt_measure_dpi = self.dpi;
     self.close_prompt_measure_saving = self.save_in_flight;
@@ -4428,274 +4978,280 @@ fn closePromptMeasuredHeight(self: *SettingsWindow, pane_width: i32) i32 {
 
 const ClosePromptLayoutGeometry = struct {
     actions: ActionRowGeometry,
+    normal_actions: NormalActionRowGeometry,
     prompt_height: i32,
-    action_height: i32,
-    stack_top: i32,
+    bar_height: i32,
+    prompt_top: i32,
+    actions_top: i32,
 };
 
-fn closePromptLayoutGeometry(self: *SettingsWindow, pane_width: i32) ClosePromptLayoutGeometry {
-    const actions = closeActionRowGeometry(pane_width, self.dpi);
-    const prompt_height = closePromptMeasuredHeight(self, pane_width);
-    const action_height = if (actions.stacked)
-        actions.third_y + self.px(32)
+fn closePromptLayoutGeometry(self: *SettingsWindow, pane_width: i32, client_height: i32) ClosePromptLayoutGeometry {
+    const available_height = @max(0, client_height);
+    const desired_padding = self.px(settings_action_padding);
+    if (!self.close_prompt_visible) {
+        const conflict_visible = self.active_conflict_field != null or self.active_owned_conflict_field != null;
+        const preferred_actions = normalActionRowGeometry(
+            pane_width,
+            self.px(3 * settings_control_height + 2 * 6),
+            conflict_visible,
+            self.dpi,
+        );
+        const preferred_span = preferred_actions.save_y + preferred_actions.button_height;
+        const bar_height = @min(
+            available_height,
+            @max(self.px(settings_action_bar_height), 2 * desired_padding + preferred_span),
+        );
+        const padding = @min(desired_padding, @divTrunc(bar_height, 4));
+        const normal_actions = normalActionRowGeometry(
+            pane_width,
+            @max(0, bar_height - 2 * padding),
+            conflict_visible,
+            self.dpi,
+        );
+        return .{
+            .actions = closeActionRowGeometry(pane_width, 0, self.dpi),
+            .normal_actions = normal_actions,
+            .prompt_height = 0,
+            .bar_height = bar_height,
+            .prompt_top = padding,
+            .actions_top = padding,
+        };
+    }
+
+    const padding = @min(desired_padding, @divTrunc(available_height, 4));
+    const actions = closeActionRowGeometry(
+        pane_width,
+        @max(0, available_height - 2 * padding),
+        self.dpi,
+    );
+    const action_span = if (actions.stacked)
+        actions.third_y + actions.button_height
     else
-        self.px(32);
+        actions.button_height;
+    const prompt_width = if (actions.stacked)
+        pane_width
+    else
+        @max(1, actions.first_x - self.px(settings_action_gap));
+    const measured_prompt_height = closePromptMeasuredHeight(self, prompt_width);
+    if (actions.stacked) {
+        const remaining = @max(0, available_height - 2 * padding - action_span);
+        const prompt_height = @min(measured_prompt_height, @max(0, remaining - self.px(settings_action_gap)));
+        const prompt_gap = if (prompt_height > 0) @min(self.px(settings_action_gap), remaining - prompt_height) else 0;
+        const actions_top = padding + prompt_height + prompt_gap;
+        return .{
+            .actions = actions,
+            .normal_actions = normalActionRowGeometry(pane_width, 0, false, self.dpi),
+            .prompt_height = prompt_height,
+            .bar_height = actions_top + action_span + padding,
+            .prompt_top = padding,
+            .actions_top = actions_top,
+        };
+    }
+    const prompt_height = @min(measured_prompt_height, @max(0, available_height - 2 * padding));
+    const row_height = @max(actions.button_height, prompt_height);
     return .{
         .actions = actions,
+        .normal_actions = normalActionRowGeometry(pane_width, 0, false, self.dpi),
         .prompt_height = prompt_height,
-        .action_height = action_height,
-        .stack_top = closePromptStackTop(
-            self.px(field_stack_top_offset),
-            self.close_prompt_visible,
-            self.px(76),
-            prompt_height,
-            self.px(8),
-            action_height,
-            self.px(field_label_offset + 8),
-        ),
+        .bar_height = @min(available_height, 2 * padding + row_height),
+        .prompt_top = padding + @divTrunc(row_height - prompt_height, 2),
+        .actions_top = padding + @divTrunc(row_height - actions.button_height, 2),
     };
 }
 
 fn settingsContentViewportTop(self: *SettingsWindow, client_rect: RECT) i32 {
-    const side = self.px(side_pad);
-    const rail_geometry = sectionRailGeometry(client_rect.bottom - client_rect.top, self.dpi);
-    const pane_left = self.px(left_rail_width) + side;
-    const pane_width = @max(1, client_rect.right - side - pane_left);
-    return rail_geometry.top_pad + closePromptLayoutGeometry(self, pane_width).stack_top;
+    const rail = sectionRailGeometry(client_rect.bottom - client_rect.top, self.dpi);
+    return rail.top_pad + self.px(settings_form_viewport_top);
+}
+
+const PaneBounds = struct { left: i32, right: i32, width: i32 };
+
+fn paneBounds(self: *const SettingsWindow, client_rect: RECT) PaneBounds {
+    const client_width = @max(0, client_rect.right - client_rect.left);
+    const padding = self.px(settings_pane_padding);
+    const left = @min(self.px(settings_rail_width) + padding, client_width);
+    const right = @max(left, client_width - @min(padding, client_width));
+    return .{ .left = left, .right = right, .width = right - left };
+}
+
+fn settingsContentViewportBottom(self: *SettingsWindow, client_rect: RECT) i32 {
+    const pane = paneBounds(self, client_rect);
+    const action_bar = closePromptLayoutGeometry(self, pane.width, client_rect.bottom - client_rect.top);
+    return @max(settingsContentViewportTop(self, client_rect), client_rect.bottom - action_bar.bar_height - self.px(settings_pane_padding));
+}
+
+fn measureStaticTextHeight(self: *SettingsWindow, text_opt: ?HWND, width: i32) i32 {
+    const text = text_opt orelse return 0;
+    var buffer: [2048:0]u16 = undefined;
+    const length = GetWindowTextW(text, &buffer, @intCast(buffer.len));
+    if (length <= 0) return 0;
+    const parent = self.hwnd orelse return 0;
+    const hdc = GetDC(parent) orelse return 0;
+    defer _ = ReleaseDC(parent, hdc);
+    const previous = if (self.ui_font) |font| SelectObject(hdc, font) else null;
+    defer {
+        if (previous) |font| _ = SelectObject(hdc, font);
+    }
+    var measure: RECT = .{ .left = 0, .top = 0, .right = @max(1, width), .bottom = 0 };
+    _ = DrawTextW(hdc, &buffer, length, &measure, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    return @max(self.px(20), measure.bottom - measure.top);
+}
+
+fn isComboControl(self: *const SettingsWindow, hwnd: HWND) bool {
+    for (self.comboControls()) |combo| if (combo == hwnd) return true;
+    return false;
 }
 
 fn layoutChildren(self: *SettingsWindow) void {
     const hwnd = self.hwnd orelse return;
     var rect: RECT = undefined;
-    if (sys.GetClientRect(hwnd, &rect) == 0) return;
+    if (GetClientRect(hwnd, &rect) == 0) return;
+    const position_flags = SWP_NOREDRAW | SWP_NOZORDER | SWP_NOACTIVATE;
 
-    // Left rail — stack section buttons top-down.
-    const rail_width = self.px(left_rail_width);
-    const side = self.px(side_pad);
+    const rail_width = self.px(settings_rail_width);
+    const rail_padding = self.px(settings_rail_padding_x);
+    const pane_padding = self.px(settings_pane_padding);
     const rail_geometry = sectionRailGeometry(rect.bottom - rect.top, self.dpi);
-    const button_height = rail_geometry.button_height;
-    const button_gap = rail_geometry.gap;
-    const btn_x = side;
-    const btn_w = rail_width - side - side;
-    var y = rail_geometry.top_pad;
-    for ([_]?HWND{
-        self.btn_section_appearance,
-        self.btn_section_terminal,
-        self.btn_section_shell,
-        self.btn_section_privacy,
-        self.btn_section_updates,
-        self.btn_section_keybindings,
-        self.btn_section_advanced,
-    }) |btn_opt| {
-        if (btn_opt) |btn| {
-            _ = sys.MoveWindow(btn, btn_x, y, btn_w, button_height, 1);
+    var rail_y = rail_geometry.top_pad;
+    for (std.enums.values(Section)) |section| {
+        if (self.sectionButton(section)) |button| {
+            _ = SetWindowPos(button, null, rail_padding, rail_y, rail_width - 2 * rail_padding, rail_geometry.button_height, position_flags);
         }
-        y += button_height + button_gap;
+        rail_y += rail_geometry.button_height + rail_geometry.gap;
     }
 
-    const pane_left = rail_width + side;
+    const pane = paneBounds(self, rect);
+    const pane_left = pane.left;
+    const pane_width = pane.width;
     const pane_top = rail_geometry.top_pad;
-    const pane_right = rect.right - side;
-    const pane_width = @max(1, pane_right - pane_left);
-    const close_prompt_layout = closePromptLayoutGeometry(self, pane_width);
-    const close_actions = close_prompt_layout.actions;
-    const prompt_height = close_prompt_layout.prompt_height;
-    const stack_top = close_prompt_layout.stack_top;
-    const row_gap = self.px(field_row_gap);
-    const control_height = self.px(28);
-    const checkbox_height = self.px(24);
-    const responsive_columns = settingsColumnCount(pane_width, self.dpi);
-    const content_rows = sectionContentRows(
-        self.active_section,
-        if (self.active_section == .appearance or self.active_section == .privacy) responsive_columns else 1,
-    );
-    const content_bottom = pane_top + stack_top + (content_rows - 1) * row_gap + control_height;
-    self.content_scroll_max = @max(0, content_bottom - (rect.bottom - side));
+    const action_bar = closePromptLayoutGeometry(self, pane_width, rect.bottom - rect.top);
+    const action_bar_top = rect.bottom - action_bar.bar_height;
+    const viewport_top = pane_top + self.px(settings_form_viewport_top);
+    const viewport_bottom = @max(viewport_top, action_bar_top - pane_padding);
+    self.proof_viewport_top = viewport_top;
+    self.proof_viewport_bottom = viewport_bottom;
+    const viewport_height = @max(0, viewport_bottom - viewport_top);
+
+    const prose_width = @min(pane_width, self.px(settings_prose_max_width));
+    if (self.text_header) |text| _ = SetWindowPos(text, null, pane_left, pane_top, prose_width, self.px(settings_header_title_height), position_flags);
+    if (self.text_summary) |text| _ = SetWindowPos(text, null, pane_left, pane_top + self.px(settings_header_summary_top), prose_width, self.px(settings_header_summary_height), position_flags);
+
+    const form_items = self.formItems();
+    var item_rects: [settings_max_form_items]SettingsFieldRects = undefined;
+    var extent_rects: [settings_max_form_items * 2 + 1]RECT = undefined;
+    var extent_count: usize = 0;
+    settingsFormItemRects(form_items, pane_width, self.dpi, item_rects[0..form_items.len]);
+    for (form_items, 0..) |item, index| {
+        if (self.controlHwnd(item.control_index) == null) continue;
+        if (item.label_index != null) {
+            extent_rects[extent_count] = item_rects[index].label;
+            extent_count += 1;
+        }
+        extent_rects[extent_count] = item_rects[index].control;
+        extent_count += 1;
+    }
+
+    var help_rect: ?RECT = null;
+    if (self.active_section == .keybindings or self.active_section == .advanced) {
+        const help_top = self.px(settings_field_row_pitch);
+        const help_width = @min(pane_width, self.px(settings_prose_max_width));
+        const help_height = measureStaticTextHeight(self, self.text_help, help_width);
+        if (help_height > 0) {
+            help_rect = .{ .left = 0, .top = help_top, .right = help_width, .bottom = help_top + help_height };
+            extent_rects[extent_count] = help_rect.?;
+            extent_count += 1;
+        }
+    }
+    const content_extent = settingsContentExtent(extent_rects[0..extent_count], self.px(settings_content_bottom_padding));
+    const scroll_geometry = settingsScrollGeometry(content_extent, viewport_height);
+    self.content_scroll_max = scroll_geometry.max_position;
     self.content_scroll_y = std.math.clamp(self.content_scroll_y, 0, self.content_scroll_max);
-    _ = sys.SetScrollRange(hwnd, SB_VERT, 0, self.content_scroll_max, 1);
-    _ = sys.SetScrollPos(hwnd, SB_VERT, self.content_scroll_y, 1);
-    _ = sys.ShowScrollBar(hwnd, SB_VERT, @intFromBool(self.content_scroll_max > 0));
-    const content_top = pane_top + stack_top - self.content_scroll_y;
+    const scroll_info: SCROLLINFO = .{
+        .cbSize = @sizeOf(SCROLLINFO),
+        .fMask = SIF_RANGE | SIF_PAGE | SIF_POS,
+        .nMin = 0,
+        .nMax = scroll_geometry.nmax,
+        .nPage = scroll_geometry.page,
+        .nPos = self.content_scroll_y,
+        .nTrackPos = 0,
+    };
+    _ = SetScrollInfo(hwnd, SB_VERT, &scroll_info, 1);
+    _ = ShowScrollBar(hwnd, SB_VERT, @intFromBool(self.content_scroll_max > 0));
 
-    const header_right = @max(pane_left, rect.right - side - self.px(110));
-    if (self.text_header) |text| _ = sys.MoveWindow(text, pane_left, pane_top, header_right - pane_left, self.px(28), 1);
-    if (self.text_summary) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(34), header_right - pane_left, self.px(40), 1);
-    if (self.text_status) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, self.px(24), 1);
-    if (self.text_close_prompt) |text| _ = sys.MoveWindow(text, pane_left, pane_top + self.px(76), pane_width, prompt_height, 1);
-    if (self.btn_conflict_keep) |button| _ = sys.MoveWindow(button, pane_left, pane_top + self.px(104), self.px(110), self.px(28), 1);
-    if (self.btn_conflict_use_disk) |button| _ = sys.MoveWindow(button, pane_left + self.px(120), pane_top + self.px(104), self.px(110), self.px(28), 1);
-    const close_action_top = pane_top + self.px(76) + prompt_height + self.px(8);
-    if (self.btn_close_save) |button| _ = sys.MoveWindow(button, pane_left, close_action_top, close_actions.first_width, self.px(32), 1);
-    if (self.btn_close_discard) |button| _ = sys.MoveWindow(button, pane_left + close_actions.second_x, close_action_top + close_actions.second_y, close_actions.second_width, self.px(32), 1);
-    if (self.btn_close_keep_editing) |button| _ = sys.MoveWindow(button, pane_left + close_actions.third_x, close_action_top + close_actions.third_y, close_actions.third_width, self.px(32), 1);
-
-    var active_label_index: usize = 0;
-    for (settings_label_specs, self.field_labels) |spec, label_opt| {
-        if (spec.section != self.active_section) continue;
-        const label = label_opt orelse continue;
-        const columns = if (self.active_section == .appearance or self.active_section == .privacy) responsive_columns else 1;
-        const column_gap = self.px(settings_column_gap);
-        const column_width = @divTrunc(pane_width - (if (columns == 2) column_gap else 0), @as(i32, @intCast(columns)));
-        const column: i32 = @intCast(active_label_index % columns);
-        const row: i32 = @intCast(active_label_index / columns);
-        _ = sys.MoveWindow(
-            label,
-            pane_left + column * (column_width + column_gap),
-            content_top + row * row_gap - self.px(field_label_offset),
-            column_width,
-            self.px(field_label_height),
-            1,
-        );
-        active_label_index += 1;
-    }
-    if (self.text_help) |text| {
-        _ = sys.MoveWindow(text, pane_left, content_top + row_gap, pane_width, @max(self.px(240), rect.bottom - content_top - row_gap - side), 1);
-    }
-
-    // Terminal section stack. All rows share this section and are
-    // hidden by `applySectionVisibility` when another section is
-    // active. Layout is a single-column flow from the content-pane
-    // header down.
-    {
-        var ty: i32 = content_top;
-        if (self.edit_scrollback) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), control_height, 1);
-            ty += row_gap;
-        }
-        if (self.combo_confirm_close) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
-            ty += row_gap;
-        }
-        if (self.combo_copy_on_select) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
-            ty += row_gap;
-        }
-        if (self.chk_trim_trail) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(260), pane_width), checkbox_height, 1);
-        }
-    }
-
-    // Privacy section stack.
-    {
-        const controls = [_]struct { hwnd: ?HWND, width: i32, height: i32 }{
-            .{ .hwnd = self.combo_clipboard_read, .width = 200, .height = 160 },
-            .{ .hwnd = self.combo_clipboard_write, .width = 200, .height = 160 },
-            .{ .hwnd = self.combo_link_url, .width = 200, .height = 160 },
-            .{ .hwnd = self.combo_link_previews, .width = 200, .height = 160 },
-            .{ .hwnd = self.chk_desktop_notifications, .width = 320, .height = 24 },
-            .{ .hwnd = self.chk_app_notify_clipboard, .width = 320, .height = 24 },
-            .{ .hwnd = self.chk_app_notify_config, .width = 320, .height = 24 },
-        };
-        const columns = responsive_columns;
-        const column_gap = self.px(settings_column_gap);
-        const column_width = @divTrunc(pane_width - (if (columns == 2) column_gap else 0), @as(i32, @intCast(columns)));
-        for (controls, 0..) |control, i| {
-            const control_hwnd = control.hwnd orelse continue;
-            const column: i32 = @intCast(i % columns);
-            const row: i32 = @intCast(i / columns);
-            _ = sys.MoveWindow(
-                control_hwnd,
-                pane_left + column * (column_width + column_gap),
-                content_top + row * row_gap,
-                @min(self.px(control.width), column_width),
-                self.px(control.height),
-                1,
+    for (form_items, 0..) |item, index| {
+        const control = self.controlHwnd(item.control_index) orelse continue;
+        const geometry = item_rects[index];
+        if (item.label_index) |label_index| if (self.field_labels[label_index]) |label| {
+            _ = SetWindowPos(
+                label,
+                null,
+                pane_left + geometry.label.left,
+                viewport_top + geometry.label.top - self.content_scroll_y,
+                geometry.label.right - geometry.label.left,
+                geometry.label.bottom - geometry.label.top,
+                position_flags,
             );
-        }
-    }
-
-    // Appearance section stack.
-    {
-        const controls = [_]struct { hwnd: ?HWND, width: i32, height: i32 }{
-            .{ .hwnd = self.edit_font_family, .width = 300, .height = 28 },
-            .{ .hwnd = self.edit_font_size, .width = 160, .height = 28 },
-            .{ .hwnd = self.edit_theme, .width = 300, .height = 28 },
-            .{ .hwnd = self.edit_bg_opacity, .width = 160, .height = 28 },
-            .{ .hwnd = self.combo_window_theme, .width = 200, .height = 180 },
-            .{ .hwnd = self.combo_cursor_style, .width = 200, .height = 160 },
-            .{ .hwnd = self.edit_pad_x, .width = 160, .height = 28 },
-            .{ .hwnd = self.edit_pad_y, .width = 160, .height = 28 },
-            .{ .hwnd = self.combo_pad_balance, .width = 200, .height = 160 },
-            .{ .hwnd = self.chk_bg_blur, .width = 260, .height = 24 },
         };
-        const columns = responsive_columns;
-        const column_gap = self.px(settings_column_gap);
-        const column_width = @divTrunc(pane_width - (if (columns == 2) column_gap else 0), @as(i32, @intCast(columns)));
-        for (controls, 0..) |control, i| {
-            const control_hwnd = control.hwnd orelse continue;
-            const column: i32 = @intCast(i % columns);
-            const row: i32 = @intCast(i / columns);
-            _ = sys.MoveWindow(
-                control_hwnd,
-                pane_left + column * (column_width + column_gap),
-                content_top + row * row_gap,
-                @min(self.px(control.width), column_width),
-                self.px(control.height),
-                1,
-            );
-        }
-    }
-
-    // Shell section.
-    {
-        var ty: i32 = content_top;
-        if (self.edit_command) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(360), pane_width), control_height, 1);
-            ty += row_gap;
-        }
-        if (self.combo_shell_integ) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(200), 1);
-        }
-    }
-
-    if (self.btn_keybindings_editor) |btn| {
-        _ = sys.MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
-    }
-
-    // Updates section.
-    {
-        var ty: i32 = content_top;
-        if (self.combo_auto_update) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(160), 1);
-            ty += row_gap;
-        }
-        if (self.combo_auto_update_channel) |e| {
-            _ = sys.MoveWindow(e, pane_left, ty, @min(self.px(200), pane_width), self.px(140), 1);
-        }
-    }
-
-    if (self.btn_open_editor) |btn| {
-        _ = sys.MoveWindow(btn, pane_left, content_top, @min(self.px(220), pane_width), self.px(32), 1);
-    }
-
-    // Save button — always-visible primary action in the header. Keeping it
-    // out of the field stack prevents overlap at high DPI and narrow heights.
-    if (self.btn_save) |btn| {
-        const w = self.px(90);
-        const h = self.px(32);
-        _ = sys.MoveWindow(
-            btn,
-            rect.right - w - side,
-            pane_top,
-            w,
-            h,
-            1,
+        _ = SetWindowPos(
+            control,
+            null,
+            pane_left + geometry.control.left,
+            viewport_top + geometry.control.top - self.content_scroll_y,
+            geometry.control.right - geometry.control.left,
+            if (isComboControl(self, control)) self.px(settings_combo_popup_height) else self.px(settings_control_height),
+            position_flags,
         );
     }
+    if (help_rect) |help| if (self.text_help) |text| {
+        _ = SetWindowPos(
+            text,
+            null,
+            pane_left + help.left,
+            viewport_top + help.top - self.content_scroll_y,
+            help.right - help.left,
+            help.bottom - help.top,
+            position_flags,
+        );
+    };
+    if (self.text_help) |text| _ = ShowWindow(text, if (help_rect != null) SW_SHOWNORMAL else SW_HIDE);
 
-    const control_viewport_top = pane_top + stack_top;
-    const viewport_bottom = rect.bottom - side;
+    const row_top = action_bar_top + action_bar.actions_top;
+    const action_gap = self.px(settings_action_gap);
+    const normal_actions = action_bar.normal_actions;
+    if (self.btn_save) |button| _ = SetWindowPos(button, null, pane_left + normal_actions.save_x, row_top + normal_actions.save_y, normal_actions.save_width, normal_actions.button_height, position_flags);
+    if (self.btn_conflict_keep) |button| _ = SetWindowPos(button, null, pane_left + normal_actions.keep_mine_x, row_top + normal_actions.keep_mine_y, normal_actions.keep_mine_width, normal_actions.button_height, position_flags);
+    if (self.btn_conflict_use_disk) |button| _ = SetWindowPos(button, null, pane_left + normal_actions.use_disk_x, row_top + normal_actions.use_disk_y, normal_actions.use_disk_width, normal_actions.button_height, position_flags);
+    if (self.text_status) |text| _ = SetWindowPos(text, null, pane_left, row_top + self.px(6), @max(0, normal_actions.status_right), self.px(20), position_flags);
+
+    const close_actions = action_bar.actions;
+    const close_top = action_bar_top + action_bar.actions_top;
+    const prompt_width = if (close_actions.stacked) pane_width else @max(0, close_actions.first_x - action_gap);
+    if (self.text_close_prompt) |text| _ = SetWindowPos(text, null, pane_left, action_bar_top + action_bar.prompt_top, prompt_width, action_bar.prompt_height, position_flags);
+    if (self.btn_close_save) |button| _ = SetWindowPos(button, null, pane_left + close_actions.first_x, close_top, close_actions.first_width, close_actions.button_height, position_flags);
+    if (self.btn_close_discard) |button| _ = SetWindowPos(button, null, pane_left + close_actions.second_x, close_top + close_actions.second_y, close_actions.second_width, close_actions.button_height, position_flags);
+    if (self.btn_close_keep_editing) |button| _ = SetWindowPos(button, null, pane_left + close_actions.third_x, close_top + close_actions.third_y, close_actions.third_width, close_actions.button_height, position_flags);
+
+    var active_clipped_controls = [_]bool{false} ** settings_clipped_control_count;
+    for (form_items) |item| active_clipped_controls[item.control_index] = true;
     for (0..settings_clipped_control_count) |index| {
-        const fully_clipped = clipChildToViewport(hwnd, self.controlHwnd(index), control_viewport_top, viewport_bottom);
+        const control = self.controlHwnd(index);
+        const region_fully_clipped = clipChildToViewport(hwnd, control, viewport_top, viewport_bottom);
+        const fully_clipped = !active_clipped_controls[index] or region_fully_clipped;
         if (self.control_uia_providers[index]) |provider| provider.setViewportFullyClipped(fully_clipped);
     }
-    const help_fully_clipped = clipChildToViewport(hwnd, self.text_help, control_viewport_top, viewport_bottom);
+    const help_region_fully_clipped = clipChildToViewport(hwnd, self.text_help, viewport_top, viewport_bottom);
+    const help_fully_clipped = help_rect == null or help_region_fully_clipped;
     if (self.text_uia_providers[4]) |provider| provider.setViewportFullyClipped(help_fully_clipped);
-    const label_viewport_top = control_viewport_top - self.px(field_label_offset);
+    var active_labels = [_]bool{false} ** settings_label_specs.len;
+    for (form_items) |item| {
+        if (item.label_index) |index| active_labels[index] = true;
+    }
     for (self.field_labels, 0..) |label, index| {
-        const fully_clipped = clipChildToViewport(hwnd, label, label_viewport_top, viewport_bottom);
+        const region_fully_clipped = clipChildToViewport(hwnd, label, viewport_top, viewport_bottom);
+        const fully_clipped = !active_labels[index] or region_fully_clipped;
         if (self.text_uia_providers[index + 5]) |provider| provider.setViewportFullyClipped(fully_clipped);
     }
+    self.proof_layout_redraw_succeeded = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE) != 0;
 }
 
 fn settingsTextProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
@@ -4750,10 +5306,95 @@ fn settingsControlProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) ca
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+fn shouldDrawSettingsSectionFocusRing(selected: bool, focused: bool) bool {
+    _ = selected;
+    return focused;
+}
+
+test "settings section focus ring follows focus, not selection" {
+    try std.testing.expect(!shouldDrawSettingsSectionFocusRing(true, false));
+    try std.testing.expect(shouldDrawSettingsSectionFocusRing(false, true));
+}
+
+fn paintSettingsSectionButton(hwnd: HWND, settings: *SettingsWindow) void {
+    var ps: PAINTSTRUCT = undefined;
+    const hdc = BeginPaint(hwnd, &ps);
+    defer _ = EndPaint(hwnd, &ps);
+    var rect: RECT = undefined;
+    if (GetClientRect(hwnd, &rect) == 0) return;
+    const colors = settings.theme_adapter.colors;
+    const selected = SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const pressed = (SendMessageW(hwnd, BM_GETSTATE, 0, 0) & BST_PUSHED) != 0;
+    const hovered = settings.section_hovered == hwnd;
+    const focused = shouldDrawSettingsSectionFocusRing(selected, GetFocus() == hwnd);
+    const fill_color = if (selected or pressed)
+        colors.selection_bg
+    else if (hovered and !colors.high_contrast)
+        colors.button_bg
+    else
+        colors.rail_bg;
+    const fill_brush = CreateSolidBrush(fill_color) orelse return;
+    defer _ = DeleteObject(fill_brush);
+    _ = FillRect(hdc, &rect, fill_brush);
+
+    if (selected) {
+        if (colors.high_contrast) {
+            const border = CreateSolidBrush(colors.selection_text) orelse return;
+            defer _ = DeleteObject(border);
+            _ = FrameRect(hdc, &rect, border);
+        } else {
+            const pill_width = @max(1, settings.px(settings_metrics.stroke_emphasis));
+            const pill_height = @min(rect.bottom - rect.top, settings.px(settings_metrics.space_6));
+            const pill_top = rect.top + @divTrunc(rect.bottom - rect.top - pill_height, 2);
+            const accent = CreateSolidBrush(colors.accent) orelse return;
+            defer _ = DeleteObject(accent);
+            const pill: RECT = .{ .left = rect.left, .top = pill_top, .right = rect.left + pill_width, .bottom = pill_top + pill_height };
+            _ = FillRect(hdc, &pill, accent);
+        }
+    }
+
+    var label: [64:0]u16 = undefined;
+    const label_len = GetWindowTextW(hwnd, &label, @intCast(label.len));
+    var text_rect = rect;
+    text_rect.left += settings.px(settings_pane_padding);
+    const font = if (selected) settings.emphasis_font else settings.ui_font;
+    const previous_font = if (font) |value| SelectObject(hdc, value) else null;
+    defer {
+        if (previous_font) |value| _ = SelectObject(hdc, value);
+    }
+    _ = SetBkMode(hdc, TRANSPARENT);
+    _ = SetTextColor(
+        hdc,
+        if (selected or pressed) colors.selection_text else if (colors.high_contrast) colors.edit_text else colors.text,
+    );
+    if (label_len > 0) _ = DrawTextW(hdc, &label, label_len, &text_rect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+    if (focused) {
+        const ring_color = if (colors.high_contrast and selected) colors.selection_text else colors.focus_ring;
+        const ring = CreateSolidBrush(ring_color) orelse return;
+        defer _ = DeleteObject(ring);
+        var focus_rect = rect;
+        const inset = settings.px(settings_metrics.space_1);
+        focus_rect.left += inset;
+        focus_rect.top += inset;
+        focus_rect.right -= inset;
+        focus_rect.bottom -= inset;
+        var layer: i32 = 0;
+        while (layer < @max(1, settings.px(settings_metrics.stroke_focus)) and focus_rect.right > focus_rect.left and focus_rect.bottom > focus_rect.top) : (layer += 1) {
+            _ = FrameRect(hdc, &focus_rect, ring);
+            focus_rect.left += 1;
+            focus_rect.top += 1;
+            focus_rect.right -= 1;
+            focus_rect.bottom -= 1;
+        }
+    }
+}
+
 fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
     const owner = if (sys.GetParent(hwnd)) |parent| recoverOwner(parent) else null;
     if (owner) |settings| {
         const previous = settings.section_button_prev_proc;
+        if (previous == null) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (settings.sectionForButton(hwnd)) |section| {
             if (msg == WM_GETOBJECT) {
                 if (settings.sectionProvider(section)) |provider| {
@@ -4768,14 +5409,60 @@ fn settingsSectionButtonProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPAR
                 }
             }
         }
-        if (previous) |proc| {
-            const result = sys.CallWindowProcW(proc, hwnd, msg, wParam, lParam);
-            if (msg == WM_SETFOCUS) {
-                if (settings.sectionForButton(hwnd)) |section| {
-                    if (settings.sectionProvider(section)) |provider| provider.raiseFocusChanged();
+        switch (msg) {
+            WM_SETTINGS_PROOF_KILLFOCUS_COUNT => return @intCast(settings.proof_killfocus_count),
+            WM_SETTINGS_PROOF_REDRAW_SUCCEEDED => return @intFromBool(settings.proof_redraw_succeeded),
+            WM_SETTINGS_PROOF_UPDATE_PENDING => return @intFromBool(settings.proof_update_pending),
+            WM_SETTINGS_PROOF_LIVE_FOCUS_RING => return @intFromBool(GetFocus() == hwnd),
+            WM_ERASEBKGND => return 1,
+            WM_PAINT => {
+                paintSettingsSectionButton(hwnd, settings);
+                return 0;
+            },
+            WM_MOUSEMOVE => {
+                if (settings.section_hovered != hwnd) {
+                    if (settings.section_hovered) |previous_hover| _ = InvalidateRect(previous_hover, null, 0);
+                    settings.section_hovered = hwnd;
+                    _ = InvalidateRect(hwnd, null, 0);
+                    var tracking: TRACKMOUSEEVENT = .{
+                        .cbSize = @sizeOf(TRACKMOUSEEVENT),
+                        .dwFlags = TME_LEAVE,
+                        .hwndTrack = hwnd,
+                        .dwHoverTime = 0,
+                    };
+                    _ = TrackMouseEvent(&tracking);
                 }
-            }
-            return result;
+            },
+            WM_MOUSELEAVE => {
+                if (settings.section_hovered == hwnd) settings.section_hovered = null;
+                _ = InvalidateRect(hwnd, null, 0);
+            },
+            BM_SETCHECK, BM_SETSTATE => {
+                if (previous) |proc| {
+                    const result = CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                    _ = InvalidateRect(hwnd, null, 0);
+                    return result;
+                }
+            },
+            WM_SETFOCUS, WM_KILLFOCUS => {
+                if (previous) |proc| {
+                    const result = CallWindowProcW(proc, hwnd, msg, wParam, lParam);
+                    if (msg == WM_KILLFOCUS) {
+                        settings.proof_killfocus_count +%= 1;
+                        settings.proof_redraw_succeeded = RedrawWindow(hwnd, null, null, RDW_INVALIDATE | RDW_UPDATENOW) != 0;
+                        var update_rect: RECT = undefined;
+                        settings.proof_update_pending = GetUpdateRect(hwnd, &update_rect, 0) != 0;
+                    } else _ = InvalidateRect(hwnd, null, 0);
+                    if (msg == WM_SETFOCUS) if (settings.sectionForButton(hwnd)) |section| {
+                        if (settings.sectionProvider(section)) |provider| provider.raiseFocusChanged();
+                    };
+                    return result;
+                }
+            },
+            else => {},
+        }
+        if (previous) |proc| {
+            return CallWindowProcW(proc, hwnd, msg, wParam, lParam);
         }
     }
     return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -4791,6 +5478,45 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
 
     const owner = recoverOwner(hwnd);
     switch (msg) {
+        WM_SETTINGS_PROOF_VIEWPORT_TOP => {
+            if (owner) |o| return @intCast(o.proof_viewport_top);
+            return 0;
+        },
+        WM_SETTINGS_PROOF_VIEWPORT_BOTTOM => {
+            if (owner) |o| return @intCast(o.proof_viewport_bottom);
+            return 0;
+        },
+        WM_SETTINGS_PROOF_SET_FOCUS => {
+            if (owner != null and wParam != 0) {
+                const target: HWND = @ptrFromInt(wParam);
+                if (IsChild(hwnd, target) != 0) {
+                    _ = SetFocus(target);
+                    return @intFromBool(GetFocus() == target);
+                }
+            }
+            return 0;
+        },
+        WM_SETTINGS_PROOF_PAINT_COUNT => {
+            if (owner) |o| return @intCast(o.proof_paint_count);
+            return 0;
+        },
+        WM_SETTINGS_PROOF_LAYOUT_REDRAW_SUCCEEDED => {
+            if (owner) |o| return @intFromBool(o.proof_layout_redraw_succeeded);
+            return 0;
+        },
+        WM_SETTINGS_PROOF_CHILD => {
+            if (owner) |o| {
+                const index: usize = @intCast(wParam);
+                const child = switch (lParam) {
+                    0 => if (index < settings_clipped_control_count) o.controlHwnd(index) else null,
+                    1 => if (index < o.field_labels.len) o.field_labels[index] else null,
+                    2 => o.text_help,
+                    else => null,
+                };
+                if (child) |value| return @intCast(@intFromPtr(value));
+            }
+            return 0;
+        },
         WM_GETOBJECT => {
             if (owner) |o| {
                 if (o.section_uia_group) |provider| {
@@ -4801,7 +5527,10 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         },
         WM_ERASEBKGND => return 1,
         WM_PAINT => {
-            if (owner) |o| paint(hwnd, o);
+            if (owner) |o| {
+                o.proof_paint_count +%= 1;
+                paint(hwnd, o);
+            }
             return 0;
         },
         WM_CTLCOLORMSGBOX,
@@ -4828,8 +5557,19 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                         colors.disabled_text
                     else if (edit_like)
                         colors.edit_text
+                    else if (control == o.text_status)
+                        switch (o.nextStatus()) {
+                            .raw_validation, .owned_validation => colors.error_text,
+                            .conflict, .owned_conflict => colors.text,
+                            .none => colors.secondary_text,
+                        }
                     else if (msg == WM_CTLCOLORBTN)
-                        colors.button_text
+                        if (o.controlIndex(control)) |index|
+                            if (controlIndexIsCheckbox(index)) colors.secondary_text else colors.button_text
+                        else
+                            colors.button_text
+                    else if (control == o.text_summary or (o.textIndex(control) orelse 0) >= 5)
+                        colors.secondary_text
                     else
                         colors.text
                 else
@@ -4888,22 +5628,36 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_MOUSEWHEEL => {
             if (owner) |o| {
                 const delta: i16 = @bitCast(@as(u16, @truncate(wParam >> 16)));
-                if (delta != 0) {
-                    o.setContentScroll(o.content_scroll_y + if (delta > 0) -o.px(56) else o.px(56));
-                }
+                const steps = @divTrunc(@as(i32, delta), 120);
+                if (steps != 0) o.setContentScroll(o.content_scroll_y - steps * o.px(64));
             }
             return 0;
         },
         WM_VSCROLL => {
             if (owner) |o| {
                 const code = wParam & 0xFFFF;
-                const page = o.px(240);
+                var client: RECT = undefined;
+                const viewport_height = if (GetClientRect(hwnd, &client) != 0)
+                    @max(1, settingsContentViewportBottom(o, client) - settingsContentViewportTop(o, client))
+                else
+                    o.px(240);
+                const page = @max(1, viewport_height - o.px(settings_control_height));
+                var tracking: SCROLLINFO = .{
+                    .cbSize = @sizeOf(SCROLLINFO),
+                    .fMask = SIF_TRACKPOS,
+                    .nMin = 0,
+                    .nMax = 0,
+                    .nPage = 0,
+                    .nPos = 0,
+                    .nTrackPos = o.content_scroll_y,
+                };
+                if (code == SB_THUMBPOSITION or code == SB_THUMBTRACK) _ = GetScrollInfo(hwnd, SB_VERT, &tracking);
                 const next = switch (code) {
-                    SB_LINEUP => o.content_scroll_y - o.px(28),
-                    SB_LINEDOWN => o.content_scroll_y + o.px(28),
+                    SB_LINEUP => o.content_scroll_y - o.px(32),
+                    SB_LINEDOWN => o.content_scroll_y + o.px(32),
                     SB_PAGEUP => o.content_scroll_y - page,
                     SB_PAGEDOWN => o.content_scroll_y + page,
-                    SB_THUMBPOSITION, SB_THUMBTRACK => @as(i32, @intCast((wParam >> 16) & 0xFFFF)),
+                    SB_THUMBPOSITION, SB_THUMBTRACK => tracking.nTrackPos,
                     SB_TOP => 0,
                     SB_BOTTOM => o.content_scroll_max,
                     else => o.content_scroll_y,
@@ -5195,12 +5949,42 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
     _ = sys.FillRect(hdc, &rect, window_brush);
 
     var rail_rect = rect;
-    rail_rect.right = owner.px(left_rail_width);
+    rail_rect.right = owner.px(settings_rail_width);
     const rail_brush = owner.theme_adapter.rail_brush orelse fallback_brush;
     if (owner.theme_adapter.rail_brush == null) {
         _ = sys.SetDCBrushColor(hdc, colors.rail_bg);
     }
-    _ = sys.FillRect(hdc, &rail_rect, rail_brush);
+    _ = FillRect(hdc, &rail_rect, rail_brush);
+
+    const rail_separator_brush = CreateSolidBrush(colors.rail_separator) orelse return;
+    defer _ = DeleteObject(rail_separator_brush);
+    const pane_separator_brush = CreateSolidBrush(colors.pane_separator) orelse return;
+    defer _ = DeleteObject(pane_separator_brush);
+    const separator_width = @max(1, owner.px(settings_metrics.stroke_hairline));
+    const pane = paneBounds(owner, rect);
+    const rail_separator: RECT = .{
+        .left = owner.px(settings_rail_width) - separator_width,
+        .top = rect.top,
+        .right = owner.px(settings_rail_width),
+        .bottom = rect.bottom,
+    };
+    _ = FillRect(hdc, &rail_separator, rail_separator_brush);
+    const rail_geometry = sectionRailGeometry(rect.bottom - rect.top, owner.dpi);
+    const header_separator: RECT = .{
+        .left = pane.left,
+        .top = rail_geometry.top_pad + owner.px(settings_header_separator_y),
+        .right = pane.right,
+        .bottom = rail_geometry.top_pad + owner.px(settings_header_separator_y) + separator_width,
+    };
+    _ = FillRect(hdc, &header_separator, pane_separator_brush);
+    const action_bar = closePromptLayoutGeometry(owner, pane.width, rect.bottom - rect.top);
+    const action_separator: RECT = .{
+        .left = pane.left,
+        .top = rect.bottom - action_bar.bar_height,
+        .right = pane.right,
+        .bottom = rect.bottom - action_bar.bar_height + separator_width,
+    };
+    _ = FillRect(hdc, &action_separator, pane_separator_brush);
 }
 
 fn readEditUtf8(edit: HWND, buf: []u8) ?[]const u8 {
