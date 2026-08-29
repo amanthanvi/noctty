@@ -48,6 +48,17 @@ const WRITE_BUF_SIZE = 4 * 1024;
 // bottleneck on high-throughput output. 64 KiB is the product default.
 const WINDOWS_READ_BUF_SIZE = 64 * 1024;
 
+fn traceInstant(enabled: bool) ?std.time.Instant {
+    if (!enabled) return null;
+    return std.time.Instant.now() catch null;
+}
+
+fn traceElapsedNs(started: ?std.time.Instant) u64 {
+    const start = started orelse return 0;
+    const now = std.time.Instant.now() catch return 0;
+    return now.since(start);
+}
+
 fn pathEntryEquals(a: []const u8, b: []const u8) bool {
     return if (builtin.os.tag == .windows)
         std.ascii.eqlIgnoreCase(a, b)
@@ -211,6 +222,7 @@ pub fn threadEnter(
             .{ pty_fds.read, io, pipe[0] },
         );
     read_thread.setName("io-reader") catch {};
+    io.surface_mailbox.surface.noteBenchmarkIoReaderSpawned();
 
     const command: ?*Command = if (self.subprocess.process) |*subprocess| switch (subprocess.*) {
         .fork_exec => |*cmd| cmd,
@@ -1519,9 +1531,11 @@ pub const ReadThread = struct {
         defer crash.sentry.thread_state = null;
 
         var buf: [WINDOWS_READ_BUF_SIZE]u8 = undefined;
+        const trace_enabled = io.outputTraceEnabled();
         while (true) {
             while (true) {
                 var n: windows.DWORD = 0;
+                const read_started = traceInstant(trace_enabled);
                 if (windows.kernel32.ReadFile(fd, &buf, buf.len, &n, null) == 0) {
                     const err = windows.kernel32.GetLastError();
                     switch (err) {
@@ -1551,7 +1565,10 @@ pub const ReadThread = struct {
                     return;
                 }
 
+                io.noteWindowsPtyRead(n, buf.len, traceElapsedNs(read_started));
+                const process_started = traceInstant(trace_enabled);
                 @call(.always_inline, termio.Termio.processOutput, .{ io, buf[0..n] });
+                io.noteWindowsProcessOutput(traceElapsedNs(process_started));
             }
 
             var quit_bytes: windows.DWORD = 0;
@@ -2086,4 +2103,8 @@ test "addGhosttyBinToPath prepends existing windows entry when not first" {
         "c:\\program files\\noctty;C:\\Users\\amant\\scoop\\shims;C:\\Program Files\\Noctty;C:\\Windows\\System32",
         env.get("PATH").?,
     );
+}
+
+test "Windows PTY read batches amortize high-volume output" {
+    try std.testing.expect(WINDOWS_READ_BUF_SIZE >= 64 * 1024);
 }

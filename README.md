@@ -134,6 +134,9 @@ What works, what's experimental, and what's out of scope is tracked in
 [docs/status.md](docs/status.md). For a feature-by-feature comparison
 with upstream Ghostty, see
 [docs/windows-capability-matrix.md](docs/windows-capability-matrix.md).
+The "fast" claim above is measured, not asserted: methodology, the
+same-machine baseline, and what is still a proxy are in
+[docs/windows-benchmark-methodology.md](docs/windows-benchmark-methodology.md).
 
 Questions and feedback go to
 [Discussions](https://github.com/amanthanvi/noctty/discussions).

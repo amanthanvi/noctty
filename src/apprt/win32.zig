@@ -66,6 +66,7 @@ const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
+const bench_trace = @import("win32/bench_trace.zig");
 const labels = @import("win32/labels.zig");
 const win32_input = @import("win32/input.zig");
 const chrome_layout = @import("win32/chrome_layout.zig");
@@ -77,6 +78,7 @@ test {
     _ = @import("win32/render_trace.zig");
     _ = @import("win32/gl_startup.zig");
     _ = @import("win32/pixel_format.zig");
+    _ = @import("win32/bench_trace.zig");
     _ = @import("win32/labels.zig");
     _ = @import("win32/input.zig");
     _ = @import("win32/chrome_layout.zig");
@@ -193,6 +195,10 @@ const windows = std.os.windows;
 pub const resourcesDir = internal_os.resourcesDir;
 
 const RenderTrace = render_trace.RenderTrace;
+const MemoryStageTrace = bench_trace.MemoryStageTrace;
+pub const BenchmarkMemoryStage = bench_trace.BenchmarkMemoryStage;
+pub const BenchmarkRenderTargetStrategy = bench_trace.BenchmarkRenderTargetStrategy;
+pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
 pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
 pub const suppressStartupLoaderErrorDialogs = gl_startup.suppressStartupLoaderErrorDialogs;
@@ -22188,6 +22194,7 @@ pub const Surface = struct {
     deferred_char: DeferredCharState = .{},
     undo_capture_suspended: bool = false,
     render_trace: RenderTrace = .{},
+    memory_stage_trace: MemoryStageTrace = .{},
     /// Per-surface bounded undo stack for terminal-local replayable
     /// actions (`clear_screen`, `reset`). Structural history that
     /// retains live tabs/surfaces lives on `Host` because it crosses
@@ -23240,6 +23247,89 @@ pub const Surface = struct {
         };
     }
 
+    pub fn noteBenchmarkMemoryStage(
+        self: *Surface,
+        stage: BenchmarkMemoryStage,
+        surface_id: ?u64,
+    ) void {
+        self.memory_stage_trace.note(
+            stage,
+            @intCast(@intFromPtr(self)),
+            surface_id,
+        );
+    }
+
+    pub fn publishBenchmarkMemorySurfaceId(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.publishSurfaceId(surface_id);
+    }
+
+    pub fn setBenchmarkMemoryGeometry(
+        self: *Surface,
+        surface_width_px: u32,
+        surface_height_px: u32,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        columns: u32,
+        rows: u32,
+    ) void {
+        self.memory_stage_trace.setGeometry(
+            surface_width_px,
+            surface_height_px,
+            cell_width_px,
+            cell_height_px,
+            columns,
+            rows,
+        );
+    }
+
+    pub fn noteBenchmarkIoReaderSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteIoReaderSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    pub fn noteBenchmarkRendererThreadSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteRendererThreadSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    pub fn noteBenchmarkIoThreadSpawned(self: *Surface, surface_id: u64) void {
+        self.memory_stage_trace.noteIoThreadSpawned(@intCast(@intFromPtr(self)), surface_id);
+    }
+
+    pub fn noteBenchmarkFirstDrawResourcesComplete(self: *Surface) void {
+        self.memory_stage_trace.noteFirstDrawResourcesComplete(
+            @intCast(@intFromPtr(self)),
+            null,
+        );
+    }
+
+    pub fn noteBenchmarkTargetResizeBegin(
+        self: *Surface,
+        strategy: BenchmarkRenderTargetStrategy,
+        default_framebuffer_srgb: bool,
+        linear_blending: bool,
+    ) void {
+        self.memory_stage_trace.noteTargetResizeBegin(
+            @intCast(@intFromPtr(self)),
+            null,
+            strategy,
+            default_framebuffer_srgb,
+            linear_blending,
+        );
+    }
+
+    pub fn noteBenchmarkTargetResizeComplete(self: *Surface) void {
+        self.memory_stage_trace.noteTargetResizeComplete(
+            @intCast(@intFromPtr(self)),
+            null,
+        );
+    }
+
+    fn setBenchmarkWglPixelFormat(
+        self: *Surface,
+        value: pixel_format.WglPixelFormatProvenance,
+    ) void {
+        self.memory_stage_trace.setWglPixelFormat(value);
+    }
+
     /// Reserve the repaint slot for a renderer frame before the expensive
     /// `updateFrame` work, so a paint that completes during that work cannot
     /// be lost.
@@ -23433,8 +23523,9 @@ pub const Surface = struct {
         try self.core_surface.draw();
     }
 
-    pub fn noteRendererDrawRequest(self: *Surface) void {
-        self.render_trace.noteRendererDrawRequest();
+    fn noteRendererDrawRequest(self: *RenderTrace) void {
+        if (!self.enabled()) return;
+        _ = self.renderer_draw_request_count.fetchAdd(1, .acq_rel);
     }
 
     pub fn noteRendererWakeupCallback(self: *Surface) void {
@@ -23445,8 +23536,31 @@ pub const Surface = struct {
         self.render_trace.noteRendererFollowupCallback();
     }
 
-    pub fn noteRendererUpdateFrame(self: *Surface) void {
-        self.render_trace.noteRendererUpdateFrame();
+    fn noteRendererUpdateFrame(
+        self: *RenderTrace,
+        process_output_generation: u64,
+        process_output_bytes: u64,
+        process_output_tick_ms: u64,
+        benchmark_end_marker_generation: u64,
+        benchmark_end_marker_output_bytes: u64,
+        cursor_blinking: bool,
+    ) void {
+        if (!self.enabled()) return;
+        self.renderer_process_output_generation.store(process_output_generation, .release);
+        self.renderer_process_output_bytes.store(process_output_bytes, .release);
+        self.renderer_process_output_tick_ms.store(process_output_tick_ms, .release);
+        self.renderer_benchmark_end_marker_generation.store(benchmark_end_marker_generation, .release);
+        self.renderer_benchmark_end_marker_output_bytes.store(benchmark_end_marker_output_bytes, .release);
+        self.renderer_cursor_blinking.store(cursor_blinking, .release);
+        _ = self.noteTimedCounter(
+            &self.renderer_update_frame_count,
+            &self.last_renderer_update_tick_ms,
+            &self.max_renderer_update_gap_ms,
+            &self.max_renderer_update_gap_ended_at_ms,
+            &self.first_renderer_update_at_ms,
+            null,
+            sys.GetTickCount64(),
+        );
     }
 
     pub fn makeGLContextCurrent(self: *Surface) !void {

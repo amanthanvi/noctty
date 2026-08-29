@@ -365,10 +365,16 @@ pub fn add(
     }
 
     // Other dependencies, mostly pure Zig
-    if (b.lazyDependency("opengl", .{})) |dep| {
+    if (b.lazyDependency("opengl", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
         step.root_module.addImport("opengl", dep.module("opengl"));
     }
-    if (b.lazyDependency("vaxis", .{})) |dep| {
+    if (b.lazyDependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
         step.root_module.addImport("vaxis", dep.module("vaxis"));
     }
     if (b.lazyDependency("wuffs", .{
@@ -477,7 +483,89 @@ pub fn add(
     self.help_strings.addImport(step);
     self.unicode_tables.addImport(step);
 
+    harmonizeModuleOptimizeMode(b, step.root_module, optimize);
+    try assertModuleOptimizeMode(b, step.root_module, optimize);
+
     return static_libs;
+}
+
+fn harmonizeModuleOptimizeMode(
+    b: *std.Build,
+    root: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
+    defer visited.deinit(b.allocator);
+    harmonizeModuleOptimizeModeRecursive(
+        b,
+        root,
+        optimize,
+        &visited,
+    ) catch @panic("OOM while harmonizing product module optimize modes");
+}
+
+fn harmonizeModuleOptimizeModeRecursive(
+    b: *std.Build,
+    module: *std.Build.Module,
+    optimize: std.builtin.OptimizeMode,
+    visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
+) !void {
+    const entry = try visited.getOrPut(b.allocator, module);
+    if (entry.found_existing) return;
+
+    module.optimize = optimize;
+    var imports = module.import_table.iterator();
+    while (imports.next()) |import| try harmonizeModuleOptimizeModeRecursive(
+        b,
+        import.value_ptr.*,
+        optimize,
+        visited,
+    );
+}
+
+fn assertModuleOptimizeMode(
+    b: *std.Build,
+    root: *std.Build.Module,
+    expected: std.builtin.OptimizeMode,
+) !void {
+    var visited: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
+    defer visited.deinit(b.allocator);
+    try assertModuleOptimizeModeRecursive(
+        b,
+        root,
+        expected,
+        "root",
+        &visited,
+    );
+}
+
+fn assertModuleOptimizeModeRecursive(
+    b: *std.Build,
+    module: *std.Build.Module,
+    expected: std.builtin.OptimizeMode,
+    import_name: []const u8,
+    visited: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
+) !void {
+    const entry = try visited.getOrPut(b.allocator, module);
+    if (entry.found_existing) return;
+
+    const actual = module.optimize orelse .Debug;
+    if (actual != expected) {
+        std.log.err(
+            "product module optimize mismatch import={s} expected={s} actual={s}",
+            .{ import_name, @tagName(expected), @tagName(actual) },
+        );
+        return error.ProductModuleOptimizeMismatch;
+    }
+
+    var imports = module.import_table.iterator();
+    while (imports.next()) |import| try assertModuleOptimizeModeRecursive(
+        b,
+        import.value_ptr.*,
+        expected,
+        import.key_ptr.*,
+        visited,
+    );
 }
 
 /// Add only the dependencies required for `Config.simd` enabled. This also

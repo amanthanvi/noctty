@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-21, against current fork HEAD.
+Last updated: 2026-08-28, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -76,6 +76,20 @@ Win32-validated VT protocol coverage is tracked in
 - Universal palette: actions, tabs, panes, profiles, named layouts, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
+
+### Performance measurement
+
+- A reproducible Windows benchmark suite covers headless VT throughput
+  (`zig build bench:vt-throughput`) and interactive metrics against the
+  real app (`test/windows/bench-windows.ps1`): cold start to first
+  frame, frame time, memory per pane, idle CPU/GPU, and ConPTY round
+  trip. CI gates the headless throughput floor; interactive thresholds
+  are provisional and inactive.
+- The measured same-machine baseline, methodology, proxies, and the
+  camera/photodiode procedure for physical key-to-pixel latency are in
+  [windows-benchmark-methodology.md](windows-benchmark-methodology.md).
+  Cross-terminal comparisons are not published: competitor adapters
+  report `not-supported` until they can prove the same causal endpoint.
 
 ### Renderer
 

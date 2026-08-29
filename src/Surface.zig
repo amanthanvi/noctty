@@ -44,6 +44,26 @@ const log = std.log.scoped(.surface);
 // The renderer implementation to use.
 const Renderer = rendererpkg.Renderer;
 
+fn syncBenchmarkMemoryGeometry(self: *Surface) void {
+    if (comptime @hasDecl(apprt.Surface, "setBenchmarkMemoryGeometry")) {
+        const grid = self.size.grid();
+        self.rt_surface.setBenchmarkMemoryGeometry(
+            self.size.screen.width,
+            self.size.screen.height,
+            self.size.cell.width,
+            self.size.cell.height,
+            @intCast(grid.columns),
+            @intCast(grid.rows),
+        );
+    }
+}
+
+pub fn noteBenchmarkIoReaderSpawned(self: *Surface) void {
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkIoReaderSpawned")) {
+        self.rt_surface.noteBenchmarkIoReaderSpawned(self.id);
+    }
+}
+
 /// Minimum window size in cells. This is used to prevent the window from
 /// being resized to a size that is too small to be useful. These defaults
 /// are chosen to match the default size of Mac's Terminal.app, but is
@@ -555,6 +575,9 @@ pub fn init(
 
     // Initialize our renderer with our initialized surface.
     try Renderer.surfaceInit(rt_surface);
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
+        rt_surface.noteBenchmarkMemoryStage(.opengl_functions_loaded, null);
+    }
 
     // Determine our DPI configurations so we can properly configure
     // font points to pixels and handle other high-DPI scaling factors.
@@ -621,6 +644,9 @@ pub fn init(
         .thread = &self.renderer_thread,
     });
     errdefer renderer_impl.deinit();
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
+        rt_surface.noteBenchmarkMemoryStage(.renderer_initialized, null);
+    }
 
     // The mutex used to protect our renderer state.
     const mutex = try alloc.create(std.Thread.Mutex);
@@ -678,6 +704,9 @@ pub fn init(
         // lets us get the most likely correct color theme and so on.
         .config_conditional_state = app.config_conditional_state,
     };
+    if (comptime @hasDecl(apprt.Surface, "publishBenchmarkMemorySurfaceId")) {
+        rt_surface.publishBenchmarkMemorySurfaceId(self.id);
+    }
 
     // The command we're going to execute
     const command: ?configpkg.Command = command: {
@@ -753,6 +782,10 @@ pub fn init(
             .terminal_output_transport = &self.terminal_output_transport,
         });
     }
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
+        self.syncBenchmarkMemoryGeometry();
+        rt_surface.noteBenchmarkMemoryStage(.terminal_initialized, self.id);
+    }
     // Outside the block, IO has now taken ownership of our temporary state
     // so we can just defer this and not the subcomponents.
     errdefer self.io.deinit();
@@ -802,6 +835,7 @@ pub fn init(
     self.io.resizeBeforeThreadStart(self.size) catch |err| {
         log.warn("unable to synchronize initial terminal size before IO thread start: {}", .{err});
     };
+    self.syncBenchmarkMemoryGeometry();
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
@@ -810,6 +844,9 @@ pub fn init(
         .{&self.renderer_thread},
     );
     self.renderer_thr.setName("renderer") catch {};
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkRendererThreadSpawned")) {
+        rt_surface.noteBenchmarkRendererThreadSpawned(self.id);
+    }
 
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
@@ -818,6 +855,12 @@ pub fn init(
         .{ &self.io_thread, &self.io },
     );
     self.io_thr.setName("io") catch {};
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkIoThreadSpawned")) {
+        rt_surface.noteBenchmarkIoThreadSpawned(self.id);
+    }
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkMemoryStage")) {
+        rt_surface.noteBenchmarkMemoryStage(.threads_started, self.id);
+    }
 
     if (config.title) |title| {
         _ = try rt_app.performAction(
@@ -2679,6 +2722,9 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 /// practical.
 fn queueRender(self: *Surface) !void {
     self.renderer_state.noteRenderWakeupNotify();
+    if (comptime @hasDecl(apprt.Surface, "noteRendererCoreWakeupNotify")) {
+        self.rt_surface.noteRendererCoreWakeupNotify();
+    }
     try self.renderer_thread.wakeup.notify();
 }
 
@@ -3572,6 +3618,9 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
     // If our focus state is unchanged we do nothing else.
     if (self.focused == focused) return;
     self.focused = focused;
+    if (comptime @hasDecl(apprt.Surface, "noteBenchmarkFocusChange")) {
+        self.rt_surface.noteBenchmarkFocusChange(focused);
+    }
 
     // Notify our render thread of the new state
     self.renderer_thread.send(.{

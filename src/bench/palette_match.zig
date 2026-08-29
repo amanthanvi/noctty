@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const zf = @import("zf");
+const stats = @import("stats.zig");
 
 const Args = struct {
     entries: usize = 500,
@@ -217,15 +218,11 @@ pub fn main() !void {
     }
 
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
-    const min_ns = samples[0];
-    const p50_ns = samples[samples.len / 2];
-    const p99_ns = samples[samples.len * 99 / 100];
-    const max_ns = samples[samples.len - 1];
-    const mean_ns = blk: {
-        var sum: u64 = 0;
-        for (samples) |s| sum += s;
-        break :blk sum / samples.len;
-    };
+    const min_ns = stats.min(samples).?;
+    const p50_ns = stats.percentile(samples, 50).?;
+    const p99_ns = stats.percentile(samples, 99).?;
+    const max_ns = stats.max(samples).?;
+    const mean_ns: u64 = @intFromFloat(stats.mean(samples).?);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
