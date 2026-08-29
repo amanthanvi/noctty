@@ -170,6 +170,8 @@ public static class NocttyAccessibilityNative {
     public static extern bool EnumWindows(EnumProc callback, IntPtr data);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)]
     public static extern int GetClassNameW(IntPtr hwnd, StringBuilder value, int capacity);
+    [DllImport("user32.dll")]
+    public static extern int GetDlgCtrlID(IntPtr hwnd);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")]
     public static extern IntPtr GetWindowLongPtrW(IntPtr hwnd, int index);
     [DllImport("user32.dll")]
@@ -642,6 +644,16 @@ public static class NocttyAccessibilityNative {
         };
         EnumChildWindows(parent, callback, IntPtr.Zero);
         return children.ToArray();
+    }
+    public static IntPtr ChildByControlId(IntPtr parent, int expectedId) {
+        IntPtr match = IntPtr.Zero;
+        EnumProc callback = delegate(IntPtr hwnd, IntPtr data) {
+            if (GetDlgCtrlID(hwnd) != expectedId) return true;
+            match = hwnd;
+            return false;
+        };
+        EnumChildWindows(parent, callback, IntPtr.Zero);
+        return match;
     }
     public static IntPtr[] TopLevelWindowsForProcess(uint expectedProcessId, string expectedClass) {
         System.Collections.Generic.List<IntPtr> windows = new System.Collections.Generic.List<IntPtr>();
@@ -1745,6 +1757,18 @@ function Wait-AccessibilityCondition([scriptblock] $Condition, [DateTime] $Deadl
         -PollMilliseconds $script:ACCESSIBILITY_POLL_MS `
         -ConditionFirst `
         -TimeoutMessage "Timed out waiting for $Description."
+}
+
+function Test-AccessibilityForegroundPrecondition {
+    param(
+        [Parameter(Mandatory)][IntPtr] $ExpectedHwnd,
+        [Parameter(Mandatory)][IntPtr] $ForegroundHwnd,
+        [Parameter(Mandatory)][bool] $ExpectedWindowAlive
+    )
+
+    return $ExpectedWindowAlive -and
+        $ExpectedHwnd -ne [IntPtr]::Zero -and
+        $ForegroundHwnd -eq $ExpectedHwnd
 }
 
 function Wait-AccessibilityWindowElement(
@@ -3540,6 +3564,85 @@ try {
     if ($documents.Count -eq 0) {
         throw 'UIA tree contains no terminal Text element.'
     }
+    $tabContainers = @($root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Tab
+        )
+    ) | Where-Object { $_.Current.ProcessId -eq $process.Id -and $_.Current.Name -eq 'Tabs' })
+    if ($tabContainers.Count -ne 1) {
+        throw "UIA tree exposes $($tabContainers.Count) named Tabs containers; expected exactly one."
+    }
+    $tabContainer = $tabContainers[0]
+    $tabSelectionPattern = $null
+    if (-not $tabContainer.TryGetCurrentPattern(
+        [System.Windows.Automation.SelectionPattern]::Pattern,
+        [ref]$tabSelectionPattern
+    )) {
+        throw 'Tabs container does not expose SelectionPattern.'
+    }
+    $tabItems = @($root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::TabItem
+        )
+    ) | Where-Object { $_.Current.ProcessId -eq $process.Id })
+    if ($tabItems.Count -eq 0) { throw 'UIA tree contains no TabItem elements.' }
+    $selectedTabItems = @()
+    foreach ($tabItem in $tabItems) {
+        $tabItemPattern = $null
+        if (-not $tabItem.TryGetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern,
+            [ref]$tabItemPattern
+        )) {
+            throw "TabItem '$($tabItem.Current.Name)' does not expose SelectionItemPattern."
+        }
+        if (-not [System.Windows.Automation.Automation]::Compare(
+            $tabItemPattern.Current.SelectionContainer,
+            $tabContainer
+        )) {
+            throw "TabItem '$($tabItem.Current.Name)' reports the wrong SelectionContainer."
+        }
+        if ($tabItemPattern.Current.IsSelected) { $selectedTabItems += $tabItem }
+    }
+    $containerSelection = @($tabSelectionPattern.Current.GetSelection())
+    if ($selectedTabItems.Count -ne 1 -or $containerSelection.Count -ne 1 -or
+        -not [System.Windows.Automation.Automation]::Compare($selectedTabItems[0], $containerSelection[0])) {
+        throw "Tabs selection is inconsistent (selected_items=$($selectedTabItems.Count), container_selection=$($containerSelection.Count)); expected exactly one matching item."
+    }
+    $tabChromeEvidence = [ordered]@{
+        container_name = $tabContainer.Current.Name
+        container_type = $tabContainer.Current.ControlType.ProgrammaticName
+        item_count = $tabItems.Count
+        selected_item_name = $selectedTabItems[0].Current.Name
+        selection_count = $containerSelection.Count
+    }
+    $tabActionEvidence = [ordered]@{}
+    foreach ($actionName in @('New tab', 'More tabs')) {
+        $actionElements = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::NameProperty,
+                $actionName
+            )
+        ) | Where-Object {
+            $_.Current.ProcessId -eq $process.Id -and
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
+        })
+        if ($actionElements.Count -ne 1) {
+            throw "UIA tree exposes $($actionElements.Count) '$actionName' Button elements; expected exactly one."
+        }
+        $invokePattern = $null
+        if (-not $actionElements[0].TryGetCurrentPattern(
+            [System.Windows.Automation.InvokePattern]::Pattern,
+            [ref]$invokePattern
+        )) {
+            throw "'$actionName' Button does not expose InvokePattern."
+        }
+        $tabActionEvidence[$actionName] = $actionElements[0].Current.ControlType.ProgrammaticName
+    }
     $document = $documents[0]
     $textPattern = $null
     if (-not $document.TryGetCurrentPattern(
@@ -3754,27 +3857,15 @@ try {
     $liveSetting = 'Polite'
 
     $supportedTextSelection = $textPattern.SupportedTextSelection
-    if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::None) {
-        throw "Terminal TextPattern advertises '$supportedTextSelection'; expected None."
+    if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::Single) {
+        throw "Terminal TextPattern advertises '$supportedTextSelection'; expected Single."
     }
-    # Compatibility path for legacy clients. TextPattern2.GetCaretRange is
-    # canonical; this range remains readable but is not a mutable selection.
+    # The terminal exposes an actual user selection when one exists. No
+    # terminal selection has been made in this scenario, so GetSelection must
+    # be empty rather than fabricating a compatibility caret.
     $selection = @($textPattern.GetSelection())
-    if ($selection.Count -ne 1) {
-        throw "Terminal TextPattern returned $($selection.Count) legacy selection ranges; expected one caret."
-    }
-    if ($selection[0].CompareEndpoints(
-        [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
-        $selection[0],
-        [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End
-    ) -ne 0) {
-        throw 'Terminal legacy selection is not a degenerate caret range.'
-    }
-    $selectionLine = $selection[0].Clone()
-    $selectionLine.ExpandToEnclosingUnit([System.Windows.Automation.Text.TextUnit]::Line)
-    $selectionLineText = $selectionLine.GetText(-1)
-    if ([string]::IsNullOrWhiteSpace($selectionLineText)) {
-        throw 'Terminal legacy caret could not expand/read its current line.'
+    if ($selection.Count -ne 0) {
+        throw "Terminal TextPattern returned $($selection.Count) ranges before a user selection; expected none."
     }
     $markerRange = $textPattern.DocumentRange.FindText($marker, $true, $false)
     if ($null -eq $markerRange) { throw 'Terminal FindText did not return the visible marker range.' }
@@ -3856,7 +3947,8 @@ try {
     )
     $textChangedRegistered = $true
 
-    $splitBaseline = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitBaselineHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+    $splitBaseline = $splitBaselineHwnds.Count
     if ($splitBaseline -ne 1) {
         throw "Split validation requires one clean terminal pane; found $splitBaseline. Rerun with -ResetState."
     }
@@ -3864,12 +3956,22 @@ try {
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+Backslash visible split' -Condition {
         return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 1)
     }
-    $splitAfterRight = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitAfterRightHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+    $splitAfterRight = $splitAfterRightHwnds.Count
+    $rightTopHwnds = @($splitAfterRightHwnds | Where-Object { $_ -notin $splitBaselineHwnds })
+    if ($rightTopHwnds.Count -ne 1) {
+        throw "Ctrl+Shift+Backslash did not expose exactly one new pane HWND (before=$($splitBaselineHwnds -join ',') after=$($splitAfterRightHwnds -join ','))."
+    }
     Send-AccessibilityChord -Keys @([uint16]0x11, [uint16]0x10, [uint16]0x45) -Description 'Ctrl+Shift+E split down' -Process $process
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'Ctrl+Shift+E visible split' -Condition {
         return [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle) -eq ($splitBaseline + 2)
     }
-    $splitAfterDown = [NocttyAccessibilityNative]::VisibleTerminalChildCount($process.MainWindowHandle)
+    $splitAfterDownHwnds = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle))
+    $splitAfterDown = $splitAfterDownHwnds.Count
+    $rightBottomHwnds = @($splitAfterDownHwnds | Where-Object { $_ -notin $splitAfterRightHwnds })
+    if ($rightBottomHwnds.Count -ne 1) {
+        throw "Ctrl+Shift+E did not expose exactly one new pane HWND (before=$($splitAfterRightHwnds -join ',') after=$($splitAfterDownHwnds -join ','))."
+    }
 
     $paneGeometry = @([NocttyAccessibilityNative]::VisibleTerminalChildren($process.MainWindowHandle) | ForEach-Object {
         $paneRect = [NocttyAccessibilityNative]::WindowRect($_)
@@ -3880,15 +3982,16 @@ try {
         }
     })
     if ($paneGeometry.Count -ne 3) { throw "Expected three terminal pane HWNDs, found $($paneGeometry.Count)." }
-    $leftPane = $paneGeometry | Sort-Object CenterX, CenterY | Select-Object -First 1
-    $rightPanes = @($paneGeometry | Where-Object { $_.Hwnd -ne $leftPane.Hwnd } | Sort-Object CenterY)
-    if ($rightPanes.Count -ne 2) { throw 'Could not resolve right-side pane geometry.' }
-    $rightTopPane = $rightPanes[0]
-    $rightBottomPane = $rightPanes[1]
-    $focusBeforePaneMove = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
-    if ($focusBeforePaneMove -ne $rightBottomPane.Hwnd) {
-        throw "Ctrl+Shift+E did not focus the new lower pane (focused=$focusBeforePaneMove expected=$($rightBottomPane.Hwnd))."
+    $leftPane = $paneGeometry | Where-Object { $_.Hwnd -eq $splitBaselineHwnds[0] } | Select-Object -First 1
+    $rightTopPane = $paneGeometry | Where-Object { $_.Hwnd -eq $rightTopHwnds[0] } | Select-Object -First 1
+    $rightBottomPane = $paneGeometry | Where-Object { $_.Hwnd -eq $rightBottomHwnds[0] } | Select-Object -First 1
+    if ($null -eq $leftPane -or $null -eq $rightTopPane -or $null -eq $rightBottomPane) {
+        throw 'Could not resolve split pane identities from their creation order.'
     }
+    Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'Ctrl+Shift+E new lower pane focus' -Condition {
+        return [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle) -eq $rightBottomPane.Hwnd
+    }
+    $focusBeforePaneMove = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
 
     $paneMoves = @(
         @{ Key = [uint16]0x26; Name = 'Alt+Up'; Expected = $rightTopPane.Hwnd },
@@ -4485,6 +4588,30 @@ try {
     if ($searchBounds.Width -le 0 -or $searchBounds.Height -le 0 -or $searchQueryEdit.Current.IsOffscreen) {
         throw 'Docked search query Edit is not visible with positive UIA bounds.'
     }
+    $searchToggleEvidence = [ordered]@{}
+    foreach ($toggleName in @('Regular expression', 'Case sensitive', 'Whole word')) {
+        $toggleElements = @($root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.PropertyCondition]::new(
+                [System.Windows.Automation.AutomationElement]::NameProperty,
+                $toggleName
+            )
+        ) | Where-Object {
+            $_.Current.ProcessId -eq $process.Id -and
+            $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::Button
+        })
+        if ($toggleElements.Count -ne 1) {
+            throw "Docked search exposes $($toggleElements.Count) '$toggleName' Button elements; expected exactly one."
+        }
+        $togglePattern = $null
+        if (-not $toggleElements[0].TryGetCurrentPattern(
+            [System.Windows.Automation.TogglePattern]::Pattern,
+            [ref]$togglePattern
+        )) {
+            throw "Docked search '$toggleName' Button does not expose TogglePattern."
+        }
+        $searchToggleEvidence[$toggleName] = $togglePattern.Current.ToggleState.ToString()
+    }
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search query UIA focus' -Condition {
         if ([NocttyAccessibilityNative]::GetForegroundWindow() -ne $process.MainWindowHandle) {
             $searchNativeFocusBeforeRecovery = [NocttyAccessibilityNative]::FocusedWindowFor($process.MainWindowHandle)
@@ -4537,6 +4664,40 @@ try {
                 -Senders ([NocttyAccessibilityNative]::ValueChangedSenders) `
                 -Element $searchQueryEdit) -gt 0
     }
+    $searchResultsHwnd = [NocttyAccessibilityNative]::ChildByControlId(
+        $process.MainWindowHandle,
+        2107
+    )
+    if ($searchResultsHwnd -eq [IntPtr]::Zero) {
+        throw 'Docked search exposes no native result-count control.'
+    }
+    $script:searchResultElement = $null
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'docked search polite Text live region' -Condition {
+            $script:searchResultElement =
+                [System.Windows.Automation.AutomationElement]::FromHandle($searchResultsHwnd)
+            return $null -ne $script:searchResultElement -and
+                $script:searchResultElement.Current.ProcessId -eq $process.Id -and
+                $script:searchResultElement.Current.ControlType -eq
+                    [System.Windows.Automation.ControlType]::Text -and
+                ($script:searchResultElement.Current.Name -in @('Searching', 'No matches') -or
+                    $script:searchResultElement.Current.Name -match '^\d+(?:/\d+)?$') -and
+                [NocttyAccessibilityNative]::GetCurrentIntProperty(
+                    $searchResultsHwnd,
+                    30135
+                ) -eq 1
+        }
+    }
+    catch {
+        $currentName = if ($null -ne $script:searchResultElement) {
+            $script:searchResultElement.Current.Name
+        }
+        else {
+            '<unavailable>'
+        }
+        throw "$($_.Exception.Message) results_hwnd=$searchResultsHwnd name='$currentName'."
+    }
+    $searchResultElement = $script:searchResultElement
     [NocttyAccessibilityNative]::ResetTextSelectionChangedCount()
     $searchTextPattern.DocumentRange.Select()
     Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(3)) -Description 'docked search TextPattern selection' -Condition {
@@ -5958,6 +6119,38 @@ try {
         private_bytes_growth = $stressPrivateGrowth
     }
 
+    # The native scrollbar child is created only after the terminal owns a
+    # scrollback range. Query it after sustained output so this UIA assertion
+    # has the product precondition it is intended to verify.
+    $scrollbars = @($root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::NameProperty,
+            'Terminal scrollbar'
+        )
+    ) | Where-Object {
+        $_.Current.ProcessId -eq $process.Id -and
+        $_.Current.ControlType -eq [System.Windows.Automation.ControlType]::ScrollBar
+    })
+    if ($scrollbars.Count -eq 0) { throw 'UIA tree exposes no named Terminal scrollbar after sustained output.' }
+    $scrollbarRanges = @()
+    foreach ($scrollbar in $scrollbars) {
+        $rangePattern = $null
+        if (-not $scrollbar.TryGetCurrentPattern(
+            [System.Windows.Automation.RangeValuePattern]::Pattern,
+            [ref]$rangePattern
+        ) -or -not $rangePattern.Current.IsReadOnly -or
+            $rangePattern.Current.Value -lt $rangePattern.Current.Minimum -or
+            $rangePattern.Current.Value -gt $rangePattern.Current.Maximum) {
+            throw 'Terminal scrollbar does not expose a bounded read-only RangeValuePattern.'
+        }
+        $scrollbarRanges += [ordered]@{
+            value = $rangePattern.Current.Value
+            minimum = $rangePattern.Current.Minimum
+            maximum = $rangePattern.Current.Maximum
+        }
+    }
+
     Assert-AccessibilityInputOwner -Process $process -Description 'settings-open idle soak'
     # Settings is an independent WS_EX_APPWINDOW. Process.Refresh() can make
     # MainWindowHandle follow it while it owns the foreground, so retain the
@@ -6023,6 +6216,22 @@ try {
     }
     if ($idleSettingsElement.Current.Name -ne $idleSettingsName) {
         throw "Settings UIA root changed after idle soak; before='$idleSettingsName', after='$($idleSettingsElement.Current.Name)'."
+    }
+    if (-not [InteractiveWin11WindowNative]::ForceForeground($idleSettingsHwnd, $true, $true)) {
+        throw 'Unable to reacquire Settings foreground ownership after the idle soak.'
+    }
+    try {
+        Wait-AccessibilityCondition -Deadline ([DateTime]::UtcNow.AddSeconds(5)) -Description 'settings foreground precondition after idle soak' -Condition {
+            $script:idleCloseSettingsAlive = [NocttyAccessibilityNative]::IsWindow($idleSettingsHwnd)
+            $script:idleCloseForegroundHwnd = [NocttyAccessibilityNative]::GetForegroundWindow()
+            return Test-AccessibilityForegroundPrecondition `
+                -ExpectedHwnd $idleSettingsHwnd `
+                -ForegroundHwnd $script:idleCloseForegroundHwnd `
+                -ExpectedWindowAlive $script:idleCloseSettingsAlive
+        }
+    }
+    catch {
+        throw "Idle Settings close precondition failed: settings_alive=$($script:idleCloseSettingsAlive); foreground=$($script:idleCloseForegroundHwnd); expected_settings=$idleSettingsHwnd. $($_.Exception.Message)"
     }
     [void](Invoke-InteractiveWin11Message `
         -Hwnd $idleSettingsHwnd `
@@ -6091,8 +6300,7 @@ try {
             rectangle_count = $terminalRectCount
             selection_range_count = $selection.Count
             supported_text_selection = $supportedTextSelection.ToString()
-            selection_is_degenerate = $true
-            selection_line_text = $selectionLineText
+            selection_is_absent_without_user_selection = $true
             live_setting = $liveSetting.ToString()
             output_notification_count = $terminalOutputNotification[0]
             output_notification_kind = $terminalOutputNotification[1]
@@ -6164,10 +6372,24 @@ try {
         }
         docked_search = [ordered]@{
             edit = $searchEditEvidence
+            toggles = $searchToggleEvidence
+            result_live_name = $searchResultElement.Current.Name
+            result_live_setting = 'Polite'
+            result_live_setting_value = [NocttyAccessibilityNative]::GetCurrentIntProperty(
+                $searchResultsHwnd,
+                30135
+            )
+            result_native_hwnd = $searchResultsHwnd.ToInt64()
+            result_is_offscreen = $searchResultElement.Current.IsOffscreen
             escape_restored_terminal_document = $true
             escape_focused_hwnd = $script:searchDismissFocusedHwnd.ToInt64()
             native_edit_hidden = $true
             hidden_control_type = $hiddenSearchElement.Current.ControlType.ProgrammaticName
+        }
+        chrome = [ordered]@{
+            tabs = $tabChromeEvidence
+            actions = $tabActionEvidence
+            scrollbars = $scrollbarRanges
         }
         settings = $settingsLifecycle
         settings_owner_lifecycle = $settingsOwnerLifecycle

@@ -82,6 +82,8 @@ pub const TerminalAccessibilitySession = struct {
     cached_visible_text: []u8,
     cached_visible_range: win32_uia.OffsetRange = .{ .start = 0, .end = 0 },
     cached_caret_offset: usize = 0,
+    cached_selection_range: ?win32_uia.OffsetRange = null,
+    cached_selection_active_offset: ?usize = null,
     cached_cells: []win32_uia.TerminalCellPosition,
     viewport_rows: u32 = 0,
     viewport_columns: u32 = 0,
@@ -400,6 +402,8 @@ pub const TerminalAccessibilitySession = struct {
         errdefer self.alloc.free(cells);
         const visible_range = snapshot.visible_range;
         const caret_offset = snapshot.caret_offset;
+        const selection_range = snapshot.selection_range;
+        const selection_active_offset = snapshot.selection_active_offset;
         const visible_text = try self.alloc.dupe(u8, text[visible_range.start..visible_range.end]);
         errdefer self.alloc.free(visible_text);
 
@@ -412,14 +416,16 @@ pub const TerminalAccessibilitySession = struct {
             return .{ .change = .unchanged };
         }
 
-        const text_changed = !std.mem.eql(u8, self.cached_text, text) or
-            self.cached_visible_range.start != visible_range.start or
-            self.cached_visible_range.end != visible_range.end;
-        const caret_changed = self.cached_caret_offset != caret_offset;
+        const text_changed = !std.mem.eql(u8, self.cached_text, text);
+        const caret_changed = self.cached_caret_offset != caret_offset or
+            !std.meta.eql(self.cached_selection_range, selection_range) or
+            self.cached_selection_active_offset != selection_active_offset;
         const unchanged = std.mem.eql(u8, self.cached_text, text) and
             self.cached_visible_range.start == visible_range.start and
             self.cached_visible_range.end == visible_range.end and
             self.cached_caret_offset == caret_offset and
+            std.meta.eql(self.cached_selection_range, selection_range) and
+            self.cached_selection_active_offset == selection_active_offset and
             self.viewport_rows == snapshot.viewport_rows and
             self.viewport_columns == snapshot.viewport_columns and
             self.cell_width == capture.cell_width and
@@ -456,6 +462,8 @@ pub const TerminalAccessibilitySession = struct {
         self.cached_visible_text = visible_text;
         self.cached_visible_range = visible_range;
         self.cached_caret_offset = caret_offset;
+        self.cached_selection_range = selection_range;
+        self.cached_selection_active_offset = selection_active_offset;
         self.cached_cells = cells;
         self.viewport_rows = snapshot.viewport_rows;
         self.viewport_columns = snapshot.viewport_columns;
@@ -646,6 +654,8 @@ pub const TerminalAccessibilitySession = struct {
             .visible_text = visible_text,
             .visible_range = self.cached_visible_range,
             .caret_offset = self.cached_caret_offset,
+            .terminal_selection_range = self.cached_selection_range,
+            .terminal_selection_active_offset = self.cached_selection_active_offset,
             .geometry = .{
                 .cell_for_byte = cells,
                 .viewport_rows = self.viewport_rows,
@@ -793,6 +803,10 @@ const MutableTestOps = struct {
         text: []const u8,
         name: []const u8 = "Terminal",
         return_name_without_copy: bool = false,
+        visible_range: ?win32_uia.OffsetRange = null,
+        caret_offset: ?usize = null,
+        selection_range: ?win32_uia.OffsetRange = null,
+        selection_active_offset: ?usize = null,
     };
 
     fn hwnd(_: *anyopaque) ?HWND {
@@ -819,8 +833,10 @@ const MutableTestOps = struct {
             .snapshot = .{
                 .alloc = alloc,
                 .text = text,
-                .visible_range = .{ .start = 0, .end = text.len },
-                .caret_offset = text.len,
+                .visible_range = value.visible_range orelse .{ .start = 0, .end = text.len },
+                .caret_offset = value.caret_offset orelse text.len,
+                .selection_range = value.selection_range,
+                .selection_active_offset = value.selection_active_offset,
                 .cell_for_byte = cells,
                 .viewport_rows = 1,
                 .viewport_columns = @intCast(text.len),
@@ -1394,6 +1410,37 @@ test "terminal name cache caps non-aliasing names to capacity" {
     const name = TerminalAccessibilitySession.providerName(@ptrCast(session), &buf);
     try std.testing.expectEqual(@as(usize, 256), name.len);
     try std.testing.expectEqualStrings(long_name[0..256], name);
+}
+
+test "terminal accessibility classifies viewport as geometry and selection as caret" {
+    var ctx: MutableTestOps.Context = .{
+        .focused = true,
+        .text = "first\nsecond\nthird",
+        .visible_range = .{ .start = 6, .end = 12 },
+        .caret_offset = 16,
+    };
+    const session = try TerminalAccessibilitySession.create(
+        std.testing.allocator,
+        MutableTestOps.ops(&ctx),
+        0,
+        0,
+    );
+    defer session.deinit();
+
+    _ = try session.refresh(.discard, false);
+    ctx.visible_range = .{ .start = 0, .end = 5 };
+    try std.testing.expectEqual(Change.geometry, (try session.refresh(.discard, false)).change);
+
+    ctx.selection_range = .{ .start = 1, .end = 4 };
+    ctx.selection_active_offset = 4;
+    try std.testing.expectEqual(Change.caret, (try session.refresh(.discard, false)).change);
+
+    ctx.selection_active_offset = 1;
+    try std.testing.expectEqual(Change.caret, (try session.refresh(.discard, false)).change);
+
+    ctx.selection_range = null;
+    ctx.selection_active_offset = null;
+    try std.testing.expectEqual(Change.caret, (try session.refresh(.discard, false)).change);
 }
 
 test "inactive terminal output snapshot is fresh on later focus without speech" {

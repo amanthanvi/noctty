@@ -117,12 +117,26 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows UI Automation (accessibility)
 
-UI Automation coverage is partial. Terminal text is exposed read-only
-through TextPattern/TextPattern2 with bounded ranges, visible geometry,
-and an active caret anchor. The host and command palette expose focus
-and selection semantics, while standard settings controls use native
-HWND providers. Still to do: broader per-widget coverage and a full
-Narrator/NVDA release matrix.
+UI Automation covers the window chrome a screen-reader user touches
+daily. Tabs expose TabItem with selection state, the new-tab and
+overflow buttons have real names instead of their painted glyphs, the
+docked-search toggles expose Toggle state, the search result count and
+host banners are live regions, and the terminal scrollbar exposes
+RangeValue. Terminal text is exposed through TextPattern/TextPattern2
+with bounded ranges (500 history rows plus the live viewport), visible
+geometry, a caret that stays truthful while scrolled back, and real
+selections. The command palette and settings sections expose list and
+selection semantics.
+
+Not yet covered: custom-painted caption buttons, the profile picker and
+tab-overview overlay rows, context menus, toasts, and quick-terminal
+chrome. There is also no keyboard focus-region cycle, so chrome cannot
+be reached from the terminal without a mouse.
+
+No screen reader has been measured against a release yet. The per-widget
+expectations, what the automated UIA harness proves, and the empty
+Narrator/NVDA/JAWS columns are published in
+[accessibility-matrix.md](accessibility-matrix.md).
 
 ### Win32 runtime extraction
 
@@ -165,7 +179,11 @@ and lands incrementally.
 
 No formal roadmap. Likely next areas:
 
-- Broader UI Automation / screen reader coverage.
+- Measured Narrator/NVDA/JAWS results for the
+  [screen-reader matrix](accessibility-matrix.md), plus UI Automation
+  for caption buttons, overlay rows, and menus.
+- A keyboard focus-region cycle so window chrome is reachable without a
+  mouse.
 - Continuing the `src/apprt/win32.zig` extraction.
 - Portable ZIP updater apply/rollback.
 - Broader local crash metadata and report packaging.

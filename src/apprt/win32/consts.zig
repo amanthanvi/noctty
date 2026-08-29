@@ -8,6 +8,7 @@ const WPARAM = win32_types.WPARAM;
 const UINT = win32_types.UINT;
 const UINT_PTR = win32_types.UINT_PTR;
 const DWORD = win32_types.DWORD;
+const LRESULT = win32_types.LRESULT;
 const WORD = win32_types.WORD;
 
 pub const CS_OWNDC = 0x0020;
@@ -42,6 +43,7 @@ pub const HTBOTTOM = 15;
 pub const HTBOTTOMLEFT = 16;
 pub const HTBOTTOMRIGHT = 17;
 pub const HTCLOSE = 20;
+pub const HTTRANSPARENT: LRESULT = -1;
 
 pub const SW_SHOW = 5;
 pub const SW_SHOWNOACTIVATE = 4;

@@ -37,7 +37,7 @@ Last reviewed: 2026-08-12.
 | [Configuration: `auto-update`](https://ghostty.org/docs/config/reference)                    | Stable-release checking and prompts backed by GitHub Releases. `download` stages only installer releases that pass SHA-256 plus Authenticode verification; apply is user-initiated (UAC may prompt), and portable ZIP apply is not implemented. See [windows.md](windows.md#updates). |
 | [Configuration: `window-save-state`](https://ghostty.org/docs/config/reference)              | Persists windows, tabs, splits, profiles, working directories, and titles under `%LOCALAPPDATA%\noctty\session-state.json`. Terminal contents and child processes are not restored.                                                                                               |
 | [Configuration: `background-blur`](https://ghostty.org/docs/config/reference)                | Windows 11 22H2+ with `background-opacity < 1` requests the DWM tabbed backdrop; accepted but inert on Windows 10 and 11 21H2. Radii are treated as on/off.                                                                                                                           |
-| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial. See [accessibility notes](#accessibility).                                                                                                                                                                                                                  |
+| [Features overview](https://ghostty.org/docs/features)                                       | Accessibility is partial: UI Automation covers the daily chrome and terminal text, but caption buttons, overlay rows, and menus are uncovered and no screen reader has been measured. See [accessibility notes](#accessibility) and the [screen-reader matrix](accessibility-matrix.md).  |
 | OSC 52 primary/selection clipboard selectors                                                 | Windows has one native clipboard: writes with selectors `c`, `s`, and `p` all target it; read replies still echo the requested selector.                                                                                                                                              |
 
 ## Windows-Specific
@@ -76,10 +76,15 @@ that:
 
 ### Accessibility
 
-The Win32 host exposes a UI Automation root provider, the command palette
-exposes a list provider, and terminal text is available read-only through
-`ITextProvider` / `ITextRangeProvider`. Broader application-chrome coverage
-and screen-reader validation remain incomplete.
+The Win32 host exposes a UI Automation root provider; tabs, the new-tab and
+overflow buttons, docked-search controls, the search result count, host
+banners, and the terminal scrollbar expose per-widget providers with the
+patterns their roles require; the command palette and settings sections
+expose list and selection semantics; and terminal text is available through
+`ITextProvider` / `ITextRangeProvider` / `ITextProvider2` including real
+selections. Caption buttons, overlay rows, menus, and toasts are still
+uncovered, and no screen reader has been measured yet — see the
+[screen-reader matrix](accessibility-matrix.md).
 
 ### Renderer
 

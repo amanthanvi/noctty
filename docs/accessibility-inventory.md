@@ -1,37 +1,56 @@
 # Windows accessibility contract
 
-noctty uses native Win32 accessibility for standard button, list, dialog,
-and settings controls. It installs custom UI Automation providers where native
-semantics are incomplete, including terminal/owner-drawn surfaces and the
-palette/search Edit HWNDs that need reliable Text, Text2, and Value patterns.
+noctty installs custom UI Automation providers wherever native Win32
+semantics are wrong or missing, which is most of its chrome: the tab
+strip and its buttons are owner-drawn native `BUTTON`s that would
+otherwise announce as plain buttons, and the terminal is an
+owner-drawn surface with no native text semantics at all. Native HWND
+providers are kept and composed with wherever they already say the
+right thing.
 
 | Surface | Contract | Provider |
 | --- | --- | --- |
-| Host window and custom caption | Window name, focus, native caption buttons | noctty root chained to host provider |
-| Terminal pane | Bounded document text/ranges, visible geometry, active caret range, text/caret/focus changes | noctty TextPattern/TextPattern2 provider |
-| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | noctty selection/list-item fragments plus custom Text/Text2/Value provider on the native query Edit HWND |
-| Tabs, docked search, settings, confirmation/update/recovery UI | Name, role, value/selection, keyboard focus | native HWND providers; custom Text/Text2/Value provider on the docked-search Edit HWND |
+| Host window and custom caption | Window name following the live title | noctty root chained to the host provider. The root exposes no patterns and reports itself not focusable. Integrated-titlebar caption buttons are custom-painted and have no provider |
+| Tab strip | Selection container named "Tabs" | noctty chrome provider on an invisible, hit-transparent child spanning the strip rect. The tab buttons are siblings, not its HWND children; they link back through SelectionContainer |
+| Tab | Tab label, selected state, selection and name events | noctty chrome provider per tab button (TabItem + SelectionItem) |
+| New tab / tab overflow | "New tab" / "More tabs", invokable | noctty chrome providers (Button + Invoke); the painted glyphs are unchanged |
+| Terminal pane | Bounded document text and ranges, visible geometry, a caret that stays truthful while scrolled back, real selections with an ordered active end, and text/caret/selection/focus changes | noctty TextPattern/TextPattern2 provider |
+| Terminal scrollbar | "Terminal scrollbar" plus position over the scrollback extent | noctty chrome provider (ScrollBar + RangeValue, read-only) |
+| Docked search | Query edit with Text/Text2/Value; named previous/next/close buttons; regex, case, and whole-word toggles carrying their pressed state; result count as a polite live region | custom Text/Text2/Value provider on the query Edit plus noctty chrome providers on the buttons and the count |
+| Universal Palette | Stable list identity, navigable result rows, one selected-result announcement, query-edit focus | noctty selection/list-item fragments plus a custom Text/Text2/Value provider on the native query Edit |
+| Host banners | Banner text announced when it appears or changes | noctty chrome provider as a live region |
+| Settings window | Section name/role/selection and per-control name, role, and value | `SettingsSectionGroupProvider`, `SettingsSectionProvider`, and `SettingsControlProvider`; native providers compose underneath and are the fallback when STA cannot be confirmed |
+
+Surfaces with no provider yet: custom-painted caption buttons, profile
+picker and tab-overview overlay rows, context menus, WinRT toasts, the
+tab drag preview, and quick-terminal chrome. There is no keyboard
+focus-region cycle, so chrome is not reachable from the terminal with
+the keyboard alone.
 
 Automated acceptance is `test/windows/interactive-win11-accessibility.ps1`.
-It emits exact-source/binary provenance with the UIA tree and requires terminal
-text, all four directional split-focus moves,
-palette selection/focus semantics, non-overlapping native settings controls,
-settings owner-close survival, idle resource bounds, graceful close/reopen,
-and clean Explorer/WER postflight. Pull requests run the quick interactive
-lane; release candidates require the full default-branch interactive lane with
-exact-SHA, hash-bound evidence. Provider unit tests cover the degenerate
-TextPattern2 caret range plus its ABI and semantics. The physical screen-reader
-matrix is optional manual acceptance evidence for validating that contract end
-to end. When recording it, verify the exact build with Narrator and NVDA:
-navigate tabs and panes, read terminal text, open/filter/invoke the palette,
-edit settings, and dismiss confirmation/update surfaces at 100%, 200%, and
-300% DPI with High Contrast both off and on.
+It emits exact-source/binary provenance with the UIA tree and requires
+terminal text, all four directional split-focus moves, tab
+container/item selection semantics, named chrome and search controls
+with their patterns, scrollbar range, palette selection/focus
+semantics, non-overlapping native settings controls, settings
+owner-close survival, idle resource bounds, graceful close/reopen, and
+clean Explorer/WER postflight. Pull requests run the quick interactive
+lane; release candidates run the full default-branch interactive lane.
+Provider unit tests cover the chrome provider patterns, the scrolled-back
+caret, terminal selection with its active end, and the degenerate
+TextPattern2 caret range plus its ABI and semantics.
 
-Stable release preflight does not require a manual matrix attestation.
-Optional reports live at `docs/accessibility-evidence/v<version>.json`; the
-validator binds a report to an ancestor commit and rejects later code changes.
-See `docs/accessibility-evidence/README.md`.
+The harness proves UIA structure, not speech. What each widget should
+announce and which readers have actually been heard are recorded in
+[accessibility-matrix.md](accessibility-matrix.md); at present no
+reader has been measured.
 
-Custom row fragments exist only for the owner-drawn Universal Palette list.
-Standard native lists keep their HWND providers so Windows owns their roles,
-navigation, selection patterns, focus, and events.
+Stable release preflight does not require a manual matrix attestation;
+`-RequireAccessibilityEvidence` is opt-in. Optional reports live at
+`docs/accessibility-evidence/v<version>.json`; the validator binds a
+report to an ancestor commit and rejects later code changes. See
+`docs/accessibility-evidence/README.md`.
+
+Custom row fragments exist only for the owner-drawn Universal Palette
+list. Standard native lists keep their HWND providers so Windows owns
+their roles, navigation, selection patterns, focus, and events.

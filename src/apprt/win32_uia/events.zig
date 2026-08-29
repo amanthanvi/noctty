@@ -62,6 +62,15 @@ pub fn raiseTextSelectionChanged(provider: *com.IRawElementProviderSimple) void 
     logIfFailed("UIA_Text_TextSelectionChangedEventId", hr);
 }
 
+pub fn raiseLiveRegionChanged(provider: *com.IRawElementProviderSimple) void {
+    if (!clientsAreListening()) return;
+    const hr = com.UiaRaiseAutomationEvent(
+        provider,
+        constants.UIA_LiveRegionChangedEventId,
+    );
+    logIfFailed("UIA_LiveRegionChangedEventId", hr);
+}
+
 pub const Notification = enum {
     other,
     action_completed,
