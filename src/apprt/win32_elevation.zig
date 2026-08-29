@@ -318,6 +318,10 @@ pub fn authenticateElevatedPipeServer(
     pipe: windows.HANDLE,
 ) !bool {
     const identity = try inspectPipeServerIdentity(alloc, pipe);
+    return isTrustedElevatedPipeServer(identity);
+}
+
+pub fn isTrustedElevatedPipeServer(identity: PipeServerIdentity) bool {
     return identity.same_user and identity.elevated;
 }
 
@@ -494,6 +498,32 @@ pub fn launchElevated(
         &exe_buffer,
         @intCast(exe_buffer.len),
     );
+    return launchElevatedWithShellApi(
+        alloc,
+        exe.ptr,
+        parameters,
+        cwd,
+        RealShellApi{},
+    );
+}
+
+const RealShellApi = struct {
+    fn shellExecute(_: @This(), info: *ShellExecuteInfoW) windows.BOOL {
+        return ShellExecuteExW(info);
+    }
+
+    fn lastError(_: @This()) windows.Win32Error {
+        return windows.kernel32.GetLastError();
+    }
+};
+
+fn launchElevatedWithShellApi(
+    alloc: Allocator,
+    executable: [*:0]const u16,
+    parameters: [:0]const u8,
+    cwd: []const u8,
+    api: anytype,
+) !LaunchResult {
     const parameters_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, parameters);
     defer alloc.free(parameters_w);
     const cwd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cwd);
@@ -504,7 +534,7 @@ pub fn launchElevated(
         .mask = see_mask_flag_no_ui,
         .hwnd = null,
         .verb = std.unicode.utf8ToUtf16LeStringLiteral("runas"),
-        .file = exe.ptr,
+        .file = executable,
         .parameters = parameters_w.ptr,
         .directory = cwd_w.ptr,
         .show = sw_show_normal,
@@ -516,9 +546,9 @@ pub fn launchElevated(
         .icon_or_monitor = null,
         .process = null,
     };
-    if (ShellExecuteExW(&info) != 0) return .launched;
+    if (api.shellExecute(&info) != 0) return .launched;
 
-    const err = windows.kernel32.GetLastError();
+    const err = api.lastError();
     if (err == .CANCELLED) return .cancelled;
     log.warn(
         "ShellExecuteExW runas failed win32_error={d} hInstApp=0x{x}",
@@ -580,6 +610,111 @@ extern "shell32" fn ShellExecuteExW(
     info: *ShellExecuteInfoW,
 ) callconv(.winapi) windows.BOOL;
 
+test "elevation launch boundary maps accepted UAC to launched" {
+    const testing = std.testing;
+
+    const FakeShellApi = struct {
+        called: bool = false,
+        saw_runas: bool = false,
+        saw_executable: bool = false,
+        saw_parameters: bool = false,
+        saw_cwd: bool = false,
+
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+            self.called = true;
+            self.saw_runas = std.mem.eql(
+                u16,
+                std.mem.span(info.verb.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("runas"),
+            );
+            self.saw_executable = std.mem.eql(
+                u16,
+                std.mem.span(info.file.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            );
+            self.saw_parameters = std.mem.eql(
+                u16,
+                std.mem.span(info.parameters.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("--working-directory=C:\\work"),
+            );
+            self.saw_cwd = std.mem.eql(
+                u16,
+                std.mem.span(info.directory.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("C:\\work"),
+            );
+            return windows.TRUE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .SUCCESS;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    const result = try launchElevatedWithShellApi(
+        testing.allocator,
+        std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+        "--working-directory=C:\\work",
+        "C:\\work",
+        &api,
+    );
+
+    try testing.expectEqual(LaunchResult.launched, result);
+    try testing.expect(api.called);
+    try testing.expect(api.saw_runas);
+    try testing.expect(api.saw_executable);
+    try testing.expect(api.saw_parameters);
+    try testing.expect(api.saw_cwd);
+}
+
+test "elevation launch boundary maps UAC cancellation without an error" {
+    const FakeShellApi = struct {
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
+            return windows.FALSE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .CANCELLED;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try std.testing.expectEqual(
+        LaunchResult.cancelled,
+        try launchElevatedWithShellApi(
+            std.testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "",
+            "C:\\work",
+            &api,
+        ),
+    );
+}
+
+test "elevation launch boundary maps non-cancellation Win32 failures to an error" {
+    const FakeShellApi = struct {
+        fn shellExecute(_: *@This(), _: *ShellExecuteInfoW) windows.BOOL {
+            return windows.FALSE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .ACCESS_DENIED;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try std.testing.expectError(
+        error.Unexpected,
+        launchElevatedWithShellApi(
+            std.testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "",
+            "C:\\work",
+            &api,
+        ),
+    );
+}
+
 test "elevation title prefix handles elevated non-elevated null and prefixed titles" {
     const testing = std.testing;
 
@@ -617,6 +752,29 @@ test "elevation IPC pipe SDDL is owner-only at high integrity" {
             "S:(ML;;NRNW;;;HI)",
         sddl,
     );
+}
+
+test "elevation IPC accepts only a same-user elevated server identity" {
+    try std.testing.expect(isTrustedElevatedPipeServer(.{
+        .process_id = 100,
+        .same_user = true,
+        .elevated = true,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 101,
+        .same_user = true,
+        .elevated = false,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 102,
+        .same_user = false,
+        .elevated = true,
+    }));
+    try std.testing.expect(!isTrustedElevatedPipeServer(.{
+        .process_id = 103,
+        .same_user = false,
+        .elevated = false,
+    }));
 }
 
 test "elevation session state exclusion requires a full split token" {
