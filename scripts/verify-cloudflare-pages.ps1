@@ -368,7 +368,8 @@ function Test-PublicPayloadOnce {
             # Pages consumes this control file; it is not a public static asset.
             continue
         }
-        if ($StaticOnly -and $entry.Path -cin @('index.html', '404.html')) {
+        if ($StaticOnly -and
+            $entry.Path -cin @('index.html', '404.html', 'why-noctty.html')) {
             # A custom-domain challenge can replace HTML. The immutable Pages
             # deployment remains the authoritative full-payload verification.
             continue

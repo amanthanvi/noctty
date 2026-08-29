@@ -32,7 +32,11 @@ $forbiddenRules = @(
     @{ Pattern = "Close where it matters"; Reason = "Avoid vague compatibility claims; name the shared and fork-specific layers." },
     @{ Pattern = "shared Ghostty terminal core · auto-detected: PowerShell, cmd, Git Bash'"; Reason = "Current profile-picker messaging should include opt-in WSL." },
     @{ Pattern = "src/terminal, src/font, src/renderer, src/input, src/config, and libghostty-vt are shared"; Reason = "The shared upstream surface is broader today and includes termio/crash/shell-integration/inspector." },
-    @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." }
+    @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." },
+    @{ Pattern = "(?i)fast(?:er|est) than"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)fastest terminal"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)blazing"; Regex = $true; Reason = "Performance copy must cite a measured figure, not an adjective." },
+    @{ Pattern = "noctty.dev"; Reason = "The project domain is noctty.com; noctty.dev is not owned by this project." }
 )
 
 $requiredRules = @(
@@ -51,6 +55,16 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "<noscript>"; Reason = "Landing page should retain a useful no-JavaScript fallback." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "https://github.com/amanthanvi/noctty/discussions"; Reason = "Footer should link to project Discussions." },
     @{ Path = Join-Path $siteRoot "index.html"; Pattern = "bug_report.yml"; Reason = "Footer should link directly to the bug report form." }
+    @{ Path = Join-Path $siteRoot "index.html"; Pattern = "why-noctty.html"; Reason = "The landing page should expose the identity and trust page." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "Get-FileHash"; Reason = "The trust page should include an executable checksum check." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "671ec822c41f39b1d79c31d27169b37486333c008c7a038261b4fae53818ce2a"; Reason = "The trust page should publish the current updater publisher-key pin." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-windows-terminal.md"; Reason = "The trust page should link the Windows Terminal migration guide." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "docs/migrate-from-git-bash.md"; Reason = "The trust page should link the Git Bash and mintty migration guide." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "gh attestation verify"; Reason = "The trust page should include the build-provenance check." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "32.14 MB against a 20 MB budget"; Reason = "The trust page must keep the missed memory budget visible." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
 )
 
 $failures = New-Object System.Collections.Generic.List[string]

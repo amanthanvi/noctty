@@ -23,6 +23,9 @@ function createSiteFixture(
   t.after(() => fs.rmSync(siteRoot, { recursive: true, force: true }));
   fs.writeFileSync(path.join(siteRoot, "index.html"), indexHtml, "utf8");
   fs.writeFileSync(path.join(siteRoot, "404.html"), notFoundHtml, "utf8");
+  // The trust page always matches index.html here, so each fixture below
+  // isolates the divergence it is actually testing.
+  fs.writeFileSync(path.join(siteRoot, "why-noctty.html"), indexHtml, "utf8");
   return siteRoot;
 }
 

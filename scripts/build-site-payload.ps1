@@ -66,6 +66,7 @@ $allowlist = [string[]] @(
     'styles.css'
     'terminal.js'
     'version.js'
+    'why-noctty.html'
 )
 [Array]::Sort($allowlist, [StringComparer]::Ordinal)
 

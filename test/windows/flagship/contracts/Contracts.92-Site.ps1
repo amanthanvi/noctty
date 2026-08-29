@@ -29,6 +29,7 @@ foreach ($siteScript in @(
 $siteCopyChecker = Join-Path $repoRoot 'scripts\check-site-copy.ps1'
 $authoredSiteSources = @(
     'site\index.html',
+    'site\why-noctty.html',
     'site\install.js',
     'site\terminal.js',
     'site\version.js',
@@ -354,7 +355,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)function getInlineScriptContract.*?\["index\.html", "404\.html"\].*?inlineScripts\.length !== 1.*?sharedScript !== undefined.*?must be byte-identical'
+        Pattern = '(?ms)const SITE_PAGES = new Map\(\[.*?"index\.html".*?"404\.html".*?"why-noctty\.html".*?function getInlineScriptContract.*?SITE_PAGES\.keys\(\).*?inlineScripts\.length !== 1.*?sharedScript !== undefined.*?must be byte-identical'
         Kind = 'Text'
         Description = 'both pages must carry one byte-identical inline bootstrap so the CSP pins exactly one script hash'
     }
@@ -372,7 +373,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             $siteAssetBuilderText
         }
-        Pattern = '(?ms)for \(const asset of \[.*?"styles\.css".*?"app\.js".*?"version\.js".*?"install\.js".*?"terminal\.js".*?\]\).*?withAssetCacheKeys\(indexHtml.*?withAssetCacheKeys\(notFoundHtml, "site/404\.html", \{\s*"styles\.css": assetHashes\["styles\.css"\],\s*"app\.js": assetHashes\["app\.js"\],\s*\}\)'
+        Pattern = '(?ms)const SITE_PAGES = new Map\(\[\s*\[\s*"index\.html",\s*\["styles\.css", "app\.js", "version\.js", "install\.js", "terminal\.js"\],\s*\],\s*\["404\.html", \["styles\.css", "app\.js"\]\],\s*\["why-noctty\.html", \["styles\.css", "app\.js", "version\.js"\]\],\s*\]\);.*?for \(const asset of new Set\(\[\.\.\.SITE_PAGES\.values\(\)\]\.flat\(\)\)\).*?for \(const \[htmlName, assets\] of SITE_PAGES\).*?withAssetCacheKeys\('
         Kind = 'Text'
         Description = 'SHA-256 cache keys cover every local script and stylesheet referenced by each page'
     }
@@ -740,7 +741,7 @@ Invoke-ContractTable -Contracts @(
         Content = {
             (Get-PowerShellBlockText -Content $cloudflarePagesVerifierText -HeaderPattern '^function\s+Test-PublicPayloadOnce(?=\s|\{)')
         }
-        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and \$entry\.Path -cin @\(''index\.html'', ''404\.html''\).*?continue.*?New-PublicAssetUri'
+        Pattern = '(?ms)\[switch\]\s+\$StaticOnly.*?\$entry\.Path -ceq ''_headers''.*?\$StaticOnly -and\s*\$entry\.Path -cin @\(''index\.html'', ''404\.html'', ''why-noctty\.html''\).*?continue.*?New-PublicAssetUri'
         Kind = 'Text'
         Description = 'static-only payload verification excludes only Pages control and HTML documents before hashing remaining assets'
     }
@@ -1278,6 +1279,7 @@ try {
     foreach ($requiredPayloadPath in @(
         'index.html',
         '404.html',
+        'why-noctty.html',
         'styles.css',
         'app.js',
         'version.js',

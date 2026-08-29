@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Refresh the static site's integrity metadata:
- *  - the CSP inline-script hash in site/_headers (both pages must carry a
+ *  - the CSP inline-script hash in site/_headers (every page must carry a
  *    byte-identical inline theme bootstrap, so exactly one hash is pinned)
  *  - the CSP prohibition on inline event handlers (fonts are self-hosted)
- *  - SHA-256 cache keys (?v=...) on local asset references in both pages
+ *  - SHA-256 cache keys (?v=...) on local asset references in every page
  *
  * Run: node scripts/build-site-assets.mjs [--check]
  * --check fails without writing when anything on disk is stale.
@@ -23,6 +23,17 @@ const siteDirectoryArgument = process.argv.find((argument) =>
 const siteRoot = siteDirectoryArgument
   ? path.resolve(siteDirectoryArgument.slice("--site-directory=".length))
   : path.join(root, "site");
+
+// Every authored page, with the local assets whose ?v= cache keys it carries.
+// index.html is the reference page for the shared inline theme bootstrap.
+const SITE_PAGES = new Map([
+  [
+    "index.html",
+    ["styles.css", "app.js", "version.js", "install.js", "terminal.js"],
+  ],
+  ["404.html", ["styles.css", "app.js"]],
+  ["why-noctty.html", ["styles.css", "app.js", "version.js"]],
+]);
 
 const sha256Hex = (text) =>
   crypto.createHash("sha256").update(text, "utf8").digest("hex");
@@ -43,7 +54,7 @@ function readSiteFile(relativePath, directory = siteRoot) {
 function getInlineScriptContract(directory = siteRoot) {
   let sharedScript;
 
-  for (const htmlName of ["index.html", "404.html"]) {
+  for (const htmlName of SITE_PAGES.keys()) {
     const html = readSiteFile(htmlName, directory);
     const inlineScripts = [
       ...html.matchAll(/<script(?<attrs>[^>]*)>(?<body>.*?)<\/script>/gis),
@@ -70,7 +81,7 @@ function getInlineScriptContract(directory = siteRoot) {
 
     if (sharedScript !== undefined && script !== sharedScript) {
       throw new Error(
-        "site/index.html and site/404.html inline bootstrap scripts differ; they must be byte-identical.",
+        `site/index.html and site/${htmlName} inline bootstrap scripts differ; they must be byte-identical.`,
       );
     }
     sharedScript = script;
@@ -173,32 +184,30 @@ function main() {
     }
   }
 
-  const indexHtml = readSiteFile("index.html");
-  const notFoundHtml = readSiteFile("404.html");
+  const pages = new Map(
+    [...SITE_PAGES.keys()].map((htmlName) => [
+      htmlName,
+      readSiteFile(htmlName),
+    ]),
+  );
   const headerContract = getHeaderContract();
 
   const assetHashes = {};
-  for (const asset of [
-    "styles.css",
-    "app.js",
-    "version.js",
-    "install.js",
-    "terminal.js",
-  ]) {
+  for (const asset of new Set([...SITE_PAGES.values()].flat())) {
     assetHashes[asset] = sha256Hex(readSiteFile(asset));
   }
 
-  const expectedIndex = withAssetCacheKeys(indexHtml, "site/index.html", {
-    "styles.css": assetHashes["styles.css"],
-    "app.js": assetHashes["app.js"],
-    "version.js": assetHashes["version.js"],
-    "install.js": assetHashes["install.js"],
-    "terminal.js": assetHashes["terminal.js"],
-  });
-  const expectedNotFound = withAssetCacheKeys(notFoundHtml, "site/404.html", {
-    "styles.css": assetHashes["styles.css"],
-    "app.js": assetHashes["app.js"],
-  });
+  const expectedPages = new Map();
+  for (const [htmlName, assets] of SITE_PAGES) {
+    expectedPages.set(
+      htmlName,
+      withAssetCacheKeys(
+        pages.get(htmlName),
+        `site/${htmlName}`,
+        Object.fromEntries(assets.map((asset) => [asset, assetHashes[asset]])),
+      ),
+    );
+  }
 
   const headers = readSiteFile("_headers");
   const expectedHeaders = Buffer.from(
@@ -206,8 +215,9 @@ function main() {
     "base64",
   ).toString("utf8");
 
-  updateOrCheck("index.html", expectedIndex, indexHtml);
-  updateOrCheck("404.html", expectedNotFound, notFoundHtml);
+  for (const [htmlName, expected] of expectedPages) {
+    updateOrCheck(htmlName, expected, pages.get(htmlName));
+  }
   updateOrCheck("_headers", expectedHeaders, headers);
 
   if (failures.length > 0) {

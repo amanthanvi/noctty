@@ -7,19 +7,20 @@ JavaScript. There is no framework, no build-time bundler, and no npm
 dependency tree:
 
 - `index.html` - the landing page, including all marketing copy
+- `why-noctty.html` - identity, trust, verification, boundaries, and migrations
 - `404.html` - the not-found page
 - `styles.css` - the whole stylesheet, plain CSS with `nc-` prefixed classes
-- `app.js` - theme toggle (shared by both pages)
+- `app.js` - theme toggle shared by every page
 - `version.js` - GitHub Releases version fetch for the hero version text
 - `install.js` - install-method switcher and clipboard copy
 - `terminal.js` - the scripted terminal demo (also imported by the Node tests)
 - `assets/` - favicon, self-hosted fonts, hero backdrop, app capture,
   and the social-preview image
 - `tests/` - `node --test` units: the terminal module, the asset builder,
-  and the inline theme bootstrap
+  the inline theme bootstrap, and the trust-page contract
 - `_headers` - Cloudflare Pages cache and browser security policy
 
-Both pages carry one byte-identical inline theme bootstrap, so the CSP pins
+All pages carry one byte-identical inline theme bootstrap, so the CSP pins
 exactly one inline-script hash. `node scripts/build-site-assets.mjs` (from
 the repo root) recomputes that hash and the
 `?v=` SHA-256 cache keys on local assets; `--check` is the CI determinism
@@ -59,7 +60,8 @@ and accessibility status are stated plainly. Sections open on a hairline rule.
 
 **Motion.** Almost none. The terminal demo types, and its caret blinks; both
 stop under `prefers-reduced-motion: reduce`, when the demo scrolls out of view,
-and when the visible Pause control is used. There is no entrance animation.
+and when the visible Pause control is used. The trust page adds one short hero
+entrance sequence; the same reduced-motion rule collapses it.
 
 **Imagery.** `hero-sky.webp` and the social card were generated with
 GPT-Image-2 and then cropped, darkened, and composited locally.
@@ -73,6 +75,9 @@ Marketing copy in this directory must be checked against:
 - [README.md](../README.md)
 - [docs/status.md](../docs/status.md)
 - [docs/getting-started.md](../docs/getting-started.md)
+- [docs/migrate-from-windows-terminal.md](../docs/migrate-from-windows-terminal.md)
+- [docs/migrate-from-git-bash.md](../docs/migrate-from-git-bash.md)
+- [docs/adr/0005-pin-updater-publisher-public-keys.md](../docs/adr/0005-pin-updater-publisher-public-keys.md)
 
 If those files and the site disagree, tighten the wording until the claim is defensible.
 
