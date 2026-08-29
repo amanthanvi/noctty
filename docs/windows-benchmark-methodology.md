@@ -18,26 +18,31 @@ generated, lazy, and transitive Zig module and fails construction on a mode
 mismatch. This prevents a nominal `ReleaseFast` executable or benchmark from
 silently retaining Debug modules inside the same compiler invocation.
 
-| Workload | Dev median | Runner median | CI minimum |
-| -------- | ---------: | ------------: | ---------: |
-| ASCII    |   195 MB/s |      73 MB/s |    50 MB/s |
-| UTF-8    |   115 MB/s |      59 MB/s |    35 MB/s |
-| OSC      |    13 MB/s |       5 MB/s |     3 MB/s |
-| Scroll   |   196 MB/s |      78 MB/s |    50 MB/s |
+| Workload | Dev median | Runner median | Runner slowest run | CI minimum |
+| -------- | ---------: | ------------: | -----------------: | ---------: |
+| ASCII    |   195 MB/s |       78 MB/s |          77.7 MB/s |    50 MB/s |
+| UTF-8    |   115 MB/s |       61 MB/s |          59.8 MB/s |    35 MB/s |
+| OSC      |    13 MB/s |      5.8 MB/s |           5.8 MB/s |     3 MB/s |
+| Scroll   |   196 MB/s |       79 MB/s |          63.3 MB/s |    50 MB/s |
 
-The CI minimum is set against the **runner** column, not the dev column. The
+The CI minimum is set against the **runner** columns, not the dev column. The
 pinned `windows-2025` runner is roughly 2.5x slower than the baseline machine,
-so tolerance derived from dev numbers would be meaningless there. The floors sit
-about 30% under the runner median, which leaves room for a single noisy run:
-observed individual runner runs have gone as low as 67.9 MB/s on scroll, which
-would have failed the previous 70 MB/s floor on its own and was only masked by
-the median-of-5.
+so a tolerance derived from dev numbers is meaningless there.
+
+The gate takes a median of five runs, and the first run on a workload can be a
+long way under the steady state: in the run these figures come from, scroll run 1
+measured 63.3 MB/s against 79.0-80.0 MB/s for runs 2-5. There is no warmup run,
+so the floor has to clear that cold outlier and not merely the median. The
+earlier 70 MB/s ascii/scroll floors did not: they sat 4% under the ascii median
+and above observed individual scroll runs, so only the median-of-5 was keeping
+them green. The floors are now set under the slowest observed run, not under the
+median.
 
 Figures are rounded because they do not warrant more precision. Each dev figure
 was taken three times on an otherwise idle machine and reproduced within about
 1% (ASCII 194.65 / 195.17 / 195.93; UTF-8 114.55 / 116.87 / 114.47; OSC 13.48 /
-13.40 / 13.61; Scroll 196.99 / 194.63 / 196.76). Runner figures are medians
-observed in the CI gate step's own log.
+13.40 / 13.61; Scroll 196.99 / 194.63 / 196.76). Runner figures are read from
+the CI gate step's own log on this branch, which uses five runs.
 
 Machine load dominates these numbers, so treat any single run on a busy machine
 as a lower bound rather than a regression. The same four workloads on the same
