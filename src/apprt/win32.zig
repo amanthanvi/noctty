@@ -338,7 +338,7 @@ const LOGFONTW = sys.LOGFONTW;
 const NONCLIENTMETRICSW = sys.NONCLIENTMETRICSW;
 
 fn lastError() std.posix.UnexpectedError {
-    return lastError();
+    return windows.unexpectedError(windows.kernel32.GetLastError());
 }
 
 fn setWindowData(hwnd: HWND, ptr: ?*anyopaque) void {
@@ -2418,7 +2418,7 @@ pub const App = struct {
     /// per §12 Q1.
     os_build: u32 = 0,
     /// Top-level switch for the integrated-titlebar path
-    /// (`WM_NCCALCSIZE` / `c.WM_NCHITTEST` state machine). Derived
+    /// (`WM_NCCALCSIZE` / `WM_NCHITTEST` state machine). Derived
     /// from the Win11 build floor via `shouldUseIntegratedTitlebar`;
     /// false keeps the stock non-client caption path.
     use_integrated_titlebar: bool = false,
@@ -7156,7 +7156,7 @@ pub const App = struct {
         // section's "Open in default editor" button.
         //
         // Fallback: if the settings window can't be brought up (e.g.
-        // headless / service session with no desktop, `sys.CreateWindowExW`
+        // headless / service session with no desktop, `CreateWindowExW`
         // refusing window creation, etc.), fall back to the legacy
         // shell-out path so `open_config` never becomes a dead action.
         // Skipping the fallback would regress CI / sandboxed flows
@@ -8244,7 +8244,7 @@ const Host = struct {
     overlay_edit_uia_selection: ?[2]u32 = null,
     cached_overlay_edit: ?[:0]const u8 = null,
     /// Guard flag: set true while `setOverlayEditText` drives a
-    /// programmatic `sys.SetWindowTextW` on the overlay EDIT. That call
+    /// programmatic `SetWindowTextW` on the overlay EDIT. That call
     /// synchronously fires `EN_CHANGE`; without this gate the nested
     /// handler would invalidate `cached_overlay_edit`, re-run
     /// `rebuildPaletteList` / `syncOverlay*` mid-write, and leave the
@@ -8276,7 +8276,7 @@ const Host = struct {
     titlebar_action_icon_font: ?*anyopaque = null, // HFONT, owned
 
     // Cached chrome paint strings — rebuilt only when their per-zone
-    // dirty bits are set, so c.WM_PAINT can skip unrelated UTF-16 churn.
+    // dirty bits are set, so WM_PAINT can skip unrelated UTF-16 churn.
     chrome_repaint_dirty: bool = true,
     chrome_paint_pending: bool = false,
     chrome_paint_mask: ChromeRepaintMask = .{},
@@ -8360,7 +8360,7 @@ const Host = struct {
     // Command palette list UI. Backed by a custom child HWND shown
     // only while the palette is open. `palette_list_ranked` caches the
     // current query's ranked matches so the paint path doesn't re-rank
-    // on every c.WM_PAINT; rebuilt on EDIT text change.
+    // on every WM_PAINT; rebuilt on EDIT text change.
     palette_list_hwnd: ?HWND = null,
     root_uia_provider: ?*win32_uia.RootProvider = null,
     tab_container_hwnd: ?HWND = null,
@@ -9400,7 +9400,7 @@ const Host = struct {
     // ── Integrated titlebar (Win11) ─────────────────────────────────────
     //
     // All four handlers below early-return `null` on Win10 / build <
-    // 22000; the caller falls through to `sys.DefWindowProcW` and the
+    // 22000; the caller falls through to `DefWindowProcW` and the
     // system paints its default caption.
 
     fn handleNcCalcSize(
@@ -9435,7 +9435,7 @@ const Host = struct {
     fn handleNcHitTest(self: *Host, hwnd: HWND, lParam: LPARAM) ?LRESULT {
         if (!self.usingIntegratedTitlebar()) return null;
 
-        // lParam is the cursor in SCREEN coords (c.WM_NCHITTEST is
+        // lParam is the cursor in SCREEN coords (WM_NCHITTEST is
         // special-cased — NOT client-relative).
         const bits: u32 = @truncate(@as(u64, @bitCast(lParam)));
         const cx: i32 = @as(i16, @bitCast(@as(u16, @truncate(bits))));
@@ -9477,7 +9477,7 @@ const Host = struct {
     fn handleNcMouseMove(self: *Host, hwnd: HWND, wParam: WPARAM) ?LRESULT {
         if (!self.usingIntegratedTitlebar()) return null;
 
-        // wParam is the hit-test code returned by our c.WM_NCHITTEST.
+        // wParam is the hit-test code returned by our WM_NCHITTEST.
         const ht: i32 = @intCast(@as(i64, @bitCast(wParam)));
         self.setCaptionHover(titlebarCaptionFromHitTest(ht));
 
@@ -9496,7 +9496,7 @@ const Host = struct {
             }
         }
 
-        return null; // fall through to sys.DefWindowProcW for native feedback
+        return null; // fall through to DefWindowProcW for native feedback
     }
 
     fn handleNcMouseLeave(self: *Host) void {
@@ -9519,7 +9519,7 @@ const Host = struct {
     /// Programmatically set the overlay EDIT's text and keep the
     /// cached UTF-8 view in sync. Wraps the write in
     /// `suppress_edit_events` so the synchronous `EN_CHANGE` that
-    /// `sys.SetWindowTextW` fires on the same thread does NOT re-run the
+    /// `SetWindowTextW` fires on the same thread does NOT re-run the
     /// cache-invalidate + sync cascade while the outer caller is
     /// mid-write. Callers must still drive their own
     /// `syncCommandPaletteBanner` / `syncOverlay*` after the write —
@@ -9546,7 +9546,7 @@ const Host = struct {
     }
 
     /// Rebuild the ranked match cache for the current EDIT query and
-    /// invalidate the list so c.WM_PAINT redraws. Called from
+    /// invalidate the list so WM_PAINT redraws. Called from
     /// `syncCommandPaletteBanner` on every keystroke, and from
     /// `showOverlay(.command_palette)` when the palette opens.
     fn storePaletteCatalogLabel(self: *Host, value: []const u8) []const u8 {
@@ -10723,7 +10723,7 @@ const Host = struct {
             // Keybind hint: look up the primary trigger for this action
             // in the reverse index that `Binding.Set` already maintains.
             // Format into a stack buffer — the per-frame allocation
-            // would otherwise stack up at every keystroke's c.WM_PAINT.
+            // would otherwise stack up at every keystroke's WM_PAINT.
             var hint_buf: [96]u8 = undefined;
             const hint = self.paletteShortcutLabel(descriptor, &hint_buf);
             if (hint) |hint_text| if (columns.shortcut.right > columns.shortcut.left) {
@@ -11964,7 +11964,7 @@ const Host = struct {
         self.subclassButton(self.overlay_cancel_hwnd.?, &hostButtonProc, &self.overlay_button_prev_proc);
 
         // Palette list — shown only when overlay_mode == .command_palette.
-        // Stamped with a pointer to the Host via c.GWLP_USERDATA so the
+        // Stamped with a pointer to the Host via GWLP_USERDATA so the
         // wndproc can dispatch clicks back to `host.invokePaletteRow`.
         self.palette_list_hwnd = sys.CreateWindowExW(
             0,
@@ -12053,11 +12053,15 @@ const Host = struct {
         hwnd: HWND,
         state: win32_uia.ChromeControlState,
     ) ?*win32_uia.ChromeControlProvider {
+        // Both helpers already bail out unless COM is initialised, so the
+        // provider always uses COM threading; callers do not repeat it.
         if (!self.app.com_initialized) return null;
+        var threaded_state = state;
+        threaded_state.use_com_threading = true;
         return win32_uia.ChromeControlProvider.create(
             std.heap.page_allocator,
             hwnd,
-            state,
+            threaded_state,
         ) catch |err| {
             log.warn("chrome UIA provider unavailable err={}", .{err});
             return null;
@@ -12099,7 +12103,6 @@ const Host = struct {
                 .role = .tab_container,
                 .name = &tabContainerUiaName,
                 .selected_provider = &activeTabUiaProvider,
-                .use_com_threading = self.app.com_initialized,
             });
         }
 
@@ -12124,7 +12127,6 @@ const Host = struct {
                 .role = .button,
                 .tag = 0,
                 .name = &hostActionUiaName,
-                .use_com_threading = self.app.com_initialized,
             });
         }
 
@@ -12149,7 +12151,6 @@ const Host = struct {
                 .role = .button,
                 .tag = 1,
                 .name = &hostActionUiaName,
-                .use_com_threading = self.app.com_initialized,
             });
         }
 
@@ -12184,7 +12185,6 @@ const Host = struct {
                 .ctx = @ptrCast(self),
                 .role = .live_text,
                 .name = &bannerUiaName,
-                .use_com_threading = self.app.com_initialized,
             });
         }
     }
@@ -12374,7 +12374,7 @@ const Host = struct {
     /// ordering: hide the overlay + free the payload FIRST, then
     /// dispatch the callback. The accept handler can synchronously
     /// destroy this Host (e.g. the confirm-close-surface path calls
-    /// `sys.DestroyWindow` which triggers the Host's `WM_DESTROY` +
+    /// `DestroyWindow` which triggers the Host's `WM_DESTROY` +
     /// teardown) — touching `self` after that is a use-after-free.
     /// Snapshot the callback into locals, null out the payload,
     /// hide the overlay state, THEN call the callback.
@@ -14518,7 +14518,7 @@ const Host = struct {
     }
 
     /// `MoveWindow` / `SetWindowPos` with repaint suppressed does not reliably
-    /// queue `c.WM_PAINT` on child HWNDs. Owner-draw tab controls always repaint
+    /// queue `WM_PAINT` on child HWNDs. Owner-draw tab controls always repaint
     /// immediately; WGL child surfaces repaint immediately outside live resize
     /// and defer to an explicit post-resize flush while the user is dragging.
     fn invalidateChromeChildPaint(self: *Host) void {
@@ -14758,7 +14758,6 @@ const Host = struct {
                     .name = &tabItemUiaName,
                     .selected = &tabItemUiaSelected,
                     .selection_container = &tabContainerUiaProvider,
-                    .use_com_threading = self.app.com_initialized,
                 });
             } else if (!ownedStringEquals(tab.cached_button_label, label)) {
                 try appendOwnedString(self.app.core_app.alloc, &tab.cached_button_label, label);
@@ -14857,6 +14856,28 @@ const Host = struct {
             } else {
                 changed.* = applyChildVisibility(container_hwnd, &self.tab_container_placement, false) or changed.*;
             }
+        }
+
+        // The banner is painted text with no control of its own, so its
+        // provider lives on an invisible child. Track the painted row (same
+        // offsets `paintChrome` uses) so position and touch navigation land
+        // on the banner instead of at the window origin. Visibility stays
+        // owned by `setBanner`.
+        if (self.banner_hwnd) |banner_hwnd| {
+            const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
+            const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
+            const banner_y: i32 = self.tabBarHeight() + overlay_offset + inspector_offset + self.scaled(2);
+            const banner_x = self.scaled(16);
+            changed.* = applyChildRect(
+                banner_hwnd,
+                &self.banner_placement,
+                childRect(
+                    banner_x,
+                    banner_y,
+                    @max(1, width - banner_x),
+                    self.scaled(24),
+                ),
+            ) or changed.*;
         }
 
         // Right-side cluster: [+][▾] — new tab and dropdown chevron.
@@ -16505,7 +16526,7 @@ fn destroySubclassedWindowWithPrev(
 ) void {
     const hwnd = hwnd_slot.* orelse return;
 
-    // Detach host state before destroying the control. sys.DestroyWindow is
+    // Detach host state before destroying the control. DestroyWindow is
     // synchronous and can reenter our subclass proc during WM_DESTROY /
     // WM_NCDESTROY, so leaving the HWND discoverable via host tabs/buttons
     // risks callbacks touching half-torn state.
@@ -18805,7 +18826,7 @@ test "win32 palette EN_CHANGE re-entry guard: suppress_edit_events gates sync ca
     // `suppress_edit_events: bool = false` flag. The palette edit
     // path relies on it gating the EN_CHANGE handler at
     // `hostWindowProc` (command_id 2002) and on `setOverlayEditText`
-    // flipping it around programmatic `sys.SetWindowTextW` calls. If a
+    // flipping it around programmatic `SetWindowTextW` calls. If a
     // refactor removes or renames the field this test fails
     // at compile time before anyone else hits the crash again.
     try std.testing.expect(@hasField(Host, "suppress_edit_events"));
@@ -20305,7 +20326,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         // Integrated-titlebar non-client handlers. All gated on the
         // host actively using the integrated titlebar (Win11 build /
         // config gate + visible tab/caption row); otherwise they fall
-        // through to sys.DefWindowProcW and the system paints its default
+        // through to DefWindowProcW and the system paints its default
         // caption.
         c.WM_NCCALCSIZE => {
             if (host) |v| {
@@ -20382,7 +20403,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         // UIA root object request. Screen readers (Narrator, NVDA) call
-        // `AccessibleObjectFromWindow` which turns into c.WM_GETOBJECT on
+        // `AccessibleObjectFromWindow` which turns into WM_GETOBJECT on
         // the target HWND. We only handle the UIA root-object ID; MSAA
         // and other IDs fall through to the default proc.
         c.WM_GETOBJECT => {
@@ -20511,7 +20532,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                     2002 => {
                         if (notify_code == c.EN_CHANGE) {
                             // Skip re-entry from our own programmatic
-                            // `sys.SetWindowTextW` on the edit HWND. The
+                            // `SetWindowTextW` on the edit HWND. The
                             // caller already wraps the write in
                             // `suppress_edit_events` and drives its
                             // own sync pass afterward; letting this
@@ -20564,7 +20585,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
                         if (v.overlay_mode == .confirm) {
                             // MUST NOT touch `v` after the callback
                             // — a destructive accept (close-surface)
-                            // fires `sys.DestroyWindow`, which triggers
+                            // fires `DestroyWindow`, which triggers
                             // the Host's WM_DESTROY path + frees the
                             // Host struct. `invokeConfirmAccept`
                             // itself documents this ordering invariant.
@@ -21422,7 +21443,7 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
 
         c.WM_GETOBJECT => {
             if (surface) |v| {
-                // UIA may query the child HWND reentrantly while sys.DestroyWindow
+                // UIA may query the child HWND reentrantly while DestroyWindow
                 // is unwinding. Surface.destroy clears this flag before it
                 // releases the owner context, so never recreate that context
                 // once teardown has begun (or before core init completes).
@@ -21703,6 +21724,12 @@ fn windowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.w
                 if (v.destroy_on_wm_destroy) {
                     v.destroy();
                 } else if (v.hwnd == hwnd) {
+                    // The chrome children die with this window. Detach their
+                    // providers here rather than leaving them to decide
+                    // availability from `IsWindow`, which can answer yes again
+                    // once the system recycles the handle value.
+                    detachChromeControlProvider(v.app, &v.scrollbar_uia_provider);
+                    v.destroySearchBarControls();
                     v.hwnd = null;
                 }
             }
@@ -21992,11 +22019,15 @@ pub const Surface = struct {
         hwnd: HWND,
         state: win32_uia.ChromeControlState,
     ) ?*win32_uia.ChromeControlProvider {
+        // Both helpers already bail out unless COM is initialised, so the
+        // provider always uses COM threading; callers do not repeat it.
         if (!self.app.com_initialized) return null;
+        var threaded_state = state;
+        threaded_state.use_com_threading = true;
         return win32_uia.ChromeControlProvider.create(
             std.heap.page_allocator,
             hwnd,
-            state,
+            threaded_state,
         ) catch |err| {
             log.warn("surface chrome UIA provider unavailable err={}", .{err});
             return null;
@@ -23064,7 +23095,7 @@ pub const Surface = struct {
 
     pub fn requestRepaint(self: *Surface) !void {
         // During an interactive drag-resize the OS drives WM_SIZE →
-        // c.WM_PAINT on every mouse-delta; stacking additional
+        // WM_PAINT on every mouse-delta; stacking additional
         // InvalidateRect calls from the renderer thread just piles
         // pressure onto the pump without producing extra visible
         // frames. Drop the wake and let the WM_SIZE-driven cadence
@@ -23419,7 +23450,6 @@ pub const Surface = struct {
             .role = .scrollbar,
             .name = &scrollbarUiaName,
             .range_value = &scrollbarUiaRange,
-            .use_com_threading = self.app.com_initialized,
         });
     }
 
@@ -24009,7 +24039,6 @@ pub const Surface = struct {
                 &searchToggleUiaState
             else
                 null,
-            .use_com_threading = self.app.com_initialized,
         });
         return hwnd;
     }
@@ -24052,7 +24081,6 @@ pub const Surface = struct {
             .ctx = @ptrCast(self),
             .role = .decorative,
             .name = &decorativeUiaName,
-            .use_com_threading = self.app.com_initialized,
         });
 
         self.search_bar_edit_hwnd = sys.CreateWindowExW(
@@ -24142,7 +24170,6 @@ pub const Surface = struct {
             .ctx = @ptrCast(self),
             .role = .live_text,
             .name = &searchResultsUiaName,
-            .use_com_threading = self.app.com_initialized,
         });
 
         self.applySearchBarFont(host.chrome_font);
@@ -25110,7 +25137,7 @@ pub const Surface = struct {
 
     /// Refresh `self.size` from `GetClientRect` and notify the core. Call this
     /// after `MoveWindow` from `Host.layout` as well as from `WM_SIZE`: with
-    /// `bRepaint = false`, the child can receive `c.WM_PAINT` before `WM_SIZE`,
+    /// `bRepaint = false`, the child can receive `WM_PAINT` before `WM_SIZE`,
     /// leaving a stale screen size until the next resize event.
     fn syncCoreSizeFromClientRect(self: *Surface) void {
         const hwnd = self.hwnd orelse return;

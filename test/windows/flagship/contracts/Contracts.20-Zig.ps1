@@ -343,9 +343,9 @@ Assert-ZigTestsDiscoveredAndRun `
     -RepoRoot $repoRoot `
     -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `
     -ExpectedNames @(
-        'TerminalProvider exposes optional terminal selection and active end'
+        'TerminalProvider GetSelection reports the caret range and real selections'
     ) `
-    -Filter 'optional terminal selection and active end'
+    -Filter 'GetSelection reports the caret range and real selections'
 Assert-ZigTestsDiscoveredAndRun `
     -RepoRoot $repoRoot `
     -Sources @{ $win32UiaWidgets = $win32UiaWidgetsText } `

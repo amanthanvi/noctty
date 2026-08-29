@@ -21,6 +21,14 @@ right thing.
 | Host banners | Banner text announced when it appears or changes | noctty chrome provider as a live region |
 | Settings window | Section name/role/selection and per-control name, role, and value | `SettingsSectionGroupProvider`, `SettingsSectionProvider`, and `SettingsControlProvider`; native providers compose underneath and are the fallback when STA cannot be confirmed |
 
+Known limitation in terminal selection: offsets are resolved against the
+plain-text formatter's pin map, which has no entry for blank trailing
+cells. A selection whose endpoints land on those cells resolves to
+nothing and is reported as the caret range rather than as a selection,
+silently. `GetSelection` still honours its contract -- a degenerate
+range at the insertion point when there is no selection -- so a caret
+tracker keeps working, but the selected extent is not announced.
+
 Surfaces with no provider yet: custom-painted caption buttons, profile
 picker and tab-overview overlay rows, context menus, WinRT toasts, the
 tab drag preview, and quick-terminal chrome. There is no keyboard

@@ -20,39 +20,48 @@ so a stale claim cannot outlive the record.
 
 - Release: unreleased (`main`)
 - Windows build: not yet recorded
+- Automated UIA harness: **not yet executed** with the current assertions
 - Narrator: **not yet measured**
 - NVDA: **not yet measured** (not installed on any noctty development or
   CI machine)
 - JAWS: **not yet measured** (commercial licence; not installed)
 
-The automated column reflects
+The "UIA assertion" column reflects
 `test/windows/interactive-win11-accessibility.ps1`, which walks the live
 UIA tree on a real interactive Windows 11 desktop and asserts control
-types, names, patterns, and events. It is a machine-readable proxy for
-the reader columns, not a replacement: it cannot prove that a reader
-speaks a name, speaks it once, speaks it in a useful order, or does not
-talk over itself.
+types, names, patterns, and events.
 
-| Widget | Expected announcement | Automated UIA check | Narrator | NVDA | JAWS | Notes |
+**Those assertions have never been executed against a live build.** They
+were written alongside the providers and are checked into the harness,
+but the interactive lane has not been run since, so the column records
+what is asserted, not what has been observed. Treat every row as
+unverified until the first run lands and this paragraph is replaced.
+
+Even once it does run, it stays a machine-readable proxy for the reader
+columns, not a replacement: it cannot prove that a reader speaks a name,
+speaks it once, speaks it in a useful order, or does not talk over
+itself.
+
+| Widget | Expected announcement | UIA assertion | Narrator | NVDA | JAWS | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Host window | Window, current title | Yes — ControlType Window | not yet measured | not yet measured | not yet measured | Name follows live title changes |
-| Tab strip | "Tabs", Selection container | Yes — ControlType Tab, Selection | not yet measured | not yet measured | not yet measured | Invisible sibling element spanning the strip rect; the tab buttons are not its HWND children |
-| Tab | Tab label, "selected" for the active tab | Yes — ControlType TabItem, SelectionItem, exactly one selected | not yet measured | not yet measured | not yet measured | Selection and name changes raise property events |
-| New tab button | "New tab", invokable | Yes — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays "+" |
-| Tab overflow button | "More tabs", invokable | Yes — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays a chevron |
-| Terminal pane | Terminal text, current line, caret position | Yes — TextPattern, TextPattern2, FindText, line units, bounding rectangles | not yet measured | not yet measured | not yet measured | Bounded to 500 history rows plus the live viewport |
-| Terminal selection | Selected text, correct active end | Yes — SupportedTextSelection Single; empty when nothing is selected | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row |
-| Terminal scrollbar | "Terminal scrollbar", position | Yes — ControlType ScrollBar, RangeValue | not yet measured | not yet measured | not yet measured | Read-only through UIA; scroll with the keyboard or wheel |
-| Docked search query | Edit, current query, caret and selection | Yes — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
-| Search previous / next | "Previous match" / "Next match", invokable | Yes — Button, Invoke | not yet measured | not yet measured | not yet measured | |
-| Search regex / case / whole word | Name plus pressed state | Yes — Button, Toggle, ToggleState tracks the flag | not yet measured | not yet measured | not yet measured | |
-| Search result count | "n of m" when it changes | Yes — live region, polite | not yet measured | not yet measured | not yet measured | Announcement timing is a reader behaviour and needs measurement |
-| Search close | "Close search", invokable | Yes — Button, Invoke | not yet measured | not yet measured | not yet measured | |
-| Command palette query | Edit, current query | Yes — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
-| Command palette list | List identity, one selected row | Yes — List, Selection, SelectionItem, selected-event sender | not yet measured | not yet measured | not yet measured | |
-| Host banner | Banner text when it appears or changes | Yes — live region | not yet measured | not yet measured | not yet measured | |
-| Settings sections | Section name, selected state | Yes — RadioButton, SelectionItem, Selection | not yet measured | not yet measured | not yet measured | |
-| Settings controls | Name, role, value | Partial — one Value edit, several Invoke buttons, visible name and control-type inventory | not yet measured | not yet measured | not yet measured | Generic Toggle and ExpandCollapse coverage is not asserted yet |
+| Host window | Window, current title | Asserted, not yet executed — ControlType Window | not yet measured | not yet measured | not yet measured | Name follows live title changes |
+| Tab strip | "Tabs", Selection container | Asserted, not yet executed — ControlType Tab, Selection | not yet measured | not yet measured | not yet measured | Invisible sibling element spanning the strip rect; the tab buttons are not its HWND children |
+| Tab | Tab label, "selected" for the active tab | Asserted, not yet executed — ControlType TabItem, SelectionItem, exactly one selected | not yet measured | not yet measured | not yet measured | Selection and name changes raise property events |
+| New tab button | "New tab", invokable | Asserted, not yet executed — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays "+" |
+| Tab overflow button | "More tabs", invokable | Asserted, not yet executed — ControlType Button, Invoke | not yet measured | not yet measured | not yet measured | Painted glyph stays a chevron |
+| Terminal pane | Terminal text, current line, caret position | Asserted, not yet executed — TextPattern, TextPattern2, FindText, line units, bounding rectangles | not yet measured | not yet measured | not yet measured | Bounded to 500 history rows plus the live viewport |
+| Terminal selection | Selected text, correct active end | Asserted, not yet executed — SupportedTextSelection Single; a degenerate range at the caret when nothing is selected | not yet measured | not yet measured | not yet measured | Rectangular selection reports its active row. A selection whose endpoints fall on blank cells is reported as the caret range instead |
+| Terminal scrollbar | "Terminal scrollbar", position | Asserted, not yet executed — ControlType ScrollBar, RangeValue | not yet measured | not yet measured | not yet measured | Read-only through UIA; scroll with the keyboard or wheel |
+| Docked search query | Edit, current query, caret and selection | Asserted, not yet executed — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
+| Search previous / next | "Previous match" / "Next match", invokable | Asserted, not yet executed — Button, Invoke | not yet measured | not yet measured | not yet measured | |
+| Search regex / case / whole word | Name plus pressed state | Asserted, not yet executed — Button, Toggle, ToggleState tracks the flag | not yet measured | not yet measured | not yet measured | |
+| Search result count | "n of m" when it changes | Asserted, not yet executed — live region, polite | not yet measured | not yet measured | not yet measured | Announcement timing is a reader behaviour and needs measurement |
+| Search close | "Close search", invokable | Asserted, not yet executed — Button, Invoke | not yet measured | not yet measured | not yet measured | |
+| Command palette query | Edit, current query | Asserted, not yet executed — Text, Value, selection, focus events | not yet measured | not yet measured | not yet measured | |
+| Command palette list | List identity, one selected row | Asserted, not yet executed — List, Selection, SelectionItem, selected-event sender | not yet measured | not yet measured | not yet measured | |
+| Host banner | Banner text when it appears or changes | Asserted, not yet executed — live region | not yet measured | not yet measured | not yet measured | |
+| Settings sections | Section name, selected state | Asserted, not yet executed — RadioButton, SelectionItem, Selection | not yet measured | not yet measured | not yet measured | |
+| Settings controls | Name, role, value | Partial, not yet executed — one Value edit, several Invoke buttons, visible name and control-type inventory | not yet measured | not yet measured | not yet measured | Generic Toggle and ExpandCollapse coverage is not asserted yet |
 
 ## Not covered by any provider yet
 
@@ -71,7 +80,8 @@ terminal with the keyboard alone.
 
 ## How we test
 
-Automated, every pull request and release candidate:
+Automated. Intended to run on every pull request and release candidate;
+as of this record it has not yet been executed with the assertions above:
 
 ```powershell
 pwsh -NoProfile -File .\test\windows\interactive-win11-accessibility.ps1

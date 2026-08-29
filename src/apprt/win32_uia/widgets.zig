@@ -48,7 +48,6 @@ const GUITHREADINFO = extern struct {
 };
 
 extern "user32" fn GetClientRect(hWnd: com.HWND, lpRect: *RECT) callconv(.winapi) com.BOOL;
-extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
 extern "user32" fn GetDlgCtrlID(hWnd: com.HWND) callconv(.winapi) i32;
 extern "user32" fn GetParent(hWnd: com.HWND) callconv(.winapi) ?com.HWND;
 extern "user32" fn IsWindow(hWnd: com.HWND) callconv(.winapi) com.BOOL;
@@ -2108,10 +2107,6 @@ pub const ChromeControlProvider = struct {
         return @fieldParentPtr("selection_item_iface", p);
     }
 
-    fn chromeIidEqual(a: *const com.GUID, b: *const com.GUID) bool {
-        return std.mem.eql(u8, std.mem.asBytes(a), std.mem.asBytes(b));
-    }
-
     fn QueryInterface(
         self_base: *com.IRawElementProviderSimple,
         iid: *const com.GUID,
@@ -2120,17 +2115,17 @@ pub const ChromeControlProvider = struct {
         const self = fromBase(self_base);
         out.* = null;
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
-        if (chromeIidEqual(iid, &com.IID_IUnknown) or chromeIidEqual(iid, &com.IID_IRawElementProviderSimple)) {
+        if (iidEqual(iid, &com.IID_IUnknown) or iidEqual(iid, &com.IID_IRawElementProviderSimple)) {
             out.* = @ptrCast(&self.base);
-        } else if ((self.state.role == .button) and chromeIidEqual(iid, &com.IID_IInvokeProvider)) {
+        } else if ((self.state.role == .button) and iidEqual(iid, &com.IID_IInvokeProvider)) {
             out.* = @ptrCast(&self.invoke_iface);
-        } else if (self.state.role == .toggle and chromeIidEqual(iid, &com.IID_IToggleProvider)) {
+        } else if (self.state.role == .toggle and iidEqual(iid, &com.IID_IToggleProvider)) {
             out.* = @ptrCast(&self.toggle_iface);
-        } else if (self.state.role == .scrollbar and chromeIidEqual(iid, &com.IID_IRangeValueProvider)) {
+        } else if (self.state.role == .scrollbar and iidEqual(iid, &com.IID_IRangeValueProvider)) {
             out.* = @ptrCast(&self.range_iface);
-        } else if (self.state.role == .tab_container and chromeIidEqual(iid, &com.IID_ISelectionProvider)) {
+        } else if (self.state.role == .tab_container and iidEqual(iid, &com.IID_ISelectionProvider)) {
             out.* = @ptrCast(&self.selection_iface);
-        } else if (self.state.role == .tab_item and chromeIidEqual(iid, &com.IID_ISelectionItemProvider)) {
+        } else if (self.state.role == .tab_item and iidEqual(iid, &com.IID_ISelectionItemProvider)) {
             out.* = @ptrCast(&self.selection_item_iface);
         } else return com.E_NOINTERFACE;
         _ = AddRef(&self.base);
@@ -2853,14 +2848,18 @@ pub const TerminalProvider = struct {
             else => com.E_OUTOFMEMORY,
         };
         defer self.alloc.free(snapshot.visible_text);
-        if (self.state.role == .terminal and snapshot.terminal_selection_range == null) {
-            defer self.alloc.free(snapshot.document_text);
-            defer if (snapshot.geometry) |geometry| self.alloc.free(geometry.cell_for_byte);
-            out.* = com.SafeArrayCreateVector(com.VT_UNKNOWN, 0, 0) orelse return com.E_OUTOFMEMORY;
-            return com.S_OK;
-        }
+        // ITextProvider::GetSelection is documented to return a degenerate
+        // range at the insertion point when a control has a caret but no
+        // selection; an empty array is only correct for a control with no
+        // insertion point at all. A terminal always has a caret, so clients
+        // that track it through GetSelection rather than TextPattern2's
+        // GetCaretRange keep working. The caret anchor matches GetCaretRange:
+        // the active end of a live selection, otherwise the cursor.
         const selection_range = if (self.state.role == .terminal)
-            snapshot.terminal_selection_range.?
+            snapshot.terminal_selection_range orelse terminal_text.OffsetRange{
+                .start = snapshot.caret_offset,
+                .end = snapshot.caret_offset,
+            }
         else
             snapshot.selection_range;
         var range: ?*com.ITextRangeProvider = null;
@@ -4767,7 +4766,7 @@ test "TerminalProvider refcount and state retain balance across text provider re
     try std.testing.expectEqual(@as(u32, 1), state_data.releases);
 }
 
-test "TerminalProvider exposes optional terminal selection and active end" {
+test "TerminalProvider GetSelection reports the caret range and real selections" {
     var state_data = TestTerminalStateData{ .caret_offset = 6 };
     const state = testTerminalState(&state_data);
 
@@ -4779,6 +4778,8 @@ test "TerminalProvider exposes optional terminal selection and active end" {
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expectEqual(com.SupportedTextSelection_Single, selection);
 
+    // No user selection: the documented contract is a degenerate range at
+    // the insertion point, not an empty array. The terminal always has one.
     var ranges: ?*com.SAFEARRAY = @ptrFromInt(0x10);
     try std.testing.expectEqual(com.S_OK, TerminalProvider.GetSelection(&p.text_iface, &ranges));
     try std.testing.expect(ranges != null);
@@ -4787,7 +4788,18 @@ test "TerminalProvider exposes optional terminal selection and active end" {
     try std.testing.expectEqual(com.S_OK, com.SafeArrayGetLBound(ranges.?, 1, &lower));
     try std.testing.expectEqual(com.S_OK, com.SafeArrayGetUBound(ranges.?, 1, &upper));
     try std.testing.expectEqual(@as(i32, 0), lower);
-    try std.testing.expectEqual(@as(i32, -1), upper);
+    try std.testing.expectEqual(@as(i32, 0), upper);
+    var caret_index: i32 = 0;
+    var caret_only: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        com.SafeArrayGetElement(ranges.?, &caret_index, @ptrCast(&caret_only)),
+    );
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 6, .end = 6 },
+        TerminalTextRangeProvider.fromBase(caret_only.?).range,
+    );
+    _ = TerminalTextRangeProvider.Release(caret_only.?);
 
     state_data.terminal_selection_range = .{ .start = 2, .end = 7 };
     state_data.terminal_selection_active_offset = 2;
@@ -6217,6 +6229,9 @@ test "uia ChromeControlProvider exposes live chrome patterns and detaches safely
         }
     };
 
+    const GetDesktopWindow = struct {
+        extern "user32" fn GetDesktopWindow() callconv(.winapi) com.HWND;
+    }.GetDesktopWindow;
     const hwnd = GetDesktopWindow();
     var context: Context = .{};
     const context_ptr: *anyopaque = @ptrCast(&context);

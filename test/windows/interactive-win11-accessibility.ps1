@@ -3860,12 +3860,20 @@ try {
     if ($supportedTextSelection -ne [System.Windows.Automation.SupportedTextSelection]::Single) {
         throw "Terminal TextPattern advertises '$supportedTextSelection'; expected Single."
     }
-    # The terminal exposes an actual user selection when one exists. No
-    # terminal selection has been made in this scenario, so GetSelection must
-    # be empty rather than fabricating a compatibility caret.
+    # The terminal exposes an actual user selection when one exists. None has
+    # been made in this scenario, so GetSelection must return the documented
+    # degenerate range at the insertion point -- clients that track the caret
+    # through GetSelection rather than TextPattern2.GetCaretRange depend on it.
     $selection = @($textPattern.GetSelection())
-    if ($selection.Count -ne 0) {
-        throw "Terminal TextPattern returned $($selection.Count) ranges before a user selection; expected none."
+    if ($selection.Count -ne 1) {
+        throw "Terminal TextPattern returned $($selection.Count) ranges before a user selection; expected one caret range."
+    }
+    if ($selection[0].CompareEndpoints(
+        [System.Windows.Automation.Text.TextPatternRangeEndpoint]::Start,
+        $selection[0],
+        [System.Windows.Automation.Text.TextPatternRangeEndpoint]::End
+    ) -ne 0) {
+        throw 'Terminal caret range is not degenerate before a user selection.'
     }
     $markerRange = $textPattern.DocumentRange.FindText($marker, $true, $false)
     if ($null -eq $markerRange) { throw 'Terminal FindText did not return the visible marker range.' }
@@ -6300,7 +6308,7 @@ try {
             rectangle_count = $terminalRectCount
             selection_range_count = $selection.Count
             supported_text_selection = $supportedTextSelection.ToString()
-            selection_is_absent_without_user_selection = $true
+            selection_is_caret_range_without_user_selection = $true
             live_setting = $liveSetting.ToString()
             output_notification_count = $terminalOutputNotification[0]
             output_notification_kind = $terminalOutputNotification[1]
