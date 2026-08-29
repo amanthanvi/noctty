@@ -20851,13 +20851,6 @@ fn paletteReleaseThunk(ctx: *anyopaque) void {
     const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
     _ = win32_uia.PaletteListProvider.Release(&provider.base);
 }
-fn quickSelectDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
-    return (@as(*win32_uia.PaletteListProvider, @ptrCast(@alignCast(ctx)))).disconnect();
-}
-fn quickSelectReleaseThunk(ctx: *anyopaque) void {
-    const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
-    _ = win32_uia.PaletteListProvider.Release(&provider.base);
-}
 fn terminalDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
     return (@as(*win32_uia.TerminalProvider, @ptrCast(@alignCast(ctx)))).disconnect();
 }
@@ -24810,18 +24803,21 @@ pub const Surface = struct {
 
     fn buildQuickSelectName(self: *const Surface, buf: []u8) []const u8 {
         const session = if (self.quick_select_session) |*value| value else return std.fmt.bufPrint(buf, "Quick select, 0 targets", .{}) catch "Quick select";
+        const count = session.labels.count;
+        // Screen readers speak this verbatim, so "1 targets" is a real defect.
+        const noun = if (count == 1) "target" else "targets";
         const typed = session.prefix.typed();
         if (typed.len == 0) {
             return std.fmt.bufPrint(
                 buf,
-                "Quick select, {d} targets",
-                .{session.labels.count},
+                "Quick select, {d} {s}",
+                .{ count, noun },
             ) catch "Quick select";
         }
         return std.fmt.bufPrint(
             buf,
-            "Quick select, {d} targets, typed {s}",
-            .{ session.labels.count, typed },
+            "Quick select, {d} {s}, typed {s}",
+            .{ count, noun, typed },
         ) catch "Quick select";
     }
 
@@ -24953,8 +24949,8 @@ pub const Surface = struct {
             scheduleDeferredUiaDisconnect(
                 self.app,
                 @ptrCast(provider),
-                &quickSelectDisconnectThunk,
-                &quickSelectReleaseThunk,
+                &paletteDisconnectThunk,
+                &paletteReleaseThunk,
             );
         }
         if (overlay) |hwnd| {
@@ -25001,22 +24997,73 @@ pub const Surface = struct {
         }
     }
 
+    /// Whether the cells a quick-select target occupies still hold the text
+    /// that was scanned when the overlay opened. Fails closed: any error, or a
+    /// span that no longer exists, counts as changed.
+    fn quickSelectTargetUnchanged(
+        self: *Surface,
+        session: *const QuickSelectSession,
+        index: usize,
+    ) bool {
+        if (!self.core_initialized) return false;
+        const alloc = self.app.core_app.alloc;
+        const matched = session.scan.matches[index];
+
+        var render_state: terminal.RenderState = .empty;
+        defer render_state.deinit(alloc);
+        self.core_surface.renderer_state.mutex.lock();
+        render_state.update(
+            alloc,
+            self.core_surface.renderer_state.terminal,
+        ) catch {
+            self.core_surface.renderer_state.mutex.unlock();
+            return false;
+        };
+        self.core_surface.renderer_state.mutex.unlock();
+
+        var builder: std.Io.Writer.Allocating = .init(alloc);
+        defer builder.deinit();
+        var map: terminal.RenderState.StringMap = .empty;
+        defer map.deinit(alloc);
+        render_state.string(&builder.writer, .{
+            .alloc = alloc,
+            .map = &map,
+        }) catch return false;
+
+        const current = win32_hints.spanText(
+            builder.writer.buffered(),
+            map.items,
+            matched.first,
+            matched.last,
+        ) orelse return false;
+        return std.mem.eql(u8, current, session.scan.matchText(index));
+    }
+
     fn fireQuickSelect(self: *Surface, index: usize, ctrl: bool, alt: bool) !void {
         const alloc = self.app.core_app.alloc;
         const session = if (self.quick_select_session) |*value| value else return;
         if (index >= session.scan.matches.len) return;
         const payload = try alloc.dupeZ(u8, session.scan.matchText(index));
         defer alloc.free(payload);
-        const can_open = if (ctrl)
-            win32_hints.beginsWithAllowedScheme(payload) catch |err| blk: {
-                log.warn("quick select scheme validation failed err={}", .{err});
-                break :blk false;
-            }
-        else
-            false;
+
+        // Re-verify against the LIVE viewport before acting.
+        //
+        // The overlay is colorkey-transparent, so the terminal keeps drawing
+        // underneath a snapshot taken when quick select opened. A program that
+        // rewrites the labeled region after the overlay is up would otherwise
+        // let the user act on bytes that are no longer the bytes on screen.
+        // Checking here, at the moment of use, is the only point where "what
+        // the user sees" and "what we act on" can be compared.
+        if (!self.quickSelectTargetUnchanged(session, index)) {
+            log.warn("quick select target changed under the overlay; ignoring", .{});
+            self.closeQuickSelect(true);
+            return;
+        }
+
+        const action = win32_hints.resolveAction(payload, ctrl, alt);
 
         self.closeQuickSelect(true);
-        if (can_open) {
+        if (action == .open) {
             _ = try self.app.performAction(
                 .{ .surface = self.core() },
                 .open_url,
@@ -25024,7 +25071,27 @@ pub const Surface = struct {
             );
             return;
         }
-        if (alt and !ctrl) {
+        if (action == .paste) {
+            // Defense-in-depth classifier pass, same as the drop path.
+            //
+            // Core's `isSafe` only flags newlines and bracketed-paste-end
+            // sequences. A quick-select payload is attacker-rendered terminal
+            // output, not something the user typed or copied, so a single-line
+            // match like `https://x/$(payload)` or one carrying `%VAR%` would
+            // otherwise reach the pty with no confirmation. Consult the full
+            // verdict (control_chars, shell_metachar, mixed_content) and fire
+            // the same confirm overlay as the core `.UnsafePaste` branch.
+            if (self.app.config.@"clipboard-paste-protection") {
+                const verdict = win32_paste_protection.inspect(payload);
+                if (verdict.severity != .safe) {
+                    log.info("quick select paste flagged severity={s} reason={s}", .{
+                        @tagName(verdict.severity),
+                        verdict.reason,
+                    });
+                    try self.requestPasteConfirm(.paste, payload);
+                    return;
+                }
+            }
             self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
                 error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
                 else => return err,

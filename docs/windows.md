@@ -488,6 +488,20 @@ completing the label to open a target that begins with an allowed URL scheme;
 other targets are copied. Hold Alt to paste through the normal protected-paste
 path.
 
+Opening is deliberately narrower than matching. `file:` URLs are labeled and
+can be copied, but Ctrl will not open them, because the system handler would
+run `file:///C:/...exe` straight from terminal output. Anything without an
+allowed scheme is copied instead of opened. Alt-paste additionally runs the
+same classifier the drag-and-drop path uses, so a match carrying shell
+metacharacters, environment-variable expansion, or control bytes raises the
+paste confirmation.
+
+Targets are re-checked against the live screen at the moment you act. If the
+program running in the terminal rewrote a labeled region while the overlay was
+up, that target is ignored rather than acted on, so what you act on is always
+what was on screen. Quick select also closes on resize, on a click, and when
+the surface loses focus.
+
 `quick-select-patterns` is repeatable and accepts bare regex values or quoted
 Zig string literals. An empty value clears configured patterns; when the
 configured list is empty, the built-in patterns apply. `quick-select-alphabet`

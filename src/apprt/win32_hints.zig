@@ -58,17 +58,46 @@ pub const default_patterns = [_][]const u8{
     uuid,
 };
 
-/// Whether text begins with one of the schemes accepted by the existing URL
-/// matcher. Callers use this as the security boundary before native opening.
-pub fn beginsWithAllowedScheme(text: []const u8) !bool {
-    var regex = try oni.Regex.init(
+/// Schemes that match (and so can be labeled and copied) but must never be
+/// handed to the system opener.
+///
+/// The open allowlist is deliberately narrower than the match allowlist.
+/// `file:` reaches ShellExecute, so `file:///C:/…/evil.exe` rendered by a
+/// hostile program would otherwise be two keystrokes from running. Matching it
+/// is still useful — the label copies the path.
+const non_openable_schemes = [_][]const u8{"file:"};
+
+/// Compiled once: the scheme set is a compile-time constant and this runs on
+/// the UI thread for every fired label.
+var scheme_regex_once = std.once(initSchemeRegex);
+var scheme_regex: ?oni.Regex = null;
+var scheme_regex_err: ?anyerror = null;
+
+fn initSchemeRegex() void {
+    scheme_regex = oni.Regex.init(
         "\\A(?:" ++ config_url.url_schemes ++ ")",
         .{},
         oni.Encoding.utf8,
         oni.Syntax.default,
         null,
-    );
-    defer regex.deinit();
+    ) catch |err| {
+        scheme_regex_err = err;
+        return;
+    };
+}
+
+/// Whether text begins with a scheme this build is willing to hand to the
+/// system opener. This is the security boundary before native opening: it is
+/// anchored, case-sensitive, and fails closed.
+pub fn beginsWithAllowedScheme(text: []const u8) !bool {
+    for (non_openable_schemes) |scheme| {
+        if (std.mem.startsWith(u8, text, scheme)) return false;
+    }
+
+    scheme_regex_once.call();
+    if (scheme_regex_err) |err| return err;
+    const regex = if (scheme_regex) |*value| value else return error.RegexUnavailable;
+
     var region = regex.search(text, .{}) catch |err| switch (err) {
         error.Mismatch => return false,
         else => return err,
@@ -83,6 +112,82 @@ pub const Match = struct {
     first: point.Coordinate,
     last: point.Coordinate,
 };
+
+/// What firing a label does with the matched text.
+pub const Action = enum { copy, open, paste };
+
+/// Resolve the action for a fired label. Ctrl asks to open and Alt asks to
+/// paste; anything not openable degrades to a copy rather than being refused,
+/// so a mistyped modifier never silently does nothing.
+pub fn resolveAction(text: []const u8, ctrl: bool, alt: bool) Action {
+    if (ctrl) {
+        const openable = beginsWithAllowedScheme(text) catch |err| blk: {
+            std.log.warn("quick select scheme validation failed err={}", .{err});
+            break :blk false;
+        };
+        return if (openable) .open else .copy;
+    }
+    if (alt) return .paste;
+    return .copy;
+}
+
+test "hints: ctrl falls back to copy for targets that cannot be opened" {
+    const testing = std.testing;
+    try oni.testing.ensureInit();
+
+    // Ctrl opens only real, allowlisted URLs.
+    try testing.expectEqual(Action.open, resolveAction("https://example.com", true, false));
+
+    // Everything else Ctrl is pressed on degrades to copy, never to open.
+    try testing.expectEqual(Action.copy, resolveAction("C:\\work\\notes.txt", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("\\\\server\\share\\x", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("deadbeef", true, false));
+    try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, false));
+
+    // Alt pastes; Ctrl wins over Alt so a chord cannot both open and paste.
+    try testing.expectEqual(Action.paste, resolveAction("deadbeef", false, true));
+    try testing.expectEqual(Action.open, resolveAction("https://example.com", true, true));
+    try testing.expectEqual(Action.copy, resolveAction("file:///C:/evil.exe", true, true));
+
+    // No modifier always copies.
+    try testing.expectEqual(Action.copy, resolveAction("https://example.com", false, false));
+}
+
+fn coordEql(lhs: point.Coordinate, rhs: point.Coordinate) bool {
+    return lhs.x == rhs.x and lhs.y == rhs.y;
+}
+
+/// The text currently occupying the cell span `first..last`, or null if that
+/// span is no longer present. The coordinate map is in reading order, so the
+/// bytes covering a cell span are contiguous.
+pub fn spanText(
+    text: []const u8,
+    map: []const point.Coordinate,
+    first: point.Coordinate,
+    last: point.Coordinate,
+) ?[]const u8 {
+    const limit = @min(text.len, map.len);
+    var start: ?usize = null;
+    for (map[0..limit], 0..) |coord, i| {
+        if (coordEql(coord, first)) {
+            start = i;
+            break;
+        }
+    }
+    const begin = start orelse return null;
+
+    var end: ?usize = null;
+    var i: usize = limit;
+    while (i > begin) {
+        i -= 1;
+        if (coordEql(map[i], last)) {
+            end = i + 1;
+            break;
+        }
+    }
+    const finish = end orelse return null;
+    return text[begin..finish];
+}
 
 /// Build the stable accessible name for one visible quick-select target.
 /// The label is announced before the matched text so keyboard users hear the
@@ -562,6 +667,42 @@ test "hints: URL open allowlist rejects arbitrary matched text" {
     try std.testing.expect(try beginsWithAllowedScheme("mailto:user@example.com"));
     try std.testing.expect(!(try beginsWithAllowedScheme("C:\\work\\notes.txt")));
     try std.testing.expect(!(try beginsWithAllowedScheme("example.com")));
+
+    // Schemes that reach a handler capable of running code are never openable,
+    // even though the URL matcher still labels them so they can be copied.
+    try std.testing.expect(!(try beginsWithAllowedScheme("file:///C:/tmp/evil.exe")));
+    try std.testing.expect(!(try beginsWithAllowedScheme("file://server/share/x")));
+    try std.testing.expect(!(try beginsWithAllowedScheme("javascript:alert(1)")));
+    try std.testing.expect(!(try beginsWithAllowedScheme("ms-msdt:/id")));
+    try std.testing.expect(!(try beginsWithAllowedScheme("search-ms:query=x")));
+
+    // Anchored: a permitted scheme appearing later must not authorize opening.
+    try std.testing.expect(!(try beginsWithAllowedScheme("evil https://example.com")));
+}
+
+test "hints: span text tracks a target's live cells" {
+    const testing = std.testing;
+    const text = "ab cd";
+    const map = [_]point.Coordinate{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 0 },
+        .{ .x = 2, .y = 0 },
+        .{ .x = 3, .y = 0 },
+        .{ .x = 4, .y = 0 },
+    };
+
+    try testing.expectEqualStrings(
+        "ab",
+        spanText(text, &map, .{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }).?,
+    );
+    try testing.expectEqualStrings(
+        "cd",
+        spanText(text, &map, .{ .x = 3, .y = 0 }, .{ .x = 4, .y = 0 }).?,
+    );
+
+    // A span that scrolled away is reported missing, so callers fail closed.
+    try testing.expect(spanText(text, &map, .{ .x = 0, .y = 7 }, .{ .x = 1, .y = 7 }) == null);
+    try testing.expect(spanText(text, &map, .{ .x = 0, .y = 0 }, .{ .x = 9, .y = 0 }) == null);
 }
 
 test "hints: labels are shortest first and prefix free" {
