@@ -4,12 +4,15 @@ const Allocator = std.mem.Allocator;
 const internal_os = @import("../os/main.zig");
 const Command = @import("command.zig").Command;
 const windows_shell_types = @import("windows_shell_types.zig");
+const windows_ssh_hosts = @import("windows_ssh_hosts.zig");
 const log = std.log.scoped(.windows_shell);
 const windows = std.os.windows;
 
 const wsl_probe_timeout_ms: windows.DWORD = 1500;
 var wsl_probe_mutex: std.Thread.Mutex = .{};
 var wsl_probe_cache: ?bool = null;
+var ssh_missing_mutex: std.Thread.Mutex = .{};
+var ssh_missing_logged = false;
 const wsl_shell_integration_next_step =
     "Enable shell integration inside the selected WSL shell startup.";
 
@@ -39,11 +42,13 @@ pub const Profile = struct {
     kind: ProfileKind,
     key: []const u8,
     label: []const u8,
+    palette_title: ?[]const u8 = null,
     command: Command,
 
     pub fn deinit(self: *Profile, alloc: Allocator) void {
         alloc.free(self.key);
         alloc.free(self.label);
+        if (self.palette_title) |value| alloc.free(value);
         self.command.deinit(alloc);
     }
 };
@@ -74,17 +79,39 @@ pub fn previewCommand(alloc: Allocator) !Command {
     return try previewCommandWithLookup(alloc, lookupExecutable);
 }
 
-pub fn listProfiles(alloc: Allocator) ![]Profile {
+pub fn listProfiles(alloc: Allocator, include_ssh_hosts: bool) ![]Profile {
     const order_hint = detectProfileOrderHint(alloc);
     defer if (order_hint) |value| alloc.free(value);
 
-    return try listProfilesWithLookupAndProbeAndWslListAndOrder(
+    const shell_profiles = try listProfilesWithLookupAndProbeAndWslListAndOrder(
         alloc,
         lookupExecutable,
         probeWslExecutableCached,
         listWslDistros,
         order_hint,
     );
+    if (!include_ssh_hosts) return shell_profiles;
+
+    // SSH discovery is additive. Any failure below degrades to the detected
+    // shells rather than propagating, because the caller treats an error as
+    // "no profiles at all" and would leave the user with no picker.
+    const hosts = windows_ssh_hosts.load(alloc) catch |err| {
+        warnSshDiscoveryOnce(err);
+        return shell_profiles;
+    };
+    defer windows_ssh_hosts.deinitHosts(alloc, hosts);
+    if (hosts.len == 0) return shell_profiles;
+
+    const ssh_path = resolveSshExecutable(alloc, lookupExecutable, accessAbsolute) catch |err| {
+        warnSshDiscoveryOnce(err);
+        return shell_profiles;
+    };
+    if (ssh_path == null) {
+        warnMissingSshOnce();
+        return shell_profiles;
+    }
+    defer alloc.free(ssh_path.?);
+    return try appendSshProfiles(alloc, shell_profiles, hosts, ssh_path.?);
 }
 
 pub fn profileOrderHint(alloc: Allocator) ?[:0]const u8 {
@@ -125,6 +152,11 @@ pub fn shellIntegrationDiagnostic(kind: ProfileKind) ShellIntegrationDiagnostic 
             .support = .unavailable,
             .summary = "Command Prompt profile; shell integration unavailable",
             .next_step = "Use PowerShell or WSL when prompt marking or cwd inheritance is required.",
+        },
+        .ssh => .{
+            .support = .unavailable,
+            .summary = "SSH profile; shell integration is disabled for remote sessions",
+            .next_step = "Enable shell integration inside the remote shell's own startup files.",
         },
     };
 }
@@ -196,7 +228,6 @@ pub fn safeCurrentDirectory(
     is_wsl: bool,
 ) !?[]const u8 {
     const current = try currentWindowsDirectory(alloc);
-    defer if (current) |value| alloc.free(value);
 
     return try safeCurrentDirectoryWithCurrent(
         alloc,
@@ -207,6 +238,7 @@ pub fn safeCurrentDirectory(
     );
 }
 
+/// Takes ownership of `current` and frees it on every path.
 fn safeCurrentDirectoryWithCurrent(
     alloc: Allocator,
     cwd: ?[]const u8,
@@ -214,6 +246,8 @@ fn safeCurrentDirectoryWithCurrent(
     is_wsl: bool,
     current: ?[]const u8,
 ) !?[]const u8 {
+    defer if (current) |value| alloc.free(value);
+
     if (cwd) |value| {
         if (isWindowsUriPath(value)) return try uriPathToWindows(alloc, value);
         if (isDriveAbsolutePath(value)) return try alloc.dupe(u8, value);
@@ -227,8 +261,6 @@ fn safeCurrentDirectoryWithCurrent(
     }
 
     if (current) |value| {
-        defer alloc.free(value);
-
         if (isDriveAbsolutePath(value)) return try alloc.dupe(u8, value);
         if (isWindowsUriPath(value)) return try uriPathToWindows(alloc, value);
         if (isObviouslyInvalidWindowsCurrentDirectory(value)) {
@@ -518,6 +550,79 @@ fn appendProfile(
     });
 }
 
+fn appendSshProfiles(
+    alloc: Allocator,
+    shell_profiles: []Profile,
+    hosts: []const windows_ssh_hosts.Host,
+    ssh_path: []const u8,
+) ![]Profile {
+    var profiles: std.ArrayList(Profile) = .empty;
+    profiles.ensureTotalCapacity(alloc, shell_profiles.len + hosts.len) catch |err| {
+        deinitProfiles(alloc, shell_profiles);
+        return err;
+    };
+    profiles.appendSliceAssumeCapacity(shell_profiles);
+    alloc.free(shell_profiles);
+    errdefer deinitProfileList(alloc, &profiles);
+
+    for (hosts) |host| {
+        const key = try std.fmt.allocPrint(alloc, "ssh:{s}", .{host.alias});
+        defer alloc.free(key);
+        const label = try std.fmt.allocPrint(alloc, "SSH: {s}", .{host.alias});
+        defer alloc.free(label);
+        const palette_title = try std.fmt.allocPrint(alloc, "Connect to {s}", .{host.alias});
+        defer alloc.free(palette_title);
+        try appendProfile(
+            alloc,
+            &profiles,
+            .ssh,
+            key,
+            label,
+            &.{ ssh_path, host.alias },
+        );
+        profiles.items[profiles.items.len - 1].palette_title = try alloc.dupe(u8, palette_title);
+    }
+
+    return try profiles.toOwnedSlice(alloc);
+}
+
+fn resolveSshExecutable(alloc: Allocator, lookup: anytype, access: anytype) !?[]u8 {
+    const path_result = lookup(alloc, "ssh.exe") catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => null,
+    };
+    if (path_result) |path| return path;
+
+    const fallback = "C:\\Windows\\System32\\OpenSSH\\ssh.exe";
+    access(fallback) catch return null;
+    return try alloc.dupe(u8, fallback);
+}
+
+fn accessAbsolute(path: []const u8) !void {
+    try std.fs.accessAbsolute(path, .{});
+}
+
+fn warnSshDiscoveryOnce(err: anyerror) void {
+    ssh_missing_mutex.lock();
+    defer ssh_missing_mutex.unlock();
+    if (ssh_missing_logged) return;
+    ssh_missing_logged = true;
+    log.warn("SSH hosts skipped: discovery failed err={}", .{err});
+}
+
+fn warnMissingSshOnce() void {
+    ssh_missing_mutex.lock();
+    defer ssh_missing_mutex.unlock();
+    if (ssh_missing_logged) return;
+    ssh_missing_logged = true;
+    log.warn("SSH hosts skipped: ssh.exe was not found on PATH or in Windows OpenSSH", .{});
+}
+
+fn deinitProfileList(alloc: Allocator, profiles: *std.ArrayList(Profile)) void {
+    for (profiles.items) |*profile| profile.deinit(alloc);
+    profiles.deinit(alloc);
+}
+
 fn detectProfileOrderHint(alloc: Allocator) ?[]u8 {
     const raw = std.process.getEnvVarOwned(alloc, "NOCTTY_WIN32_PROFILE_ORDER") catch
         return null;
@@ -598,6 +703,7 @@ fn profileOrderTokenMatches(token: []const u8, profile: Profile) bool {
         .cmd => std.ascii.eqlIgnoreCase(token, "cmd") or
             std.ascii.eqlIgnoreCase(token, "cmd.exe") or
             std.ascii.eqlIgnoreCase(token, "command-prompt"),
+        .ssh => false,
     };
 }
 
@@ -1144,6 +1250,95 @@ test "listProfilesWithLookupAndProbeAndWslList enumerates windows profiles" {
     try testing.expectEqual(ProfileKind.cmd, profiles[6].kind);
 }
 
+test "ssh profiles append after shells with alias-only argv" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const shell_profiles = try alloc.alloc(Profile, 1);
+    shell_profiles[0] = .{
+        .kind = .cmd,
+        .key = try alloc.dupe(u8, "cmd.exe"),
+        .label = try alloc.dupe(u8, "Command Prompt"),
+        .command = try directCommand(alloc, &.{"cmd.exe"}),
+    };
+    const hosts = [_]windows_ssh_hosts.Host{.{ .alias = "production" }};
+    const profiles = try appendSshProfiles(
+        alloc,
+        shell_profiles,
+        &hosts,
+        "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+    );
+    defer deinitProfiles(alloc, profiles);
+
+    try testing.expectEqual(@as(usize, 2), profiles.len);
+    try testing.expectEqual(ProfileKind.cmd, profiles[0].kind);
+    try testing.expectEqual(ProfileKind.ssh, profiles[1].kind);
+    try testing.expectEqualStrings("ssh:production", profiles[1].key);
+    try testing.expectEqualStrings("SSH: production", profiles[1].label);
+    try testing.expectEqualStrings("Connect to production", profiles[1].palette_title.?);
+    try testing.expectEqual(@as(usize, 2), profiles[1].command.direct.len);
+    try testing.expectEqualStrings(
+        "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+        profiles[1].command.direct[0],
+    );
+    try testing.expectEqualStrings("production", profiles[1].command.direct[1]);
+}
+
+test "ssh executable resolution prefers PATH then System32 fallback" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const from_path = (try resolveSshExecutable(alloc, struct {
+        fn lookup(a: Allocator, exe: []const u8) !?[]u8 {
+            try testing.expectEqualStrings("ssh.exe", exe);
+            return try a.dupe(u8, "C:\\Tools\\OpenSSH\\ssh.exe");
+        }
+    }.lookup, struct {
+        fn access(_: []const u8) !void {
+            return error.Unexpected;
+        }
+    }.access)).?;
+    defer alloc.free(from_path);
+    try testing.expectEqualStrings("C:\\Tools\\OpenSSH\\ssh.exe", from_path);
+
+    const fallback = (try resolveSshExecutable(alloc, struct {
+        fn lookup(_: Allocator, _: []const u8) !?[]u8 {
+            return null;
+        }
+    }.lookup, struct {
+        fn access(path: []const u8) !void {
+            try testing.expectEqualStrings(
+                "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+                path,
+            );
+        }
+    }.access)).?;
+    defer alloc.free(fallback);
+    try testing.expectEqualStrings("C:\\Windows\\System32\\OpenSSH\\ssh.exe", fallback);
+
+    // A PATH lookup error is not fatal: it falls through to the same fallback.
+    const after_lookup_error = (try resolveSshExecutable(alloc, struct {
+        fn lookup(_: Allocator, _: []const u8) anyerror!?[]u8 {
+            return error.AccessDenied;
+        }
+    }.lookup, struct {
+        fn access(_: []const u8) !void {}
+    }.access)).?;
+    defer alloc.free(after_lookup_error);
+    try testing.expectEqualStrings("C:\\Windows\\System32\\OpenSSH\\ssh.exe", after_lookup_error);
+
+    // Neither present: no SSH entries are produced at all.
+    try testing.expectEqual(@as(?[]u8, null), try resolveSshExecutable(alloc, struct {
+        fn lookup(_: Allocator, _: []const u8) !?[]u8 {
+            return null;
+        }
+    }.lookup, struct {
+        fn access(_: []const u8) !void {
+            return error.FileNotFound;
+        }
+    }.access));
+}
+
 test "profileOrderTokenMatches supports Windows profile aliases" {
     const testing = std.testing;
 
@@ -1288,6 +1483,24 @@ test "safeCurrentDirectory keeps inherit semantics for non-wsl shells" {
     defer alloc.free(result);
 
     try testing.expectEqualStrings("C:\\Users\\amant", result);
+}
+
+test "safeCurrentDirectory keeps an inherited cwd ahead of a home request" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // SSH launches ask for home with an explicit path rather than this flag,
+    // so the pre-existing "inherited cwd wins" precedence stays intact.
+    const result = (try safeCurrentDirectoryWithCurrent(
+        alloc,
+        null,
+        true,
+        false,
+        try alloc.dupe(u8, "C:\\work"),
+    )).?;
+    defer alloc.free(result);
+
+    try testing.expectEqualStrings("C:\\work", result);
 }
 
 test "safeCurrentDirectory falls back to home for invalid cwd" {

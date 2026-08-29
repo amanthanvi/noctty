@@ -11,6 +11,7 @@ const configpkg = @import("../config.zig");
 const config_edit = @import("../config/edit.zig");
 const themepkg = @import("../config/theme.zig");
 const windows_shell = @import("../config/windows_shell.zig");
+const windows_ssh_hosts = @import("../config/windows_ssh_hosts.zig");
 const input = @import("../input.zig");
 const homedir = @import("../os/homedir.zig");
 const internal_os = @import("../os/main.zig");
@@ -615,8 +616,34 @@ fn applyProfileSurfaceConfig(
     config: *configpkg.Config,
     profile: *const windows_shell.Profile,
 ) !void {
-    try applyProfileCommandConfig(config, profile);
     config.@"working-directory" = .home;
+    try applyProfileLaunchConfig(config, profile);
+}
+
+/// Applies a profile's command plus the kind-specific hardening that has to
+/// hold on EVERY launch path — new surface, split, and restore alike. Splits
+/// used to apply only the command, which silently dropped the SSH guarantees
+/// below, so both paths go through here.
+fn applyProfileLaunchConfig(
+    config: *configpkg.Config,
+    profile: *const windows_shell.Profile,
+) !void {
+    try applyProfileCommandConfig(config, profile);
+    if (profile.kind != .ssh) return;
+
+    // Shell integration injection rewrites the two-element ssh argv into a
+    // space-joined, unquoted `cmd.exe /C` string. A remote session cannot use
+    // it anyway: the integration scripts run locally.
+    config.@"shell-integration" = .none;
+
+    // `.home` alone loses to an inherited working directory, so resolve the
+    // path explicitly and let the drive-absolute branch of the cwd resolver
+    // take it. This is the same directory `ssh` itself expands `~` to.
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (try windows_ssh_hosts.userProfileDir(&home_buf)) |home| {
+        const alloc = config._arena.?.allocator();
+        config.@"working-directory" = .{ .path = try alloc.dupe(u8, home) };
+    }
 }
 
 fn applyProfileCommandConfig(
@@ -2250,7 +2277,13 @@ pub const App = struct {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
         defer config.deinit();
 
-        if (pane.profile) |key| try self.applyRestoredProfileConfig(&config, host, key);
+        // A refused profile (today: SSH) must not leave its key on the surface
+        // either, or a later split of the restored pane would re-resolve it and
+        // launch the connection this restore just declined.
+        const profile_applied = if (pane.profile) |key|
+            try self.applyRestoredProfileConfig(&config, host, key)
+        else
+            false;
         if (pane.cwd) |cwd| {
             const alloc = config._arena.?.allocator();
             config.@"working-directory" = .{ .path = try alloc.dupe(u8, cwd) };
@@ -2269,7 +2302,9 @@ pub const App = struct {
         });
         transaction.noteSurface(surface);
 
-        if (pane.profile) |key| try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
+        if (profile_applied) {
+            try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, pane.profile.?);
+        }
         if (pane.title_override) |title| try surface.setTitleOverride(title);
         if (pane.tab_title_override) |title| try surface.setTabTitleOverride(title);
         if (pane.cwd) |cwd| try surface.setPwd(cwd);
@@ -2281,17 +2316,20 @@ pub const App = struct {
         config: *configpkg.Config,
         host: ?*Host,
         key: []const u8,
-    ) !void {
+    ) !bool {
         if (host) |existing| {
-            if ((try existing.profileForKey(key))) |profile| {
-                try applyProfileSurfaceConfig(config, profile);
-            }
-            return;
+            const profile = (try existing.profileForKey(key)) orelse return false;
+            if (!isSessionRestorableProfile(profile)) return false;
+            try applyProfileSurfaceConfig(config, profile);
+            return true;
         }
 
-        const profiles = try windows_shell.listProfiles(self.core_app.alloc);
+        const profiles = try windows_shell.listProfiles(
+            self.core_app.alloc,
+            self.config.@"ssh-config-hosts",
+        );
         defer windows_shell.deinitProfiles(self.core_app.alloc, profiles);
-        try applyProfileConfigByKey(config, profiles, key);
+        return try applyProfileConfigByKey(config, profiles, key);
     }
 
     fn applyRestoredWindowPlacement(
@@ -2429,12 +2467,22 @@ pub const App = struct {
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
         for (tab.tree.nodes, 0..) |node, i| {
             nodes[i] = switch (node) {
-                .leaf => |surface| .{ .pane = .{
-                    .cwd = surface.pwd,
-                    .profile = surface.launch_profile_key,
-                    .title_override = surface.title_override,
-                    .tab_title_override = surface.tab_title_override,
-                } },
+                .leaf => |surface| .{
+                    .pane = .{
+                        .cwd = surface.pwd,
+                        // Never persist an SSH launch: restore would relaunch
+                        // it unattended. The alias tab title goes with it, or
+                        // it would stick to the local shell that replaces the
+                        // pane. Both read the kind recorded at launch, not the
+                        // key text.
+                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
+                        .title_override = surface.title_override,
+                        .tab_title_override = if (surface.launched_ssh)
+                            null
+                        else
+                            surface.tab_title_override,
+                    },
+                },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {
                         .horizontal => .horizontal,
@@ -3273,6 +3321,7 @@ pub const App = struct {
                 });
                 if (inherited_profile_key) |key| {
                     try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
+                    surface.launched_ssh = source.launched_ssh;
                 }
                 tab_info.tab.clearRedoHistory();
                 if (tab_info.host.pushStructuralUndo(.{
@@ -4214,7 +4263,7 @@ pub const App = struct {
         const key = source.launch_profile_key orelse return null;
         const host = source.host orelse return null;
         const profile = (try host.profileForKey(key)) orelse return null;
-        try applyProfileCommandConfig(config, profile);
+        try applyProfileLaunchConfig(config, profile);
         return profile.key;
     }
 
@@ -4246,7 +4295,8 @@ pub const App = struct {
             else => null,
         };
 
-        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, profile.label);
+        const surface_title = sshProfileAlias(profile) orelse profile.label;
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, surface_title);
         defer self.core_app.alloc.free(title_w);
         const surface = try self.createWindowSurface(&config, title_w.ptr, .{
             .host_id = if (open_target == .window) null else if (source) |v| v.host_id else null,
@@ -4258,6 +4308,10 @@ pub const App = struct {
             .clone_state_from = source,
         });
         try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, profile.key);
+        surface.launched_ssh = profile.kind == .ssh;
+        if (sshProfileAlias(profile)) |alias| {
+            try appendOwnedString(self.core_app.alloc, &surface.tab_title_override, alias);
+        }
         return surface;
     }
 
@@ -8492,8 +8546,8 @@ const Host = struct {
                 _ = self.appendPaletteDescriptor(.{
                     .item = .{
                         .id = win32_palette.catalog.stableStringId(.profile, profile.key),
-                        .title = profile.label,
-                        .subtitle = "Profile",
+                        .title = profile.palette_title orelse profile.label,
+                        .subtitle = if (profile.kind == .ssh) "SSH host" else "Profile",
                         .keywords = profile.key,
                     },
                     .payload = .{ .profile = profile.key },
@@ -9951,7 +10005,10 @@ const Host = struct {
 
     fn reloadProfiles(self: *Host) !bool {
         const replacing = self.profiles != null;
-        const next_profiles = try windows_shell.listProfiles(self.app.core_app.alloc);
+        const next_profiles = try windows_shell.listProfiles(
+            self.app.core_app.alloc,
+            self.app.config.@"ssh-config-hosts",
+        );
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
@@ -15771,7 +15828,9 @@ fn drawPaletteRowText(hdc: HDC, text: []const u8, rect: RECT, color: u32) void {
     // under 256 chars); anything longer gets truncated rather than
     // allocating per paint.
     var buf: [256]u16 = undefined;
-    const copied = std.unicode.utf8ToUtf16Le(&buf, text) catch buf.len;
+    // On invalid UTF-8 only a prefix was written, so falling back to `buf.len`
+    // would render uninitialized stack. Draw nothing instead.
+    const copied = std.unicode.utf8ToUtf16Le(&buf, text) catch 0;
     const n: usize = @min(copied, buf.len - 1);
     buf[n] = 0;
 
@@ -17308,9 +17367,23 @@ fn applyProfileConfigByKey(
     config: *configpkg.Config,
     profiles: []const windows_shell.Profile,
     key: []const u8,
-) !void {
-    const index = profileIndexByKey(profiles, key) orelse return;
-    try applyProfileSurfaceConfig(config, &profiles[index]);
+) !bool {
+    const index = profileIndexByKey(profiles, key) orelse return false;
+    const profile = &profiles[index];
+    if (!isSessionRestorableProfile(profile)) return false;
+    try applyProfileSurfaceConfig(config, profile);
+    return true;
+}
+
+/// Session restore relaunches a pane's profile unattended at startup. An SSH
+/// profile would dial out with no interaction, so it is refused here.
+///
+/// The decision is made on the resolved profile rather than on the key text,
+/// so it cannot drift from the case-insensitive comparison `profileIndexByKey`
+/// uses: a state file naming `SSH:prod` resolves to the same profile as
+/// `ssh:prod` and is refused identically.
+fn isSessionRestorableProfile(profile: *const windows_shell.Profile) bool {
+    return profile.kind != .ssh;
 }
 
 const preferredProfileIndex = labels.preferredProfileIndex;
@@ -17505,6 +17578,12 @@ const buildSearchDetailText = labels.buildSearchDetailText;
 const buildProfileChromeBadgeText = labels.buildProfileChromeBadgeText;
 
 const buildProfileStatusBadgeText = labels.buildProfileStatusBadgeText;
+
+fn sshProfileAlias(profile: *const windows_shell.Profile) ?[]const u8 {
+    if (profile.kind != .ssh or !std.mem.startsWith(u8, profile.key, "ssh:")) return null;
+    const alias = profile.key["ssh:".len..];
+    return if (alias.len > 0) alias else null;
+}
 
 const profileStatusBadgeTextLen = labels.profileStatusBadgeTextLen;
 /// Build a label for the profile dropdown menu: "Profile Name\tCtrl+Shift+N"
@@ -20021,6 +20100,9 @@ pub const Surface = struct {
     title_override: ?[:0]const u8 = null,
     tab_title_override: ?[:0]const u8 = null,
     launch_profile_key: ?[:0]const u8 = null,
+    /// Recorded from the resolved profile kind at launch, so nothing downstream
+    /// has to re-derive "is this SSH?" from the key text.
+    launched_ssh: bool = false,
     mouse_shape: terminal.MouseShape = .text,
     mouse_visible: bool = true,
     hovered_link: ?[:0]const u8 = null,
@@ -21252,9 +21334,41 @@ pub const Surface = struct {
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
-        if (ownedStringEquals(self.title, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.title, title);
+        var changed = false;
+
+        // Direct commands initially report argv[0] as their title. Keep an
+        // SSH alias over that automatic value, then release it as soon as the
+        // remote terminal supplies a different title.
+        if (self.launch_profile_key) |key| {
+            if (self.host) |host| {
+                if (host.profiles) |profiles| {
+                    if (profileIndexByKey(profiles, key)) |index| {
+                        const profile = &profiles[index];
+                        if (sshProfileAlias(profile)) |alias| {
+                            if (self.tab_title_override) |override| {
+                                if (std.mem.eql(u8, override, alias)) {
+                                    const command_title = switch (profile.command) {
+                                        .direct => |argv| argv.len > 0 and std.ascii.eqlIgnoreCase(title, argv[0]),
+                                        .shell => false,
+                                    };
+                                    if (!command_title) {
+                                        try appendOwnedString(alloc, &self.tab_title_override, null);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!ownedStringEquals(self.title, title)) {
+            try appendOwnedString(alloc, &self.title, title);
+            changed = true;
+        }
+        if (!changed) return;
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
@@ -27950,6 +28064,122 @@ test "win32 applyProfileCommandConfig preserves inherited working directory" {
     try std.testing.expectEqualStrings("C:\\work", clone.@"working-directory".?.path);
 }
 
+test "win32 ssh profile surface config uses home working directory" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var base = try configpkg.Config.default(std.testing.allocator);
+    defer base.deinit();
+    var clone = base.shallowClone(std.testing.allocator);
+    defer clone.deinit();
+    const clone_alloc = clone._arena.?.allocator();
+    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
+
+    // Production builds SSH profiles as a two-element direct argv.
+    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
+    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
+    var profile: windows_shell.Profile = .{
+        .kind = .ssh,
+        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
+        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
+        .palette_title = try std.testing.allocator.dupe(u8, "Connect to production"),
+        .command = .{ .direct = argv },
+    };
+    defer profile.deinit(std.testing.allocator);
+
+    try applyProfileSurfaceConfig(&clone, &profile);
+
+    try std.testing.expect(clone.command != null);
+    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
+    try std.testing.expectEqualStrings("production", clone.command.?.direct[1]);
+
+    // An explicit home path, not `.home`, so it outranks the inherited cwd.
+    try std.testing.expect(clone.@"working-directory".? == .path);
+    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
+    try std.testing.expectEqualStrings("production", sshProfileAlias(&profile).?);
+}
+
+test "win32 ssh hardening also holds on the split launch path" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // The split path used to apply only the command, which silently dropped
+    // shell-integration=none and let the ssh argv be flattened into cmd.exe /C.
+    var base = try configpkg.Config.default(std.testing.allocator);
+    defer base.deinit();
+    base.@"shell-integration" = .bash;
+    var clone = base.shallowClone(std.testing.allocator);
+    defer clone.deinit();
+    const clone_alloc = clone._arena.?.allocator();
+    clone.@"shell-integration" = .bash;
+    clone.@"working-directory" = .{ .path = try clone_alloc.dupe(u8, "C:\\work") };
+
+    const argv = try std.testing.allocator.alloc([:0]const u8, 2);
+    argv[0] = try std.testing.allocator.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try std.testing.allocator.dupeZ(u8, "production");
+    var profile: windows_shell.Profile = .{
+        .kind = .ssh,
+        .key = try std.testing.allocator.dupe(u8, "ssh:production"),
+        .label = try std.testing.allocator.dupe(u8, "SSH: production"),
+        .command = .{ .direct = argv },
+    };
+    defer profile.deinit(std.testing.allocator);
+
+    try applyProfileLaunchConfig(&clone, &profile);
+
+    try std.testing.expectEqual(configpkg.Config.ShellIntegration.none, clone.@"shell-integration");
+    try std.testing.expect(clone.@"working-directory".? == .path);
+    try std.testing.expect(!std.mem.eql(u8, "C:\\work", clone.@"working-directory".?.path));
+    try std.testing.expectEqual(@as(usize, 2), clone.command.?.direct.len);
+}
+
+test "win32 session restore refuses ssh profiles regardless of key case" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var base = try configpkg.Config.default(alloc);
+    defer base.deinit();
+
+    const argv = try alloc.alloc([:0]const u8, 2);
+    argv[0] = try alloc.dupeZ(u8, "C:\\Windows\\System32\\OpenSSH\\ssh.exe");
+    argv[1] = try alloc.dupeZ(u8, "prod");
+    const cmd_argv = try alloc.alloc([:0]const u8, 1);
+    cmd_argv[0] = try alloc.dupeZ(u8, "cmd.exe");
+    var profiles = [_]windows_shell.Profile{
+        .{
+            .kind = .cmd,
+            .key = try alloc.dupe(u8, "cmd.exe"),
+            .label = try alloc.dupe(u8, "Command Prompt"),
+            .command = .{ .direct = cmd_argv },
+        },
+        .{
+            .kind = .ssh,
+            .key = try alloc.dupe(u8, "ssh:prod"),
+            .label = try alloc.dupe(u8, "SSH: prod"),
+            .command = .{ .direct = argv },
+        },
+    };
+    defer for (&profiles) |*profile| profile.deinit(alloc);
+
+    // profileIndexByKey matches case-insensitively, so a state file naming
+    // "SSH:prod" still resolves the ssh profile. The refusal must key on the
+    // resolved kind, not on the key text, or the guard is bypassed and noctty
+    // dials out at startup with no interaction.
+    for ([_][]const u8{ "ssh:prod", "SSH:prod", "Ssh:PROD" }) |key| {
+        var clone = base.shallowClone(alloc);
+        defer clone.deinit();
+        try std.testing.expect(profileIndexByKey(&profiles, key) != null);
+        try std.testing.expect(!(try applyProfileConfigByKey(&clone, &profiles, key)));
+        try std.testing.expect(clone.command == null);
+    }
+
+    // A local profile still restores.
+    var clone = base.shallowClone(alloc);
+    defer clone.deinit();
+    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "CMD.EXE"));
+    try std.testing.expectEqualStrings("cmd.exe", clone.command.?.direct[0]);
+}
+
 test "win32 applyProfileConfigByKey applies saved first-pane profile before host exists" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -27970,7 +28200,7 @@ test "win32 applyProfileConfigByKey applies saved first-pane profile before host
     defer profile.deinit(std.testing.allocator);
     const profiles = [_]windows_shell.Profile{profile};
 
-    try applyProfileConfigByKey(&clone, &profiles, "cmd.exe");
+    try std.testing.expect(try applyProfileConfigByKey(&clone, &profiles, "cmd.exe"));
 
     try std.testing.expect(clone.command != null);
     try std.testing.expectEqualStrings("cmd.exe", clone.command.?.shell);
