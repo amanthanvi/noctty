@@ -489,6 +489,20 @@ pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     SecurityDescriptorSize: ?*u32,
 ) callconv(.winapi) BOOL;
 
+/// Read the security descriptor attached to a kernel object. Returns a
+/// Win32 error code (0 == ERROR_SUCCESS), not a BOOL. The out-descriptor is
+/// LocalAlloc'd; free it with `LocalFree`.
+pub extern "advapi32" fn GetSecurityInfo(
+    handle: HANDLE,
+    ObjectType: DWORD,
+    SecurityInfo: DWORD,
+    ppsidOwner: ?*?*anyopaque,
+    ppsidGroup: ?*?*anyopaque,
+    ppDacl: ?*?*anyopaque,
+    ppSacl: ?*?*anyopaque,
+    ppSecurityDescriptor: *?*anyopaque,
+) callconv(.winapi) DWORD;
+
 pub extern "advapi32" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
     SecurityDescriptor: *anyopaque,
     RequestedStringSDRevision: DWORD,

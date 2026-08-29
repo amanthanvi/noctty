@@ -407,13 +407,15 @@ pub const SECURITY_MANDATORY_MEDIUM_RID = 0x2000;
 /// `ConvertSecurityDescriptorToStringSecurityDescriptorW`.
 pub const SDDL_REVISION_1 = 1;
 
-/// `SECURITY_INFORMATION` bits. `LABEL_SECURITY_INFORMATION` selects the
-/// mandatory-label ACE in the SACL without needing `SeSecurityPrivilege`.
-pub const OWNER_SECURITY_INFORMATION = 0x00000001;
-pub const GROUP_SECURITY_INFORMATION = 0x00000002;
+/// `SECURITY_INFORMATION` bits used when reading the IPC pipe descriptor back
+/// as SDDL. `LABEL_SECURITY_INFORMATION` selects the mandatory-label ACE in
+/// the SACL without needing `SeSecurityPrivilege`.
 pub const DACL_SECURITY_INFORMATION = 0x00000004;
-pub const SACL_SECURITY_INFORMATION = 0x00000008;
 pub const LABEL_SECURITY_INFORMATION = 0x00000010;
+
+/// `SE_OBJECT_TYPE.SE_KERNEL_OBJECT`, for reading a named pipe's descriptor
+/// back off the live handle with `GetSecurityInfo`.
+pub const SE_KERNEL_OBJECT = 6;
 
 /// Main-thread COM apartment for in-process STA clients (settings path
 /// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means

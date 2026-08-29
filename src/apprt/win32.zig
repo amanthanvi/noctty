@@ -789,6 +789,12 @@ fn resolveIpcPipeNameForTarget(
     };
 }
 
+/// Connect to the single-instance IPC pipe as a client.
+///
+/// `error.FileNotFound` and `error.PipeUnreachable` both mean "there is no
+/// instance we can talk to"; callers must treat them the same and fall back
+/// to running locally. They are kept distinct only so the unreachable case
+/// can be logged differently.
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
     var retries: u8 = 0;
     while (true) {
@@ -806,6 +812,16 @@ fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
         const err = windows.kernel32.GetLastError();
         switch (err) {
             .FILE_NOT_FOUND => return error.FileNotFound,
+
+            // The pipe exists but this token may not open it. The common
+            // cause is an elevated instance holding the name: its descriptor
+            // carries a NO_WRITE_UP mandatory label, so a medium-integrity
+            // client is denied at CreateFileW. That is the intended denial,
+            // but it must NOT abort startup -- an ordinary non-elevated
+            // launch has to fall through to its own local instance rather
+            // than failing to open a window at all.
+            .ACCESS_DENIED => return error.PipeUnreachable,
+
             .PIPE_BUSY => {
                 if (retries == 0 and sys.WaitNamedPipeW(pipe_name.ptr, 1000) != 0) {
                     retries += 1;
@@ -825,6 +841,15 @@ fn sendNewWindowIpc(
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         error.FileNotFound => return false,
+        // No instance we are allowed to talk to. Report "not forwarded" so
+        // the caller starts a local instance instead of aborting startup.
+        error.PipeUnreachable => {
+            log.info(
+                "single-instance pipe exists but is not accessible to this token; starting a local instance",
+                .{},
+            );
+            return false;
+        },
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -842,7 +867,8 @@ fn sendListWindowsIpc(
     pipe_name: [:0]const u16,
 ) !?[]u8 {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return null,
+        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable => return null,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -866,7 +892,8 @@ fn sendPerformActionIpc(
     action_text: []const u8,
 ) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return false,
+        // Both mean "no instance we can reach"; see `connectToIpcPipe`.
+        error.FileNotFound, error.PipeUnreachable => return false,
         error.PipeBusy => return error.IPCFailed,
         else => return err,
     };
@@ -879,93 +906,260 @@ fn sendPerformActionIpc(
     return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
 }
 
-/// Configuration keys that a forwarded `new_window` argv may never set.
+/// Configuration keys a forwarded `new_window` argv is allowed to set.
 ///
-/// `applyNewWindowArguments` runs on the server side of the single-instance
-/// IPC pipe and feeds attacker-controllable argv straight into
-/// `Config.loadIter`, so the automation allowlist in `App.isSafeAutomationAction`
-/// is not the boundary for this request kind. Every key below either selects
-/// code that the server will execute or names an additional configuration
-/// source that could set such a key transitively:
+/// `applyNewWindowArguments` runs on the SERVER side of the single-instance
+/// IPC pipe and feeds caller-controlled argv straight into `Config.loadIter`,
+/// so the automation allowlist in `App.isSafeAutomationAction` is not the
+/// boundary for this request kind. Any process running as this user can write
+/// to the pipe, so this argv must be treated as untrusted input.
 ///
-///   - `command` / `initial-command` become the spawned child (termio/Exec).
-///   - `config-file` and `config-default-files` re-point config loading.
-///   - `theme` accepts an absolute path and is parsed as a full config file
-///     (see `config/theme.zig` `open`), so it is a `config-file` by proxy.
-///   - `custom-shader` loads and compiles files from arbitrary paths.
+/// This is an ALLOWLIST, deliberately, and not a denylist. The config surface
+/// is ~190 fields and grows with every upstream merge; a denylist gets it
+/// wrong by omission every time a new key lands. Deny-by-default means an
+/// unrecognised key -- including any key added upstream after this list was
+/// written -- is refused until someone reviews it.
 ///
-/// `-e` is rejected as well: `Config.parseManuallyHook` turns it into
-/// `initial-command`.
-const forbidden_forwarded_config_keys = [_][]const u8{
-    "command",
-    "initial-command",
-    "config-file",
-    "config-default-files",
-    "theme",
-    "custom-shader",
+/// Admission rule: a key qualifies only if its value is a scalar, an enum, a
+/// color, or (for `title`) a display string that is sanitized downstream. A
+/// key does NOT qualify if its value is resolved as a filesystem path, a
+/// command, an environment variable, a font or theme NAME looked up against
+/// something, an additional configuration source, or bytes that can reach the
+/// pty. That rule excludes, among others:
+///
+///   - `command`, `initial-command`, `-e`  -> become the spawned child.
+///   - `input`                             -> written straight to the pty;
+///     its own doc comment warns it can execute programs in a shell.
+///   - `env`                               -> overrides are applied AFTER
+///     `shell_integration.setup`, so `ZDOTDIR` / `ENV` / `XDG_DATA_DIRS` /
+///     `GHOSTTY_BASH_RCFILE` / `PATH` become code execution at shell start.
+///   - `config-file`, `config-default-files`, `theme` -> config sources.
+///     `theme` accepts an absolute path and is parsed as a full config file
+///     (`config/theme.zig` `open`), so it is a `config-file` by proxy.
+///   - `background-image`, `bell-audio-path`, `custom-shader`,
+///     `gtk-custom-css`                    -> arbitrary file reads, and UNC
+///     values make this process authenticate to a remote SMB host.
+///   - `keybind`, `command-palette-entry`  -> inject attacker-chosen binding
+///     actions, re-opening the `.perform_action` allowlist by another door.
+///   - `enquiry-response`                  -> attacker bytes written to the
+///     pty when the child sends ENQ.
+///   - `title-report`, `window-save-state`, `class` -> not presentation.
+///   - `font-family*`, `font-style*`, `font-feature`, `font-variation*`,
+///     `font-codepoint-map`, `window-title-font-family` -> name strings that
+///     are resolved by font discovery. Excluded on the admission rule rather
+///     than because a concrete exploit is known.
+///
+/// `working-directory` is handled separately: it is admitted, but its VALUE
+/// is constrained by `forwardedWorkingDirectoryAllowed`.
+const forwarded_argv_allowed_keys = [_][]const u8{
+    // Window geometry, decoration, and state.
+    "window-width",
+    "window-height",
+    "window-position-x",
+    "window-position-y",
+    "window-padding-x",
+    "window-padding-y",
+    "window-padding-balance",
+    "window-padding-color",
+    "window-decoration",
+    "window-theme",
+    "window-colorspace",
+    "window-subtitle",
+    "window-titlebar-background",
+    "window-titlebar-foreground",
+    "window-show-tab-bar",
+    "window-new-tab-position",
+    "window-step-resize",
+    "window-vsync",
+    "maximize",
+    "fullscreen",
+    "title",
+
+    // Font sizing and rendering. Font NAME keys are deliberately absent.
+    "font-size",
+    "font-thicken",
+    "font-thicken-strength",
+    "font-synthetic-style",
+    "font-shaping-break",
+
+    // Colors and compositing.
+    "background",
+    "foreground",
+    "palette",
+    "selection-foreground",
+    "selection-background",
+    "cursor-color",
+    "cursor-text",
+    "cursor-style",
+    "cursor-style-blink",
+    "cursor-opacity",
+    "background-opacity",
+    "background-opacity-cells",
+    "background-blur",
+    "unfocused-split-opacity",
+    "unfocused-split-fill",
+    "split-divider-color",
+    "bold-color",
+    "faint-opacity",
+    "minimum-contrast",
+    "alpha-blending",
 };
 
-/// Returns the offending key when `arg` is a forwarded argument that the
-/// server must not honor, or null when it is acceptable.
-///
-/// `cli/args.zig` only accepts `--key=value` and `--key` forms (values are
-/// never a separate argv token), plus the `-e` manual hook, so prefix
-/// matching on the key segment is exhaustive.
-fn forbiddenForwardedArgument(arg: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, arg, "-e")) return "-e";
-    if (!std.mem.startsWith(u8, arg, "--")) return null;
+/// The one allowlisted key whose value needs its own check.
+const forwarded_working_directory_key = "working-directory";
 
+/// Extract the config key from a forwarded argument, or null when the
+/// argument is not in `--key[=value]` form.
+///
+/// `cli/args.zig` (:112-133) takes `key = arg[2..]` up to the first `=` and
+/// matches it with exact case-sensitive `mem.eql` against field names. There
+/// is no prefix abbreviation, no `--key value` separate-token form, no case
+/// folding, and no underscore/hyphen aliasing, so this sees exactly the key
+/// the loader will act on.
+fn forwardedArgumentKey(arg: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
     const body = arg[2..];
-    const key = if (std.mem.indexOfScalar(u8, body, '=')) |idx| body[0..idx] else body;
-    for (forbidden_forwarded_config_keys) |forbidden| {
-        if (std.mem.eql(u8, key, forbidden)) return forbidden;
+    return if (std.mem.indexOfScalar(u8, body, '=')) |idx| body[0..idx] else body;
+}
+
+/// True when a forwarded config key is on the allowlist. `working-directory`
+/// is included here; its value is checked separately.
+fn forwardedKeyAllowed(key: []const u8) bool {
+    if (std.mem.eql(u8, key, forwarded_working_directory_key)) return true;
+    for (forwarded_argv_allowed_keys) |allowed| {
+        if (std.mem.eql(u8, key, allowed)) return true;
     }
-    return null;
+    return false;
+}
+
+/// True when a key is safe to echo into a log line.
+///
+/// The refused key comes from the pipe, so it is attacker-controlled text and
+/// must not be logged raw (newlines would forge log records). Real config keys
+/// are lowercase ASCII with hyphens and digits, so anything else is reported
+/// generically instead.
+fn forwardedKeyLoggable(key: []const u8) bool {
+    if (key.len == 0 or key.len > 64) return false;
+    for (key) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or
+            (ch >= '0' and ch <= '9') or
+            ch == '-';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /// Returns true when a forwarded `--working-directory` value is one the
 /// server is willing to honor.
 ///
 /// The startup forwarder always sends the launching process's realpath'd cwd
-/// (`collectStartupForwardArguments`), so this key cannot simply be rejected
-/// without breaking single-instance launches. Instead it is constrained to
-/// the two symbolic values plus a local drive-letter absolute path that
-/// currently resolves to a directory. That rejects UNC paths, which would
-/// otherwise make the server authenticate to an attacker-chosen SMB host.
+/// (`collectStartupForwardArguments`), so this key cannot be rejected
+/// outright without breaking every single-instance launch. It is instead
+/// constrained to the symbolic values, a home-relative path, or a local
+/// drive-letter absolute path.
+///
+/// SCOPE OF THIS CHECK, stated precisely: it rejects UNC *syntax* only. A
+/// mapped drive (`net use Z: \\host\share`), a `subst` drive, or a junction
+/// under a local drive still resolves off-box, and any same-user process can
+/// create those. That is acceptable under this channel's threat model --
+/// same-user code is already trusted -- and the point of the check is to stop
+/// a bare `\\attacker\share` value from making the server authenticate to an
+/// attacker-chosen SMB host.
+///
+/// The check is deliberately PURELY SYNTACTIC. An earlier version called
+/// `openDirAbsolute` to confirm the directory existed, but that resolution is
+/// itself the SMB authentication we are trying to avoid for mapped drives and
+/// junctions, and it was defeated by TOCTOU anyway since the path is
+/// re-resolved at spawn time.
 fn forwardedWorkingDirectoryAllowed(value: []const u8) bool {
-    const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+    var trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+
+    // `Config.parseCLI` strips one pair of surrounding double quotes, so a
+    // quoted path is a legal value and must not be refused here.
+    if (trimmed.len >= 2 and trimmed[0] == '"' and trimmed[trimmed.len - 1] == '"') {
+        trimmed = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], &std.ascii.whitespace);
+    }
+
     if (std.mem.eql(u8, trimmed, "home")) return true;
     if (std.mem.eql(u8, trimmed, "inherit")) return true;
 
-    // Reject UNC (`\\host\share`, `//host/share`) and device (`\\?\`) paths.
+    // `~`, `~/...` and `~\...` are documented legal values that
+    // `WorkingDirectory.finalize` expands against the user's own home
+    // directory, so they cannot point off-box.
+    if (std.mem.eql(u8, trimmed, "~")) return true;
+    if (trimmed.len >= 2 and trimmed[0] == '~' and
+        (trimmed[1] == '/' or trimmed[1] == '\\')) return true;
+
+    // Everything else must be a local drive-letter absolute path. This
+    // rejects UNC (`\\host\share`, `//host/share`), device namespace
+    // (`\\?\`, `\\.\`), relative (`foo\bar`) and drive-relative (`C:foo`).
     if (trimmed.len < 3) return false;
-    if (trimmed[0] == '\\' or trimmed[0] == '/') return false;
     if (!std.ascii.isAlphabetic(trimmed[0])) return false;
     if (trimmed[1] != ':') return false;
     if (trimmed[2] != '\\' and trimmed[2] != '/') return false;
-
-    var dir = std.fs.openDirAbsolute(trimmed, .{}) catch return false;
-    dir.close();
     return true;
 }
 
-/// Scan a forwarded `new_window` argv and return a reason string when the
-/// whole request must be refused, or null when every argument is acceptable.
-///
-/// The reason is a static string suitable for logging; it names the key but
-/// never the attacker-supplied value.
-fn forwardedArgvRejection(argv: []const [:0]const u8) ?[]const u8 {
-    for (argv) |arg| {
-        if (forbiddenForwardedArgument(arg)) |key| return key;
+/// Why a forwarded argv was refused. `key` borrows from the argument and is
+/// only safe to log when `forwardedKeyLoggable(key)`.
+const ForwardedArgvRejection = struct {
+    reason: enum { not_allowlisted, bad_working_directory, not_a_config_flag },
+    key: []const u8,
+};
 
-        if (std.mem.startsWith(u8, arg, "--working-directory=")) {
-            const value = arg["--working-directory=".len..];
+/// Scan a forwarded `new_window` argv and describe the first argument that
+/// must not be honored, or null when every argument is acceptable.
+///
+/// Every element is scanned, so a repeated or trailing occurrence of a key
+/// cannot slip past by appearing after an acceptable one.
+fn forwardedArgvRejection(argv: []const [:0]const u8) ?ForwardedArgvRejection {
+    for (argv) |arg| {
+        const key = forwardedArgumentKey(arg) orelse {
+            // Not `--key[=value]`. `-e` lands here, and
+            // `Config.parseManuallyHook` would turn it into
+            // `initial-command`. Nothing in this form is ever legitimate on
+            // a forwarded argv, so refuse rather than relying on the loader
+            // to treat it as an inert diagnostic.
+            return .{ .reason = .not_a_config_flag, .key = arg };
+        };
+
+        if (!forwardedKeyAllowed(key)) {
+            return .{ .reason = .not_allowlisted, .key = key };
+        }
+
+        if (std.mem.eql(u8, key, forwarded_working_directory_key)) {
+            const value = if (std.mem.indexOfScalar(u8, arg, '=')) |idx|
+                arg[idx + 1 ..]
+            else
+                "";
             if (!forwardedWorkingDirectoryAllowed(value)) {
-                return "working-directory (not a local directory)";
+                return .{ .reason = .bad_working_directory, .key = key };
             }
         }
     }
     return null;
+}
+
+/// Log a refused forwarded argv at error level, without echoing untrusted
+/// text into the log.
+fn logForwardedArgvRejection(rejection: ForwardedArgvRejection) void {
+    switch (rejection.reason) {
+        .bad_working_directory => log.err(
+            "refusing forwarded new-window argv: working-directory must be home, inherit, ~/..., or a local absolute path",
+            .{},
+        ),
+        .not_a_config_flag => log.err(
+            "refusing forwarded new-window argv: contains an argument that is not a --key=value config flag",
+            .{},
+        ),
+        .not_allowlisted => if (forwardedKeyLoggable(rejection.key)) log.err(
+            "refusing forwarded new-window argv: key {s} is not permitted over IPC",
+            .{rejection.key},
+        ) else log.err(
+            "refusing forwarded new-window argv: contains a key that is not permitted over IPC",
+            .{},
+        ),
+    }
 }
 
 /// Apply a forwarded `new_window` argv to `config`.
@@ -975,9 +1169,8 @@ fn forwardedArgvRejection(argv: []const [:0]const u8) ?[]const u8 {
 /// caller with a window that does not match what was asked for, and would
 /// make an attacker's probe indistinguishable from a normal launch.
 ///
-/// The rejection is logged by the caller that handles it (see the
-/// `.new_window` arm of `performAction`) so that this stays a pure predicate
-/// over argv.
+/// This function does not log, so that it stays a pure predicate over argv
+/// and can be unit tested; every caller logs the rejection it handles.
 fn applyNewWindowArguments(
     alloc_gpa: Allocator,
     config: *configpkg.Config,
@@ -1004,6 +1197,23 @@ fn normalizeForwardedStartupArg(
         std.mem.startsWith(u8, arg, "--gtk-single-instance=") or
         std.mem.eql(u8, arg, "--safe-mode"))
     {
+        return null;
+    }
+
+    // Drop anything the running instance would refuse, so an ordinary launch
+    // still gets a window instead of having the whole request rejected. This
+    // is a usability measure on OUR OWN argv, not a security control -- the
+    // server re-checks every argument, because a hostile pipe writer never
+    // runs this code.
+    const key = forwardedArgumentKey(arg) orelse {
+        log.warn("not forwarding non-flag startup argument to the running instance", .{});
+        return null;
+    };
+    if (!forwardedKeyAllowed(key)) {
+        log.warn(
+            "not forwarding {s} to the running instance: it may not be set over IPC",
+            .{key},
+        );
         return null;
     }
 
@@ -1132,6 +1342,12 @@ fn buildIpcPipeSddl(
 /// account, a DACL keyed on that SID alone would let a filtered medium-IL
 /// process drive an elevated instance's pipe. Returning the label SID here
 /// lets the caller add `S:(ML;;NW;;;S-1-16-<rid>)`, which blocks write-up.
+///
+/// RESIDUAL: the policy is `NW` only, not `NR`/`NX`. A lower-integrity
+/// process can still open the pipe for READ and occupy a pipe instance --
+/// an availability nuisance against an elevated instance, bounded by the
+/// server's read timeout. `NR` would close that but is a larger behavioral
+/// change; it is tracked as a follow-up rather than done here.
 ///
 /// Returns null at or below medium integrity (where the label would be a
 /// no-op). The returned string is OS-allocated; free it with `sys.LocalFree`.
@@ -3568,14 +3784,11 @@ pub const App = struct {
                 defer config.deinit();
                 // The forwarded argv reaches us over the single-instance IPC
                 // pipe, so it is only as trusted as any process running as
-                // this user. Refuse the whole request when it names a key
-                // that selects executed code or an extra config source.
+                // this user. Refuse the whole request unless every key is on
+                // the presentation allowlist.
                 if (forwarded_arguments) |argv| {
-                    if (forwardedArgvRejection(argv)) |reason| {
-                        std.log.err(
-                            "refusing forwarded new-window argv: {s} may not be set over IPC",
-                            .{reason},
-                        );
+                    if (forwardedArgvRejection(argv)) |rejection| {
+                        logForwardedArgvRejection(rejection);
                         return true;
                     }
                 }
@@ -3586,8 +3799,16 @@ pub const App = struct {
                 ) catch |err| switch (err) {
                     // Defense in depth: `applyNewWindowArguments` enforces
                     // the same filter independently. Treat a rejection as
-                    // handled so it cannot abort the app tick.
-                    error.ForbiddenForwardedArgument => return true,
+                    // handled so it cannot abort the app tick. Logged here
+                    // too so the rejection can never become silent if the
+                    // pre-check above is ever refactored away.
+                    error.ForbiddenForwardedArgument => {
+                        log.err(
+                            "refusing forwarded new-window argv: rejected by applyNewWindowArguments",
+                            .{},
+                        );
+                        return true;
+                    },
                     else => return err,
                 };
                 _ = try self.createWindowSurface(&config, default_title, .{
@@ -28104,14 +28325,125 @@ test "win32 integrity SID parsing accepts only mandatory label SIDs" {
     try expect(integrityRidFromSidString(L("S-1-16-99999999999")) == null);
 }
 
-test "win32 IPC pipe security descriptor round-trips to the expected SDDL" {
+/// Render a security descriptor to SDDL text.
+///
+/// Any two descriptors being compared must BOTH come through this one helper.
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW` abbreviates a
+/// well-known SID to its two-letter alias (`SY`, `BA`, `LA`, ...) while
+/// `ConvertSidToStringSidW` always emits the full `S-1-5-...` form, so
+/// rendering one side each way cannot be compared for any account that has an
+/// alias -- which includes a runner executing as built-in Administrator or as
+/// SYSTEM.
+///
+/// Helper shape borrowed from the equivalent fix on
+/// `issues/123-paste-path-audit-fuzz` (`win32_ipc.zig` `descriptorSddlAlloc`);
+/// keep the two in sync, or collapse them into one shared helper, when those
+/// branches meet.
+fn testDescriptorSddlAlloc(
+    alloc: Allocator,
+    descriptor: *anyopaque,
+    information: u32,
+) ![]u8 {
+    var text: ?[*:0]u16 = null;
+    if (sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        c.SDDL_REVISION_1,
+        information,
+        &text,
+        null,
+    ) == 0) return windows.unexpectedError(windows.kernel32.GetLastError());
+    defer _ = sys.LocalFree(@ptrCast(text.?));
+
+    return std.unicode.utf16LeToUtf8Alloc(alloc, std.mem.span(text.?));
+}
+
+/// Rewrite `GENERIC_ALL` to `FILE_ALL_ACCESS` in SDDL text.
+///
+/// Windows resolves generic rights against the object's generic mapping when
+/// an ACE is ATTACHED, so a descriptor built asking for `GA` reads back off a
+/// named pipe as `FA`. Same access, canonical spelling. The request side has
+/// to be normalized before it can be compared with what the object carries.
+fn testMapGenericAllToFileAllAlloc(alloc: Allocator, sddl: []const u8) ![]u8 {
+    return std.mem.replaceOwned(u8, alloc, sddl, ";;GA;;", ";;FA;;");
+}
+
+test "win32 IPC pipe descriptor attaches the expected DACL and label" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
-    const descriptor = try allocIpcPipeSecurityDescriptor();
-    defer _ = sys.LocalFree(descriptor);
+    const alloc = std.testing.allocator;
+    const requested = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(requested);
 
-    // Resolve the expected principal independently of the descriptor so the
-    // assertion is on content, not on "the function returned something".
+    var security_attributes: windows.SECURITY_ATTRIBUTES = .{
+        .nLength = @sizeOf(windows.SECURITY_ATTRIBUTES),
+        .lpSecurityDescriptor = requested,
+        .bInheritHandle = windows.FALSE,
+    };
+
+    const pipe_name_utf8 = try std.fmt.allocPrintSentinel(
+        alloc,
+        "\\\\.\\pipe\\noctty-ipc-sddl-{d}",
+        .{sys.GetTickCount64()},
+        0,
+    );
+    defer alloc.free(pipe_name_utf8);
+    const pipe_name = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pipe_name_utf8);
+    defer alloc.free(pipe_name);
+
+    // Assert against the descriptor Windows ACTUALLY ATTACHED, not against the
+    // string we handed in. Only the live object shows the generic-rights
+    // mapping, and only the live object proves the label survived creation.
+    const pipe = sys.CreateNamedPipeW(
+        pipe_name.ptr,
+        c.PIPE_ACCESS_DUPLEX,
+        windows.PIPE_TYPE_BYTE |
+            c.PIPE_READMODE_BYTE |
+            win32_ipc.pipe_nowait |
+            c.PIPE_REJECT_REMOTE_CLIENTS,
+        1,
+        1024,
+        1024,
+        0,
+        &security_attributes,
+    );
+    try std.testing.expect(pipe != windows.INVALID_HANDLE_VALUE);
+    defer _ = windows.CloseHandle(pipe);
+
+    // DACL *and* label. Requesting the DACL alone would assert nothing about
+    // the label, and would pass even if a label were wrongly emitted at medium
+    // integrity. LABEL_SECURITY_INFORMATION needs no SeSecurityPrivilege.
+    const information = c.DACL_SECURITY_INFORMATION | c.LABEL_SECURITY_INFORMATION;
+
+    var attached: ?*anyopaque = null;
+    const status = sys.GetSecurityInfo(
+        pipe,
+        c.SE_KERNEL_OBJECT,
+        information,
+        null,
+        null,
+        null,
+        null,
+        &attached,
+    );
+    try std.testing.expectEqual(@as(u32, 0), status);
+    defer _ = sys.LocalFree(attached.?);
+
+    const actual = try testDescriptorSddlAlloc(alloc, attached.?, information);
+    defer alloc.free(actual);
+
+    // (1) What the pipe carries must equal what we asked for, once generic
+    // rights are normalized and both sides are rendered the same way.
+    {
+        const requested_text = try testDescriptorSddlAlloc(alloc, requested, information);
+        defer alloc.free(requested_text);
+        const requested_mapped = try testMapGenericAllToFileAllAlloc(alloc, requested_text);
+        defer alloc.free(requested_mapped);
+        try std.testing.expectEqualStrings(requested_mapped, actual);
+    }
+
+    // (2) That alone would still pass if `allocIpcPipeSecurityDescriptor` were
+    // changed to request a wider trustee, so rebuild the descriptor we WANT
+    // independently from the token's own SID and require an exact match.
     var token: windows.HANDLE = undefined;
     try std.testing.expect(sys.OpenProcessToken(
         windows.kernel32.GetCurrentProcess(),
@@ -28131,41 +28463,65 @@ test "win32 IPC pipe security descriptor round-trips to the expected SDDL" {
     ) != 0);
     const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
 
-    var expected_sid: ?[*:0]u16 = null;
+    var user_sid: ?[*:0]u16 = null;
     try std.testing.expect(sys.ConvertSidToStringSidW(
         token_user.User.Sid,
-        &expected_sid,
+        &user_sid,
     ) != 0);
-    const sid = expected_sid.?;
-    defer _ = sys.LocalFree(@ptrCast(sid));
+    defer _ = sys.LocalFree(@ptrCast(user_sid.?));
 
-    var sid_utf8: [128]u8 = undefined;
-    const sid_utf8_len = try std.unicode.utf16LeToUtf8(&sid_utf8, std.mem.span(sid));
+    const integrity_sid = try allocIpcPipeIntegritySid(token);
+    defer if (integrity_sid) |v| {
+        _ = sys.LocalFree(@ptrCast(v));
+    };
 
-    var expected_buf: [320]u8 = undefined;
-    const expected = try std.fmt.bufPrint(
-        &expected_buf,
-        "D:P(A;;GA;;;{s})",
-        .{sid_utf8[0..sid_utf8_len]},
+    var reference_buf: [320]u16 = undefined;
+    const reference_sddl = try buildIpcPipeSddl(
+        &reference_buf,
+        std.mem.span(user_sid.?),
+        if (integrity_sid) |v| std.mem.span(v) else null,
     );
 
-    // Round-trip the built descriptor back to SDDL. A null descriptor, an
-    // Everyone ACE, an unprotected DACL, or a narrower/wider access mask all
-    // change this string.
-    var actual_sddl: ?[*:0]u16 = null;
-    try std.testing.expect(sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
-        descriptor,
+    var reference: ?*anyopaque = null;
+    try std.testing.expect(sys.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        reference_sddl.ptr,
         c.SDDL_REVISION_1,
-        c.DACL_SECURITY_INFORMATION,
-        &actual_sddl,
+        &reference,
         null,
     ) != 0);
-    const actual_utf16 = std.mem.span(actual_sddl.?);
-    defer _ = sys.LocalFree(@ptrCast(actual_sddl.?));
+    defer _ = sys.LocalFree(reference.?);
 
-    var actual_buf: [320]u8 = undefined;
-    const actual_len = try std.unicode.utf16LeToUtf8(&actual_buf, actual_utf16);
-    try std.testing.expectEqualStrings(expected, actual_buf[0..actual_len]);
+    const reference_text = try testDescriptorSddlAlloc(alloc, reference.?, information);
+    defer alloc.free(reference_text);
+    const reference_mapped = try testMapGenericAllToFileAllAlloc(alloc, reference_text);
+    defer alloc.free(reference_mapped);
+    try std.testing.expectEqualStrings(reference_mapped, actual);
+
+    // (3) Pin the SHAPE independently, so a future change to the SDDL we
+    // request cannot quietly widen access while still matching (1) and (2).
+    const sacl_idx = std.mem.indexOf(u8, actual, "S:");
+    const dacl_text = if (sacl_idx) |idx| actual[0..idx] else actual;
+    const sacl_text = if (sacl_idx) |idx| actual[idx..] else "";
+
+    try std.testing.expect(std.mem.startsWith(u8, dacl_text, "D:P"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "(A;"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, dacl_text, "("));
+    try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;WD)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, dacl_text, ";;;AN)") == null);
+
+    if (integrity_sid) |label_sid| {
+        // Above medium: the label must be present, with NO_WRITE_UP.
+        try std.testing.expect(std.mem.startsWith(u8, sacl_text, "S:"));
+        try std.testing.expect(std.mem.indexOf(u8, sacl_text, "(ML;;NW;;;") != null);
+        const rid = integrityRidFromSidString(std.mem.span(label_sid)).?;
+        try std.testing.expect(rid > c.SECURITY_MANDATORY_MEDIUM_RID);
+    } else {
+        // At or below medium an unlabeled object already evaluates as medium
+        // with NO_WRITE_UP, so emitting a label here would be wrong. Asserting
+        // its ABSENCE is the half that catches a label emitted for every
+        // process.
+        try std.testing.expect(std.mem.indexOf(u8, actual, "(ML;") == null);
+    }
 }
 
 test "win32 IPC pipe DACL still admits a same-user client" {
@@ -28224,70 +28580,160 @@ test "win32 IPC pipe DACL still admits a same-user client" {
     defer _ = windows.CloseHandle(client);
 }
 
-test "win32 forwarded new-window argv rejects code and config-source keys" {
+test "win32 forwarded new-window argv refuses everything off the allowlist" {
     const expect = std.testing.expect;
 
-    // A pipe writer that gets `--command` accepted gets execution in the
-    // server's context, which is the whole point of the server-side filter.
-    try std.testing.expectEqualStrings(
-        "command",
-        forbiddenForwardedArgument("--command=powershell -enc AAAA").?,
-    );
-    try std.testing.expectEqualStrings(
-        "initial-command",
-        forbiddenForwardedArgument("--initial-command=calc.exe").?,
-    );
-    try std.testing.expectEqualStrings(
-        "config-file",
-        forbiddenForwardedArgument("--config-file=C:/tmp/evil.conf").?,
-    );
-    try std.testing.expectEqualStrings(
-        "config-default-files",
-        forbiddenForwardedArgument("--config-default-files=false").?,
-    );
-    // `theme` takes an absolute path and is parsed as a whole config file,
-    // so it is a `config-file` by proxy.
-    try std.testing.expectEqualStrings(
-        "theme",
-        forbiddenForwardedArgument("--theme=C:/tmp/evil.conf").?,
-    );
-    try std.testing.expectEqualStrings(
-        "custom-shader",
-        forbiddenForwardedArgument("--custom-shader=C:/tmp/x.glsl").?,
-    );
-    // `-e` is turned into `initial-command` by `Config.parseManuallyHook`.
-    try std.testing.expectEqualStrings("-e", forbiddenForwardedArgument("-e").?);
+    // THE PROPERTY THAT MATTERS: the filter is deny-by-default, so a key
+    // nobody enumerated -- including any key a future upstream merge adds --
+    // is refused rather than allowed by omission. These names are not in the
+    // allowlist and are not in any denylist either.
+    try expect(!forwardedKeyAllowed("totally-made-up-key"));
+    try expect(!forwardedKeyAllowed("some-future-upstream-key"));
+    try expect(!forwardedKeyAllowed(""));
 
-    // Valueless and prefix-similar forms.
-    try std.testing.expectEqualStrings("command", forbiddenForwardedArgument("--command").?);
-    try expect(forbiddenForwardedArgument("--command-palette-entry=x") == null);
-    try expect(forbiddenForwardedArgument("--font-size=14") == null);
-    try expect(forbiddenForwardedArgument("--title=hello") == null);
-    try expect(forbiddenForwardedArgument("not-a-flag") == null);
+    // Each of these reproduces arbitrary code execution, an arbitrary file
+    // read, an SMB authentication, or a pty write if it is honored.
+    for ([_][]const u8{
+        "command",
+        "initial-command",
+        "config-file",
+        "config-default-files",
+        "theme",
+        "custom-shader",
+        "gtk-custom-css",
+        // Written straight to the pty; its doc comment warns it can execute
+        // programs in a shell.
+        "input",
+        // Overrides are applied after shell-integration setup, so ZDOTDIR /
+        // ENV / XDG_DATA_DIRS / PATH become code execution at shell start.
+        "env",
+        // Arbitrary file read, and a UNC value authenticates to a remote host.
+        "background-image",
+        "bell-audio-path",
+        // Re-open the perform_action allowlist through another door.
+        "keybind",
+        "command-palette-entry",
+        // Attacker bytes written to the pty on ENQ.
+        "enquiry-response",
+        // Not presentation.
+        "title-report",
+        "window-save-state",
+        "class",
+        "single-instance",
+    }) |key| {
+        try expect(!forwardedKeyAllowed(key));
+    }
+
+    // Prefix confusion must not admit anything: `windows-...` is a different
+    // key from `window-...`.
+    try expect(!forwardedKeyAllowed("windows-job-object-kill-on-close"));
+    try expect(forwardedKeyAllowed("window-height"));
+
+    // Representative allowlisted keys still work.
+    for ([_][]const u8{
+        "window-width",
+        "window-height",
+        "font-size",
+        "title",
+        "background",
+        "background-opacity",
+        "fullscreen",
+        "maximize",
+        "working-directory",
+    }) |key| {
+        try expect(forwardedKeyAllowed(key));
+    }
 }
 
-test "win32 forwarded working-directory is constrained to local directories" {
+test "win32 forwarded argv key extraction matches the config loader" {
+    const expect = std.testing.expect;
+
+    try std.testing.expectEqualStrings("font-size", forwardedArgumentKey("--font-size=14").?);
+    try std.testing.expectEqualStrings("maximize", forwardedArgumentKey("--maximize").?);
+    // Only the segment before the FIRST `=` is the key, matching
+    // cli/args.zig.
+    try std.testing.expectEqualStrings("title", forwardedArgumentKey("--title=a=b").?);
+    try std.testing.expectEqualStrings("", forwardedArgumentKey("--=x").?);
+
+    // Not `--key[=value]` form; these are refused wholesale by
+    // `forwardedArgvRejection`.
+    try expect(forwardedArgumentKey("-e") == null);
+    try expect(forwardedArgumentKey("powershell") == null);
+    try expect(forwardedArgumentKey("-") == null);
+}
+
+test "win32 forwarded rejection reasons are classified and safe to log" {
+    const argv_bad_key = [_][:0]const u8{"--input=calc.exe"};
+    const r1 = forwardedArgvRejection(&argv_bad_key).?;
+    try std.testing.expectEqual(.not_allowlisted, r1.reason);
+    try std.testing.expectEqualStrings("input", r1.key);
+    try std.testing.expect(forwardedKeyLoggable(r1.key));
+
+    // `-e` becomes `initial-command` in Config.parseManuallyHook.
+    const argv_dash_e = [_][:0]const u8{ "-e", "calc.exe" };
+    try std.testing.expectEqual(
+        .not_a_config_flag,
+        forwardedArgvRejection(&argv_dash_e).?.reason,
+    );
+
+    const argv_wd = [_][:0]const u8{"--working-directory=\\\\attacker\\share"};
+    try std.testing.expectEqual(
+        .bad_working_directory,
+        forwardedArgvRejection(&argv_wd).?.reason,
+    );
+
+    // A bad key later in the argv is still caught.
+    const argv_trailing = [_][:0]const u8{ "--font-size=14", "--env=ZDOTDIR=C:\\a" };
+    try std.testing.expectEqualStrings(
+        "env",
+        forwardedArgvRejection(&argv_trailing).?.key,
+    );
+
+    const argv_ok = [_][:0]const u8{ "--font-size=14", "--working-directory=home" };
+    try std.testing.expect(forwardedArgvRejection(&argv_ok) == null);
+
+    // A refused key is attacker-controlled text, so it must not be echoed
+    // into a log line raw.
+    try std.testing.expect(!forwardedKeyLoggable("has space"));
+    try std.testing.expect(!forwardedKeyLoggable("newline\ninjected"));
+    try std.testing.expect(!forwardedKeyLoggable("UPPER"));
+    try std.testing.expect(!forwardedKeyLoggable("a" ** 65));
+    try std.testing.expect(forwardedKeyLoggable("window-height"));
+}
+
+test "win32 forwarded working-directory rejects UNC syntax and keeps legal forms" {
     const expect = std.testing.expect;
 
     try expect(forwardedWorkingDirectoryAllowed("home"));
     try expect(forwardedWorkingDirectoryAllowed("inherit"));
 
-    // UNC values would make the server authenticate to an attacker-chosen
-    // SMB host just by resolving the path.
+    // Documented legal values that an earlier revision wrongly refused,
+    // killing the whole +new-window request with only a log line.
+    try expect(forwardedWorkingDirectoryAllowed("~"));
+    try expect(forwardedWorkingDirectoryAllowed("~/projects"));
+    try expect(forwardedWorkingDirectoryAllowed("~\\projects"));
+    try expect(forwardedWorkingDirectoryAllowed("\"C:\\Program Files\\x\""));
+    try expect(forwardedWorkingDirectoryAllowed("  C:\\Users\\me  "));
+
+    // A literal UNC value would make this process authenticate to an
+    // attacker-chosen SMB host. NOTE: this is a check on SYNTAX only -- a
+    // mapped drive or a junction still resolves off-box.
     try expect(!forwardedWorkingDirectoryAllowed("\\\\attacker\\share"));
     try expect(!forwardedWorkingDirectoryAllowed("//attacker/share"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\?\\UNC\\attacker\\share"));
     try expect(!forwardedWorkingDirectoryAllowed("\\\\?\\C:\\Windows"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\.\\pipe\\x"));
     try expect(!forwardedWorkingDirectoryAllowed("relative\\path"));
+    try expect(!forwardedWorkingDirectoryAllowed("C:foo"));
     try expect(!forwardedWorkingDirectoryAllowed(""));
+    try expect(!forwardedWorkingDirectoryAllowed("\"\\\\attacker\\share\""));
 
+    // A realpath'd local cwd is what the startup forwarder always sends, so
+    // it has to keep working or single-instance launches break.
     if (builtin.os.tag == .windows) {
-        // The startup forwarder always sends a realpath'd cwd, so a real
-        // local directory has to keep working or single-instance launches
-        // would break.
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
         try expect(forwardedWorkingDirectoryAllowed(cwd));
-        try expect(!forwardedWorkingDirectoryAllowed("C:\\this-path-should-not-exist-noctty"));
     }
 }
 
@@ -28320,6 +28766,45 @@ test "win32 applyNewWindowArguments rejects a forwarded command outright" {
         );
     }
 
+    // `--input` is written straight to the pty and its own doc comment warns
+    // it can execute programs in a shell.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--input=powershell -enc AAAA\n",
+            }),
+        );
+        try std.testing.expectEqual(@as(usize, 0), config.input.list.items.len);
+    }
+
+    // `--env` reaches the child after shell-integration setup, so it can
+    // repoint ZDOTDIR/ENV and run an attacker script at shell start.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--env=ZDOTDIR=C:\\attacker",
+            }),
+        );
+    }
+
+    // Deny-by-default: a key that appears in NO list is still refused.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--some-key-nobody-enumerated=1",
+            }),
+        );
+    }
+
     {
         var config = try configpkg.Config.default(alloc);
         defer config.deinit();
@@ -28331,14 +28816,18 @@ test "win32 applyNewWindowArguments rejects a forwarded command outright" {
         );
     }
 
-    // A benign argv is still applied.
+    // A benign argv is still applied, including the working-directory the
+    // startup forwarder always sends.
     {
         var config = try configpkg.Config.default(alloc);
         defer config.deinit();
         try applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
             "--window-height=40",
+            "--font-size=16",
+            "--working-directory=home",
         });
         try std.testing.expectEqual(@as(u32, 40), config.@"window-height");
+        try std.testing.expectEqual(@as(f32, 16), config.@"font-size");
     }
 }
 

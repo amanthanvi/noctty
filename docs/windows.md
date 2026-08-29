@@ -322,7 +322,10 @@ DACL whose single ACE grants access to the SID of the token that owns
 the running noctty process. When that process runs above medium
 integrity, a `NO_WRITE_UP` mandatory-label ACE is added as well, so a
 filtered (non-elevated) token of the same account cannot drive an
-elevated instance.
+elevated instance. The label sets `NO_WRITE_UP` only, so a
+lower-integrity process can still open the pipe for *reading*; it can
+occupy a pipe instance (bounded by the server's read timeout) but cannot
+submit a request.
 
 **This is not a privilege boundary.** Any code already running as your
 user is fully trusted with this channel: it can list your windows,
@@ -359,12 +362,36 @@ arbitrary file helper actions (`text`, `csi`, `esc`,
 disabled for automation until they are reviewed and allowlisted.
 
 `+new-window` forwards command-line arguments to the running instance.
-The running instance refuses any forwarded argument that would select
-code to run or an extra configuration source — `--command`,
-`--initial-command`, `-e`, `--config-file`, `--config-default-files`,
-`--theme`, and `--custom-shader` — and refuses the whole request rather
-than dropping the key. `--working-directory` is accepted only as `home`,
-`inherit`, or a local absolute path that resolves to a directory.
+The running instance applies an **allowlist**: only window-scoped
+presentation settings are honored, and every other key is refused. The
+allowlist covers window geometry and decoration (`--window-width`,
+`--window-height`, `--window-position-*`, `--window-padding-*`,
+`--window-decoration`, `--maximize`, `--fullscreen`, ...), `--title`,
+non-name font settings (`--font-size`, `--font-thicken`, ...), and
+colors (`--background`, `--foreground`, `--palette`, `--cursor-color`,
+`--background-opacity`, ...).
+
+Everything else is refused, including anything that would run code
+(`--command`, `--initial-command`, `-e`, `--input`, `--env`), load a
+file (`--background-image`, `--custom-shader`, `--bell-audio-path`),
+change the configuration source (`--config-file`,
+`--config-default-files`, `--theme`), or write to the terminal
+(`--keybind`, `--command-palette-entry`, `--enquiry-response`). A key
+that is not on the allowlist — including one added by a future
+release — is refused by default rather than allowed by omission. The
+whole request is refused rather than the key being dropped.
+
+`--working-directory` is allowed as `home`, `inherit`, `~/...`, or a
+local drive-letter absolute path. UNC *syntax* (`\\host\share`) is
+refused so the running instance is not made to authenticate to a remote
+SMB host. Note this is a check on syntax only: a mapped or `subst`
+drive, or a junction under a local drive, still resolves off-box.
+
+When you launch noctty normally and an instance is already running, any
+argument the running instance would refuse is dropped by the launching
+process before forwarding, with a warning in the log, so you still get a
+window. That drop is a convenience on your own command line, not a
+security control — the running instance re-checks every argument.
 
 ## Crash reports and diagnostics
 
