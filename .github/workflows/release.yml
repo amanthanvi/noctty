@@ -253,6 +253,7 @@ jobs:
           -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
+          -RequireConPty
 
       - name: Build and package ARM64 release artifacts
         shell: pwsh
@@ -269,6 +270,7 @@ jobs:
           -Optimize ReleaseFast
           -RequireInstaller
           -RequireSigning
+          -RequireConPty
 
       - name: Verify signed release artifacts
         shell: pwsh

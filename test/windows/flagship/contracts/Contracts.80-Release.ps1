@@ -61,7 +61,7 @@ $releasePreflightStepSha256 =
 $readinessPreflightStepSha256 =
     '153aa1d2b13ac09f38ba3269bc78840e57a93c98e54b99168a5d937b8dab7989'
 $releaseWorkflowSha256 =
-    '908ff971221435538b6e4148507bdc6241b6b4f481d488f1f662337bf62da74a'
+    '332f31e6ce005edfafca003567935dbf380ca1dd8c188080af2c9f7297e2a100'
 $readinessWorkflowSha256 =
     '7c66f756a0219af4e791bccef9824c7373050e41aa753836f6f95577a5a1edc5'
 # Full-file pins deliberately make every workflow edit a semantic-review event,
@@ -1439,7 +1439,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseDefenderScanner
         Content = $releaseDefenderScannerText
         ExpectedSha256 =
-            'bf322937fcadd765ed7f32358bb496c38edc6f081a87da97fdbfb4e2e0e2b3e8'
+            'da69f7467929d5242511bb71cf628e766f5ae26bc1b4a8f00bddceaeab43351b'
         CriticalStatement = '& $scanner -SignatureUpdate'
     }
     [pscustomobject] @{

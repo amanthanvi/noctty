@@ -1,7 +1,7 @@
 $releaseArtifactVerifier = Join-Path $repoRoot 'scripts\release-verify-artifacts.ps1'
 $releaseArtifactVerifierText = Get-Content -LiteralPath $releaseArtifactVerifier -Raw
 $releaseArtifactVerifierSha256 =
-    '67719f4ee9604d389eca6958f54088b0cc0923151d2c0be19aa372bf08fc80c0'
+    '4bec1509c1d1f0fa697bb6c9142042868c829a274aa894c46d32b715f62d7b5a'
 $canonicalReleaseArtifactVerifier = ConvertTo-CanonicalText `
     -Text $releaseArtifactVerifierText
 if ((Get-CanonicalTextSha256 -Text $canonicalReleaseArtifactVerifier) -cne

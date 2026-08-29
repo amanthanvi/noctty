@@ -73,7 +73,9 @@ $portablePayloads = @(
     'noctty/noctty.com',
     'noctty/noctty.exe',
     'noctty/ghostty-vt.dll',
-    'noctty/noctty-terminal-handoff-proxy.dll'
+    'noctty/noctty-terminal-handoff-proxy.dll',
+    'noctty/conpty.dll',
+    'noctty/OpenConsole.exe'
 )
 $architectures = @(Get-WindowsPackageArchitectures)
 $expectedScanCount = $architectures.Count * (1 + $portablePayloads.Count)

@@ -10,7 +10,9 @@ param(
 
     [switch]$RequireInstaller,
 
-    [switch]$RequireSigning
+    [switch]$RequireSigning,
+
+    [switch]$RequireConPty
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,6 +69,9 @@ try {
     }
     if ($RequireSigning) {
         $packageArgs.RequireSigning = $true
+    }
+    if ($RequireConPty) {
+        $packageArgs.RequireConPty = $true
     }
 
     Write-Host "Package phase: $($archInfo.Name)"

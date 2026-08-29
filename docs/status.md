@@ -47,6 +47,10 @@ Win32-validated VT protocol coverage is tracked in
 
 ### Windows application runtime (new in this fork)
 
+- Packaged builds prefer the bundled side-by-side ConPTY and warn before
+  falling back to the in-box conhost, which strips Kitty APC and Sixel DCS
+  payloads. See
+  [windows-vt-conformance.md](windows-vt-conformance.md#conpty-transport-generations-and-mangling-catalog).
 - Native Win32 windows, tab bar with overflow, same-window tab reorder, and
   exact-pane drag-to-split.
 - Horizontal and vertical splits.
