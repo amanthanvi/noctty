@@ -1,0 +1,1418 @@
+//! Taskbar jump list: a "Recent" category of working directories and a
+//! "Profiles" category of detected shells.
+//!
+//! Recent entries come from the terminal's pwd stream, which means a program
+//! running inside a session can emit OSC 7 for any path it likes and seed a
+//! persistent, user-visible entry. That is inherent to the data source and the
+//! blast radius is small (activating an entry only sets noctty's working
+//! directory), but titles are rendered by the shell, so `buildTitleAlloc`
+//! strips Unicode bidi/isolate controls to keep a seeded entry from
+//! misrepresenting where it points.
+
+const std = @import("std");
+const windows = std.os.windows;
+const windows_shell = @import("../config/windows_shell.zig");
+const Command = @import("../config/command.zig").Command;
+const win32_aumid = @import("win32_aumid.zig");
+const persistence = @import("win32_session_persistence.zig");
+const sys = @import("win32/sys.zig");
+
+const Allocator = std.mem.Allocator;
+const DWORD = u32;
+const HRESULT = windows.HRESULT;
+const GUID = windows.GUID;
+const HWND = ?*anyopaque;
+const UINT = u32;
+const UINT_PTR = usize;
+const WORD = u16;
+
+const log = std.log.scoped(.win32_jump_list);
+
+pub const state_filename = "jump-list-recents.json";
+pub const max_recents: usize = 10;
+pub const max_state_bytes: usize = 64 * 1024;
+pub const debounce_ms: UINT = 500;
+const max_profile_tombstones: usize = 128;
+const max_rebuild_retries: u8 = 3;
+const max_shell_link_chars: usize = 32_768;
+
+const CLSCTX_INPROC_SERVER: DWORD = 0x1;
+const CO_E_NOTINITIALIZED: HRESULT = @bitCast(@as(u32, 0x800401F0));
+const E_NOINTERFACE: HRESULT = @bitCast(@as(u32, 0x80004002));
+const VT_LPWSTR: u16 = 31;
+
+const CLSID_DestinationList = GUID.parse("{77F10CF0-3DB5-4966-B520-B7C54FD35ED6}");
+const IID_ICustomDestinationList = GUID.parse("{6332DEBF-87B5-4670-90C0-5E57B408A49E}");
+const CLSID_EnumerableObjectCollection = GUID.parse("{2D3468C1-36A7-43B6-AC24-D3F02FD9607A}");
+const IID_IObjectCollection = GUID.parse("{5632B1A4-E38A-400A-928A-D4CD63230295}");
+const IID_IObjectArray = GUID.parse("{92CA9DCD-5622-4BBA-A805-5E9F541BD8C9}");
+const CLSID_ShellLink = GUID.parse("{00021401-0000-0000-C000-000000000046}");
+const IID_IShellLinkW = GUID.parse("{000214F9-0000-0000-C000-000000000046}");
+const IID_IPropertyStore = GUID.parse("{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}");
+
+const PROPERTYKEY = extern struct {
+    fmtid: GUID,
+    pid: DWORD,
+};
+
+const PKEY_Title = PROPERTYKEY{
+    .fmtid = GUID.parse("{F29F85E0-4FF9-1068-AB91-08002B27B3D9}"),
+    .pid = 2,
+};
+const PKEY_AppUserModel_ID = PROPERTYKEY{
+    .fmtid = GUID.parse("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}"),
+    .pid = 5,
+};
+
+const PROPVARIANT = extern struct {
+    vt: u16,
+    reserved1: u16 = 0,
+    reserved2: u16 = 0,
+    reserved3: u16 = 0,
+    value: extern union {
+        pwsz: [*:0]const u16,
+        raw: [2]usize,
+    },
+
+    fn fromString(value: [:0]const u16) PROPVARIANT {
+        return .{
+            .vt = VT_LPWSTR,
+            .value = .{ .pwsz = value.ptr },
+        };
+    }
+};
+
+// Aliased from the shared Win32 surface rather than re-declared, so this
+// module cannot drift from src/apprt/win32/sys.zig.
+const CoCreateInstance = sys.CoCreateInstance;
+const GetCurrentProcessId = sys.GetCurrentProcessId;
+const SetTimer = sys.SetTimer;
+const KillTimer = sys.KillTimer;
+
+// Only this module needs ordinal string comparison, so it stays local.
+extern "kernel32" fn CompareStringOrdinal(
+    [*]const u16,
+    i32,
+    [*]const u16,
+    i32,
+    i32,
+) callconv(.winapi) i32;
+
+const IObjectArrayVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    GetCount: *const fn (*anyopaque, *UINT) callconv(.winapi) HRESULT,
+    GetAt: *const fn (*anyopaque, UINT, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+};
+
+const IObjectArray = extern struct {
+    vtbl: *const IObjectArrayVtbl,
+
+    fn fromRaw(raw: *anyopaque) *IObjectArray {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn asRaw(self: *IObjectArray) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *IObjectArray) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+};
+
+const IObjectCollectionVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    GetCount: *const fn (*anyopaque, *UINT) callconv(.winapi) HRESULT,
+    GetAt: *const fn (*anyopaque, UINT, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddObject: *const fn (*anyopaque, *anyopaque) callconv(.winapi) HRESULT,
+    AddFromArray: *const fn (*anyopaque, *IObjectArray) callconv(.winapi) HRESULT,
+    RemoveObjectAt: *const fn (*anyopaque, UINT) callconv(.winapi) HRESULT,
+    Clear: *const fn (*anyopaque) callconv(.winapi) HRESULT,
+};
+
+const IObjectCollection = extern struct {
+    vtbl: *const IObjectCollectionVtbl,
+
+    fn fromRaw(raw: *anyopaque) *IObjectCollection {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn asRaw(self: *IObjectCollection) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn asArray(self: *IObjectCollection) *IObjectArray {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *IObjectCollection) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+
+    fn addObject(self: *IObjectCollection, object: *anyopaque) HRESULT {
+        return self.vtbl.AddObject(self.asRaw(), object);
+    }
+};
+
+const ICustomDestinationListVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    SetAppID: *const fn (*anyopaque, [*:0]const u16) callconv(.winapi) HRESULT,
+    BeginList: *const fn (*anyopaque, *UINT, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AppendCategory: *const fn (*anyopaque, [*:0]const u16, *IObjectArray) callconv(.winapi) HRESULT,
+    AppendKnownCategory: *const fn (*anyopaque, i32) callconv(.winapi) HRESULT,
+    AddUserTasks: *const fn (*anyopaque, *IObjectArray) callconv(.winapi) HRESULT,
+    CommitList: *const fn (*anyopaque) callconv(.winapi) HRESULT,
+    GetRemovedDestinations: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    DeleteList: *const fn (*anyopaque, ?[*:0]const u16) callconv(.winapi) HRESULT,
+    AbortList: *const fn (*anyopaque) callconv(.winapi) HRESULT,
+};
+
+const ICustomDestinationList = extern struct {
+    vtbl: *const ICustomDestinationListVtbl,
+
+    fn fromRaw(raw: *anyopaque) *ICustomDestinationList {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn asRaw(self: *ICustomDestinationList) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *ICustomDestinationList) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+};
+
+const IShellLinkWVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    GetPath: *const fn (*anyopaque, [*]u16, i32, ?*anyopaque, DWORD) callconv(.winapi) HRESULT,
+    GetIDList: *const fn (*anyopaque, *?*anyopaque) callconv(.winapi) HRESULT,
+    SetIDList: *const fn (*anyopaque, ?*const anyopaque) callconv(.winapi) HRESULT,
+    GetDescription: *const fn (*anyopaque, [*]u16, i32) callconv(.winapi) HRESULT,
+    SetDescription: *const fn (*anyopaque, [*:0]const u16) callconv(.winapi) HRESULT,
+    GetWorkingDirectory: *const fn (*anyopaque, [*]u16, i32) callconv(.winapi) HRESULT,
+    SetWorkingDirectory: *const fn (*anyopaque, [*:0]const u16) callconv(.winapi) HRESULT,
+    GetArguments: *const fn (*anyopaque, [*]u16, i32) callconv(.winapi) HRESULT,
+    SetArguments: *const fn (*anyopaque, [*:0]const u16) callconv(.winapi) HRESULT,
+    GetHotkey: *const fn (*anyopaque, *WORD) callconv(.winapi) HRESULT,
+    SetHotkey: *const fn (*anyopaque, WORD) callconv(.winapi) HRESULT,
+    GetShowCmd: *const fn (*anyopaque, *i32) callconv(.winapi) HRESULT,
+    SetShowCmd: *const fn (*anyopaque, i32) callconv(.winapi) HRESULT,
+    GetIconLocation: *const fn (*anyopaque, [*]u16, i32, *i32) callconv(.winapi) HRESULT,
+    SetIconLocation: *const fn (*anyopaque, [*:0]const u16, i32) callconv(.winapi) HRESULT,
+    SetRelativePath: *const fn (*anyopaque, [*:0]const u16, DWORD) callconv(.winapi) HRESULT,
+    Resolve: *const fn (*anyopaque, HWND, DWORD) callconv(.winapi) HRESULT,
+    SetPath: *const fn (*anyopaque, [*:0]const u16) callconv(.winapi) HRESULT,
+};
+
+const IShellLinkW = extern struct {
+    vtbl: *const IShellLinkWVtbl,
+
+    fn fromRaw(raw: *anyopaque) *IShellLinkW {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn asRaw(self: *IShellLinkW) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *IShellLinkW) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+};
+
+const IPropertyStoreVtbl = extern struct {
+    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(.winapi) HRESULT,
+    AddRef: *const fn (*anyopaque) callconv(.winapi) u32,
+    Release: *const fn (*anyopaque) callconv(.winapi) u32,
+    GetCount: *const fn (*anyopaque, *DWORD) callconv(.winapi) HRESULT,
+    GetAt: *const fn (*anyopaque, DWORD, *PROPERTYKEY) callconv(.winapi) HRESULT,
+    GetValue: *const fn (*anyopaque, *const PROPERTYKEY, *PROPVARIANT) callconv(.winapi) HRESULT,
+    SetValue: *const fn (*anyopaque, *const PROPERTYKEY, *const PROPVARIANT) callconv(.winapi) HRESULT,
+    Commit: *const fn (*anyopaque) callconv(.winapi) HRESULT,
+};
+
+const IPropertyStore = extern struct {
+    vtbl: *const IPropertyStoreVtbl,
+
+    fn fromRaw(raw: *anyopaque) *IPropertyStore {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn asRaw(self: *IPropertyStore) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    fn release(self: *IPropertyStore) void {
+        _ = self.vtbl.Release(self.asRaw());
+    }
+
+    fn setValue(self: *IPropertyStore, key: *const PROPERTYKEY, value: *const PROPVARIANT) HRESULT {
+        return self.vtbl.SetValue(self.asRaw(), key, value);
+    }
+};
+
+const RecentState = struct {
+    schema_version: u32 = 1,
+    directories: []const []const u8 = &.{},
+    hidden_profiles: []const []const u8 = &.{},
+};
+
+const VersionHeader = struct {
+    schema_version: u32,
+};
+
+fn parseRecentStateAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(RecentState) {
+    var header = try std.json.parseFromSlice(VersionHeader, alloc, raw, .{
+        .ignore_unknown_fields = true,
+    });
+    defer header.deinit();
+    if (header.value.schema_version != 1) return error.UnsupportedVersion;
+
+    return try std.json.parseFromSlice(RecentState, alloc, raw, .{
+        .ignore_unknown_fields = false,
+    });
+}
+
+fn encodeRecentStateAlloc(
+    alloc: Allocator,
+    directories: []const []const u8,
+    hidden_profiles: []const []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try std.json.Stringify.value(RecentState{
+        .directories = directories,
+        .hidden_profiles = hidden_profiles,
+    }, .{
+        .whitespace = .minified,
+    }, &out.writer);
+    if (out.written().len > max_state_bytes) return error.StateTooLarge;
+    return try out.toOwnedSlice();
+}
+
+const RecentList = struct {
+    items: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *RecentList, alloc: Allocator) void {
+        for (self.items.items) |item| alloc.free(item);
+        self.items.deinit(alloc);
+        self.* = .{};
+    }
+
+    fn insert(self: *RecentList, alloc: Allocator, path: []const u8) !bool {
+        if (!isRecentLocalPath(path)) return false;
+
+        for (self.items.items, 0..) |item, index| {
+            if (!try pathsEqualIgnoreCase(alloc, item, path)) continue;
+            if (index == 0) return false;
+            var i = index;
+            while (i > 0) : (i -= 1) self.items.items[i] = self.items.items[i - 1];
+            self.items.items[0] = item;
+            return true;
+        }
+
+        const owned = try alloc.dupe(u8, path);
+        errdefer alloc.free(owned);
+        if (self.items.items.len < max_recents) {
+            try self.items.append(alloc, owned);
+        } else {
+            alloc.free(self.items.items[max_recents - 1]);
+        }
+
+        var i = @min(self.items.items.len, max_recents) - 1;
+        while (i > 0) : (i -= 1) self.items.items[i] = self.items.items[i - 1];
+        self.items.items[0] = owned;
+        return true;
+    }
+
+    fn appendLoaded(self: *RecentList, alloc: Allocator, path: []const u8) !void {
+        if (self.items.items.len >= max_recents or !isRecentLocalPath(path)) return;
+        for (self.items.items) |item| {
+            if (try pathsEqualIgnoreCase(alloc, item, path)) return;
+        }
+        const owned = try alloc.dupe(u8, path);
+        errdefer alloc.free(owned);
+        try self.items.append(alloc, owned);
+    }
+
+    fn removeArguments(
+        self: *RecentList,
+        alloc: Allocator,
+        removed_arguments: []const []const u8,
+    ) !bool {
+        var changed = false;
+        var index: usize = 0;
+        while (index < self.items.items.len) {
+            const arguments = try buildWorkingDirectoryArgumentsAlloc(alloc, self.items.items[index]);
+            defer alloc.free(arguments);
+            if (!containsArguments(removed_arguments, arguments)) {
+                index += 1;
+                continue;
+            }
+
+            alloc.free(self.items.items[index]);
+            _ = self.items.orderedRemove(index);
+            changed = true;
+        }
+        return changed;
+    }
+};
+
+const ProfileTombstones = struct {
+    items: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *ProfileTombstones, alloc: Allocator) void {
+        for (self.items.items) |item| alloc.free(item);
+        self.items.deinit(alloc);
+        self.* = .{};
+    }
+
+    fn contains(self: *const ProfileTombstones, key: []const u8) bool {
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item, key)) return true;
+        }
+        return false;
+    }
+
+    fn insert(self: *ProfileTombstones, alloc: Allocator, key: []const u8) !bool {
+        if (key.len == 0 or self.contains(key)) return false;
+        const owned = try alloc.dupe(u8, key);
+        errdefer alloc.free(owned);
+        if (self.items.items.len == max_profile_tombstones) {
+            alloc.free(self.items.orderedRemove(0));
+        }
+        try self.items.append(alloc, owned);
+        return true;
+    }
+
+    fn remove(self: *ProfileTombstones, alloc: Allocator, key: []const u8) bool {
+        for (self.items.items, 0..) |item, index| {
+            if (!std.mem.eql(u8, item, key)) continue;
+            alloc.free(item);
+            _ = self.items.orderedRemove(index);
+            return true;
+        }
+        return false;
+    }
+};
+
+const LoadedState = struct {
+    recents: RecentList = .{},
+    hidden_profiles: ProfileTombstones = .{},
+
+    fn deinit(self: *LoadedState, alloc: Allocator) void {
+        self.recents.deinit(alloc);
+        self.hidden_profiles.deinit(alloc);
+        self.* = .{};
+    }
+};
+
+fn loadStateAlloc(alloc: Allocator, path: []const u8) LoadedState {
+    var result: LoadedState = .{};
+    const raw = persistence.readFileBoundedAlloc(alloc, path, max_state_bytes) catch |err| {
+        switch (err) {
+            error.FileNotFound => {},
+            error.FileTooBig => log.warn("jump list recent state exceeds size limit path={s}", .{path}),
+            else => log.warn("jump list recent state read failed path={s} err={}", .{ path, err }),
+        }
+        return result;
+    };
+    defer alloc.free(raw);
+
+    var parsed = parseRecentStateAlloc(alloc, raw) catch |err| {
+        switch (err) {
+            error.OutOfMemory => log.warn("jump list recent state parse allocation failed path={s}", .{path}),
+            else => log.warn("jump list recent state ignored path={s} err={}", .{ path, err }),
+        }
+        return result;
+    };
+    defer parsed.deinit();
+
+    for (parsed.value.directories) |directory| {
+        result.recents.appendLoaded(alloc, directory) catch |err| {
+            log.warn("jump list recent state entry allocation failed err={}", .{err});
+            break;
+        };
+    }
+    for (parsed.value.hidden_profiles) |key| {
+        _ = result.hidden_profiles.insert(alloc, key) catch |err| {
+            log.warn("jump list hidden profile state allocation failed err={}", .{err});
+            break;
+        };
+    }
+    return result;
+}
+
+pub fn isRecentLocalPath(path: []const u8) bool {
+    if (!std.unicode.utf8ValidateSlice(path)) return false;
+    if (path.len < 3 or !std.ascii.isAlphabetic(path[0]) or path[1] != ':' or
+        (path[2] != '\\' and path[2] != '/'))
+    {
+        return false;
+    }
+    for (path, 0..) |byte, index| {
+        if (byte < 32) return false;
+        switch (byte) {
+            '"', '<', '>', '|', '?', '*' => return false,
+            ':' => if (index != 1) return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn pathsEqualIgnoreCase(alloc: Allocator, lhs: []const u8, rhs: []const u8) !bool {
+    const lhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, lhs);
+    defer alloc.free(lhs_w);
+    const rhs_w = try std.unicode.utf8ToUtf16LeAlloc(alloc, rhs);
+    defer alloc.free(rhs_w);
+    const result = CompareStringOrdinal(
+        lhs_w.ptr,
+        @intCast(lhs_w.len),
+        rhs_w.ptr,
+        @intCast(rhs_w.len),
+        1,
+    );
+    if (result == 0) return error.PathComparisonFailed;
+    return result == 2;
+}
+
+/// Unicode controls that reorder or isolate the text around them. A jump-list
+/// title is drawn by the shell, so leaving these in lets a seeded Recent entry
+/// render as a path it does not point at.
+fn isBidiControl(cp: u21) bool {
+    return switch (cp) {
+        0x061C, 0x200E, 0x200F => true,
+        0x202A...0x202E => true,
+        0x2066...0x2069 => true,
+        else => false,
+    };
+}
+
+/// Copy `text` for use as a jump-list item title, dropping bidi controls.
+pub fn buildTitleAlloc(alloc: Allocator, text: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+
+    var view = std.unicode.Utf8View.init(text) catch {
+        // Not valid UTF-8; nothing to reorder, so copy it through unchanged.
+        out.deinit();
+        return try alloc.dupe(u8, text);
+    };
+    var iter = view.iterator();
+    while (iter.nextCodepointSlice()) |slice| {
+        const cp = std.unicode.utf8Decode(slice) catch continue;
+        if (isBidiControl(cp)) continue;
+        try out.writer.writeAll(slice);
+    }
+    return try out.toOwnedSlice();
+}
+
+pub fn buildWorkingDirectoryArgumentsAlloc(alloc: Allocator, path: []const u8) ![]u8 {
+    if (!isRecentLocalPath(path)) return error.InvalidWorkingDirectory;
+    const option = try std.fmt.allocPrint(alloc, "--working-directory={s}", .{path});
+    defer alloc.free(option);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try Command.writeDirectArg(&out.writer, option);
+    return try out.toOwnedSlice();
+}
+
+pub fn buildProfileArgumentsAlloc(alloc: Allocator, command: Command) ![]u8 {
+    const argv = switch (command) {
+        .direct => |value| value,
+        .shell => return error.UnsupportedProfileCommand,
+    };
+    if (argv.len == 0) return error.UnsupportedProfileCommand;
+
+    var command_value: std.Io.Writer.Allocating = .init(alloc);
+    defer command_value.deinit();
+    try command_value.writer.writeAll("direct:");
+    for (argv, 0..) |arg, index| {
+        if (index > 0) try command_value.writer.writeByte(' ');
+        try Command.writeDirectArg(&command_value.writer, arg);
+    }
+
+    const command_option = try std.fmt.allocPrint(
+        alloc,
+        "--command={s}",
+        .{command_value.written()},
+    );
+    defer alloc.free(command_option);
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    // Match in-app profile launches: start at home instead of inheriting the caller's cwd.
+    try out.writer.writeAll("--working-directory=home ");
+    try Command.writeDirectArg(&out.writer, command_option);
+    try out.writer.writeByte(' ');
+    const initial_command_option = try std.fmt.allocPrint(
+        alloc,
+        "--initial-command={s}",
+        .{command_value.written()},
+    );
+    defer alloc.free(initial_command_option);
+    try Command.writeDirectArg(&out.writer, initial_command_option);
+    return try out.toOwnedSlice();
+}
+
+fn containsArguments(values: []const []const u8, arguments: []const u8) bool {
+    for (values) |value| {
+        if (std.mem.eql(u8, value, arguments)) return true;
+    }
+    return false;
+}
+
+fn recentSlotCount(slot_budget: UINT, recent_count: usize, profile_count: usize) usize {
+    const slots: usize = slot_budget;
+    if (slots == 0 or recent_count == 0) return 0;
+    if (profile_count == 0 or slots == 1) return @min(recent_count, slots);
+    const reserved_profiles = @min(slots - 1, profile_count);
+    return @min(recent_count, slots - reserved_profiles);
+}
+
+fn nextRebuildRetryCount(current: u8) ?u8 {
+    if (current >= max_rebuild_retries) return null;
+    return current + 1;
+}
+
+const RemovedArguments = struct {
+    items: std.ArrayListUnmanaged([]u8) = .empty,
+    complete: bool = true,
+
+    fn deinit(self: *RemovedArguments, alloc: Allocator) void {
+        for (self.items.items) |item| alloc.free(item);
+        self.items.deinit(alloc);
+        self.* = .{};
+    }
+};
+
+const ProfileItem = struct {
+    key: []u8,
+    title: []u8,
+    arguments: []u8,
+
+    fn deinit(self: *ProfileItem, alloc: Allocator) void {
+        alloc.free(self.key);
+        alloc.free(self.title);
+        alloc.free(self.arguments);
+        self.* = undefined;
+    }
+};
+
+pub const JumpList = struct {
+    alloc: Allocator,
+    state_path: []u8,
+    exe_path: ?[]u8,
+    recents: RecentList,
+    hidden_profiles: ProfileTombstones,
+    profiles: std.ArrayListUnmanaged(ProfileItem) = .empty,
+    timer_id: ?UINT_PTR = null,
+    persist_dirty: bool = false,
+    rebuild_dirty: bool = true,
+    rebuild_retry_count: u8 = 0,
+    com_disabled: bool = false,
+    startup_profile_discovery_pending: bool = false,
+
+    pub fn init(alloc: Allocator, state_path: []const u8) !JumpList {
+        const owned_state_path = try alloc.dupe(u8, state_path);
+        errdefer alloc.free(owned_state_path);
+        const loaded = loadStateAlloc(alloc, state_path);
+        return .{
+            .alloc = alloc,
+            .state_path = owned_state_path,
+            .exe_path = std.fs.selfExePathAlloc(alloc) catch |err| exe: {
+                log.warn("jump list executable path unavailable err={}", .{err});
+                break :exe null;
+            },
+            .recents = loaded.recents,
+            .hidden_profiles = loaded.hidden_profiles,
+        };
+    }
+
+    pub fn deinit(self: *JumpList) void {
+        self.stopTimer();
+        if (self.persist_dirty) self.persist();
+        self.recents.deinit(self.alloc);
+        self.hidden_profiles.deinit(self.alloc);
+        self.clearProfiles();
+        self.profiles.deinit(self.alloc);
+        if (self.exe_path) |path| self.alloc.free(path);
+        self.alloc.free(self.state_path);
+        self.* = undefined;
+    }
+
+    pub fn startup(self: *JumpList) void {
+        self.stopTimer();
+        self.flush();
+        self.startup_profile_discovery_pending = true;
+        self.schedule();
+    }
+
+    pub fn takeStartupProfileDiscovery(self: *JumpList) bool {
+        if (!self.startup_profile_discovery_pending) return false;
+        self.startup_profile_discovery_pending = false;
+        return true;
+    }
+
+    pub fn updateProfiles(self: *JumpList, profiles: []const windows_shell.Profile) void {
+        self.updateProfilesAlloc(profiles) catch |err| {
+            log.warn("jump list profile snapshot failed err={}", .{err});
+        };
+    }
+
+    fn updateProfilesAlloc(self: *JumpList, profiles: []const windows_shell.Profile) !void {
+        var next: std.ArrayListUnmanaged(ProfileItem) = .empty;
+        errdefer {
+            for (next.items) |*item| item.deinit(self.alloc);
+            next.deinit(self.alloc);
+        }
+
+        for (profiles) |profile| {
+            const title = try buildTitleAlloc(self.alloc, profile.label);
+            const key = self.alloc.dupe(u8, profile.key) catch |err| {
+                self.alloc.free(title);
+                return err;
+            };
+            const arguments = buildProfileArgumentsAlloc(self.alloc, profile.command) catch |err| switch (err) {
+                error.UnsupportedProfileCommand => {
+                    self.alloc.free(key);
+                    self.alloc.free(title);
+                    continue;
+                },
+                else => {
+                    self.alloc.free(key);
+                    self.alloc.free(title);
+                    return err;
+                },
+            };
+            next.append(self.alloc, .{ .key = key, .title = title, .arguments = arguments }) catch |err| {
+                self.alloc.free(key);
+                self.alloc.free(title);
+                self.alloc.free(arguments);
+                return err;
+            };
+        }
+
+        if (profileItemsEqual(self.profiles.items, next.items)) {
+            for (next.items) |*item| item.deinit(self.alloc);
+            next.deinit(self.alloc);
+            return;
+        }
+
+        self.clearProfiles();
+        self.profiles.deinit(self.alloc);
+        self.profiles = next;
+        self.rebuild_retry_count = 0;
+        self.rebuild_dirty = true;
+        self.schedule();
+    }
+
+    pub fn noteProfileUsed(self: *JumpList, key: []const u8) void {
+        if (!self.hidden_profiles.remove(self.alloc, key)) return;
+        self.persist_dirty = true;
+        self.rebuild_retry_count = 0;
+        self.rebuild_dirty = true;
+        self.schedule();
+    }
+
+    pub fn noteRecent(self: *JumpList, path: []const u8) void {
+        const changed = self.recents.insert(self.alloc, path) catch |err| {
+            log.warn("jump list recent update failed err={}", .{err});
+            return;
+        };
+        if (!changed) return;
+        self.persist_dirty = true;
+        self.rebuild_retry_count = 0;
+        self.rebuild_dirty = true;
+        self.schedule();
+    }
+
+    pub fn handleTimer(self: *JumpList, timer_id: UINT_PTR) bool {
+        if (self.timer_id == null or timer_id != self.timer_id.?) return false;
+        self.stopTimer();
+        self.flush();
+        return true;
+    }
+
+    pub fn flush(self: *JumpList) void {
+        if (self.rebuild_dirty and !self.com_disabled) {
+            if (self.rebuildCom()) |_| {
+                self.rebuild_dirty = false;
+                self.rebuild_retry_count = 0;
+            } else |err| switch (err) {
+                error.ComNotInitialized => {
+                    self.com_disabled = true;
+                    log.warn("jump list COM unavailable; disabling rebuilds for this process", .{});
+                },
+                else => {
+                    log.warn("jump list rebuild unavailable err={}", .{err});
+                    if (nextRebuildRetryCount(self.rebuild_retry_count)) |next| {
+                        self.rebuild_retry_count = next;
+                        self.schedule();
+                    } else {
+                        log.warn("jump list rebuild retries exhausted; waiting for a model change", .{});
+                    }
+                },
+            }
+        }
+        if (self.persist_dirty) self.persist();
+    }
+
+    /// Re-arm the debounce if the deferred startup profile discovery still
+    /// has not found a host. Called when one is created, so an
+    /// `initial-window=false` launch is not stranded without a Profiles
+    /// category until something else happens to dirty the model.
+    pub fn scheduleIfStartupPending(self: *JumpList) void {
+        if (self.startup_profile_discovery_pending) self.schedule();
+    }
+
+    fn schedule(self: *JumpList) void {
+        self.stopTimer();
+        const timer_id = SetTimer(null, 0, debounce_ms, null);
+        if (timer_id == 0) {
+            log.warn("jump list debounce timer unavailable", .{});
+            return;
+        }
+        self.timer_id = timer_id;
+    }
+
+    fn stopTimer(self: *JumpList) void {
+        if (self.timer_id) |timer_id| {
+            _ = KillTimer(null, timer_id);
+            self.timer_id = null;
+        }
+    }
+
+    /// Write the recent/tombstone model out.
+    ///
+    /// Two noctty processes each own their own in-memory model and replace
+    /// this file atomically, so the last writer wins. That is deliberate: the
+    /// payload is an MRU convenience list, and it matches how
+    /// `session-state.json` and `palette-mru.txt` already behave. Merging on
+    /// write would have to reconcile removals too, which is more machinery
+    /// than a recents list is worth.
+    fn persist(self: *JumpList) void {
+        const encoded = encodeRecentStateAlloc(
+            self.alloc,
+            self.recents.items.items,
+            self.hidden_profiles.items.items,
+        ) catch |err| {
+            log.warn("jump list recent encode failed err={}", .{err});
+            return;
+        };
+        defer self.alloc.free(encoded);
+
+        if (std.fs.path.dirname(self.state_path)) |directory| {
+            std.fs.makeDirAbsolute(directory) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => {
+                    log.warn("jump list recent directory create failed path={s} err={}", .{ directory, err });
+                    return;
+                },
+            };
+        }
+        const temporary_path = std.fmt.allocPrint(
+            self.alloc,
+            "{s}.tmp-{x}-{x}",
+            .{ self.state_path, GetCurrentProcessId(), @as(u64, @bitCast(std.time.milliTimestamp())) },
+        ) catch |err| {
+            log.warn("jump list recent temp path allocation failed err={}", .{err});
+            return;
+        };
+        defer self.alloc.free(temporary_path);
+
+        persistence.writeFileAtomic(self.state_path, temporary_path, encoded) catch |err| {
+            log.warn("jump list recent write failed path={s} err={}", .{ self.state_path, err });
+            return;
+        };
+        self.persist_dirty = false;
+    }
+
+    fn clearProfiles(self: *JumpList) void {
+        for (self.profiles.items) |*item| item.deinit(self.alloc);
+        self.profiles.clearRetainingCapacity();
+    }
+
+    fn rebuildCom(self: *JumpList) !void {
+        const exe_path = self.exe_path orelse return error.ExecutableUnavailable;
+        const exe_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, exe_path);
+        defer self.alloc.free(exe_w);
+        const aumid_w = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
+
+        var raw_destination: ?*anyopaque = null;
+        const create_hr = CoCreateInstance(
+            &CLSID_DestinationList,
+            null,
+            CLSCTX_INPROC_SERVER,
+            &IID_ICustomDestinationList,
+            &raw_destination,
+        );
+        if (create_hr == CO_E_NOTINITIALIZED) return error.ComNotInitialized;
+        if (create_hr < 0 or raw_destination == null) return error.DestinationListUnavailable;
+        const destination = ICustomDestinationList.fromRaw(raw_destination.?);
+        defer destination.release();
+
+        if (destination.vtbl.SetAppID(destination.asRaw(), aumid_w) < 0) {
+            return error.SetAppIdFailed;
+        }
+
+        var slot_budget: UINT = 0;
+        var raw_removed: ?*anyopaque = null;
+        if (destination.vtbl.BeginList(
+            destination.asRaw(),
+            &slot_budget,
+            &IID_IObjectArray,
+            &raw_removed,
+        ) < 0) return error.BeginListFailed;
+
+        var transaction_open = true;
+        defer if (transaction_open) {
+            const abort_hr = destination.vtbl.AbortList(destination.asRaw());
+            if (abort_hr < 0) log.debug("jump list AbortList failed hr=0x{x}", .{@as(u32, @bitCast(abort_hr))});
+        };
+
+        var removed_arguments: RemovedArguments = .{};
+        defer removed_arguments.deinit(self.alloc);
+        if (raw_removed) |raw| {
+            const removed = IObjectArray.fromRaw(raw);
+            defer removed.release();
+            removed_arguments = try self.readRemovedArguments(removed, exe_w);
+        }
+        if (try self.recents.removeArguments(self.alloc, removed_arguments.items.items)) {
+            self.persist_dirty = true;
+        }
+        for (self.profiles.items) |item| {
+            if (!containsArguments(removed_arguments.items.items, item.arguments)) continue;
+            if (try self.hidden_profiles.insert(self.alloc, item.key)) self.persist_dirty = true;
+        }
+        if (!removed_arguments.complete) return error.RemovedDestinationsIncomplete;
+
+        var visible_profile_count: usize = 0;
+        for (self.profiles.items) |item| {
+            if (!self.hidden_profiles.contains(item.key)) visible_profile_count += 1;
+        }
+        const recent_count = recentSlotCount(
+            slot_budget,
+            self.recents.items.items.len,
+            visible_profile_count,
+        );
+        if (recent_count > 0) {
+            try self.appendRecentCategory(destination, exe_w, recent_count);
+        }
+        if (visible_profile_count > 0) {
+            try self.appendProfilesCategory(destination, exe_w);
+        }
+        // Named layouts (C17, #133) will add a third category here, built
+        // from win32_layouts.listNamesAlloc + launchArgvAlloc rather than
+        // any layout enumeration of our own.
+
+        if (destination.vtbl.CommitList(destination.asRaw()) < 0) return error.CommitListFailed;
+        transaction_open = false;
+    }
+
+    fn appendRecentCategory(
+        self: *JumpList,
+        destination: *ICustomDestinationList,
+        exe_w: [:0]const u16,
+        count: usize,
+    ) !void {
+        const collection = try createObjectCollection();
+        defer collection.release();
+
+        for (self.recents.items.items[0..count]) |path| {
+            const title = try buildTitleAlloc(self.alloc, path);
+            defer self.alloc.free(title);
+            const arguments = try buildWorkingDirectoryArgumentsAlloc(self.alloc, path);
+            defer self.alloc.free(arguments);
+            const link = try self.createShellLink(exe_w, arguments, title, path);
+            defer link.release();
+            if (collection.addObject(link.asRaw()) < 0) return error.AddRecentLinkFailed;
+        }
+
+        const category = std.unicode.utf8ToUtf16LeStringLiteral("Recent");
+        if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
+            return error.AppendRecentCategoryFailed;
+        }
+    }
+
+    fn appendProfilesCategory(
+        self: *JumpList,
+        destination: *ICustomDestinationList,
+        exe_w: [:0]const u16,
+    ) !void {
+        const collection = try createObjectCollection();
+        defer collection.release();
+
+        for (self.profiles.items) |item| {
+            if (self.hidden_profiles.contains(item.key)) continue;
+            const link = try self.createShellLink(exe_w, item.arguments, item.title, null);
+            defer link.release();
+            if (collection.addObject(link.asRaw()) < 0) return error.AddProfileLinkFailed;
+        }
+
+        const category = std.unicode.utf8ToUtf16LeStringLiteral("Profiles");
+        if (destination.vtbl.AppendCategory(destination.asRaw(), category, collection.asArray()) < 0) {
+            return error.AppendProfilesCategoryFailed;
+        }
+    }
+
+    fn readRemovedArguments(
+        self: *JumpList,
+        removed: *IObjectArray,
+        exe_w: [:0]const u16,
+    ) !RemovedArguments {
+        var result: RemovedArguments = .{};
+        errdefer result.deinit(self.alloc);
+
+        var count: UINT = 0;
+        if (removed.vtbl.GetCount(removed.asRaw(), &count) < 0) {
+            log.debug("jump list removed item count unavailable", .{});
+            result.complete = false;
+            return result;
+        }
+        const path_buffer = try self.alloc.alloc(u16, max_shell_link_chars);
+        defer self.alloc.free(path_buffer);
+        const arguments_buffer = try self.alloc.alloc(u16, max_shell_link_chars);
+        defer self.alloc.free(arguments_buffer);
+
+        for (0..count) |index| {
+            var raw_link: ?*anyopaque = null;
+            const get_hr = removed.vtbl.GetAt(
+                removed.asRaw(),
+                @intCast(index),
+                &IID_IShellLinkW,
+                &raw_link,
+            );
+            if (get_hr == E_NOINTERFACE) continue;
+            if (get_hr < 0 or raw_link == null) {
+                log.debug("jump list removed item ignored index={d} hr=0x{x}", .{
+                    index,
+                    @as(u32, @bitCast(get_hr)),
+                });
+                result.complete = false;
+                continue;
+            }
+            const link = IShellLinkW.fromRaw(raw_link.?);
+            defer link.release();
+
+            @memset(path_buffer, 0);
+            if (link.vtbl.GetPath(
+                link.asRaw(),
+                path_buffer.ptr,
+                @intCast(path_buffer.len),
+                null,
+                0,
+            ) < 0) {
+                log.debug("jump list removed link path unavailable index={d}", .{index});
+                result.complete = false;
+                continue;
+            }
+            const path_len = std.mem.indexOfScalar(u16, path_buffer, 0) orelse {
+                log.debug("jump list removed link path too long index={d}", .{index});
+                result.complete = false;
+                continue;
+            };
+            const path_comparison = CompareStringOrdinal(
+                exe_w.ptr,
+                @intCast(exe_w.len),
+                path_buffer.ptr,
+                @intCast(path_len),
+                1,
+            );
+            if (path_comparison == 0) {
+                log.debug("jump list removed link path comparison failed index={d}", .{index});
+                result.complete = false;
+                continue;
+            }
+            if (path_comparison != 2) continue;
+
+            @memset(arguments_buffer, 0);
+            if (link.vtbl.GetArguments(
+                link.asRaw(),
+                arguments_buffer.ptr,
+                @intCast(arguments_buffer.len),
+            ) < 0) {
+                log.debug("jump list removed link arguments unavailable index={d}", .{index});
+                result.complete = false;
+                continue;
+            }
+            const arguments_len = std.mem.indexOfScalar(u16, arguments_buffer, 0) orelse {
+                log.debug("jump list removed link arguments too long index={d}", .{index});
+                result.complete = false;
+                continue;
+            };
+            const arguments = std.unicode.utf16LeToUtf8Alloc(
+                self.alloc,
+                arguments_buffer[0..arguments_len],
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    log.debug("jump list removed link arguments invalid index={d} err={}", .{ index, err });
+                    result.complete = false;
+                    continue;
+                },
+            };
+            errdefer self.alloc.free(arguments);
+            try result.items.append(self.alloc, arguments);
+        }
+        return result;
+    }
+
+    fn createShellLink(
+        self: *JumpList,
+        exe_w: [:0]const u16,
+        arguments: []const u8,
+        title: []const u8,
+        working_directory: ?[]const u8,
+    ) !*IShellLinkW {
+        var raw_link: ?*anyopaque = null;
+        const create_hr = CoCreateInstance(
+            &CLSID_ShellLink,
+            null,
+            CLSCTX_INPROC_SERVER,
+            &IID_IShellLinkW,
+            &raw_link,
+        );
+        if (create_hr == CO_E_NOTINITIALIZED) return error.ComNotInitialized;
+        if (create_hr < 0 or raw_link == null) return error.ShellLinkUnavailable;
+        const link = IShellLinkW.fromRaw(raw_link.?);
+        errdefer link.release();
+
+        const arguments_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, arguments);
+        defer self.alloc.free(arguments_w);
+        const title_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, title);
+        defer self.alloc.free(title_w);
+
+        if (link.vtbl.SetPath(link.asRaw(), exe_w.ptr) < 0) return error.SetLinkPathFailed;
+        if (link.vtbl.SetArguments(link.asRaw(), arguments_w.ptr) < 0) return error.SetLinkArgumentsFailed;
+        if (link.vtbl.SetIconLocation(link.asRaw(), exe_w.ptr, 0) < 0) return error.SetLinkIconFailed;
+
+        if (working_directory) |path| {
+            const path_w = try std.unicode.utf8ToUtf16LeAllocZ(self.alloc, path);
+            defer self.alloc.free(path_w);
+            if (link.vtbl.SetWorkingDirectory(link.asRaw(), path_w.ptr) < 0) {
+                return error.SetLinkWorkingDirectoryFailed;
+            }
+        }
+
+        var raw_store: ?*anyopaque = null;
+        if (link.vtbl.QueryInterface(link.asRaw(), &IID_IPropertyStore, &raw_store) < 0 or raw_store == null) {
+            return error.PropertyStoreUnavailable;
+        }
+        const store = IPropertyStore.fromRaw(raw_store.?);
+        defer store.release();
+
+        const aumid_w = std.unicode.utf8ToUtf16LeStringLiteral(win32_aumid.aumid_utf8);
+        const aumid_value = PROPVARIANT.fromString(aumid_w);
+        if (store.setValue(&PKEY_AppUserModel_ID, &aumid_value) < 0) return error.SetLinkAumidFailed;
+        const title_value = PROPVARIANT.fromString(title_w);
+        if (store.setValue(&PKEY_Title, &title_value) < 0) return error.SetLinkTitleFailed;
+        if (store.vtbl.Commit(store.asRaw()) < 0) return error.CommitLinkPropertiesFailed;
+
+        return link;
+    }
+};
+
+fn profileItemsEqual(lhs: []const ProfileItem, rhs: []const ProfileItem) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left.key, right.key) or
+            !std.mem.eql(u8, left.title, right.title) or
+            !std.mem.eql(u8, left.arguments, right.arguments)) return false;
+    }
+    return true;
+}
+
+fn createObjectCollection() !*IObjectCollection {
+    var raw_collection: ?*anyopaque = null;
+    const create_hr = CoCreateInstance(
+        &CLSID_EnumerableObjectCollection,
+        null,
+        CLSCTX_INPROC_SERVER,
+        &IID_IObjectCollection,
+        &raw_collection,
+    );
+    if (create_hr == CO_E_NOTINITIALIZED) return error.ComNotInitialized;
+    if (create_hr < 0 or raw_collection == null) return error.ObjectCollectionUnavailable;
+    return IObjectCollection.fromRaw(raw_collection.?);
+}
+
+test "jump_list recent insert dedupes case insensitively and keeps newest first" {
+    var recent: RecentList = .{};
+    defer recent.deinit(std.testing.allocator);
+
+    try std.testing.expect(try recent.insert(std.testing.allocator, "C:\\one"));
+    try std.testing.expect(try recent.insert(std.testing.allocator, "D:\\two"));
+    try std.testing.expect(try recent.insert(std.testing.allocator, "E:\\three"));
+    try std.testing.expect(try recent.insert(std.testing.allocator, "c:\\ONE"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "C:\\one"));
+
+    try std.testing.expectEqual(@as(usize, 3), recent.items.items.len);
+    try std.testing.expectEqualStrings("C:\\one", recent.items.items[0]);
+    try std.testing.expectEqualStrings("E:\\three", recent.items.items[1]);
+    try std.testing.expectEqualStrings("D:\\two", recent.items.items[2]);
+
+    var unicode: RecentList = .{};
+    defer unicode.deinit(std.testing.allocator);
+    try std.testing.expect(try unicode.insert(std.testing.allocator, "C:\\Üser\\Source"));
+    try std.testing.expect(!try unicode.insert(std.testing.allocator, "c:\\üSER\\source"));
+    try std.testing.expectEqual(@as(usize, 1), unicode.items.items.len);
+}
+
+test "jump_list recent insert caps at ten and rejects nonlocal paths" {
+    var recent: RecentList = .{};
+    defer recent.deinit(std.testing.allocator);
+
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "relative\\path"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "\\\\server\\share"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "/mnt/c/project"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "C:relative"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "C:\\bad*name"));
+    try std.testing.expect(!try recent.insert(std.testing.allocator, "C:\\bad\tname"));
+    const invalid_utf8 = [_]u8{ 'C', ':', '\\', 0xFF };
+    try std.testing.expect(!try recent.insert(std.testing.allocator, &invalid_utf8));
+
+    var buffer: [32]u8 = undefined;
+    for (0..12) |index| {
+        const path = try std.fmt.bufPrint(&buffer, "C:\\project-{d}", .{index});
+        try std.testing.expect(try recent.insert(std.testing.allocator, path));
+    }
+    try std.testing.expectEqual(max_recents, recent.items.items.len);
+    try std.testing.expectEqualStrings("C:\\project-11", recent.items.items[0]);
+    try std.testing.expectEqualStrings("C:\\project-2", recent.items.items[9]);
+}
+
+test "jump_list JSON round trips and corrupt or oversized state starts empty" {
+    const values = [_][]const u8{ "C:\\src\\noctty", "D:\\work" };
+    const hidden_profiles = [_][]const u8{"wsl:Ubuntu"};
+    const encoded = try encodeRecentStateAlloc(std.testing.allocator, &values, &hidden_profiles);
+    defer std.testing.allocator.free(encoded);
+    var parsed = try parseRecentStateAlloc(std.testing.allocator, encoded);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(values[0], parsed.value.directories[0]);
+    try std.testing.expectEqualStrings(values[1], parsed.value.directories[1]);
+    try std.testing.expectEqualStrings(hidden_profiles[0], parsed.value.hidden_profiles[0]);
+    try std.testing.expectError(
+        error.SyntaxError,
+        parseRecentStateAlloc(std.testing.allocator, "{not json"),
+    );
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var file = try tmp.dir.createFile("corrupt.json", .{});
+        defer file.close();
+        try file.writeAll("{not json");
+    }
+    const corrupt_path = try tmp.dir.realpathAlloc(std.testing.allocator, "corrupt.json");
+    defer std.testing.allocator.free(corrupt_path);
+    var corrupt = loadStateAlloc(std.testing.allocator, corrupt_path);
+    defer corrupt.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), corrupt.recents.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), corrupt.hidden_profiles.items.items.len);
+
+    {
+        var file = try tmp.dir.createFile("oversized.json", .{});
+        defer file.close();
+        var remaining = max_state_bytes + 1;
+        const chunk = [_]u8{'x'} ** 1024;
+        while (remaining > 0) {
+            const count = @min(remaining, chunk.len);
+            try file.writeAll(chunk[0..count]);
+            remaining -= count;
+        }
+    }
+    const oversized_path = try tmp.dir.realpathAlloc(std.testing.allocator, "oversized.json");
+    defer std.testing.allocator.free(oversized_path);
+    var oversized = loadStateAlloc(std.testing.allocator, oversized_path);
+    defer oversized.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), oversized.recents.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), oversized.hidden_profiles.items.items.len);
+
+    const oversized_key = try std.testing.allocator.alloc(u8, max_state_bytes);
+    defer std.testing.allocator.free(oversized_key);
+    @memset(oversized_key, 'x');
+    try std.testing.expectError(
+        error.StateTooLarge,
+        encodeRecentStateAlloc(std.testing.allocator, &.{}, &.{oversized_key}),
+    );
+}
+
+test "jump_list titles drop bidi controls and keep everything else" {
+    const testing = std.testing;
+
+    // U+202E RIGHT-TO-LEFT OVERRIDE around a segment is what lets a seeded
+    // entry render as a path it does not point at.
+    const spoofed = try buildTitleAlloc(
+        testing.allocator,
+        "C:\\Users\\a\\\u{202E}gpj.exe\u{202C}",
+    );
+    defer testing.allocator.free(spoofed);
+    try testing.expectEqualStrings("C:\\Users\\a\\gpj.exe", spoofed);
+
+    // Ordinary non-ASCII is untouched.
+    const unicode_path = try buildTitleAlloc(testing.allocator, "D:\\\u{9805}\u{76EE}\\\u{1F680}");
+    defer testing.allocator.free(unicode_path);
+    try testing.expectEqualStrings("D:\\\u{9805}\u{76EE}\\\u{1F680}", unicode_path);
+
+    // Invalid UTF-8 is copied through rather than silently emptied.
+    const invalid = try buildTitleAlloc(testing.allocator, "C:\\bad\xff");
+    defer testing.allocator.free(invalid);
+    try testing.expectEqualStrings("C:\\bad\xff", invalid);
+}
+
+test "jump_list argument builders preserve Windows argv boundaries" {
+    const recent = try buildWorkingDirectoryArgumentsAlloc(
+        std.testing.allocator,
+        "C:\\Users\\Aman Thanvi\\src",
+    );
+    defer std.testing.allocator.free(recent);
+    try std.testing.expectEqualStrings(
+        "\"--working-directory=C:\\Users\\Aman Thanvi\\src\"",
+        recent,
+    );
+
+    const profile = try buildProfileArgumentsAlloc(std.testing.allocator, .{
+        .direct = &.{ "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "-NoLogo", "a b" },
+    });
+    defer std.testing.allocator.free(profile);
+    try std.testing.expectEqualStrings(
+        "--working-directory=home \"--command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\" \"--initial-command=direct:\\\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\\\" -NoLogo \\\"a b\\\"\"",
+        profile,
+    );
+
+    var argv = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, profile);
+    defer argv.deinit();
+    try std.testing.expectEqualStrings("--working-directory=home", argv.next().?);
+    const command_option = argv.next().?;
+    const initial_command_option = argv.next().?;
+    try std.testing.expect(argv.next() == null);
+    try std.testing.expect(std.mem.startsWith(u8, command_option, "--command="));
+    try std.testing.expect(std.mem.startsWith(u8, initial_command_option, "--initial-command="));
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed_command: Command = undefined;
+    try parsed_command.parseCLI(arena.allocator(), command_option["--command=".len..]);
+    try std.testing.expect(parsed_command == .direct);
+    try std.testing.expectEqual(@as(usize, 3), parsed_command.direct.len);
+    try std.testing.expectEqualStrings("C:\\Program Files\\PowerShell\\7\\pwsh.exe", parsed_command.direct[0]);
+    try std.testing.expectEqualStrings("-NoLogo", parsed_command.direct[1]);
+    try std.testing.expectEqualStrings("a b", parsed_command.direct[2]);
+    var parsed_initial_command: Command = undefined;
+    try parsed_initial_command.parseCLI(
+        arena.allocator(),
+        initial_command_option["--initial-command=".len..],
+    );
+    try std.testing.expectEqualDeep(parsed_command, parsed_initial_command);
+    try std.testing.expectError(
+        error.UnsupportedProfileCommand,
+        buildProfileArgumentsAlloc(std.testing.allocator, .{ .shell = "pwsh.exe" }),
+    );
+}
+
+test "jump_list removed recent arguments clear tracked entries" {
+    var recent: RecentList = .{};
+    defer recent.deinit(std.testing.allocator);
+    try std.testing.expect(try recent.insert(std.testing.allocator, "C:\\one"));
+    try std.testing.expect(try recent.insert(std.testing.allocator, "D:\\two"));
+    const removed = try buildWorkingDirectoryArgumentsAlloc(std.testing.allocator, "C:\\one");
+    defer std.testing.allocator.free(removed);
+
+    try std.testing.expect(try recent.removeArguments(std.testing.allocator, &.{removed}));
+    try std.testing.expectEqual(@as(usize, 1), recent.items.items.len);
+    try std.testing.expectEqualStrings("D:\\two", recent.items.items[0]);
+    try std.testing.expect(!try recent.removeArguments(std.testing.allocator, &.{removed}));
+}
+
+test "jump_list slot budget reserves profiles before recents" {
+    try std.testing.expectEqual(@as(usize, 5), recentSlotCount(10, 10, 5));
+    try std.testing.expectEqual(@as(usize, 1), recentSlotCount(3, 10, 5));
+    try std.testing.expectEqual(@as(usize, 3), recentSlotCount(3, 10, 0));
+    try std.testing.expectEqual(@as(usize, 0), recentSlotCount(0, 10, 2));
+    try std.testing.expectEqual(@as(usize, 1), recentSlotCount(1, 10, 2));
+    try std.testing.expectEqual(@as(usize, 2), recentSlotCount(10, 2, 2));
+}
+
+test "jump_list removed profile tombstone persists until profile use" {
+    var hidden: ProfileTombstones = .{};
+    defer hidden.deinit(std.testing.allocator);
+    try std.testing.expect(try hidden.insert(std.testing.allocator, "wsl:Ubuntu"));
+    try std.testing.expect(!try hidden.insert(std.testing.allocator, "wsl:Ubuntu"));
+    try std.testing.expect(hidden.contains("wsl:Ubuntu"));
+    try std.testing.expect(hidden.remove(std.testing.allocator, "wsl:Ubuntu"));
+    try std.testing.expect(!hidden.contains("wsl:Ubuntu"));
+    try std.testing.expect(!hidden.remove(std.testing.allocator, "wsl:Ubuntu"));
+
+    var key_buffer: [32]u8 = undefined;
+    for (0..max_profile_tombstones + 1) |index| {
+        const key = try std.fmt.bufPrint(&key_buffer, "wsl:distro-{d}", .{index});
+        try std.testing.expect(try hidden.insert(std.testing.allocator, key));
+    }
+    try std.testing.expectEqual(max_profile_tombstones, hidden.items.items.len);
+    try std.testing.expect(!hidden.contains("wsl:distro-0"));
+    try std.testing.expect(hidden.contains("wsl:distro-128"));
+}
+
+test "jump_list rebuild retry budget is bounded" {
+    var retry_count: u8 = 0;
+    var expected: u8 = 1;
+    while (expected <= max_rebuild_retries) : (expected += 1) {
+        retry_count = nextRebuildRetryCount(retry_count).?;
+        try std.testing.expectEqual(expected, retry_count);
+    }
+    try std.testing.expect(nextRebuildRetryCount(retry_count) == null);
+}
+
+test "jump_list raw COM interfaces preserve pointer layout and PROPVARIANT ABI" {
+    const pointer_size = @sizeOf(*anyopaque);
+
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(ICustomDestinationList, "vtbl"));
+    try std.testing.expectEqual(3 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "SetAppID"));
+    try std.testing.expectEqual(4 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "BeginList"));
+    try std.testing.expectEqual(5 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "AppendCategory"));
+    try std.testing.expectEqual(8 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "CommitList"));
+    try std.testing.expectEqual(9 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "GetRemovedDestinations"));
+    try std.testing.expectEqual(11 * pointer_size, @offsetOf(ICustomDestinationListVtbl, "AbortList"));
+    try std.testing.expectEqual(5 * pointer_size, @offsetOf(IObjectCollectionVtbl, "AddObject"));
+    try std.testing.expectEqual(10 * pointer_size, @offsetOf(IShellLinkWVtbl, "GetArguments"));
+    try std.testing.expectEqual(11 * pointer_size, @offsetOf(IShellLinkWVtbl, "SetArguments"));
+    try std.testing.expectEqual(17 * pointer_size, @offsetOf(IShellLinkWVtbl, "SetIconLocation"));
+    try std.testing.expectEqual(20 * pointer_size, @offsetOf(IShellLinkWVtbl, "SetPath"));
+    try std.testing.expectEqual(6 * pointer_size, @offsetOf(IPropertyStoreVtbl, "SetValue"));
+    try std.testing.expectEqual(7 * pointer_size, @offsetOf(IPropertyStoreVtbl, "Commit"));
+
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(PROPERTYKEY, "fmtid"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(PROPERTYKEY, "pid"));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(PROPERTYKEY));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(PROPVARIANT, "vt"));
+    try std.testing.expectEqual(@as(usize, 2), @offsetOf(PROPVARIANT, "reserved1"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(PROPVARIANT, "reserved2"));
+    try std.testing.expectEqual(@as(usize, 6), @offsetOf(PROPVARIANT, "reserved3"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(PROPVARIANT, "value"));
+    try std.testing.expectEqual(if (@sizeOf(usize) == 8) @as(usize, 24) else 16, @sizeOf(PROPVARIANT));
+}
+
+test "jump_list property keys and AUMID match Windows shell contracts" {
+    try std.testing.expectEqualDeep(
+        GUID.parse("{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}"),
+        PKEY_AppUserModel_ID.fmtid,
+    );
+    try std.testing.expectEqual(@as(DWORD, 5), PKEY_AppUserModel_ID.pid);
+    try std.testing.expectEqualDeep(
+        GUID.parse("{F29F85E0-4FF9-1068-AB91-08002B27B3D9}"),
+        PKEY_Title.fmtid,
+    );
+    try std.testing.expectEqualStrings("io.github.amanthanvi.noctty", win32_aumid.aumid_utf8);
+}

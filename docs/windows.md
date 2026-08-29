@@ -240,6 +240,18 @@ registration time only when noctty is still selected, then removes noctty's
 per-user COM registration. It does not overwrite a default-terminal choice
 made after noctty was registered. Both commands are idempotent.
 
+## Launch topology
+
+The taskbar jump list has two categories:
+
+- **Recent** lists up to 10 absolute local working directories reported by
+  shell pwd/OSC integration, newest first. Selecting an entry launches noctty
+  in that directory. Entries persist in
+  `%LOCALAPPDATA%\noctty\jump-list-recents.json`; to clear them, close noctty,
+  delete that file, and start noctty once so Windows receives the empty list.
+- **Profiles** lists the detected shell profiles. Selecting an entry launches
+  noctty with that profile's command.
+
 ## Notifications and progress
 
 Desktop notifications use WinRT toasts when available and fall back to

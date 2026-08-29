@@ -35,6 +35,7 @@ const win32_clipboard_html = @import("win32_clipboard_html.zig");
 const win32_undo = @import("win32_undo.zig");
 const win32_toast_winrt = @import("win32_toast_winrt.zig");
 const win32_taskbar_progress = @import("win32_taskbar_progress.zig");
+const win32_jump_list = @import("win32_jump_list.zig");
 const win32_powershell_install = @import("win32_powershell_install.zig");
 const win32_link_preview = @import("win32_link_preview.zig");
 const win32_quick_terminal = @import("win32_quick_terminal.zig");
@@ -2459,6 +2460,9 @@ pub const App = struct {
     /// unavailable, in which case progress continues to render only in
     /// the window title/status text.
     taskbar_progress: ?win32_taskbar_progress.TaskbarProgress = null,
+    /// Persisted taskbar destinations and their debounced shell COM commit.
+    /// `null` when the app-state path cannot be resolved or initialized.
+    jump_list: ?win32_jump_list.JumpList = null,
     toast_activation_post_pending: std.atomic.Value(bool) = .init(false),
     /// Absolute path supplied via `--config-file <path>` on the CLI.
     /// Resolved ONCE against the startup cwd during `App.init` — that's
@@ -2598,6 +2602,13 @@ pub const App = struct {
             std.log.warn("taskbar progress init failed err={}; falling back to title-only progress", .{err});
             break :blk null;
         };
+        if (localAppDataPathAlloc(core_app.alloc, win32_jump_list.state_filename)) |path| {
+            defer core_app.alloc.free(path);
+            self.jump_list = win32_jump_list.JumpList.init(core_app.alloc, path) catch |err| blk: {
+                log.warn("jump list state init failed err={}", .{err});
+                break :blk null;
+            };
+        }
         self.refreshSystemWheelSettings();
         self.refreshSystemScrollbarPreference();
         self.resolved_theme = resolveTheme(&self.config);
@@ -2747,6 +2758,7 @@ pub const App = struct {
             log.info("initial-window is disabled; win32 runtime waiting without a window", .{});
         }
 
+        if (!self.embedding_mode) self.initializeJumpList();
         if (!self.embedding_mode) self.scheduleGlobalHotkeySync();
         if (!self.embedding_mode and self.global_hotkeys_dirty and self.windows.items.len == 0) {
             self.global_hotkeys_dirty = false;
@@ -2876,6 +2888,28 @@ pub const App = struct {
                         continue;
                     }
                 }
+                // Our timer is a thread timer (`SetTimer(null, ...)`), which
+                // posts with a null hwnd. Checking that keeps us from
+                // swallowing a window timer whose numeric id happens to
+                // collide.
+                if (self.jump_list) |*jump_list| {
+                    if (@intFromPtr(msg.hwnd) == 0 and jump_list.handleTimer(msg.wParam)) {
+                        // Profile discovery is app-wide, so any host will do —
+                        // `initial-window=false` starts without a primary
+                        // surface. The request stays pending until one exists.
+                        if (self.hosts.items.len > 0 and
+                            jump_list.takeStartupProfileDiscovery())
+                        {
+                            const host = self.hosts.items[0];
+                            if (host.profiles == null) {
+                                _ = host.ensureProfiles() catch |err| {
+                                    log.warn("jump list deferred profile discovery failed err={}", .{err});
+                                };
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if (self.quit_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
                         self.stopQuitTimer();
@@ -2981,6 +3015,10 @@ pub const App = struct {
             taskbar.deinit();
             self.taskbar_progress = null;
         }
+        if (self.jump_list) |*jump_list| {
+            jump_list.deinit();
+            self.jump_list = null;
+        }
         if (self.cli_config_override_path) |path| {
             self.core_app.alloc.free(path);
             self.cli_config_override_path = null;
@@ -3002,6 +3040,11 @@ pub const App = struct {
     /// or allocation fails.
     fn localAppDataPath(self: *const App, name: []const u8) ?[]u8 {
         return localAppDataPathAlloc(self.core_app.alloc, name);
+    }
+
+    fn initializeJumpList(self: *App) void {
+        const jump_list = if (self.jump_list) |*value| value else return;
+        jump_list.startup();
     }
 
     /// Resolve `%LOCALAPPDATA%\noctty\palette-mru.txt`. Caller frees
@@ -5079,6 +5122,7 @@ pub const App = struct {
             .pwd => {
                 if (self.findSurfaceForTarget(target)) |surface| {
                     try surface.setPwd(value.pwd);
+                    if (self.jump_list) |*jump_list| jump_list.noteRecent(value.pwd);
                     return true;
                 }
 
@@ -5983,6 +6027,7 @@ pub const App = struct {
             }
             self.removeHost(host);
         }
+        if (self.jump_list) |*jump_list| jump_list.scheduleIfStartupPending();
         if (clone_state_from) |source| {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
@@ -11597,6 +11642,7 @@ const Host = struct {
         );
         if (self.profiles) |profiles| windows_shell.deinitProfiles(self.app.core_app.alloc, profiles);
         self.profiles = next_profiles;
+        if (self.app.jump_list) |*jump_list| jump_list.updateProfiles(next_profiles);
         if (replacing and self.overlay_mode == .command_palette) self.rebuildPaletteList();
         self.app.applyLauncherQuickSlotPreferences(self.profiles.?);
         const profiles = self.profiles.?;
@@ -11767,6 +11813,7 @@ const Host = struct {
         const profile = self.selectedProfile() orelse return false;
         const source = self.activeSurface() orelse return false;
         const surface = self.app.createProfileSurface(.{ .surface = source.core() }, profile, open_target) catch return false;
+        if (self.app.jump_list) |*jump_list| jump_list.noteProfileUsed(profile.key);
         if (self.overlay_mode == .profile) {
             self.hideOverlay();
             runUiActionOrLog("profile launch layout failed", self.layout());
