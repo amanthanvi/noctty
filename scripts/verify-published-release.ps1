@@ -72,7 +72,16 @@ function Test-GhAttestationAvailable {
     & gh attestation verify --help *> $null
     if ($LASTEXITCODE -eq 0) { return $true }
 
-    Write-Warning 'Skipping build provenance attestation verification: the installed GitHub CLI does not provide the gh attestation verify subcommand. Upgrade gh to verify provenance.'
+    # An old gh cannot prove provenance either way. Interactively that is a
+    # degraded-but-useful run, so warn and continue. In CI this script is the
+    # post-publish gate, so a probe that cannot verify must fail the run rather
+    # than let an unattested release pass silently.
+    $message = 'the installed GitHub CLI does not provide the gh attestation verify subcommand'
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        throw "Cannot verify build provenance attestations: $message. Upgrade gh on the runner."
+    }
+
+    Write-Warning "Skipping build provenance attestation verification: $message. Upgrade gh to verify provenance."
     return $false
 }
 
