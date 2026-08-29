@@ -10618,7 +10618,7 @@ const Host = struct {
         // widths survive, while the integrated-caption policy
         // (caption row inside client + maximized invisible-margin
         // compensation) stays centralized in `win32_nc_layout`.
-        const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
+        const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState = if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const adjusted = win32_nc_layout.calcNcClientRect(.{
             .left = params.rgrc[0].left,
@@ -10649,7 +10649,7 @@ const Host = struct {
             .bottom = win_rect.bottom,
         };
         const cursor: win32_nc_layout.Point = .{ .x = cx, .y = cy };
-        const metrics = win32_nc_layout.metricsDefault(self.current_dpi);
+        const metrics = self.ncMetrics();
         const state: win32_nc_layout.WindowState =
             if (sys.IsZoomed(hwnd) != 0) .maximized else .normal;
         const ht = win32_nc_layout.hitTest(window_rect, cursor, metrics, state);
@@ -10781,7 +10781,12 @@ const Host = struct {
         const hwnd = self.hwnd orelse return 0;
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) return 0;
-        const list_top = self.tabBarHeight() + self.scaled(host_overlay_height);
+        const bands = self.contentBands(
+            self.tabBarHeight(),
+            self.scaled(host_overlay_height),
+            0,
+        );
+        const list_top = bands.inspector_top;
         return paletteVisibleRowCapacity(
             rect.bottom - list_top - self.scaled(8),
             self.scaled(palette_row_height),
@@ -14757,7 +14762,13 @@ const Host = struct {
         focused: bool,
         hovered: bool,
     ) void {
-        const theme = &self.app.resolved_theme;
+        const titlebar_theme = clientTitlebarTheme(
+            &self.app.resolved_theme,
+            &self.app.config,
+            self.usingIntegratedTitlebar(),
+            isHighContrastActive(),
+        );
+        const theme = &titlebar_theme;
         const parent_bg = theme.chrome_bg;
         const is_hc = isHighContrastActive();
         fillSolidRect(draw.hDC, draw.rcItem, parent_bg);
@@ -14813,7 +14824,13 @@ const Host = struct {
         const tab_button = self.isTabButton(draw.hwndItem);
         const search_role = self.searchBarButtonRole(draw.hwndItem);
         const icon = self.searchBarButtonIcon(draw.hwndItem);
-        const theme = &self.app.resolved_theme;
+        const titlebar_theme = clientTitlebarTheme(
+            &self.app.resolved_theme,
+            &self.app.config,
+            tab_button and self.usingIntegratedTitlebar(),
+            isHighContrastActive(),
+        );
+        const theme = &titlebar_theme;
         if (search_role) |role| {
             self.drawSearchBarButton(
                 draw,
@@ -15371,6 +15388,31 @@ const Host = struct {
         return self.scaled(base);
     }
 
+    fn contentBands(
+        self: *const Host,
+        tab_bottom: i32,
+        overlay_height: i32,
+        inspector_height: i32,
+    ) win32_nc_layout.ContentBands {
+        const caption_bottom = if (self.usingIntegratedTitlebar())
+            self.ncMetrics().caption_button_h
+        else
+            0;
+        return win32_nc_layout.contentBands(
+            tab_bottom,
+            caption_bottom,
+            overlay_height,
+            inspector_height,
+        );
+    }
+
+    fn ncMetrics(self: *const Host) win32_nc_layout.Metrics {
+        return win32_nc_layout.metricsDefault(
+            self.current_dpi,
+            host_caption_button_h,
+        );
+    }
+
     fn rightButtonsWidth(self: *const Host) i32 {
         if (self.usingIntegratedTitlebar()) {
             return self.scaled(host_titlebar_action_button_size) * 2 + self.scaled(12);
@@ -15439,21 +15481,26 @@ const Host = struct {
         return x;
     }
 
+    fn contentRectFromClient(self: *Host, rect: RECT) RECT {
+        const tab_offset: i32 = self.tabBarHeight();
+        const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
+        const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
+        const bands = self.contentBands(tab_offset, overlay_offset, inspector_offset);
+        return .{
+            .left = 0,
+            .top = bands.content_top,
+            .right = rect.right,
+            .bottom = @max(bands.content_top + 1, rect.bottom - statusBarHeight()),
+        };
+    }
+
     fn contentRect(self: *Host) !RECT {
         const hwnd = self.hwnd orelse return error.InvalidHost;
         var rect: RECT = undefined;
         if (sys.GetClientRect(hwnd, &rect) == 0) {
             return lastError();
         }
-        const tab_offset: i32 = self.tabBarHeight();
-        const overlay_offset: i32 = if (self.overlay_mode == .none) 0 else self.scaled(host_overlay_height);
-        const inspector_offset: i32 = if (self.inspectorPanelVisible()) self.scaled(host_inspector_panel_height) else 0;
-        return .{
-            .left = 0,
-            .top = tab_offset + overlay_offset + inspector_offset,
-            .right = rect.right,
-            .bottom = @max(tab_offset + 1, rect.bottom - statusBarHeight()),
-        };
+        return self.contentRectFromClient(rect);
     }
 
     fn close(self: *Host) void {
@@ -16183,7 +16230,12 @@ const Host = struct {
             const edit_hwnd = self.overlay_edit_hwnd orelse return false;
             const accept_hwnd = self.overlay_accept_hwnd orelse return false;
             const cancel_hwnd = self.overlay_cancel_hwnd orelse return false;
-            const overlay_y = self.tabBarHeight();
+            const bands = self.contentBands(
+                self.tabBarHeight(),
+                self.scaled(host_overlay_height),
+                0,
+            );
+            const overlay_y = bands.overlay_top;
             const padding = self.scaled(host_overlay_padding);
             const label_w = self.scaled(host_overlay_label_width);
             const accept_button_w = self.scaled(host_overlay_accept_width);
@@ -16571,7 +16623,7 @@ const Host = struct {
         theme: *const win32_theme.ThemeColors,
     ) void {
         const cb_w = self.scaled(host_caption_button_w);
-        const cb_h = self.scaled(host_caption_button_h);
+        const cb_h = self.ncMetrics().caption_button_h;
         if (cb_w <= 0 or cb_h <= 0) return;
 
         const maximized = if (self.hwnd) |h| sys.IsZoomed(h) != 0 else false;
@@ -16619,6 +16671,18 @@ const Host = struct {
         paint_top: bool,
         theme: *const ThemeColors,
     ) void {
+        // The client-drawn band is what the user actually sees while the
+        // integrated titlebar is active, so `window-titlebar-background` /
+        // `-foreground` have to reach it here rather than only the DWM
+        // caption. Unconfigured, this is byte-identical to `theme`.
+        const titlebar_theme_value = clientTitlebarTheme(
+            theme,
+            &self.app.config,
+            self.usingIntegratedTitlebar(),
+            isHighContrastActive(),
+        );
+        const titlebar_theme = &titlebar_theme_value;
+
         // Tab bar (only when visible)
         if (paint_top and tab_h > 0) {
             const tab_rect = RECT{
@@ -16627,7 +16691,7 @@ const Host = struct {
                 .right = client_rect.right,
                 .bottom = tab_h,
             };
-            fillSolidRect(hdc, tab_rect, theme.chrome_bg);
+            fillSolidRect(hdc, tab_rect, titlebar_theme.chrome_bg);
 
             // Focused-tab accent underline. Lives in the 2 px gap
             // between the tab button's bottom edge (button_height = tab_h
@@ -16661,7 +16725,7 @@ const Host = struct {
                     .right = client_rect.right,
                     .bottom = @max(1, self.scaled(2)),
                 },
-                themeSurface(theme, .tab_accent),
+                themeSurface(titlebar_theme, .tab_accent),
             );
             if (!self.usingIntegratedTitlebar()) {
                 const cluster_left = @max(self.scaled(8), client_rect.right - self.rightButtonsWidth() - self.scaled(4));
@@ -16675,8 +16739,8 @@ const Host = struct {
                     drawRoundedRect(
                         hdc,
                         cluster_rect,
-                        themeSurface(theme, .caption_cluster_bg),
-                        themeSurface(theme, .caption_cluster_border),
+                        themeSurface(titlebar_theme, .caption_cluster_bg),
+                        themeSurface(titlebar_theme, .caption_cluster_border),
                         self.scaled(6),
                     );
                     if (cluster_left > self.scaled(14)) {
@@ -16695,7 +16759,7 @@ const Host = struct {
             // from our NC mouse handlers so Snap Layout hover remains
             // intact while the visuals stay app-owned.
             if (self.usingIntegratedTitlebar()) {
-                self.paintCaptionButtons(hdc, client_rect, theme);
+                self.paintCaptionButtons(hdc, client_rect, titlebar_theme);
             }
 
             fillSolidRect(
@@ -16706,7 +16770,7 @@ const Host = struct {
                     .right = client_rect.right,
                     .bottom = tab_h,
                 },
-                theme.chrome_border,
+                titlebar_theme.chrome_border,
             );
         } // end tab bar painting
     }
@@ -16717,15 +16781,16 @@ const Host = struct {
         alloc: Allocator,
         client_rect: RECT,
         tab_h: i32,
+        bands: win32_nc_layout.ContentBands,
         paint_top: bool,
         theme: *const ThemeColors,
     ) bool {
         if (paint_top and self.overlay_mode != .none) {
             const overlay_rect = RECT{
                 .left = 0,
-                .top = tab_h,
+                .top = bands.overlay_top,
                 .right = client_rect.right,
-                .bottom = tab_h + self.scaled(host_overlay_height),
+                .bottom = bands.inspector_top,
             };
             fillSolidRect(hdc, overlay_rect, theme.overlay_bg);
             const overlay_panel = RECT{
@@ -17082,8 +17147,7 @@ const Host = struct {
         hdc: HDC,
         alloc: Allocator,
         client_rect: RECT,
-        tab_h: i32,
-        overlay_offset: i32,
+        bands: win32_nc_layout.ContentBands,
         inspector_panel_visible: bool,
         paint_top: bool,
         theme: *const ThemeColors,
@@ -17091,9 +17155,9 @@ const Host = struct {
         if (paint_top and inspector_panel_visible) {
             const panel_rect = RECT{
                 .left = 0,
-                .top = tab_h + overlay_offset,
+                .top = bands.inspector_top,
                 .right = client_rect.right,
-                .bottom = tab_h + overlay_offset + self.scaled(host_inspector_panel_height),
+                .bottom = bands.content_top,
             };
             fillSolidRect(hdc, panel_rect, theme.inspector_bg);
             fillSolidRect(
@@ -17696,11 +17760,12 @@ const Host = struct {
         const inspector_panel_visible = self.inspectorPanelVisible();
         const inspector_offset: i32 = if (inspector_panel_visible) self.scaled(host_inspector_panel_height) else 0;
         const status_h = statusBarHeight();
+        const bands = self.contentBands(tab_h, overlay_offset, inspector_offset);
         const content_rect = RECT{
             .left = 0,
-            .top = tab_h + overlay_offset + inspector_offset,
+            .top = bands.content_top,
             .right = client_rect.right,
-            .bottom = @max(tab_h + 1, client_rect.bottom - status_h),
+            .bottom = @max(bands.content_top + 1, client_rect.bottom - status_h),
         };
         const top_rect = RECT{
             .left = client_rect.left,
@@ -17717,17 +17782,16 @@ const Host = struct {
         const paint_top = paintRectVisible(hdc, ps.rcPaint, top_rect);
         const paint_content = paintRectVisible(hdc, ps.rcPaint, content_rect);
         const paint_status = paintRectVisible(hdc, ps.rcPaint, status_rect);
-        const banner_y: i32 = tab_h + overlay_offset + inspector_offset + self.scaled(2);
+        const banner_y: i32 = bands.content_top + self.scaled(2);
 
         self.paintChromeTabBar(hdc, client_rect, tab_h, paint_top, theme);
-        if (!self.paintChromeOverlay(hdc, alloc, client_rect, tab_h, paint_top, theme)) return;
+        if (!self.paintChromeOverlay(hdc, alloc, client_rect, tab_h, bands, paint_top, theme)) return;
         self.paintChromeContentLane(hdc, content_rect, paint_content, theme);
         self.paintChromeInspectorPanel(
             hdc,
             alloc,
             client_rect,
-            tab_h,
-            overlay_offset,
+            bands,
             inspector_panel_visible,
             paint_top,
             theme,
@@ -18700,6 +18764,37 @@ fn titlebarTextColor(theme: *const ThemeColors, config: *const configpkg.Config)
     }
 
     return theme.text_primary;
+}
+
+fn clientTitlebarTheme(
+    theme: *const ThemeColors,
+    config: *const configpkg.Config,
+    integrated: bool,
+    high_contrast: bool,
+) ThemeColors {
+    var result = theme.*;
+    if (!integrated or high_contrast or config.@"window-theme" != .ghostty) return result;
+
+    if (config.@"window-titlebar-background" != null) {
+        result.chrome_bg = titlebarCaptionColor(theme, config);
+        if (config.@"window-titlebar-foreground" == null) {
+            const background = config.@"window-titlebar-background".?;
+            result.is_dark = (terminal.color.RGB{
+                .r = background.r,
+                .g = background.g,
+                .b = background.b,
+            }).perceivedLuminance() < 0.5;
+            const derived_theme = if (result.is_dark) darkTheme() else lightTheme();
+            result.text_primary = derived_theme.text_primary;
+            result.button_chrome_fg = derived_theme.text_primary;
+        }
+    }
+    if (config.@"window-titlebar-foreground" != null) {
+        const foreground = titlebarTextColor(theme, config);
+        result.text_primary = foreground;
+        result.button_chrome_fg = foreground;
+    }
+    return result;
 }
 
 fn applyDwmThemeWithBuild(hwnd: HWND, theme: *const ThemeColors, config: *const configpkg.Config, os_build: u32) void {
@@ -23911,12 +24006,12 @@ pub const Surface = struct {
             self.drop_target_registered = false;
         };
 
-        const content_rect: RECT = host.contentRect() catch .{
+        const content_rect = host.contentRect() catch host.contentRectFromClient(.{
             .left = 0,
-            .top = host_tab_height,
+            .top = 0,
             .right = 1280,
-            .bottom = 800 - host_status_height,
-        };
+            .bottom = 800,
+        });
         _ = applyChildRect(hwnd, &self.placement, content_rect);
         self.placement.visible = false;
         self.placement.visible_known = true;
@@ -31638,11 +31733,41 @@ test "win32 titlebar colors honor ghostty overrides" {
     try std.testing.expectEqual(theme.text_primary, titlebarTextColor(&theme, &config));
 
     config.@"window-theme" = .ghostty;
-    config.@"window-titlebar-background" = .{ .r = 1, .g = 2, .b = 3 };
+    // Nothing configured: the client band must be byte-identical to the
+    // base theme, or every integrated titlebar changes appearance.
+    try std.testing.expectEqualDeep(theme, clientTitlebarTheme(&theme, &config, true, false));
+
+    // Background only: derive readable glyphs from its luminance instead of
+    // keeping the dark palette's light text on a light band.
+    config.@"window-titlebar-background" = .{ .r = 240, .g = 241, .b = 242 };
+    const background_only = clientTitlebarTheme(&theme, &config, true, false);
+    try std.testing.expectEqual(rgb(240, 241, 242), background_only.chrome_bg);
+    try std.testing.expect(!background_only.is_dark);
+    try std.testing.expectEqual(lightTheme().text_primary, background_only.text_primary);
+    try std.testing.expectEqual(lightTheme().text_primary, background_only.button_chrome_fg);
+
+    // Foreground only: keep the theme background and its darkness.
+    config.@"window-titlebar-background" = null;
     config.@"window-titlebar-foreground" = .{ .r = 4, .g = 5, .b = 6 };
+    const foreground_only = clientTitlebarTheme(&theme, &config, true, false);
+    try std.testing.expectEqual(theme.chrome_bg, foreground_only.chrome_bg);
+    try std.testing.expectEqual(theme.is_dark, foreground_only.is_dark);
+    try std.testing.expectEqual(rgb(4, 5, 6), foreground_only.text_primary);
+    try std.testing.expectEqual(rgb(4, 5, 6), foreground_only.button_chrome_fg);
+
+    config.@"window-titlebar-background" = .{ .r = 1, .g = 2, .b = 3 };
 
     try std.testing.expectEqual(rgb(1, 2, 3), titlebarCaptionColor(&theme, &config));
     try std.testing.expectEqual(rgb(4, 5, 6), titlebarTextColor(&theme, &config));
+
+    const client_theme = clientTitlebarTheme(&theme, &config, true, false);
+    try std.testing.expectEqual(rgb(1, 2, 3), client_theme.chrome_bg);
+    try std.testing.expectEqual(rgb(4, 5, 6), client_theme.text_primary);
+    try std.testing.expectEqual(rgb(4, 5, 6), client_theme.button_chrome_fg);
+
+    // Non-integrated and high contrast both bypass the overrides.
+    try std.testing.expectEqualDeep(theme, clientTitlebarTheme(&theme, &config, false, false));
+    try std.testing.expectEqualDeep(theme, clientTitlebarTheme(&theme, &config, true, true));
 }
 
 test "win32 cursorPosFromLParam decodes signed coordinates" {

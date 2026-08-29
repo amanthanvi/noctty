@@ -2271,6 +2271,8 @@ keybind: Keybinds = .{},
 
 /// Background color for the window titlebar. This only takes effect if
 /// `window-theme` is set to `ghostty`.
+/// On Windows, a custom value can differ from the tab fill and produce a
+/// two-tone integrated titlebar strip.
 ///
 /// Supported in the Windows-only fork when `window-theme=ghostty`.
 ///
