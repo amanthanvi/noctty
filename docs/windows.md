@@ -306,7 +306,13 @@ saved profiles; layout files do not contain a separate command field.
 Layout names accept ASCII letters, digits, spaces, dots, underscores, and
 hyphens, up to 64 bytes. Leading or trailing spaces and dots are rejected, as
 are Windows reserved device names such as `CON` or `COM1`. An unreadable layout
-file is quarantined with the same `.corrupt` rules as session state.
+file is quarantined with the same `.corrupt` rules as session state, and a
+layout is refused if it would open more than 16 tabs or 64 panes.
+
+Treat the `layouts\` directory as config-level trust: launching a layout starts
+a shell per pane with the working directories and profiles the file names. If
+you sync or share that directory, anyone who can write to it can influence what
+your next layout launch runs, exactly as they could by editing your config.
 
 Bind `save_layout:<name>` to save or atomically replace a layout, and bind
 `launch_layout:<name>` to materialize it in a new window. Saved layouts also
@@ -508,6 +514,13 @@ argument the running instance would refuse is dropped by the launching
 process before forwarding, with a warning in the log, so you still get a
 window. That drop is a convenience on your own command line, not a
 security control — the running instance re-checks every argument.
+
+`launch_layout:<name>` and `save_layout:<name>` are allowlisted. Launching a
+layout is equivalent to the already-supported `+new-window` with forwarded
+arguments. Saving is the one automation action that writes a file: it is
+limited to a validated layout name under `%LOCALAPPDATA%\noctty\layouts\`,
+writes atomically, and **replaces an existing layout of the same name without
+prompting**. It only accepts the focused target, so `--surface-id` is rejected.
 
 ## Crash reports and diagnostics
 

@@ -2153,7 +2153,9 @@ fn persistRecoveryRecord(
 
 fn writePersistentFileAlloc(alloc: Allocator, path: []const u8, data: []const u8) !void {
     if (std.fs.path.dirname(path)) |dir| {
-        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        // Recursive: `layouts\` sits one level below `%LOCALAPPDATA%\noctty`,
+        // which itself may not exist yet on a first save.
+        std.fs.cwd().makePath(dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -2959,6 +2961,15 @@ pub const App = struct {
                     ) catch {};
                     return false;
                 }
+                // A layout file can come from a synced or shared directory, and
+                // materializing one spawns a shell per pane. Refuse oversized
+                // documents instead of quarantining them: the file may well be
+                // the user's own, just too large for one window.
+                win32_layouts.validateLaunchSize(parsed.value.windows[0]) catch |err| {
+                    log.warn("named layout launch rejected oversized document name={s} err={}", .{ name, err });
+                    if (banner_host) |host| host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
+                    return false;
+                };
                 const surface = self.restoreSessionWindow(parsed.value.windows[0]) catch |err| {
                     log.warn("named layout materialization failed name={s} err={}", .{ name, err });
                     if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
@@ -3011,7 +3022,7 @@ pub const App = struct {
 
         var arena = std.heap.ArenaAllocator.init(self.core_app.alloc);
         defer arena.deinit();
-        const window = buildNamedLayoutWindow(arena.allocator(), host) catch |err| {
+        const window = buildSessionWindow(arena.allocator(), host, .layout) catch |err| {
             log.warn("named layout save snapshot failed name={s} err={}", .{ name, err });
             host.setBanner(.err, "Layout could not be saved.") catch {};
             return false;
@@ -3346,25 +3357,32 @@ pub const App = struct {
         var built: usize = 0;
         for (self.hosts.items) |host| {
             if (hostSessionTabCount(host) == 0) continue;
-            windows_state[built] = try buildSessionWindow(alloc, host);
+            windows_state[built] = try buildSessionWindow(alloc, host, .session);
             built += 1;
         }
 
         return .{ .windows = windows_state };
     }
 
+    /// What a window snapshot is for. `.session` is this process's own restore
+    /// state; `.layout` is a user-visible named layout file, which carries only
+    /// the shape fields and no window geometry.
+    const SnapshotScope = enum { session, layout };
+
     fn buildSessionWindow(
         alloc: Allocator,
         host: *Host,
+        scope: SnapshotScope,
     ) !win32_session_state.Window {
         const tab_count = hostSessionTabCount(host);
+        if (scope == .layout and tab_count == 0) return error.EmptyTabs;
         const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
         var selected_tab: usize = 0;
         var built: usize = 0;
         for (host.tabs.items, 0..) |*tab, i| {
             if (tabContainsQuickTerminal(tab)) continue;
             if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildSessionTab(alloc, tab);
+            tabs[built] = try buildSessionTab(alloc, tab, scope);
             built += 1;
         }
 
@@ -3372,6 +3390,8 @@ pub const App = struct {
             .selected_tab = selected_tab,
             .tabs = tabs,
         };
+        // Geometry is restore state, not layout shape.
+        if (scope == .layout) return window;
         if (sessionWindowRect(host)) |rect| {
             window.x = rect.left;
             window.y = rect.top;
@@ -3384,81 +3404,10 @@ pub const App = struct {
         return window;
     }
 
-    fn buildNamedLayoutWindow(
-        alloc: Allocator,
-        host: *Host,
-    ) !win32_session_state.Window {
-        const tab_count = hostSessionTabCount(host);
-        if (tab_count == 0) return error.EmptyTabs;
-        const tabs = try alloc.alloc(win32_session_state.Tab, tab_count);
-        var selected_tab: usize = 0;
-        var built: usize = 0;
-        for (host.tabs.items, 0..) |*tab, i| {
-            if (tabContainsQuickTerminal(tab)) continue;
-            if (i <= host.active_tab) selected_tab = built;
-            tabs[built] = try buildNamedLayoutTab(alloc, tab);
-            built += 1;
-        }
-        return .{
-            .selected_tab = selected_tab,
-            .tabs = tabs,
-        };
-    }
-
-    fn buildNamedLayoutTab(
-        alloc: Allocator,
-        tab: *const Tab,
-    ) !win32_session_state.Tab {
-        var selected_leaf: usize = 0;
-        var leaf_index: usize = 0;
-        for (tab.tree.nodes, 0..) |node, node_index| {
-            switch (node) {
-                .leaf => {},
-                .split => continue,
-            }
-            if (tab.focused.idx() == node_index) selected_leaf = leaf_index;
-            leaf_index += 1;
-        }
-        return .{
-            .selected_leaf = selected_leaf,
-            .layout = try buildNamedLayoutTree(alloc, tab),
-        };
-    }
-
-    fn buildNamedLayoutTree(
-        alloc: Allocator,
-        tab: *const Tab,
-    ) !win32_session_state.LayoutTree {
-        if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
-        const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
-        for (tab.tree.nodes, 0..) |node, index| {
-            nodes[index] = switch (node) {
-                // Intentionally enumerate the layout-safe pane fields. Never
-                // copy a session Pane, because session-only state must not leak
-                // into named layout files as the session schema evolves.
-                .leaf => |pane_surface| .{ .pane = .{
-                    .cwd = pane_surface.pwd,
-                    .profile = pane_surface.launch_profile_key,
-                    .title_override = pane_surface.title_override,
-                    .tab_title_override = pane_surface.tab_title_override,
-                } },
-                .split => |split| .{ .split = .{
-                    .axis = switch (split.layout) {
-                        .horizontal => .horizontal,
-                        .vertical => .vertical,
-                    },
-                    .ratio = @floatCast(split.ratio),
-                    .first = @intFromEnum(split.left),
-                    .second = @intFromEnum(split.right),
-                } },
-            };
-        }
-        return .{ .root = 0, .nodes = nodes };
-    }
-
     fn buildSessionTab(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.Tab {
         var selected_leaf: usize = 0;
         var leaf_index: usize = 0;
@@ -3473,33 +3422,43 @@ pub const App = struct {
 
         return .{
             .selected_leaf = selected_leaf,
-            .layout = try buildSessionLayout(alloc, tab),
+            .layout = try buildSessionLayout(alloc, tab, scope),
         };
     }
 
     fn buildSessionLayout(
         alloc: Allocator,
         tab: *const Tab,
+        scope: SnapshotScope,
     ) !win32_session_state.LayoutTree {
         if (tab.tree.nodes.len > std.math.maxInt(u16)) return error.TooManySessionLayoutNodes;
         const nodes = try alloc.alloc(win32_session_state.Node, tab.tree.nodes.len);
         for (tab.tree.nodes, 0..) |node, i| {
             nodes[i] = switch (node) {
-                .leaf => |surface| .{
-                    .pane = .{
+                // The two pane literals are deliberately separate. Anything
+                // added to the session pane below (terminal contents, process
+                // state) must stay out of user-visible layout files unless it
+                // is also added to the layout literal on purpose. Neither
+                // snapshot may persist an SSH launch for unattended restore.
+                .leaf => |surface| switch (scope) {
+                    .session => .{ .pane = .{
                         .cwd = if (surface.launched_ssh) null else surface.pwd,
-                        // Never persist an SSH launch: restore would relaunch
-                        // it unattended. The alias tab title goes with it, or
-                        // it would stick to the local shell that replaces the
-                        // pane. Both read the kind recorded at launch, not the
-                        // key text.
                         .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
                         .title_override = surface.title_override,
                         .tab_title_override = if (surface.launched_ssh)
                             null
                         else
                             surface.tab_title_override,
-                    },
+                    } },
+                    .layout => .{ .pane = .{
+                        .cwd = if (surface.launched_ssh) null else surface.pwd,
+                        .profile = if (surface.launched_ssh) null else surface.launch_profile_key,
+                        .title_override = surface.title_override,
+                        .tab_title_override = if (surface.launched_ssh)
+                            null
+                        else
+                            surface.tab_title_override,
+                    } },
                 },
                 .split => |split| .{ .split = .{
                     .axis = switch (split.layout) {

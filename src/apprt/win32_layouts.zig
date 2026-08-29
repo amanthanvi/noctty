@@ -14,6 +14,18 @@ const Allocator = std.mem.Allocator;
 pub const max_name_bytes: usize = 64;
 pub const max_palette_entries: usize = 64;
 
+/// Materializing a layout spawns one shell per pane, so a layout file — which
+/// may arrive from a synced or shared directory — is capped well below what the
+/// session schema alone allows (up to 65,535 nodes inside the 1 MiB file cap).
+/// Session restore is exempt: that file is written by this process only.
+pub const max_launch_tabs: usize = 16;
+pub const max_launch_panes: usize = 64;
+
+pub const LaunchSizeError = error{
+    TooManyLayoutTabs,
+    TooManyLayoutPanes,
+};
+
 pub const NameError = error{
     EmptyName,
     NameTooLong,
@@ -56,6 +68,20 @@ fn isReservedDeviceName(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name[0..3], "LPT");
 }
 
+/// Reject layout documents that would open an unreasonable number of shells.
+pub fn validateLaunchSize(window: session_state.Window) LaunchSizeError!void {
+    if (window.tabs.len > max_launch_tabs) return error.TooManyLayoutTabs;
+
+    var panes: usize = 0;
+    for (window.tabs) |tab| {
+        for (tab.layout.nodes) |node| switch (node) {
+            .pane => panes += 1,
+            .split => {},
+        };
+        if (panes > max_launch_panes) return error.TooManyLayoutPanes;
+    }
+}
+
 /// Compose `layouts\<name>.json` after validating the name.
 pub fn relativePathAlloc(alloc: Allocator, name: []const u8) (NameError || Allocator.Error)![]u8 {
     try validateName(name);
@@ -89,7 +115,7 @@ pub fn listNamesAlloc(
     defer directory.close();
 
     var iterator = directory.iterate();
-    entries: while (try iterator.next()) |entry| {
+    while (try iterator.next()) |entry| {
         if (entry.kind != .file) continue;
         // Match only the exact extension `relativePathAlloc` writes, so every
         // enumerated name maps back to a launchable path even on a
@@ -98,10 +124,6 @@ pub fn listNamesAlloc(
         if (!std.mem.eql(u8, extension, ".json")) continue;
         const stem = entry.name[0 .. entry.name.len - extension.len];
         validateName(stem) catch continue;
-
-        for (names.items) |existing| {
-            if (std.mem.eql(u8, existing, stem)) continue :entries;
-        }
 
         if (names.items.len < limit) {
             const owned_name = try alloc.dupe(u8, stem);
@@ -136,6 +158,11 @@ pub fn listNamesAlloc(
 /// Build the argv consumed by a named-layout jump-list entry:
 /// `{ "+new-window", "--launch-layout=<name>" }`.
 /// The caller owns each sentinel string and the returned outer slice.
+///
+/// Seam, not dead code: together with `listNamesAlloc` this is the agreed
+/// integration point for the C12 jump-list work (issue #126), which owns the
+/// only production caller. Covered by tests here so the contract cannot drift
+/// before that lands.
 pub fn launchArgvAlloc(
     alloc: Allocator,
     name: []const u8,
@@ -316,5 +343,36 @@ test "named layout jump list argv uses the shared new-window CLI" {
     try std.testing.expectError(
         error.LeadingOrTrailingSpaceOrDot,
         launchArgvAlloc(std.testing.allocator, "../demo"),
+    );
+}
+
+test "named layout launch size cap rejects oversized documents" {
+    const pane_nodes = [_]session_state.Node{.{ .pane = .{} }};
+    const one_pane_tab: session_state.Tab = .{
+        .selected_leaf = 0,
+        .layout = .{ .root = 0, .nodes = &pane_nodes },
+    };
+
+    var ok_tabs: [max_launch_tabs]session_state.Tab = undefined;
+    @memset(&ok_tabs, one_pane_tab);
+    try validateLaunchSize(.{ .selected_tab = 0, .tabs = &ok_tabs });
+
+    var too_many_tabs: [max_launch_tabs + 1]session_state.Tab = undefined;
+    @memset(&too_many_tabs, one_pane_tab);
+    try std.testing.expectError(
+        error.TooManyLayoutTabs,
+        validateLaunchSize(.{ .selected_tab = 0, .tabs = &too_many_tabs }),
+    );
+
+    // One tab holding more panes than the whole-window budget.
+    var fat_nodes: [max_launch_panes + 1]session_state.Node = undefined;
+    @memset(&fat_nodes, .{ .pane = .{} });
+    const fat_tabs = [_]session_state.Tab{.{
+        .selected_leaf = 0,
+        .layout = .{ .root = 0, .nodes = &fat_nodes },
+    }};
+    try std.testing.expectError(
+        error.TooManyLayoutPanes,
+        validateLaunchSize(.{ .selected_tab = 0, .tabs = &fat_tabs }),
     );
 }
