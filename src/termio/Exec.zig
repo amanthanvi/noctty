@@ -44,7 +44,9 @@ const darwin = if (builtin.os.tag.isDarwin()) struct {
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 const WRITE_BUF_SIZE = 4 * 1024;
-const WINDOWS_READ_BUF_SIZE = 16 * 1024;
+// ConPTY hands back large bursts; a 16 KiB batch made the reader the
+// bottleneck on high-throughput output. 64 KiB is the product default.
+const WINDOWS_READ_BUF_SIZE = 64 * 1024;
 
 fn pathEntryEquals(a: []const u8, b: []const u8) bool {
     return if (builtin.os.tag == .windows)
@@ -192,7 +194,7 @@ pub fn threadEnter(
 
     // Start our read thread
     const read_thread = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         if (builtin.os.tag == .windows) ReadThread.threadMainWindows else ReadThread.threadMainPosix,
         .{ pty_fds.read, io, pipe[0] },
     );

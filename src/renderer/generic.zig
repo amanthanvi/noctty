@@ -79,6 +79,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         const Self = @This();
 
         pub const API = GraphicsAPI;
+        pub const FrameUpdate = struct {
+            cursor_blinking: bool,
+        };
 
         const Target = GraphicsAPI.Target;
         const Buffer = GraphicsAPI.Buffer;
@@ -390,7 +393,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Initialize the target. Just as with the other resources,
                 // start it off as small as we can since it'll be resized.
-                const target = try api.initTarget(1, 1);
+                const target = try api.initTarget(1, 1, custom_shaders);
 
                 return .{
                     .uniforms = uniforms,
@@ -424,7 +427,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.custom_shader_state) |*state| {
                     try state.resize(api, width, height);
                 }
-                const target = try api.initTarget(width, height);
+                const target = try api.initTarget(
+                    width,
+                    height,
+                    self.custom_shader_state != null,
+                );
                 self.target.deinit();
                 self.target = target;
             }
@@ -883,6 +890,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Called on the app thread after the renderer thread exits and before
+        /// graphics resources are destroyed.
+        pub fn prepareSurfaceDeinit(self: *const Self, surface: *apprt.Surface) !void {
+            if (@hasDecl(GraphicsAPI, "prepareSurfaceDeinit")) {
+                try self.api.prepareSurfaceDeinit(surface);
+            }
+        }
+
         /// Callback called by renderer.Thread when it exits.
         pub fn threadExit(self: *const Self) void {
             // If our API has to do things on thread exit, let it.
@@ -1125,7 +1140,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             state: *renderer.State,
             cursor_blink_visible: bool,
-        ) Allocator.Error!void {
+        ) Allocator.Error!FrameUpdate {
             // const start = std.time.Instant.now() catch unreachable;
             // const start_micro = std.time.microTimestamp();
             // defer {
@@ -1160,6 +1175,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
+                cursor_blinking: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1174,10 +1190,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 state.mutex.lock();
                 defer state.mutex.unlock();
 
+                const cursor_blinking = state.terminal.modes.get(.cursor_blinking);
+
                 // If we're in a synchronized output state, we pause all rendering.
                 if (state.terminal.modes.get(.synchronized_output)) {
                     log.debug("synchronized output started, skipping render", .{});
-                    return;
+                    return .{ .cursor_blinking = cursor_blinking };
                 }
 
                 // If scroll-to-bottom on output is enabled, check if the final line
@@ -1299,6 +1317,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
+                    .cursor_blinking = cursor_blinking,
                 };
             };
 
@@ -1389,7 +1408,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     renderer.cursorStyle(&self.terminal_state, .{
                         .preedit = critical.preedit != null,
                         .focused = self.focused,
-                        .blink_visible = cursor_blink_visible,
+                        .blink_visible = cursor_blink_visible or
+                            !critical.cursor_blinking,
                     }),
                     &critical.links,
                 ) catch |err| {
@@ -1433,6 +1453,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Notify our shaper we're done for the frame. For some shapers,
             // such as CoreText, this triggers off-thread cleanup logic.
             self.font_shaper.endFrame();
+            return .{ .cursor_blinking = critical.cursor_blinking };
         }
 
         /// Draw the frame to the screen.

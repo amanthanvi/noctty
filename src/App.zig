@@ -77,6 +77,7 @@ pub fn create(alloc: Allocator) CreateError!*App {
     var app = try alloc.create(App);
     errdefer alloc.destroy(app);
     try app.init(alloc);
+    app.font_grid_set.startDiscoveryPrefetch();
     return app;
 }
 
@@ -123,6 +124,15 @@ pub fn destroy(self: *App) void {
 
     // Free the app memory
     self.alloc.destroy(self);
+}
+
+test "App create overlaps Windows font discovery with runtime startup" {
+    if (comptime builtin.target.os.tag != .windows or
+        !@hasDecl(font.Discover, "refresh")) return;
+
+    const app = try create(std.testing.allocator);
+    defer app.destroy();
+    try std.testing.expect(app.font_grid_set.discoveryPrefetchStarted());
 }
 
 /// Tick ticks the app loop. This will drain our mailbox and process those

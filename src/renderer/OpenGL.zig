@@ -45,6 +45,38 @@ const enable_gl_debug_output = false;
 pub const MIN_VERSION_MAJOR = 4;
 pub const MIN_VERSION_MINOR = 3;
 
+pub const TargetStrategy = enum {
+    offscreen,
+    default_framebuffer,
+};
+
+pub const TargetStrategyOptions = struct {
+    win32: bool,
+    custom_shaders: bool,
+    default_framebuffer_srgb: bool,
+    linear_blending: bool,
+};
+
+pub fn targetStrategy(opts: TargetStrategyOptions) TargetStrategy {
+    if (opts.win32 and
+        !opts.custom_shaders and
+        opts.default_framebuffer_srgb and
+        opts.linear_blending)
+    {
+        return .default_framebuffer;
+    }
+    return .offscreen;
+}
+
+pub fn targetStrategyRequiresBlit(strategy: TargetStrategy) bool {
+    return strategy == .offscreen;
+}
+
+const DefaultFramebufferInfo = struct {
+    framebuffer: gl.Framebuffer,
+    srgb: bool,
+};
+
 alloc: std.mem.Allocator,
 
 /// Alpha blending mode
@@ -58,16 +90,67 @@ rt_surface: *apprt.Surface,
 vsync_enabled: bool,
 swap_interval_configured: bool = false,
 swap_interval_supported: bool = false,
+default_framebuffer: gl.Framebuffer,
+default_framebuffer_srgb: bool,
 
 /// NOTE: This is fallible to satisfy the renderer init interface, even though
 ///       OpenGL setup here cannot currently fail.
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
+    const default_framebuffer: DefaultFramebufferInfo = if (apprt.runtime == apprt.win32)
+        queryDefaultFramebufferInfo() catch |err| info: {
+            log.warn(
+                "unable to verify default framebuffer color encoding; retaining offscreen target err={}",
+                .{err},
+            );
+            break :info .{
+                .framebuffer = .{ .id = 0 },
+                .srgb = false,
+            };
+        }
+    else
+        .{
+            .framebuffer = .{ .id = 0 },
+            .srgb = false,
+        };
+
     return .{
         .alloc = alloc,
         .blending = opts.config.blending,
         .rt_surface = opts.rt_surface,
         .vsync_enabled = opts.config.vsync,
+        .default_framebuffer = default_framebuffer.framebuffer,
+        .default_framebuffer_srgb = default_framebuffer.srgb,
     };
+}
+
+fn queryDefaultFramebufferInfo() gl.errors.Error!DefaultFramebufferInfo {
+    var framebuffer: gl.c.GLint = 0;
+    gl.glad.context.GetIntegerv.?(
+        gl.c.GL_DRAW_FRAMEBUFFER_BINDING,
+        &framebuffer,
+    );
+    try gl.errors.getError();
+    if (!defaultFramebufferBindingIsUsable(framebuffer)) {
+        return error.InvalidOperation;
+    }
+
+    var encoding: gl.c.GLint = 0;
+    gl.glad.context.GetFramebufferAttachmentParameteriv.?(
+        gl.c.GL_DRAW_FRAMEBUFFER,
+        gl.c.GL_BACK_LEFT,
+        gl.c.GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING,
+        &encoding,
+    );
+    try gl.errors.getError();
+
+    return .{
+        .framebuffer = .{ .id = @intCast(framebuffer) },
+        .srgb = encoding == gl.c.GL_SRGB,
+    };
+}
+
+pub fn defaultFramebufferBindingIsUsable(framebuffer: gl.c.GLint) bool {
+    return framebuffer == 0;
 }
 
 pub fn deinit(self: *OpenGL) void {
@@ -266,6 +349,39 @@ pub fn threadExit(self: *const OpenGL) void {
     }
 }
 
+fn makeSurfaceContextCurrentForDeinit(surface: anytype) !void {
+    try surface.makeGLContextCurrent();
+}
+
+/// Renderer resources are owned by a pane's WGL context. Core surface
+/// teardown runs on the app thread after the renderer thread has exited, so
+/// rebind the owning context before deleting buffers, textures, and shaders.
+/// Otherwise those deletes target whichever surviving pane was current last.
+pub fn prepareSurfaceDeinit(
+    self: *const OpenGL,
+    surface: *apprt.Surface,
+) !void {
+    _ = self;
+    switch (apprt.runtime) {
+        else => {},
+        apprt.win32 => try makeSurfaceContextCurrentForDeinit(surface),
+    }
+}
+
+test "OpenGL surface teardown makes the owning context current" {
+    const Probe = struct {
+        made_current: bool = false,
+
+        fn makeGLContextCurrent(self: *@This()) !void {
+            self.made_current = true;
+        }
+    };
+
+    var probe: Probe = .{};
+    try makeSurfaceContextCurrentForDeinit(&probe);
+    try std.testing.expect(probe.made_current);
+}
+
 pub fn displayRealized(self: *const OpenGL) void {
     _ = self;
 }
@@ -343,11 +459,35 @@ pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
 }
 
 /// Initialize a new render target which can be presented by this API.
-pub fn initTarget(self: *const OpenGL, width: usize, height: usize) !Target {
-    return Target.init(.{
-        .internal_format = if (self.blending.isLinear()) .srgba else .rgba,
-        .width = width,
-        .height = height,
+pub fn initTarget(
+    self: *const OpenGL,
+    width: usize,
+    height: usize,
+    custom_shaders: bool,
+) !Target {
+    return switch (self.selectTargetStrategy(custom_shaders)) {
+        .default_framebuffer => Target.initDefault(
+            self.default_framebuffer,
+            width,
+            height,
+        ),
+        .offscreen => Target.init(.{
+            .internal_format = if (self.blending.isLinear()) .srgba else .rgba,
+            .width = width,
+            .height = height,
+        }),
+    };
+}
+
+pub fn selectTargetStrategy(
+    self: *const OpenGL,
+    custom_shaders: bool,
+) TargetStrategy {
+    return targetStrategy(.{
+        .win32 = apprt.runtime == apprt.win32,
+        .custom_shaders = custom_shaders,
+        .default_framebuffer_srgb = self.default_framebuffer_srgb,
+        .linear_blending = self.blending.isLinear(),
     });
 }
 
@@ -360,41 +500,42 @@ pub fn present(self: *OpenGL, target: Target) !void {
         self.ensureWin32SwapInterval();
     }
 
-    // In order to present a target we blit it to the default framebuffer.
-
-    // We disable GL_FRAMEBUFFER_SRGB while doing this blit, otherwise the
-    // values may be linearized as they're copied, but even though the draw
-    // framebuffer has a linear internal format, the values in it should be
-    // sRGB, not linear!
-    try gl.disable(gl.c.GL_FRAMEBUFFER_SRGB);
-    defer gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch |err| {
-        log.err("Error re-enabling GL_FRAMEBUFFER_SRGB, err={}", .{err});
+    const strategy: TargetStrategy = switch (target.storage) {
+        .offscreen => .offscreen,
+        .default_framebuffer => .default_framebuffer,
     };
 
-    // Bind the target for reading.
-    const fbobind = try target.framebuffer.bind(.read);
-    defer fbobind.unbind();
+    if (targetStrategyRequiresBlit(strategy)) {
+        // The offscreen target stores sRGB values. Disable conversion while
+        // copying those values to the window's default framebuffer.
+        try gl.disable(gl.c.GL_FRAMEBUFFER_SRGB);
+        defer gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch |err| {
+            log.err("Error re-enabling GL_FRAMEBUFFER_SRGB, err={}", .{err});
+        };
 
-    const dst_width: i32, const dst_height: i32 = if (apprt.runtime == apprt.win32) size: {
-        const size = try self.surfaceSize();
-        break :size .{ @intCast(size.width), @intCast(size.height) };
-    } else .{ @intCast(target.width), @intCast(target.height) };
+        const fbobind = try target.framebuffer.bind(.read);
+        defer fbobind.unbind();
 
-    if (dst_width <= 0 or dst_height <= 0) return;
+        const dst_width: i32, const dst_height: i32 = if (apprt.runtime == apprt.win32) size: {
+            const size = try self.surfaceSize();
+            break :size .{ @intCast(size.width), @intCast(size.height) };
+        } else .{ @intCast(target.width), @intCast(target.height) };
 
-    // Blit
-    gl.glad.context.BlitFramebuffer.?(
-        0,
-        0,
-        @intCast(target.width),
-        @intCast(target.height),
-        0,
-        0,
-        dst_width,
-        dst_height,
-        gl.c.GL_COLOR_BUFFER_BIT,
-        gl.c.GL_NEAREST,
-    );
+        if (dst_width <= 0 or dst_height <= 0) return;
+
+        gl.glad.context.BlitFramebuffer.?(
+            0,
+            0,
+            @intCast(target.width),
+            @intCast(target.height),
+            0,
+            0,
+            dst_width,
+            dst_height,
+            gl.c.GL_COLOR_BUFFER_BIT,
+            gl.c.GL_NEAREST,
+        );
+    }
 
     // Keep track of this target in case we need to repeat it.
     self.last_target = target;
@@ -545,4 +686,63 @@ test "OpenGL hasVsync requires enabled swap interval" {
 
     api.vsync_enabled = false;
     try std.testing.expect(!api.hasVsync());
+}
+
+test "OpenGL direct default target policy preserves unsupported paths" {
+    try std.testing.expectEqual(
+        TargetStrategy.default_framebuffer,
+        targetStrategy(.{
+            .win32 = true,
+            .custom_shaders = false,
+            .default_framebuffer_srgb = true,
+            .linear_blending = true,
+        }),
+    );
+    try std.testing.expectEqual(
+        TargetStrategy.offscreen,
+        targetStrategy(.{
+            .win32 = true,
+            .custom_shaders = true,
+            .default_framebuffer_srgb = true,
+            .linear_blending = true,
+        }),
+    );
+    try std.testing.expectEqual(
+        TargetStrategy.offscreen,
+        targetStrategy(.{
+            .win32 = false,
+            .custom_shaders = false,
+            .default_framebuffer_srgb = true,
+            .linear_blending = true,
+        }),
+    );
+    try std.testing.expectEqual(
+        TargetStrategy.offscreen,
+        targetStrategy(.{
+            .win32 = true,
+            .custom_shaders = false,
+            .default_framebuffer_srgb = false,
+            .linear_blending = true,
+        }),
+    );
+    try std.testing.expectEqual(
+        TargetStrategy.offscreen,
+        targetStrategy(.{
+            .win32 = true,
+            .custom_shaders = false,
+            .default_framebuffer_srgb = true,
+            .linear_blending = false,
+        }),
+    );
+}
+
+test "OpenGL direct default target presents without an offscreen blit" {
+    try std.testing.expect(!targetStrategyRequiresBlit(.default_framebuffer));
+    try std.testing.expect(targetStrategyRequiresBlit(.offscreen));
+}
+
+test "OpenGL direct default target rejects a stray framebuffer binding" {
+    try std.testing.expect(defaultFramebufferBindingIsUsable(0));
+    try std.testing.expect(!defaultFramebufferBindingIsUsable(1));
+    try std.testing.expect(!defaultFramebufferBindingIsUsable(-1));
 }

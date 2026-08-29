@@ -53,6 +53,7 @@ pub fn suppressStartupLoaderErrorDialogs() StartupLoaderErrorDialogSuppression {
 pub const OpenGLStartupStep = enum {
     get_dc,
     choose_pixel_format,
+    describe_pixel_format,
     set_pixel_format,
     create_context,
     initial_make_current,
@@ -66,6 +67,7 @@ pub const OpenGLStartupStep = enum {
         return switch (self) {
             .get_dc => "acquiring the window device context",
             .choose_pixel_format => "choosing a WGL pixel format",
+            .describe_pixel_format => "describing the selected WGL pixel format",
             .set_pixel_format => "setting the WGL pixel format",
             .create_context => "creating the WGL context",
             .initial_make_current => "making the initial WGL context current",

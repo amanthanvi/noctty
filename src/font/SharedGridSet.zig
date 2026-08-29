@@ -46,6 +46,11 @@ font_discover: ?Discover = null,
 /// Lock to protect multi-threaded access to the map.
 lock: std.Thread.Mutex = .{},
 
+/// Windows font metadata discovery can overlap runtime/window setup. The
+/// worker takes `lock`, so the first grid lookup either observes a complete
+/// scan or waits for it without duplicating discovery work.
+discovery_prefetch_thread: ?std.Thread = null,
+
 pub const InitError = Library.InitError;
 
 /// Initialize a new SharedGridSet.
@@ -61,6 +66,11 @@ pub fn init(alloc: Allocator) InitError!SharedGridSet {
 }
 
 pub fn deinit(self: *SharedGridSet) void {
+    if (self.discovery_prefetch_thread) |thread| {
+        thread.join();
+        self.discovery_prefetch_thread = null;
+    }
+
     var it = self.map.iterator();
     while (it.next()) |entry| {
         entry.key_ptr.deinit();
@@ -75,6 +85,34 @@ pub fn deinit(self: *SharedGridSet) void {
     }
 
     self.font_lib.deinit();
+}
+
+/// Start Windows font discovery once the SharedGridSet has a stable address.
+/// Spawn failure is harmless: the existing synchronous lookup remains the
+/// fallback when the first surface requests its font grid.
+pub fn startDiscoveryPrefetch(self: *SharedGridSet) void {
+    if (comptime builtin.target.os.tag != .windows or
+        Discover == void or
+        !@hasDecl(Discover, "refresh")) return;
+    if (self.discovery_prefetch_thread != null) return;
+
+    self.discovery_prefetch_thread = std.Thread.spawn(
+        .{},
+        discoveryPrefetchMain,
+        .{self},
+    ) catch return;
+}
+
+pub fn discoveryPrefetchStarted(self: *const SharedGridSet) bool {
+    return self.discovery_prefetch_thread != null;
+}
+
+fn discoveryPrefetchMain(self: *SharedGridSet) void {
+    self.lock.lock();
+    defer self.lock.unlock();
+
+    const disco = self.discover() catch return;
+    if (disco) |value| value.refresh();
 }
 
 /// Returns the number of cached grids.

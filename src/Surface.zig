@@ -802,7 +802,7 @@ pub fn init(
 
     // Start our renderer thread
     self.renderer_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         rendererpkg.Thread.threadMain,
         .{&self.renderer_thread},
     );
@@ -810,7 +810,7 @@ pub fn init(
 
     // Start our IO thread
     self.io_thr = try std.Thread.spawn(
-        .{},
+        internal_os.surfaceThreadSpawnConfig(),
         termio.Thread.threadMain,
         .{ &self.io_thread, &self.io },
     );
@@ -862,6 +862,12 @@ pub fn deinit(self: *Surface) void {
 
         // We need to become the active rendering thread again
         self.renderer.threadEnter(self.rt_surface) catch unreachable;
+        // Renderer resources belong to this runtime surface's graphics
+        // context. Teardown is back on the app thread now, so restore that
+        // context before deleting any graphics objects.
+        self.renderer.prepareSurfaceDeinit(self.rt_surface) catch |err| {
+            log.err("error preparing renderer surface deinit err={}", .{err});
+        };
     }
 
     // We need to deinit AFTER everything is stopped, since there are
