@@ -879,6 +879,105 @@ fn sendPerformActionIpc(
     return try win32_ipc.readAckWithTimeout(pipe, win32_ipc.automation_response_timeout_ms);
 }
 
+/// Configuration keys that a forwarded `new_window` argv may never set.
+///
+/// `applyNewWindowArguments` runs on the server side of the single-instance
+/// IPC pipe and feeds attacker-controllable argv straight into
+/// `Config.loadIter`, so the automation allowlist in `App.isSafeAutomationAction`
+/// is not the boundary for this request kind. Every key below either selects
+/// code that the server will execute or names an additional configuration
+/// source that could set such a key transitively:
+///
+///   - `command` / `initial-command` become the spawned child (termio/Exec).
+///   - `config-file` and `config-default-files` re-point config loading.
+///   - `theme` accepts an absolute path and is parsed as a full config file
+///     (see `config/theme.zig` `open`), so it is a `config-file` by proxy.
+///   - `custom-shader` loads and compiles files from arbitrary paths.
+///
+/// `-e` is rejected as well: `Config.parseManuallyHook` turns it into
+/// `initial-command`.
+const forbidden_forwarded_config_keys = [_][]const u8{
+    "command",
+    "initial-command",
+    "config-file",
+    "config-default-files",
+    "theme",
+    "custom-shader",
+};
+
+/// Returns the offending key when `arg` is a forwarded argument that the
+/// server must not honor, or null when it is acceptable.
+///
+/// `cli/args.zig` only accepts `--key=value` and `--key` forms (values are
+/// never a separate argv token), plus the `-e` manual hook, so prefix
+/// matching on the key segment is exhaustive.
+fn forbiddenForwardedArgument(arg: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, arg, "-e")) return "-e";
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
+
+    const body = arg[2..];
+    const key = if (std.mem.indexOfScalar(u8, body, '=')) |idx| body[0..idx] else body;
+    for (forbidden_forwarded_config_keys) |forbidden| {
+        if (std.mem.eql(u8, key, forbidden)) return forbidden;
+    }
+    return null;
+}
+
+/// Returns true when a forwarded `--working-directory` value is one the
+/// server is willing to honor.
+///
+/// The startup forwarder always sends the launching process's realpath'd cwd
+/// (`collectStartupForwardArguments`), so this key cannot simply be rejected
+/// without breaking single-instance launches. Instead it is constrained to
+/// the two symbolic values plus a local drive-letter absolute path that
+/// currently resolves to a directory. That rejects UNC paths, which would
+/// otherwise make the server authenticate to an attacker-chosen SMB host.
+fn forwardedWorkingDirectoryAllowed(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (std.mem.eql(u8, trimmed, "home")) return true;
+    if (std.mem.eql(u8, trimmed, "inherit")) return true;
+
+    // Reject UNC (`\\host\share`, `//host/share`) and device (`\\?\`) paths.
+    if (trimmed.len < 3) return false;
+    if (trimmed[0] == '\\' or trimmed[0] == '/') return false;
+    if (!std.ascii.isAlphabetic(trimmed[0])) return false;
+    if (trimmed[1] != ':') return false;
+    if (trimmed[2] != '\\' and trimmed[2] != '/') return false;
+
+    var dir = std.fs.openDirAbsolute(trimmed, .{}) catch return false;
+    dir.close();
+    return true;
+}
+
+/// Scan a forwarded `new_window` argv and return a reason string when the
+/// whole request must be refused, or null when every argument is acceptable.
+///
+/// The reason is a static string suitable for logging; it names the key but
+/// never the attacker-supplied value.
+fn forwardedArgvRejection(argv: []const [:0]const u8) ?[]const u8 {
+    for (argv) |arg| {
+        if (forbiddenForwardedArgument(arg)) |key| return key;
+
+        if (std.mem.startsWith(u8, arg, "--working-directory=")) {
+            const value = arg["--working-directory=".len..];
+            if (!forwardedWorkingDirectoryAllowed(value)) {
+                return "working-directory (not a local directory)";
+            }
+        }
+    }
+    return null;
+}
+
+/// Apply a forwarded `new_window` argv to `config`.
+///
+/// Returns `error.ForbiddenForwardedArgument` for the whole request if any
+/// argument is rejected. Dropping individual keys silently would leave the
+/// caller with a window that does not match what was asked for, and would
+/// make an attacker's probe indistinguishable from a normal launch.
+///
+/// The rejection is logged by the caller that handles it (see the
+/// `.new_window` arm of `performAction`) so that this stays a pure predicate
+/// over argv.
 fn applyNewWindowArguments(
     alloc_gpa: Allocator,
     config: *configpkg.Config,
@@ -886,6 +985,10 @@ fn applyNewWindowArguments(
 ) !void {
     const argv = arguments orelse return;
     if (argv.len == 0) return;
+
+    if (forwardedArgvRejection(argv) != null) {
+        return error.ForbiddenForwardedArgument;
+    }
 
     var iter: ForwardedArgIterator = .{ .args = argv };
     try config.loadIter(alloc_gpa, &iter);
@@ -967,10 +1070,107 @@ fn collectStartupForwardArguments(alloc: Allocator) !?[]const [:0]const u8 {
     return try argv.toOwnedSlice(alloc);
 }
 
+/// Parse the relative identifier out of an integrity-level SID string of the
+/// form `S-1-16-<rid>`. Returns null for anything that is not a mandatory
+/// label SID, so callers fail closed rather than mislabelling the pipe.
+fn integrityRidFromSidString(sid: []const u16) ?u32 {
+    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-");
+    if (sid.len <= prefix.len) return null;
+    if (!std.mem.eql(u16, sid[0..prefix.len], prefix)) return null;
+
+    var rid: u32 = 0;
+    for (sid[prefix.len..]) |unit| {
+        if (unit < '0' or unit > '9') return null;
+        rid = std.math.mul(u32, rid, 10) catch return null;
+        rid = std.math.add(u32, rid, @intCast(unit - '0')) catch return null;
+    }
+    return rid;
+}
+
+/// Render the SDDL text for the IPC pipe security descriptor into `buf`.
+///
+/// `D:P` is a protected DACL (no inherited ACEs) holding exactly one ACE:
+/// `GENERIC_ALL` for `user_sid`. When `integrity_sid` is non-null a
+/// mandatory-label ACE with the `NO_WRITE_UP` policy is appended, which is
+/// what keeps a lower-integrity process from opening the pipe for write.
+fn buildIpcPipeSddl(
+    buf: []u16,
+    user_sid: []const u16,
+    integrity_sid: ?[]const u16,
+) error{IpcSecurityDescriptorFailed}![:0]u16 {
+    var len: usize = 0;
+
+    const Appender = struct {
+        fn append(dest: []u16, at: *usize, text: []const u16) error{IpcSecurityDescriptorFailed}!void {
+            // Reserve one unit for the sentinel.
+            if (text.len + 1 > dest.len - at.*) return error.IpcSecurityDescriptorFailed;
+            @memcpy(dest[at.*..][0..text.len], text);
+            at.* += text.len;
+        }
+    };
+
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("D:P(A;;GA;;;"));
+    try Appender.append(buf, &len, user_sid);
+    try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
+
+    if (integrity_sid) |label| {
+        try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral("S:(ML;;NW;;;"));
+        try Appender.append(buf, &len, label);
+        try Appender.append(buf, &len, std.unicode.utf8ToUtf16LeStringLiteral(")"));
+    }
+
+    buf[len] = 0;
+    return buf[0..len :0];
+}
+
+/// Resolve the process token's mandatory integrity level as an SDDL SID
+/// string, but only when it sits strictly above medium integrity.
+///
+/// Windows does not auto-label kernel objects created by a high-integrity
+/// process, and an unlabeled object evaluates as medium. Because the token
+/// USER SID is identical across the elevated and non-elevated tokens of one
+/// account, a DACL keyed on that SID alone would let a filtered medium-IL
+/// process drive an elevated instance's pipe. Returning the label SID here
+/// lets the caller add `S:(ML;;NW;;;S-1-16-<rid>)`, which blocks write-up.
+///
+/// Returns null at or below medium integrity (where the label would be a
+/// no-op). The returned string is OS-allocated; free it with `sys.LocalFree`.
+fn allocIpcPipeIntegritySid(token: windows.HANDLE) !?[*:0]u16 {
+    var label_buf: [256]u8 align(@alignOf(sys.TOKEN_MANDATORY_LABEL)) = undefined;
+    var label_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenIntegrityLevel,
+        &label_buf,
+        label_buf.len,
+        &label_len,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const label: *const sys.TOKEN_MANDATORY_LABEL = @ptrCast(&label_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(
+        label.Label.Sid,
+        &sid_string,
+    ) == 0) return error.IpcSecurityDescriptorFailed;
+    const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
+
+    const rid = integrityRidFromSidString(std.mem.span(sid)) orelse {
+        _ = sys.LocalFree(@ptrCast(sid));
+        return error.IpcSecurityDescriptorFailed;
+    };
+    if (rid <= c.SECURITY_MANDATORY_MEDIUM_RID) {
+        _ = sys.LocalFree(@ptrCast(sid));
+        return null;
+    }
+
+    return sid;
+}
+
 /// Build the security descriptor for the single-instance IPC pipe: a
 /// protected DACL whose only ACE grants full access to the SID that owns
-/// this process. Without it the pipe gets the default DACL, which is wider
-/// than the same-user contract the IPC verbs assume.
+/// this process, plus a mandatory-label ACE when this process runs above
+/// medium integrity. Without it the pipe gets the default DACL, which is
+/// wider than the same-user contract the IPC verbs assume.
 ///
 /// The current user's SID is resolved from the process token rather than
 /// using the `OW` (owner rights) SDDL alias, because an elevated token's
@@ -1007,23 +1207,29 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
     const sid = sid_string orelse return error.IpcSecurityDescriptorFailed;
     defer _ = sys.LocalFree(@ptrCast(sid));
 
-    // "D:P" is a protected DACL (no inherited ACEs) containing exactly one
-    // ACE: GENERIC_ALL for the current user. Nothing is granted to
-    // Administrators, SYSTEM, NETWORK, or ANONYMOUS.
-    const prefix = std.unicode.utf8ToUtf16LeStringLiteral("D:P(A;;GA;;;");
-    const sid_len = std.mem.len(sid);
-    var sddl: [256]u16 = undefined;
-    if (prefix.len + sid_len + 2 > sddl.len) {
-        return error.IpcSecurityDescriptorFailed;
-    }
-    @memcpy(sddl[0..prefix.len], prefix);
-    @memcpy(sddl[prefix.len..][0..sid_len], sid[0..sid_len]);
-    sddl[prefix.len + sid_len] = ')';
-    sddl[prefix.len + sid_len + 1] = 0;
+    const integrity_sid = try allocIpcPipeIntegritySid(token);
+    defer if (integrity_sid) |v| {
+        _ = sys.LocalFree(@ptrCast(v));
+    };
+
+    // NOTE: there is no `O:` term, so the object owner defaults to the
+    // token's default owner. For an elevated token that is the
+    // Administrators group, and an owner always retains implicit
+    // READ_CONTROL/WRITE_DAC. A local administrator can therefore rewrite
+    // this DACL; that is inherent to running as an administrator and is not
+    // a boundary this descriptor claims to hold. What the descriptor does
+    // hold is that no ACE grants access to other interactive users,
+    // NETWORK, or ANONYMOUS.
+    var sddl_buf: [320]u16 = undefined;
+    const sddl = try buildIpcPipeSddl(
+        &sddl_buf,
+        std.mem.span(sid),
+        if (integrity_sid) |v| std.mem.span(v) else null,
+    );
 
     var descriptor: ?*anyopaque = null;
     if (sys.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        @ptrCast(&sddl),
+        sddl.ptr,
         c.SDDL_REVISION_1,
         &descriptor,
         null,
@@ -1035,9 +1241,11 @@ fn allocIpcPipeSecurityDescriptor() !*anyopaque {
 fn ipcServerMain(app: *App) void {
     const pipe_name = app.ipc_pipe_name orelse return;
 
-    // Fail closed: an unrestricted single-instance pipe would accept
-    // requests from any local account, so refuse to listen at all if the
-    // DACL cannot be built.
+    // Fail closed: with the default named-pipe security descriptor the pipe
+    // grants Administrators and LocalSystem full control, grants Everyone
+    // read (enough to occupy instances and observe the channel), and is
+    // reachable over SMB. Refuse to listen at all if the descriptor cannot
+    // be built rather than falling back to that.
     const descriptor = allocIpcPipeSecurityDescriptor() catch |err| {
         log.warn("failed to build win32 IPC pipe security descriptor err={}", .{err});
         return;
@@ -3358,7 +3566,30 @@ pub const App = struct {
                     .window,
                 );
                 defer config.deinit();
-                try applyNewWindowArguments(self.core_app.alloc, &config, forwarded_arguments);
+                // The forwarded argv reaches us over the single-instance IPC
+                // pipe, so it is only as trusted as any process running as
+                // this user. Refuse the whole request when it names a key
+                // that selects executed code or an extra config source.
+                if (forwarded_arguments) |argv| {
+                    if (forwardedArgvRejection(argv)) |reason| {
+                        std.log.err(
+                            "refusing forwarded new-window argv: {s} may not be set over IPC",
+                            .{reason},
+                        );
+                        return true;
+                    }
+                }
+                applyNewWindowArguments(
+                    self.core_app.alloc,
+                    &config,
+                    forwarded_arguments,
+                ) catch |err| switch (err) {
+                    // Defense in depth: `applyNewWindowArguments` enforces
+                    // the same filter independently. Treat a rejection as
+                    // handled so it cannot abort the app tick.
+                    error.ForbiddenForwardedArgument => return true,
+                    else => return err,
+                };
                 _ = try self.createWindowSurface(&config, default_title, .{
                     .clone_state_from = self.findSurfaceForTarget(target),
                 });
@@ -15316,6 +15547,58 @@ fn launchTargetButtonKeyAction(vk: WPARAM) ?LaunchTargetButtonKeyAction {
     };
 }
 
+/// True when `title` contains a byte that must not survive into a stored
+/// window/tab title. See `sanitizeTitleAlloc` for why.
+fn titleNeedsSanitize(title: []const u8) bool {
+    var i: usize = 0;
+    while (i < title.len) : (i += 1) {
+        const byte = title[i];
+        if (byte < 0x20 or byte == 0x7F) return true;
+        // UTF-8 encoding of the C1 controls U+0080..U+009F, which includes
+        // 8-bit CSI (U+009B) and ST (U+009C).
+        if (byte == 0xC2 and i + 1 < title.len and
+            title[i + 1] >= 0x80 and title[i + 1] <= 0x9F) return true;
+    }
+    return false;
+}
+
+/// Strip C0 controls, DEL, and C1 controls from a title.
+///
+/// A stored title is not display-only: with `title-report = true` the child
+/// process can issue `CSI 21 t` and the surface answers with
+/// `ESC ] l <title> ESC \` written back to the pty
+/// (`Surface.handleMessage` `.report_title`). Titles arrive from two places
+/// — OSC 0/2 from the child, and `set_surface_title` / `set_tab_title`
+/// performed over the automation IPC pipe — and the IPC path does not honor
+/// the `config.title != null` guard that the OSC path checks. Sanitizing at
+/// the apprt setters covers both, so an IPC peer cannot smuggle an escape
+/// sequence into the terminal by way of the title.
+///
+/// Returns null when `title` is already clean, so the common path allocates
+/// nothing. Otherwise returns an owned copy the caller must free.
+fn sanitizeTitleAlloc(alloc: Allocator, title: []const u8) Allocator.Error!?[]u8 {
+    if (!titleNeedsSanitize(title)) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, title.len);
+
+    var i: usize = 0;
+    while (i < title.len) : (i += 1) {
+        const byte = title[i];
+        if (byte < 0x20 or byte == 0x7F) continue;
+        if (byte == 0xC2 and i + 1 < title.len and
+            title[i + 1] >= 0x80 and title[i + 1] <= 0x9F)
+        {
+            i += 1;
+            continue;
+        }
+        out.appendAssumeCapacity(byte);
+    }
+
+    return try out.toOwnedSlice(alloc);
+}
+
 fn appendOwnedString(
     alloc: Allocator,
     target: *?[:0]const u8,
@@ -21458,6 +21741,13 @@ pub const Surface = struct {
 
     fn setTitle(self: *Surface, title: []const u8) !void {
         const alloc = self.app.core_app.alloc;
+        // Both the OSC 0/2 path and the automation IPC path
+        // (`set_surface_title`) land here, and a stored title can be echoed
+        // back to the pty by `title-report`. See `sanitizeTitleAlloc`.
+        const sanitized = try sanitizeTitleAlloc(alloc, title);
+        defer if (sanitized) |v| alloc.free(v);
+        const value = sanitized orelse title;
+
         var changed = false;
 
         // Direct commands initially report argv[0] as their title. Keep an
@@ -21465,15 +21755,15 @@ pub const Surface = struct {
         // remote terminal supplies a different title.
         if (sshAliasFromLaunchKey(self.launched_ssh, self.launch_profile_key)) |alias| {
             if (self.tab_title_override) |override| {
-                if (std.mem.eql(u8, override, alias) and !isAutomaticSshCommandTitle(title)) {
+                if (std.mem.eql(u8, override, alias) and !isAutomaticSshCommandTitle(value)) {
                     try appendOwnedString(alloc, &self.tab_title_override, null);
                     changed = true;
                 }
             }
         }
 
-        if (!ownedStringEquals(self.title, title)) {
-            try appendOwnedString(alloc, &self.title, title);
+        if (!ownedStringEquals(self.title, value)) {
+            try appendOwnedString(alloc, &self.title, value);
             changed = true;
         }
         if (!changed) return;
@@ -21486,17 +21776,28 @@ pub const Surface = struct {
     }
 
     fn setTitleOverride(self: *Surface, title: ?[]const u8) !void {
-        if (optionalOwnedStringEquals(self.title_override, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.title_override, title);
+        const sanitized = if (title) |v| try sanitizeTitleAlloc(alloc, v) else null;
+        defer if (sanitized) |v| alloc.free(v);
+        const value: ?[]const u8 = if (sanitized) |v| v else title;
+
+        if (optionalOwnedStringEquals(self.title_override, value)) return;
+        try appendOwnedString(alloc, &self.title_override, value);
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
 
     fn setTabTitleOverride(self: *Surface, title: ?[]const u8) !void {
-        if (optionalOwnedStringEquals(self.tab_title_override, title)) return;
         const alloc = self.app.core_app.alloc;
-        try appendOwnedString(alloc, &self.tab_title_override, title);
+        // `set_tab_title` is reachable over the automation IPC pipe and
+        // `effectiveTitle` can surface this value to `title-report`, so it
+        // gets the same sanitizing as `setTitle`.
+        const sanitized = if (title) |v| try sanitizeTitleAlloc(alloc, v) else null;
+        defer if (sanitized) |v| alloc.free(v);
+        const value: ?[]const u8 = if (sanitized) |v| v else title;
+
+        if (optionalOwnedStringEquals(self.tab_title_override, value)) return;
+        try appendOwnedString(alloc, &self.tab_title_override, value);
         try self.refreshWindowTitle();
         self.notifyTerminalUiaNameChanged();
     }
@@ -27737,6 +28038,136 @@ test "win32 timed out automation request remains owned until consumption" {
     request.release(); // Delayed mailbox consumer owns the final reference.
 }
 
+test "win32 IPC pipe SDDL renders the exact DACL and mandatory label" {
+    const user_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-5-21-1111-2222-3333-1001");
+    const high_sid = std.unicode.utf8ToUtf16LeStringLiteral("S-1-16-12288");
+
+    var buf: [320]u16 = undefined;
+
+    // Medium integrity: no label ACE, because an unlabeled object already
+    // evaluates as medium with NO_WRITE_UP.
+    {
+        const sddl = try buildIpcPipeSddl(&buf, user_sid, null);
+        var utf8: [320]u8 = undefined;
+        const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
+        try std.testing.expectEqualStrings(
+            "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)",
+            utf8[0..len],
+        );
+    }
+
+    // Above medium: the label ACE is what stops a filtered medium-integrity
+    // token of the SAME user from opening the elevated instance's pipe for
+    // write. The DACL alone cannot, because the token USER SID is identical
+    // across the elevated and non-elevated tokens of one account.
+    {
+        const sddl = try buildIpcPipeSddl(&buf, user_sid, high_sid);
+        var utf8: [320]u8 = undefined;
+        const len = try std.unicode.utf16LeToUtf8(&utf8, sddl);
+        try std.testing.expectEqualStrings(
+            "D:P(A;;GA;;;S-1-5-21-1111-2222-3333-1001)S:(ML;;NW;;;S-1-16-12288)",
+            utf8[0..len],
+        );
+    }
+
+    // A buffer too small to hold the text plus its sentinel fails closed.
+    var tiny: [8]u16 = undefined;
+    try std.testing.expectError(
+        error.IpcSecurityDescriptorFailed,
+        buildIpcPipeSddl(&tiny, user_sid, null),
+    );
+}
+
+test "win32 integrity SID parsing accepts only mandatory label SIDs" {
+    const expect = std.testing.expect;
+    const L = std.unicode.utf8ToUtf16LeStringLiteral;
+
+    try std.testing.expectEqual(
+        @as(?u32, 0x3000),
+        integrityRidFromSidString(L("S-1-16-12288")),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0x2000),
+        integrityRidFromSidString(L("S-1-16-8192")),
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0x4000),
+        integrityRidFromSidString(L("S-1-16-16384")),
+    );
+
+    // Anything that is not S-1-16-<digits> must fail closed rather than be
+    // treated as an integrity level.
+    try expect(integrityRidFromSidString(L("S-1-5-21-1-2-3-1001")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-12a88")) == null);
+    try expect(integrityRidFromSidString(L("")) == null);
+    try expect(integrityRidFromSidString(L("S-1-16-99999999999")) == null);
+}
+
+test "win32 IPC pipe security descriptor round-trips to the expected SDDL" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const descriptor = try allocIpcPipeSecurityDescriptor();
+    defer _ = sys.LocalFree(descriptor);
+
+    // Resolve the expected principal independently of the descriptor so the
+    // assertion is on content, not on "the function returned something".
+    var token: windows.HANDLE = undefined;
+    try std.testing.expect(sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) != 0);
+    defer _ = windows.CloseHandle(token);
+
+    var token_user_buf: [256]u8 align(@alignOf(sys.TOKEN_USER)) = undefined;
+    var token_user_len: u32 = 0;
+    try std.testing.expect(sys.GetTokenInformation(
+        token,
+        c.TokenUser,
+        &token_user_buf,
+        token_user_buf.len,
+        &token_user_len,
+    ) != 0);
+    const token_user: *const sys.TOKEN_USER = @ptrCast(&token_user_buf);
+
+    var expected_sid: ?[*:0]u16 = null;
+    try std.testing.expect(sys.ConvertSidToStringSidW(
+        token_user.User.Sid,
+        &expected_sid,
+    ) != 0);
+    const sid = expected_sid.?;
+    defer _ = sys.LocalFree(@ptrCast(sid));
+
+    var sid_utf8: [128]u8 = undefined;
+    const sid_utf8_len = try std.unicode.utf16LeToUtf8(&sid_utf8, std.mem.span(sid));
+
+    var expected_buf: [320]u8 = undefined;
+    const expected = try std.fmt.bufPrint(
+        &expected_buf,
+        "D:P(A;;GA;;;{s})",
+        .{sid_utf8[0..sid_utf8_len]},
+    );
+
+    // Round-trip the built descriptor back to SDDL. A null descriptor, an
+    // Everyone ACE, an unprotected DACL, or a narrower/wider access mask all
+    // change this string.
+    var actual_sddl: ?[*:0]u16 = null;
+    try std.testing.expect(sys.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        descriptor,
+        c.SDDL_REVISION_1,
+        c.DACL_SECURITY_INFORMATION,
+        &actual_sddl,
+        null,
+    ) != 0);
+    const actual_utf16 = std.mem.span(actual_sddl.?);
+    defer _ = sys.LocalFree(@ptrCast(actual_sddl.?));
+
+    var actual_buf: [320]u8 = undefined;
+    const actual_len = try std.unicode.utf16LeToUtf8(&actual_buf, actual_utf16);
+    try std.testing.expectEqualStrings(expected, actual_buf[0..actual_len]);
+}
+
 test "win32 IPC pipe DACL still admits a same-user client" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
@@ -27791,6 +28222,152 @@ test "win32 IPC pipe DACL still admits a same-user client" {
     );
     try std.testing.expect(client != windows.INVALID_HANDLE_VALUE);
     defer _ = windows.CloseHandle(client);
+}
+
+test "win32 forwarded new-window argv rejects code and config-source keys" {
+    const expect = std.testing.expect;
+
+    // A pipe writer that gets `--command` accepted gets execution in the
+    // server's context, which is the whole point of the server-side filter.
+    try std.testing.expectEqualStrings(
+        "command",
+        forbiddenForwardedArgument("--command=powershell -enc AAAA").?,
+    );
+    try std.testing.expectEqualStrings(
+        "initial-command",
+        forbiddenForwardedArgument("--initial-command=calc.exe").?,
+    );
+    try std.testing.expectEqualStrings(
+        "config-file",
+        forbiddenForwardedArgument("--config-file=C:/tmp/evil.conf").?,
+    );
+    try std.testing.expectEqualStrings(
+        "config-default-files",
+        forbiddenForwardedArgument("--config-default-files=false").?,
+    );
+    // `theme` takes an absolute path and is parsed as a whole config file,
+    // so it is a `config-file` by proxy.
+    try std.testing.expectEqualStrings(
+        "theme",
+        forbiddenForwardedArgument("--theme=C:/tmp/evil.conf").?,
+    );
+    try std.testing.expectEqualStrings(
+        "custom-shader",
+        forbiddenForwardedArgument("--custom-shader=C:/tmp/x.glsl").?,
+    );
+    // `-e` is turned into `initial-command` by `Config.parseManuallyHook`.
+    try std.testing.expectEqualStrings("-e", forbiddenForwardedArgument("-e").?);
+
+    // Valueless and prefix-similar forms.
+    try std.testing.expectEqualStrings("command", forbiddenForwardedArgument("--command").?);
+    try expect(forbiddenForwardedArgument("--command-palette-entry=x") == null);
+    try expect(forbiddenForwardedArgument("--font-size=14") == null);
+    try expect(forbiddenForwardedArgument("--title=hello") == null);
+    try expect(forbiddenForwardedArgument("not-a-flag") == null);
+}
+
+test "win32 forwarded working-directory is constrained to local directories" {
+    const expect = std.testing.expect;
+
+    try expect(forwardedWorkingDirectoryAllowed("home"));
+    try expect(forwardedWorkingDirectoryAllowed("inherit"));
+
+    // UNC values would make the server authenticate to an attacker-chosen
+    // SMB host just by resolving the path.
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\attacker\\share"));
+    try expect(!forwardedWorkingDirectoryAllowed("//attacker/share"));
+    try expect(!forwardedWorkingDirectoryAllowed("\\\\?\\C:\\Windows"));
+    try expect(!forwardedWorkingDirectoryAllowed("relative\\path"));
+    try expect(!forwardedWorkingDirectoryAllowed(""));
+
+    if (builtin.os.tag == .windows) {
+        // The startup forwarder always sends a realpath'd cwd, so a real
+        // local directory has to keep working or single-instance launches
+        // would break.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+        try expect(forwardedWorkingDirectoryAllowed(cwd));
+        try expect(!forwardedWorkingDirectoryAllowed("C:\\this-path-should-not-exist-noctty"));
+    }
+}
+
+test "win32 applyNewWindowArguments rejects a forwarded command outright" {
+    const alloc = std.testing.allocator;
+
+    // The whole request must be refused rather than silently stripping the
+    // key, so the caller never builds a window from a half-honored argv.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--window-height=40",
+                "--command=powershell -enc AAAA",
+            }),
+        );
+        try std.testing.expect(config.command == null);
+    }
+
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--config-file=C:/tmp/evil.conf",
+            }),
+        );
+    }
+
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try std.testing.expectError(
+            error.ForbiddenForwardedArgument,
+            applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+                "--working-directory=\\\\attacker\\share",
+            }),
+        );
+    }
+
+    // A benign argv is still applied.
+    {
+        var config = try configpkg.Config.default(alloc);
+        defer config.deinit();
+        try applyNewWindowArguments(alloc, &config, &[_][:0]const u8{
+            "--window-height=40",
+        });
+        try std.testing.expectEqual(@as(u32, 40), config.@"window-height");
+    }
+}
+
+test "win32 title sanitizing strips control bytes from IPC and OSC titles" {
+    const alloc = std.testing.allocator;
+
+    // Clean titles allocate nothing.
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "hello world") == null);
+    try std.testing.expect(try sanitizeTitleAlloc(alloc, "caf\u{00e9} \u{4e2d}\u{6587}") == null);
+
+    // With `title-report = true` a stored title is echoed back to the child
+    // as `ESC ] l <title> ESC \`, so an ESC in an IPC-supplied title would
+    // let a pipe writer inject a sequence into the pty.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x1b]0;pwned\x07b")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a]0;pwnedb", out);
+    }
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\x1b\\b\nc\rd\x00e\x7ff")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a\\bcdef", out);
+    }
+    // 8-bit CSI (U+009B) and ST (U+009C) as UTF-8.
+    {
+        const out = (try sanitizeTitleAlloc(alloc, "a\u{009b}0mb\u{009c}c")).?;
+        defer alloc.free(out);
+        try std.testing.expectEqualStrings("a0mbc", out);
+    }
 }
 
 test "win32 IPC silent client read is bounded" {

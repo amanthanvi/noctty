@@ -316,10 +316,21 @@ on Windows. Global keyboard capture is intentionally not implemented.
 noctty exposes a local Windows automation surface over the same
 single-instance IPC path used by `+new-window`.
 
-The named pipe behind it is local-only and user-private: it is created
-with `PIPE_REJECT_REMOTE_CLIENTS` and a protected DACL whose single ACE
-grants access to the SID that owns the running noctty process. Other
-local accounts and remote SMB clients cannot open it.
+The named pipe behind it is restricted to processes running as the same
+user: it is created with `PIPE_REJECT_REMOTE_CLIENTS` and a protected
+DACL whose single ACE grants access to the SID of the token that owns
+the running noctty process. When that process runs above medium
+integrity, a `NO_WRITE_UP` mandatory-label ACE is added as well, so a
+filtered (non-elevated) token of the same account cannot drive an
+elevated instance.
+
+**This is not a privilege boundary.** Any code already running as your
+user is fully trusted with this channel: it can list your windows,
+perform allowlisted actions, and open new windows. Treat the automation
+surface the way you would treat your own shell — it reduces exposure to
+other accounts and to the network, not to malware running as you. The
+pipe *name* is also not protected; another process running as you can
+create it first.
 
 List windows, tabs, and panes:
 
@@ -343,9 +354,17 @@ Actions use the same names as `keybind` values. `--surface-id` is only
 valid for surface-scoped actions; app-scoped actions such as `quit`
 always target the app. The running instance rejects terminal-input and
 arbitrary file helper actions (`text`, `csi`, `esc`,
-`paste_from_clipboard`, `write_screen_file`, `end_key_sequence`, and
-`crash`), and new keybinding action variants stay disabled for automation
-until they are reviewed and allowlisted.
+`paste_from_clipboard`, `write_screen_file`, `end_key_sequence`,
+`clear_screen`, and `crash`), and new keybinding action variants stay
+disabled for automation until they are reviewed and allowlisted.
+
+`+new-window` forwards command-line arguments to the running instance.
+The running instance refuses any forwarded argument that would select
+code to run or an extra configuration source — `--command`,
+`--initial-command`, `-e`, `--config-file`, `--config-default-files`,
+`--theme`, and `--custom-shader` — and refuses the whole request rather
+than dropping the key. `--working-directory` is accepted only as `home`,
+`inherit`, or a local absolute path that resolves to a directory.
 
 ## Crash reports and diagnostics
 

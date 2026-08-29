@@ -241,6 +241,10 @@ test "automation-action safety rejects terminal input and crash actions" {
     // so it is terminal input even though it takes no argument.
     try std.testing.expect(!isSafeAutomationAction(.end_key_sequence));
 
+    // clear_screen writes 0x0C to the child at a prompt and erases the
+    // full scrollback, so it is terminal input too.
+    try std.testing.expect(!isSafeAutomationAction(.clear_screen));
+
     // Key table actions only move the binding stack and stay allowed.
     try std.testing.expect(isSafeAutomationAction(.deactivate_all_key_tables));
 }
@@ -248,6 +252,62 @@ test "automation-action safety rejects terminal input and crash actions" {
 test "automation-action safety rejects end_key_sequence parsed from IPC text" {
     const action = try input.Binding.Action.parse("end_key_sequence");
     try std.testing.expect(!isSafeAutomationAction(action));
+}
+
+/// An App with just enough state for `performAutomationAction` to run its
+/// pre-dispatch checks. `font_grid_set` is untouched on that path, so this
+/// avoids standing up the font subsystem for a pure gating test.
+fn testAutomationApp() App {
+    return .{
+        .alloc = std.testing.allocator,
+        .surfaces = .{},
+        .mailbox = .{},
+        .font_grid_set = undefined,
+        .config_conditional_state = .{},
+    };
+}
+
+test "automation-action dispatch rejects unsafe actions before dispatching" {
+    var app = testAutomationApp();
+    defer app.surfaces.deinit(app.alloc);
+
+    // `performAutomationAction` returns before it touches `rt_app` for every
+    // outcome asserted here: the safety gate rejects first, and with no
+    // focused surface the fallback is a surface-scope check. A dangling but
+    // correctly aligned pointer is therefore never dereferenced.
+    const rt_app: *apprt.App = @ptrFromInt(@alignOf(apprt.App));
+
+    // These go through the real IPC entry point, so deleting the
+    // `isSafeAutomationAction` gate inside `performAutomationAction` fails
+    // this test rather than leaving the parse-only tests above green.
+    for ([_][]const u8{
+        "end_key_sequence",
+        "clear_screen",
+        "paste_from_clipboard",
+    }) |action_text| {
+        try std.testing.expectError(
+            error.UnsafeAutomationAction,
+            app.performAutomationAction(rt_app, .focused, action_text),
+        );
+        try std.testing.expectError(
+            error.UnsafeAutomationAction,
+            app.performAutomationAction(rt_app, .{ .surface_id = 1 }, action_text),
+        );
+    }
+
+    // An allowlisted surface-scoped action gets past the gate and fails
+    // later for lack of a target, which is what proves the gate is what
+    // rejected the actions above.
+    try std.testing.expectError(
+        error.NoAutomationTarget,
+        app.performAutomationAction(rt_app, .focused, "scroll_to_top"),
+    );
+
+    // Unparseable action text is rejected before the gate.
+    try std.testing.expectError(
+        error.InvalidAutomationAction,
+        app.performAutomationAction(rt_app, .focused, "no_such_action_zz"),
+    );
 }
 
 test "automation-action surface id targets reject app scoped actions" {
@@ -607,11 +667,22 @@ fn automationActionTargetError(
     };
 }
 
-/// Actions that `+perform-action` may invoke over IPC. Anything that can
-/// put bytes on the pty is excluded, including `end_key_sequence`: it
-/// resolves to `endKeySequence(.flush, ...)`, which writes the pending
-/// key-sequence queue to the terminal. New action variants default to
-/// unsafe until they are reviewed.
+/// Actions that `+perform-action` may invoke over IPC.
+///
+/// Anything that can put bytes on the pty is excluded:
+///
+///   - `end_key_sequence` resolves to `endKeySequence(.flush, ...)`, which
+///     writes the pending key-sequence queue to the terminal.
+///   - `clear_screen` reaches `Termio.clearScreen`, which sends `0x0C` (FF)
+///     to the child when the cursor is at a prompt, and also erases the
+///     full scrollback without regard to `readonly`.
+///
+/// This is only the boundary for the `.perform_action` IPC request kind.
+/// The `.new_window` kind on the same pipe carries argv and is filtered
+/// separately in `apprt/win32.zig` (`applyNewWindowArguments`); the pipe
+/// itself is restricted to the same user and is not a privilege boundary.
+///
+/// New action variants default to unsafe until they are reviewed.
 fn isSafeAutomationAction(action: input.Binding.Action) bool {
     return switch (action) {
         .ignore,
@@ -632,7 +703,6 @@ fn isSafeAutomationAction(action: input.Binding.Action) bool {
         .prompt_tab_title,
         .set_surface_title,
         .set_tab_title,
-        .clear_screen,
         .select_all,
         .scroll_to_top,
         .scroll_to_bottom,

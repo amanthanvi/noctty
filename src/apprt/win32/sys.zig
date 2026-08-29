@@ -457,6 +457,12 @@ pub const TOKEN_USER = extern struct {
     User: SID_AND_ATTRIBUTES,
 };
 
+/// `TOKEN_MANDATORY_LABEL` as returned by `GetTokenInformation` with
+/// `TokenIntegrityLevel`. `Label.Sid` is an `S-1-16-<rid>` integrity SID.
+pub const TOKEN_MANDATORY_LABEL = extern struct {
+    Label: SID_AND_ATTRIBUTES,
+};
+
 pub extern "advapi32" fn OpenProcessToken(
     ProcessHandle: HANDLE,
     DesiredAccess: DWORD,
@@ -481,6 +487,14 @@ pub extern "advapi32" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
     StringSDRevision: DWORD,
     SecurityDescriptor: *?*anyopaque,
     SecurityDescriptorSize: ?*u32,
+) callconv(.winapi) BOOL;
+
+pub extern "advapi32" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+    SecurityDescriptor: *anyopaque,
+    RequestedStringSDRevision: DWORD,
+    SecurityInformation: DWORD,
+    StringSecurityDescriptor: *?[*:0]u16,
+    StringSecurityDescriptorLen: ?*u32,
 ) callconv(.winapi) BOOL;
 
 pub extern "kernel32" fn LocalFree(hMem: ?*anyopaque) callconv(.winapi) ?*anyopaque;

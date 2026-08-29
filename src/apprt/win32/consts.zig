@@ -391,14 +391,29 @@ pub const PIPE_UNLIMITED_INSTANCES = 255;
 /// single-instance IPC pipe must opt out explicitly.
 pub const PIPE_REJECT_REMOTE_CLIENTS = 0x00000008;
 
-/// Token access and info class used to resolve the current user's SID for
-/// the IPC pipe DACL.
+/// Token access and info classes used to resolve the current user's SID and
+/// integrity level for the IPC pipe security descriptor.
 pub const TOKEN_QUERY = 0x0008;
 pub const TokenUser = 1;
+pub const TokenIntegrityLevel = 25;
+
+/// Relative identifier of the medium mandatory integrity level
+/// (`S-1-16-8192`). Windows treats an object with no mandatory label as
+/// medium integrity, so a label ACE is only worth adding above this.
+pub const SECURITY_MANDATORY_MEDIUM_RID = 0x2000;
 
 /// SDDL string revision accepted by
-/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
+/// `ConvertSecurityDescriptorToStringSecurityDescriptorW`.
 pub const SDDL_REVISION_1 = 1;
+
+/// `SECURITY_INFORMATION` bits. `LABEL_SECURITY_INFORMATION` selects the
+/// mandatory-label ACE in the SACL without needing `SeSecurityPrivilege`.
+pub const OWNER_SECURITY_INFORMATION = 0x00000001;
+pub const GROUP_SECURITY_INFORMATION = 0x00000002;
+pub const DACL_SECURITY_INFORMATION = 0x00000004;
+pub const SACL_SECURITY_INFORMATION = 0x00000008;
+pub const LABEL_SECURITY_INFORMATION = 0x00000010;
 
 /// Main-thread COM apartment for in-process STA clients (settings path
 /// picker, WinRT toast factory, OLE drag-drop targets). `S_FALSE` means
