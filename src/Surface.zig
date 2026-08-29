@@ -6173,6 +6173,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             };
             defer self.alloc.free(output);
 
+            if (output.len == 0) {
+                log.info(
+                    "copy last command output ignored: the completed command produced no output",
+                    .{},
+                );
+                return true;
+            }
+
             self.rt_surface.setClipboard(.standard, &.{.{
                 .mime = "text/plain",
                 .data = output,
