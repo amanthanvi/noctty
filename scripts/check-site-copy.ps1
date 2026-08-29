@@ -63,7 +63,7 @@ $requiredRules = @(
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "self-signed certificate"; Reason = "The trust page must state the current signing limitation plainly." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "gh attestation verify"; Reason = "The trust page should include the build-provenance check." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No screen reader has been run"; Reason = "The trust page must keep the accessibility limit unhedged." }
-    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "32.14 MB against a 20 MB budget"; Reason = "The trust page must keep the missed memory budget visible." }
+    @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "miss a budget stated in PRODUCT.md"; Reason = "The trust page must keep the missed performance budgets visible." }
     @{ Path = Join-Path $siteRoot "why-noctty.html"; Pattern = "No comparison against another terminal is published"; Reason = "The trust page must keep the no-competitor-numbers statement." }
 )
 

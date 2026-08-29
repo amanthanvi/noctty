@@ -44,12 +44,26 @@ test("trust page states its limits without hedging", () => {
     /no code-signing certificate from a public certificate\s+authority/i,
   );
   assert.match(trustHtml, /SmartScreen will\s+warn/);
-  assert.match(trustHtml, /32\.14 MB against a 20 MB budget/);
-  assert.match(trustHtml, /313 ms p95/);
+  assert.match(trustHtml, /Two results miss a budget stated in PRODUCT\.md/);
+  assert.match(trustHtml, /Key-to-pixel\s+latency is not measured at all/);
   assert.match(trustHtml, /No screen reader has been run/);
   assert.match(
     trustHtml,
     /No comparison against another terminal is published/,
+  );
+});
+
+test("trust page hardcodes no performance figure", () => {
+  // Benchmark numbers move with the machine state and the build they were
+  // taken against. The page cites the methodology doc so a re-measurement
+  // never leaves an unreproducible figure published here.
+  const figures = trustHtml.match(
+    /[0-9]+(?:\.[0-9]+)?\s?(?:MB\/s|MB|ms|GB)\b/g,
+  );
+  assert.equal(
+    figures,
+    null,
+    `cite docs/windows-benchmark-methodology.md instead of ${figures?.join(", ")}`,
   );
 });
 

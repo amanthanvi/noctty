@@ -189,18 +189,23 @@
         <article>
           <h3>Performance</h3>
           <p>
-            One same-machine baseline is published: 2026-08-27, a Ryzen 9 9900X
-            with an RTX 5070 Ti on Windows build 26200, a ReleaseFast build,
-            five runs per metric. It covers throughput, frame time, cold start,
-            per-pane memory, idle cost, and ConPTY round trip.
+            Throughput, frame time, cold start, per-pane memory, idle cost, and
+            ConPTY round trip are measured on one machine, a Ryzen 9 9900X with
+            an RTX 5070 Ti on Windows build 26200, from ReleaseFast builds. The
+            methodology doc carries each figure with the date, the run count,
+            and the state the machine was in, because a benchmark taken under
+            load is a different measurement.
           </p>
           <p>
-            Two results miss a budget stated in PRODUCT.md and are published as
-            measured rather than adjusted. Memory per additional pane is
-            32.14 MB against a 20 MB budget. Cold start medians 297 ms against
-            an under-300 ms budget with a 313 ms p95, so the median fits and the
-            tail does not. Key-to-pixel latency is not measured at all; the
-            suite ships a software proxy that cannot certify it.
+            Two results miss a budget stated in PRODUCT.md, and they are
+            recorded as measured rather than adjusted: memory per additional
+            pane, and the cold start tail, where the median fits the budget and
+            the p95 does not. Both are currently marked provisional. They were
+            taken under parallel build load, against a build that predates a
+            round of performance work, so the figures are not repeated here
+            until they have been re-measured on an idle machine. Key-to-pixel
+            latency is not measured at all; the suite ships a software proxy
+            that cannot certify it.
           </p>
           <p>
             No comparison against another terminal is published, here or
