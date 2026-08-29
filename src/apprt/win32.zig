@@ -63,6 +63,7 @@ const win32_compositor_native = @import("win32_compositor_native.zig");
 const win32_shell = @import("win32_shell.zig");
 const win32_ipc = @import("win32_ipc.zig");
 const win32_terminal_handoff = @import("win32_terminal_handoff.zig");
+const win32_hints = @import("win32_hints.zig");
 const render_trace = @import("win32/render_trace.zig");
 const gl_startup = @import("win32/gl_startup.zig");
 const pixel_format = @import("win32/pixel_format.zig");
@@ -424,6 +425,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32");
 const host_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.host");
 const palette_list_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.palette_list");
 const scrollbar_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.scrollbar");
+const quick_select_class_name = std.unicode.utf8ToUtf16LeStringLiteral("noctty.win32.quick_select");
 
 /// Palette list row height at 96 DPI. Scaled via `Host.scaled` at paint.
 const palette_row_height: i32 = 36;
@@ -2758,6 +2760,34 @@ fn sessionRestorePolicyAllows(
         !startup_profile_picker;
 }
 
+fn writeOpenUrlTrace(file: std.fs.File, url: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+    try writer.interface.print("{s}\r\n", .{url});
+    try writer.interface.flush();
+}
+
+/// Explicit Debug-build test seam for URL activation. When set, the Win32
+/// runtime records the requested URL instead of dispatching an uncontrolled
+/// ShellExecuteW. Release builds always use the system URL handler.
+fn recordOpenUrlForTest(alloc: Allocator, url: []const u8) !bool {
+    const raw_path = std.process.getEnvVarOwned(
+        alloc,
+        "NOCTTY_WIN32_OPEN_URL_TRACE_FILE",
+    ) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return false,
+        else => return err,
+    };
+    defer alloc.free(raw_path);
+    const path = std.mem.trim(u8, raw_path, " \t\r\n");
+    if (path.len == 0) return false;
+
+    const file = try std.fs.createFileAbsolute(path, .{ .truncate = true });
+    defer file.close();
+    try writeOpenUrlTrace(file, url);
+    return true;
+}
+
 pub const App = struct {
     pub const must_draw_from_app_thread = true;
 
@@ -2770,6 +2800,7 @@ pub const App = struct {
     host_class_atom: ATOM = 0,
     palette_list_class_atom: ATOM = 0,
     scrollbar_class_atom: ATOM = 0,
+    quick_select_class_atom: ATOM = 0,
     hosts: std.ArrayListUnmanaged(*Host) = .empty,
     windows: std.ArrayListUnmanaged(*Surface) = .empty,
     /// Internal test seam so action-path tests can drive real
@@ -5461,6 +5492,13 @@ pub const App = struct {
                 return false;
             },
 
+            .toggle_quick_select => {
+                if (self.findSurfaceForTarget(target)) |surface| {
+                    return try surface.toggleQuickSelect();
+                }
+                return false;
+            },
+
             .pwd => {
                 if (self.findSurfaceForTarget(target)) |surface| {
                     try surface.setPwd(value.pwd);
@@ -6184,6 +6222,30 @@ pub const App = struct {
         self.scrollbar_class_atom = sys.RegisterClassExW(&wc);
         if (self.scrollbar_class_atom == 0) {
             return lastError();
+        }
+    }
+
+    fn ensureQuickSelectClass(self: *App) !void {
+        if (self.quick_select_class_atom != 0) return;
+
+        var wc: WNDCLASSEXW = .{
+            .cbSize = @sizeOf(WNDCLASSEXW),
+            .style = 0,
+            .lpfnWndProc = &quickSelectProc,
+            .cbClsExtra = 0,
+            .cbWndExtra = 0,
+            .hInstance = self.hinstance,
+            .hIcon = null,
+            .hCursor = sys.LoadCursorW(null, c.IDC_ARROW),
+            .hbrBackground = null,
+            .lpszMenuName = null,
+            .lpszClassName = quick_select_class_name,
+            .hIconSm = null,
+        };
+
+        self.quick_select_class_atom = sys.RegisterClassExW(&wc);
+        if (self.quick_select_class_atom == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
         }
     }
 
@@ -8063,6 +8125,9 @@ pub const App = struct {
     }
 
     fn openUrl(self: *App, url: []const u8) !void {
+        if (builtin.mode == .Debug and
+            try recordOpenUrlForTest(self.core_app.alloc, url)) return;
+
         const url_w = try std.unicode.utf8ToUtf16LeAllocZ(self.core_app.alloc, url);
         defer self.core_app.alloc.free(url_w);
 
@@ -9049,6 +9114,21 @@ const ConfirmPayload = struct {
     }
 };
 
+fn beginConfirmOverlay(
+    host: *Host,
+    payload: ConfirmPayload,
+    ensure_controls: *const fn (*Host) anyerror!void,
+    present: *const fn (*Host) anyerror!void,
+) !void {
+    // Lazy control creation finishes by resetting the overlay to its hidden
+    // baseline. Do that before installing the confirm payload so first-use
+    // initialization cannot discard the labels, body, and callbacks.
+    try ensure_controls(host);
+    host.confirm_payload = payload;
+    errdefer host.confirm_payload = null;
+    try present(host);
+}
+
 const ChildPlacement = struct {
     hwnd: ?HWND = null,
     rect: RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -9212,6 +9292,8 @@ const Host = struct {
     overlay_hint_hwnd: ?HWND = null,
     overlay_accept_hwnd: ?HWND = null,
     overlay_cancel_hwnd: ?HWND = null,
+    overlay_accept_uia_provider: ?*win32_uia.SettingsControlProvider = null,
+    overlay_cancel_uia_provider: ?*win32_uia.SettingsControlProvider = null,
     overlay_button_prev_proc: ?*const anyopaque = null,
     cached_overlay_label: ?[:0]const u8 = null,
     cached_overlay_hint: ?[:0]const u8 = null,
@@ -11819,6 +11901,21 @@ const Host = struct {
         destroySubclassedWindow(&self.overlay_edit_hwnd, &self.overlay_edit_prev_proc);
         destroyChildWindow(&self.overlay_hint_hwnd);
 
+        const overlay_button_providers = takeOverlayButtonUiaProviders(
+            &self.overlay_accept_uia_provider,
+            &self.overlay_cancel_uia_provider,
+        );
+        inline for (.{ overlay_button_providers.accept, overlay_button_providers.cancel }) |provider_opt| {
+            if (provider_opt) |provider| {
+                provider.detach();
+                scheduleDeferredUiaDisconnect(
+                    self.app,
+                    @ptrCast(provider),
+                    &overlayButtonDisconnectThunk,
+                    &overlayButtonReleaseThunk,
+                );
+            }
+        }
         const overlay_prev = self.overlay_button_prev_proc;
         self.overlay_button_prev_proc = null;
         destroySubclassedWindowWithPrev(&self.overlay_accept_hwnd, overlay_prev);
@@ -12976,6 +13073,29 @@ const Host = struct {
         ) orelse return lastError();
         self.subclassButton(self.overlay_cancel_hwnd.?, &hostButtonProc, &self.overlay_button_prev_proc);
 
+        if (self.app.com_initialized) {
+            self.overlay_accept_uia_provider = win32_uia.SettingsControlProvider.create(
+                std.heap.page_allocator,
+                self.overlay_accept_hwnd.?,
+                .button,
+                null,
+            ) catch |err| blk: {
+                log.warn("overlay accept UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+            self.overlay_cancel_uia_provider = win32_uia.SettingsControlProvider.create(
+                std.heap.page_allocator,
+                self.overlay_cancel_hwnd.?,
+                .button,
+                null,
+            ) catch |err| blk: {
+                log.warn("overlay cancel UIA provider unavailable err={}", .{err});
+                break :blk null;
+            };
+        } else {
+            log.warn("overlay button UIA providers disabled: UI thread is not a confirmed STA", .{});
+        }
+
         // Palette list — shown only when overlay_mode == .command_palette.
         // Stamped with a pointer to the Host via GWLP_USERDATA so the
         // wndproc can dispatch clicks back to `host.invokePaletteRow`.
@@ -13370,7 +13490,7 @@ const Host = struct {
         // branch, so we don't leak here.
         if (self.overlay_mode != .none) self.hideOverlay();
 
-        self.confirm_payload = .{
+        try beginConfirmOverlay(self, .{
             .title = title_owned,
             .body = body_owned,
             .accept_label = accept_owned,
@@ -13378,8 +13498,10 @@ const Host = struct {
             .on_accept = on_accept,
             .on_cancel = on_cancel,
             .userdata = userdata,
-        };
+        }, &Host.ensureOverlayControls, &Host.showConfirmOverlay);
+    }
 
+    fn showConfirmOverlay(self: *Host) !void {
         try self.showOverlay(.confirm, null);
     }
 
@@ -18726,6 +18848,61 @@ fn paletteListNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
     return host.buildPaletteListName(buf);
 }
 
+fn quickSelectNameThunk(ctx: *anyopaque, buf: []u8) []const u8 {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    return surface.buildQuickSelectName(buf);
+}
+
+fn quickSelectFocusedThunk(ctx: *anyopaque) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const hwnd = surface.quick_select_hwnd orelse return false;
+    return sys.GetFocus() == hwnd;
+}
+
+fn quickSelectRowCountThunk(ctx: *anyopaque) usize {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return 0;
+    return session.labels.count;
+}
+
+fn quickSelectSelectedIndexThunk(ctx: *anyopaque) ?usize {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    return surface.quickSelectFirstRemainingIndex();
+}
+
+fn quickSelectRowNameThunk(ctx: *anyopaque, index: usize, buf: []u8) []const u8 {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return "Quick select target";
+    if (index >= session.labels.count or index >= session.scan.matches.len) return "Quick select target";
+    return win32_hints.accessibleTargetName(
+        buf,
+        index,
+        session.labels.count,
+        session.labels.get(index),
+        session.scan.matchText(index),
+    );
+}
+
+fn quickSelectRowEnabledThunk(ctx: *anyopaque, index: usize) bool {
+    const surface: *const Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return false;
+    return index < session.labels.count and session.labels.startsWith(index, session.prefix.typed());
+}
+
+fn quickSelectRowIdThunk(_: *anyopaque, index: usize) u64 {
+    return index + 1;
+}
+
+fn quickSelectSelectRowThunk(ctx: *anyopaque, index: usize) void {
+    const surface: *Surface = @ptrCast(@alignCast(ctx));
+    const session = if (surface.quick_select_session) |*value| value else return;
+    if (index >= session.labels.count or !session.labels.startsWith(index, session.prefix.typed())) return;
+    const label = session.labels.get(index);
+    @memcpy(session.prefix.bytes[0..label.len], label);
+    session.prefix.len = label.len;
+    surface.quickSelectPrefixChanged();
+}
+
 fn paletteListRowCountThunk(ctx: *anyopaque) usize {
     const host: *const Host = @ptrCast(@alignCast(ctx));
     return host.palette_list_ranked_count;
@@ -19896,6 +20073,72 @@ fn paletteListProc(
     }
 }
 
+fn quickSelectProc(
+    hwnd: HWND,
+    msg: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+) callconv(.winapi) LRESULT {
+    const surface = getSurface(hwnd);
+    switch (msg) {
+        c.WM_ERASEBKGND => return 1,
+        c.WM_PAINT => {
+            if (surface) |value| value.paintQuickSelect();
+            return 0;
+        },
+        c.WM_SETFOCUS => {
+            if (surface) |value| if (value.quick_select_uia_provider) |provider| {
+                win32_uia.events.raiseFocusChanged(&provider.base);
+            };
+            return 0;
+        },
+        c.WM_KILLFOCUS => {
+            if (surface) |value| value.closeQuickSelect(false);
+            return 0;
+        },
+        // The overlay covers the terminal while it is up, so a click that
+        // would otherwise reach the terminal dismisses quick select instead
+        // of being silently swallowed.
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN => {
+            if (surface) |value| value.closeQuickSelect(true);
+            return 0;
+        },
+        c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
+            if (surface) |value| value.handleQuickSelectKey(wParam, lParam);
+            return 0;
+        },
+        c.WM_KEYUP,
+        c.WM_SYSKEYUP,
+        c.WM_CHAR,
+        c.WM_SYSCHAR,
+        c.WM_DEADCHAR,
+        c.WM_SYSDEADCHAR,
+        => return 0,
+        c.WM_GETOBJECT => {
+            const value = surface orelse return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (!value.app.com_initialized) return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            value.ensureQuickSelectUiaProvider() catch |err| {
+                log.warn("quick select UIA provider unavailable err={}", .{err});
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            };
+            const provider = value.quick_select_uia_provider orelse
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            if (win32_uia.returnPaletteListProvider(
+                hwnd,
+                wParam,
+                lParam,
+                provider,
+            )) |result| return result;
+            return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        c.WM_SETCURSOR => {
+            _ = sys.SetCursor(sys.LoadCursorW(null, c.IDC_ARROW));
+            return 1;
+        },
+        else => return sys.DefWindowProcW(hwnd, msg, wParam, lParam),
+    }
+}
+
 fn scrollbarProc(
     hwnd: HWND,
     msg: UINT,
@@ -20608,6 +20851,13 @@ fn paletteReleaseThunk(ctx: *anyopaque) void {
     const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
     _ = win32_uia.PaletteListProvider.Release(&provider.base);
 }
+fn quickSelectDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.PaletteListProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+fn quickSelectReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.PaletteListProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.PaletteListProvider.Release(&provider.base);
+}
 fn terminalDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
     return (@as(*win32_uia.TerminalProvider, @ptrCast(@alignCast(ctx)))).disconnect();
 }
@@ -20635,6 +20885,49 @@ fn detachChromeControlProvider(
         &chromeDisconnectThunk,
         &chromeReleaseThunk,
     );
+}
+
+fn overlayButtonDisconnectThunk(ctx: *anyopaque) win32_uia.HRESULT {
+    return (@as(*win32_uia.SettingsControlProvider, @ptrCast(@alignCast(ctx)))).disconnect();
+}
+
+fn overlayButtonReleaseThunk(ctx: *anyopaque) void {
+    const provider: *win32_uia.SettingsControlProvider = @ptrCast(@alignCast(ctx));
+    _ = win32_uia.SettingsControlProvider.Release(&provider.base);
+}
+
+const OverlayButtonUiaProviders = struct {
+    accept: ?*win32_uia.SettingsControlProvider,
+    cancel: ?*win32_uia.SettingsControlProvider,
+};
+
+fn overlayButtonUiaProviderForHwnd(
+    hwnd: HWND,
+    accept_hwnd: ?HWND,
+    cancel_hwnd: ?HWND,
+    accept_provider: ?*win32_uia.SettingsControlProvider,
+    cancel_provider: ?*win32_uia.SettingsControlProvider,
+) ?*win32_uia.SettingsControlProvider {
+    if (accept_hwnd) |accept| {
+        if (hwnd == accept) return accept_provider;
+    }
+    if (cancel_hwnd) |cancel| {
+        if (hwnd == cancel) return cancel_provider;
+    }
+    return null;
+}
+
+fn takeOverlayButtonUiaProviders(
+    accept: *?*win32_uia.SettingsControlProvider,
+    cancel: *?*win32_uia.SettingsControlProvider,
+) OverlayButtonUiaProviders {
+    const result: OverlayButtonUiaProviders = .{
+        .accept = accept.*,
+        .cancel = cancel.*,
+    };
+    accept.* = null;
+    cancel.* = null;
+    return result;
 }
 
 fn shouldRefocusAfterOverlayHide(
@@ -22332,6 +22625,7 @@ const hotkeySpecForTrigger = win32_input.hotkeySpecForTrigger;
 const hotkeySpecEql = win32_input.hotkeySpecEql;
 
 const hotkeyRegistrationFailureReason = win32_input.hotkeyRegistrationFailureReason;
+const quickSelectAsciiFromKey = win32_input.quickSelectAsciiFromKey;
 
 fn quitTimerDelayMs(delay: configpkg.Config.Duration) UINT {
     const clamped_ns = @max(delay.duration, std.time.ns_per_s);
@@ -22830,6 +23124,22 @@ fn terminalAccessibilityOutputCallback(
     }
 }
 
+const QuickSelectSession = struct {
+    scan: win32_hints.Scan,
+    labels: win32_hints.LabelSet,
+    prefix: win32_hints.PrefixState = .{},
+    cell_width: i32,
+    cell_height: i32,
+    padding_left: i32,
+    padding_top: i32,
+
+    fn deinit(self: *QuickSelectSession, alloc: Allocator) void {
+        self.labels.deinit(alloc);
+        self.scan.deinit(alloc);
+        self.* = undefined;
+    }
+};
+
 pub const Surface = struct {
     app: *App,
     shell_id: ?win32_shell.model.PaneId = null,
@@ -22903,6 +23213,10 @@ pub const Surface = struct {
     scrollbar_marker_revision: u64 = 0,
     scrollbar_marker_budget: usize = 0,
     scrollbar_paint_cache: ?ScrollbarPaintKey = null,
+    quick_select_hwnd: ?HWND = null,
+    quick_select_placement: ChildPlacement = .{},
+    quick_select_session: ?QuickSelectSession = null,
+    quick_select_uia_provider: ?*win32_uia.PaletteListProvider = null,
     pwd: ?[:0]const u8 = null,
     progress_status: ?[:0]const u8 = null,
     taskbar_progress: ?win32_taskbar_progress.ProgressReport = null,
@@ -24458,6 +24772,334 @@ pub const Surface = struct {
         );
         self.scrollbar_marker_budget = marker_budget;
         self.scrollbar_marker_revision +%= 1;
+    }
+
+    fn ensureQuickSelectUiaProvider(self: *Surface) !void {
+        if (!self.app.com_initialized or self.quick_select_uia_provider != null) return;
+        self.quick_select_uia_provider = try win32_uia.PaletteListProvider.create(
+            std.heap.page_allocator,
+            self.quick_select_hwnd orelse return error.NoQuickSelectWindow,
+            self.quickSelectUiaState(),
+        );
+    }
+
+    fn quickSelectUiaState(self: *const Surface) win32_uia.PaletteListState {
+        return .{
+            .ctx = @ptrCast(@constCast(self)),
+            .name = &quickSelectNameThunk,
+            .localized_control_type = "quick select targets",
+            .keyboard_focusable = true,
+            .focused = &quickSelectFocusedThunk,
+            .row_count = &quickSelectRowCountThunk,
+            .selected_index = &quickSelectSelectedIndexThunk,
+            .row_name = &quickSelectRowNameThunk,
+            .row_enabled = &quickSelectRowEnabledThunk,
+            .row_id = &quickSelectRowIdThunk,
+            .select_row = &quickSelectSelectRowThunk,
+            .use_com_threading = self.app.com_initialized,
+        };
+    }
+
+    fn quickSelectFirstRemainingIndex(self: *const Surface) ?usize {
+        const session = if (self.quick_select_session) |*value| value else return null;
+        for (0..session.labels.count) |index| {
+            if (session.labels.startsWith(index, session.prefix.typed())) return index;
+        }
+        return null;
+    }
+
+    fn buildQuickSelectName(self: *const Surface, buf: []u8) []const u8 {
+        const session = if (self.quick_select_session) |*value| value else return std.fmt.bufPrint(buf, "Quick select, 0 targets", .{}) catch "Quick select";
+        const typed = session.prefix.typed();
+        if (typed.len == 0) {
+            return std.fmt.bufPrint(
+                buf,
+                "Quick select, {d} targets",
+                .{session.labels.count},
+            ) catch "Quick select";
+        }
+        return std.fmt.bufPrint(
+            buf,
+            "Quick select, {d} targets, typed {s}",
+            .{ session.labels.count, typed },
+        ) catch "Quick select";
+    }
+
+    fn toggleQuickSelect(self: *Surface) !bool {
+        if (self.quick_select_session != null) {
+            self.closeQuickSelect(true);
+            return true;
+        }
+        if (!self.core_initialized) return false;
+
+        const alloc = self.app.core_app.alloc;
+        var render_state: terminal.RenderState = .empty;
+        defer render_state.deinit(alloc);
+        self.core_surface.renderer_state.mutex.lock();
+        render_state.update(
+            alloc,
+            self.core_surface.renderer_state.terminal,
+        ) catch |err| {
+            self.core_surface.renderer_state.mutex.unlock();
+            return err;
+        };
+        const renderer_size = self.core_surface.size;
+        self.core_surface.renderer_state.mutex.unlock();
+
+        const configured = self.app.config.@"quick-select-patterns".list.items;
+        const patterns: []const []const u8 = if (configured.len == 0)
+            &win32_hints.default_patterns
+        else
+            configured;
+        var scan = try win32_hints.scanRenderState(alloc, &render_state, patterns);
+        errdefer scan.deinit(alloc);
+        if (scan.matches.len == 0) {
+            scan.deinit(alloc);
+            return true;
+        }
+
+        var label_set = try win32_hints.generateLabels(
+            alloc,
+            self.app.config.@"quick-select-alphabet".value,
+            scan.matches.len,
+        );
+        errdefer label_set.deinit(alloc);
+
+        try self.ensureQuickSelectWindow();
+        self.quick_select_session = .{
+            .scan = scan,
+            .labels = label_set,
+            .cell_width = @intCast(renderer_size.cell.width),
+            .cell_height = @intCast(renderer_size.cell.height),
+            .padding_left = @intCast(renderer_size.padding.left),
+            .padding_top = @intCast(renderer_size.padding.top),
+        };
+
+        self.ensureQuickSelectUiaProvider() catch |err| {
+            log.warn("quick select UIA provider unavailable err={}", .{err});
+        };
+
+        self.refreshQuickSelectPlacement();
+        const hwnd = self.quick_select_hwnd.?;
+        _ = applyChildVisibility(hwnd, &self.quick_select_placement, true);
+        _ = sys.SetFocus(hwnd);
+        _ = sys.InvalidateRect(hwnd, null, 0);
+        return true;
+    }
+
+    fn ensureQuickSelectWindow(self: *Surface) !void {
+        if (self.quick_select_hwnd != null) return;
+        try self.app.ensureQuickSelectClass();
+        const parent = self.hwnd orelse return error.NoSurfaceWindow;
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(parent, &rect) == 0) {
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+
+        self.quick_select_hwnd = sys.CreateWindowExW(
+            c.WS_EX_LAYERED,
+            quick_select_class_name,
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            c.WS_CHILD | c.WS_TABSTOP,
+            0,
+            0,
+            @max(1, rect.right),
+            @max(1, rect.bottom),
+            parent,
+            null,
+            self.app.hinstance,
+            null,
+        ) orelse return windows.unexpectedError(windows.kernel32.GetLastError());
+        const hwnd = self.quick_select_hwnd.?;
+        _ = sys.SetWindowLongPtrW(
+            hwnd,
+            c.GWLP_USERDATA,
+            @as(LONG_PTR, @intCast(@intFromPtr(self))),
+        );
+        if (sys.SetLayeredWindowAttributes(
+            hwnd,
+            scrollbar_transparent_key,
+            255,
+            c.LWA_ALPHA | c.LWA_COLORKEY,
+        ) == 0) {
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            _ = sys.DestroyWindow(hwnd);
+            self.quick_select_hwnd = null;
+            return windows.unexpectedError(windows.kernel32.GetLastError());
+        }
+    }
+
+    fn refreshQuickSelectPlacement(self: *Surface) void {
+        const overlay = self.quick_select_hwnd orelse return;
+        const parent = self.hwnd orelse return;
+        var rect: RECT = undefined;
+        if (sys.GetClientRect(parent, &rect) == 0) return;
+        _ = applyChildRect(overlay, &self.quick_select_placement, rect);
+    }
+
+    fn closeQuickSelect(self: *Surface, restore_focus: bool) void {
+        // Callers include unconditional lifecycle hooks (resize, hide,
+        // teardown), so closing when nothing is open must be a no-op —
+        // otherwise `restore_focus` would steal focus on every resize.
+        if (self.quick_select_hwnd == null and self.quick_select_session == null) return;
+
+        const overlay = self.quick_select_hwnd;
+        self.quick_select_hwnd = null;
+        self.quick_select_placement = .{};
+
+        if (self.quick_select_uia_provider) |provider| {
+            self.quick_select_uia_provider = null;
+            provider.detach();
+            scheduleDeferredUiaDisconnect(
+                self.app,
+                @ptrCast(provider),
+                &quickSelectDisconnectThunk,
+                &quickSelectReleaseThunk,
+            );
+        }
+        if (overlay) |hwnd| {
+            _ = sys.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, 0);
+            _ = sys.DestroyWindow(hwnd);
+        }
+        if (self.quick_select_session) |*session| session.deinit(self.app.core_app.alloc);
+        self.quick_select_session = null;
+
+        if (restore_focus) {
+            if (self.hwnd) |hwnd| _ = sys.SetFocus(hwnd);
+        }
+    }
+
+    fn quickSelectPrefixChanged(self: *Surface) void {
+        if (self.quick_select_hwnd) |hwnd| _ = sys.InvalidateRect(hwnd, null, 0);
+        if (self.quick_select_uia_provider) |provider| {
+            win32_uia.events.raiseNameChanged(&provider.base);
+            if (self.quickSelectFirstRemainingIndex()) |index| provider.raiseSelectionChanged(index);
+        }
+    }
+
+    fn handleQuickSelectKey(self: *Surface, wParam: WPARAM, lParam: LPARAM) void {
+        if (wParam == c.VK_ESCAPE) {
+            self.closeQuickSelect(true);
+            return;
+        }
+        if (wParam == c.VK_BACK) {
+            if (self.quick_select_session) |*session| {
+                if (session.prefix.backspace()) self.quickSelectPrefixChanged();
+            }
+            return;
+        }
+
+        const char = quickSelectAsciiFromKey(wParam, lParam) orelse return;
+        const mods = currentMods();
+        const session = if (self.quick_select_session) |*value| value else return;
+        switch (session.prefix.input(&session.labels, char)) {
+            .ignored => {},
+            .narrowed => self.quickSelectPrefixChanged(),
+            .complete => |index| self.fireQuickSelect(index, mods.ctrl, mods.alt) catch |err| {
+                log.warn("quick select action failed err={}", .{err});
+            },
+        }
+    }
+
+    fn fireQuickSelect(self: *Surface, index: usize, ctrl: bool, alt: bool) !void {
+        const alloc = self.app.core_app.alloc;
+        const session = if (self.quick_select_session) |*value| value else return;
+        if (index >= session.scan.matches.len) return;
+        const payload = try alloc.dupeZ(u8, session.scan.matchText(index));
+        defer alloc.free(payload);
+        const can_open = if (ctrl)
+            win32_hints.beginsWithAllowedScheme(payload) catch |err| blk: {
+                log.warn("quick select scheme validation failed err={}", .{err});
+                break :blk false;
+            }
+        else
+            false;
+
+        self.closeQuickSelect(true);
+        if (can_open) {
+            _ = try self.app.performAction(
+                .{ .surface = self.core() },
+                .open_url,
+                .{ .kind = .unknown, .url = payload },
+            );
+            return;
+        }
+        if (alt and !ctrl) {
+            self.core_surface.completeClipboardRequest(.paste, payload, false) catch |err| switch (err) {
+                error.UnsafePaste, error.UnauthorizedPaste => try self.requestPasteConfirm(.paste, payload),
+                else => return err,
+            };
+            return;
+        }
+        try self.writeClipboardText(payload);
+    }
+
+    fn paintQuickSelect(self: *Surface) void {
+        const hwnd = self.quick_select_hwnd orelse return;
+        const session = if (self.quick_select_session) |*value| value else return;
+        var ps: PAINTSTRUCT = undefined;
+        const hdc = sys.BeginPaint(hwnd, &ps);
+        defer _ = sys.EndPaint(hwnd, &ps);
+        var client: RECT = undefined;
+        if (sys.GetClientRect(hwnd, &client) == 0) return;
+        fillSolidRect(hdc, client, scrollbar_transparent_key);
+
+        const host = self.host orelse return;
+        const theme = &self.app.resolved_theme;
+        const metrics: win32_theme.ThemeMetrics = if (isHighContrastActive())
+            .highContrast()
+        else
+            .{};
+        _ = sys.SetBkMode(hdc, c.TRANSPARENT);
+        _ = sys.SetTextColor(hdc, theme.button_active_fg);
+        const previous_font: ?HGDIOBJ = if (host.chrome_font) |font| sys.SelectObject(hdc, font) else null;
+        defer {
+            if (previous_font) |font| _ = sys.SelectObject(hdc, font);
+        }
+
+        for (session.scan.matches, 0..) |matched, index| {
+            if (!session.labels.startsWith(index, session.prefix.typed())) continue;
+            const label = session.labels.get(index);
+            const placed = win32_hints.labelPlacement(.{
+                .left = matched.first.x,
+                .top = matched.first.y,
+                .right = @as(u32, matched.first.x) + 1,
+                .bottom = matched.first.y + 1,
+            }, label.len, .{
+                .cell_width = session.cell_width,
+                .cell_height = session.cell_height,
+                .padding_left = session.padding_left,
+                .padding_top = session.padding_top,
+                .viewport_width = client.right,
+                .viewport_height = client.bottom,
+                .dpi = host.current_dpi,
+                .logical_padding_x = metrics.space_1,
+                .logical_stroke = metrics.stroke_hairline,
+            });
+            var chip: RECT = .{
+                .left = placed.left,
+                .top = placed.top,
+                .right = placed.right,
+                .bottom = placed.bottom,
+            };
+            drawRoundedRect(
+                hdc,
+                chip,
+                theme.button_active_bg,
+                theme.button_active_border,
+                host.scaled(metrics.radius_md),
+            );
+
+            var utf16: [win32_hints.PrefixState.max_len]u16 = undefined;
+            for (label, 0..) |byte, i| utf16[i] = byte;
+            _ = sys.DrawTextW(
+                hdc,
+                @ptrCast(&utf16),
+                @intCast(label.len),
+                &chip,
+                c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_NOPREFIX,
+            );
+        }
     }
 
     fn ensureScrollbarWindow(self: *Surface) !void {
@@ -26199,6 +26841,12 @@ pub const Surface = struct {
     fn windowSizeChanged(self: *Surface) void {
         self.syncCoreSizeFromClientRect();
 
+        // Quick select holds a viewport snapshot plus the cell metrics that
+        // were current when it opened. A resize or font-size change invalidates
+        // both, so labels would land on the wrong cells; close it instead of
+        // repositioning a stale overlay.
+        self.closeQuickSelect(true);
+
         // `MoveWindow(..., bRepaint = false)` resizes the child HWND without
         // guaranteeing a follow-up paint for the newly exposed pixels. Request
         // one from the child itself after `WM_SIZE`, when the default
@@ -26547,6 +27195,7 @@ pub const Surface = struct {
         const alloc = self.app.core_app.alloc;
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
+        self.closeQuickSelect(false);
 
         if (self.terminal_accessibility) |session| {
             self.core_surface.setTerminalOutputInterested(false);
@@ -26654,7 +27303,13 @@ pub const Surface = struct {
     fn setVisible(self: *Surface, visible: bool) void {
         const visibility_changed = self.window_visible != visible;
         self.window_visible = visible;
-        if (!visible) self.deferred_char.clear();
+        if (!visible) {
+            self.deferred_char.clear();
+            // A quick-select child cannot exist before the surface HWND.
+            // Some structural tests deliberately use partial, HWND-less
+            // surfaces, so do not inspect overlay state in that case.
+            if (self.hwnd != null) self.closeQuickSelect(false);
+        }
 
         const hwnd = self.hwnd orelse return;
         const child_visibility_changed = applyChildVisibility(hwnd, &self.placement, visible);
@@ -32277,6 +32932,27 @@ test "automation-action win32 ipc maps specific failure ack" {
     try std.testing.expectError(
         error.InvalidAutomationTarget,
         win32_ipc.readAck(file.handle),
+    );
+}
+
+test "hints: recorded URL launch trace preserves the exact request" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("quick-select-open-url.txt", .{
+        .read = true,
+        .truncate = true,
+    });
+    defer file.close();
+
+    try writeOpenUrlTrace(file, "https://example.com/a?x=1&y=2");
+    try file.seekTo(0);
+    const recorded = try file.readToEndAlloc(std.testing.allocator, 1024);
+    defer std.testing.allocator.free(recorded);
+    try std.testing.expectEqualStrings(
+        "https://example.com/a?x=1&y=2\r\n",
+        recorded,
     );
 }
 

@@ -438,6 +438,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Toggle the tab overview.",
         }},
 
+        .toggle_quick_select => comptime &.{.{
+            .action = .toggle_quick_select,
+            .title = "Toggle Quick Select",
+            .description = "Label visible terminal targets for keyboard selection.",
+        }},
+
         .prompt_surface_title => comptime &.{.{
             .action = .prompt_surface_title,
             .title = "Change Terminal Title…",

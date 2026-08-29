@@ -770,6 +770,12 @@ pub const Action = union(enum) {
     /// libadwaita version can be found by running `noctty +version`.
     toggle_command_palette,
 
+    /// Toggle quick select for the focused terminal surface.
+    ///
+    /// Quick select labels visible URLs, paths, hashes, addresses, and UUIDs
+    /// for keyboard-only copy, open, or paste actions.
+    toggle_quick_select,
+
     /// Toggle the quick terminal.
     ///
     /// The quick terminal, also known as the "Quake-style" or drop-down
@@ -1371,6 +1377,7 @@ pub const Action = union(enum) {
             .toggle_secure_input,
             .toggle_mouse_reporting,
             .toggle_command_palette,
+            .toggle_quick_select,
             .toggle_background_opacity,
             .show_on_screen_keyboard,
             .reset_window_size,

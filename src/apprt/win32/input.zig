@@ -380,6 +380,40 @@ pub fn currentMods() input.Mods {
     return currentModsFromKeyboardState(currentKeyboardState(&state));
 }
 
+/// Translate a key event into the single printable ASCII character a
+/// quick-select label is typed with, or null when the key is not one.
+///
+/// Ctrl and Alt select the action a completed label performs, so they are
+/// masked out of the keyboard state before translation; otherwise the layout
+/// would fold the label key into a control character and no label would match.
+pub fn quickSelectAsciiFromKey(wParam: WPARAM, lParam: LPARAM) ?u8 {
+    const vk: UINT = @intCast(wParam & 0xFFFF);
+    var state: [256]u8 = [_]u8{0} ** 256;
+    const keyboard_state = currentKeyboardState(&state) orelse {
+        const codepoint = unshiftedCodepointForVirtualKey(vk);
+        return if (codepoint >= 0x20 and codepoint < 0x7F)
+            @intCast(codepoint)
+        else
+            null;
+    };
+
+    state[c.VK_CONTROL] = 0;
+    state[c.VK_LCONTROL] = 0;
+    state[c.VK_RCONTROL] = 0;
+    state[c.VK_MENU] = 0;
+    state[c.VK_LMENU] = 0;
+    state[c.VK_RMENU] = 0;
+    const translated = translateKeyText(
+        vk,
+        lParam,
+        modsFromKeyboardState(keyboard_state),
+        keyboard_state,
+    );
+    if (translated.len != 1) return null;
+    const char = translated.utf8[0];
+    return if (char >= 0x20 and char < 0x7F) char else null;
+}
+
 fn keyFromVirtualKey(vk: UINT, lParam: LPARAM) input.Key {
     return switch (vk) {
         c.VK_BACK => .backspace,

@@ -475,6 +475,24 @@ auto-apply is not implemented yet.
 The updater is also the only outbound network call the app makes; there
 is no telemetry and no analytics.
 
+## Quick select
+
+`Ctrl+Shift+Space` runs `toggle_quick_select` for the focused terminal
+surface. Quick select scans the visible viewport once when it opens and
+labels matching URLs, paths, git SHAs, IP addresses, and UUIDs. Type a label
+to select its target. Backspace removes one typed label character, and Esc
+cancels and returns keyboard focus to the terminal.
+
+Completing a label copies its matched text to the clipboard. Hold Ctrl while
+completing the label to open a target that begins with an allowed URL scheme;
+other targets are copied. Hold Alt to paste through the normal protected-paste
+path.
+
+`quick-select-patterns` is repeatable and accepts bare regex values or quoted
+Zig string literals. An empty value clears configured patterns; when the
+configured list is empty, the built-in patterns apply. `quick-select-alphabet`
+sets the non-empty, unique ASCII characters used for labels.
+
 ## Quick terminal and global hotkeys
 
 The quick terminal uses the same `toggle_quick_terminal` action and

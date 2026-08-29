@@ -154,6 +154,9 @@ pub const PaletteListState = struct {
     /// the slice actually written. A typical implementation writes
     /// something like "Command palette: 3 of 87 — New Tab".
     name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
+    localized_control_type: []const u8 = "command palette matches",
+    keyboard_focusable: bool = false,
+    focused: ?*const fn (ctx: *anyopaque) bool = null,
     row_count: ?*const fn (ctx: *anyopaque) usize = null,
     selected_index: ?*const fn (ctx: *anyopaque) ?usize = null,
     row_name: ?*const fn (ctx: *anyopaque, index: usize, buf: []u8) []const u8 = null,
@@ -161,6 +164,14 @@ pub const PaletteListState = struct {
     row_id: ?*const fn (ctx: *anyopaque, index: usize) u64 = null,
     select_row: ?*const fn (ctx: *anyopaque, index: usize) void = null,
     geometry: ?*const fn (ctx: *anyopaque) ?PaletteListGeometry = null,
+    use_com_threading: bool = false,
+};
+
+/// Live state queried by the quick-select overlay provider. The indirection
+/// keeps this module independent of the Win32 Surface implementation.
+pub const QuickSelectState = struct {
+    ctx: *anyopaque,
+    name: *const fn (ctx: *anyopaque, buf: []u8) []const u8,
     use_com_threading: bool = false,
 };
 
@@ -212,6 +223,180 @@ pub const TerminalRangeGeometry = struct {
     cell_height: f64,
     origin_x: f64,
     origin_y: f64,
+};
+
+/// Minimal provider for the focusable, owner-drawn quick-select overlay.
+pub const QuickSelectProvider = struct {
+    base: com.IRawElementProviderSimple,
+    refcount: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    hwnd: com.HWND,
+    state: QuickSelectState,
+    detached: std.atomic.Value(bool),
+    disconnected: std.atomic.Value(bool),
+
+    const vtbl: com.IRawElementProviderSimpleVtbl = .{
+        .QueryInterface = QueryInterface,
+        .AddRef = AddRef,
+        .Release = Release,
+        .get_ProviderOptions = get_ProviderOptions,
+        .GetPatternProvider = GetPatternProvider,
+        .GetPropertyValue = GetPropertyValue,
+        .get_HostRawElementProvider = get_HostRawElementProvider,
+    };
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        hwnd: com.HWND,
+        state: QuickSelectState,
+    ) !*QuickSelectProvider {
+        const self = try alloc.create(QuickSelectProvider);
+        self.* = .{
+            .base = .{ .vtbl = &vtbl },
+            .refcount = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .hwnd = hwnd,
+            .state = state,
+            .detached = std.atomic.Value(bool).init(false),
+            .disconnected = std.atomic.Value(bool).init(false),
+        };
+        return self;
+    }
+
+    pub fn detach(self: *QuickSelectProvider) void {
+        self.detached.store(true, .release);
+    }
+
+    pub fn disconnect(self: *QuickSelectProvider) com.HRESULT {
+        self.detach();
+        if (self.disconnected.load(.acquire)) return com.S_OK;
+        const hr = com.UiaDisconnectProvider(&self.base);
+        if (hr == com.S_OK) self.disconnected.store(true, .release);
+        return hr;
+    }
+
+    pub fn raiseNameChanged(self: *QuickSelectProvider) void {
+        if (self.detached.load(.acquire)) return;
+        events.raiseNameChanged(&self.base);
+    }
+
+    pub fn raiseFocusChanged(self: *QuickSelectProvider) void {
+        if (self.detached.load(.acquire)) return;
+        events.raiseFocusChanged(&self.base);
+    }
+
+    fn fromBase(base: *com.IRawElementProviderSimple) *QuickSelectProvider {
+        return @fieldParentPtr("base", base);
+    }
+
+    pub fn QueryInterface(
+        base: *com.IRawElementProviderSimple,
+        iid: *const com.GUID,
+        out: *?*anyopaque,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(base);
+        out.* = null;
+        if (iidEqual(iid, &com.IID_IUnknown) or
+            iidEqual(iid, &com.IID_IRawElementProviderSimple))
+        {
+            out.* = @ptrCast(&self.base);
+            _ = self.refcount.fetchAdd(1, .monotonic);
+            return com.S_OK;
+        }
+        return com.E_NOINTERFACE;
+    }
+
+    pub fn AddRef(base: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        return fromBase(base).refcount.fetchAdd(1, .monotonic) + 1;
+    }
+
+    pub fn Release(base: *com.IRawElementProviderSimple) callconv(.winapi) u32 {
+        const self = fromBase(base);
+        const previous = self.refcount.fetchSub(1, .acq_rel);
+        if (previous == 1) {
+            self.alloc.destroy(self);
+            return 0;
+        }
+        return previous - 1;
+    }
+
+    fn get_ProviderOptions(
+        base: *com.IRawElementProviderSimple,
+        out: *i32,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(base);
+        out.* = com.ProviderOptions_ServerSideProvider |
+            (if (self.state.use_com_threading) com.ProviderOptions_UseComThreading else 0);
+        return com.S_OK;
+    }
+
+    fn GetPatternProvider(
+        base: *com.IRawElementProviderSimple,
+        _: i32,
+        out: *?*com.IUnknown,
+    ) callconv(.winapi) com.HRESULT {
+        out.* = null;
+        return if (fromBase(base).detached.load(.acquire))
+            com.UIA_E_ELEMENTNOTAVAILABLE
+        else
+            com.S_OK;
+    }
+
+    fn GetPropertyValue(
+        base: *com.IRawElementProviderSimple,
+        property: i32,
+        out: *com.VARIANT,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(base);
+        out.* = com.VARIANT.empty();
+        if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
+
+        switch (property) {
+            constants.UIA_ControlTypePropertyId => {
+                out.* = com.VARIANT.fromI4(constants.UIA_ListControlTypeId);
+            },
+            constants.UIA_NamePropertyId => {
+                var buf: [256]u8 = undefined;
+                const bstr = allocBstrFromUtf8(
+                    self.alloc,
+                    self.state.name(self.state.ctx, &buf),
+                ) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_LocalizedControlTypePropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("quick select targets");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_FrameworkIdPropertyId => {
+                const literal = std.unicode.utf8ToUtf16LeStringLiteral("Win32");
+                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                out.* = com.VARIANT.fromBstr(bstr);
+            },
+            constants.UIA_IsControlElementPropertyId,
+            constants.UIA_IsContentElementPropertyId,
+            constants.UIA_IsEnabledPropertyId,
+            constants.UIA_IsKeyboardFocusablePropertyId,
+            => out.* = com.VARIANT.fromBool(true),
+            constants.UIA_HasKeyboardFocusPropertyId => {
+                out.* = com.VARIANT.fromBool(hwndHasKeyboardFocus(self.hwnd));
+            },
+            else => {},
+        }
+        return com.S_OK;
+    }
+
+    fn get_HostRawElementProvider(
+        base: *com.IRawElementProviderSimple,
+        out: *?*com.IRawElementProviderSimple,
+    ) callconv(.winapi) com.HRESULT {
+        const self = fromBase(base);
+        if (self.detached.load(.acquire)) {
+            out.* = null;
+            return com.UIA_E_ELEMENTNOTAVAILABLE;
+        }
+        return com.UiaHostProviderFromHwnd(self.hwnd, out);
+    }
 };
 
 pub const PaletteListProvider = struct {
@@ -541,8 +726,10 @@ pub const PaletteListProvider = struct {
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_LocalizedControlTypePropertyId => {
-                const literal = std.unicode.utf8ToUtf16LeStringLiteral("command palette matches");
-                const bstr = com.SysAllocString(literal) orelse return com.E_OUTOFMEMORY;
+                const bstr = allocBstrFromUtf8(
+                    self.alloc,
+                    self.state.localized_control_type,
+                ) orelse return com.E_OUTOFMEMORY;
                 out.* = com.VARIANT.fromBstr(bstr);
             },
             constants.UIA_FrameworkIdPropertyId => {
@@ -554,11 +741,15 @@ pub const PaletteListProvider = struct {
             constants.UIA_IsContentElementPropertyId,
             constants.UIA_IsEnabledPropertyId,
             => out.* = com.VARIANT.fromBool(true),
-            constants.UIA_IsKeyboardFocusablePropertyId => out.* = com.VARIANT.fromBool(false),
+            constants.UIA_IsKeyboardFocusablePropertyId => {
+                out.* = com.VARIANT.fromBool(self.state.keyboard_focusable);
+            },
             constants.UIA_HasKeyboardFocusPropertyId => {
-                // The EDIT sibling actually owns focus; the list
-                // announces selection via NameChanged instead.
-                out.* = com.VARIANT.fromBool(false);
+                const focused = if (self.state.focused) |callback|
+                    callback(self.state.ctx)
+                else
+                    false;
+                out.* = com.VARIANT.fromBool(focused);
             },
             else => {},
         }
@@ -3793,6 +3984,17 @@ pub fn handlePaletteListGetObject(
     return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
 }
 
+/// Return the stable provider owned by an open quick-select overlay.
+pub fn returnQuickSelectProvider(
+    hwnd: com.HWND,
+    wParam: com.WPARAM,
+    lParam: com.LPARAM,
+    provider: *QuickSelectProvider,
+) ?com.LRESULT {
+    if (lParam != com.UiaRootObjectId) return null;
+    return com.UiaReturnRawElementProvider(hwnd, wParam, lParam, &provider.base);
+}
+
 /// Return an already-owned palette provider for `WM_GETOBJECT`. A stable
 /// provider identity is required when the widget also raises events between
 /// accessibility queries.
@@ -4311,6 +4513,58 @@ test "PaletteListProvider QueryInterface accepts IUnknown" {
     try std.testing.expectEqual(com.S_OK, hr);
     try std.testing.expect(out != null);
     _ = PaletteListProvider.Release(&p.base); // Drop the QI ref.
+}
+
+test "PaletteListProvider exposes configurable identity and focus" {
+    var counter: u32 = 0;
+    const callbacks = struct {
+        fn name(_: *anyopaque, buf: []u8) []const u8 {
+            return std.fmt.bufPrint(buf, "Quick select, 1 target", .{}) catch "";
+        }
+
+        fn focused(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    const state: PaletteListState = .{
+        .ctx = @ptrCast(&counter),
+        .name = callbacks.name,
+        .localized_control_type = "quick select targets",
+        .keyboard_focusable = true,
+        .focused = callbacks.focused,
+    };
+
+    const provider = try PaletteListProvider.create(std.testing.allocator, @ptrFromInt(0x1), state);
+    defer _ = PaletteListProvider.Release(&provider.base);
+
+    var localized_type = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_LocalizedControlTypePropertyId,
+        &localized_type,
+    ));
+    defer _ = com.VariantClear(&localized_type);
+    const expected_type = std.unicode.utf8ToUtf16LeStringLiteral("quick select targets");
+    try std.testing.expectEqual(@as(u32, expected_type.len), com.SysStringLen(localized_type.value.bstr));
+    try std.testing.expectEqualSlices(u16, expected_type, localized_type.value.bstr.?[0..expected_type.len]);
+
+    var focusable = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_IsKeyboardFocusablePropertyId,
+        &focusable,
+    ));
+    try std.testing.expectEqual(com.VT_BOOL, focusable.vt);
+    try std.testing.expectEqual(com.VARIANT_TRUE, focusable.value.bool_val);
+
+    var focused = com.VARIANT.empty();
+    try std.testing.expectEqual(com.S_OK, PaletteListProvider.GetPropertyValue(
+        &provider.base,
+        constants.UIA_HasKeyboardFocusPropertyId,
+        &focused,
+    ));
+    try std.testing.expectEqual(com.VT_BOOL, focused.vt);
+    try std.testing.expectEqual(com.VARIANT_TRUE, focused.value.bool_val);
 }
 
 test "palette list and row providers propagate COM threading options" {
@@ -6043,6 +6297,48 @@ test "edit provider exposes one mutable text selection" {
     );
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.AddToSelection(selected.?));
     try std.testing.expectEqual(com.UIA_E_INVALIDOPERATION, TerminalTextRangeProvider.RemoveFromSelection(selected.?));
+}
+
+test "terminal provider exposes an active read-only selection" {
+    var data = TestTerminalStateData{
+        .value_text = "hello world",
+        .visible_value_text = "hello world",
+        .visible_range = .{ .start = 0, .end = 11 },
+        .caret_offset = 11,
+        .selection_range = .{ .start = 0, .end = 5 },
+        .has_selection = true,
+    };
+    var provider = try TerminalProvider.create(
+        std.testing.allocator,
+        @ptrFromInt(0x1),
+        testTerminalState(&data),
+    );
+    defer _ = TerminalProvider.Release(&provider.base);
+
+    var supported: i32 = com.SupportedTextSelection_Single;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.get_SupportedTextSelection(&provider.text_iface, &supported),
+    );
+    try std.testing.expectEqual(com.SupportedTextSelection_None, supported);
+
+    var selections: ?*com.SAFEARRAY = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        TerminalProvider.GetSelection(&provider.text_iface, &selections),
+    );
+    defer _ = com.SafeArrayDestroy(selections);
+    var index: i32 = 0;
+    var selected: ?*com.ITextRangeProvider = null;
+    try std.testing.expectEqual(
+        com.S_OK,
+        com.SafeArrayGetElement(selections.?, &index, @ptrCast(&selected)),
+    );
+    defer _ = TerminalTextRangeProvider.Release(selected.?);
+    try std.testing.expectEqual(
+        terminal_text.OffsetRange{ .start = 0, .end = 5 },
+        TerminalTextRangeProvider.fromBase(selected.?).range,
+    );
 }
 
 test "read-only edit provider still exposes Value contract" {
