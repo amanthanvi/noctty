@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
+    # $Version reaches a nuspec, artifact file names, and download URLs. The
+    # release workflow already constrains it, but validate at the parameter so
+    # manual and test invocations cannot inject path or URL fragments either.
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version,
 
     [string]$Tag,
