@@ -1,18 +1,18 @@
 {
   "schema_version": "noctty.verification.baseline-manifest.v1",
-  "captured_at": "2026-09-01T00:18:13.9015870Z",
-  "git_commit": "5220df49e39c96182cf13150c53c4fd71fbc5b10",
+  "captured_at": "2026-09-03T01:40:01.0000000Z",
+  "git_commit": "e3a38268e6aa2187c8a41a07179aef360b27b78f",
   "platform": {
     "os": "Windows 11",
     "architecture": "x86_64",
-    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #133 named layouts after auditing the session parser changes. The parser keeps the reviewed .allocate = .alloc_always ownership fix and decodes layout placement as opaque JSON before constructing the strict placement-free shape; the on-disk schema remains unchanged at v1. Hashes reflect checkout normalization. The durable git_commit identifies the PR base; Contracts.99-Baselines.ps1 independently pins the reviewed session-schema digest so squash-merging and deleting the PR branch cannot disable fail-closed artifact verification."
+    "description": "Post-rebrand Windows-checkout source contracts, rolled forward for issue #131 scrollback-content restore on top of the issue #133 named-layouts roll after auditing every session parser hunk. The session schema remains v1 and adds optional bounded plain-text pane scrollback snapshots; the parser keeps the reviewed .allocate = .alloc_always ownership fix, decodes layout placement as opaque JSON before constructing the strict placement-free shape, and drops over-limit snapshots without losing layout. Hashes reflect checkout normalization. The durable git_commit identifies the PR base; Contracts.99-Baselines.ps1 independently pins the reviewed session-schema digest so squash-merging and deleting the PR branch cannot disable fail-closed artifact verification."
   },
   "artifacts": [
     {
       "id": "session-schema-v1",
       "kind": "session",
       "path": "src/apprt/win32_session_state.zig",
-      "sha256": "69ff5a127d0bfb4eb5b19f2786ff602c611831a4e16c8d07d81f03ecc5b4ecbb",
+      "sha256": "591abc7a724cfc076f97a4a27d5368bbdcd5d6915942a711cc5de2c12959a0d5",
       "scenario_id": null
     },
     {
