@@ -21,22 +21,6 @@ if (-not (Test-Path $exePath)) {
     throw "Missing built executable: $exePath. Run `zig build -Demit-exe=true` first."
 }
 
-function Find-DetachedCliResourcesDir {
-    $artifactsDir = Join-Path $repoRoot 'dist\artifacts'
-    if (-not (Test-Path $artifactsDir)) {
-        return $null
-    }
-
-    return Get-ChildItem $artifactsDir -Directory |
-        ForEach-Object { Join-Path $_.FullName 'noctty\share\ghostty' } |
-        Where-Object { Test-Path (Join-Path $_ 'themes') } |
-        Select-Object -First 1
-}
-
-if (-not $ResourcesDir -and $Action -eq '+list-themes') {
-    $ResourcesDir = Find-DetachedCliResourcesDir
-}
-
 if (-not ('DetachedCliActionNative' -as [type])) {
     Add-Type @"
 using System;
@@ -78,14 +62,19 @@ function Get-DetachedCliWindowTitle {
 # reliable way to reproduce an Explorer/scheduled-task style launch from a
 # script that is itself running in a console.
 #
-# WMI does not carry the caller's environment into the new process, so
-# GHOSTTY_RESOURCES_DIR cannot be propagated on this path.
-if ($ResourcesDir -and $Action -eq '+list-themes') {
-    throw 'Detached +list-themes cannot receive GHOSTTY_RESOURCES_DIR through a console-less launch.'
-}
+# What this asserts is that a console-less CLI action surfaces the failure
+# dialog and exits 1 instead of failing silently. That holds for every action,
+# including +list-themes, because the action fails on output long before it
+# needs its resources -- which is why $ResourcesDir is accepted but not used.
+# It is retained only because package-portable-cli.ps1 passes it and that script
+# is pinned by a frozen verification baseline.
+$null = $ResourcesDir
 
 $quotedExe = '"' + $exePath + '"'
-$commandLine = (@($quotedExe, $Action) + $ExtraArgs) -join ' '
+$quotedArgs = @($ExtraArgs | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    })
+$commandLine = (@($quotedExe, $Action) + $quotedArgs) -join ' '
 $creation = Invoke-CimMethod `
     -ClassName Win32_Process `
     -MethodName Create `

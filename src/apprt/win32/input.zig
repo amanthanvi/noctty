@@ -255,6 +255,41 @@ fn isAltGr(mods: input.Mods) bool {
         mods.sides.ctrl == .left and mods.sides.alt == .right;
 }
 
+/// Whether the active layout defines any AltGr mappings.
+///
+/// Windows only injects the synthetic left Ctrl on layouts that have an AltGr,
+/// so on a layout without one (plain US, for instance) a left Ctrl plus right
+/// Alt can only be a chord the user physically pressed, and collapsing it would
+/// silently turn `ctrl+ralt+x` into a literal "x". Probing is cheap and needs no
+/// cached state: it only runs while both keys are held, and the answer follows
+/// the layout automatically because it is measured from the layout itself.
+fn layoutHasAltGrMappings() bool {
+    var state: [256]u8 = [_]u8{0} ** 256;
+    state[c.VK_CONTROL] = 0x80;
+    state[c.VK_LCONTROL] = 0x80;
+    state[c.VK_MENU] = 0x80;
+    state[c.VK_RMENU] = 0x80;
+
+    // The printable ranges plus the OEM keys cover every key layouts actually
+    // put an AltGr character on.
+    for (c.VK_0..c.VK_9 + 1) |vk| {
+        if (altGrProbeProducesText(@intCast(vk), &state)) return true;
+    }
+    for (c.VK_A..c.VK_Z + 1) |vk| {
+        if (altGrProbeProducesText(@intCast(vk), &state)) return true;
+    }
+    for (c.VK_OEM_1..c.VK_OEM_7 + 1) |vk| {
+        if (altGrProbeProducesText(@intCast(vk), &state)) return true;
+    }
+    return altGrProbeProducesText(c.VK_OEM_102, &state);
+}
+
+fn altGrProbeProducesText(vk: UINT, state: *const [256]u8) bool {
+    var utf16: [4]u16 = [_]u16{0} ** 4;
+    const scan_code = sys.MapVirtualKeyW(vk, c.MAPVK_VK_TO_VSC);
+    return translateKeyTextToUnicode(vk, scan_code, state, &utf16) != 0;
+}
+
 /// Drop the Ctrl+Alt that Windows synthesizes for AltGr. Reporting it verbatim
 /// makes the encoder treat every AltGr combination as a Ctrl+Alt chord, which
 /// encodes as ESC plus a C0 byte -- that is why AltGr+backspace arrived as
@@ -268,6 +303,15 @@ fn withoutSyntheticAltGr(mods: input.Mods) input.Mods {
     result.sides.ctrl = .left;
     result.sides.alt = .left;
     return result;
+}
+
+/// Apply the AltGr collapse only when the active layout actually has an AltGr.
+/// The layout probe is behind the cheap modifier check so it only runs while
+/// left Ctrl and right Alt are both held.
+fn normalizeAltGrMods(mods: input.Mods) input.Mods {
+    if (!isAltGr(mods)) return mods;
+    if (!layoutHasAltGrMappings()) return mods;
+    return withoutSyntheticAltGr(mods);
 }
 
 fn fallbackMods() input.Mods {
@@ -649,6 +693,28 @@ fn translatePrintableCodepoint(
     return printableCodepoint(utf16[0..@min(@as(usize, @intCast(count)), utf16.len)]);
 }
 
+/// The codepoint this key produces with every modifier cleared, taken from the
+/// active layout so non-US layouts report their own key codes: ctrl+ő on a
+/// Hungarian layout must report U+0151, not '['. Falls back to the static US
+/// table when the layout produces nothing printable (dead keys, function keys).
+///
+/// This must be derived identically for press, repeat and release. The Kitty
+/// encoder builds its key code from this field, so a press/release pair that
+/// disagreed would look like two different keys to an application pairing them.
+fn unshiftedCodepoint(
+    vk: UINT,
+    scan_code: UINT,
+    keyboard_state: ?*const [256]u8,
+) u21 {
+    const state = keyboard_state orelse return unshiftedCodepointForVirtualKey(vk);
+    return translatePrintableCodepoint(
+        vk,
+        scan_code,
+        state,
+        .{ .control = true, .shift = true },
+    ) orelse unshiftedCodepointForVirtualKey(vk);
+}
+
 fn translateKeyText(
     vk: UINT,
     lParam: LPARAM,
@@ -665,15 +731,8 @@ fn translateKeyText(
 
     const scan_code = scanCodeFromLParam(lParam);
 
-    // The unshifted codepoint has to come from the active layout, not from a
-    // US-layout table: ctrl+ő on a Hungarian layout must report U+0151.
     var result: KeyText = .{
-        .unshifted_codepoint = translatePrintableCodepoint(
-            vk,
-            scan_code,
-            state,
-            .{ .control = true, .shift = true },
-        ) orelse unshiftedCodepointForVirtualKey(vk),
+        .unshifted_codepoint = unshiftedCodepoint(vk, scan_code, state),
     };
 
     var utf16: [4]u16 = [_]u16{0} ** 4;
@@ -745,22 +804,27 @@ pub fn keyEventFromWin32Message(
     const key = keyFromVirtualKey(vk, lParam);
     var keyboard_state_storage: [256]u8 = [_]u8{0} ** 256;
     const keyboard_state = currentKeyboardState(&keyboard_state_storage);
-    const mods = withoutSyntheticAltGr(currentModsFromKeyboardState(keyboard_state));
+    const mods = normalizeAltGrMods(currentModsFromKeyboardState(keyboard_state));
 
-    var result: Win32KeyMessage = .{ .event = .{
-        .action = action,
-        .key = key,
-        .mods = mods,
-        .unshifted_codepoint = unshiftedCodepointForVirtualKey(vk),
-    } };
+    var result: Win32KeyMessage = .{
+        .event = .{
+            .action = action,
+            .key = key,
+            .mods = mods,
+            // Derived for release events too, not just press/repeat: see
+            // unshiftedCodepoint.
+            .unshifted_codepoint = unshiftedCodepoint(
+                vk,
+                scanCodeFromLParam(lParam),
+                keyboard_state,
+            ),
+        },
+    };
 
     if (action != .release) {
         const translated = translateKeyText(vk, lParam, mods, keyboard_state);
         result.event.utf8 = translated.utf8[0..translated.len];
         result.event.consumed_mods = translated.consumed_mods;
-        if (translated.unshifted_codepoint != 0) {
-            result.event.unshifted_codepoint = translated.unshifted_codepoint;
-        }
         if (shouldDeferTextToCharMessage(action, key, mods, translated)) {
             // Keep the physical-key event visible to bindings/modifier state
             // but defer text emission to WM_CHAR so plain typing doesn't rely
@@ -786,11 +850,13 @@ test "win32 keyFromVirtualKey maps core keys" {
     try std.testing.expectEqual(input.Key.quote, keyFromVirtualKey(c.VK_OEM_7, 0));
 }
 
-/// The layout-sensitive tests below assert US-layout results, so skip them when
-/// the machine running the suite has a different layout loaded.
+/// The layout-sensitive tests below assert plain-US results, so skip them on any
+/// other layout. The full HKL is compared rather than just the language id
+/// because US-International, Dvorak and Colemak share LANGID 0x0409 but
+/// translate differently.
 fn testingUsLayout() bool {
     if (comptime builtin.os.tag != .windows) return false;
-    return (sys.GetKeyboardLayout(0) & 0xFFFF) == 0x0409;
+    return sys.GetKeyboardLayout(0) == 0x04090409;
 }
 
 fn testingKeyboardState(mods: input.Mods) [256]u8 {
@@ -814,6 +880,10 @@ fn testingKeyboardState(mods: input.Mods) [256]u8 {
 /// Build the key event the window procedure would hand the core surface, but
 /// from an explicit modifier set instead of the live keyboard. `text` is owned
 /// by the caller because the event borrows its UTF-8 buffer.
+///
+/// The AltGr collapse is applied unconditionally here so the table below can
+/// assert AltGr semantics on any runner. Whether the collapse fires in
+/// production is the layout probe's job and is covered separately.
 fn testingKeyEvent(vk: UINT, raw_mods: input.Mods, text: *KeyText) input.KeyEvent {
     const state = testingKeyboardState(raw_mods);
     const mods = withoutSyntheticAltGr(raw_mods);
@@ -831,8 +901,54 @@ fn testingKeyEvent(vk: UINT, raw_mods: input.Mods, text: *KeyText) input.KeyEven
 /// lParam carrying the layout scan code for `vk` in the position
 /// `scanCodeFromLParam` reads it from.
 fn testingScanCode(vk: UINT) LPARAM {
-    const scan = sys.MapVirtualKeyW(vk, 0);
+    const scan = sys.MapVirtualKeyW(vk, c.MAPVK_VK_TO_VSC);
     return @bitCast(@as(usize, scan) << 16);
+}
+
+// The Kitty encoder builds its key code from unshifted_codepoint, so press and
+// release have to agree. VK_DIVIDE is the regression probe: it is absent from
+// unshiftedCodepointForVirtualKey's table (which would report 0) but the layout
+// translates it to '/', so a release path still using the table shows up here.
+test "win32 unshifted codepoint agrees across press and release" {
+    if (!testingUsLayout()) return error.SkipZigTest;
+
+    const keys = [_]UINT{ c.VK_DIVIDE, c.VK_MULTIPLY, c.VK_ADD, c.VK_A, c.VK_OEM_COMMA };
+    for (keys) |vk| {
+        const lParam = testingScanCode(vk);
+        const press = keyEventFromWin32Message(c.WM_KEYDOWN, vk, lParam).?;
+        const release = keyEventFromWin32Message(c.WM_KEYUP, vk, lParam).?;
+        try std.testing.expectEqual(
+            press.event.unshifted_codepoint,
+            release.event.unshifted_codepoint,
+        );
+        try std.testing.expect(release.event.unshifted_codepoint != 0);
+    }
+
+    // Pin the layout-derived value for a key the static table does not carry.
+    const divide = keyEventFromWin32Message(
+        c.WM_KEYUP,
+        c.VK_DIVIDE,
+        testingScanCode(c.VK_DIVIDE),
+    ).?;
+    try std.testing.expectEqual(@as(u21, '/'), divide.event.unshifted_codepoint);
+    try std.testing.expectEqual(@as(u21, 0), unshiftedCodepointForVirtualKey(c.VK_DIVIDE));
+}
+
+test "win32 AltGr collapse only applies to layouts that have an AltGr" {
+    if (!testingUsLayout()) return error.SkipZigTest;
+
+    // Plain US has no AltGr mappings, so left Ctrl + right Alt can only be a
+    // chord the user physically pressed and must survive as one.
+    try std.testing.expect(!layoutHasAltGrMappings());
+
+    const altgr: input.Mods = .{
+        .ctrl = true,
+        .alt = true,
+        .sides = .{ .ctrl = .left, .alt = .right },
+    };
+    const normalized = normalizeAltGrMods(altgr);
+    try std.testing.expect(normalized.ctrl);
+    try std.testing.expect(normalized.alt);
 }
 
 // Every combination the reporter of #178 listed, plus the ones that already

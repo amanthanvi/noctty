@@ -184,10 +184,15 @@ layout text: `ctrl+c` sends `0x03`, and combinations that have no C0 byte
 AltGr is treated as a layout shift, not as a Ctrl+Alt chord. Windows
 synthesizes left Ctrl plus right Alt whenever AltGr is pressed, and noctty
 drops that synthetic pair so `AltGr+<key>` produces the layout character (or
-nothing) instead of a Ctrl+Alt terminal sequence. A deliberate Ctrl+Alt chord
-still works with the left Alt key or with the right Ctrl key; left Ctrl plus
-right Alt is indistinguishable from AltGr at the Win32 layer and is always read
-as AltGr.
+nothing) instead of a Ctrl+Alt terminal sequence.
+
+That collapse only applies on layouts that actually define AltGr mappings,
+which are the only layouts where Windows injects the synthetic Ctrl. On a
+layout without an AltGr — plain US, for example — left Ctrl plus right Alt can
+only be a chord you pressed, and it is passed through as one. On a layout that
+does have an AltGr, the two are not distinguishable from the modifier state
+noctty reads, so left Ctrl plus right Alt is always read as AltGr there; use
+the left Alt key or the right Ctrl key for a deliberate Ctrl+Alt chord.
 
 Console applications reached through ConPTY see these sequences through
 conhost's own decoder, which does not translate every form back into a console

@@ -35,8 +35,9 @@ pub fn attachParentConsole() void {
     if (!stdHandleUsable(std_err)) bindStdHandleToConsole(std_err, "CONOUT$");
 }
 
+/// Both helpers below are only ever reached from attachParentConsole, which has
+/// already established that this is Windows.
 fn stdHandleUsable(id: i32) bool {
-    if (comptime builtin.os.tag != .windows) return true;
     const handle = GetStdHandle(id);
     if (handle == null or handle == windows.INVALID_HANDLE_VALUE) return false;
     // A stale inherited handle reports FILE_TYPE_UNKNOWN.
@@ -44,7 +45,6 @@ fn stdHandleUsable(id: i32) bool {
 }
 
 fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
-    if (comptime builtin.os.tag != .windows) return;
     const path = std.unicode.utf8ToUtf16LeStringLiteral(name);
     const handle = CreateFileW(
         path,
@@ -199,6 +199,20 @@ pub const std_options: std.Options = .{
     },
     .logFn = logFn,
 };
+
+// The attach must never disturb a handle that already works, or redirection
+// (`noctty.exe +version > out.txt`) and the noctty.com launcher would break.
+// The test runner's own stdout is a live handle, so it stands in for both.
+test "cli console attach leaves working std handles alone" {
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const std_out = -11;
+    try std.testing.expect(stdHandleUsable(std_out));
+
+    const before = GetStdHandle(std_out);
+    attachParentConsole();
+    try std.testing.expectEqual(before, GetStdHandle(std_out));
+}
 
 test "cli help output failures get a text output hint" {
     var buffer: [512]u8 = undefined;
