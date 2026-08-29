@@ -86,6 +86,7 @@ pub const min_window_height_cells: u32 = 4;
 /// The maximum number of key tables that can be active at any
 /// given time. `activate_key_table` calls after this are ignored.
 const max_active_key_tables = 8;
+const copy_mode_table_name = "copy_mode";
 
 /// Unique ID used to identify this surface for IPC purposes. It is
 /// exposed to the commands running in surfaces as the environment variable
@@ -193,6 +194,10 @@ visible: bool = true,
 
 /// Used to determine whether to continuously scroll.
 selection_scroll_active: bool = false,
+
+/// True while the built-in copy-mode key table owns keyboard input and
+/// the terminal selection is acting as its cursor/anchor.
+copy_mode_active: bool = false,
 
 /// True if the surface is in read-only mode. When read-only, no input
 /// is sent to the PTY but terminal-level operations like selections,
@@ -3392,6 +3397,104 @@ fn maybeHandleBinding(
     return null;
 }
 
+fn copyModeStartPin(
+    cursor: terminal.Pin,
+    viewport_tl: terminal.Pin,
+    viewport_br: terminal.Pin,
+) terminal.Pin {
+    return if (cursor.isBetween(viewport_tl, viewport_br)) cursor else viewport_br;
+}
+
+test "copy mode starts at a visible cursor or the viewport edge" {
+    const testing = std.testing;
+    var screen = try terminal.Screen.init(testing.allocator, .{
+        .cols = 8,
+        .rows = 4,
+        .max_scrollback = 0,
+    });
+    defer screen.deinit();
+    try screen.testWriteString("one\ntwo\nthree");
+
+    const before = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const viewport_tl = screen.pages.pin(.{ .screen = .{ .x = 0, .y = 1 } }).?;
+    const viewport_br = screen.pages.pin(.{ .screen = .{ .x = 4, .y = 2 } }).?;
+    const visible = screen.pages.pin(.{ .screen = .{ .x = 2, .y = 1 } }).?;
+
+    try testing.expectEqual(
+        visible,
+        copyModeStartPin(visible, viewport_tl, viewport_br),
+    );
+    try testing.expectEqual(
+        viewport_br,
+        copyModeStartPin(before, viewport_tl, viewport_br),
+    );
+}
+
+fn copyModeTableIsActive(self: *const Surface) bool {
+    if (!self.copy_mode_active) return false;
+    const table = self.config.keybind.tables.getPtr(copy_mode_table_name) orelse return false;
+    const stack = self.keyboard.table_stack.items;
+    return stack.len > 0 and stack[stack.len - 1].set == table;
+}
+
+fn finishCopyMode(self: *Surface) !void {
+    if (!self.copy_mode_active) return;
+    self.copy_mode_active = false;
+    self.renderer_state.mutex.lock();
+    self.io.terminal.screens.active.clearSelection();
+    self.renderer_state.mutex.unlock();
+    try self.queueRender();
+}
+
+fn startCopyMode(self: *Surface) anyerror!bool {
+    if (self.copy_mode_active or self.keyboard.table_stack.items.len > 0) return false;
+    if (self.config.keybind.tables.getPtr(copy_mode_table_name) == null) return false;
+
+    self.renderer_state.mutex.lock();
+    const screen: *terminal.Screen = self.io.terminal.screens.active;
+    const viewport_tl = screen.pages.getTopLeft(.viewport);
+    const viewport_br = screen.pages.getBottomRight(.viewport) orelse {
+        self.renderer_state.mutex.unlock();
+        return false;
+    };
+    const initial = copyModeStartPin(screen.cursor.page_pin.*, viewport_tl, viewport_br);
+    screen.select(terminal.Selection.init(initial, initial, false)) catch |err| {
+        self.renderer_state.mutex.unlock();
+        return err;
+    };
+    self.renderer_state.mutex.unlock();
+    errdefer {
+        self.renderer_state.mutex.lock();
+        self.io.terminal.screens.active.clearSelection();
+        self.renderer_state.mutex.unlock();
+        self.queueRender() catch {};
+    }
+    try self.queueRender();
+
+    self.copy_mode_active = true;
+    const activated = self.performBindingAction(.{
+        .activate_key_table = copy_mode_table_name,
+    }) catch |err| {
+        self.finishCopyMode() catch {};
+        return err;
+    };
+    if (!activated) {
+        try self.finishCopyMode();
+        return false;
+    }
+    return true;
+}
+
+fn toggleCopyMode(self: *Surface) anyerror!bool {
+    if (!self.copy_mode_active) return try self.startCopyMode();
+
+    _ = try self.performBindingAction(.deactivate_key_table);
+    // The normal path clears copy mode from the generic deactivation branch.
+    // Keep this fallback for a user-customized table stack.
+    if (self.copy_mode_active) try self.finishCopyMode();
+    return true;
+}
+
 fn deactivateAllKeyTables(self: *Surface) !bool {
     switch (self.keyboard.table_stack.items.len) {
         // No key table active. This does nothing.
@@ -3400,6 +3503,8 @@ fn deactivateAllKeyTables(self: *Surface) !bool {
         // Clear the entire table stack.
         else => self.keyboard.table_stack.clearAndFree(self.alloc),
     }
+
+    if (self.copy_mode_active) try self.finishCopyMode();
 
     // Notify the UI.
     _ = self.rt_app.performAction(
@@ -5976,6 +6081,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .toggle_copy_mode => return try self.toggleCopyMode(),
+
         .toggle_background_opacity => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_background_opacity,
@@ -6069,6 +6176,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .deactivate_key_table => {
+            const leaving_copy_mode = self.copyModeTableIsActive();
             switch (self.keyboard.table_stack.items.len) {
                 // No key table active. This does nothing.
                 0 => return false,
@@ -6081,6 +6189,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // we finish our key table.
                 else => _ = self.keyboard.table_stack.pop(),
             }
+
+            if (leaving_copy_mode) try self.finishCopyMode();
 
             // Notify the UI.
             _ = self.rt_app.performAction(

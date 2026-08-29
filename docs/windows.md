@@ -531,7 +531,7 @@ auto-apply is not implemented yet.
 The updater is also the only outbound network call the app makes; there
 is no telemetry and no analytics.
 
-## Quick select
+## Quick select & copy mode
 
 `Ctrl+Shift+Space` runs `toggle_quick_select` for the focused terminal
 surface. Quick select scans the visible viewport once when it opens and
@@ -564,6 +564,16 @@ configured list is empty, the built-in patterns apply. `quick-select-alphabet`
 sets the unique printable ASCII characters used for labels, requires at least
 two characters, and treats ASCII letters that differ only by case as duplicates.
 Use Zig string literal syntax to preserve leading or trailing spaces.
+
+`Ctrl+Shift+X` runs `toggle_copy_mode`. Copy mode starts a selection at the
+terminal cursor when it is visible, or at the bottom edge of a scrolled
+viewport. Use `h`/`j`/`k`/`l` or the arrow keys to move, `Ctrl+U`/`Ctrl+D` or
+Page Up/Page Down to move by a viewport, `g`/`G` or Home/End to jump through
+scrollback, and `0`/`$` to jump within a line. `y` or Enter copies and exits;
+`q` or Esc cancels. Other keys are consumed instead of reaching the PTY.
+
+These bindings live in the `copy_mode` key table, so they can be replaced
+with normal `keybind = copy_mode/...` entries.
 
 ## Quick terminal and global hotkeys
 

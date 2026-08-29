@@ -150,6 +150,7 @@ ones you'll use daily:
 | Move between panes       | `Alt+Arrow`                   |
 | Command palette          | `Ctrl+Shift+P`                |
 | Quick select             | `Ctrl+Shift+Space`            |
+| Copy mode                | `Ctrl+Shift+X`                |
 | Start search             | `Ctrl+Shift+F`                |
 | Increase / decrease font | `Ctrl+=` / `Ctrl+-`           |
 | Reload config            | `Ctrl+Shift+,`                |

@@ -776,6 +776,12 @@ pub const Action = union(enum) {
     /// for keyboard-only copy, open, or paste actions.
     toggle_quick_select,
 
+    /// Toggle modal keyboard selection and scrollback navigation.
+    ///
+    /// The default copy-mode key table provides vi-style movement, copying,
+    /// and cancellation without sending input to the terminal.
+    toggle_copy_mode,
+
     /// Toggle the quick terminal.
     ///
     /// The quick terminal, also known as the "Quake-style" or drop-down
@@ -1378,6 +1384,7 @@ pub const Action = union(enum) {
             .toggle_mouse_reporting,
             .toggle_command_palette,
             .toggle_quick_select,
+            .toggle_copy_mode,
             .toggle_background_opacity,
             .show_on_screen_keyboard,
             .reset_window_size,

@@ -6603,6 +6603,53 @@ pub const Keybinds = struct {
             .toggle_quick_select,
         );
 
+        // Copy mode. The named table is intentionally user-customizable, but
+        // its defaults consume every otherwise-unbound key so modal input can
+        // never leak into the PTY.
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .unicode = 'x' }, .mods = .{ .ctrl = true, .shift = true } },
+            .toggle_copy_mode,
+        );
+        const copy_mode = blk: {
+            const gop = try self.tables.getOrPut(alloc, "copy_mode");
+            std.debug.assert(!gop.found_existing);
+            gop.key_ptr.* = try alloc.dupe(u8, "copy_mode");
+            gop.value_ptr.* = .{};
+            break :blk gop.value_ptr;
+        };
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'h' } }, .{ .adjust_selection = .left });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'j' } }, .{ .adjust_selection = .down });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'k' } }, .{ .adjust_selection = .up });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'l' } }, .{ .adjust_selection = .right });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .arrow_left } }, .{ .adjust_selection = .left });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .arrow_down } }, .{ .adjust_selection = .down });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .arrow_up } }, .{ .adjust_selection = .up });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .arrow_right } }, .{ .adjust_selection = .right });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .page_up } }, .{ .adjust_selection = .page_up });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .page_down } }, .{ .adjust_selection = .page_down });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'u' }, .mods = .{ .ctrl = true } }, .{ .adjust_selection = .page_up });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'd' }, .mods = .{ .ctrl = true } }, .{ .adjust_selection = .page_down });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .home } }, .{ .adjust_selection = .home });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .end } }, .{ .adjust_selection = .end });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'g' } }, .{ .adjust_selection = .home });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'g' }, .mods = .{ .shift = true } }, .{ .adjust_selection = .end });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = '0' } }, .{ .adjust_selection = .beginning_of_line });
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = '4' }, .mods = .{ .shift = true } }, .{ .adjust_selection = .end_of_line });
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .escape } }, .toggle_copy_mode);
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'q' } }, .toggle_copy_mode);
+        try copy_mode.put(alloc, .{ .key = .{ .unicode = 'y' } }, .{ .copy_to_clipboard = .mixed });
+        copy_mode.appendChain(alloc, .toggle_copy_mode) catch |err| switch (err) {
+            error.NoChainParent => unreachable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try copy_mode.put(alloc, .{ .key = .{ .physical = .enter } }, .{ .copy_to_clipboard = .mixed });
+        copy_mode.appendChain(alloc, .toggle_copy_mode) catch |err| switch (err) {
+            error.NoChainParent => unreachable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        try copy_mode.put(alloc, .{ .key = .catch_all }, .ignore);
+
         // Mac-specific keyboard bindings.
         if (comptime builtin.target.os.tag.isDarwin()) {
             try self.set.put(
@@ -7517,6 +7564,46 @@ pub const Keybinds = struct {
         try testing.expect(foo_entry.leaf_chained.actions.items[1] == .deactivate_key_table);
     }
 
+    test "copy mode defaults are modal and keyboard driven" {
+        const testing = std.testing;
+        var arena = ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var keybinds: Keybinds = .{};
+        try keybinds.init(arena.allocator());
+
+        const root = keybinds.set.get(.{
+            .mods = .{ .ctrl = true, .shift = true },
+            .key = .{ .unicode = 'x' },
+        }).?.value_ptr.*;
+        try testing.expect(root == .leaf);
+        try testing.expect(root.leaf.action == .toggle_copy_mode);
+
+        const copy_mode = keybinds.tables.get("copy_mode").?;
+        const move_left = copy_mode.get(.{
+            .key = .{ .unicode = 'h' },
+        }).?.value_ptr.*;
+        try testing.expect(move_left == .leaf);
+        try testing.expectEqual(
+            inputpkg.Binding.Action{ .adjust_selection = .left },
+            move_left.leaf.action,
+        );
+
+        const copy = copy_mode.get(.{
+            .key = .{ .unicode = 'y' },
+        }).?.value_ptr.*;
+        try testing.expect(copy == .leaf_chained);
+        try testing.expectEqual(@as(usize, 2), copy.leaf_chained.actions.items.len);
+        try testing.expect(copy.leaf_chained.actions.items[0] == .copy_to_clipboard);
+        try testing.expect(copy.leaf_chained.actions.items[1] == .toggle_copy_mode);
+
+        const catch_all = copy_mode.get(.{
+            .key = .catch_all,
+        }).?.value_ptr.*;
+        try testing.expect(catch_all == .leaf);
+        try testing.expect(catch_all.leaf.action == .ignore);
+    }
+
     test "Windows split defaults avoid Narrator table navigation chords" {
         if (builtin.target.os.tag != .windows) return error.SkipZigTest;
 
@@ -7797,8 +7884,10 @@ pub const Keybinds = struct {
         // Reset to defaults (empty value)
         try keybinds.parseCLI(alloc, "");
 
-        // Tables should be cleared, root set has defaults
-        try testing.expectEqual(0, keybinds.tables.count());
+        // Custom tables should be cleared while built-in tables and root
+        // bindings return to their defaults.
+        try testing.expectEqual(1, keybinds.tables.count());
+        try testing.expect(keybinds.tables.contains("copy_mode"));
         try testing.expect(keybinds.set.bindings.count() > 0);
     }
 };

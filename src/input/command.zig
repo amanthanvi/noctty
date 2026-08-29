@@ -444,6 +444,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Label visible terminal targets for keyboard selection.",
         }},
 
+        .toggle_copy_mode => comptime &.{.{
+            .action = .toggle_copy_mode,
+            .title = "Toggle Copy Mode",
+            .description = "Select and navigate terminal scrollback from the keyboard.",
+        }},
+
         .prompt_surface_title => comptime &.{.{
             .action = .prompt_surface_title,
             .title = "Change Terminal Title…",
