@@ -113,6 +113,7 @@ pub const WM_SETCURSOR = 0x0020;
 pub const WM_SETFOCUS = 0x0007;
 pub const WM_SETTINGCHANGE = 0x001A;
 pub const WM_SIZE = 0x0005;
+pub const WM_WINDOWPOSCHANGED = 0x0047;
 pub const WM_ENTERSIZEMOVE = 0x0231;
 pub const WM_EXITSIZEMOVE = 0x0232;
 pub const SIZE_MAXIMIZED: u32 = 2;

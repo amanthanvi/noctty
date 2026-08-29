@@ -14,6 +14,7 @@ const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 const terminalpkg = @import("../terminal/main.zig");
 const terminal_render_dirty = @import("../terminal/render_dirty.zig");
+const win32_power = @import("../apprt/win32_power.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -60,6 +61,13 @@ const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
 const RENDER_FOLLOWUP_BURST_MS = 128;
 
+comptime {
+    // The power policy returns this same interval for focused, non-saver
+    // surfaces so their pacing stays exactly what it was before adaptive
+    // rendering existed. Keep the two constants in lockstep.
+    std.debug.assert(DRAW_INTERVAL == win32_power.DEFAULT_PRESENT_INTERVAL_MS);
+}
+
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
 /// If this is `true` then we send a `redraw_surface` message to the apprt
@@ -96,6 +104,7 @@ stop_c: xev.Completion = .{},
 render_h: xev.Timer,
 render_c: xev.Completion = .{},
 render_followup_pending: bool = false,
+last_present_request_ms: u64 = 0,
 
 /// The timer used for draw calls. Draw calls don't update from the
 /// terminal state so they're much cheaper. They're used for animation
@@ -161,10 +170,14 @@ flags: packed struct {
 
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
+    unfocused_render_fps: u32,
+    power_saver_rendering: configpkg.PowerSaverRendering,
 
     pub fn init(config: *const configpkg.Config) DerivedConfig {
         return .{
             .custom_shader_animation = config.@"custom-shader-animation",
+            .unfocused_render_fps = config.@"unfocused-render-fps",
+            .power_saver_rendering = config.@"power-saver-rendering",
         };
     }
 };
@@ -299,7 +312,7 @@ fn threadMain_(self: *Thread) !void {
     self.cursor_h.run(
         &self.loop,
         &self.cursor_c,
-        cursorBlinkInterval(),
+        self.cursorBlinkInterval(),
         Thread,
         self,
         cursorTimerCallback,
@@ -379,10 +392,14 @@ fn syncDrawTimer(self: *Thread) void {
     if (self.draw_c.state() == .active) return;
 
     // Start the timer which loops
+    const delay_ms = self.nextPresentTimerDelayMs() orelse {
+        self.draw_active = false;
+        return;
+    };
     self.draw_h.run(
         &self.loop,
         &self.draw_c,
-        DRAW_INTERVAL,
+        delay_ms,
         Thread,
         self,
         drawCallback,
@@ -445,8 +462,8 @@ fn drainMailbox(self: *Thread) !bool {
                 self.setQosClass();
 
                 // If we became visible then we immediately trigger a draw.
-                // We don't need to update frame data because that should
-                // still be happening.
+                // `drawFrame` applies the present-pacing policy itself, so a
+                // throttled surface still draws as soon as its interval is up.
                 if (v) self.drawFrame(false);
 
                 // Notify the renderer so it can update any state.
@@ -483,7 +500,7 @@ fn drainMailbox(self: *Thread) !bool {
                     // active, its callback owns the eventual rearm.
                     self.flags.cursor_blink_visible = true;
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(cursorBlinkInterval());
+                    self.armCursorTimerIfDead(self.cursorBlinkInterval());
                 }
             },
 
@@ -491,7 +508,7 @@ fn drainMailbox(self: *Thread) !bool {
                 self.flags.cursor_blink_visible = true;
                 if (self.flags.focused) {
                     self.cursor_blink_reset_at = std.time.Instant.now() catch null;
-                    self.armCursorTimerIfDead(cursorBlinkInterval());
+                    self.armCursorTimerIfDead(self.cursorBlinkInterval());
                 }
             },
 
@@ -573,11 +590,53 @@ fn shouldAcceptSearchGeneration(self: *const Thread, generation: u64) bool {
     return self.search_generation.load(.acquire) == generation;
 }
 
+fn powerSnapshot(self: *const Thread) win32_power.Snapshot {
+    _ = self;
+    if (apprt.runtime != apprt.win32) return .{};
+    win32_power.pollIfStale();
+    return win32_power.snapshot();
+}
+
+fn minimumPresentIntervalMs(self: *const Thread) ?u64 {
+    if (apprt.runtime != apprt.win32) {
+        return if (self.flags.visible) DRAW_INTERVAL else null;
+    }
+    return win32_power.minimumPresentIntervalMs(
+        self.flags.focused,
+        self.flags.visible,
+        self.powerSnapshot(),
+        .{
+            .unfocused_render_fps = self.config.unfocused_render_fps,
+            .power_saver_rendering = self.config.power_saver_rendering,
+        },
+    );
+}
+
+fn presentWaitMs(self: *const Thread, interval_ms: u64) u64 {
+    if (interval_ms <= DRAW_INTERVAL or self.last_present_request_ms == 0) return 0;
+    const elapsed_ms = win32_power.tickCountMs() -| self.last_present_request_ms;
+    return interval_ms -| elapsed_ms;
+}
+
+fn nextPresentTimerDelayMs(self: *const Thread) ?u64 {
+    const interval_ms = self.minimumPresentIntervalMs() orelse return null;
+    const wait_ms = self.presentWaitMs(interval_ms);
+    return if (wait_ms > 0) wait_ms else interval_ms;
+}
+
+fn notePresentRequest(self: *Thread, interval_ms: u64) void {
+    if (interval_ms <= DRAW_INTERVAL) {
+        self.last_present_request_ms = 0;
+        return;
+    }
+    self.last_present_request_ms = win32_power.tickCountMs();
+}
+
 /// Trigger a draw. This will not update frame data or anything, it will
 /// just trigger a draw/paint.
 fn drawFrame(self: *Thread, now: bool) void {
-    // If we're invisible, we do not draw.
-    if (!self.flags.visible) return;
+    const interval_ms = self.minimumPresentIntervalMs() orelse return;
+    if (self.presentWaitMs(interval_ms) > 0) return;
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`.
@@ -598,20 +657,26 @@ fn drawFrame(self: *Thread, now: bool) void {
             if (comptime @hasDecl(apprt.Surface, "cancelRendererRepaintRequest")) {
                 self.surface.cancelRendererRepaintRequest();
             }
+        } else {
+            self.notePresentRequest(interval_ms);
         }
     } else {
-        self.renderer.drawFrame(false) catch |err|
+        self.renderer.drawFrame(false) catch |err| {
             log.warn("error drawing err={}", .{err});
+            return;
+        };
+        self.notePresentRequest(interval_ms);
     }
 }
 
 fn scheduleRenderFollowup(self: *Thread) void {
     if (self.render_followup_pending) return;
+    const delay_ms = self.nextPresentTimerDelayMs() orelse return;
     self.render_followup_pending = true;
     self.render_h.run(
         &self.loop,
         &self.render_c,
-        DRAW_INTERVAL,
+        delay_ms,
         Thread,
         self,
         renderCallback,
@@ -659,6 +724,13 @@ fn renderOnce(self: *Thread, from_wakeup: bool) bool {
         log.err("error draining mailbox err={}", .{err});
         return false;
     };
+
+    // Invisible surfaces retain terminal state but do no renderer work. A
+    // throttled surface defers both updateFrame and presentation through the
+    // existing follow-up timer so background output cannot burn CPU at the
+    // uncapped wakeup rate.
+    const interval_ms = self.minimumPresentIntervalMs() orelse return false;
+    if (self.presentWaitMs(interval_ms) > 0) return true;
 
     // Update our frame data.
     if (comptime @hasDecl(apprt.Surface, "noteRendererUpdateFrame")) {
@@ -741,7 +813,11 @@ fn drawCallback(
 
     // Only continue if we're still active
     if (t.draw_active) {
-        t.draw_h.run(&t.loop, &t.draw_c, DRAW_INTERVAL, Thread, t, drawCallback);
+        if (t.nextPresentTimerDelayMs()) |delay_ms| {
+            t.draw_h.run(&t.loop, &t.draw_c, delay_ms, Thread, t, drawCallback);
+        } else {
+            t.draw_active = false;
+        }
     }
 
     return .disarm;
@@ -805,7 +881,7 @@ fn cursorTimerCallback(
         null;
     switch (cursorBlinkTimerDecision(
         t.flags.focused,
-        cursorBlinkInterval(),
+        t.cursorBlinkInterval(),
         reset_elapsed_ns,
     )) {
         .disarm => {
@@ -825,7 +901,7 @@ fn cursorTimerCallback(
     t.flags.cursor_blink_visible = !t.flags.cursor_blink_visible;
     t.wakeup.notify() catch {};
 
-    t.armCursorTimerIfDead(cursorBlinkInterval());
+    t.armCursorTimerIfDead(t.cursorBlinkInterval());
     return .disarm;
 }
 
@@ -847,7 +923,8 @@ fn stopCallback(
 }
 
 /// Returns the interval for the blinking cursor in milliseconds.
-fn cursorBlinkInterval() u64 {
+fn cursorBlinkInterval(self: *const Thread) u64 {
+    var interval: u64 = CURSOR_BLINK_INTERVAL;
     if (std.valgrind.runningOnValgrind() > 0) {
         // If we're running under Valgrind, the cursor blink adds enough
         // churn that it makes some stalls annoying unless you're on a
@@ -856,10 +933,17 @@ fn cursorBlinkInterval() u64 {
         // This is a hack, we should change some of our cursor timer
         // logic to be more efficient:
         // https://github.com/ghostty-org/ghostty/issues/8003
-        return CURSOR_BLINK_INTERVAL * 5;
+        interval *= 5;
     }
 
-    return CURSOR_BLINK_INTERVAL;
+    if (apprt.runtime == apprt.win32 and win32_power.saverRenderingActive(
+        self.config.power_saver_rendering,
+        self.powerSnapshot(),
+    )) {
+        interval *= 2;
+    }
+
+    return interval;
 }
 
 fn cursorBlinkRemainingMs(interval_ms: u64, elapsed_ns: u64) u64 {

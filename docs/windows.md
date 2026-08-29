@@ -109,6 +109,32 @@ Terminal progress reports are mapped to Windows taskbar progress for the
 active surface in each host window. Terminal apps can also set
 in-terminal progress state through Ghostty's shared VT/OSC support.
 
+## Power and battery
+
+noctty reads AC/battery and saver state from `GetSystemPowerStatus`.
+Windows power-setting notifications cover modern Energy Saver and the
+legacy Battery Saver signal; a fallback query runs at most once every 30
+seconds.
+
+`unfocused-render-fps` caps presentation for visible, unfocused surfaces
+and defaults to `30`. Values below `1` are treated as `1`; values above
+`125` have no additional effect, since the renderer never presents more
+often than every 8 ms.
+`power-saver-rendering` accepts `auto`, `on`, or `off` and defaults to
+`auto`: `auto` follows Windows battery or energy saver, `on` forces saver pacing,
+and `off` disables it. Focused surfaces retain their normal cadence when
+saver pacing is inactive. Saver pacing caps presentation at about 30
+fps and lengthens draw and cursor-blink timer cadences. Minimized and
+DWM-cloaked host windows do not present until they become visible again.
+
+Set `NOCTTY_RENDER_TRACE_FILE` to an absolute output path to write a JSON
+render trace when the first traced surface is destroyed. Presented fps
+can be derived as
+`(swap_buffers_count - 1) * 1000 / (last_swap_at_ms - first_swap_at_ms)`
+when at least two swaps are present and the time difference is positive.
+Debug builds also log one `presented fps` sample per surface per second,
+with the frame count and sample interval.
+
 ## Windows, tabs, and splits
 
 noctty uses a native Win32 host window with:

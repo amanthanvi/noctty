@@ -281,6 +281,10 @@ pub const RenderTrace = struct {
             .first_renderer_update_at_ms = self.first_renderer_update_at_ms.load(.acquire),
             .first_paint_at_ms = self.first_paint_at_ms.load(.acquire),
             .first_swap_at_ms = self.first_swap_at_ms.load(.acquire),
+            .last_swap_at_ms = elapsedTraceMs(
+                self.start_tick_ms,
+                self.last_swap_tick_ms.load(.acquire),
+            ),
         }, .{})}) catch return;
         stream.flush() catch return;
     }

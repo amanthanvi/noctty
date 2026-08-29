@@ -20,6 +20,7 @@ const updatepkg = @import("../update/github_releases.zig");
 const SplitTree = @import("../datastruct/split_tree.zig").SplitTree;
 
 const win32_theme = @import("win32_theme.zig");
+const win32_power = @import("win32_power.zig");
 const win32_tween = @import("win32_tween.zig");
 const win32_uia = @import("win32_uia/mod.zig");
 const win32_terminal_accessibility = @import("win32_terminal_accessibility.zig");
@@ -4523,6 +4524,8 @@ pub const App = struct {
             if (source.host) |existing| try self.inheritHostWindowState(host, existing);
         }
 
+        host.power_notifications = win32_power.Notifications.init(hwnd);
+
         // Passive first-show for quick-terminal-keyboard-interactivity
         // = none: `SW_SHOWNOACTIVATE` makes the window visible but
         // does NOT bring it to the foreground, so the user's current
@@ -6921,6 +6924,9 @@ const Host = struct {
     id: u32,
     shell_id: ?win32_shell.model.WindowId = null,
     hwnd: ?HWND = null,
+    power_notifications: win32_power.Notifications = .{},
+    surfaces_visible: bool = true,
+    dwm_cloaked: bool = false,
     cached_decorations_visible: bool = true,
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     active_tab: usize = 0,
@@ -9378,6 +9384,7 @@ const Host = struct {
     }
 
     fn deinit(self: *Host) void {
+        self.power_notifications.deinit();
         // Stop the tween heartbeat timer before we tear down the
         // scheduler — leaving a SetTimer bound to a destroyed HWND
         // would panic the next time it fired.
@@ -10360,6 +10367,19 @@ const Host = struct {
             }
         }
         _ = sys.ShowWindow(hwnd, if (visible) c.SW_SHOW else c.SW_HIDE);
+        self.refreshSurfaceVisibility();
+    }
+
+    fn refreshSurfaceVisibility(self: *Host) void {
+        const hwnd = self.hwnd orelse return;
+        const state = win32_power.queryHostVisibility(hwnd, self.dwm_cloaked);
+        self.dwm_cloaked = state.cloaked;
+        if (self.surfaces_visible == state.visible) return;
+        self.surfaces_visible = state.visible;
+        for (self.tabs.items) |*tab| {
+            var it = tab.tree.iterator();
+            while (it.next()) |entry| entry.view.syncOcclusion();
+        }
     }
 
     fn present(self: *Host) void {
@@ -10371,6 +10391,7 @@ const Host = struct {
         )) |show_cmd| {
             _ = sys.ShowWindow(hwnd, show_cmd);
         }
+        self.refreshSurfaceVisibility();
         _ = sys.SetForegroundWindow(hwnd);
         _ = sys.SetFocus(hwnd);
     }
@@ -18891,6 +18912,29 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
             return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
+        win32_power.WM_POWERBROADCAST => {
+            // Only the power-setting notifications we registered for are
+            // ours. Suspend/resume and the legacy APM query messages must
+            // keep reaching DefWindowProcW.
+            if (wParam != win32_power.PBT_POWERSETTINGCHANGE) {
+                return sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            _ = win32_power.handlePowerSettingChange(lParam);
+            return 1;
+        },
+
+        c.WM_WINDOWPOSCHANGED => {
+            const result = sys.DefWindowProcW(hwnd, msg, wParam, lParam);
+            // This fires once per mouse-move during a drag-move/resize, and
+            // the visibility query costs a DWM round-trip. A window being
+            // dragged is by definition visible, so skip it until the drag
+            // ends; WM_EXITSIZEMOVE produces a final WM_WINDOWPOSCHANGED.
+            if (host) |v| {
+                if (!v.is_live_resize.load(.acquire)) v.refreshSurfaceVisibility();
+            }
+            return result;
+        },
+
         c.WM_ENTERSIZEMOVE => {
             // User started a drag-resize or drag-move. We don't know
             // which yet, but setting the flag on both is harmless —
@@ -18997,6 +19041,7 @@ fn hostWindowProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callcon
         c.WM_DESTROY => {
             if (host) |v| {
                 v.app.detachShellCompositorWindow(hwnd);
+                v.power_notifications.deinit();
                 v.hwnd = null;
             }
             return 0;
@@ -19943,6 +19988,9 @@ pub const Surface = struct {
     live_resize_repaint_deferred: bool = false,
     renderer_repaint_requested: std.atomic.Value(bool) = .init(false),
     renderer_repaint_retry_pending: std.atomic.Value(bool) = .init(false),
+    presented_frame_count: u64 = 0,
+    presented_fps_last_tick_ms: u64 = 0,
+    presented_fps_last_frame_count: u64 = 0,
     draw_in_progress: bool = false,
     ime_composing: bool = false,
     deferred_char: DeferredCharState = .{},
@@ -21118,7 +21166,36 @@ pub const Surface = struct {
             const err = windows.kernel32.GetLastError();
             return windows.unexpectedError(err);
         }
+        self.notePresentedFrame();
         self.render_trace.noteSwapBuffers();
+    }
+
+    /// Sample presented frames per second for this surface. `RenderTrace`
+    /// carries the same signal for the benchmark suite; this is the
+    /// no-trace-file path, so it compiles away entirely unless debug
+    /// logging is on. `swapGLBuffers` runs on the app thread, so the
+    /// bookkeeping needs no synchronization.
+    fn notePresentedFrame(self: *Surface) void {
+        if (comptime !std.log.logEnabled(.debug, .win32)) return;
+
+        self.presented_frame_count += 1;
+        const now_ms = sys.GetTickCount64();
+        if (self.presented_fps_last_tick_ms == 0) {
+            self.presented_fps_last_tick_ms = now_ms;
+            self.presented_fps_last_frame_count = self.presented_frame_count;
+            return;
+        }
+
+        const elapsed_ms = now_ms -| self.presented_fps_last_tick_ms;
+        if (elapsed_ms < std.time.ms_per_s) return;
+
+        const frames = self.presented_frame_count -| self.presented_fps_last_frame_count;
+        self.presented_fps_last_tick_ms = now_ms;
+        self.presented_fps_last_frame_count = self.presented_frame_count;
+        log.debug(
+            "presented fps surface_id={} fps={} frames={} interval_ms={}",
+            .{ self.core_surface.id, frames *| std.time.ms_per_s / elapsed_ms, frames, elapsed_ms },
+        );
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
@@ -23438,7 +23515,13 @@ pub const Surface = struct {
             };
         }
 
+        self.syncOcclusion();
+    }
+
+    fn syncOcclusion(self: *Surface) void {
         if (!self.core_initialized) return;
+        const visible = self.window_visible and
+            (if (self.host) |host| host.surfaces_visible else true);
         if (!shouldDispatchOcclusion(self.occlusion_visible, visible)) return;
         self.occlusion_visible = visible;
         self.core_surface.occlusionCallback(visible) catch |err| {

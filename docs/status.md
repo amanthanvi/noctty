@@ -77,6 +77,10 @@ Win32-validated VT protocol coverage is tracked in
 - Terminal content renders with OpenGL 4.3+ via WGL.
 - Window chrome uses a separate D3D11/DirectComposition + DirectWrite
   pipeline with GDI fallback; it never touches the terminal renderer.
+- Presentation is power- and visibility-aware: focused non-saver cadence
+  is unchanged, unfocused and saver pacing is capped, and minimized or
+  DWM-cloaked windows stop presenting. Details and measurement fields are
+  in [windows.md](windows.md#power-and-battery).
 
 ### Updater
 
