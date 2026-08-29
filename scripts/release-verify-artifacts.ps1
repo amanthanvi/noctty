@@ -125,12 +125,7 @@ foreach ($architecture in (Get-WindowsPackageArchitectures)) {
         -ManifestPath $manifest `
         -PayloadRoot (Join-Path $extractDirectory 'noctty') `
         -Label "Portable manifest $architecture"
-    foreach ($relativePath in @(
-        'noctty/noctty.com',
-        'noctty/noctty.exe',
-        'noctty/ghostty-vt.dll',
-        'noctty/noctty-terminal-handoff-proxy.dll'
-    )) {
+    foreach ($relativePath in (Get-WindowsSignedRuntimePayloads)) {
         [void](Assert-ReleaseSignature `
             -Path (Join-Path $extractDirectory $relativePath) `
             -Label "$relativePath $architecture" `

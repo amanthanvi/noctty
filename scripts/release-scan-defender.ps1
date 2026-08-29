@@ -69,11 +69,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Microsoft Defender signature update failed with exit code $LASTEXITCODE."
 }
 
-$portablePayloads = @(
-    'noctty/noctty.com',
-    'noctty/noctty.exe',
-    'noctty/ghostty-vt.dll',
-    'noctty/noctty-terminal-handoff-proxy.dll',
+$portablePayloads = @(Get-WindowsSignedRuntimePayloads) + @(
     'noctty/conpty.dll',
     'noctty/OpenConsole.exe'
 )

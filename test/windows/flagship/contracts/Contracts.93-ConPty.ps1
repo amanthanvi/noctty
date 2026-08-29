@@ -56,7 +56,7 @@ Assert-WorkflowContractAbsent `
     -Description 'diagnostic bundles do not duplicate the ConPTY info shape'
 Assert-WorkflowContract `
     -Path $releaseDefenderScanner `
-    -Pattern '(?ms)noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/conpty\.dll.*?noctty/OpenConsole\.exe.*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\)' `
+    -Pattern '(?ms)\$portablePayloads = @\(Get-WindowsSignedRuntimePayloads\) \+ @\(\s*''noctty/conpty\.dll'',\s*''noctty/OpenConsole\.exe''\s*\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\)' `
     -Description 'release Defender scan covers the bundled ConPTY pair in every architecture'
 Assert-WorkflowContract `
     -Path $releaseArtifactVerifier `
@@ -118,3 +118,32 @@ foreach ($packageStepSpec in @(
         throw "$($packageStepSpec.Name) must require bundled ConPTY exactly once."
     }
 }
+
+# --- Shared signed-runtime-payload list (issue #129 / #130) ----------------
+# Every PE noctty signs must be re-verified and Defender-scanned at release.
+# A single list feeds all three gates so a newly shipped binary cannot be
+# covered by one and silently missed by the others.
+$releaseCommonScript = Join-Path $repoRoot 'scripts\common.ps1'
+$publishedReleaseVerifierScript = Join-Path $repoRoot 'scripts\verify-published-release.ps1'
+Assert-WorkflowContract `
+    -Path $releaseCommonScript `
+    -Pattern "(?ms)function Get-WindowsSignedRuntimePayloads.*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll" `
+    -Description 'the shared signed-runtime payload list covers every PE noctty ships and signs'
+foreach ($payloadConsumer in @(
+    $releaseArtifactVerifier,
+    $publishedReleaseVerifierScript,
+    $releaseDefenderScanner
+)) {
+    Assert-WorkflowContract `
+        -Path $payloadConsumer `
+        -Pattern 'Get-WindowsSignedRuntimePayloads' `
+        -Description "release gate $(Split-Path -Leaf $payloadConsumer) derives its payload set from the shared signed-runtime list"
+    Assert-WorkflowContractAbsent `
+        -Path $payloadConsumer `
+        -Pattern "'noctty/ghostty-vt\.dll'" `
+        -Description "release gate $(Split-Path -Leaf $payloadConsumer) does not hardcode a parallel payload list"
+}
+Assert-WorkflowContract `
+    -Path $publishedReleaseVerifierScript `
+    -Pattern '(?ms)\$expectedSignatureCount =\s*@\(Get-WindowsPackageArchitectures\)\.Count \*\s*\(\$signedAssetsPerArchitecture \+ @\(Get-WindowsSignedRuntimePayloads\)\.Count\)' `
+    -Description 'published-release signature evidence count is derived, not a hardcoded literal'

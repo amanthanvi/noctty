@@ -1431,7 +1431,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseCommon
         Content = $releaseCommonText
         ExpectedSha256 =
-            'bf8499f8548de2a84484dc04309aae481e694b5a39a9c6e84b05c4e5408f63c6'
+            'c69ba084b4bba0ee397a493e5f12459d988507b4bc756ffb71ffb627f500257b'
         CriticalStatement =
             "    return [System.IO.Path]::GetFullPath((Join-Path `$PSScriptRoot '..'))"
     }
@@ -1439,7 +1439,7 @@ $protectedReleaseScriptSpecs = @(
         Context = $releaseDefenderScanner
         Content = $releaseDefenderScannerText
         ExpectedSha256 =
-            'da69f7467929d5242511bb71cf628e766f5ae26bc1b4a8f00bddceaeab43351b'
+            'e6fc67dc4affd48c4d90e7f0a31fce6dd9512b79ec9aab102c2ece1605af883d'
         CriticalStatement = '& $scanner -SignatureUpdate'
     }
     [pscustomobject] @{
@@ -1872,7 +1872,7 @@ Invoke-ContractTable -Contracts @(
     @{
         File = $releaseDefenderScanner
         Content = { $releaseDefenderScannerText }
-        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?noctty/noctty\.com.*?noctty/noctty\.exe.*?noctty/ghostty-vt\.dll.*?noctty/noctty-terminal-handoff-proxy\.dll.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
+        Pattern = '(?ms)Get-MpComputerStatus -ErrorAction Stop.*?AMServiceEnabled.*?AntivirusEnabled.*?AMRunningMode -ne ''Normal''.*?-replace ''-\\d\+\$'', ''''.*?-as \[version\].*?Sort-Object Version -Descending.*?MpCmdRun\.exe.*?-SignatureUpdate.*?if \(\$LASTEXITCODE -ne 0\).*?Get-WindowsSignedRuntimePayloads.*?noctty/conpty\.dll.*?noctty/OpenConsole\.exe.*?\$architectures = @\(Get-WindowsPackageArchitectures\).*?\$expectedScanCount = \$architectures\.Count \* \(1 \+ \$portablePayloads\.Count\).*?-Kind setup.*?noctty-release-verify-\$architecture.*?scanPaths\.Count -ne \$expectedScanCount.*?-Scan -ScanType 3 -File \$scanPath -DisableRemediation -ReturnHR.*?if \(\$LASTEXITCODE -ne 0\)'
         Kind = 'Text'
         Description = 'release scans installers and portable PE payloads with active current Microsoft Defender and fails closed'
     }

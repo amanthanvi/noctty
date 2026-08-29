@@ -237,11 +237,11 @@ try {
                 -PayloadRoot (Join-Path $extractDirectory 'noctty') `
                 -Label "Portable manifest $architecture"
         }
-        $expectedPortablePePaths = @(
-            'noctty/noctty.com',
-            'noctty/noctty.exe',
-            'noctty/ghostty-vt.dll',
-            'noctty/noctty-terminal-handoff-proxy.dll'
+        # Every PE in the portable ZIP is either one we sign (the shared list)
+        # or Microsoft's bundled ConPTY pair, which is checked separately below.
+        $expectedPortablePePaths = @(Get-WindowsSignedRuntimePayloads) + @(
+            'noctty/conpty.dll',
+            'noctty/OpenConsole.exe'
         )
         $portablePePaths = @(Get-PortablePeRelativePaths -Root $extractDirectory)
         $missingPortablePe = @($expectedPortablePePaths | Where-Object { $_ -notin $portablePePaths })
@@ -249,7 +249,7 @@ try {
         if ($missingPortablePe.Count -gt 0 -or $unexpectedPortablePe.Count -gt 0) {
             throw "$portableName PE inventory mismatch. Missing: $($missingPortablePe -join ', '); unexpected: $($unexpectedPortablePe -join ', ')."
         }
-        foreach ($relativePath in $expectedPortablePePaths) {
+        foreach ($relativePath in (Get-WindowsSignedRuntimePayloads)) {
             $binaryPath = Join-Path $extractDirectory $relativePath
             $signatureEvidence.Add((Assert-ReleaseSignature `
                 -Path $binaryPath `
@@ -259,7 +259,13 @@ try {
         }
     }
 
-    $expectedSignatureCount = if ($requiresPortableManifests) { 12 } else { 10 }
+    # Per architecture: one setup, one portable manifest (from 1.3.124), and
+    # every signed runtime payload. Derived so that shipping a new signed
+    # binary cannot silently shrink the evidence set.
+    $signedAssetsPerArchitecture = if ($requiresPortableManifests) { 2 } else { 1 }
+    $expectedSignatureCount =
+        @(Get-WindowsPackageArchitectures).Count *
+        ($signedAssetsPerArchitecture + @(Get-WindowsSignedRuntimePayloads).Count)
     if ($signatureEvidence.Count -ne $expectedSignatureCount) {
         throw "Published release must contain exactly $expectedSignatureCount verified Authenticode signatures; found $($signatureEvidence.Count)."
     }
