@@ -3078,6 +3078,26 @@ pub const TerminalProvider = struct {
         if (self.detached.load(.acquire)) return com.UIA_E_ELEMENTNOTAVAILABLE;
         if (self.state.role == .edit) {
             out.* = com.SupportedTextSelection_Single;
+            return com.S_OK;
+        }
+
+        // A terminal advertises a selection only while one actually exists
+        // (copy mode, or a mouse drag). Clients that honor `None` never call
+        // GetSelection, so reporting `None` while GetSelection returns a real
+        // range would hide the copy-mode selection from them.
+        if (self.state.role == .terminal) {
+            const snapshot = self.terminalSnapshot() catch |err| return switch (err) {
+                error.ElementNotAvailable => com.UIA_E_ELEMENTNOTAVAILABLE,
+                else => com.E_OUTOFMEMORY,
+            };
+            // Unlike GetSelection, nothing here takes ownership of the
+            // snapshot's document text or geometry, so free all three.
+            defer {
+                self.alloc.free(snapshot.visible_text);
+                self.alloc.free(snapshot.document_text);
+                if (snapshot.geometry) |geometry| self.alloc.free(geometry.cell_for_byte);
+            }
+            if (snapshot.has_selection) out.* = com.SupportedTextSelection_Single;
         }
         return com.S_OK;
     }
@@ -6312,12 +6332,14 @@ test "terminal provider exposes an active read-only selection" {
     );
     defer _ = TerminalProvider.Release(&provider.base);
 
-    var supported: i32 = com.SupportedTextSelection_Single;
+    // A terminal reporting a real selection range must also advertise that it
+    // supports one; clients honoring `None` never call GetSelection.
+    var supported: i32 = com.SupportedTextSelection_None;
     try std.testing.expectEqual(
         com.S_OK,
         TerminalProvider.get_SupportedTextSelection(&provider.text_iface, &supported),
     );
-    try std.testing.expectEqual(com.SupportedTextSelection_None, supported);
+    try std.testing.expectEqual(com.SupportedTextSelection_Single, supported);
 
     var selections: ?*com.SAFEARRAY = null;
     try std.testing.expectEqual(

@@ -88,6 +88,12 @@ pub const min_window_height_cells: u32 = 4;
 const max_active_key_tables = 8;
 const copy_mode_table_name = "copy_mode";
 
+/// One entry on the active key-table stack.
+const KeyTableEntry = struct {
+    set: *const input.Binding.Set,
+    once: bool,
+};
+
 /// Unique ID used to identify this surface for IPC purposes. It is
 /// exposed to the commands running in surfaces as the environment variable
 /// GHOSTTY_SURFACE_ID. It must not be zero as zero is used to incicate a null
@@ -331,10 +337,7 @@ pub const Keyboard = struct {
     /// in this is the first activated table (NOT the default keybinding set).
     ///
     /// This is bounded by `max_active_key_tables`.
-    table_stack: std.ArrayListUnmanaged(struct {
-        set: *const input.Binding.Set,
-        once: bool,
-    }) = .empty,
+    table_stack: std.ArrayListUnmanaged(KeyTableEntry) = .empty,
 
     /// The last handled binding. This is used to prevent encoding release
     /// events for handled bindings. We only need to keep track of one because
@@ -3437,6 +3440,80 @@ fn copyModeTableIsActive(self: *const Surface) bool {
     return stack.len > 0 and stack[stack.len - 1].set == table;
 }
 
+/// How many tables must be popped to remove the copy-mode table from the
+/// stack, or 0 if it is not on the stack at all.
+///
+/// Copy mode is not necessarily innermost: users can activate further tables
+/// from within it (`keybind = copy_mode/t=activate_key_table:foo`), which
+/// buries it. Popping only once in that case removes the wrong table and
+/// strands copy_mode.
+fn copyModePopCount(
+    stack: []const KeyTableEntry,
+    table: *const input.Binding.Set,
+) usize {
+    var i: usize = stack.len;
+    while (i > 0) {
+        i -= 1;
+        if (stack[i].set == table) return stack.len - i;
+    }
+    return 0;
+}
+
+test "copy mode pops every table down to and including copy_mode" {
+    const testing = std.testing;
+    // Distinct array slots: identical comptime-const empty structs can share
+    // a single address, which would make every pointer comparison match.
+    var sets: [3]input.Binding.Set = .{ .{}, .{}, .{} };
+    const copy_mode = &sets[0];
+    const other = &sets[1];
+    const inner = &sets[2];
+
+    // Not on the stack at all.
+    try testing.expectEqual(@as(usize, 0), copyModePopCount(&.{}, copy_mode));
+    try testing.expectEqual(
+        @as(usize, 0),
+        copyModePopCount(&.{.{ .set = other, .once = false }}, copy_mode),
+    );
+
+    // Innermost: a single pop, the ordinary case.
+    try testing.expectEqual(
+        @as(usize, 1),
+        copyModePopCount(&.{.{ .set = copy_mode, .once = false }}, copy_mode),
+    );
+
+    // Buried by a user-activated table. Popping once here would strand
+    // copy_mode, whose catch_all=ignore then swallows every key.
+    try testing.expectEqual(
+        @as(usize, 2),
+        copyModePopCount(&.{
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+        }, copy_mode),
+    );
+    // A table activated BEFORE copy mode is left alone: only copy_mode and
+    // what was stacked on top of it come off.
+    try testing.expectEqual(
+        @as(usize, 2),
+        copyModePopCount(&.{
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = true },
+        }, copy_mode),
+    );
+
+    // Re-entered copy mode: stop at the innermost occurrence so the outer one
+    // is left for its own exit, keeping one pop-group per toggle.
+    try testing.expectEqual(
+        @as(usize, 2),
+        copyModePopCount(&.{
+            .{ .set = copy_mode, .once = false },
+            .{ .set = other, .once = false },
+            .{ .set = copy_mode, .once = false },
+            .{ .set = inner, .once = false },
+        }, copy_mode),
+    );
+}
+
 fn finishCopyMode(self: *Surface) !void {
     if (!self.copy_mode_active) return;
     self.copy_mode_active = false;
@@ -3488,9 +3565,24 @@ fn startCopyMode(self: *Surface) anyerror!bool {
 fn toggleCopyMode(self: *Surface) anyerror!bool {
     if (!self.copy_mode_active) return try self.startCopyMode();
 
-    _ = try self.performBindingAction(.deactivate_key_table);
-    // The normal path clears copy mode from the generic deactivation branch.
-    // Keep this fallback for a user-customized table stack.
+    // Pop every table down to and including copy_mode, not just one. A user
+    // can activate another table from inside copy mode, which buries
+    // copy_mode; popping once would remove only the inner table and strand
+    // copy_mode on the stack with `copy_mode_active` cleared. Its
+    // `catch_all = ignore` then swallows every key — including the binding
+    // that would exit — while `startCopyMode` refuses because the stack is
+    // non-empty, wedging the keyboard until a config reload.
+    var pops: usize = if (self.config.keybind.tables.getPtr(copy_mode_table_name)) |table|
+        copyModePopCount(self.keyboard.table_stack.items, table)
+    else
+        0;
+    while (pops > 0) : (pops -= 1) {
+        if (!try self.performBindingAction(.deactivate_key_table)) break;
+    }
+
+    // `deactivate_key_table` clears copy mode from its own branch when it pops
+    // the copy-mode table. This covers the case where the table was already
+    // gone from the stack (e.g. cleared out from under us).
     if (self.copy_mode_active) try self.finishCopyMode();
     return true;
 }

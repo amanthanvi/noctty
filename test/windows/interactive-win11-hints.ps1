@@ -660,7 +660,7 @@ try {
     $quick = [System.Windows.Automation.AutomationElement]::FromHandle($quickHwnd)
     if ($null -eq $quick) { throw 'Quick-select overlay exposes no UIA root.' }
     if ($quick.Current.ControlType -ne [System.Windows.Automation.ControlType]::List) { throw 'Quick-select UIA root is not a List.' }
-    if ($quick.Current.Name -ne 'Quick select, 1 targets') { throw "Unexpected quick-select name '$($quick.Current.Name)'." }
+    if ($quick.Current.Name -ne 'Quick select, 1 target') { throw "Unexpected quick-select name '$($quick.Current.Name)'." }
     if (-not $quick.Current.HasKeyboardFocus) { throw 'Quick-select UIA root does not own keyboard focus.' }
     $quickRootName = $quick.Current.Name
     $quickControlType = $quick.Current.ControlType.ProgrammaticName

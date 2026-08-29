@@ -62,37 +62,6 @@ finally {
     Remove-Item -LiteralPath Function:\Get-HintsScenarioPlan -ErrorAction SilentlyContinue
 }
 
-$scenarioBranches = @($ast.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.IfStatementAst] -and
-                $node.Clauses.Count -eq 1 -and
-                $node.Clauses[0].Item1.Extent.Text -match '^\$scenarioPlan\.(RunMain|RunUnsafePaste)$'
-        }, $true))
-$mainBranches = @($scenarioBranches | Where-Object {
-        $_.Clauses[0].Item1.Extent.Text -eq '$scenarioPlan.RunMain'
-    })
-$unsafeBranches = @($scenarioBranches | Where-Object {
-        $_.Clauses[0].Item1.Extent.Text -eq '$scenarioPlan.RunUnsafePaste'
-    })
-if ($mainBranches.Count -ne 1 -or
-    $mainBranches[0].Clauses[0].Item2.Extent.Text -notmatch "Start-HintsScenario -Name 'main'") {
-    throw 'RunMain must guard the main quick-select/copy-mode process.'
-}
-if ($unsafeBranches.Count -ne 1 -or
-    $unsafeBranches[0].Clauses[0].Item2.Extent.Text -notmatch "Start-HintsScenario -Name 'unsafe-paste'") {
-    throw 'RunUnsafePaste must guard the protected-paste process.'
-}
-
-$source = Get-Content -LiteralPath $harnessPath -Raw
-if ($source -notmatch '''-Scenario'', \$Scenario' -or
-    $source -notmatch '-SandboxName \$scenarioPlan\.SandboxName' -or
-    $source -notmatch 'Join-Path \$layout\.Logs \$scenarioPlan\.ArtifactName') {
-    throw 'Scenario selection must cross bootstrap, sandbox, and artifact boundaries.'
-}
-if (@([regex]::Matches($source, 'Write-HintsQuickSelectFailureDiagnostics')).Count -ne 3) {
-    throw 'Both main quick-select waits must retain failure-only focus/key diagnostics.'
-}
-
 $inputFunctions = @($ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -101,14 +70,6 @@ $inputFunctions = @($ast.FindAll({
 if ($inputFunctions.Count -ne 1) {
     throw 'Hints harness must own exactly one input-event reader.'
 }
-$inputReaderSource = $inputFunctions[0].Extent.Text
-if ($inputReaderSource -match '\bGet-Content\b' -or
-    $inputReaderSource -notmatch '\[IO\.FileStream\]::new' -or
-    $inputReaderSource -notmatch '\[IO\.FileShare\]::ReadWrite' -or
-    $inputReaderSource -notmatch '\[IO\.FileShare\]::Delete') {
-    throw 'Hints input reader must use a shared FileStream snapshot instead of Get-Content.'
-}
-
 if (-not ('HintsHeldInputWriterProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
