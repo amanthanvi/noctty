@@ -26,6 +26,7 @@ pub const win32_settings_transaction = @import("apprt/win32_settings_transaction
 pub const win32_universal_palette = @import("apprt/win32_universal_palette.zig");
 pub const win32_tab_drop_zones = @import("apprt/win32_tab_drop_zones.zig");
 pub const win32_compositor = @import("apprt/win32_compositor.zig");
+pub const win32_shell_menu = @import("apprt/win32_shell_menu.zig");
 pub const browser = @import("apprt/browser.zig");
 pub const embedded = none;
 pub const surface = @import("apprt/surface.zig");
@@ -76,4 +77,5 @@ test {
     _ = win32_tab_drop_zones;
     _ = win32_compositor;
     _ = win32_shell;
+    _ = win32_shell_menu;
 }

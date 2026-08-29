@@ -81,6 +81,12 @@ pub const Action = enum {
     // Create a split in a running noctty instance.
     @"new-split",
 
+    // Register per-user classic Explorer context-menu verbs.
+    @"register-shell-menu",
+
+    // Remove per-user classic Explorer context-menu verbs.
+    @"unregister-shell-menu",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables

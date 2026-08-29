@@ -55,6 +55,9 @@ Win32-validated VT protocol coverage is tracked in
   picker and universal palette and launch through the system `ssh.exe`.
 - Native taskbar jump list with recent working directories and detected
   shell profiles.
+- Classic Explorer `Open noctty here` verbs for folders, folder backgrounds,
+  and drives, registered by the installer or explicitly per-user for portable
+  builds.
 - Per-monitor DPI scaling.
 - DWM dark title bar that follows the app theme.
 - High-contrast mode detection and palette switching.

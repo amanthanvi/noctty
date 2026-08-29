@@ -70,6 +70,9 @@ or extract that file; delete it and download it again.
 Keep the whole extracted folder together: `noctty.exe` needs the
 `share` folder next to it for themes, terminfo, and shell integration.
 
+Portable users can opt into Explorer's `Open noctty here` verb with
+`.\noctty.exe +register-shell-menu`.
+
 Neither the installer nor the portable ZIP adds `noctty` to your
 PATH. The `noctty +...` commands below assume you've either added
 the folder containing `noctty.exe` to PATH or are running them from
