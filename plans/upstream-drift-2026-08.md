@@ -282,7 +282,7 @@ base64 crash).
 
 ## Recommended immediate cherry-pick slice
 
-### Gated slice — applied in the 2026-08 window
+### Gated slice — applied on the sync branch, not on this one
 
 These seven commits meet the content policy for an immediate slice: they are
 security-relevant or roadmap-named; none touches `src/apprt/**`; none changes
@@ -298,6 +298,14 @@ The list is ordered chronologically and has no known cross-item dependency.
 | `9e6e2ea96458` | `renderer: reset terminal state cleanup counter`                           | `src/renderer/generic.zig`                                   | One-line reset outside fork Win32-specific hunks.                             |
 | `bd647035e97d` | `input: don't emit fallback text on key release`                           | `src/input/key_encode.zig`                                   | Actual roadmap Kitty release fix; fork only deleted a separate unused helper. |
 | `a8c3ab1915c9` | `simd: fix scalar base64 empty input handling causing a crash`             | `src/simd/base64.zig`                                        | Fork unchanged; bounded scalar decoder fix and test.                          |
+
+> **These seven commits are not on this branch.** This document and
+> `scripts/upstream-drift.ps1` are the policy deliverable; the source changes
+> live on the separate branch `issues/141-upstream-sync-2026-08` (PR #175),
+> which is stacked on this one and is **not** an ancestor of it. Merging the
+> policy alone publishes the analysis, not the fixes. Until #175 also lands,
+> treat every "applied"/"certified" statement below as describing that branch,
+> and read the deferred-work section as still including the whole slice.
 
 Each of the seven was applied with `git cherry-pick --no-commit -n <sha>` in an
 index-writable worktree, inspected, and committed with a
