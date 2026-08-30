@@ -167,7 +167,24 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   The memory trace also requires exact teardown stages for core deinit, WGL
   unbind/context deletion, DC release, and final Surface resource cleanup. A
   missing stage fails the metric instead of assuming a native cleanup API
-  succeeded.
+  succeeded. Each teardown stage is emitted only when the call it names
+  reported success: `wgl_context_deleted` requires a `wglDeleteContext` that
+  returned non-zero, `dc_released` a `ReleaseDC` that returned non-zero
+  against a window we still held, and `wgl_context_unbound` either a
+  successful `wglMakeCurrent(null, null)` or a context that was already not
+  current on the destroying thread. A failed cleanup therefore omits its
+  stage and fails the run, rather than letting stage presence alone assert a
+  release that never happened.
+  `surface_destroy_complete` is sampled after `App.windowDestroyed` detaches
+  the surface, because that call is still per-pane teardown: it removes the
+  surface from `App.windows`, discards the structural-history entries
+  referencing it, deinitializes the owning tab and its split tree when this
+  was the tab's last pane, and reconciles pending shell state. Sampling
+  before it would draw the private-memory boundary in the wrong place and
+  misattribute those still-held bytes to allocator or driver behaviour. The
+  `Surface` allocation itself is necessarily still live at that point, since
+  the snapshot cannot outlive the trace recording it; that single allocation
+  is the whole remaining gap in the boundary.
   The stage list is exactly the set of boundaries the runtime actually
   emits: `surface_begin`, `child_hwnd_created`, `gl_context_created`,
   `opengl_functions_loaded`, `renderer_initialized`, `terminal_initialized`,
@@ -184,9 +201,18 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   evidence.
   Selected-format evidence records actual color, alpha, depth, stencil,
   stereo, accumulation, and auxiliary-buffer properties. Extended selection
-  uses one of two exact Khronos API families: `WGL_EXT_pixel_format` with
-  `WGL_ARB_framebuffer_sRGB`, or `WGL_ARB_pixel_format` with
-  `WGL_EXT_colorspace` set to `WGL_COLORSPACE_SRGB_EXT`. The selected family is
+  uses one of three pairings, tried in order and never mixed:
+  `WGL_EXT_pixel_format` with either framebuffer-sRGB spelling
+  (`WGL_ARB_framebuffer_sRGB` or `WGL_EXT_framebuffer_sRGB`, both of which
+  declare 0x20A9 against the EXT entry points); `WGL_ARB_pixel_format` with
+  `WGL_EXT_colorspace` set to `WGL_COLORSPACE_SRGB_EXT`; or, last,
+  `WGL_ARB_pixel_format` with either framebuffer-sRGB spelling queried
+  through `wglGetPixelFormatAttribivARB`. The first two are the spec-exact
+  pairings; the third is the de-facto pairing mainstream loaders use, and it
+  is tried last so that a driver matching a spec-exact pairing keeps that
+  path. Without it, a driver advertising `WGL_ARB_pixel_format` and
+  `WGL_ARB_framebuffer_sRGB` but not `WGL_EXT_pixel_format` would match no
+  pairing and silently fall back to classic selection. The selected family is
   recorded explicitly; classic fallback first deterministically enumerates and
   ranks the described formats. If a driver exposes no strict-compatible
   descriptor through that inventory, the still-untouched real DC uses the

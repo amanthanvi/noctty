@@ -23581,14 +23581,39 @@ pub const Surface = struct {
     }
 
     pub fn clearGLContextCurrent(self: *Surface) void {
-        const hdc = self.hdc orelse return;
-        const hglrc = self.hglrc orelse return;
+        _ = self.clearGLContextCurrentChecked();
+    }
 
-        if (sys.wglGetCurrentContext() != hglrc or sys.wglGetCurrentDC() != hdc) {
-            return;
+    /// Unbind this surface's GL context from the calling thread and report
+    /// whether the unbind boundary actually holds afterwards.
+    ///
+    /// Returns true only when the surface's context is provably not current
+    /// on this thread: either nothing of ours was current here, or
+    /// `wglMakeCurrent(null, null)` reported success. The benchmark memory
+    /// trace records `wgl_context_unbound` from this result, so a discarded
+    /// failure must never be reported as a completed unbind.
+    ///
+    /// The native actions taken are identical to the unchecked wrapper; only
+    /// the outcome is reported.
+    pub fn clearGLContextCurrentChecked(self: *Surface) bool {
+        // Without a context of our own, nothing of ours can be current.
+        const hglrc = self.hglrc orelse return true;
+        if (sys.wglGetCurrentContext() != hglrc) return true;
+
+        // Our context is current here, so it must be unbound. Preserve the
+        // pairing requirement: only clear when the bound DC is also ours,
+        // and report failure when we cannot establish that.
+        const hdc = self.hdc orelse return false;
+        if (sys.wglGetCurrentDC() != hdc) return false;
+
+        if (sys.wglMakeCurrent(null, null) == 0) {
+            log.warn(
+                "win32 wglMakeCurrent(null, null) failed during GL teardown err={}",
+                .{windows.kernel32.GetLastError()},
+            );
+            return false;
         }
-
-        _ = sys.wglMakeCurrent(null, null);
+        return true;
     }
 
     pub fn swapGLBuffers(self: *Surface) !void {
@@ -26015,14 +26040,31 @@ pub const Surface = struct {
             self.progress_status = null;
         }
 
+        // App-level detachment is still per-pane teardown: `windowDestroyed`
+        // removes this surface from `App.windows`, discards the structural
+        // history entries referencing it, deinitializes the owning tab and
+        // its split tree when this was the tab's last pane, drops any
+        // prepared close tree, and reconciles pending shell state. Sampling
+        // before that draws the private-memory boundary in the wrong place
+        // and misattributes those still-held bytes to allocator or driver
+        // behaviour.
+        //
+        // Safe to sample afterwards: `windowDestroyed` reads `self`
+        // throughout but never frees it — `alloc.destroy(self)` below is the
+        // sole owner-side free, so `self` and its trace are necessarily live
+        // when the call returns.
+        self.app.windowDestroyed(self);
+
         // The final stage, then the trace itself. `MemoryStageTrace.deinit`
         // clears `path`, after which `note` is a no-op — so this must stay
         // the last thing before the Surface is freed, and in particular
-        // after `destroyGL` emits its three teardown stages.
+        // after `destroyGL` emits its teardown stages.
+        //
+        // The `Surface` allocation itself is unavoidably still live at this
+        // point: the snapshot cannot outlive the trace that records it. That
+        // one allocation is the whole remaining gap in the boundary.
         self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
         self.memory_stage_trace.deinit(alloc);
-
-        self.app.windowDestroyed(self);
         alloc.destroy(self);
     }
 
@@ -26532,19 +26574,47 @@ pub const Surface = struct {
         }
     }
 
+    /// Release the surface's native GL resources.
+    ///
+    /// Each benchmark teardown stage is emitted only when the boundary it
+    /// names actually holds. `Get-BenchMemoryStageSamples` validates stage
+    /// presence alone, so emitting a stage whose native call failed would
+    /// let a memory run report verified native teardown while the HGLRC or
+    /// DC was never released. A missing stage fails the run closed, which is
+    /// the intended outcome when cleanup did not happen.
     fn destroyGL(self: *Surface) void {
-        if (self.hglrc != null) {
-            self.clearGLContextCurrent();
-            self.noteBenchmarkMemoryStage(.wgl_context_unbound, null);
-            _ = sys.wglDeleteContext(self.hglrc);
+        if (self.hglrc) |hglrc| {
+            if (self.clearGLContextCurrentChecked()) {
+                self.noteBenchmarkMemoryStage(.wgl_context_unbound, null);
+            }
+
+            const deleted = sys.wglDeleteContext(hglrc) != 0;
+            if (!deleted) {
+                log.warn(
+                    "win32 wglDeleteContext failed during surface teardown err={}",
+                    .{windows.kernel32.GetLastError()},
+                );
+            }
+            // Drop our reference either way. The Surface is freed moments
+            // from now, so retaining a handle we failed to delete would only
+            // strand it behind freed memory.
             self.hglrc = null;
-            self.noteBenchmarkMemoryStage(.wgl_context_deleted, null);
+            if (deleted) self.noteBenchmarkMemoryStage(.wgl_context_deleted, null);
         }
 
-        if (self.hdc != null) {
-            if (self.hwnd) |hwnd| _ = sys.ReleaseDC(hwnd, self.hdc);
+        if (self.hdc) |hdc| {
+            // A private (CS_OWNDC) DC still reports success from ReleaseDC,
+            // so requiring success does not weaken the normal path; it only
+            // catches a release we never attempted or that genuinely failed.
+            const released = if (self.hwnd) |hwnd| sys.ReleaseDC(hwnd, hdc) != 0 else false;
+            if (!released) {
+                log.warn(
+                    "win32 ReleaseDC failed during surface teardown had_hwnd={} err={}",
+                    .{ self.hwnd != null, windows.kernel32.GetLastError() },
+                );
+            }
             self.hdc = null;
-            self.noteBenchmarkMemoryStage(.dc_released, null);
+            if (released) self.noteBenchmarkMemoryStage(.dc_released, null);
         }
 
         self.hwnd = null;
@@ -33721,4 +33791,118 @@ test "win32 tab overview parser accepts one-based tab numbers" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
 
     try std.testing.expectEqual(@as(usize, 2), try std.fmt.parseUnsigned(usize, "2", 10));
+}
+
+test "win32 destroyGL records a teardown stage only when the cleanup succeeded" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    // `Get-BenchMemoryStageSamples` validates stage presence alone, so a
+    // stage emitted after a failed native call would let a memory run report
+    // verified teardown for an HGLRC or DC that was never released. Each
+    // stage must therefore be gated on the call it names.
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+
+    // A context handle the driver cannot delete, and a DC with no window to
+    // release it against. Both cleanups fail, so neither completion stage
+    // may appear. The unbind stage still appears: nothing of ours is current
+    // on this thread, so that boundary genuinely holds.
+    {
+        const sub_path = "teardown-failed.jsonl";
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        defer alloc.free(path);
+
+        surface.* = uninitializedInertStorage(Surface);
+        surface.memory_stage_trace = .{ .path = path };
+        surface.hwnd = null;
+        surface.hdc = @ptrFromInt(0x1000);
+        surface.hglrc = @ptrFromInt(0x1000);
+
+        surface.destroyGL();
+
+        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        defer alloc.free(contents);
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_unbound\"") != null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"wgl_context_deleted\"") == null,
+        );
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") == null,
+        );
+        // The handles are dropped either way; only the claim is withheld.
+        try std.testing.expectEqual(@as(HGLRC, null), surface.hglrc);
+        try std.testing.expectEqual(@as(HDC, null), surface.hdc);
+    }
+
+    // A real window DC that ReleaseDC does release. The stage must appear,
+    // so the fail-closed rule does not break the ordinary teardown path.
+    {
+        const sub_path = "teardown-released.jsonl";
+        try tmp.dir.writeFile(.{ .sub_path = sub_path, .data = "" });
+        const path = try tmp.dir.realpathAlloc(alloc, sub_path);
+        defer alloc.free(path);
+
+        const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+        const window_name = std.unicode.utf8ToUtf16LeStringLiteral("");
+        const hwnd = sys.CreateWindowExW(
+            0,
+            class,
+            window_name,
+            c.WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            null,
+            null,
+            sys.GetModuleHandleW(null),
+            null,
+        ) orelse return error.SkipZigTest;
+        defer _ = sys.DestroyWindow(hwnd);
+        const hdc = sys.GetDC(hwnd) orelse return error.SkipZigTest;
+
+        surface.* = uninitializedInertStorage(Surface);
+        surface.memory_stage_trace = .{ .path = path };
+        surface.hwnd = hwnd;
+        surface.hdc = hdc;
+        surface.hglrc = null;
+
+        surface.destroyGL();
+
+        const contents = try tmp.dir.readFileAlloc(alloc, sub_path, 16 * 1024);
+        defer alloc.free(contents);
+        try std.testing.expect(
+            std.mem.indexOf(u8, contents, "\"stage\":\"dc_released\"") != null,
+        );
+        try std.testing.expectEqual(@as(HDC, null), surface.hdc);
+    }
+}
+
+test "win32 GL unbind reports the boundary it actually established" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+
+    // No context of ours exists, so nothing of ours can be current.
+    surface.* = uninitializedInertStorage(Surface);
+    surface.hglrc = null;
+    surface.hdc = null;
+    try std.testing.expect(surface.clearGLContextCurrentChecked());
+
+    // A context that is not current on this thread is already unbound here,
+    // so the boundary holds without calling wglMakeCurrent at all.
+    surface.* = uninitializedInertStorage(Surface);
+    surface.hglrc = @ptrFromInt(0x1000);
+    surface.hdc = @ptrFromInt(0x2000);
+    try std.testing.expect(sys.wglGetCurrentContext() != surface.hglrc);
+    try std.testing.expect(surface.clearGLContextCurrentChecked());
 }
