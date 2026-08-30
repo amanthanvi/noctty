@@ -375,20 +375,27 @@ recorded PIDs.
 The latest hardened green run reported:
 
 ```text
-CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":71240,"killed_client_pid":46576,"shell_pid":61236,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2581541,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":21626880,"observed_host_private_max_detached_bytes":21626880,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
+CONPTY_HOST_SPIKE_RESULT {"result":"PASS","verdict":"GREEN","host_pid":68268,"killed_client_pid":58724,"shell_pid":23320,"same_shell_pid":true,"shell_state_intact":true,"alt_screen_entered":true,"alt_screen_redraw":"cursor-addressed-preexisting-content@100x31","alt_screen_exited":true,"detached_drain":true,"detached_output_completed":true,"ring_capacity_bytes":1048576,"ring_retained_bytes":1048576,"ring_total_bytes":2576380,"replay_bytes":1048576,"oldest_replay_absent":true,"newest_replay_present":true,"observed_host_private_baseline_bytes":38449152,"observed_host_private_max_detached_bytes":38449152,"observed_host_private_growth_bytes":0,"observed_private_growth_within_ring_cap":true,"pipe_security":"current-user-DACL+first-instance+reject-remote","detach_frame":true,"ceiling":"same-logon-session-only;never-logoff-or-reboot"}
 ```
 
 The memory evidence is intentionally precise and observational: total
-process private memory was 21,626,880 bytes before detached overflow, so
+process private memory was 38,449,152 bytes before detached overflow, so
 the whole process was not and cannot be under a 1 MiB ring cap. The
 retained-output allocation never exceeded 1,048,576 bytes, and the
-sampled private-memory growth while draining at least 2,581,541 bytes
+sampled private-memory growth while draining at least 2,576,380 bytes
 detached was 0 bytes in this one run. The structural guarantee is the
 ring's retained-byte bound; the process-memory figure is not a guarantee
 or a long-duration whole-process memory budget. An
 attached client also causes a transient, capacity-sized replay snapshot;
 the snapshot is copied under the ring mutex and sent after unlocking so a
 slow replay cannot stop the continuously running ConPTY drain thread.
+
+The drain thread also performs no diagnostics I/O. The `RING_STATS`
+lines the harness parses are published by a separate thread that samples
+the ring every 20 ms, because a synchronous stderr write on the drain
+thread would block whenever stderr is a pipe whose reader stops
+consuming — which would backpressure ConPTY through the very
+measurement instrument used to prove detached draining.
 
 Residual unknowns remain product-sized: arbitrary third-party and
 complex TUI behavior beyond this synthetic polling alt-screen probe; a

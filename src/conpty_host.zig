@@ -172,7 +172,7 @@ const Ring = struct {
         cursor: u64,
     };
 
-    fn append(self: *Ring, src: []const u8) Stats {
+    fn append(self: *Ring, src: []const u8) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -181,7 +181,7 @@ const Ring = struct {
             @memcpy(self.bytes, src[src.len - self.bytes.len ..]);
             self.head = 0;
             self.len = self.bytes.len;
-            return self.statsLocked();
+            return;
         }
 
         const free = self.bytes.len - self.len;
@@ -196,6 +196,11 @@ const Ring = struct {
         @memcpy(self.bytes[write_at .. write_at + first_len], src[0..first_len]);
         @memcpy(self.bytes[0 .. src.len - first_len], src[first_len..]);
         self.len += src.len;
+    }
+
+    fn stats(self: *Ring) Stats {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.statsLocked();
     }
 
@@ -242,6 +247,11 @@ const DrainContext = struct {
     ring: *Ring,
 };
 
+// Keep all diagnostics off this thread. Anything the host writes to stderr can
+// block indefinitely when stderr is a pipe whose reader stops consuming, and
+// this is the only thread draining ConPTY. Blocking here would backpressure the
+// shell even with no client attached, which is the load-bearing property this
+// spike exists to measure.
 fn drainConpty(context: *DrainContext) void {
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
@@ -254,11 +264,34 @@ fn drainConpty(context: *DrainContext) void {
             null,
         ) == 0 or read_len == 0) return;
 
-        const stats = context.ring.append(buffer[0..read_len]);
-        std.debug.print(
-            "RING_STATS total={} retained={} capacity={}\n",
-            .{ stats.total, stats.retained, stats.capacity },
-        );
+        context.ring.append(buffer[0..read_len]);
+    }
+}
+
+const stats_sample_interval_ns = 20 * std.time.ns_per_ms;
+
+const StatsContext = struct {
+    ring: *Ring,
+    stop: std.atomic.Value(bool) = .init(false),
+};
+
+// Samples the ring on its own thread so a stalled stderr consumer can only
+// stall diagnostics, never ConPTY draining. One final sample is published after
+// `stop` is observed so the last totals are never lost on shutdown.
+fn reportRingStats(context: *StatsContext) void {
+    var last_total: u64 = 0;
+    while (true) {
+        const stopping = context.stop.load(.acquire);
+        const stats = context.ring.stats();
+        if (stats.total != last_total) {
+            last_total = stats.total;
+            std.debug.print(
+                "RING_STATS total={} retained={} capacity={}\n",
+                .{ stats.total, stats.retained, stats.capacity },
+            );
+        }
+        if (stopping) return;
+        std.Thread.sleep(stats_sample_interval_ns);
     }
 }
 
@@ -331,10 +364,16 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
         .rt_post_fork_info = undefined,
     };
     var drain_thread: ?std.Thread = null;
+    var stats_context = StatsContext{ .ring = &ring };
+    var stats_thread: ?std.Thread = null;
     defer {
         command.closeWindowsJobObject();
         pty.deinit();
         if (drain_thread) |thread| thread.join();
+        if (stats_thread) |thread| {
+            stats_context.stop.store(true, .release);
+            thread.join();
+        }
         if (command.pid) |process| _ = windows.CloseHandle(process);
     }
 
@@ -344,6 +383,7 @@ fn serve(alloc: Allocator, args: []const [:0]u8) !void {
 
     var drain_context = DrainContext{ .output = pty.out_pipe, .ring = &ring };
     drain_thread = try std.Thread.spawn(.{}, drainConpty, .{&drain_context});
+    stats_thread = try std.Thread.spawn(.{}, reportRingStats, .{&stats_context});
 
     var security = try PipeSecurity.init(alloc);
     defer security.deinit();
