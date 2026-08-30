@@ -114,11 +114,8 @@ pub fn parseAlloc(alloc: Allocator, raw: []const u8) !std.json.Parsed(SessionSta
     }
 
     var parsed = try std.json.parseFromSlice(SessionState, alloc, raw, .{
-        .ignore_unknown_fields = false,
-        // Own every string. Callers such as `win32_session_persistence.loadAlloc`
-        // free the source buffer before the document is used, so borrowed
-        // (escape-free) strings would dangle.
         .allocate = .alloc_always,
+        .ignore_unknown_fields = false,
     });
     errdefer parsed.deinit();
 

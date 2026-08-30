@@ -5307,12 +5307,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             ),
 
             .launch_layout => |name| {
-                const argument = try std.fmt.allocPrintSentinel(
-                    self.alloc,
-                    "--launch-layout={s}",
-                    .{name},
-                    0,
-                );
+                const argument = try App.launchLayoutArgument(self.alloc, name);
                 defer self.alloc.free(argument);
                 const arguments = [_][:0]const u8{argument};
                 try self.app.newWindow(

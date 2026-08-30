@@ -97,8 +97,11 @@ pub const Options = struct {
 /// `--class` flag) will be sent to the remote noctty instance and will be
 /// parsed as command line flags. These flags will override certain settings
 /// when creating the first surface in the new window. Currently,
-/// `--working-directory`, `--command`, `--title`, and `--launch-layout` are
-/// supported. `-e` will also work as an alias for `--command`, except that if
+/// `--working-directory`, `--command`, and `--title` are supported.
+/// `--launch-layout=<name>` is also supported, but it is not a setting
+/// override: it materializes a saved layout instead of creating an ordinary
+/// new window, so the other overrides do not apply to it.
+/// `-e` will also work as an alias for `--command`, except that if
 /// `-e` is found on the command line all following arguments will become part
 /// of the command and no more arguments will be parsed for configuration
 /// settings.

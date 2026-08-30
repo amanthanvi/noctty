@@ -2970,7 +2970,17 @@ pub const App = struct {
                     if (banner_host) |host| host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
                     return false;
                 };
-                const surface = self.restoreSessionWindow(parsed.value.windows[0]) catch |err| {
+                // A layout is a shape, not a placement: the save path omits
+                // window geometry deliberately. Strip any a hand-authored or
+                // synced file carries so it cannot place the new window
+                // off-screen, resize it, or maximize it.
+                var shape = parsed.value.windows[0];
+                shape.x = null;
+                shape.y = null;
+                shape.width = null;
+                shape.height = null;
+                shape.state = null;
+                const surface = self.restoreSessionWindow(shape) catch |err| {
                     log.warn("named layout materialization failed name={s} err={}", .{ name, err });
                     if (banner_host) |host| host.setBanner(.err, "Layout could not be opened.") catch {};
                     return false;
@@ -3025,6 +3035,13 @@ pub const App = struct {
         const window = buildSessionWindow(arena.allocator(), host, .layout) catch |err| {
             log.warn("named layout save snapshot failed name={s} err={}", .{ name, err });
             host.setBanner(.err, "Layout could not be saved.") catch {};
+            return false;
+        };
+        // Launch refuses documents above this cap, so refuse to write one.
+        // Saving must not report success for a layout that can never open.
+        win32_layouts.validateLaunchSize(window) catch |err| {
+            log.warn("named layout save rejected oversized window name={s} err={}", .{ name, err });
+            host.setBanner(.err, "Layout has too many tabs or panes.") catch {};
             return false;
         };
         const layout_windows = [_]win32_session_state.Window{window};
@@ -3233,6 +3250,13 @@ pub const App = struct {
             .split;
         var config = try apprt.surface.newConfig(self.core_app, &self.config, open_kind);
         defer config.deinit();
+
+        // `initial-command` (from `-e` or the config option) applies to the
+        // ordinary first window. A restored pane's command comes from its
+        // saved profile, so clear it: otherwise `Surface.init` prefers it
+        // while `app.first` is set and the first pane of a restored session
+        // or a launched layout runs the wrong command.
+        config.@"initial-command" = null;
 
         // A refused profile (today: SSH) must not leave its key on the surface
         // either, or a later split of the restored pane would re-resolve it and

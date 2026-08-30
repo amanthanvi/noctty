@@ -305,20 +305,29 @@ saved profiles; layout files do not contain a separate command field.
 
 Layout names accept ASCII letters, digits, spaces, dots, underscores, and
 hyphens, up to 64 bytes. Leading or trailing spaces and dots are rejected, as
-are Windows reserved device names such as `CON` or `COM1`. An unreadable layout
-file is quarantined with the same `.corrupt` rules as session state, and a
-layout is refused if it would open more than 16 tabs or 64 panes.
+are Windows reserved device names such as `CON` or `COM1`. A corrupt or
+structurally invalid layout file is quarantined with the same `.corrupt` rules
+as session state; a transient read failure is reported without quarantining the
+file, so a locked or briefly unavailable layout is not moved aside. A layout is
+refused, without quarantine, if it would open more than 16 tabs or 64 panes.
+Window position, size, and maximized state are ignored on launch even if a file
+contains them, because a layout describes a shape and not a placement.
 
 Treat the `layouts\` directory as config-level trust: launching a layout starts
-a shell per pane with the working directories and profiles the file names. If
-you sync or share that directory, anyone who can write to it can influence what
-your next layout launch runs, exactly as they could by editing your config.
+one shell per pane, using the working directories and profiles that the layout
+file names. If you sync or share that directory, anyone who can write to it can
+influence what your next layout launch runs, exactly as they could by editing
+your config.
 
 Bind `save_layout:<name>` to save or atomically replace a layout, and bind
 `launch_layout:<name>` to materialize it in a new window. Saved layouts also
 appear in the command palette as `Launch layout: <name>`. From the command
 line, `noctty +new-window --launch-layout=<name>` forwards the request to a
-running instance or launches it cold when no instance is running. The layout
+running instance or launches it cold when no instance is running.
+`--launch-layout` is a command-line-only, one-shot option: setting
+`launch-layout` in `config.ghostty` is ignored with a warning, because a
+configuration file is read on every start and the layout would otherwise
+replay on each launch instead of when you ask for it. The layout
 module also exposes name enumeration and launch arguments for future Windows
 jump-list integration; noctty does not currently add jump-list layout entries.
 

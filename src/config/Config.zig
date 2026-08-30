@@ -2531,8 +2531,15 @@ keybind: Keybinds = .{},
 @"initial-window": bool = true,
 
 /// Materialize a saved Windows layout instead of creating the ordinary
-/// initial window. This option is intended for CLI use, including
+/// initial window, for example `noctty --launch-layout=<name>` or
 /// `noctty +new-window --launch-layout=<name>`.
+///
+/// This is a CLI-only configuration and it is one-shot. Setting it in a
+/// configuration file has no effect (it is not an error, but the value is
+/// discarded with a warning), because a configuration file is read on every
+/// start and the layout would then replay on each launch instead of when the
+/// user asks for it. It is also cleared after it is honored, so a later
+/// ordinary new window and a configuration reload never replay it.
 @"launch-layout": ?[]const u8 = null,
 
 /// The duration that undo operations remain available. After this
@@ -3423,8 +3430,65 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
         }
     }
     var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+
+    // `launch-layout` is CLI-only. A configuration file is read on every
+    // start, so honoring it from a file would replay the saved layout on each
+    // launch and suppress ordinary session restore. Any value a file sets is
+    // discarded here; a value already present came from the command line
+    // (`loadCliArgs` runs before `loadRecursiveFiles`) and is preserved.
+    const cli_launch_layout = self.@"launch-layout";
     try self.loadIter(alloc, &iter);
+    if (self.@"launch-layout") |name| {
+        const from_file = if (cli_launch_layout) |prior|
+            !std.mem.eql(u8, name, prior)
+        else
+            true;
+        if (from_file) log.warn(
+            "{s}: ignoring launch-layout={s}; it can only be set on the command line",
+            .{ path, name },
+        );
+    }
+    self.@"launch-layout" = cli_launch_layout;
+
     try self.expandPaths(std.fs.path.dirname(path).?);
+}
+
+test "launch-layout is ignored in configuration files" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // A configuration file is read on every start, so a layout named there
+    // would replay on each launch. The value is dropped.
+    {
+        var reader: std.Io.Reader = .fixed("launch-layout = Project Alpha\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expect(cfg.@"launch-layout" == null);
+    }
+
+    // A command-line value survives a later file load (`loadRecursiveFiles`
+    // runs after `loadCliArgs`), even when the file tries to override it.
+    {
+        var reader: std.Io.Reader = .fixed("launch-layout = Project Beta\n");
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        cfg.@"launch-layout" = "Project Alpha";
+        try cfg.loadReader(
+            alloc,
+            &reader,
+            "/home/ghostty/.config/ghostty/config.ghostty",
+        );
+        try cfg.finalize();
+
+        try testing.expectEqualStrings("Project Alpha", cfg.@"launch-layout".?);
+    }
 }
 
 test "handle bom in config files" {
