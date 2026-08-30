@@ -28369,9 +28369,12 @@ pub const Surface = struct {
 
     // Must route through formatFilePayload + surfaceDropPayloadCallback so paste protection applies.
     fn handleDropFiles(self: *Surface, wParam: WPARAM) void {
-        if (!self.core_initialized) return;
+        // `WM_DROPFILES` transfers ownership of the `HDROP` to us on every
+        // path, so claim it before any early return.
         const hDrop: *anyopaque = @ptrFromInt(wParam);
         defer sys.DragFinish(hDrop);
+
+        if (!self.core_initialized) return;
 
         const file_count = sys.DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
         if (file_count == 0) return;
