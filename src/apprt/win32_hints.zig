@@ -235,6 +235,78 @@ const Candidate = struct {
     }
 };
 
+/// The scan text for a render state, paired with its byte-to-cell map.
+pub const RenderText = struct {
+    text: []u8,
+    map: []point.Coordinate,
+
+    pub fn deinit(self: *RenderText, alloc: Allocator) void {
+        alloc.free(self.map);
+        alloc.free(self.text);
+        self.* = undefined;
+    }
+};
+
+/// Whether the cell at `coord` only exists to reserve room for a wide
+/// character that lives in a neighbouring cell.
+fn isWideSpacerCell(
+    render_state: *const terminal.RenderState,
+    coord: point.Coordinate,
+) bool {
+    const rows = render_state.row_data.slice();
+    if (coord.y >= rows.len) return false;
+    const cells = rows.items(.cells)[coord.y].slice();
+    if (coord.x >= cells.len) return false;
+    return switch (cells.items(.raw)[coord.x].wide) {
+        .spacer_tail, .spacer_head => true,
+        .narrow, .wide => false,
+    };
+}
+
+/// Build the scan text and byte-to-cell map for one render state.
+///
+/// `RenderState.string` emits `\x00` for every cell that carries no codepoint.
+/// For a genuinely blank cell that NUL is the right separator — the built-in
+/// path patterns all exclude `\x00`, so a match stops at the end of the text.
+/// The spacer cells that flank a wide character are not blanks though: they are
+/// part of the character next to them. Left in, they split every wide character
+/// in two, so `C:\用户\文档` would be labeled and copied as `C:\用`. Drop the
+/// spacer bytes and their map entries; blank cells keep theirs.
+pub fn renderStateText(
+    alloc: Allocator,
+    render_state: *const terminal.RenderState,
+) !RenderText {
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+    var raw_map: terminal.RenderState.StringMap = .empty;
+    defer raw_map.deinit(alloc);
+    try render_state.string(&builder.writer, .{
+        .alloc = alloc,
+        .map = &raw_map,
+    });
+
+    const raw_text = builder.writer.buffered();
+    const limit = @min(raw_text.len, raw_map.items.len);
+
+    var text = try alloc.alloc(u8, limit);
+    errdefer alloc.free(text);
+    var map = try alloc.alloc(point.Coordinate, limit);
+    errdefer alloc.free(map);
+
+    var len: usize = 0;
+    for (raw_text[0..limit], raw_map.items[0..limit]) |byte, coord| {
+        if (byte == 0 and isWideSpacerCell(render_state, coord)) continue;
+        text[len] = byte;
+        map[len] = coord;
+        len += 1;
+    }
+
+    return .{
+        .text = try alloc.realloc(text, len),
+        .map = try alloc.realloc(map, len),
+    };
+}
+
 /// Scan one already-snapshotted visible render state. The render-state string
 /// and byte-to-cell map are retained so no terminal access is needed while the
 /// overlay is open.
@@ -243,25 +315,15 @@ pub fn scanRenderState(
     render_state: *const terminal.RenderState,
     patterns: []const []const u8,
 ) !Scan {
-    var builder: std.Io.Writer.Allocating = .init(alloc);
-    defer builder.deinit();
-    var map: terminal.RenderState.StringMap = .empty;
-    defer map.deinit(alloc);
-    try render_state.string(&builder.writer, .{
-        .alloc = alloc,
-        .map = &map,
-    });
+    var rendered = try renderStateText(alloc, render_state);
+    errdefer rendered.deinit(alloc);
 
-    const text = try builder.toOwnedSlice();
-    errdefer alloc.free(text);
-    const owned_map = try map.toOwnedSlice(alloc);
-    errdefer alloc.free(owned_map);
-    const matches = try extractMatches(alloc, text, owned_map, patterns);
+    const matches = try extractMatches(alloc, rendered.text, rendered.map, patterns);
     errdefer alloc.free(matches);
 
     return .{
-        .text = text,
-        .map = owned_map,
+        .text = rendered.text,
+        .map = rendered.map,
         .matches = matches,
     };
 }
@@ -408,8 +470,9 @@ pub const LabelSet = struct {
 };
 
 pub fn generateLabels(alloc: Allocator, alphabet: []const u8, count: usize) !LabelSet {
+    // `validate` already rejects a single-character alphabet, so this only
+    // catches a direct caller that skipped config parsing.
     try QuickSelectAlphabet.validate(alphabet);
-    if (alphabet.len == 1 and count > 1) return error.InsufficientAlphabet;
 
     var leaves: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
@@ -648,6 +711,34 @@ test "hints: scans visible viewport defaults with text and coordinates" {
         try testing.expectEqual(want.x, matched.first.x);
         try testing.expectEqual(want.y, matched.first.y);
     }
+}
+
+// Every wide character occupies two cells, and the second one carries no
+// codepoint. `RenderState.string` emits `\x00` for it, which the built-in path
+// patterns exclude, so before the spacers were dropped a CJK path was labeled
+// and copied only up to its first wide character.
+test "hints: wide characters do not truncate a matched path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try oni.testing.ensureInit();
+
+    var state = try renderFixture(alloc, 40, 2, "PATH C:\\用户\\文档\\a.txt\r\nEND");
+    defer state.deinit(alloc);
+
+    var scan = try scanRenderState(alloc, &state, &default_patterns);
+    defer scan.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 1), scan.matches.len);
+    try testing.expectEqualStrings("C:\\用户\\文档\\a.txt", scan.matchText(0));
+
+    // The trailing cell still maps to the last cell the text occupies, so the
+    // fire-time re-verification can find the same span again.
+    const matched = scan.matches[0];
+    try testing.expectEqual(@as(u16, 5), matched.first.x);
+    try testing.expectEqualStrings(
+        scan.matchText(0),
+        spanText(scan.text, scan.map, matched.first, matched.last).?,
+    );
 }
 
 test "hints: scan negative fixture has no matches" {

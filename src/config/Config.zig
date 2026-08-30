@@ -1432,8 +1432,9 @@ link: RepeatableLink = .{},
 /// SHA, IP address, and UUID patterns apply.
 @"quick-select-patterns": QuickSelectPatterns = .{},
 
-/// ASCII characters used to generate quick-select labels. The value must be
-/// non-empty and each character must be unique.
+/// ASCII characters used to generate quick-select labels. The value must have
+/// at least two characters and each character must be unique. Labels are
+/// prefix-free, so a single character could only ever label one target.
 @"quick-select-alphabet": QuickSelectAlphabet = .{},
 
 /// Enable URL matching. URLs are matched on hover with control (Linux) or
@@ -8665,14 +8666,22 @@ pub const QuickSelectAlphabet = struct {
 
     pub const Error = error{
         EmptyAlphabet,
+        AlphabetTooShort,
         DuplicateCharacter,
         NonAsciiCharacter,
     };
 
-    /// A usable alphabet is non-empty and every character is a distinct
-    /// printable ASCII byte, so a typed label maps to exactly one target.
+    /// A usable alphabet has at least two characters and every character is a
+    /// distinct printable ASCII byte, so a typed label maps to exactly one
+    /// target.
+    ///
+    /// Two is the real floor, not one: labels are prefix-free, so a
+    /// single-character alphabet can only ever name one target. Accepting it
+    /// here would push the failure to the first viewport with two matches,
+    /// where the overlay would just silently refuse to open.
     pub fn validate(alphabet: []const u8) Error!void {
         if (alphabet.len == 0) return error.EmptyAlphabet;
+        if (alphabet.len == 1) return error.AlphabetTooShort;
         var seen = [_]bool{false} ** 128;
         for (alphabet) |char| {
             if (char < 0x20 or char >= 0x7f) return error.NonAsciiCharacter;
@@ -8713,6 +8722,10 @@ pub const QuickSelectAlphabet = struct {
         try alphabet.parseCLI(arena.allocator(), "arst");
         try testing.expectEqualStrings("arst", alphabet.value);
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), ""));
+        // One character cannot label two targets, so it is rejected up front
+        // rather than failing later when the overlay tries to open.
+        try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a"));
+        try testing.expectError(error.AlphabetTooShort, validate("a"));
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "aa"));
         try testing.expectError(error.InvalidValue, alphabet.parseCLI(arena.allocator(), "a\xC3\xA9"));
     }

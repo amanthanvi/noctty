@@ -25021,18 +25021,14 @@ pub const Surface = struct {
         };
         self.core_surface.renderer_state.mutex.unlock();
 
-        var builder: std.Io.Writer.Allocating = .init(alloc);
-        defer builder.deinit();
-        var map: terminal.RenderState.StringMap = .empty;
-        defer map.deinit(alloc);
-        render_state.string(&builder.writer, .{
-            .alloc = alloc,
-            .map = &map,
-        }) catch return false;
+        // Same builder as the open-time scan, wide-character spacers included,
+        // or a target containing a wide character would never compare equal.
+        var rendered = win32_hints.renderStateText(alloc, &render_state) catch return false;
+        defer rendered.deinit(alloc);
 
         const current = win32_hints.spanText(
-            builder.writer.buffered(),
-            map.items,
+            rendered.text,
+            rendered.map,
             matched.first,
             matched.last,
         ) orelse return false;
