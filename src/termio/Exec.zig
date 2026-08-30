@@ -180,10 +180,11 @@ pub fn threadEnter(
 
                 // On Windows the launch can fail *after* CreateProcessW has
                 // already produced a child (job object attach, exit-code
-                // probe, initial thread resume). That child is terminated
-                // during unwind, so it is gone by the time we get here — but
-                // "no child process was created" would be a false statement,
-                // so those failures get their own report.
+                // probe, initial thread resume). Unwind attempts to terminate
+                // that child, and in the exit-code-probe case it had already
+                // exited on its own — either way we do not own it by the time
+                // we get here, but "no child process was created" would be a
+                // false statement, so those failures get their own report.
                 if (self.subprocess.windows_process_created) {
                     return error.ProcessStartedThenFailed;
                 }
