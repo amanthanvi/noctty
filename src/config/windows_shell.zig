@@ -1304,12 +1304,20 @@ fn isWindowsUriPath(path: []const u8) bool {
 /// True for a UNC path that still carries the leading `/` of the URI it came
 /// from, e.g. `/\\server\share\dir`. cmd's `$P` expands to a raw UNC path, so
 /// `kitty-shell-cwd://localhost/$P` yields exactly this shape.
+/// A `kitty-shell-cwd` path whose body is a Windows UNC path, i.e. the URI
+/// separator followed by `\\server\share...`.
+///
+/// The remainder must be backslash-separated. Backslashes are legal in POSIX
+/// filenames, so a WSL or POSIX shell could in principle report a directory
+/// such as `/\\server/share`; requiring that no forward slash appears after
+/// the URI separator keeps that case on the WSL path where it belongs, while
+/// still matching everything cmd's `$P` can produce (cmd always emits
+/// backslashes).
 fn isUncUriPath(path: []const u8) bool {
-    return path.len >= 4 and
-        path[0] == '/' and
-        path[1] == '\\' and
-        path[2] == '\\' and
-        !isSeparator(path[3]);
+    if (path.len < 4) return false;
+    if (path[0] != '/' or path[1] != '\\' or path[2] != '\\') return false;
+    if (isSeparator(path[3])) return false;
+    return std.mem.indexOfScalar(u8, path[3..], '/') == null;
 }
 
 pub fn isDriveAbsolutePath(path: []const u8) bool {
@@ -1847,6 +1855,13 @@ test "osc7PathToLocal strips the uri slash from a unc path" {
     const posix = try osc7PathToLocal(alloc, "/home/aman/src");
     defer alloc.free(posix);
     try testing.expectEqualStrings("/home/aman/src", posix);
+
+    // Backslashes are legal in POSIX filenames, so a POSIX cwd can start with
+    // two of them. A forward slash later in the path proves it is not the
+    // backslash-separated UNC form cmd's `$P` produces, so it stays POSIX.
+    const posix_backslashes = try osc7PathToLocal(alloc, "/\\\\server/share");
+    defer alloc.free(posix_backslashes);
+    try testing.expectEqualStrings("/\\\\server/share", posix_backslashes);
 }
 
 test "isUncUriPath only matches uri-carried unc paths" {
