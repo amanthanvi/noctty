@@ -3187,6 +3187,16 @@ fn maybeHandleBinding(
                 }
             }
 
+            // A catch-all of `ignore` swallows every press, so it has to
+            // swallow every release too. `last_trigger` remembers only the
+            // most recent press, so with two keys held at once the first
+            // key's release would not match and would fall through to
+            // encoding -- visible to a client using the Kitty protocol with
+            // `report_events`. Copy mode's keyboard isolation is built on
+            // this catch-all, so the guarantee has to hold for overlapping
+            // keys, not just sequential ones.
+            if (self.catchAllIsIgnore()) return .consumed;
+
             return null;
         },
 
