@@ -3434,7 +3434,13 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
     // `launch-layout` is CLI-only. A configuration file is read on every
     // start, so honoring it from a file would replay the saved layout on each
     // launch and suppress ordinary session restore. Discard both the parsed
-    // value and the replay step the file appended: `loadTheme` and
+    // value and the replay step the file appended.
+    //
+    // NOTE: `loadTheme` reads a theme file through its own `LineIterator` and
+    // does not come through here, so it repeats this guard. Any new file
+    // reader must do the same.
+    //
+    // The step matters as much as the value, because `loadTheme` and
     // `changeConditionalState` re-run `_replay_steps` through `loadIter`,
     // which does not pass through here, so leaving the step behind would
     // resurrect the value. A value already present came from the command line
@@ -4051,7 +4057,21 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     var file_reader = file.reader(&buf);
     const reader = &file_reader.interface;
     var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
+
+    // A theme is a configuration file too, and it is re-read on every load, so
+    // the same CLI-only rule as `loadReader` applies to `launch-layout` -- but
+    // this path builds its own `LineIterator` and never routes through
+    // `loadReader`, so the guard has to be repeated here. Drop the steps before
+    // the conditional loop below wraps them into `.conditional_arg`, and clear
+    // the field: the replay of `self._replay_steps` further down restores a
+    // command-line value if there is one.
+    const theme_replay_start = new_config._replay_steps.items.len;
     try new_config.loadIter(alloc_gpa, &iter);
+    if (new_config.dropLaunchLayoutReplaySteps(theme_replay_start)) |value| log.warn(
+        "{s}: ignoring launch-layout={s}; it can only be set on the command line",
+        .{ path, value },
+    );
+    new_config.@"launch-layout" = null;
 
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
