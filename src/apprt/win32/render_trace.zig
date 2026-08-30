@@ -11,6 +11,7 @@ const log = std.log.scoped(.win32);
 
 const GetTickCount64 = sys.GetTickCount64;
 const processOriginTickMs = bench_trace.processOriginTickMs;
+const absolutizeTracePath = bench_trace.absolutizeTracePath;
 const queryPerformanceCounter = bench_trace.queryPerformanceCounter;
 const queryPerformanceFrequency = bench_trace.queryPerformanceFrequency;
 
@@ -128,10 +129,19 @@ pub const RenderTrace = struct {
             };
         if (trimmed.len != raw.len) alloc.free(raw);
 
+        // `writeSnapshot` opens the path with `createFileAbsolute`, so the
+        // path we retain has to be absolute. Resolving it here (rather than
+        // at write time) also keeps the trace pinned to the cwd the process
+        // started in. `absolutizeTracePath` takes ownership of `owned`.
+        const absolute = absolutizeTracePath(alloc, owned) catch |err| {
+            log.warn("render trace path could not be absolutized err={}", .{err});
+            return .{};
+        };
+
         return initWithClaimedPath(
             alloc,
             &render_trace_file_claimed,
-            owned,
+            absolute,
             processOriginTickMs(),
             renderTraceLiveEnabled(alloc),
         );
@@ -474,7 +484,10 @@ pub const RenderTrace = struct {
 
     pub fn writeSnapshot(self: *RenderTrace) void {
         const trace_path = self.path orelse return;
-        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch return;
+        const file = std.fs.createFileAbsolute(trace_path, .{ .truncate = true }) catch |err| {
+            log.warn("render trace snapshot open failed path={s} err={}", .{ trace_path, err });
+            return;
+        };
         defer file.close();
         const snapshot_sequence = self.snapshot_sequence.fetchAdd(1, .acq_rel) + 1;
 
@@ -555,14 +568,6 @@ pub const RenderTrace = struct {
         stream.flush() catch return;
     }
 };
-
-fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
-    if (std.fs.path.isAbsolute(owned)) return owned;
-    defer alloc.free(owned);
-    const cwd = try std.process.getCwdAlloc(alloc);
-    defer alloc.free(cwd);
-    return try std.fs.path.join(alloc, &.{ cwd, owned });
-}
 
 fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
     return !claimed.swap(true, .acq_rel);

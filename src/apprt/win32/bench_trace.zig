@@ -36,11 +36,28 @@ extern "kernel32" fn K32GetProcessMemoryInfo(
 var process_origin_tick_ms = std.atomic.Value(u64).init(0);
 var memory_stage_trace_write_mutex: std.Thread.Mutex = .{};
 
+/// Resolve a trace output path against the current working directory.
+///
+/// Every trace writer here opens its file with `createFileAbsolute`, which
+/// asserts the path is absolute, so a relative `NOCTTY_*_FILE` value has to
+/// be resolved once at init rather than at each write. Takes ownership of
+/// `owned` in every path, including the error paths.
+pub fn absolutizeTracePath(alloc: Allocator, owned: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(owned)) return owned;
+    defer alloc.free(owned);
+    const cwd = try std.process.getCwdAlloc(alloc);
+    defer alloc.free(cwd);
+    return try std.fs.path.join(alloc, &.{ cwd, owned });
+}
+
 pub const BenchmarkMemoryStage = enum {
     surface_begin,
     child_hwnd_created,
-    child_dc_acquired,
-    wgl_context_current,
+    // The DC acquisition and the first `wglMakeCurrent` both happen inside
+    // `App.createGLContext`, which has no surface in scope, so they are
+    // observed together at its one call site rather than reported as two
+    // stages the trace cannot actually separate.
+    gl_context_created,
     opengl_functions_loaded,
     renderer_initialized,
     terminal_initialized,
@@ -48,10 +65,6 @@ pub const BenchmarkMemoryStage = enum {
     io_thread_spawned,
     threads_started,
     io_reader_spawned,
-    first_renderer_update_complete,
-    target_resize_begin,
-    target_resize_complete,
-    first_draw_resources_complete,
     first_successful_swap,
     destroy_begin,
     core_deinit_complete,
@@ -59,17 +72,6 @@ pub const BenchmarkMemoryStage = enum {
     wgl_context_deleted,
     dc_released,
     surface_destroy_complete,
-};
-
-pub const BenchmarkRenderTargetStrategy = enum(u8) {
-    offscreen,
-    default_framebuffer,
-};
-
-pub const RenderTargetProvenance = struct {
-    strategy: BenchmarkRenderTargetStrategy,
-    default_framebuffer_srgb: bool,
-    linear_blending: bool,
 };
 
 const PROCESS_MEMORY_COUNTERS_EX = extern struct {
@@ -112,18 +114,10 @@ pub const MemoryStageTrace = struct {
     wgl_samples: std.atomic.Value(u8) = .init(0),
     wgl_total_format_count: std.atomic.Value(u16) = .init(0),
     wgl_candidate_count: std.atomic.Value(u16) = .init(0),
-    render_target_ready: std.atomic.Value(bool) = .init(false),
-    render_target_strategy: std.atomic.Value(u8) = .init(0),
-    default_framebuffer_srgb: std.atomic.Value(bool) = .init(false),
-    render_target_linear_blending: std.atomic.Value(bool) = .init(false),
     published_surface_id: std.atomic.Value(u64) = .init(0),
     renderer_thread_recorded: std.atomic.Value(bool) = .init(false),
     io_thread_recorded: std.atomic.Value(bool) = .init(false),
     io_reader_recorded: std.atomic.Value(bool) = .init(false),
-    first_renderer_update_recorded: std.atomic.Value(bool) = .init(false),
-    target_resize_begin_recorded: std.atomic.Value(bool) = .init(false),
-    target_resize_complete_recorded: std.atomic.Value(bool) = .init(false),
-    first_draw_resources_recorded: std.atomic.Value(bool) = .init(false),
     first_swap_recorded: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: Allocator) MemoryStageTrace {
@@ -138,18 +132,22 @@ pub const MemoryStageTrace = struct {
             alloc.free(raw);
             return .{};
         }
-        if (trimmed.len == raw.len) return .{
-            .path = raw,
+        const owned = if (trimmed.len == raw.len) raw else owned: {
+            const dupe = alloc.dupe(u8, trimmed) catch {
+                alloc.free(raw);
+                return .{};
+            };
+            alloc.free(raw);
+            break :owned dupe;
         };
 
-        const owned = alloc.dupe(u8, trimmed) catch {
-            alloc.free(raw);
+        // `note` writes with `createFileAbsolute`, so resolve a relative
+        // path once here against the process's starting cwd.
+        const absolute = absolutizeTracePath(alloc, owned) catch |err| {
+            log.warn("memory stage trace path could not be absolutized err={}", .{err});
             return .{};
         };
-        alloc.free(raw);
-        return .{
-            .path = owned,
-        };
+        return .{ .path = absolute };
     }
 
     pub fn deinit(self: *MemoryStageTrace, alloc: Allocator) void {
@@ -181,9 +179,11 @@ pub const MemoryStageTrace = struct {
         const columns = self.columns.load(.acquire);
         const rows = self.rows.load(.acquire);
         const wgl_pixel_format = self.wglPixelFormat();
-        const render_target = self.renderTargetProvenance();
 
-        const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch return;
+        const file = std.fs.createFileAbsolute(path, .{ .truncate = false }) catch |err| {
+            log.warn("memory stage trace open failed path={s} err={}", .{ path, err });
+            return;
+        };
         defer file.close();
         file.seekFromEnd(0) catch return;
 
@@ -222,9 +222,6 @@ pub const MemoryStageTrace = struct {
             .wgl_samples = if (wgl_pixel_format) |value| value.samples else null,
             .wgl_total_format_count = if (wgl_pixel_format) |value| value.total_format_count else null,
             .wgl_candidate_count = if (wgl_pixel_format) |value| value.candidate_count else null,
-            .render_target_strategy = if (render_target) |value| @tagName(value.strategy) else null,
-            .default_framebuffer_srgb = if (render_target) |value| value.default_framebuffer_srgb else null,
-            .render_target_linear_blending = if (render_target) |value| value.linear_blending else null,
         }, .{})}) catch return;
         stream.flush() catch return;
     }
@@ -307,27 +304,6 @@ pub const MemoryStageTrace = struct {
         };
     }
 
-    pub fn setRenderTargetProvenance(
-        self: *MemoryStageTrace,
-        strategy: BenchmarkRenderTargetStrategy,
-        default_framebuffer_srgb: bool,
-        linear_blending: bool,
-    ) void {
-        self.render_target_strategy.store(@intFromEnum(strategy), .monotonic);
-        self.default_framebuffer_srgb.store(default_framebuffer_srgb, .monotonic);
-        self.render_target_linear_blending.store(linear_blending, .monotonic);
-        self.render_target_ready.store(true, .release);
-    }
-
-    pub fn renderTargetProvenance(self: *const MemoryStageTrace) ?RenderTargetProvenance {
-        if (!self.render_target_ready.load(.acquire)) return null;
-        return .{
-            .strategy = @enumFromInt(self.render_target_strategy.load(.monotonic)),
-            .default_framebuffer_srgb = self.default_framebuffer_srgb.load(.monotonic),
-            .linear_blending = self.render_target_linear_blending.load(.monotonic),
-        };
-    }
-
     pub fn surfaceId(self: *const MemoryStageTrace, explicit: ?u64) ?u64 {
         if (explicit) |surface_id| return surface_id;
         const published = self.published_surface_id.load(.acquire);
@@ -355,53 +331,6 @@ pub const MemoryStageTrace = struct {
 
     pub fn noteIoReaderSpawned(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
         self.noteOnce(&self.io_reader_recorded, .io_reader_spawned, surface_token, surface_id);
-    }
-
-    pub fn noteFirstRendererUpdateComplete(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(&self.first_renderer_update_recorded, .first_renderer_update_complete, surface_token, self.surfaceId(surface_id));
-    }
-
-    pub fn noteTargetResizeBegin(
-        self: *MemoryStageTrace,
-        surface_token: u64,
-        surface_id: ?u64,
-        strategy: BenchmarkRenderTargetStrategy,
-        default_framebuffer_srgb: bool,
-        linear_blending: bool,
-    ) void {
-        self.setRenderTargetProvenance(
-            strategy,
-            default_framebuffer_srgb,
-            linear_blending,
-        );
-        self.noteOnce(
-            &self.target_resize_begin_recorded,
-            .target_resize_begin,
-            surface_token,
-            self.surfaceId(surface_id),
-        );
-    }
-
-    pub fn noteTargetResizeComplete(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(
-            &self.target_resize_complete_recorded,
-            .target_resize_complete,
-            surface_token,
-            self.surfaceId(surface_id),
-        );
-    }
-
-    pub fn noteFirstDrawResourcesComplete(self: *MemoryStageTrace, surface_token: u64, surface_id: ?u64) void {
-        self.noteOnce(&self.first_draw_resources_recorded, .first_draw_resources_complete, surface_token, self.surfaceId(surface_id));
-    }
-
-    pub fn noteFirstSuccessfulSwap(
-        self: *MemoryStageTrace,
-        surface_token: u64,
-        surface_id: ?u64,
-    ) void {
-        if (!self.claimFirstSwapObservation()) return;
-        self.note(.first_successful_swap, surface_token, self.surfaceId(surface_id));
     }
 
     pub fn claimFirstSwapObservation(self: *MemoryStageTrace) bool {
@@ -455,48 +384,12 @@ test "win32 memory stage trace claims exactly one first swap observation" {
     try std.testing.expect(!trace.claimFirstSwapObservation());
 }
 
-test "win32 memory stage trace publishes direct target compatibility" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "memory-stage-target.jsonl", .data = "" });
-    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "memory-stage-target.jsonl");
-    defer std.testing.allocator.free(path);
-
-    var trace: MemoryStageTrace = .{ .path = path };
-    trace.publishSurfaceId(22);
-    trace.noteTargetResizeBegin(
-        11,
-        null,
-        .default_framebuffer,
-        true,
-        true,
-    );
-
-    const contents = try tmp.dir.readFileAlloc(
-        std.testing.allocator,
-        "memory-stage-target.jsonl",
-        4096,
-    );
-    defer std.testing.allocator.free(contents);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"target_resize_begin\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"surface_id\":22") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"render_target_strategy\":\"default_framebuffer\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"default_framebuffer_srgb\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"render_target_linear_blending\":true") != null);
-}
-
 test "win32 memory stage trace claims each concurrent boundary exactly once" {
     var trace: MemoryStageTrace = .{};
     try std.testing.expect(trace.renderer_thread_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
     try std.testing.expect(trace.renderer_thread_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) != null);
     try std.testing.expect(trace.io_thread_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
     try std.testing.expect(trace.io_reader_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
-    try std.testing.expect(trace.first_renderer_update_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
-    try std.testing.expect(trace.target_resize_begin_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
-    try std.testing.expect(trace.target_resize_complete_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
-    try std.testing.expect(trace.first_draw_resources_recorded.cmpxchgStrong(false, true, .acq_rel, .acquire) == null);
 }
 
 test "win32 memory stage trace preserves every surface identity record" {
@@ -539,10 +432,10 @@ test "win32 memory stage trace publishes core identity before worker stages" {
 
     var trace: MemoryStageTrace = .{ .path = path };
     trace.publishSurfaceId(22);
-    // The renderer can complete its first update before runtime Surface.init
-    // returns and flips core_initialized. The trace must still carry the ID
-    // that core Surface.init assigned before starting either worker.
-    trace.noteFirstRendererUpdateComplete(11, null);
+    // A worker boundary can be reached before runtime Surface.init returns
+    // and flips core_initialized. The trace must still carry the ID that
+    // core Surface.init assigned before starting either worker.
+    trace.noteRendererThreadSpawned(11, trace.surfaceId(null));
 
     const contents = try tmp.dir.readFileAlloc(
         std.testing.allocator,
@@ -550,7 +443,7 @@ test "win32 memory stage trace publishes core identity before worker stages" {
         4096,
     );
     defer std.testing.allocator.free(contents);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"first_renderer_update_complete\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\"stage\":\"renderer_thread_spawned\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\"surface_id\":22") != null);
 }
 

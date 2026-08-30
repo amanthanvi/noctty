@@ -204,6 +204,18 @@
       "allOf": [
         {
           "if": {
+            "required": ["status", "median"],
+            "properties": {
+              "status": { "enum": ["pass", "fail"] },
+              "median": { "type": "number" }
+            }
+          },
+          "then": {
+            "required": ["threshold"]
+          }
+        },
+        {
+          "if": {
             "required": ["metric", "status"],
             "properties": {
               "metric": {
@@ -236,68 +248,6 @@
                   "windows_read_buffer_kib",
                   "diagnostic_profile_scope"
                 ]
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["metric", "status", "details"],
-            "properties": {
-              "metric": { "const": "memory_bytes_per_additional_pane" },
-              "status": { "enum": ["pass", "fail"] },
-              "details": {
-                "required": ["benchmark_force_offscreen"],
-                "properties": {
-                  "benchmark_force_offscreen": { "const": true }
-                }
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "details": {
-                "properties": {
-                  "pane_lifecycle_samples": {
-                    "items": {
-                      "properties": {
-                        "target_strategy_override": {
-                          "const": "forced_offscreen"
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["metric", "status", "details"],
-            "properties": {
-              "metric": { "const": "memory_bytes_per_additional_pane" },
-              "status": { "enum": ["pass", "fail"] },
-              "details": {
-                "required": ["benchmark_force_offscreen"],
-                "properties": {
-                  "benchmark_force_offscreen": { "const": false }
-                }
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "details": {
-                "properties": {
-                  "pane_lifecycle_samples": {
-                    "items": {
-                      "properties": {
-                        "target_strategy_override": { "const": "none" }
-                      }
-                    }
-                  }
-                }
               }
             }
           }
@@ -430,9 +380,6 @@
                   "shell_child_memory_included",
                   "additional_panes",
                   "memory_cycle_count",
-                  "benchmark_force_offscreen",
-                  "benchmark_minimize_c_heap",
-                  "memory_target_strategy_override",
                   "memory_diagnostic_only",
                   "memory_trace_token_scope"
                 ]
@@ -460,9 +407,6 @@
                   "memory_stage_observation_scope",
                   "pane_close_action",
                   "destroy_settle_seconds",
-                  "benchmark_minimize_c_heap",
-                  "c_heap_minimize_scope",
-                  "swap_suppression_scope",
                   "pane_lifecycle_samples"
                 ]
               }
@@ -768,18 +712,6 @@
           "minimum": 1,
           "maximum": 5
         },
-        "benchmark_force_offscreen": {
-          "type": "boolean"
-        },
-        "benchmark_minimize_c_heap": {
-          "type": "boolean"
-        },
-        "benchmark_suppress_swap": {
-          "type": "boolean"
-        },
-        "memory_target_strategy_override": {
-          "enum": ["none", "forced_offscreen"]
-        },
         "memory_diagnostic_only": {
           "type": "boolean"
         },
@@ -798,14 +730,6 @@
           "const": true
         },
         "memory_stage_observation_scope": {
-          "type": "string",
-          "minLength": 1
-        },
-        "c_heap_minimize_scope": {
-          "type": "string",
-          "minLength": 1
-        },
-        "swap_suppression_scope": {
           "type": "string",
           "minLength": 1
         },
@@ -895,32 +819,6 @@
       "allOf": [
         {
           "if": {
-            "required": ["benchmark_force_offscreen"],
-            "properties": { "benchmark_force_offscreen": { "const": true } }
-          },
-          "then": {
-            "properties": {
-              "memory_target_strategy_override": {
-                "const": "forced_offscreen"
-              },
-              "benchmark_suppress_swap": { "const": false },
-              "memory_diagnostic_only": { "const": true }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["benchmark_force_offscreen"],
-            "properties": { "benchmark_force_offscreen": { "const": false } }
-          },
-          "then": {
-            "properties": {
-              "memory_target_strategy_override": { "const": "none" }
-            }
-          }
-        },
-        {
-          "if": {
             "required": ["memory_cycle_count"],
             "properties": { "memory_cycle_count": { "minimum": 2 } }
           },
@@ -930,67 +828,11 @@
         },
         {
           "if": {
-            "required": [
-              "benchmark_force_offscreen",
-              "benchmark_minimize_c_heap",
-              "benchmark_suppress_swap",
-              "memory_cycle_count"
-            ],
-            "properties": {
-              "benchmark_force_offscreen": { "const": false },
-              "benchmark_minimize_c_heap": { "const": false },
-              "benchmark_suppress_swap": { "const": false },
-              "memory_cycle_count": { "const": 1 }
-            }
+            "required": ["memory_cycle_count"],
+            "properties": { "memory_cycle_count": { "const": 1 } }
           },
           "then": {
             "properties": { "memory_diagnostic_only": { "const": false } }
-          }
-        },
-        {
-          "if": {
-            "required": ["benchmark_minimize_c_heap"],
-            "properties": { "benchmark_minimize_c_heap": { "const": true } }
-          },
-          "then": {
-            "properties": {
-              "memory_diagnostic_only": { "const": true }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["benchmark_suppress_swap"],
-            "properties": { "benchmark_suppress_swap": { "const": true } }
-          },
-          "then": {
-            "properties": {
-              "benchmark_force_offscreen": { "const": false },
-              "benchmark_minimize_c_heap": { "const": false },
-              "memory_diagnostic_only": { "const": true },
-              "pane_lifecycle_samples": {
-                "items": {
-                  "properties": { "swap_suppressed": { "const": true } },
-                  "required": ["swap_suppressed"]
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["benchmark_suppress_swap"],
-            "properties": { "benchmark_suppress_swap": { "const": false } }
-          },
-          "then": {
-            "properties": {
-              "pane_lifecycle_samples": {
-                "items": {
-                  "properties": { "swap_suppressed": { "const": false } },
-                  "required": ["swap_suppressed"]
-                }
-              }
-            }
           }
         }
       ]
@@ -1047,9 +889,6 @@
         "private_bytes_after_each_pane",
         "marginal_private_bytes",
         "private_bytes_after_logical_close",
-        "c_heap_minimize_requested",
-        "c_heap_minimize_succeeded",
-        "private_bytes_after_c_heap_minimize",
         "private_bytes_after_destroy_settle",
         "reclaimed_private_bytes_after_destroy_settle",
         "retained_private_bytes_above_baseline_after_destroy_settle",
@@ -1062,7 +901,6 @@
         "baseline_surface_ids",
         "survivor_surface_ids_after_each_close",
         "survivor_surface_ids_after_destroy_settle",
-        "target_strategy_override",
         "created_surface_ids",
         "created_surface_count",
         "memory_stage_samples"
@@ -1085,13 +923,6 @@
           "items": { "type": "number" }
         },
         "private_bytes_after_logical_close": { "type": "number", "minimum": 0 },
-        "c_heap_minimize_requested": { "type": "boolean" },
-        "c_heap_minimize_succeeded": { "type": ["boolean", "null"] },
-        "private_bytes_after_c_heap_minimize": {
-          "type": ["number", "null"],
-          "minimum": 0
-        },
-        "swap_suppressed": { "type": "boolean" },
         "private_bytes_after_destroy_settle": {
           "type": "number",
           "minimum": 0
@@ -1142,9 +973,6 @@
           "uniqueItems": true,
           "items": { "type": "integer", "minimum": 1 }
         },
-        "target_strategy_override": {
-          "enum": ["none", "forced_offscreen"]
-        },
         "created_surface_ids": {
           "type": "array",
           "minItems": 3,
@@ -1155,7 +983,7 @@
         "created_surface_count": { "const": 3 },
         "memory_stage_samples": {
           "type": "array",
-          "minItems": 22,
+          "minItems": 17,
           "items": { "$ref": "#/definitions/memory_stage_sample" },
           "allOf": [
             {
@@ -1173,13 +1001,7 @@
             {
               "contains": {
                 "required": ["stage"],
-                "properties": { "stage": { "const": "child_dc_acquired" } }
-              }
-            },
-            {
-              "contains": {
-                "required": ["stage"],
-                "properties": { "stage": { "const": "wgl_context_current" } }
+                "properties": { "stage": { "const": "gl_context_created" } }
               }
             },
             {
@@ -1231,34 +1053,6 @@
             {
               "contains": {
                 "required": ["stage"],
-                "properties": {
-                  "stage": { "const": "first_renderer_update_complete" }
-                }
-              }
-            },
-            {
-              "contains": {
-                "required": ["stage"],
-                "properties": { "stage": { "const": "target_resize_begin" } }
-              }
-            },
-            {
-              "contains": {
-                "required": ["stage"],
-                "properties": { "stage": { "const": "target_resize_complete" } }
-              }
-            },
-            {
-              "contains": {
-                "required": ["stage"],
-                "properties": {
-                  "stage": { "const": "first_draw_resources_complete" }
-                }
-              }
-            },
-            {
-              "contains": {
-                "required": ["stage"],
                 "properties": { "stage": { "const": "destroy_begin" } }
               }
             },
@@ -1299,103 +1093,14 @@
       },
       "allOf": [
         {
-          "if": {
-            "required": ["swap_suppressed"],
-            "properties": { "swap_suppressed": { "const": true } }
-          },
-          "then": {
-            "properties": {
-              "memory_stage_samples": {
-                "contains": {
-                  "required": ["stage"],
-                  "properties": {
-                    "stage": { "const": "first_swap_suppressed" }
-                  }
-                },
-                "not": {
-                  "contains": {
-                    "required": ["stage"],
-                    "properties": {
-                      "stage": { "const": "first_successful_swap" }
-                    }
-                  }
+          "properties": {
+            "memory_stage_samples": {
+              "contains": {
+                "required": ["stage"],
+                "properties": {
+                  "stage": { "const": "first_successful_swap" }
                 }
               }
-            }
-          },
-          "else": {
-            "properties": {
-              "memory_stage_samples": {
-                "contains": {
-                  "required": ["stage"],
-                  "properties": {
-                    "stage": { "const": "first_successful_swap" }
-                  }
-                },
-                "not": {
-                  "contains": {
-                    "required": ["stage"],
-                    "properties": {
-                      "stage": { "const": "first_swap_suppressed" }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["target_strategy_override"],
-            "properties": {
-              "target_strategy_override": { "const": "forced_offscreen" }
-            }
-          },
-          "then": {
-            "properties": {
-              "memory_stage_samples": {
-                "items": {
-                  "if": {
-                    "required": ["stage"],
-                    "properties": {
-                      "stage": {
-                        "enum": [
-                          "target_resize_begin",
-                          "target_resize_complete",
-                          "first_draw_resources_complete",
-                          "first_successful_swap"
-                        ]
-                      }
-                    }
-                  },
-                  "then": {
-                    "properties": {
-                      "render_target_strategy": { "const": "offscreen" }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": ["c_heap_minimize_requested"],
-            "properties": { "c_heap_minimize_requested": { "const": true } }
-          },
-          "then": {
-            "properties": {
-              "c_heap_minimize_succeeded": { "const": true },
-              "private_bytes_after_c_heap_minimize": {
-                "type": "number",
-                "minimum": 0
-              }
-            }
-          },
-          "else": {
-            "properties": {
-              "c_heap_minimize_succeeded": { "type": "null" },
-              "private_bytes_after_c_heap_minimize": { "type": "null" }
             }
           }
         }
@@ -1432,20 +1137,15 @@
         "wgl_multisample_query_supported",
         "wgl_sample_buffers",
         "wgl_samples",
-        "wgl_set_pixel_format_count",
         "wgl_total_format_count",
-        "wgl_candidate_count",
-        "render_target_strategy",
-        "default_framebuffer_srgb",
-        "render_target_linear_blending"
+        "wgl_candidate_count"
       ],
       "properties": {
         "stage": {
           "enum": [
             "surface_begin",
             "child_hwnd_created",
-            "child_dc_acquired",
-            "wgl_context_current",
+            "gl_context_created",
             "opengl_functions_loaded",
             "renderer_initialized",
             "terminal_initialized",
@@ -1453,12 +1153,7 @@
             "io_thread_spawned",
             "threads_started",
             "io_reader_spawned",
-            "first_renderer_update_complete",
-            "target_resize_begin",
-            "target_resize_complete",
-            "first_draw_resources_complete",
             "first_successful_swap",
-            "first_swap_suppressed",
             "destroy_begin",
             "core_deinit_complete",
             "wgl_context_unbound",
@@ -1528,11 +1223,6 @@
           "minimum": 0,
           "maximum": 0
         },
-        "wgl_set_pixel_format_count": {
-          "type": ["integer", "null"],
-          "minimum": 1,
-          "maximum": 1
-        },
         "wgl_total_format_count": {
           "type": ["integer", "null"],
           "minimum": 1
@@ -1540,13 +1230,7 @@
         "wgl_candidate_count": {
           "type": ["integer", "null"],
           "minimum": 1
-        },
-        "render_target_strategy": {
-          "type": ["string", "null"],
-          "enum": ["offscreen", "default_framebuffer", null]
-        },
-        "default_framebuffer_srgb": { "type": ["boolean", "null"] },
-        "render_target_linear_blending": { "type": ["boolean", "null"] }
+        }
       },
       "allOf": [
         {
@@ -1554,7 +1238,7 @@
             "properties": {
               "stage": {
                 "enum": [
-                  "wgl_context_current",
+                  "gl_context_created",
                   "opengl_functions_loaded",
                   "renderer_initialized",
                   "terminal_initialized",
@@ -1562,12 +1246,7 @@
                   "io_thread_spawned",
                   "threads_started",
                   "io_reader_spawned",
-                  "first_renderer_update_complete",
-                  "target_resize_begin",
-                  "target_resize_complete",
-                  "first_draw_resources_complete",
                   "first_successful_swap",
-                  "first_swap_suppressed",
                   "destroy_begin",
                   "core_deinit_complete",
                   "wgl_context_unbound",
@@ -1618,8 +1297,7 @@
                 "enum": ["classic", "ext_srgb", "arb_ext_colorspace_srgb"]
               },
               "wgl_srgb_capable": { "type": "boolean" },
-              "wgl_multisample_query_supported": { "type": "boolean" },
-              "wgl_set_pixel_format_count": { "const": 1 }
+              "wgl_multisample_query_supported": { "type": "boolean" }
             }
           }
         },
@@ -1691,12 +1369,7 @@
                   "io_thread_spawned",
                   "threads_started",
                   "io_reader_spawned",
-                  "first_renderer_update_complete",
-                  "target_resize_begin",
-                  "target_resize_complete",
-                  "first_draw_resources_complete",
                   "first_successful_swap",
-                  "first_swap_suppressed",
                   "destroy_begin",
                   "core_deinit_complete",
                   "wgl_context_unbound",
@@ -1716,55 +1389,6 @@
               "cell_height_px": { "type": "integer", "minimum": 1 },
               "columns": { "type": "integer", "minimum": 1 },
               "rows": { "type": "integer", "minimum": 1 }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "stage": {
-                "enum": [
-                  "target_resize_begin",
-                  "target_resize_complete",
-                  "first_draw_resources_complete",
-                  "first_successful_swap",
-                  "first_swap_suppressed",
-                  "destroy_begin",
-                  "core_deinit_complete",
-                  "wgl_context_unbound",
-                  "wgl_context_deleted",
-                  "dc_released",
-                  "surface_destroy_complete"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "render_target_strategy": {
-                "type": "string",
-                "enum": ["offscreen", "default_framebuffer"]
-              },
-              "default_framebuffer_srgb": { "type": "boolean" },
-              "render_target_linear_blending": { "type": "boolean" }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "render_target_strategy": { "const": "default_framebuffer" }
-            },
-            "required": ["render_target_strategy"]
-          },
-          "then": {
-            "properties": {
-              "default_framebuffer_srgb": { "const": true },
-              "render_target_linear_blending": { "const": true },
-              "wgl_selection_source": {
-                "enum": ["ext_srgb", "arb_ext_colorspace_srgb"]
-              },
-              "wgl_srgb_capable": { "const": true }
             }
           }
         }

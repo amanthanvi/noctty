@@ -168,15 +168,20 @@ machine/display fingerprint, endpoint, observers, and threshold provenance.
   unbind/context deletion, DC release, and final Surface resource cleanup. A
   missing stage fails the metric instead of assuming a native cleanup API
   succeeded.
-  Benchmark-only process-private snapshots immediately before and after the
-  first full-size render-target resize isolate that allocation boundary. Those
-  records disclose whether the surface used an owned offscreen framebuffer or
-  the Win32 default framebuffer, whether the default framebuffer was verified
-  sRGB, and whether blending was linear. Direct-default rendering is limited to
-  Win32 surfaces without custom shaders, with framebuffer binding zero, verified
-  sRGB encoding, and linear or linear-corrected blending; every incompatible or
-  unverified path retains the offscreen target and evidence fails closed if the
-  strategy provenance is absent.
+  The stage list is exactly the set of boundaries the runtime actually
+  emits: `surface_begin`, `child_hwnd_created`, `gl_context_created`,
+  `opengl_functions_loaded`, `renderer_initialized`, `terminal_initialized`,
+  `renderer_thread_spawned`, `io_thread_spawned`, `threads_started`,
+  `io_reader_spawned`, `first_successful_swap`, and the six teardown stages.
+  DC acquisition and the first `wglMakeCurrent` are reported as the single
+  `gl_context_created` boundary because both happen inside one `App` method
+  with no surface in scope; splitting them would name two stages the trace
+  cannot separate. Render-target strategy provenance is deliberately **not**
+  in the trace: recording it needs a renderer-to-apprt seam that does not
+  exist, and the direct-default-framebuffer precondition is enforced at its
+  source by the runtime `GL_FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING` query in
+  `OpenGL.init` plus the `targetStrategy` unit tests, not by benchmark
+  evidence.
   Selected-format evidence records actual color, alpha, depth, stencil,
   stereo, accumulation, and auxiliary-buffer properties. Extended selection
   uses one of two exact Khronos API families: `WGL_EXT_pixel_format` with
@@ -251,11 +256,19 @@ budgets: `PRODUCT.md` explicitly leaves them provisional until a same-machine
 baseline and tolerance are reviewed. Inactive thresholds are emitted with
 `passed: null`; they cannot silently fail or pass a gate. Threshold files must
 use actual JSON booleans, and the harness rejects any threshold that is both
-active and provisional. `-Gate` fails closed when the selected metrics have no
-applicable active threshold or contain an error, skipped, or adapter-required
-result. Until a reviewed threshold is activated, run interactive metrics as
-baseline collection without `-Gate`; a schema-valid `pass` record then means
-collection succeeded, not that a product budget was certified. The separate
+active and provisional.
+
+Threshold provenance is attached to every measured metric whether or not
+`-Gate` was passed, so a baseline record still carries the direction, value,
+`active`, `provisional`, `source` and `passed` that the comparison produced;
+the schema requires a `threshold` object on any metric that reports a median
+with `pass` or `fail` status. `-Gate` decides only whether a breach turns into
+a failing metric status and a nonzero exit, and it fails closed when the
+selected metrics have no applicable active threshold or contain an error,
+skipped, or adapter-required result. Until a reviewed threshold is activated,
+run interactive metrics as baseline collection without `-Gate`; a schema-valid
+`pass` record then means collection succeeded, not that a product budget was
+certified. The separate
 headless CI regression gates below use their documented workload-specific
 baseline and tolerance rather than this interactive threshold file.
 

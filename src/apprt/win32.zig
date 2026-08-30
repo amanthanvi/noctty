@@ -197,7 +197,6 @@ pub const resourcesDir = internal_os.resourcesDir;
 const RenderTrace = render_trace.RenderTrace;
 const MemoryStageTrace = bench_trace.MemoryStageTrace;
 pub const BenchmarkMemoryStage = bench_trace.BenchmarkMemoryStage;
-pub const BenchmarkRenderTargetStrategy = bench_trace.BenchmarkRenderTargetStrategy;
 pub const captureProcessOrigin = bench_trace.captureProcessOrigin;
 
 pub const StartupLoaderErrorDialogSuppression = gl_startup.StartupLoaderErrorDialogSuppression;
@@ -7293,7 +7292,14 @@ pub const App = struct {
         return try client_size_fn(ctx, live_hwnd);
     }
 
-    fn createGLContext(self: *App, hwnd: HWND) !struct { hdc: HDC, hglrc: HGLRC } {
+    fn createGLContext(self: *App, hwnd: HWND) !struct {
+        hdc: HDC,
+        hglrc: HGLRC,
+        // Returned rather than logged-and-dropped so the caller can hand
+        // the selected format to its benchmark memory-stage trace. Nothing
+        // in the product path reads it.
+        provenance: pixel_format.WglPixelFormatProvenance,
+    } {
         if (self.core_app.first) beginOpenGLStartupDiagnostics();
 
         const hdc = sys.GetDC(hwnd) orelse {
@@ -7347,7 +7353,11 @@ pub const App = struct {
             return windows.unexpectedError(err);
         }
 
-        return .{ .hdc = hdc, .hglrc = hglrc };
+        return .{
+            .hdc = hdc,
+            .hglrc = hglrc,
+            .provenance = selection.provenance,
+        };
     }
 
     fn openUrl(self: *App, url: []const u8) !void {
@@ -22448,6 +22458,11 @@ pub const Surface = struct {
             .decorations_visible = initialDecorationsVisible(config, opts),
             .scrollbar_config = config.scrollbar,
             .render_trace = RenderTrace.init(app.core_app.alloc),
+            // Unlike the render trace there is no single-claimant rule here:
+            // the memory stage trace is JSONL and every surface appends its
+            // own lifecycle records to the shared file, serialized by a
+            // process-wide mutex in `bench_trace`.
+            .memory_stage_trace = MemoryStageTrace.init(app.core_app.alloc),
             .undo_stack = win32_undo.UndoStack.init(app.core_app.alloc),
             .search_bar = win32_search_bar.SearchBar.init(app.core_app.alloc),
             .drop_target = win32_surface_drop_target.DropTarget.init(
@@ -22468,6 +22483,11 @@ pub const Surface = struct {
         // the first COM callback has a valid context.
         self.drop_target.surface_ctx = @ptrCast(self);
         self.background_opacity_default = normalizedBackgroundOpacity(config.@"background-opacity");
+        // First memory-stage sample. Every later stage's private-bytes delta
+        // is measured against this one, so it has to be the first thing that
+        // happens after the trace field exists and before any window, DC,
+        // GL or terminal allocation.
+        self.noteBenchmarkMemoryStage(.surface_begin, null);
 
         const hwnd = sys.CreateWindowExW(
             0,
@@ -22512,11 +22532,16 @@ pub const Surface = struct {
         self.placement.visible = false;
         self.placement.visible_known = true;
         log.debug("surface.init hwnd created", .{});
+        self.noteBenchmarkMemoryStage(.child_hwnd_created, null);
 
         const gl = try app.createGLContext(hwnd);
         self.hdc = gl.hdc;
         self.hglrc = gl.hglrc;
         errdefer self.destroyGL();
+        // Must precede the stage note: `MemoryStageTrace.note` only emits
+        // the wgl_* provenance fields once the format has been published.
+        self.setBenchmarkWglPixelFormat(gl.provenance);
+        self.noteBenchmarkMemoryStage(.gl_context_created, null);
         log.debug("surface.init gl context created", .{});
 
         self.size = try app.clientSize(hwnd);
@@ -23294,35 +23319,6 @@ pub const Surface = struct {
         self.memory_stage_trace.noteIoThreadSpawned(@intCast(@intFromPtr(self)), surface_id);
     }
 
-    pub fn noteBenchmarkFirstDrawResourcesComplete(self: *Surface) void {
-        self.memory_stage_trace.noteFirstDrawResourcesComplete(
-            @intCast(@intFromPtr(self)),
-            null,
-        );
-    }
-
-    pub fn noteBenchmarkTargetResizeBegin(
-        self: *Surface,
-        strategy: BenchmarkRenderTargetStrategy,
-        default_framebuffer_srgb: bool,
-        linear_blending: bool,
-    ) void {
-        self.memory_stage_trace.noteTargetResizeBegin(
-            @intCast(@intFromPtr(self)),
-            null,
-            strategy,
-            default_framebuffer_srgb,
-            linear_blending,
-        );
-    }
-
-    pub fn noteBenchmarkTargetResizeComplete(self: *Surface) void {
-        self.memory_stage_trace.noteTargetResizeComplete(
-            @intCast(@intFromPtr(self)),
-            null,
-        );
-    }
-
     fn setBenchmarkWglPixelFormat(
         self: *Surface,
         value: pixel_format.WglPixelFormatProvenance,
@@ -23604,6 +23600,11 @@ pub const Surface = struct {
             return windows.unexpectedError(err);
         }
         self.render_trace.noteSwapBuffers();
+        // Only the first swap that actually returned non-zero; the claim is
+        // idempotent so later swaps cost one atomic load.
+        if (self.memory_stage_trace.claimFirstSwapObservation()) {
+            self.noteBenchmarkMemoryStage(.first_successful_swap, null);
+        }
     }
 
     fn setTitle(self: *Surface, title: []const u8) !void {
@@ -25922,6 +25923,7 @@ pub const Surface = struct {
 
     fn destroy(self: *Surface) void {
         const alloc = self.app.core_app.alloc;
+        self.noteBenchmarkMemoryStage(.destroy_begin, null);
         self.destroy_on_wm_destroy = false;
         self.deferred_char.clear();
 
@@ -25949,6 +25951,9 @@ pub const Surface = struct {
             self.core_surface.deinit();
             self.core_initialized = false;
         }
+        // Outside the `core_initialized` branch so the stage is still
+        // emitted for a surface that failed before core init.
+        self.noteBenchmarkMemoryStage(.core_deinit_complete, null);
 
         // Drain the undo stack. Entries own scrollback / title bytes
         // allocated via `app.core_app.alloc`; `deinit` frees each.
@@ -26009,6 +26014,13 @@ pub const Surface = struct {
             alloc.free(value);
             self.progress_status = null;
         }
+
+        // The final stage, then the trace itself. `MemoryStageTrace.deinit`
+        // clears `path`, after which `note` is a no-op — so this must stay
+        // the last thing before the Surface is freed, and in particular
+        // after `destroyGL` emits its three teardown stages.
+        self.noteBenchmarkMemoryStage(.surface_destroy_complete, null);
+        self.memory_stage_trace.deinit(alloc);
 
         self.app.windowDestroyed(self);
         alloc.destroy(self);
@@ -26523,13 +26535,16 @@ pub const Surface = struct {
     fn destroyGL(self: *Surface) void {
         if (self.hglrc != null) {
             self.clearGLContextCurrent();
+            self.noteBenchmarkMemoryStage(.wgl_context_unbound, null);
             _ = sys.wglDeleteContext(self.hglrc);
             self.hglrc = null;
+            self.noteBenchmarkMemoryStage(.wgl_context_deleted, null);
         }
 
         if (self.hdc != null) {
             if (self.hwnd) |hwnd| _ = sys.ReleaseDC(hwnd, self.hdc);
             self.hdc = null;
+            self.noteBenchmarkMemoryStage(.dc_released, null);
         }
 
         self.hwnd = null;

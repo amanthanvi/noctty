@@ -22,6 +22,7 @@ const internal_os = @import("../os/main.zig");
 const windows = internal_os.windows;
 const configpkg = @import("../config.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const BenchmarkEndMarker = @import("bench_marker.zig").BenchmarkEndMarker;
 
 const log = std.log.scoped(.io_exec);
 
@@ -232,69 +233,6 @@ const OutputTrace = struct {
     }
 };
 
-/// Optional benchmark-only end marker observed in the PTY byte stream. The
-/// matcher is deliberately inert unless the harness supplies the environment
-/// variable, so production output parsing pays only one predictable branch.
-const BenchmarkEndMarker = struct {
-    bytes: ?[]const u8 = null,
-    owned: bool = false,
-    seen: bool = false,
-
-    fn init(alloc: Allocator) BenchmarkEndMarker {
-        const raw = std.process.getEnvVarOwned(
-            alloc,
-            "NOCTTY_BENCH_ALT_END_MARKER",
-        ) catch return .{};
-        errdefer alloc.free(raw);
-
-        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-        if (trimmed.len == 0) {
-            alloc.free(raw);
-            return .{};
-        }
-
-        const owned = if (trimmed.len == raw.len)
-            raw
-        else
-            alloc.dupe(u8, trimmed) catch {
-                alloc.free(raw);
-                return .{};
-            };
-        if (trimmed.len != raw.len) alloc.free(raw);
-        return .{ .bytes = owned, .owned = true };
-    }
-
-    fn initForTest(bytes: []const u8) BenchmarkEndMarker {
-        return .{ .bytes = bytes };
-    }
-
-    fn deinit(self: *BenchmarkEndMarker, alloc: Allocator) void {
-        if (self.owned) if (self.bytes) |bytes| alloc.free(bytes);
-        self.* = .{};
-    }
-
-    /// Returns true exactly once after the terminal parser has committed the
-    /// configured marker at the start of the visible top row. Looking at the
-    /// reconstructed grid is required because ConPTY may interleave cursor
-    /// movement with visible text in its screen-diff output.
-    fn observeVisible(
-        self: *BenchmarkEndMarker,
-        terminal: *const terminalpkg.Terminal,
-    ) bool {
-        const pattern = self.bytes orelse return false;
-        if (self.seen or pattern.len == 0) return false;
-
-        const top = terminal.screens.active.pages.getTopLeft(.viewport);
-        const cells = top.cells(.right);
-        if (pattern.len > cells.len) return false;
-        for (pattern, cells[0..pattern.len]) |expected, cell| {
-            if (cell.codepoint() != @as(u21, expected)) return false;
-        }
-        self.seen = true;
-        return true;
-    }
-};
-
 fn claimTraceFile(claimed: *std.atomic.Value(bool)) bool {
     return !claimed.swap(true, .acq_rel);
 }
@@ -346,21 +284,11 @@ test "termio output trace aggregates Windows PTY hot-path timings in memory" {
     try std.testing.expectEqual(@as(u64, 37), trace.renderer_mutex_hold_max_ns);
 }
 
-test "benchmark end marker waits for reconstructed visible terminal state" {
-    var term = try terminalpkg.Terminal.init(std.testing.allocator, .{
-        .cols = 30,
-        .rows = 3,
-    });
-    defer term.deinit(std.testing.allocator);
-    var stream = term.vtStream();
-    defer stream.deinit();
-
-    var marker = BenchmarkEndMarker.initForTest("NB121DEADBEEFCAFE");
-    stream.nextSlice("\x1b[1;1H\x1b[2KNB121DEAD");
-    try std.testing.expect(!marker.observeVisible(&term));
-    stream.nextSlice("\x1b[0mBEEFCAFE");
-    try std.testing.expect(marker.observeVisible(&term));
-    try std.testing.expect(!marker.observeVisible(&term));
+test {
+    // The benchmark end-marker matcher lives in its own module so the
+    // benchmark boundary is visible in the file list, not buried in
+    // Termio. Pull its tests in explicitly.
+    _ = @import("bench_marker.zig");
 }
 
 /// Mutex state argument for queueMessage.

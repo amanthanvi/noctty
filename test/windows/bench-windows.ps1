@@ -915,12 +915,10 @@ function Get-BenchMemoryStageSamples {
     if ($records.Count -eq 0) { throw "memory stage trace was empty: $Path" }
 
     $firstSwapStage = 'first_successful_swap'
-    $forbiddenSwapStage = 'first_swap_suppressed'
     $requiredStages = @(
         'surface_begin'
         'child_hwnd_created'
-        'child_dc_acquired'
-        'wgl_context_current'
+        'gl_context_created'
         'opengl_functions_loaded'
         'renderer_initialized'
         'terminal_initialized'
@@ -928,10 +926,6 @@ function Get-BenchMemoryStageSamples {
         'io_thread_spawned'
         'threads_started'
         'io_reader_spawned'
-        'first_renderer_update_complete'
-        'target_resize_begin'
-        'target_resize_complete'
-        'first_draw_resources_complete'
         $firstSwapStage
         'destroy_begin'
         'core_deinit_complete'
@@ -999,12 +993,6 @@ function Get-BenchMemoryStageSamples {
                 throw "surface $surfaceId expected one '$stage' memory snapshot, got $stageCount"
             }
         }
-        $forbiddenSwapCount = @($surfaceRecords | Where-Object {
-            [string] $_.stage -ceq $forbiddenSwapStage
-        }).Count
-        if ($forbiddenSwapCount -ne 0) {
-            throw "surface $surfaceId emitted forbidden '$forbiddenSwapStage' memory snapshot count $forbiddenSwapCount"
-        }
 
         $traceSequences = [Collections.Generic.List[uint64]]::new()
         foreach ($record in $surfaceRecords) {
@@ -1030,12 +1018,8 @@ function Get-BenchMemoryStageSamples {
                 'wgl_multisample_query_supported',
                 'wgl_sample_buffers',
                 'wgl_samples',
-                'wgl_set_pixel_format_count',
                 'wgl_total_format_count',
-                'wgl_candidate_count',
-                'render_target_strategy',
-                'default_framebuffer_srgb',
-                'render_target_linear_blending'
+                'wgl_candidate_count'
             )) {
                 if ($record.PSObject.Properties.Name -notcontains $propertyName) {
                     throw "surface $surfaceId memory snapshot '$($record.stage)' omitted '$propertyName'"
@@ -1056,8 +1040,7 @@ function Get-BenchMemoryStageSamples {
             $record = @($surfaceRecords | Where-Object { [string] $_.stage -ceq $stage })[0]
             $requiresWglPixelFormat = $stage -notin @(
                 'surface_begin',
-                'child_hwnd_created',
-                'child_dc_acquired'
+                'child_hwnd_created'
             )
             if ($requiresWglPixelFormat) {
                 $validPixelFormat =
@@ -1084,9 +1067,7 @@ function Get-BenchMemoryStageSamples {
                     $record.wgl_selection_source -is [string] -and
                     $record.wgl_selection_source -cin @('classic', 'ext_srgb', 'arb_ext_colorspace_srgb') -and
                     $record.wgl_srgb_capable -is [System.Boolean] -and
-                    $record.wgl_multisample_query_supported -is [System.Boolean] -and
-                    (Test-BenchIntegralNumber -Value $record.wgl_set_pixel_format_count) -and
-                    [uint64] $record.wgl_set_pixel_format_count -eq 1
+                    $record.wgl_multisample_query_supported -is [System.Boolean]
                 if (-not $validPixelFormat) {
                     throw "surface $surfaceId memory snapshot '$stage' has invalid selected WGL pixel format provenance"
                 }
@@ -1125,12 +1106,7 @@ function Get-BenchMemoryStageSamples {
                 'io_thread_spawned',
                 'threads_started',
                 'io_reader_spawned',
-                'first_renderer_update_complete',
-                'target_resize_begin',
-                'target_resize_complete',
-                'first_draw_resources_complete',
                 'first_successful_swap',
-                'first_swap_suppressed',
                 'destroy_begin',
                 'core_deinit_complete',
                 'wgl_context_unbound',
@@ -1152,35 +1128,6 @@ function Get-BenchMemoryStageSamples {
                     if ($null -eq $record.$propertyName -or [uint64] $record.$propertyName -eq 0) {
                         throw "surface $surfaceId memory snapshot '$stage' has invalid '$propertyName' geometry"
                     }
-                }
-            }
-            $requiresRenderTargetProvenance = $stage -in @(
-                'target_resize_begin',
-                'target_resize_complete',
-                'first_draw_resources_complete',
-                'first_successful_swap',
-                'first_swap_suppressed',
-                'destroy_begin',
-                'core_deinit_complete',
-                'wgl_context_unbound',
-                'wgl_context_deleted',
-                'dc_released',
-                'surface_destroy_complete'
-            )
-            if ($requiresRenderTargetProvenance) {
-                $validRenderTarget =
-                    [string] $record.render_target_strategy -cin @('offscreen', 'default_framebuffer') -and
-                    $record.default_framebuffer_srgb -is [System.Boolean] -and
-                    $record.render_target_linear_blending -is [System.Boolean]
-                if (-not $validRenderTarget) {
-                    throw "surface $surfaceId memory snapshot '$stage' has invalid render-target provenance"
-                }
-                if ([string] $record.render_target_strategy -ceq 'default_framebuffer' -and
-                    (-not $record.default_framebuffer_srgb -or
-                    -not $record.render_target_linear_blending -or
-                    $record.wgl_selection_source -cnotin @('ext_srgb', 'arb_ext_colorspace_srgb') -or
-                    -not $record.wgl_srgb_capable)) {
-                    throw "surface $surfaceId memory snapshot '$stage' selected an incompatible direct default framebuffer"
                 }
             }
             $tick = [uint64] $record.tick_ms
@@ -1213,12 +1160,8 @@ function Get-BenchMemoryStageSamples {
                 wgl_multisample_query_supported = if ($null -eq $record.wgl_multisample_query_supported) { $null } else { [bool] $record.wgl_multisample_query_supported }
                 wgl_sample_buffers = if ($null -eq $record.wgl_sample_buffers) { $null } else { [uint64] $record.wgl_sample_buffers }
                 wgl_samples = if ($null -eq $record.wgl_samples) { $null } else { [uint64] $record.wgl_samples }
-                wgl_set_pixel_format_count = if ($null -eq $record.wgl_set_pixel_format_count) { $null } else { [uint64] $record.wgl_set_pixel_format_count }
                 wgl_total_format_count = if ($null -eq $record.wgl_total_format_count) { $null } else { [uint64] $record.wgl_total_format_count }
                 wgl_candidate_count = if ($null -eq $record.wgl_candidate_count) { $null } else { [uint64] $record.wgl_candidate_count }
-                render_target_strategy = if ($null -eq $record.render_target_strategy) { $null } else { [string] $record.render_target_strategy }
-                default_framebuffer_srgb = if ($null -eq $record.default_framebuffer_srgb) { $null } else { [bool] $record.default_framebuffer_srgb }
-                render_target_linear_blending = if ($null -eq $record.render_target_linear_blending) { $null } else { [bool] $record.render_target_linear_blending }
             })
         }
     }
@@ -2024,7 +1967,6 @@ if ($script:adapter.Installed) {
                             baseline_surface_ids = [uint64[]] $baselineSurfaceIds
                             survivor_surface_ids_after_each_close = $survivorSurfaceIdsAfterEachClose.ToArray()
                             survivor_surface_ids_after_destroy_settle = $survivorSurfaceIdsAfterDestroySettle
-                            target_strategy_override = 'none'
                             created_surface_count = $createdSurfaceIds.Count
                             memory_stage_samples = $memoryStageSamples
                         })
@@ -2041,15 +1983,12 @@ if ($script:adapter.Installed) {
                 shell_child_memory_included = $false
                 additional_panes = $additionalPanes
                 memory_cycle_count = $MemoryCycles
-                memory_target_strategy_override = 'none'
                 memory_diagnostic_only = [bool] ($MemoryCycles -ne 1)
                 memory_trace_token_scope = 'surface_begin_incarnation'
                 private_memory_scope = 'main process PrivateMemorySize64; includes terminal, renderer, native heap, and WGL/OpenGL driver private commit'
                 graphics_context_model = 'each Surface selection creates and deletes one short-lived display-local WGL bootstrap HGLRC before creating its persistent Surface HGLRC; PrivateMemorySize64 may include retained driver allocation/cache effects from both and cannot apportion the combined pane delta among components'
                 memory_stage_observer_included = $true
-                memory_stage_observation_scope = 'in-process K32GetProcessMemoryInfo PrivateUsage sampled before each stage trace write; trace path allocation and file serialization observer are included only in memory attribution runs; repeated cycles share one process and therefore include prior-cycle allocator and driver cache state; forced-offscreen changes only renderer target strategy after the selected WGL pixel format is fixed'
-                c_heap_minimize_scope = 'diagnostic-only UCRT _heapmin request after synchronous pane destruction; never used by product gates or normal runtime'
-                swap_suppression_scope = 'diagnostic-only return at the Surface SwapBuffers seam after renderer draw/resource work; WGL context, target selection, and teardown remain active; never used by product gates or normal runtime'
+                memory_stage_observation_scope = 'in-process K32GetProcessMemoryInfo PrivateUsage sampled before each stage trace write; trace path allocation and file serialization observer are included only in memory attribution runs; repeated cycles share one process and therefore include prior-cycle allocator and driver cache state'
                 pane_close_action = 'targeted close_surface synchronously clears structural history and destroys each native Surface; the later sample is a post-destroy allocator/driver settle observation'
                 destroy_settle_seconds = $destroySettleSeconds
                 pane_lifecycle_samples = $paneLifecycleSamples.ToArray()
@@ -2061,7 +2000,6 @@ if ($script:adapter.Installed) {
                 shell_child_memory_included = $false
                 additional_panes = $additionalPanes
                 memory_cycle_count = $MemoryCycles
-                memory_target_strategy_override = 'none'
                 memory_diagnostic_only = [bool] ($MemoryCycles -ne 1)
                 memory_trace_token_scope = 'surface_begin_incarnation'
                 error = $_.Exception.Message
@@ -2238,70 +2176,81 @@ if ($script:adapter.Installed) {
 $thresholdBreaches = [Collections.Generic.List[string]]::new()
 $gateContractFailures = [Collections.Generic.List[string]]::new()
 $activeThresholdCount = 0
-if ($Gate) {
-    if (-not (Test-Path -LiteralPath $ThresholdPath -PathType Leaf)) { throw "Threshold file not found: $ThresholdPath" }
-    $parsedThresholds = Get-Content -LiteralPath $ThresholdPath -Raw | ConvertFrom-Json
-    $thresholds = @($parsedThresholds | ForEach-Object { $_ })
-    $thresholdByMetric = @{}
-    foreach ($threshold in $thresholds) {
-        foreach ($requiredProperty in @('metric', 'direction', 'value', 'active', 'provisional', 'source')) {
-            if ($null -eq $threshold.PSObject.Properties[$requiredProperty]) {
-                throw "Threshold entry is missing required property '$requiredProperty': $($threshold | ConvertTo-Json -Compress)"
-            }
-        }
-        $thresholdMetric = [string] $threshold.metric
-        if ([string]::IsNullOrWhiteSpace($thresholdMetric)) { throw 'Threshold metric must be nonempty' }
-        if ($thresholdByMetric.ContainsKey($thresholdMetric)) { throw "Threshold metric '$thresholdMetric' is duplicated" }
-        if ([string] $threshold.direction -notmatch '^(min|minimum|at-least|max|maximum|at-most)$') {
-            throw "Unknown threshold direction '$($threshold.direction)' for metric $thresholdMetric"
-        }
-        if ($threshold.active -isnot [System.Boolean]) {
-            throw "Threshold active for metric '$thresholdMetric' must be a JSON boolean"
-        }
-        if ($threshold.provisional -isnot [System.Boolean]) {
-            throw "Threshold provisional for metric '$thresholdMetric' must be a JSON boolean"
-        }
-        if ($threshold.active -and $threshold.provisional) {
-            throw "Threshold metric '$thresholdMetric' cannot be both active and provisional"
-        }
-        $thresholdValue = [double] $threshold.value
-        if ([double]::IsNaN($thresholdValue) -or [double]::IsInfinity($thresholdValue)) { throw "Threshold value for metric '$thresholdMetric' must be finite" }
-        if ([string]::IsNullOrWhiteSpace([string] $threshold.source)) { throw "Threshold source for metric '$thresholdMetric' must be nonempty" }
-        $thresholdByMetric[$thresholdMetric] = $threshold
-    }
-    foreach ($record in $metrics) {
-        if ($record.status -ne 'pass' -and $record.status -ne 'fail') { continue }
-        if ($null -eq $record.median) { continue }
-        if (-not $thresholdByMetric.ContainsKey([string] $record.metric)) {
-            throw "Threshold file has no entry for measured metric '$($record.metric)'"
-        }
-        $threshold = $thresholdByMetric[[string] $record.metric]
-        $measured = [double] $record.median
-        $value = [double] $threshold.value
-        $active = $threshold.active
-        if ($active) { $activeThresholdCount++ }
-        $passed = if ($active) {
-            switch -Regex ([string] $threshold.direction) {
-                '^(min|minimum|at-least)$' { $measured -ge $value; break }
-                '^(max|maximum|at-most)$' { $measured -le $value; break }
-                default { throw "Unknown threshold direction '$($threshold.direction)' for metric $($threshold.metric)" }
-            }
-        }
-        else { $null }
-        $record | Add-Member -NotePropertyName threshold -NotePropertyValue ([pscustomobject][ordered]@{
-            direction = [string] $threshold.direction
-            value = $value
-            active = $active
-            provisional = $threshold.provisional
-            source = [string] $threshold.source
-            passed = $passed
-        })
-        if ($active -and -not $passed) {
-            $record.status = 'fail'
-            $thresholdBreaches.Add("$($record.metric) median $measured $($record.unit) breached $($threshold.direction) threshold $value $($record.unit)")
+# Threshold provenance is part of the evidence contract for every measured
+# metric, not just for gated runs: the methodology doc directs baseline
+# collection to run without -Gate and still promises that the evidence
+# records threshold provenance and that inactive thresholds appear with
+# `passed: null`. So thresholds are always loaded, validated and attached;
+# -Gate only decides whether a breach turns into a failing status and a
+# nonzero exit.
+if (-not (Test-Path -LiteralPath $ThresholdPath -PathType Leaf)) { throw "Threshold file not found: $ThresholdPath" }
+$parsedThresholds = Get-Content -LiteralPath $ThresholdPath -Raw | ConvertFrom-Json
+$thresholds = @($parsedThresholds | ForEach-Object { $_ })
+$thresholdByMetric = @{}
+foreach ($threshold in $thresholds) {
+    foreach ($requiredProperty in @('metric', 'direction', 'value', 'active', 'provisional', 'source')) {
+        if ($null -eq $threshold.PSObject.Properties[$requiredProperty]) {
+            throw "Threshold entry is missing required property '$requiredProperty': $($threshold | ConvertTo-Json -Compress)"
         }
     }
+    $thresholdMetric = [string] $threshold.metric
+    if ([string]::IsNullOrWhiteSpace($thresholdMetric)) { throw 'Threshold metric must be nonempty' }
+    if ($thresholdByMetric.ContainsKey($thresholdMetric)) { throw "Threshold metric '$thresholdMetric' is duplicated" }
+    if ([string] $threshold.direction -notmatch '^(min|minimum|at-least|max|maximum|at-most)$') {
+        throw "Unknown threshold direction '$($threshold.direction)' for metric $thresholdMetric"
+    }
+    if ($threshold.active -isnot [System.Boolean]) {
+        throw "Threshold active for metric '$thresholdMetric' must be a JSON boolean"
+    }
+    if ($threshold.provisional -isnot [System.Boolean]) {
+        throw "Threshold provisional for metric '$thresholdMetric' must be a JSON boolean"
+    }
+    if ($threshold.active -and $threshold.provisional) {
+        throw "Threshold metric '$thresholdMetric' cannot be both active and provisional"
+    }
+    $thresholdValue = [double] $threshold.value
+    if ([double]::IsNaN($thresholdValue) -or [double]::IsInfinity($thresholdValue)) { throw "Threshold value for metric '$thresholdMetric' must be finite" }
+    if ([string]::IsNullOrWhiteSpace([string] $threshold.source)) { throw "Threshold source for metric '$thresholdMetric' must be nonempty" }
+    $thresholdByMetric[$thresholdMetric] = $threshold
+}
+foreach ($record in $metrics) {
+    if ($record.status -ne 'pass' -and $record.status -ne 'fail') { continue }
+    if ($null -eq $record.median) { continue }
+    if (-not $thresholdByMetric.ContainsKey([string] $record.metric)) {
+        throw "Threshold file has no entry for measured metric '$($record.metric)'"
+    }
+    $threshold = $thresholdByMetric[[string] $record.metric]
+    $measured = [double] $record.median
+    $value = [double] $threshold.value
+    $active = $threshold.active
+    if ($active) { $activeThresholdCount++ }
+    # `passed` is the comparison result, independent of -Gate. An inactive
+    # threshold is always `null`, so it can never read as a silent pass or
+    # a silent failure.
+    $passed = if ($active) {
+        switch -Regex ([string] $threshold.direction) {
+            '^(min|minimum|at-least)$' { $measured -ge $value; break }
+            '^(max|maximum|at-most)$' { $measured -le $value; break }
+            default { throw "Unknown threshold direction '$($threshold.direction)' for metric $($threshold.metric)" }
+        }
+    }
+    else { $null }
+    $record | Add-Member -NotePropertyName threshold -NotePropertyValue ([pscustomobject][ordered]@{
+        direction = [string] $threshold.direction
+        value = $value
+        active = $active
+        provisional = $threshold.provisional
+        source = [string] $threshold.source
+        passed = $passed
+    })
+    # Enforcement is the one thing -Gate owns.
+    if ($Gate -and $active -and -not $passed) {
+        $record.status = 'fail'
+        $thresholdBreaches.Add("$($record.metric) median $measured $($record.unit) breached $($threshold.direction) threshold $value $($record.unit)")
+    }
+}
 
+if ($Gate) {
     if (-not $script:adapter.Installed) {
         $gateContractFailures.Add("target '$Target' is not installed")
     }
