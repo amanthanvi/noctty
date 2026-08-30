@@ -33,6 +33,8 @@ pub const RequestKind = enum(u8) {
     new_window = 1,
     list_windows = 2,
     perform_action = 3,
+    new_tab = 4,
+    new_split = 5,
     focus = 6,
     send_text = 7,
     launch_layout = 8,
@@ -49,6 +51,24 @@ pub const SendTextPayload = struct {
 
     pub fn deinit(self: *@This(), alloc: Allocator) void {
         alloc.free(self.text);
+        self.* = undefined;
+    }
+};
+
+pub const NewTabPayload = struct {
+    target: apprt.ipc.AutomationTarget,
+    working_directory: ?[]u8,
+    pub fn deinit(self: *@This(), alloc: Allocator) void {
+        if (self.working_directory) |value| alloc.free(value);
+        self.* = undefined;
+    }
+};
+pub const NewSplitPayload = struct {
+    target: apprt.ipc.AutomationTarget,
+    direction: apprt.ipc.AutomationSplitDirection,
+    working_directory: ?[]u8,
+    pub fn deinit(self: *@This(), alloc: Allocator) void {
+        if (self.working_directory) |value| alloc.free(value);
         self.* = undefined;
     }
 };
@@ -90,6 +110,40 @@ fn decodeAutomationTarget(src: *const [9]u8) !apprt.ipc.AutomationTarget {
             error.InvalidAutomationTarget,
         else => error.InvalidAutomationTarget,
     };
+}
+
+fn appendWorkingDirectory(dst: *std.ArrayList(u8), alloc: Allocator, value: ?[]const u8) !void {
+    const cwd = value orelse return appendU32(dst, alloc, 0);
+    if (cwd.len == 0 or cwd.len > max_new_window_arg_len or
+        !std.unicode.utf8ValidateSlice(cwd) or std.mem.indexOfScalar(u8, cwd, 0) != null)
+    {
+        return error.InvalidAutomationWorkingDirectory;
+    }
+    try appendU32(dst, alloc, @intCast(cwd.len));
+    try dst.appendSlice(alloc, cwd);
+}
+
+fn decodeWorkingDirectory(alloc: Allocator, pipe: windows.HANDLE, deadline_ms: u64) !?[]u8 {
+    var len_buf: [4]u8 = undefined;
+    try readExactUntil(pipe, &len_buf, deadline_ms);
+    const len = readU32(&len_buf);
+    if (len == 0) return null;
+    if (len > max_new_window_arg_len) return error.InvalidAutomationWorkingDirectory;
+    const cwd = try alloc.alloc(u8, len);
+    errdefer alloc.free(cwd);
+    try readExactUntil(pipe, cwd, deadline_ms);
+    if (!std.unicode.utf8ValidateSlice(cwd) or std.mem.indexOfScalar(u8, cwd, 0) != null) {
+        return error.InvalidAutomationWorkingDirectory;
+    }
+    return cwd;
+}
+
+fn validateLaunchTarget(target: apprt.ipc.AutomationTarget, window: bool) !void {
+    switch (target) {
+        .focused => {},
+        .surface_id => if (window) return error.InvalidAutomationTarget,
+        .window_id => if (!window) return error.InvalidAutomationTarget,
+    }
 }
 
 fn readU32(src: []const u8) u32 {
@@ -190,6 +244,43 @@ pub fn encodeLaunchLayoutRequest(
     try appendU32(&encoded, alloc, @intCast(name.len));
     try encoded.appendSlice(alloc, name);
     return try encoded.toOwnedSlice(alloc);
+}
+
+fn encodeLaunchRequest(
+    alloc: Allocator,
+    kind: RequestKind,
+    target: apprt.ipc.AutomationTarget,
+    direction: ?apprt.ipc.AutomationSplitDirection,
+    working_directory: ?[]const u8,
+) ![]u8 {
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(alloc);
+    try appendU32(&encoded, alloc, wire_version);
+    try encoded.append(alloc, @intFromEnum(kind));
+    try appendAutomationTarget(&encoded, alloc, target);
+    if (direction) |value| try encoded.append(alloc, switch (value) {
+        .left => 1,
+        .right => 2,
+        .up => 3,
+        .down => 4,
+    });
+    try appendWorkingDirectory(&encoded, alloc, working_directory);
+    return try encoded.toOwnedSlice(alloc);
+}
+
+pub fn encodeNewTabRequest(alloc: Allocator, target: apprt.ipc.AutomationTarget, cwd: ?[]const u8) ![]u8 {
+    try validateLaunchTarget(target, true);
+    return encodeLaunchRequest(alloc, .new_tab, target, null, cwd);
+}
+
+pub fn encodeNewSplitRequest(
+    alloc: Allocator,
+    target: apprt.ipc.AutomationTarget,
+    direction: apprt.ipc.AutomationSplitDirection,
+    cwd: ?[]const u8,
+) ![]u8 {
+    try validateLaunchTarget(target, false);
+    return encodeLaunchRequest(alloc, .new_split, target, direction, cwd);
 }
 
 pub fn encodeFocusRequest(
@@ -327,6 +418,32 @@ fn validateLaunchLayoutName(name: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(name)) return error.InvalidAutomationAction;
     if (std.mem.indexOfScalar(u8, name, 0) != null) return error.InvalidAutomationAction;
     win32_layouts.validateName(name) catch return error.InvalidAutomationAction;
+}
+
+pub fn decodeNewTabPayload(alloc: Allocator, pipe: windows.HANDLE) !NewTabPayload {
+    const deadline_ms = deadline();
+    var encoded: [9]u8 = undefined;
+    try readExactUntil(pipe, &encoded, deadline_ms);
+    const target = try decodeAutomationTarget(&encoded);
+    try validateLaunchTarget(target, true);
+    return .{ .target = target, .working_directory = try decodeWorkingDirectory(alloc, pipe, deadline_ms) };
+}
+
+pub fn decodeNewSplitPayload(alloc: Allocator, pipe: windows.HANDLE) !NewSplitPayload {
+    const deadline_ms = deadline();
+    var encoded: [10]u8 = undefined;
+    try readExactUntil(pipe, &encoded, deadline_ms);
+    const target = try decodeAutomationTarget(encoded[0..9]);
+    try validateLaunchTarget(target, false);
+    const direction: apprt.ipc.AutomationSplitDirection = switch (encoded[9]) {
+        1 => .left,
+        2 => .right,
+        3 => .up,
+        4 => .down,
+        else => return error.InvalidAutomationDirection,
+    };
+    const cwd = try decodeWorkingDirectory(alloc, pipe, deadline_ms);
+    return .{ .target = target, .direction = direction, .working_directory = cwd };
 }
 
 pub fn decodeFocusPayload(pipe: windows.HANDLE) !apprt.ipc.AutomationTarget {
@@ -528,15 +645,17 @@ fn automationTargetBytes(tag: u8, value: u64) [9]u8 {
     return encoded;
 }
 
-fn writeAutomationSendTextPayload(
+fn writeAutomationSizedPayload(
     file: *std.fs.File,
     target: [9]u8,
+    extra: []const u8,
     declared_len: u32,
     body: []const u8,
 ) !void {
     try file.setEndPos(0);
     try file.seekTo(0);
     try file.writeAll(&target);
+    try file.writeAll(extra);
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, declared_len, .little);
     try file.writeAll(&len_buf);
@@ -544,187 +663,73 @@ fn writeAutomationSendTextPayload(
     try file.seekTo(0);
 }
 
-test "win32 automation wire and status numeric pins" {
-    try std.testing.expectEqual(@as(u32, 1), wire_version);
-    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(RequestKind.new_window));
-    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(RequestKind.list_windows));
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(RequestKind.perform_action));
-    try std.testing.expectEqual(@as(u8, 6), @intFromEnum(RequestKind.focus));
-    try std.testing.expectEqual(@as(u8, 7), @intFromEnum(RequestKind.send_text));
-    try std.testing.expectEqual(@as(u8, 0), ack_success);
-    try std.testing.expectEqual(@as(u8, 1), ack_failure);
-    try std.testing.expectEqual(@as(u8, 2), ack_invalid_automation_action);
-    try std.testing.expectEqual(@as(u8, 3), ack_unsafe_automation_action);
-    try std.testing.expectEqual(@as(u8, 4), ack_invalid_automation_target);
-    try std.testing.expectEqual(@as(u8, 5), ack_no_automation_target);
-    try std.testing.expectEqual(@as(u8, 6), ack_automation_target_not_found);
-    try std.testing.expectEqual(@as(u8, 7), ack_automation_policy_refused);
+fn writeAutomationBytes(file: *std.fs.File, bytes: []const u8) !void {
+    try file.setEndPos(0);
+    try file.seekTo(0);
+    try file.writeAll(bytes);
+    try file.seekTo(0);
 }
 
-test "win32 automation focus request round trip" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "win32 automation numeric pins" {
+    try std.testing.expectEqual(@as(u32, 1), wire_version);
+    for ([_]RequestKind{ .new_window, .list_windows, .perform_action, .new_tab, .new_split, .focus, .send_text }, 1..) |kind, value| {
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(kind));
+    }
+    const acks = [_]u8{ ack_success, ack_failure, ack_invalid_automation_action, ack_unsafe_automation_action, ack_invalid_automation_target, ack_no_automation_target, ack_automation_target_not_found, ack_automation_policy_refused };
+    for (acks, 0..) |ack, value| try std.testing.expectEqual(@as(u8, @intCast(value)), ack);
+    for ([_]apprt.ipc.AutomationSplitDirection{ .left, .right, .up, .down }, 1..) |direction, value| {
+        try std.testing.expectEqual(@as(u8, @intCast(value)), @intFromEnum(direction));
+        const request = try encodeNewSplitRequest(std.testing.allocator, .focused, direction, null);
+        defer std.testing.allocator.free(request);
+        try std.testing.expectEqual(@as(u8, @intCast(value)), request[14]);
+    }
+}
 
+test "win32 automation request and ack round trips" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-focus.bin", .{ .read = true });
+    var file = try tmp.dir.createFile("automation-roundtrip.bin", .{ .read = true });
     defer file.close();
 
-    for ([_]apprt.ipc.AutomationTarget{
-        .{ .surface_id = 42 },
-        .{ .window_id = 17 },
-    }) |target| {
+    for ([_]apprt.ipc.AutomationTarget{ .{ .surface_id = 42 }, .{ .window_id = 17 } }) |target| {
         const request = try encodeFocusRequest(std.testing.allocator, target);
         defer std.testing.allocator.free(request);
-        try file.setEndPos(0);
-        try file.seekTo(0);
-        try file.writeAll(request);
-        try file.seekTo(0);
+        try writeAutomationBytes(&file, request);
         try std.testing.expectEqual(RequestKind.focus, try decodeRequestKind(file.handle));
         try std.testing.expectEqual(target, try decodeFocusPayload(file.handle));
     }
-}
 
-test "win32 automation send text request round trip" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const target: apprt.ipc.AutomationTarget = .{ .surface_id = 0x1234 };
     const text = "printable £ ✓ ; | $(allowed) https://example.com mixed";
-    const request = try encodeSendTextRequest(std.testing.allocator, target, text);
-    defer std.testing.allocator.free(request);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-send-text.bin", .{ .read = true });
-    defer file.close();
-    try file.writeAll(request);
-    try file.seekTo(0);
-
+    const send = try encodeSendTextRequest(std.testing.allocator, .{ .surface_id = 0x1234 }, text);
+    defer std.testing.allocator.free(send);
+    try writeAutomationBytes(&file, send);
     try std.testing.expectEqual(RequestKind.send_text, try decodeRequestKind(file.handle));
-    var payload = try decodeSendTextPayload(std.testing.allocator, file.handle);
-    defer payload.deinit(std.testing.allocator);
-    try std.testing.expectEqual(target, payload.target);
-    try std.testing.expectEqualStrings(text, payload.text);
-}
+    var sent = try decodeSendTextPayload(std.testing.allocator, file.handle);
+    defer sent.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(text, sent.text);
 
-test "win32 automation target tags reject invalid forms" {
-    try std.testing.expectEqual(
-        apprt.ipc.AutomationTarget.focused,
-        try decodeAutomationTarget(&automationTargetBytes(0, 0)),
-    );
-    try std.testing.expectEqual(
-        apprt.ipc.AutomationTarget{ .surface_id = 42 },
-        try decodeAutomationTarget(&automationTargetBytes(1, 42)),
-    );
-    try std.testing.expectEqual(
-        apprt.ipc.AutomationTarget{ .window_id = 17 },
-        try decodeAutomationTarget(&automationTargetBytes(2, 17)),
-    );
+    const cwd = try std.testing.allocator.alloc(u8, max_new_window_arg_len);
+    defer std.testing.allocator.free(cwd);
+    @memset(cwd, 'x');
+    const tab = try encodeNewTabRequest(std.testing.allocator, .{ .window_id = std.math.maxInt(u32) }, cwd);
+    defer std.testing.allocator.free(tab);
+    try writeAutomationBytes(&file, tab);
+    try std.testing.expectEqual(RequestKind.new_tab, try decodeRequestKind(file.handle));
+    var tab_payload = try decodeNewTabPayload(std.testing.allocator, file.handle);
+    defer tab_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .window_id = std.math.maxInt(u32) }, tab_payload.target);
+    try std.testing.expectEqual(@as(usize, max_new_window_arg_len), tab_payload.working_directory.?.len);
 
-    for ([_][9]u8{
-        automationTargetBytes(0, 1),
-        automationTargetBytes(1, 0),
-        automationTargetBytes(2, 0),
-        automationTargetBytes(2, @as(u64, std.math.maxInt(u32)) + 1),
-        automationTargetBytes(3, 1),
-    }) |encoded| {
-        try std.testing.expectError(error.InvalidAutomationTarget, decodeAutomationTarget(&encoded));
-    }
-
-    try std.testing.expectError(
-        error.InvalidAutomationTarget,
-        encodeFocusRequest(std.testing.allocator, .{ .surface_id = 0 }),
-    );
-    try std.testing.expectError(
-        error.InvalidAutomationTarget,
-        encodeFocusRequest(std.testing.allocator, .{ .window_id = 0 }),
-    );
-}
-
-test "win32 automation send text codec enforces text contract" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    const target: apprt.ipc.AutomationTarget = .{ .surface_id = 42 };
-    const max_text = try std.testing.allocator.alloc(u8, max_action_text_len);
-    defer std.testing.allocator.free(max_text);
-    @memset(max_text, 'x');
-    const max_request = try encodeSendTextRequest(std.testing.allocator, target, max_text);
-    defer std.testing.allocator.free(max_request);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-send-text-contract.bin", .{ .read = true });
-    defer file.close();
-    try file.writeAll(max_request);
-    try file.seekTo(0);
-    try std.testing.expectEqual(RequestKind.send_text, try decodeRequestKind(file.handle));
-    var max_payload = try decodeSendTextPayload(std.testing.allocator, file.handle);
-    defer max_payload.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, max_action_text_len), max_payload.text.len);
-
-    const over_text = try std.testing.allocator.alloc(u8, max_action_text_len + 1);
-    defer std.testing.allocator.free(over_text);
-    @memset(over_text, 'x');
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        encodeSendTextRequest(std.testing.allocator, target, ""),
-    );
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        encodeSendTextRequest(std.testing.allocator, target, over_text),
-    );
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        encodeSendTextRequest(std.testing.allocator, target, &.{0xFF}),
-    );
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        encodeSendTextRequest(std.testing.allocator, target, "a\x00b"),
-    );
-
-    const raw_target = automationTargetBytes(1, 42);
-    try writeAutomationSendTextPayload(&file, raw_target, 0, "");
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        decodeSendTextPayload(std.testing.allocator, file.handle),
-    );
-    try writeAutomationSendTextPayload(&file, raw_target, max_action_text_len + 1, "");
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        decodeSendTextPayload(std.testing.allocator, file.handle),
-    );
-    try writeAutomationSendTextPayload(&file, raw_target, 1, &.{0xFF});
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        decodeSendTextPayload(std.testing.allocator, file.handle),
-    );
-    try writeAutomationSendTextPayload(&file, raw_target, 3, "a\x00b");
-    try std.testing.expectError(
-        error.InvalidAutomationText,
-        decodeSendTextPayload(std.testing.allocator, file.handle),
-    );
-}
-
-test "win32 automation send text partial EOF frees allocation" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-send-text-eof.bin", .{ .read = true });
-    defer file.close();
-    try writeAutomationSendTextPayload(&file, automationTargetBytes(1, 42), 3, "x");
-    try std.testing.expectError(
-        error.EndOfStream,
-        decodeSendTextPayload(std.testing.allocator, file.handle),
-    );
-}
-
-test "win32 automation ack maps target and policy statuses" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var file = try tmp.dir.createFile("automation-ack.bin", .{ .read = true });
-    defer file.close();
+    const split = try encodeNewSplitRequest(std.testing.allocator, .{ .surface_id = 42 }, .down, "C:\\x");
+    defer std.testing.allocator.free(split);
+    try writeAutomationBytes(&file, split);
+    try std.testing.expectEqual(RequestKind.new_split, try decodeRequestKind(file.handle));
+    var split_payload = try decodeNewSplitPayload(std.testing.allocator, file.handle);
+    defer split_payload.deinit(std.testing.allocator);
+    try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .surface_id = 42 }, split_payload.target);
+    try std.testing.expectEqual(apprt.ipc.AutomationSplitDirection.down, split_payload.direction);
+    try std.testing.expectEqualStrings("C:\\x", split_payload.working_directory.?);
 
     for ([_]struct { status: u8, expected: anyerror }{
         .{ .status = ack_automation_target_not_found, .expected = error.AutomationTargetNotFound },
@@ -735,6 +740,69 @@ test "win32 automation ack maps target and policy statuses" {
         try writeAckStatus(file.handle, case.status);
         try file.seekTo(0);
         try std.testing.expectError(case.expected, readAck(file.handle));
+    }
+}
+
+test "win32 automation malformed codecs free allocations" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectEqual(apprt.ipc.AutomationTarget.focused, try decodeAutomationTarget(&automationTargetBytes(0, 0)));
+    try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .surface_id = 42 }, try decodeAutomationTarget(&automationTargetBytes(1, 42)));
+    try std.testing.expectEqual(apprt.ipc.AutomationTarget{ .window_id = 17 }, try decodeAutomationTarget(&automationTargetBytes(2, 17)));
+    for ([_][9]u8{ automationTargetBytes(0, 1), automationTargetBytes(1, 0), automationTargetBytes(2, 0), automationTargetBytes(2, @as(u64, std.math.maxInt(u32)) + 1), automationTargetBytes(3, 1) }) |encoded| {
+        try std.testing.expectError(error.InvalidAutomationTarget, decodeAutomationTarget(&encoded));
+    }
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .surface_id = 0 }));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeFocusRequest(alloc, .{ .window_id = 0 }));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewTabRequest(alloc, .{ .surface_id = 1 }, null));
+    try std.testing.expectError(error.InvalidAutomationTarget, encodeNewSplitRequest(alloc, .{ .window_id = 1 }, .right, null));
+    for ([_][]const u8{ "", &.{0xFF}, "x\x00y" }) |value| {
+        try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, value));
+        try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, value));
+    }
+    const oversized = try alloc.alloc(u8, max_new_window_arg_len + 1);
+    defer alloc.free(oversized);
+    @memset(oversized, 'x');
+    try std.testing.expectError(error.InvalidAutomationText, encodeSendTextRequest(alloc, .{ .surface_id = 1 }, oversized[0 .. max_action_text_len + 1]));
+    try std.testing.expectError(error.InvalidAutomationWorkingDirectory, encodeNewTabRequest(alloc, .focused, oversized));
+
+    const max_send = try encodeSendTextRequest(alloc, .{ .surface_id = 42 }, oversized[0..max_action_text_len]);
+    defer alloc.free(max_send);
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile("automation-invalid.bin", .{ .read = true });
+    defer file.close();
+    try writeAutomationBytes(&file, max_send);
+    _ = try decodeRequestKind(file.handle);
+    var max_payload = try decodeSendTextPayload(alloc, file.handle);
+    defer max_payload.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, max_action_text_len), max_payload.text.len);
+
+    const surface = automationTargetBytes(1, 42);
+    const window = automationTargetBytes(2, 42);
+    const bad_cases = [_]struct { len: u32, body: []const u8, expected: anyerror }{
+        .{ .len = 0, .body = "", .expected = error.InvalidAutomationText },
+        .{ .len = max_action_text_len + 1, .body = "", .expected = error.InvalidAutomationText },
+        .{ .len = 1, .body = &.{0xFF}, .expected = error.InvalidAutomationText },
+        .{ .len = 3, .body = "x\x00y", .expected = error.InvalidAutomationText },
+        .{ .len = 3, .body = "x", .expected = error.EndOfStream },
+    };
+    for (bad_cases) |case| {
+        try writeAutomationSizedPayload(&file, surface, "", case.len, case.body);
+        try std.testing.expectError(case.expected, decodeSendTextPayload(alloc, file.handle));
+    }
+    try writeAutomationSizedPayload(&file, surface, "", 0, "");
+    try std.testing.expectError(error.InvalidAutomationTarget, decodeNewTabPayload(alloc, file.handle));
+    try writeAutomationSizedPayload(&file, surface, &.{0}, 0, "");
+    try std.testing.expectError(error.InvalidAutomationDirection, decodeNewSplitPayload(alloc, file.handle));
+    for ([_]struct { len: u32, body: []const u8, expected: anyerror }{
+        .{ .len = 1, .body = &.{0xFF}, .expected = error.InvalidAutomationWorkingDirectory },
+        .{ .len = 3, .body = "x\x00y", .expected = error.InvalidAutomationWorkingDirectory },
+        .{ .len = max_new_window_arg_len + 1, .body = "", .expected = error.InvalidAutomationWorkingDirectory },
+        .{ .len = 3, .body = "x", .expected = error.EndOfStream },
+    }) |case| {
+        try writeAutomationSizedPayload(&file, window, "", case.len, case.body);
+        try std.testing.expectError(case.expected, decodeNewTabPayload(alloc, file.handle));
     }
 }
 

@@ -147,7 +147,23 @@ pub const AutomationTarget = union(enum) {
     window_id: u32,
 };
 
+pub const AutomationSplitDirection = enum(u8) {
+    left = 1,
+    right = 2,
+    up = 3,
+    down = 4,
+};
+
 pub const AutomationCommand = union(enum) {
+    new_tab: struct {
+        target: AutomationTarget,
+        working_directory: ?[]const u8,
+    },
+    new_split: struct {
+        target: AutomationTarget,
+        direction: AutomationSplitDirection,
+        working_directory: ?[]const u8,
+    },
     focus: AutomationTarget,
     send_text: struct {
         target: AutomationTarget,

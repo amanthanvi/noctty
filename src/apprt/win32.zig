@@ -717,6 +717,7 @@ fn shouldTreatWslSplitPwdAsStartupFallback(
 }
 
 fn applySplitWorkingDirectoryFromSource(
+    app: *App,
     config: *configpkg.Config,
     source: *Surface,
     startup_cwd: ?[]const u8,
@@ -724,7 +725,10 @@ fn applySplitWorkingDirectoryFromSource(
     if (!config.@"split-inherit-working-directory") return false;
 
     const alloc = config._arena.?.allocator();
-    const live_pwd = source.core().pwd(alloc) catch |err| blk: {
+    const live_pwd = (if (app.test_automation_pwd) |query|
+        query(alloc, source)
+    else
+        source.core().pwd(alloc)) catch |err| blk: {
         log.warn("win32 split cwd inheritance could not query live cwd err={}", .{err});
         break :blk null;
     };
@@ -1119,6 +1123,16 @@ fn sendPerformActionIpc(
     action_text: []const u8,
     response_timeout_ms: u64,
 ) !bool {
+    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendAutomationAckRequest(
+    pipe_name: [:0]const u16,
+    request: []const u8,
+    response_timeout_ms: u64,
+) !bool {
     const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
         // Both mean "no instance we can reach"; see `connectToIpcPipe`.
         error.FileNotFound, error.PipeUnreachable => return false,
@@ -1126,12 +1140,8 @@ fn sendPerformActionIpc(
         else => return err,
     };
     defer _ = windows.CloseHandle(pipe);
-
-    const request = try win32_ipc.encodePerformActionRequest(alloc, target, action_text);
-    defer alloc.free(request);
-
     try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+    return win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
 }
 
 fn sendFocusIpc(
@@ -1140,16 +1150,34 @@ fn sendFocusIpc(
     target: apprt.ipc.AutomationTarget,
     response_timeout_ms: u64,
 ) !bool {
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    defer _ = windows.CloseHandle(pipe);
-
     const request = try win32_ipc.encodeFocusRequest(alloc, target);
     defer alloc.free(request);
-    try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewTabIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewTabRequest(alloc, target, working_directory);
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
+}
+
+fn sendNewSplitIpc(
+    alloc: Allocator,
+    pipe_name: [:0]const u16,
+    target: apprt.ipc.AutomationTarget,
+    direction: apprt.ipc.AutomationSplitDirection,
+    working_directory: ?[]const u8,
+    response_timeout_ms: u64,
+) !bool {
+    const request = try win32_ipc.encodeNewSplitRequest(alloc, target, direction, working_directory);
+    defer alloc.free(request);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
 
 fn sendAutomationTextIpc(
@@ -1159,16 +1187,9 @@ fn sendAutomationTextIpc(
     value: []const u8,
     response_timeout_ms: u64,
 ) !bool {
-    const pipe = connectToIpcPipe(pipe_name) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    defer _ = windows.CloseHandle(pipe);
-
     const request = try win32_ipc.encodeSendTextRequest(alloc, target, value);
     defer alloc.free(request);
-    try win32_ipc.writeAll(pipe, request);
-    return try win32_ipc.readAckWithTimeout(pipe, response_timeout_ms);
+    return sendAutomationAckRequest(pipe_name, request, response_timeout_ms);
 }
 
 fn automationTextAllowed(text: []const u8) bool {
@@ -1511,6 +1532,45 @@ fn scanLaunchLayoutIpcArgument(
 ///
 /// This function does not log, so that it stays a pure predicate over argv
 /// and can be unit tested; every caller logs the rejection it handles.
+fn automationWorkingDirectoryValue(value: []const u8) []const u8 {
+    var result = std.mem.trim(u8, value, &std.ascii.whitespace);
+    if (result.len >= 2 and result[0] == '"' and result[result.len - 1] == '"') {
+        result = std.mem.trim(u8, result[1 .. result.len - 1], &std.ascii.whitespace);
+    }
+    return result;
+}
+
+/// Mirrors #185's `forwardedWorkingDirectoryAllowed` on the receiver.
+fn automationWorkingDirectoryAllowed(value: []const u8) bool {
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "home") or std.mem.eql(u8, path, "inherit") or
+        std.mem.eql(u8, path, "~")) return true;
+    if (path.len >= 2 and path[0] == '~' and (path[1] == '/' or path[1] == '\\')) return true;
+    return path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and
+        (path[2] == '/' or path[2] == '\\');
+}
+
+fn applyAutomationWorkingDirectory(config: *configpkg.Config, value: []const u8) !void {
+    if (!automationWorkingDirectoryAllowed(value)) return error.AutomationPolicyRefused;
+    const alloc = config._arena.?.allocator();
+    const path = automationWorkingDirectoryValue(value);
+    if (std.mem.eql(u8, path, "~")) {
+        config.@"working-directory" = .home;
+        return;
+    }
+    var working_directory: configpkg.WorkingDirectory = undefined;
+    if (path.len >= 2 and path[0] == '~' and path[1] == '\\') {
+        const normalized = try alloc.dupe(u8, path);
+        normalized[1] = '/';
+        working_directory = .{ .path = normalized };
+    } else {
+        working_directory = .home;
+        try working_directory.parseCLI(alloc, path);
+    }
+    try working_directory.finalize(alloc);
+    config.@"working-directory" = working_directory;
+}
+
 fn applyNewWindowArguments(
     alloc_gpa: Allocator,
     config: *configpkg.Config,
@@ -1943,6 +2003,14 @@ fn handleIpcClient(app: *App, pipe: windows.HANDLE) !win32_ipc.RequestKind {
             log.warn("failed to process win32 launch-layout IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
         },
+        .new_tab => handleNewTabIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation new-tab IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
+        .new_split => handleNewSplitIpcClient(app, pipe) catch |err| {
+            log.warn("failed to process win32 automation new-split IPC request err={}", .{err});
+            try win32_ipc.writeAck(pipe, false);
+        },
         .focus => handleFocusIpcClient(app, pipe) catch |err| {
             log.warn("failed to process win32 automation focus IPC request err={}", .{err});
             try win32_ipc.writeAck(pipe, false);
@@ -2060,11 +2128,7 @@ fn handleFocusIpcClient(app: *App, pipe: windows.HANDLE) !void {
         else => return err,
     };
     requestAutomationCommand(app, .{ .focus = target }) catch |err| {
-        const status: u8 = switch (err) {
-            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
-            error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
-            else => return err,
-        };
+        const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
     };
@@ -2088,12 +2152,61 @@ fn handleSendTextIpcClient(app: *App, pipe: windows.HANDLE) !void {
         .target = payload.target,
         .text = payload.text,
     } }) catch |err| {
-        const status: u8 = switch (err) {
-            error.InvalidAutomationTarget => win32_ipc.ack_invalid_automation_target,
-            error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
-            error.AutomationPolicyRefused => win32_ipc.ack_automation_policy_refused,
-            else => return err,
-        };
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn automationCommandAckStatus(err: anyerror) ?u8 {
+    return switch (err) {
+        error.InvalidAutomationTarget, error.InvalidAutomationDirection => win32_ipc.ack_invalid_automation_target,
+        error.AutomationTargetNotFound => win32_ipc.ack_automation_target_not_found,
+        error.AutomationPolicyRefused, error.InvalidAutomationWorkingDirectory => win32_ipc.ack_automation_policy_refused,
+        else => null,
+    };
+}
+
+fn handleNewTabIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    var payload = win32_ipc.decodeNewTabPayload(app.core_app.alloc, pipe) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(app, .{ .new_tab = .{
+        .target = payload.target,
+        .working_directory = payload.working_directory,
+    } }) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    try win32_ipc.writeAck(pipe, true);
+}
+
+fn handleNewSplitIpcClient(app: *App, pipe: windows.HANDLE) !void {
+    var payload = win32_ipc.decodeNewSplitPayload(app.core_app.alloc, pipe) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
+        try win32_ipc.writeAckStatus(pipe, status);
+        return;
+    };
+    defer payload.deinit(app.core_app.alloc);
+    if (payload.working_directory) |cwd| if (!automationWorkingDirectoryAllowed(cwd)) {
+        try win32_ipc.writeAckStatus(pipe, win32_ipc.ack_automation_policy_refused);
+        return;
+    };
+    requestAutomationCommand(app, .{ .new_split = .{
+        .target = payload.target,
+        .direction = payload.direction,
+        .working_directory = payload.working_directory,
+    } }) catch |err| {
+        const status = automationCommandAckStatus(err) orelse return err;
         try win32_ipc.writeAckStatus(pipe, status);
         return;
     };
@@ -4777,67 +4890,14 @@ pub const App = struct {
             },
 
             .new_tab => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .tab,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = if (source) |v| v.host_id else null,
-                    .tab_insert_index = if (source) |v| if (v.host) |host|
-                        windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
-                    else
-                        null else null,
-                    .clone_state_from = source,
-                });
-                if (source) |v| {
-                    v.invalidateRedoForUnsupportedTabStructuralAction();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewTab(source, null);
                 return true;
             },
 
             .new_split => {
-                var config = try apprt.surface.newConfig(
-                    self.core_app,
-                    &self.config,
-                    .split,
-                );
-                defer config.deinit();
                 const source = self.findSurfaceForTarget(target) orelse return false;
-                const tab_info = self.findTabForSurface(source) orelse return false;
-                const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
-                if (shouldInheritSplitWorkingDirectory(source.launched_ssh)) {
-                    _ = try applySplitWorkingDirectoryFromSource(&config, source, self.startup_cwd);
-                }
-                const split_direction = splitDirectionFromAction(value);
-                const surface = try self.createWindowSurface(&config, default_title, .{
-                    .host_id = source.host_id,
-                    .tab_id = tab_info.tab.id,
-                    .clone_state_from = source,
-                    .split_direction = split_direction,
-                });
-                if (inherited_profile_key) |key| {
-                    try appendOwnedString(self.core_app.alloc, &surface.launch_profile_key, key);
-                    surface.launched_ssh = source.launched_ssh;
-                }
-                tab_info.tab.clearRedoHistory();
-                if (tab_info.host.pushStructuralUndo(.{
-                    .kind = .split_create,
-                    .timestamp_ms = sys.GetTickCount64(),
-                    .sequence_id = self.nextUndoSequence(),
-                    .payload = .{ .split_create = .{
-                        .source_surface = source,
-                        .created_surface = surface,
-                        .direction = split_direction,
-                    } },
-                })) |_| {} else |err| {
-                    log.warn("new_split undo snapshot failed err={}", .{err});
-                    _ = tab_info.host.clearStructuralRedo();
-                }
-                self.activateSurface(surface);
+                _ = try self.createNewSplit(source, splitDirectionFromAction(value), null);
                 return true;
             },
 
@@ -5549,6 +5609,44 @@ pub const App = struct {
         return try sendFocusIpc(alloc, pipe_name, automation_target, response_timeout_ms);
     }
 
+    pub fn newAutomationTab(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewTabIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
+    pub fn newAutomationSplit(
+        alloc: Allocator,
+        instance_target: apprt.ipc.Target,
+        automation_target: apprt.ipc.AutomationTarget,
+        direction: apprt.ipc.AutomationSplitDirection,
+        working_directory: ?[]const u8,
+        response_timeout_ms: u64,
+    ) !bool {
+        const pipe_name = try resolveIpcPipeNameForTarget(alloc, instance_target);
+        defer alloc.free(pipe_name);
+        return try sendNewSplitIpc(
+            alloc,
+            pipe_name,
+            automation_target,
+            direction,
+            working_directory,
+            response_timeout_ms,
+        );
+    }
+
     pub fn sendAutomationText(
         alloc: Allocator,
         instance_target: apprt.ipc.Target,
@@ -5569,6 +5667,34 @@ pub const App = struct {
 
     pub fn performAutomationCommand(self: *App, command: apprt.ipc.AutomationCommand) !void {
         switch (command) {
+            .new_tab => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const source = switch (value.target) {
+                    .focused => self.focusedSurfaceForUndoRedo(),
+                    .window_id => |id| self.activeSurfaceForHost(id),
+                    .surface_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                _ = try self.createNewTab(source, value.working_directory);
+            },
+            .new_split => |value| {
+                if (value.working_directory) |cwd| {
+                    if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
+                }
+                const source = switch (value.target) {
+                    .focused => self.focusedSurfaceForUndoRedo(),
+                    .surface_id => |id| self.findSurfaceById(id),
+                    .window_id => return error.InvalidAutomationTarget,
+                } orelse return error.AutomationTargetNotFound;
+                const direction: SplitTreeSurface.Split.Direction = switch (value.direction) {
+                    .left => .left,
+                    .right => .right,
+                    .up => .up,
+                    .down => .down,
+                };
+                _ = try self.createNewSplit(source, direction, value.working_directory);
+            },
             .focus => |target| {
                 const surface = switch (target) {
                     .surface_id => |id| self.findSurfaceById(id),
@@ -5881,6 +6007,76 @@ pub const App = struct {
 
         try surface.init(self, title, config, opts);
         if (opts.host_id == null) self.consumePendingToastActivation();
+        return surface;
+    }
+
+    fn createNewTab(self: *App, source: ?*Surface, working_directory: ?[]const u8) !*Surface {
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
+        defer config.deinit();
+        // `newConfig(.tab)` consults the globally focused surface. Reset and
+        // inherit from the exact requested host instead.
+        config.@"working-directory" = self.config.@"working-directory";
+        if (source) |surface| {
+            const split_inherit = config.@"split-inherit-working-directory";
+            {
+                defer config.@"split-inherit-working-directory" = split_inherit;
+                config.@"split-inherit-working-directory" = config.@"tab-inherit-working-directory";
+                _ = try applySplitWorkingDirectoryFromSource(self, &config, surface, self.startup_cwd);
+            }
+        }
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = if (source) |value| value.host_id else null,
+            .tab_insert_index = if (source) |value| if (value.host) |host|
+                windowNewTabInsertIndex(host, self.config.@"window-new-tab-position")
+            else
+                null else null,
+            .clone_state_from = source,
+        });
+        if (source) |value| value.invalidateRedoForUnsupportedTabStructuralAction();
+        self.activateSurface(surface);
+        return surface;
+    }
+
+    fn createNewSplit(
+        self: *App,
+        source: *Surface,
+        direction: SplitTreeSurface.Split.Direction,
+        working_directory: ?[]const u8,
+    ) !*Surface {
+        const tab_info = self.findTabForSurface(source) orelse return error.AutomationTargetNotFound;
+        var config = try apprt.surface.newConfig(self.core_app, &self.config, .split);
+        defer config.deinit();
+        config.@"working-directory" = self.config.@"working-directory";
+        const inherited_profile_key = try applySplitProfileConfigFromSource(&config, source);
+        _ = try applySplitWorkingDirectoryFromSource(self, &config, source, self.startup_cwd);
+        if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
+        const surface = try self.createWindowSurface(&config, default_title, .{
+            .host_id = source.host_id,
+            .tab_id = tab_info.tab.id,
+            .clone_state_from = source,
+            .split_direction = direction,
+        });
+        if (inherited_profile_key) |key| try appendOwnedString(
+            self.core_app.alloc,
+            &surface.launch_profile_key,
+            key,
+        );
+        tab_info.tab.clearRedoHistory();
+        if (tab_info.host.pushStructuralUndo(.{
+            .kind = .split_create,
+            .timestamp_ms = sys.GetTickCount64(),
+            .sequence_id = self.nextUndoSequence(),
+            .payload = .{ .split_create = .{
+                .source_surface = source,
+                .created_surface = surface,
+                .direction = direction,
+            } },
+        })) |_| {} else |err| {
+            log.warn("new_split undo snapshot failed err={}", .{err});
+            _ = tab_info.host.clearStructuralRedo();
+        }
+        self.activateSurface(surface);
         return surface;
     }
 
@@ -31226,6 +31422,30 @@ test "automation focus selects exact targets without fallback" {
         error.InvalidAutomationTarget,
         app.performAutomationCommand(.{ .focus = .focused }),
     );
+    try std.testing.expectError(
+        error.InvalidAutomationTarget,
+        app.performAutomationCommand(.{ .new_tab = .{
+            .target = .{ .surface_id = 102 },
+            .working_directory = null,
+        } }),
+    );
+    try std.testing.expectError(
+        error.AutomationTargetNotFound,
+        app.performAutomationCommand(.{ .new_split = .{
+            .target = .{ .surface_id = 999 },
+            .direction = .right,
+            .working_directory = null,
+        } }),
+    );
+}
+
+test "automation working directory receiver policy mirrors forwarded syntax" {
+    for ([_][]const u8{ "home", "inherit", "~", "~/x", "~\\x", "C:\\x" }) |value| {
+        try std.testing.expect(automationWorkingDirectoryAllowed(value));
+    }
+    for ([_][]const u8{ "", "relative", "C:relative", "\\\\host\\share", "//host/share", "\\\\?\\C:\\x", "\\\\.\\x" }) |value| {
+        try std.testing.expect(!automationWorkingDirectoryAllowed(value));
+    }
 }
 
 test "automation send text enforces receiver policy and protected paste path" {

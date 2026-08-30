@@ -75,6 +75,12 @@ pub const Action = enum {
     // Send policy-bounded printable text to a surface in the running instance.
     @"send-text",
 
+    // Create a tab in a running noctty instance.
+    @"new-tab",
+
+    // Create a split in a running noctty instance.
+    @"new-split",
+
     pub fn detectSpecialCase(arg: []const u8) ?SpecialCase(Action) {
         // If we see a "-e" and we haven't seen a command yet, then
         // we are done looking for commands. This special case enables

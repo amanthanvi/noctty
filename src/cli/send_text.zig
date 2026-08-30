@@ -6,9 +6,8 @@ const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
 const lib = @import("../lib/main.zig");
 const paste_protection = @import("../apprt/win32_paste_protection.zig");
-
+const support = @import("automation_working_directory.zig");
 const max_text_len = 16 * 1024;
-
 pub const Options = struct {
     _arena: ?ArenaAllocator = null,
     /// Select a custom single-instance namespace.
@@ -17,7 +16,6 @@ pub const Options = struct {
     timeout: u64 = 10_000,
     /// Required nonzero pane ID from `+list-windows`.
     @"surface-id": ?u64 = null,
-
     pub fn deinit(self: *Options) void {
         if (self._arena) |arena| arena.deinit();
         self.* = undefined;
@@ -26,10 +24,7 @@ pub const Options = struct {
         return actionpkg.help_error;
     }
 };
-
-/// Send one nonempty printable UTF-8 argument (at most 16 KiB) to the required
-/// `--surface-id`. Supports `--class` and a 0..10000 ms `--timeout`. Automation
-/// cannot send Enter, newline, or control input and never raises a paste prompt.
+/// Send printable UTF-8 to `--surface-id`; control input is refused and never prompts.
 pub fn run(alloc: Allocator) !u8 {
     var iter = try args.argsIterator(alloc);
     defer iter.deinit();
@@ -39,19 +34,15 @@ pub fn run(alloc: Allocator) !u8 {
     try writer.interface.flush();
     return result;
 }
-
 fn runArgs(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer) !u8 {
     return runArgsWithSend(alloc, iter, stderr, sendAutomationText);
 }
-
 const SendFn = *const fn (Allocator, apprt.ipc.Target, apprt.ipc.AutomationTarget, []const u8, u64) anyerror!bool;
 const TextPolicy = enum { allowed, invalid, refused };
-
 fn report(stderr: *std.Io.Writer, code: u8, message: []const u8) !u8 {
     try stderr.writeAll(message);
     return code;
 }
-
 fn runArgsWithSend(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hook: SendFn) !u8 {
     var opts: Options = .{ ._arena = ArenaAllocator.init(alloc) };
     defer opts.deinit();
@@ -78,7 +69,6 @@ fn runArgsWithSend(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hook
         .invalid => return report(stderr, 1, "Invalid automation text.\n"),
         .refused => return report(stderr, 4, "Automation control input refused.\n"),
     }
-
     const ok = hook(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
@@ -93,7 +83,6 @@ fn runArgsWithSend(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hook
     };
     return if (ok) 0 else report(stderr, 2, "No matching noctty instance.\n");
 }
-
 fn automationTextPolicy(text: []const u8) TextPolicy {
     if (text.len == 0 or text.len > max_text_len) return .invalid;
     const view = std.unicode.Utf8View.init(text) catch return .invalid;
@@ -102,28 +91,9 @@ fn automationTextPolicy(text: []const u8) TextPolicy {
     if (paste_protection.inspect(text).severity == .control_chars) return .refused;
     return .allowed;
 }
-
 fn sendAutomationText(alloc: Allocator, instance: apprt.ipc.Target, target: apprt.ipc.AutomationTarget, text: []const u8, timeout: u64) !bool {
     return apprt.App.sendAutomationText(alloc, instance, target, text, timeout);
 }
-
-const TestArgs = struct {
-    items: []const []const u8,
-    index: usize = 0,
-    fn next(self: *@This()) ?[]const u8 {
-        if (self.index == self.items.len) return null;
-        defer self.index += 1;
-        return self.items[self.index];
-    }
-};
-
-fn testRun(items: []const []const u8, hook: SendFn) !u8 {
-    var iter: TestArgs = .{ .items = items };
-    var stderr = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer stderr.deinit();
-    return runArgsWithSend(std.testing.allocator, &iter, &stderr.writer, hook);
-}
-
 test "automation send-text cli contract and policy" {
     const testing = std.testing;
     const Hook = struct {
@@ -138,17 +108,9 @@ test "automation send-text cli contract and policy" {
                 try testing.expectEqualStrings("lane9", instance.class);
                 try testing.expectEqual(@as(u64, 0), timeout);
             } else try testing.expectEqual(@as(u64, 10_000), timeout);
-            return switch (outcome) {
-                1 => error.InvalidAutomationTarget,
-                2 => false,
-                3 => error.AutomationTargetNotFound,
-                4 => error.AutomationPolicyRefused,
-                5 => error.IPCFailed,
-                else => true,
-            };
+            return support.testOutcome(outcome);
         }
     };
-
     for ([_][]const u8{
         "caf\xc3\xa9 \xe2\x98\x95",
         "echo $env:Path; whoami | more",
@@ -160,9 +122,8 @@ test "automation send-text cli contract and policy" {
             &.{ "--class=lane9", "--timeout=0", "--surface-id=42", value }
         else
             &.{ "--surface-id=42", value };
-        try testing.expectEqual(@as(u8, 0), try testRun(argv, &Hook.call));
+        try testing.expectEqual(@as(u8, 0), try support.testRun(runArgsWithSend, argv, &Hook.call));
     }
-
     const Invalid = struct {
         var called = false;
         fn call(_: Allocator, _: apprt.ipc.Target, _: apprt.ipc.AutomationTarget, _: []const u8, _: u64) !bool {
@@ -181,26 +142,24 @@ test "automation send-text cli contract and policy" {
         &.{ "--timeout=18446744073709551616", "--surface-id=1", "text" },
     }) |argv| {
         Invalid.called = false;
-        try testing.expectEqual(@as(u8, 1), try testRun(argv, &Invalid.call));
+        try testing.expectEqual(@as(u8, 1), try support.testRun(runArgsWithSend, argv, &Invalid.call));
         try testing.expect(!Invalid.called);
     }
-
     for ([_][]const u8{ "before\r", "before\n", "before\t", "before\x00", "before\x1B", "before\x7F", "before\xC2\x80" }) |value| {
         Invalid.called = false;
-        try testing.expectEqual(@as(u8, 4), try testRun(&.{ "--surface-id=1", value }, &Invalid.call));
+        try testing.expectEqual(@as(u8, 4), try support.testRun(runArgsWithSend, &.{ "--surface-id=1", value }, &Invalid.call));
         try testing.expect(!Invalid.called);
     }
     const oversized = try testing.allocator.alloc(u8, max_text_len + 1);
     defer testing.allocator.free(oversized);
     @memset(oversized, 'x');
     for ([_][]const u8{ "", "\xFF", oversized }) |value| {
-        try testing.expectEqual(@as(u8, 1), try testRun(&.{ "--surface-id=1", value }, &Invalid.call));
+        try testing.expectEqual(@as(u8, 1), try support.testRun(runArgsWithSend, &.{ "--surface-id=1", value }, &Invalid.call));
         try testing.expect(!Invalid.called);
     }
-
     Hook.expected = "text";
     for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |code| {
         Hook.outcome = code;
-        try testing.expectEqual(code, try testRun(&.{ "--surface-id=42", "text" }, &Hook.call));
+        try testing.expectEqual(code, try support.testRun(runArgsWithSend, &.{ "--surface-id=42", "text" }, &Hook.call));
     }
 }

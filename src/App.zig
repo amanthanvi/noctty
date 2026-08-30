@@ -993,6 +993,15 @@ pub const Message = union(enum) {
             const request = try alloc.create(@This());
             errdefer alloc.destroy(request);
             const owned: apprt.ipc.AutomationCommand = switch (command) {
+                .new_tab => |value| .{ .new_tab = .{
+                    .target = value.target,
+                    .working_directory = if (value.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
+                } },
+                .new_split => |value| .{ .new_split = .{
+                    .target = value.target,
+                    .direction = value.direction,
+                    .working_directory = if (value.working_directory) |cwd| try alloc.dupe(u8, cwd) else null,
+                } },
                 .focus => |target| .{ .focus = target },
                 .send_text => |value| .{ .send_text = .{
                     .target = value.target,
@@ -1010,6 +1019,8 @@ pub const Message = union(enum) {
         pub fn release(self: *@This()) void {
             if (self.refs.fetchSub(1, .acq_rel) != 1) return;
             switch (self.command) {
+                .new_tab => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
+                .new_split => |value| if (value.working_directory) |cwd| self.alloc.free(cwd),
                 .send_text => |value| self.alloc.free(value.text),
                 .focus => {},
             }

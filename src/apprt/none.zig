@@ -44,6 +44,27 @@ pub const App = struct {
         return false;
     }
 
+    pub fn newAutomationTab(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: ?[]const u8,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
+    pub fn newAutomationSplit(
+        _: Allocator,
+        _: apprt.ipc.Target,
+        _: apprt.ipc.AutomationTarget,
+        _: apprt.ipc.AutomationSplitDirection,
+        _: ?[]const u8,
+        _: u64,
+    ) !bool {
+        return false;
+    }
+
     pub fn sendAutomationText(
         _: Allocator,
         _: apprt.ipc.Target,

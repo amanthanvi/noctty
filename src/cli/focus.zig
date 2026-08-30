@@ -4,10 +4,9 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const actionpkg = @import("action.zig");
 const apprt = @import("../apprt.zig");
 const args = @import("args.zig");
-
+const support = @import("automation_working_directory.zig");
 pub const Options = struct {
     _arena: ?ArenaAllocator = null,
-    /// Select a custom single-instance namespace.
     class: ?[:0]const u8 = null,
     /// Response timeout in milliseconds, from 0 through 10000.
     timeout: u64 = 10_000,
@@ -15,7 +14,6 @@ pub const Options = struct {
     @"surface-id": ?u64 = null,
     /// Nonzero window ID from `+list-windows`.
     @"window-id": ?u32 = null,
-
     pub fn deinit(self: *Options) void {
         if (self._arena) |arena| arena.deinit();
         self.* = undefined;
@@ -24,11 +22,7 @@ pub const Options = struct {
         return actionpkg.help_error;
     }
 };
-
-/// Select a window or pane in a running local noctty instance. Exactly one of
-/// `--surface-id=<id>` or `--window-id=<id>` is required. `--class=<class>`
-/// selects an instance namespace and `--timeout=<ms>` sets the 0..10000 ms
-/// response timeout (default 10000). Foreground activation is best-effort.
+/// Select exactly one `--surface-id` or `--window-id`; supports `--class` and 0..10000 ms `--timeout`.
 pub fn run(alloc: Allocator) !u8 {
     var iter = try args.argsIterator(alloc);
     defer iter.deinit();
@@ -38,18 +32,14 @@ pub fn run(alloc: Allocator) !u8 {
     try writer.interface.flush();
     return result;
 }
-
 fn runArgs(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer) !u8 {
     return runArgsWithFocus(alloc, iter, stderr, focusAutomationTarget);
 }
-
 const FocusFn = *const fn (Allocator, apprt.ipc.Target, apprt.ipc.AutomationTarget, u64) anyerror!bool;
-
 fn report(stderr: *std.Io.Writer, code: u8, message: []const u8) !u8 {
     try stderr.writeAll(message);
     return code;
 }
-
 fn runArgsWithFocus(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hook: FocusFn) !u8 {
     var opts: Options = .{};
     defer opts.deinit();
@@ -65,7 +55,6 @@ fn runArgsWithFocus(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hoo
         if (id == 0) return report(stderr, 1, "+focus requires exactly one nonzero target.\n");
         break :target .{ .window_id = id };
     } else return report(stderr, 1, "+focus requires exactly one nonzero target.\n");
-
     const ok = hook(
         alloc,
         if (opts.class) |class| .{ .class = class } else .detect,
@@ -78,11 +67,9 @@ fn runArgsWithFocus(alloc: Allocator, iter: anytype, stderr: *std.Io.Writer, hoo
     };
     return if (ok) 0 else report(stderr, 2, "No matching noctty instance.\n");
 }
-
 fn focusAutomationTarget(alloc: Allocator, instance: apprt.ipc.Target, target: apprt.ipc.AutomationTarget, timeout: u64) !bool {
     return apprt.App.focusAutomationTarget(alloc, instance, target, timeout);
 }
-
 fn testRun(line: []const u8, hook: FocusFn) !u8 {
     var iter = try std.process.ArgIteratorGeneral(.{}).init(std.testing.allocator, line);
     defer iter.deinit();
@@ -90,7 +77,6 @@ fn testRun(line: []const u8, hook: FocusFn) !u8 {
     defer stderr.deinit();
     return runArgsWithFocus(std.testing.allocator, &iter, &stderr.writer, hook);
 }
-
 test "automation focus cli contract" {
     const testing = std.testing;
     const Forward = struct {
@@ -115,7 +101,6 @@ test "automation focus cli contract" {
         Forward.window = i == 1;
         try testing.expectEqual(@as(u8, 0), try testRun(line, &Forward.call));
     }
-
     const Invalid = struct {
         var called = false;
         fn call(_: Allocator, _: apprt.ipc.Target, _: apprt.ipc.AutomationTarget, _: u64) !bool {
@@ -138,17 +123,10 @@ test "automation focus cli contract" {
         try testing.expectEqual(@as(u8, 1), try testRun(line, &Invalid.call));
         try testing.expect(!Invalid.called);
     }
-
     const Exit = struct {
         var outcome: u8 = 0;
         fn call(_: Allocator, _: apprt.ipc.Target, _: apprt.ipc.AutomationTarget, _: u64) !bool {
-            return switch (outcome) {
-                1 => error.InvalidAutomationTarget,
-                2 => false,
-                3 => error.AutomationTargetNotFound,
-                5 => error.IPCFailed,
-                else => true,
-            };
+            return support.testOutcome(outcome);
         }
     };
     for ([_]u8{ 0, 1, 2, 3, 5 }) |code| {
