@@ -635,8 +635,16 @@ fn translateKeyTextToUnicode(
 const KeyStateMask = struct {
     /// Clear Ctrl and Alt (including the synthetic AltGr pair).
     control: bool = false,
-    /// Clear Shift and Caps Lock.
+    /// Clear Shift. Implies `caps_lock`, because the two together are what
+    /// "unshifted" means.
     shift: bool = false,
+    /// Clear Caps Lock on its own.
+    ///
+    /// Caps Lock must not change the identity of a control chord: fixterms
+    /// sends the fixterms-excluded letters as CSI u built from the event text,
+    /// so leaving Caps Lock live would encode ctrl+m as `CSI 77;5u` ("M")
+    /// instead of `CSI 109;5u` ("m") purely because the lock was on.
+    caps_lock: bool = false,
 };
 
 fn maskedKeyboardState(state: *const [256]u8, mask: KeyStateMask) [256]u8 {
@@ -653,8 +661,8 @@ fn maskedKeyboardState(state: *const [256]u8, mask: KeyStateMask) [256]u8 {
         copy[c.VK_SHIFT] = 0;
         copy[c.VK_LSHIFT] = 0;
         copy[c.VK_RSHIFT] = 0;
-        copy[c.VK_CAPITAL] = 0;
     }
+    if (mask.shift or mask.caps_lock) copy[c.VK_CAPITAL] = 0;
     return copy;
 }
 
@@ -751,8 +759,14 @@ fn translateKeyText(
     // or the CSI u form, so re-translate Ctrl chords with Ctrl and Alt masked
     // out. Without this, ctrl+comma, ctrl+period, ctrl+m and friends reach the
     // encoder with no text at all and encode to nothing.
+    // Caps Lock is masked with Ctrl but Shift is not: in a Ctrl chord Shift is
+    // part of the chord the user typed, while Caps Lock is ambient state that
+    // must not change which key the chord reports.
     const codepoint: ?u21 = if (mods.ctrl)
-        translatePrintableCodepoint(vk, scan_code, state, .{ .control = true })
+        translatePrintableCodepoint(vk, scan_code, state, .{
+            .control = true,
+            .caps_lock = true,
+        })
     else
         printableCodepoint(utf16[0..@min(@as(usize, @intCast(count)), utf16.len)]);
 
@@ -1059,6 +1073,48 @@ test "win32 control chords carry the unmodified layout text" {
     try std.testing.expectEqual(@as(usize, 0), enter.len);
     const tab = translateKeyText(c.VK_TAB, testingScanCode(c.VK_TAB), ctrl, &state);
     try std.testing.expectEqual(@as(usize, 0), tab.len);
+}
+
+// Caps Lock is ambient state, not part of the chord the user typed. The Ctrl
+// re-translation asks the layout for the text again, so an unmasked Caps Lock
+// turned ctrl+m into "M" and encoded CSI 77;5u instead of CSI 109;5u -- the
+// lock silently changed which key the application saw.
+test "win32 caps lock does not change control chord identity" {
+    if (!testingUsLayout()) return error.SkipZigTest;
+
+    const caps_ctrl: input.Mods = .{ .ctrl = true, .caps_lock = true };
+    const caps_ctrl_shift: input.Mods = .{ .ctrl = true, .shift = true, .caps_lock = true };
+
+    const cases = [_]struct {
+        name: []const u8,
+        vk: UINT,
+        mods: input.Mods,
+        expect: []const u8,
+    }{
+        // The fixterms-excluded letters go out as CSI u built from the text.
+        .{ .name = "caps+ctrl+m", .vk = c.VK_A + 12, .mods = caps_ctrl, .expect = "\x1b[109;5u" },
+        .{ .name = "caps+ctrl+i", .vk = c.VK_A + 8, .mods = caps_ctrl, .expect = "\x1b[105;5u" },
+        // Shift is still part of the chord and still reported.
+        .{ .name = "caps+ctrl+shift+m", .vk = c.VK_A + 12, .mods = caps_ctrl_shift, .expect = "\x1b[109;6u" },
+        // C0 letters were already caps-insensitive; keep them that way.
+        .{ .name = "caps+ctrl+a", .vk = c.VK_A, .mods = caps_ctrl, .expect = "\x01" },
+        .{ .name = "caps+ctrl+c", .vk = c.VK_A + 2, .mods = caps_ctrl, .expect = "\x03" },
+    };
+
+    for (cases) |case| {
+        var buf: [64]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        var text: KeyText = .{};
+        try input.key_encode.encode(
+            &writer,
+            testingKeyEvent(case.vk, case.mods, &text),
+            .{ .alt_esc_prefix = true },
+        );
+        std.testing.expectEqualStrings(case.expect, writer.buffered()) catch |err| {
+            std.debug.print("win32 caps lock case failed: {s}\n", .{case.name});
+            return err;
+        };
+    }
 }
 
 test "win32 synthetic AltGr modifiers are not a ctrl+alt chord" {

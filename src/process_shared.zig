@@ -40,8 +40,14 @@ pub fn attachParentConsole() void {
 fn stdHandleUsable(id: i32) bool {
     const handle = GetStdHandle(id);
     if (handle == null or handle == windows.INVALID_HANDLE_VALUE) return false;
-    // A stale inherited handle reports FILE_TYPE_UNKNOWN.
-    return GetFileType(handle.?) != 0;
+    // FILE_TYPE_UNKNOWN (0) is both the error return and a legitimate answer
+    // for a valid handle whose type Windows cannot classify. `GetFileType`
+    // documents the difference as "clear the last error first; on success it
+    // is left at NO_ERROR", so a device redirection we cannot classify must
+    // stay untouched rather than be replaced with CONOUT$.
+    SetLastError(0);
+    if (GetFileType(handle.?) != 0) return true;
+    return GetLastError() == 0;
 }
 
 fn bindStdHandleToConsole(id: i32, comptime name: []const u8) void {
@@ -63,6 +69,8 @@ extern "kernel32" fn AttachConsole(dwProcessId: u32) callconv(.winapi) windows.B
 extern "kernel32" fn GetStdHandle(nStdHandle: i32) callconv(.winapi) ?windows.HANDLE;
 extern "kernel32" fn SetStdHandle(nStdHandle: i32, hHandle: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn GetFileType(hFile: windows.HANDLE) callconv(.winapi) u32;
+extern "kernel32" fn SetLastError(dwErrCode: u32) callconv(.winapi) void;
+extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn CreateFileW(
     lpFileName: [*:0]const u16,
     dwDesiredAccess: u32,
