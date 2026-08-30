@@ -1122,6 +1122,13 @@ pub fn takePortableUpdateFailure(alloc: Allocator) !?[]u8 {
     const failure = std.process.getEnvVarOwned(alloc, portable_failure_env) catch return null;
     defer alloc.free(failure);
     _ = internal_os.unsetenv(portable_failure_env);
+    if (std.mem.eql(u8, failure, @errorName(error.PortableUpdateRecoveryUnavailable))) {
+        const message = try alloc.dupe(
+            u8,
+            "Portable update recovery files are missing. Noctty abandoned automatic rollback and launched the installed build; reinstall or update manually if it does not work correctly.",
+        );
+        return message;
+    }
     const message = try std.fmt.allocPrint(
         alloc,
         "The portable update could not be applied ({s}); the current noctty build is still running. Open the release page to update manually.",
@@ -1175,6 +1182,10 @@ fn launchPortableHelper(
     install_root: []const u8,
     mode: PortableHelperMode,
 ) !bool {
+    if (try abandonUnrecoverablePortableApply(alloc, state_path, install_root)) {
+        setPortableFailureEnvironment(alloc, error.PortableUpdateRecoveryUnavailable) catch {};
+        return false;
+    }
     var initial_state = try loadState(alloc, state_path);
     defer initial_state.deinit(alloc);
     var initial_layout = try portableStageLayout(alloc, state_path, &initial_state);
@@ -1449,6 +1460,34 @@ fn abandonPendingPortableApply(
     clearOptionalOwned(alloc, &state.portable_confirmation_token);
     try saveState(state_path, &state);
     return true;
+}
+
+fn abandonUnrecoverablePortableApply(
+    alloc: Allocator,
+    state_path: []const u8,
+    install_root: []const u8,
+) !bool {
+    try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
+    const state_lock = try openStateLock(state_path);
+    defer state_lock.close();
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    if (state.staged_kind != .portable) return false;
+    const phase = state.portable_apply_phase orelse return false;
+    if (phase != .swapped and phase != .rollback) return false;
+    if (portableStateWatcherIsActive(&state)) return false;
+
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
+    portable_apply.validateBackup(alloc, layout.backup_path) catch |err| switch (err) {
+        error.FileNotFound, error.IncompletePortableUpdateBackup => {
+            clearStagedPortableState(alloc, &state);
+            try saveState(state_path, &state);
+            return true;
+        },
+        else => return err,
+    };
+    return false;
 }
 
 fn recoverPendingPortableFailure(
@@ -3355,6 +3394,170 @@ test "portable pre-swap failure clears pending intent" {
     try std.testing.expectEqual(@as(u32, 0), loaded.portable_watcher_pid);
     try std.testing.expectEqual(@as(u64, 0), loaded.portable_watcher_started_at);
     try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
+}
+
+test "portable recovery abandons stranded swapped transaction" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(install_root);
+    const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ install_root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .portable_apply_phase = .swapped,
+        .portable_backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" }),
+        .portable_confirmation_token = try alloc.dupe(u8, "token"),
+        .apply_requested_at = 123,
+    };
+    defer state.deinit(alloc);
+    for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
+        if (phase == .rollback) try tmp.dir.makePath("updates/1.3.200");
+        state.portable_apply_phase = phase;
+        try saveState(state_path, &state);
+
+        try std.testing.expect(!(try launchPortableHelper(alloc, state_path, install_root, .rollback)));
+        const message = (try takePortableUpdateFailure(alloc)).?;
+        defer alloc.free(message);
+        try std.testing.expect(std.mem.indexOf(u8, message, "recovery files are missing") != null);
+
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expect(loaded.portable_apply_phase == null);
+        try std.testing.expect(loaded.staged_version == null);
+        try std.testing.expect(loaded.staged_kind == null);
+        try std.testing.expect(loaded.portable_backup_path == null);
+        try std.testing.expect(loaded.portable_confirmation_token == null);
+        try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
+    }
+
+    try tmp.dir.makePath("updates/1.3.200/backup");
+    try tmp.dir.writeFile(.{
+        .sub_path = "updates/1.3.200/backup/.complete",
+        .data = "locked",
+    });
+    const marker_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup", ".complete" });
+    defer alloc.free(marker_path);
+    const marker_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, marker_path);
+    defer alloc.free(marker_path_w);
+    // dwShareMode=0 denies subsequent opens per the Microsoft CreateFileW
+    // contract, giving this test a deterministic transient access failure.
+    const held = std.os.windows.kernel32.CreateFileW(
+        marker_path_w.ptr,
+        std.os.windows.GENERIC_READ,
+        0,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == std.os.windows.INVALID_HANDLE_VALUE) {
+        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+    }
+    defer std.os.windows.CloseHandle(held);
+
+    state.portable_apply_phase = .swapped;
+    try saveState(state_path, &state);
+    try std.testing.expectError(
+        error.AccessDenied,
+        abandonUnrecoverablePortableApply(alloc, state_path, install_root),
+    );
+    {
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expectEqual(portable_apply.Phase.swapped, loaded.portable_apply_phase.?);
+    }
+
+    state.portable_watcher_pid = std.os.windows.GetCurrentProcessId();
+    state.portable_watcher_started_at = processCreationTime(std.os.windows.GetCurrentProcess()).?;
+    try saveState(state_path, &state);
+    try std.testing.expect(!(try abandonUnrecoverablePortableApply(alloc, state_path, install_root)));
+    var owned = try loadState(alloc, state_path);
+    defer owned.deinit(alloc);
+    try std.testing.expectEqual(portable_apply.Phase.swapped, owned.portable_apply_phase.?);
+    try std.testing.expectEqual(state.portable_watcher_pid, owned.portable_watcher_pid);
+    try std.testing.expectEqual(state.portable_watcher_started_at, owned.portable_watcher_started_at);
+}
+
+test "portable recovery preserves complete rollback" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "old-build" });
+    const install_root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(install_root);
+    const state_path = try std.fs.path.join(alloc, &.{ install_root, "update-state.json" });
+    defer alloc.free(state_path);
+    const stage_dir = try std.fs.path.join(alloc, &.{ install_root, "updates", "1.3.200" });
+    defer alloc.free(stage_dir);
+    const backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" });
+    defer alloc.free(backup_path);
+    try portable_apply.prepareBackup(alloc, install_root, backup_path);
+    const artifact_name = try std.fmt.allocPrint(
+        alloc,
+        "noctty-1.3.200-windows-{s}-portable.zip",
+        .{windowsInstallerArch()},
+    );
+    defer alloc.free(artifact_name);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .portable,
+        .staged_portable_path = try std.fs.path.join(alloc, &.{ stage_dir, artifact_name }),
+        .staged_payload_path = try std.fs.path.join(alloc, &.{ stage_dir, "payload", "noctty" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+        .staged_at = 456,
+        .apply_requested_at = 123,
+        .portable_apply_phase = .swapped,
+        .portable_backup_path = try alloc.dupe(u8, backup_path),
+        .portable_confirmation_token = try alloc.dupe(u8, "token"),
+    };
+    defer state.deinit(alloc);
+
+    for ([_]portable_apply.Phase{ .swapped, .rollback }) |phase| {
+        try tmp.dir.writeFile(.{ .sub_path = "noctty.com", .data = "broken-new-build" });
+        state.portable_apply_phase = phase;
+        try saveState(state_path, &state);
+
+        try std.testing.expect(!(try abandonUnrecoverablePortableApply(
+            alloc,
+            state_path,
+            install_root,
+        )));
+        var loaded = try loadState(alloc, state_path);
+        defer loaded.deinit(alloc);
+        try std.testing.expectEqualStrings(state.staged_version.?, loaded.staged_version.?);
+        try std.testing.expectEqual(state.staged_kind.?, loaded.staged_kind.?);
+        try std.testing.expectEqualStrings(state.staged_portable_path.?, loaded.staged_portable_path.?);
+        try std.testing.expectEqualStrings(state.staged_payload_path.?, loaded.staged_payload_path.?);
+        try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
+        try std.testing.expectEqual(state.staged_at, loaded.staged_at);
+        try std.testing.expectEqual(state.apply_requested_at, loaded.apply_requested_at);
+        try std.testing.expectEqual(phase, loaded.portable_apply_phase.?);
+        try std.testing.expectEqualStrings(state.portable_backup_path.?, loaded.portable_backup_path.?);
+        try std.testing.expectEqualStrings(state.portable_confirmation_token.?, loaded.portable_confirmation_token.?);
+        try std.testing.expectEqual(state.portable_watcher_pid, loaded.portable_watcher_pid);
+        try std.testing.expectEqual(state.portable_watcher_started_at, loaded.portable_watcher_started_at);
+
+        try portable_apply.rollback(alloc, install_root, backup_path);
+        const restored = try tmp.dir.readFileAlloc(alloc, "noctty.com", 32);
+        defer alloc.free(restored);
+        try std.testing.expectEqualStrings("old-build", restored);
+    }
 }
 
 test "confirmed portable cleanup failure cannot rearm startup gating" {
