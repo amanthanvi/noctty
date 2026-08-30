@@ -6218,6 +6218,19 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                     return true;
                 }
 
+                // Only write into something that has told us it is reading a
+                // line of input. "No command is running" is not enough on its
+                // own: a child that emits OSC 133;A without a following B
+                // clears the running flag while still owning the pty, and we
+                // would type into that child instead of a shell prompt.
+                if (!self.io.terminal.screens.active.semanticPromptInputPending()) {
+                    log.info(
+                        "insert last command ignored: no OSC 133;B input mark is outstanding",
+                        .{},
+                    );
+                    return true;
+                }
+
                 break :command try self.io.terminal.screens.active.lastCommandString(
                     self.alloc,
                 );

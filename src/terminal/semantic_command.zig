@@ -138,6 +138,20 @@ pub fn commandRunning(self: *const SemanticCommand) bool {
     return self.active != null;
 }
 
+/// Whether an OSC 133;B input mark is outstanding, i.e. something has told us
+/// it is reading a line of input right now.
+///
+/// Callers that only *read* history do not need this: absence of an input mark
+/// is harmless for copying. Callers that write bytes back do, because it is the
+/// only evidence we have that the bytes will land in a line editor at a prompt
+/// rather than in whatever else happens to own the pty. A child that emits
+/// OSC 133;A without a following B clears `active`, so a "no command is
+/// running" check alone would happily type into that child.
+pub fn inputPending(self: *const SemanticCommand) bool {
+    const pending = self.pending orelse return false;
+    return pinIsValid(pending);
+}
+
 /// Discard B/C state when a new prompt begins without a completing D mark.
 pub fn abortCommand(self: *SemanticCommand, pages: *PageList) void {
     self.clearPending(pages);

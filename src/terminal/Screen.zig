@@ -2460,6 +2460,13 @@ pub fn semanticPromptCommandRunning(self: *const Screen) bool {
     return self.semantic_command.commandRunning();
 }
 
+/// Whether an OSC 133;B input mark is currently outstanding. See
+/// `SemanticCommand.inputPending` — required before writing recovered bytes
+/// back to the pty, not required for reading history.
+pub fn semanticPromptInputPending(self: *const Screen) bool {
+    return self.semantic_command.inputPending();
+}
+
 /// Discard B/C state when a new prompt begins without a completing D mark.
 pub fn semanticPromptAbortCommand(self: *Screen) void {
     self.semantic_command.abortCommand(&self.pages);
@@ -10526,6 +10533,42 @@ test "Screen: last-command has no region without shell integration or D" {
 
     try testing.expect((try s.lastCommandOutputString(alloc)) == null);
     try testing.expect((try s.lastCommandString(alloc)) == null);
+}
+
+test "Screen: semantic prompt input pending tracks the OSC 133;B mark" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 40, .rows = 8, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try testing.expect(!s.semanticPromptInputPending());
+
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.semanticPromptStartInput();
+    try s.testWriteString("echo one");
+    try testing.expect(s.semanticPromptInputPending());
+
+    // Once the command starts the input mark is consumed, and it stays
+    // consumed after the command completes.
+    s.cursorSetSemanticContent(.output);
+    try s.semanticPromptStartOutput();
+    try testing.expect(!s.semanticPromptInputPending());
+    try s.testWriteString(" one");
+    try s.semanticPromptEndCommand();
+    try testing.expect(!s.semanticPromptInputPending());
+
+    // A bare OSC 133;A with no following B — the shape a non-shell child can
+    // produce — must not look like a live prompt to write into, even though no
+    // command is reported as running.
+    try s.testWriteString("\n");
+    s.semanticPromptAbortCommand();
+    s.cursorSetSemanticContent(.{ .prompt = .initial });
+    try s.testWriteString("PS> ");
+    try testing.expect(!s.semanticPromptCommandRunning());
+    try testing.expect(!s.semanticPromptInputPending());
 }
 
 test "Screen: last-command drops a record shifted onto the active input row" {
