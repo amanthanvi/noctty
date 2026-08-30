@@ -1317,7 +1317,17 @@ fn isUncUriPath(path: []const u8) bool {
     if (path.len < 4) return false;
     if (path[0] != '/' or path[1] != '\\' or path[2] != '\\') return false;
     if (isSeparator(path[3])) return false;
-    return std.mem.indexOfScalar(u8, path[3..], '/') == null;
+
+    // Must be backslash-separated throughout: a forward slash proves this is a
+    // POSIX path that merely begins with backslashes, not the form cmd's `$P`
+    // produces.
+    if (std.mem.indexOfScalar(u8, path[3..], '/') != null) return false;
+
+    // A UNC path needs both a host and a non-empty share (`\\server\share`).
+    // `/\\server` alone is a legal POSIX filename, never a usable UNC path.
+    const host = path[3..];
+    const sep = std.mem.indexOfScalar(u8, host, '\\') orelse return false;
+    return sep + 1 < host.len;
 }
 
 pub fn isDriveAbsolutePath(path: []const u8) bool {
@@ -1862,6 +1872,13 @@ test "osc7PathToLocal strips the uri slash from a unc path" {
     const posix_backslashes = try osc7PathToLocal(alloc, "/\\\\server/share");
     defer alloc.free(posix_backslashes);
     try testing.expectEqualStrings("/\\\\server/share", posix_backslashes);
+
+    // A host with no share is not a usable UNC path, so it is a POSIX name.
+    for ([_][]const u8{ "/\\\\server", "/\\\\server\\" }) |path| {
+        const kept = try osc7PathToLocal(alloc, path);
+        defer alloc.free(kept);
+        try testing.expectEqualStrings(path, kept);
+    }
 }
 
 test "isUncUriPath only matches uri-carried unc paths" {
