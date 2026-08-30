@@ -118,13 +118,19 @@ windows_job_object_plan: if (builtin.os.tag == .windows) apprt.win32_job_object.
 windows_job_object_handle: if (builtin.os.tag == .windows) ?windows.HANDLE else void =
     if (builtin.os.tag == .windows) null else {},
 
-/// Set as soon as `CreateProcessW` returns successfully, before any of the
+/// Whether `CreateProcessW` returned successfully. That is the whole
+/// meaning: it says a process was created, and says nothing about whether
+/// one still exists.
+///
+/// Set immediately after `CreateProcessW` returns and before any of the
 /// post-creation launch setup (job object attach, exit-code probe, initial
-/// thread resume) that can still fail. Those failures unwind through the
-/// errdefer that terminates the child, so `start` returns an error even
-/// though Windows *did* create a process. Callers need this to tell "the
-/// command never launched" apart from "the command launched and we tore it
-/// down", because the two need different error reports. Inert on non-Windows.
+/// thread resume) that can still fail. Those failures unwind through an
+/// errdefer that *attempts* to terminate the child — `TerminateProcess`'s
+/// result is discarded, and in the exit-code-probe case the child had
+/// already exited on its own. So do not read `true` as "the child is gone";
+/// read it only as "the command did launch", which is what distinguishes a
+/// failure that needs the no-child report from one that does not. Inert on
+/// non-Windows, where a failed `start` always means no child exists.
 windows_process_created: if (builtin.os.tag == .windows) bool else void =
     if (builtin.os.tag == .windows) false else {},
 
@@ -395,9 +401,10 @@ fn startWindows(self: *Command, arena: Allocator) !void {
         @ptrCast(&startup_info_ex.StartupInfo),
         &process_information,
     );
-    // Past this point a child exists. Everything below can still fail and
-    // unwind through the errdefer below, which terminates it — but the
-    // failure is no longer "no child process was created".
+    // Past this point a child was created. Everything below can still fail
+    // and unwind through the errdefer below, which attempts to terminate it
+    // — but whatever the outcome of that attempt, "no child process was
+    // created" is no longer a true statement about the failure.
     self.windows_process_created = true;
     errdefer {
         _ = windows.kernel32.TerminateProcess(process_information.hProcess, 1);
