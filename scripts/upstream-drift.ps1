@@ -12,6 +12,17 @@ $head = & git -C $repoRoot rev-parse HEAD
 if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed for HEAD' }
 $head = "$head".Trim()
 
+# A fresh clone has only `origin`, so this is the expected first-run state.
+# Say what to do about it instead of failing deep inside a git plumbing call.
+& git -C $repoRoot rev-parse --verify --quiet "$upstreamRef^{commit}" > $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "No local ref '$upstreamRef'. This script never fetches; create the read-only remote and refresh it first:" -ForegroundColor Yellow
+    Write-Host '  git remote add upstream https://github.com/ghostty-org/ghostty.git'
+    Write-Host '  git remote set-url --push upstream DISABLED'
+    Write-Host '  git fetch upstream'
+    exit 1
+}
+
 $base = & git -C $repoRoot merge-base $head $upstreamRef
 if ($LASTEXITCODE -ne 0) { throw "git merge-base failed for $upstreamRef" }
 $base = "$base".Trim()

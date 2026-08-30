@@ -137,14 +137,28 @@ window.
 
 ## How to check drift
 
-`scripts/upstream-drift.ps1` reads local refs only. Refresh the read-only
-upstream tracking ref explicitly when network and Git metadata permissions
-allow it, then run the report:
+`scripts/upstream-drift.ps1` reads local refs only. A fresh clone has only
+`origin`, so add the upstream remote once before the first drift check.
+Disabling its push URL is not optional politeness — this fork never pushes
+upstream, and `DISABLED` makes an accidental `git push upstream` fail instead
+of authenticate:
+
+```powershell
+git remote add upstream https://github.com/ghostty-org/ghostty.git
+git remote set-url --push upstream DISABLED
+```
+
+Then refresh the read-only upstream tracking ref explicitly when network and
+Git metadata permissions allow it, and run the report:
 
 ```powershell
 git fetch upstream
 pwsh -NoProfile -File scripts/upstream-drift.ps1
 ```
+
+`upstream-drift.ps1` itself never fetches and never writes. If the tracking ref
+is absent — the expected state on a fresh clone — it says so, prints the two
+commands above, and exits 1 rather than reaching for the network.
 
 Use `-Remote` and `-Branch` only when checking another local tracking-ref pair.
 The equivalent raw Git inputs are:
