@@ -47,7 +47,7 @@ Last reviewed: 2026-08-21.
 | [Features overview](https://ghostty.org/docs/features)                            | Upstream docs still say Windows support is planned. noctty ships a native Win32 app on Windows 10/11 x64 and ARM64.    |
 | [Features overview: GPU-accelerated rendering](https://ghostty.org/docs/features) | Terminal content renders with OpenGL 4.3+ via WGL. See [renderer notes](#renderer).                                        |
 | [Configuration](https://ghostty.org/docs/config)                                  | Windows state/config paths live under `%LOCALAPPDATA%\noctty\...`, not the macOS/Linux paths documented upstream.      |
-| Local automation                                                                  | `+list-windows` JSON plus allowlisted `+perform-action` over single-instance IPC. See [windows.md](windows.md#automation). |
+| Local automation                                                                  | Versioned JSON state and stable local verbs for windows, tabs, splits, focus, policy-allowed actions, and control-free text. See [automation.md](automation.md). |
 | [Features overview](https://ghostty.org/docs/features)                            | Win32-specific UX: DWM dark title bar, high-contrast palette switching, IME, drag-and-drop, and native context menus.      |
 | Universal palette                                                                 | One blended, fuzzy-ranked command surface. See [universal palette notes](#universal-palette).                              |
 | Named layouts                                                                     | Saves one window's tab/split/profile/cwd/title shape and materializes it in a new window from keybind, palette, or CLI.     |

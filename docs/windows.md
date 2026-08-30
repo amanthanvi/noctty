@@ -641,6 +641,11 @@ limited to a validated layout name under `%LOCALAPPDATA%\noctty\layouts\`,
 writes atomically, and **replaces an existing layout of the same name without
 prompting**. It only accepts the focused target, so `--surface-id` is rejected.
 
+noctty exposes a local, current-user CLI surface for versioned JSON state
+and policy-bounded window, tab, split, focus, action, and text operations.
+The stable verb, schema, exit-code, trust, and privacy contract is in
+[automation.md](automation.md).
+
 ## Crash reports and diagnostics
 
 noctty keeps a local crash directory and never uploads anything from

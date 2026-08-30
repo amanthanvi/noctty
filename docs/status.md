@@ -4,7 +4,7 @@ What currently works in noctty, what is experimental, and what is out
 of scope. When this page disagrees with a commit message, trust this
 page.
 
-Last updated: 2026-08-21, against current fork HEAD.
+Last updated: 2026-08-30, against current fork HEAD.
 
 For a row-by-row mapping against official Ghostty docs (including the
 implementation nuance this page deliberately leaves out), see
@@ -76,6 +76,9 @@ Win32-validated VT protocol coverage is tracked in
 - Universal palette: actions, tabs, panes, profiles, named layouts, themes, native
   settings, help, and recent commands in one fuzzy-searched,
   keyboard-driven list.
+- Local CLI automation with versioned JSON state and policy-bounded verbs
+  for windows, tabs, splits, focus, actions, and control-free text; see
+  [automation.md](automation.md).
 
 ### Renderer
 

@@ -123,6 +123,9 @@ panes, `Ctrl+Shift+P` opens the command palette, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` copy and paste. The full table, plus how to rebind, is in
 [docs/getting-started.md](docs/getting-started.md#5-keybindings).
 
+Local CLI automation is documented in
+[docs/automation.md](docs/automation.md).
+
 ## Status
 
 noctty is young: it has a single maintainer, and its first public
