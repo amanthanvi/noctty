@@ -7,8 +7,10 @@
 //!      `integration_script_sha256`. Writes atomically (temp + rename) only
 //!      when the hash differs or the file is missing.
 //!   3. `buildInjectedArgv` wraps interactive PowerShell launches with
-//!      `-NoExit -Command "& { . '<path>' }"` while preserving existing
-//!      prefix flags and skipping explicit command / script entry points.
+//!      `-NoExit -Command "& { $__ghostty_utf8_console = $true|$false; . '<path>' }"`
+//!      while preserving existing prefix flags and skipping explicit command /
+//!      script entry points. The sentinel is always bound, both ways, so it
+//!      shadows any same-named variable a profile may have defined.
 //!
 //! Testing: `@embedFile("../...")` needs the `src/` package root.
 //!   echo 'test { _ = @import("apprt/win32_powershell_install.zig"); }' > src/_t.zig
@@ -395,14 +397,17 @@ fn isValueTakingInteractiveFlag(arg: []const u8) bool {
 pub const utf8_console_variable = "__ghostty_utf8_console";
 
 fn buildCommandValue(alloc: Allocator, escaped: []const u8, utf8_console: bool) ![]u8 {
-    if (!utf8_console) {
-        return std.fmt.allocPrint(alloc, "& {{ . '{s}' }}", .{escaped});
-    }
-
+    // Always bind the sentinel, including the `false` case. `integration.ps1`
+    // resolves it with an unscoped `Get-Variable`, which walks the scope chain
+    // up to global — so if we emitted nothing when the decision is "no", a
+    // profile that happens to define `$global:__ghostty_utf8_console = $true`
+    // would be found instead and force UTF-8 against `utf8-console = never`
+    // or against the CJK guard. A local binding shadows any such outer
+    // variable, so the decision we computed is the one that applies.
     return std.fmt.allocPrint(
         alloc,
-        "& {{ ${s} = $true; . '{s}' }}",
-        .{ utf8_console_variable, escaped },
+        "& {{ ${s} = ${s}; . '{s}' }}",
+        .{ utf8_console_variable, if (utf8_console) "true" else "false", escaped },
     );
 }
 
@@ -479,7 +484,7 @@ test "buildInjectedArgv: interactive shell injects without changing banner seman
     try std.testing.expectEqualStrings("pwsh.exe", r[0]);
     try std.testing.expectEqualStrings("-NoExit", r[1]);
     try std.testing.expectEqualStrings("-Command", r[2]);
-    try std.testing.expectEqualStrings("& { . 'C:\\Users\\test\\integration.ps1' }", r[3]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\Users\\test\\integration.ps1' }", r[3]);
 }
 
 test "buildInjectedArgv: utf8 console travels in the command payload" {
@@ -501,6 +506,24 @@ test "buildInjectedArgv: utf8 console travels in the command payload" {
     try std.testing.expect(std.mem.indexOf(u8, r[3], "env:") == null);
 }
 
+test "buildInjectedArgv: a negative utf8 decision is bound explicitly" {
+    // `integration.ps1` resolves the sentinel with an unscoped `Get-Variable`,
+    // which walks the scope chain up to global. Emitting nothing for the
+    // "no" case would let a profile's `$global:__ghostty_utf8_console = $true`
+    // be found instead and override `utf8-console = never` or the CJK guard.
+    // The explicit `$false` binding shadows any such outer variable.
+    const argv = [_][]const u8{"pwsh.exe"};
+    const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
+    defer {
+        for (r) |s| std.testing.allocator.free(s);
+        std.testing.allocator.free(r);
+    }
+    try std.testing.expectEqualStrings(
+        "& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }",
+        r[3],
+    );
+}
+
 test "buildInjectedArgv: preserves existing prefix flags" {
     const argv = [_][]const u8{ "pwsh.exe", "-ExecutionPolicy", "Bypass", "-NoProfile" };
     const r = (try buildInjectedArgv(std.testing.allocator, &argv, "C:\\int.ps1", false)).?;
@@ -515,7 +538,7 @@ test "buildInjectedArgv: preserves existing prefix flags" {
     try std.testing.expectEqualStrings("-NoProfile", r[3]);
     try std.testing.expectEqualStrings("-NoExit", r[4]);
     try std.testing.expectEqualStrings("-Command", r[5]);
-    try std.testing.expectEqualStrings("& { . 'C:\\int.ps1' }", r[6]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[6]);
 }
 
 test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
@@ -530,7 +553,7 @@ test "buildInjectedArgv: preserves slash-prefixed interactive flags" {
     try std.testing.expectEqualStrings("/NoProfile", r[1]);
     try std.testing.expectEqualStrings("-NoExit", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
 }
 
 test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
@@ -545,7 +568,7 @@ test "buildInjectedArgv: existing noexit is not duplicated for powershell.exe" {
     try std.testing.expectEqualStrings("-NoExit", r[1]);
     try std.testing.expectEqualStrings("-NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
 }
 
 test "buildInjectedArgv: existing slash noexit is not duplicated" {
@@ -560,7 +583,7 @@ test "buildInjectedArgv: existing slash noexit is not duplicated" {
     try std.testing.expectEqualStrings("/NoExit", r[1]);
     try std.testing.expectEqualStrings("/NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
 }
 
 test "buildInjectedArgv: path with single quote" {
@@ -570,7 +593,7 @@ test "buildInjectedArgv: path with single quote" {
         for (r) |s| std.testing.allocator.free(s);
         std.testing.allocator.free(r);
     }
-    try std.testing.expectEqualStrings("& { . 'C:\\don''t\\integration.ps1' }", r[3]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\don''t\\integration.ps1' }", r[3]);
 }
 
 test "buildInjectedArgv: skips explicit command mode" {
@@ -625,7 +648,7 @@ test "buildInjectedArgv: existing noexit prefix is not duplicated" {
     try std.testing.expectEqualStrings("-NoEx", r[1]);
     try std.testing.expectEqualStrings("-NoProfile", r[2]);
     try std.testing.expectEqualStrings("-Command", r[3]);
-    try std.testing.expectEqualStrings("& { . 'C:\\int.ps1' }", r[4]);
+    try std.testing.expectEqualStrings("& { $__ghostty_utf8_console = $false; . 'C:\\int.ps1' }", r[4]);
 }
 
 test "buildInjectedArgv: skips ambiguous no prefix" {

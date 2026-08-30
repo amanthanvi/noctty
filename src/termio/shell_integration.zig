@@ -260,7 +260,7 @@ test "setup powershell: interactive direct command auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -297,7 +297,7 @@ test "setup powershell: interactive shell command auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -334,7 +334,7 @@ test "setup powershell: interactive shell command with quoted exe path auto inje
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
@@ -452,7 +452,7 @@ test "setup powershell: slash-prefixed interactive launch auto injects" {
     defer alloc.free(expected_path);
     const expected_command = try std.fmt.allocPrint(
         alloc,
-        "& {{ . '{s}' }}",
+        "& {{ $__ghostty_utf8_console = $false; . '{s}' }}",
         .{expected_path},
     );
     defer alloc.free(expected_command);
