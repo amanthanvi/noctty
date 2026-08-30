@@ -1656,7 +1656,12 @@ fn rollbackPortableUpdateAndRelaunch(
     try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
     try validatePortableStageDirectory(alloc, layout.stage_dir);
 
-    try portable_apply.rollback(alloc, install_root, layout.backup_path);
+    try portable_apply.rollback(
+        alloc,
+        install_root,
+        layout.backup_path,
+        layout.displaced_path,
+    );
     _ = try portable_apply.decide(.portable, .rollback, .rollback_completed);
     {
         const state_lock = try openStateLock(state_path);
@@ -1671,9 +1676,7 @@ fn rollbackPortableUpdateAndRelaunch(
         clearOptionalOwned(alloc, &state.portable_confirmation_token);
         try saveState(state_path, &state);
     }
-    portable_apply.cleanupBackup(layout.backup_path) catch |err| {
-        log.warn("portable update rollback backup cleanup failed path={s} err={}", .{ layout.backup_path, err });
-    };
+    cleanupPortableRecoveryPaths(layout.backup_path, layout.displaced_path);
 
     const child = try spawnInstalledNoctty(alloc, install_root, original_args, null, null);
     std.os.windows.CloseHandle(child.thread_handle);
@@ -1801,11 +1804,15 @@ fn finalizePortableConfirmation(alloc: Allocator, state_path: []const u8) !void 
         try saveState(state_path, &state);
     }
     const paths = cleanup_paths.?;
-    portable_apply.cleanupBackup(paths.backup) catch |err| {
-        log.warn("portable update backup cleanup failed path={s} err={}", .{ paths.backup, err });
+    cleanupPortableRecoveryPaths(paths.backup, paths.displaced);
+}
+
+fn cleanupPortableRecoveryPaths(backup_path: []const u8, displaced_path: []const u8) void {
+    portable_apply.cleanupBackup(backup_path) catch |err| {
+        log.warn("portable update backup cleanup failed path={s} err={}", .{ backup_path, err });
     };
-    portable_apply.cleanupUpdatePath(paths.displaced) catch |err| {
-        log.warn("portable update displaced cleanup failed path={s} err={}", .{ paths.displaced, err });
+    portable_apply.cleanupUpdatePath(displaced_path) catch |err| {
+        log.warn("portable update displaced cleanup failed path={s} err={}", .{ displaced_path, err });
     };
 }
 
@@ -3745,6 +3752,8 @@ test "portable recovery preserves complete rollback" {
     defer alloc.free(stage_dir);
     const backup_path = try std.fs.path.join(alloc, &.{ stage_dir, "backup" });
     defer alloc.free(backup_path);
+    const displaced_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced" });
+    defer alloc.free(displaced_path);
     try portable_apply.prepareBackup(alloc, install_root, backup_path);
     const artifact_name = try std.fmt.allocPrint(
         alloc,
@@ -3791,7 +3800,7 @@ test "portable recovery preserves complete rollback" {
         try std.testing.expectEqual(state.portable_watcher_pid, loaded.portable_watcher_pid);
         try std.testing.expectEqual(state.portable_watcher_started_at, loaded.portable_watcher_started_at);
 
-        try portable_apply.rollback(alloc, install_root, backup_path);
+        try portable_apply.rollback(alloc, install_root, backup_path, displaced_path);
         const restored = try tmp.dir.readFileAlloc(alloc, "noctty.com", 32);
         defer alloc.free(restored);
         try std.testing.expectEqualStrings("old-build", restored);
@@ -3804,7 +3813,9 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makePath("updates/1.3.200/backup");
+    try tmp.dir.makePath("updates/1.3.200/displaced");
     try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/backup/held.txt", .data = "held" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200/displaced/held.txt", .data = "held" });
     const root = try tmp.dir.realpathAlloc(alloc, ".");
     defer alloc.free(root);
     const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
@@ -3832,6 +3843,10 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     defer alloc.free(held_path);
     const held = try openLockedInstaller(held_path);
     defer held.close();
+    const displaced_held_path = try std.fs.path.join(alloc, &.{ stage_dir, "displaced", "held.txt" });
+    defer alloc.free(displaced_held_path);
+    const displaced_held = try openLockedInstaller(displaced_held_path);
+    defer displaced_held.close();
     try finalizePortableConfirmation(alloc, state_path);
 
     var loaded = try loadState(alloc, state_path);
@@ -3840,6 +3855,7 @@ test "confirmed portable cleanup failure cannot rearm startup gating" {
     try std.testing.expect(loaded.staged_version == null);
     try std.testing.expect(loaded.staged_kind == null);
     try std.fs.accessAbsolute(held_path, .{});
+    try std.fs.accessAbsolute(displaced_held_path, .{});
 }
 
 test "portable relaunch replays original argv" {
