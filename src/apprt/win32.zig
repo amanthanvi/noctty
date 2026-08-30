@@ -2593,6 +2593,38 @@ const recovery_ready_persist_attempts: u8 = 3;
 /// `(recovery_ready_persist_attempts - 1) * this` late.
 const recovery_ready_retry_delay_ms: u32 = 750;
 
+/// May a tick spend a ready-marker attempt yet?
+///
+/// The retry timer only guarantees that an attempt *happens*; it cannot stop
+/// an earlier unrelated tick — PTY output, a keystroke, a resize — from
+/// reaching `resolveRecoveryStartup` first and spending the attempt with no
+/// delay at all. A busy terminal would therefore burn the whole budget in
+/// microseconds, which is the same defect as retrying on a bare wake. The
+/// deadline is what actually makes the spacing real, for every transport.
+fn recoveryRetryDue(not_before_ms: ?u64, now_ms: u64) bool {
+    const deadline = not_before_ms orelse return true;
+    return now_ms >= deadline;
+}
+
+/// What to do after a ready-marker attempt failed.
+const RecoveryFailureAction = enum {
+    /// Budget survives and a spaced retry is armed.
+    retry_scheduled,
+    /// Budget survives but no retry could be armed, so nothing will bring the
+    /// loop back. Retrying immediately instead would spend the remaining
+    /// attempts in microseconds — the busy retry the delay exists to prevent —
+    /// and would still end with the marker unresolved, just with the failure
+    /// counted three times and the log claiming retries that never waited.
+    give_up_unschedulable,
+    /// Budget exhausted, or an error that cannot clear by waiting.
+    give_up_exhausted,
+};
+
+fn recoveryFailurePolicy(budget_exhausted: bool, scheduled: bool) RecoveryFailureAction {
+    if (budget_exhausted) return .give_up_exhausted;
+    return if (scheduled) .retry_scheduled else .give_up_unschedulable;
+}
+
 /// Retry budget for the ready marker, spent across message-loop ticks.
 ///
 /// The ready marker is the only thing that breaks a failure streak, so a
@@ -3175,6 +3207,10 @@ pub const App = struct {
     terminal_handoff_server: ?*win32_terminal_handoff.Server = null,
     undo_prune_timer_id: ?UINT_PTR = null,
     recovery_retry_timer_id: ?UINT_PTR = null,
+    /// Monotonic `GetTickCount64` deadline before which no tick may spend a
+    /// ready-marker attempt. Cleared by the retry timer, which is the tick
+    /// the deadline was waiting for.
+    recovery_retry_not_before_ms: ?u64 = null,
     next_undo_sequence: u64 = 1,
     running: bool = false,
     /// A normal last-host close destroys the native/session model before
@@ -3703,8 +3739,7 @@ pub const App = struct {
             if (msg.message == c.WM_TIMER) {
                 if (self.recovery_retry_timer_id) |timer_id| {
                     if (msg.wParam == timer_id) {
-                        self.stopRecoveryRetryTimer();
-                        self.resolveRecoveryStartup();
+                        self.onRecoveryRetryTimer();
                         continue;
                     }
                 }
@@ -4254,23 +4289,39 @@ pub const App = struct {
     /// which is exactly the crash-loop evidence that selects safe mode.
     fn resolveRecoveryStartup(self: *App) void {
         if (!self.recovery_ready_resolved) {
+            // An unrelated tick that beat the retry timer must not spend an
+            // attempt; the armed timer will bring the loop back on time.
+            if (!recoveryRetryDue(self.recovery_retry_not_before_ms, sys.GetTickCount64())) return;
+
             if (self.markRecoveryReady()) {
                 self.recovery_ready_resolved = true;
                 self.stopRecoveryRetryTimer();
+                self.recovery_retry_not_before_ms = null;
             } else |err| {
-                if (self.recovery_ready_retry.recordFailure(err)) {
-                    log.warn(
-                        "win32 recovery: ready marker unresolved after {d} attempt(s) err={}",
-                        .{ self.recovery_ready_retry.failures, err },
-                    );
-                    self.recovery_ready_resolved = true;
-                    self.stopRecoveryRetryTimer();
-                } else {
-                    log.warn(
+                const exhausted = self.recovery_ready_retry.recordFailure(err);
+                const scheduled = !exhausted and self.scheduleRecoveryRetry();
+                switch (recoveryFailurePolicy(exhausted, scheduled)) {
+                    .retry_scheduled => log.warn(
                         "win32 recovery: ready marker attempt {d} failed err={}; retrying in {d}ms",
                         .{ self.recovery_ready_retry.failures, err, recovery_ready_retry_delay_ms },
-                    );
-                    self.scheduleRecoveryRetry();
+                    ),
+                    .give_up_unschedulable => {
+                        log.warn(
+                            "win32 recovery: ready marker attempt {d} failed err={} and no retry could be scheduled; leaving the launch unresolved",
+                            .{ self.recovery_ready_retry.failures, err },
+                        );
+                        self.recovery_ready_resolved = true;
+                        self.recovery_retry_not_before_ms = null;
+                    },
+                    .give_up_exhausted => {
+                        log.warn(
+                            "win32 recovery: ready marker unresolved after {d} attempt(s) err={}",
+                            .{ self.recovery_ready_retry.failures, err },
+                        );
+                        self.recovery_ready_resolved = true;
+                        self.stopRecoveryRetryTimer();
+                        self.recovery_retry_not_before_ms = null;
+                    },
                 }
             }
         }
@@ -5431,17 +5482,21 @@ pub const App = struct {
     /// Bounded by `RecoveryReadyRetry`: only a failure that has not exhausted
     /// the budget reaches here, so at most
     /// `recovery_ready_persist_attempts - 1` timers are ever armed.
-    fn scheduleRecoveryRetry(self: *App) void {
+    /// Returns false when no retry could be armed. There is deliberately no
+    /// wake fallback: a wake re-ticks immediately, so the remaining attempts
+    /// would run back to back and the delay that lets a handle hold clear
+    /// would be gone exactly when `SetTimer` failing says the session is
+    /// already degraded. The caller stops instead.
+    fn scheduleRecoveryRetry(self: *App) bool {
         self.stopRecoveryRetryTimer();
         const timer_id = sys.SetTimer(null, 0, recovery_ready_retry_delay_ms, null);
         if (timer_id == 0) {
             log.warn("failed to start win32 recovery retry timer err={}", .{windows.kernel32.GetLastError()});
-            // Fall back to an immediate wake: a spaced retry is better, but
-            // an unresolved launch that never retries at all is worse.
-            self.wakeup();
-            return;
+            return false;
         }
         self.recovery_retry_timer_id = timer_id;
+        self.recovery_retry_not_before_ms = sys.GetTickCount64() +| recovery_ready_retry_delay_ms;
+        return true;
     }
 
     fn stopRecoveryRetryTimer(self: *App) void {
@@ -5449,6 +5504,16 @@ pub const App = struct {
             _ = sys.KillTimer(null, timer_id);
             self.recovery_retry_timer_id = null;
         }
+    }
+
+    /// The retry timer fired: this is the tick the deadline was holding out
+    /// for, so clear it rather than re-checking the clock. `SetTimer` may
+    /// deliver marginally early, and refusing its own tick would leave nothing
+    /// armed to come back.
+    fn onRecoveryRetryTimer(self: *App) void {
+        self.stopRecoveryRetryTimer();
+        self.recovery_retry_not_before_ms = null;
+        self.resolveRecoveryStartup();
     }
 
     fn stopUndoPruneTimer(self: *App) void {
@@ -35215,6 +35280,50 @@ test "win32 recovery ready marker schedules a bounded number of retries" {
     // OutOfMemory resolves on the first failure, so it arms no timer at all.
     var oom: RecoveryReadyRetry = .{};
     try std.testing.expect(oom.recordFailure(error.OutOfMemory));
+}
+
+test "win32 recovery ready marker will not spend an attempt before its deadline" {
+    // No retry armed yet: the first attempt runs on the startup tick.
+    try std.testing.expect(recoveryRetryDue(null, 0));
+    try std.testing.expect(recoveryRetryDue(null, std.math.maxInt(u64)));
+
+    // A retry is armed for `now + delay`. Unrelated ticks — PTY output, a
+    // keystroke — reach `resolveRecoveryStartup` first on a busy terminal and
+    // must be refused, or the budget is spent with no spacing at all.
+    const armed_at: u64 = 1_000;
+    const deadline: u64 = armed_at + recovery_ready_retry_delay_ms;
+    try std.testing.expect(!recoveryRetryDue(deadline, armed_at));
+    try std.testing.expect(!recoveryRetryDue(deadline, deadline - 1));
+    try std.testing.expect(recoveryRetryDue(deadline, deadline));
+    try std.testing.expect(recoveryRetryDue(deadline, deadline + 1));
+}
+
+test "win32 recovery gives up rather than busy-retrying when no timer can be armed" {
+    // Budget survives and a spaced retry was armed: keep going.
+    try std.testing.expectEqual(
+        RecoveryFailureAction.retry_scheduled,
+        recoveryFailurePolicy(false, true),
+    );
+
+    // Budget survives but nothing could be armed. Falling back to an
+    // immediate wake would re-tick with no delay and burn every remaining
+    // attempt in microseconds, which is the busy retry the delay exists to
+    // prevent — and it would still end unresolved. Stop instead, so the
+    // safe-mode notice is released once with an honest single failure.
+    try std.testing.expectEqual(
+        RecoveryFailureAction.give_up_unschedulable,
+        recoveryFailurePolicy(false, false),
+    );
+
+    // Exhaustion wins regardless of whether a timer could have been armed.
+    try std.testing.expectEqual(
+        RecoveryFailureAction.give_up_exhausted,
+        recoveryFailurePolicy(true, false),
+    );
+    try std.testing.expectEqual(
+        RecoveryFailureAction.give_up_exhausted,
+        recoveryFailurePolicy(true, true),
+    );
 }
 
 test "win32 safe mode notice waits for the launch to resolve on disk" {
