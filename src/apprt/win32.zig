@@ -18115,6 +18115,23 @@ fn formatSessionSnapshotMarker(
     );
 }
 
+/// True when nothing has been written to the screen yet: the active area holds
+/// no text or background fill, and nothing has scrolled off into history.
+/// Used to decide whether a restored snapshot would land on top of a child's
+/// startup output. A shell can return the cursor to the origin after printing
+/// (`ESC[H`), so cursor position is not on its own a usable test.
+fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
+    // `.screen` spans history plus the active area, so this also catches
+    // output that has already scrolled off the top.
+    var row_it = screen.pages.rowIterator(.right_down, .{ .screen = .{} }, null);
+    while (row_it.next()) |row| {
+        for (row.cells(.all)) |cell| {
+            if (!cell.isEmpty()) return false;
+        }
+    }
+    return true;
+}
+
 fn restoreTerminalScrollbackSnapshot(
     terminal_state: *terminal.Terminal,
     snapshot: win32_session_state.ScrollbackSnapshot,
@@ -18132,11 +18149,13 @@ fn restoreTerminalScrollbackSnapshot(
     // returns, so the child may already have painted by the time restore runs.
     // Printing a snapshot underneath a live prompt and then scrolling the lot
     // into history would bury the shell's own prompt and leave it painting
-    // into a pane it believes is still on screen. A pane that has not been
-    // painted yet still has its cursor at the origin, so treat anything else
-    // as "too late" and skip: a missing snapshot is recoverable, a desynced
-    // shell is not.
-    if (screen.cursor.x != 0 or screen.cursor.y != 0) return error.PaneAlreadyPainted;
+    // into a pane it believes is still on screen. Skip instead: a missing
+    // snapshot is recoverable, a desynced shell is not.
+    //
+    // The cursor position alone is not a sufficient test — `"PS> \x1b[H"`
+    // leaves prompt cells behind while returning the cursor to the origin —
+    // so require the whole active area to be unpainted.
+    if (!terminalScreenIsUnpainted(screen)) return error.PaneAlreadyPainted;
 
     const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
     const first_line = snapshot.lines.len - @min(snapshot.lines.len, max_lines);
@@ -35234,6 +35253,48 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
         try std.testing.expect(std.mem.indexOf(u8, screen, "PS C:\\src>") != null);
         try std.testing.expect(std.mem.indexOf(u8, screen, "L01") == null);
         try std.testing.expect(std.mem.indexOf(u8, screen, "SNAPSHOT END") == null);
+    }
+
+    // The child painted and then homed the cursor. Cursor position alone would
+    // call this pane pristine, so the predicate must look at the cells.
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 1024,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("PS C:\\src> \x1b[H");
+        try std.testing.expectEqual(@as(usize, 0), terminal_state.screens.active.cursor.x);
+        try std.testing.expectEqual(@as(usize, 0), terminal_state.screens.active.cursor.y);
+
+        try std.testing.expectError(
+            error.PaneAlreadyPainted,
+            restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
+    }
+
+    // A pane that pwsh has cleared but not yet prompted into is still eligible:
+    // its startup `ESC[2J ESC[H` leaves no painted cells.
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 1024,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H");
+
+        try std.testing.expectEqual(
+            @as(usize, lines.len),
+            try restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
     }
 }
 
