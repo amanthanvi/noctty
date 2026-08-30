@@ -53,8 +53,8 @@ pub const Target = union(Key) {
     }
 };
 
-pub const automation_window_list_schema = "noctty.windows.v2";
-pub const automation_window_list_api_version: u32 = 2;
+pub const automation_window_list_schema = "noctty.windows.v3";
+pub const automation_window_list_api_version: u32 = 3;
 
 comptime {
     const version_suffix = std.fmt.comptimePrint(".v{d}", .{automation_window_list_api_version});
@@ -66,17 +66,32 @@ comptime {
 pub const AutomationWindowList = struct {
     schema: []const u8 = automation_window_list_schema,
     api_version: u32 = automation_window_list_api_version,
+    instance: AutomationInstance,
     windows: []AutomationWindow,
 
     pub fn deinit(self: *AutomationWindowList, alloc: Allocator) void {
+        self.instance.deinit(alloc);
         for (self.windows) |*window| window.deinit(alloc);
         alloc.free(self.windows);
         self.* = undefined;
     }
 };
 
+pub const AutomationInstance = struct {
+    pid: u32,
+    version: []const u8,
+    class: []const u8,
+
+    pub fn deinit(self: *AutomationInstance, alloc: Allocator) void {
+        alloc.free(self.version);
+        alloc.free(self.class);
+        self.* = undefined;
+    }
+};
+
 pub const AutomationWindow = struct {
     window_id: u32,
+    title: []const u8,
     focused: bool,
     active_tab_id: ?u32,
     tab_count: u64,
@@ -84,6 +99,7 @@ pub const AutomationWindow = struct {
     tabs: []AutomationTab,
 
     pub fn deinit(self: *AutomationWindow, alloc: Allocator) void {
+        alloc.free(self.title);
         for (self.tabs) |*tab| tab.deinit(alloc);
         alloc.free(self.tabs);
         self.* = undefined;
@@ -98,6 +114,7 @@ pub const AutomationTab = struct {
     panes: []AutomationPane,
 
     pub fn deinit(self: *AutomationTab, alloc: Allocator) void {
+        for (self.panes) |*pane| pane.deinit(alloc);
         alloc.free(self.panes);
         self.* = undefined;
     }
@@ -105,8 +122,16 @@ pub const AutomationTab = struct {
 
 pub const AutomationPane = struct {
     surface_id: u64,
+    title: ?[]const u8,
+    working_directory: ?[]const u8,
     focused: bool,
     active: bool,
+
+    pub fn deinit(self: *AutomationPane, alloc: Allocator) void {
+        if (self.title) |title| alloc.free(title);
+        if (self.working_directory) |working_directory| alloc.free(working_directory);
+        self.* = undefined;
+    }
 };
 
 pub const AutomationActionTarget = union(enum) {

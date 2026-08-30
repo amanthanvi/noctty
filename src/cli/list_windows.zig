@@ -28,10 +28,10 @@ pub const Options = struct {
 /// The `list-windows` command prints a read-only automation snapshot for the
 /// matching local noctty instance as JSON.
 ///
-/// The current schema exposes only stable host/tab/pane identifiers, focus
-/// state, active-pane state, and structural counts. It does not expose
-/// terminal text, shell input, working directories, or any write/control
-/// actions.
+/// The current schema exposes instance metadata, stable host/tab/pane
+/// identifiers, titles, last-known working directories, focus state,
+/// active-pane state, and structural counts. It never exposes terminal text,
+/// scrollback, selection, clipboard data, or pending shell input.
 ///
 /// Flags:
 ///
@@ -130,7 +130,7 @@ test "automation-window-list cli prints json payload" {
                 .class => |class| try testing.allocator.dupe(u8, class),
                 .detect => return error.UnexpectedTarget,
             };
-            return try alloc.dupe(u8, "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[]}");
+            return try alloc.dupe(u8, "{\"schema\":\"noctty.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}");
         }
     };
     defer if (Hook.seen_class) |value| testing.allocator.free(value);
@@ -157,7 +157,7 @@ test "automation-window-list cli prints json payload" {
 
     try testing.expectEqual(@as(u8, 0), exit_code);
     try testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[]}\n",
+        "{\"schema\":\"noctty.windows.v3\",\"api_version\":3,\"instance\":{\"pid\":1,\"version\":\"test\",\"class\":\"lane9\"},\"windows\":[]}\n",
         stdout_buf.written(),
     );
     try testing.expectEqualStrings("", stderr_buf.written());

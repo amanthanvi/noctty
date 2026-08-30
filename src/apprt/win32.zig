@@ -2366,6 +2366,9 @@ pub const App = struct {
         title: LPCWSTR,
         opts: SurfaceInitOptions,
     ) anyerror!*Surface = null,
+    /// Test-only seam for automation snapshots built without a live core
+    /// surface. Returned strings are owned by the caller.
+    test_automation_pwd: ?*const fn (Allocator, *Surface) anyerror!?[]const u8 = null,
     /// Test-only interleaving seam for the focus revision race between a
     /// structural split-close prepare and commit.
     test_before_split_undo_shell_commit: ?*const fn (
@@ -2382,6 +2385,8 @@ pub const App = struct {
     wheel_settings: SystemWheelSettings = .{},
     system_dynamic_scrollbars: bool = true,
     ipc_pipe_name: ?[:0]const u16 = null,
+    /// Effective sanitized namespace captured when the IPC server starts.
+    ipc_namespace: ?[]const u8 = null,
     ipc_thread: ?std.Thread = null,
     ipc_stop_requested: std.atomic.Value(bool) = .init(false),
     global_hotkeys: std.ArrayListUnmanaged(RegisteredGlobalHotkey) = .empty,
@@ -3983,7 +3988,13 @@ pub const App = struct {
         if (self.config.@"single-instance" != .true) return;
         if (self.ipc_thread != null) return;
 
-        self.ipc_pipe_name = try self.resolveIpcPipeName(self.core_app.alloc);
+        self.ipc_namespace = try sanitizeIpcNamespace(self.core_app.alloc, self.config.class);
+        errdefer {
+            if (self.ipc_namespace) |namespace| self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
+        }
+
+        self.ipc_pipe_name = try allocIpcPipeName(self.core_app.alloc, self.ipc_namespace);
         errdefer {
             if (self.ipc_pipe_name) |pipe_name| self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
@@ -4012,6 +4023,10 @@ pub const App = struct {
         if (self.ipc_pipe_name) |pipe_name| {
             self.core_app.alloc.free(pipe_name);
             self.ipc_pipe_name = null;
+        }
+        if (self.ipc_namespace) |namespace| {
+            self.core_app.alloc.free(namespace);
+            self.ipc_namespace = null;
         }
         self.ipc_stop_requested.store(false, .release);
     }
@@ -5399,6 +5414,19 @@ pub const App = struct {
         self: *App,
         alloc: Allocator,
     ) !apprt.ipc.AutomationWindowList {
+        const namespace = self.ipc_namespace orelse return error.IpcServerNotStarted;
+        var instance: apprt.ipc.AutomationInstance = instance: {
+            const version = try alloc.dupe(u8, build_config.version_string);
+            errdefer alloc.free(version);
+            const namespace_copy = try alloc.dupe(u8, namespace);
+            break :instance .{
+                .pid = sys.GetCurrentProcessId(),
+                .version = version,
+                .class = namespace_copy,
+            };
+        };
+        errdefer instance.deinit(alloc);
+
         const window_entries = try alloc.alloc(apprt.ipc.AutomationWindow, self.automationWindowCount());
         var built: usize = 0;
         errdefer {
@@ -5408,11 +5436,11 @@ pub const App = struct {
 
         for (self.hosts.items) |host| {
             if (host.tabs.items.len == 0) continue;
-            window_entries[built] = try buildAutomationWindow(alloc, host);
+            window_entries[built] = try self.buildAutomationWindow(alloc, host);
             built += 1;
         }
 
-        return .{ .windows = window_entries };
+        return .{ .instance = instance, .windows = window_entries };
     }
 
     fn automationWindowCount(self: *const App) usize {
@@ -5425,6 +5453,7 @@ pub const App = struct {
     }
 
     fn buildAutomationWindow(
+        self: *App,
         alloc: Allocator,
         host: *Host,
     ) !apprt.ipc.AutomationWindow {
@@ -5438,13 +5467,16 @@ pub const App = struct {
         var active_tab_id: ?u32 = null;
         for (host.tabs.items, 0..) |*tab, i| {
             const active = i == host.active_tab;
-            tabs[i] = try buildAutomationTab(alloc, tab, active);
+            tabs[i] = try self.buildAutomationTab(alloc, tab, active);
             if (active) active_tab_id = tab.id;
             built += 1;
         }
 
+        const title = try alloc.dupe(u8, host.cached_window_title orelse "noctty");
+
         return .{
             .window_id = host.id,
+            .title = title,
             .focused = if (host.activeSurface()) |surface| surface.window_focused else false,
             .active_tab_id = active_tab_id,
             .tab_count = @intCast(tabs.len),
@@ -5454,18 +5486,36 @@ pub const App = struct {
     }
 
     fn buildAutomationTab(
+        self: *App,
         alloc: Allocator,
         tab: *const Tab,
         active: bool,
     ) !apprt.ipc.AutomationTab {
         var panes: std.ArrayList(apprt.ipc.AutomationPane) = .empty;
+        // Registration order matters: `defer` and `errdefer` run LIFO, so the
+        // per-pane string cleanup must be registered AFTER the list teardown
+        // in order to run BEFORE it. The reverse order reads `panes.items`
+        // after `deinit` has freed the backing buffer.
         defer panes.deinit(alloc);
+        errdefer for (panes.items) |*pane| pane.deinit(alloc);
 
         const focused_surface = tab.focusedSurface();
         var it = tab.tree.iterator();
         while (it.next()) |entry| {
+            const title = if (entry.view.effectiveTitle()) |value|
+                try alloc.dupe(u8, value)
+            else
+                null;
+            errdefer if (title) |value| alloc.free(value);
+            const working_directory = if (self.test_automation_pwd) |query|
+                try query(alloc, entry.view)
+            else
+                try entry.view.core().pwd(alloc);
+            errdefer if (working_directory) |value| alloc.free(value);
             try panes.append(alloc, .{
                 .surface_id = entry.view.core().id,
+                .title = title,
+                .working_directory = working_directory,
                 .focused = if (focused_surface) |surface| surface == entry.view else false,
                 // True only for the focused pane in the active tab, not every
                 // tab-local focused pane.
@@ -29863,6 +29913,17 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "lane_9";
+    app.test_automation_pwd = &struct {
+        fn query(alloc: Allocator, surface: *Surface) !?[]const u8 {
+            return switch (surface.core().id) {
+                701 => null,
+                702 => try alloc.dupe(u8, "C:\\work\\\"quote\"\t\r\n"),
+                703 => try alloc.dupe(u8, "home"),
+                else => error.UnexpectedSurface,
+            };
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
@@ -29870,6 +29931,7 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     host.id = 17;
     host.tabs = .empty;
     host.active_tab = 1;
+    host.cached_window_title = "host \"quote\"\\slash\t\r\n";
     defer {
         for (host.tabs.items) |*tab| tab.deinit();
         host.tabs.deinit(std.testing.allocator);
@@ -29880,6 +29942,9 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab0_surface.core_surface.id = 701;
     tab0_surface.host = &host;
     tab0_surface.host_id = host.id;
+    tab0_surface.title = null;
+    tab0_surface.title_override = null;
+    tab0_surface.tab_title_override = null;
 
     var tab1_primary: Surface = undefined;
     tab1_primary.core_surface = undefined;
@@ -29887,12 +29952,18 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     tab1_primary.host = &host;
     tab1_primary.host_id = host.id;
     tab1_primary.window_focused = true;
+    tab1_primary.title = "terminal title";
+    tab1_primary.title_override = "surface title";
+    tab1_primary.tab_title_override = "tab \"title\"\\\t\r\n";
 
     var tab1_split: Surface = undefined;
     tab1_split.core_surface = undefined;
     tab1_split.core_surface.id = 703;
     tab1_split.host = &host;
     tab1_split.host_id = host.id;
+    tab1_split.title = "split title";
+    tab1_split.title_override = null;
+    tab1_split.tab_title_override = null;
 
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 3, &tab0_surface));
     try host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 4, &tab1_primary));
@@ -29921,10 +29992,58 @@ test "automation-window-list win32 json includes host tab and pane ids" {
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":4,\"tab_count\":2,\"pane_count\":3,\"tabs\":[{\"tab_id\":3,\"active\":false,\"focused_surface_id\":701,\"pane_count\":1,\"panes\":[{\"surface_id\":701,\"focused\":true,\"active\":false}]},{\"tab_id\":4,\"active\":true,\"focused_surface_id\":702,\"pane_count\":2,\"panes\":[{\"surface_id\":703,\"focused\":false,\"active\":false},{\"surface_id\":702,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqualStrings("noctty.windows.v3", apprt.ipc.automation_window_list_schema);
+    try std.testing.expectEqual(@as(u32, 3), apprt.ipc.automation_window_list_api_version);
+    try std.testing.expectEqualStrings("noctty.windows.v3", root.get("schema").?.string);
+    try std.testing.expectEqual(@as(i64, 3), root.get("api_version").?.integer);
+    const instance = root.get("instance").?.object;
+    try std.testing.expectEqual(@as(i64, sys.GetCurrentProcessId()), instance.get("pid").?.integer);
+    try std.testing.expectEqualStrings(build_config.version_string, instance.get("version").?.string);
+    try std.testing.expectEqualStrings("lane_9", instance.get("class").?.string);
+
+    const windows_json = root.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("host \"quote\"\\slash\t\r\n", window.get("title").?.string);
+    try std.testing.expect(window.get("focused").?.bool);
+    try std.testing.expectEqual(@as(i64, 4), window.get("active_tab_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), window.get("tab_count").?.integer);
+    try std.testing.expectEqual(@as(i64, 3), window.get("pane_count").?.integer);
+    const tabs = window.get("tabs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), tabs.len);
+    try std.testing.expectEqual(@as(i64, 3), tabs[0].object.get("tab_id").?.integer);
+    try std.testing.expect(!tabs[0].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 701), tabs[0].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), tabs[0].object.get("pane_count").?.integer);
+    const null_pane = tabs[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expectEqual(@as(i64, 701), null_pane.get("surface_id").?.integer);
+    try std.testing.expect(null_pane.get("focused").?.bool);
+    try std.testing.expect(!null_pane.get("active").?.bool);
+    try std.testing.expect(null_pane.get("title").? == .null);
+    try std.testing.expect(null_pane.get("working_directory").? == .null);
+    const active_panes = tabs[1].object.get("panes").?.array.items;
+    try std.testing.expectEqual(@as(i64, 4), tabs[1].object.get("tab_id").?.integer);
+    try std.testing.expect(tabs[1].object.get("active").?.bool);
+    try std.testing.expectEqual(@as(i64, 702), tabs[1].object.get("focused_surface_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), tabs[1].object.get("pane_count").?.integer);
+    try std.testing.expectEqual(@as(usize, 2), active_panes.len);
+    try std.testing.expectEqual(@as(i64, 703), active_panes[0].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("split title", active_panes[0].object.get("title").?.string);
+    try std.testing.expectEqualStrings("home", active_panes[0].object.get("working_directory").?.string);
+    try std.testing.expectEqual(@as(i64, 702), active_panes[1].object.get("surface_id").?.integer);
+    try std.testing.expectEqualStrings("tab \"title\"\\\t\r\n", active_panes[1].object.get("title").?.string);
+    try std.testing.expectEqualStrings("C:\\work\\\"quote\"\t\r\n", active_panes[1].object.get("working_directory").?.string);
+    try std.testing.expect(active_panes[1].object.get("focused").?.bool);
+    try std.testing.expect(active_panes[1].object.get("active").?.bool);
+    try std.testing.expect(active_panes[1].object.get("pid") == null);
+
+    for ([_][]const u8{ "grid", "scrollback", "selection", "clipboard", "shell_input" }) |key| {
+        try std.testing.expect(std.mem.indexOf(u8, json, key) == null);
+    }
 }
 
 test "automation-window-list win32 json skips empty hosts kept alive for undo history" {
@@ -29933,6 +30052,12 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     var app: App = undefined;
     app.windows = .empty;
     app.hosts = .empty;
+    app.ipc_namespace = "empty-host-test";
+    app.test_automation_pwd = &struct {
+        fn query(_: Allocator, _: *Surface) !?[]const u8 {
+            return null;
+        }
+    }.query;
     defer app.windows.deinit(std.testing.allocator);
     defer app.hosts.deinit(std.testing.allocator);
 
@@ -29949,6 +30074,7 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     live_host.id = 17;
     live_host.tabs = .empty;
     live_host.active_tab = 0;
+    live_host.cached_window_title = null;
     defer {
         for (live_host.tabs.items) |*tab| tab.deinit();
         live_host.tabs.deinit(std.testing.allocator);
@@ -29960,6 +30086,9 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     surface.host = &live_host;
     surface.host_id = live_host.id;
     surface.window_focused = true;
+    surface.title = null;
+    surface.title_override = null;
+    surface.tab_title_override = null;
 
     try live_host.tabs.append(std.testing.allocator, try Tab.init(std.testing.allocator, 5, &surface));
     try app.hosts.append(std.testing.allocator, &empty_host);
@@ -29969,10 +30098,16 @@ test "automation-window-list win32 json skips empty hosts kept alive for undo hi
     const json = try app.buildAutomationWindowListJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
 
-    try std.testing.expectEqualStrings(
-        "{\"schema\":\"noctty.windows.v2\",\"api_version\":2,\"windows\":[{\"window_id\":17,\"focused\":true,\"active_tab_id\":5,\"tab_count\":1,\"pane_count\":1,\"tabs\":[{\"tab_id\":5,\"active\":true,\"focused_surface_id\":801,\"pane_count\":1,\"panes\":[{\"surface_id\":801,\"focused\":true,\"active\":true}]}]}]}",
-        json,
-    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const windows_json = parsed.value.object.get("windows").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), windows_json.len);
+    const window = windows_json[0].object;
+    try std.testing.expectEqual(@as(i64, 17), window.get("window_id").?.integer);
+    try std.testing.expectEqualStrings("noctty", window.get("title").?.string);
+    const pane = window.get("tabs").?.array.items[0].object.get("panes").?.array.items[0].object;
+    try std.testing.expect(pane.get("title").? == .null);
+    try std.testing.expect(pane.get("working_directory").? == .null);
 }
 
 test "win32 timed out automation request remains owned until consumption" {
