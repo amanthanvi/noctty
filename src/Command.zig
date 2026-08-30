@@ -421,6 +421,14 @@ fn startWindows(self: *Command, arena: Allocator) !void {
                 return windows.unexpectedError(windows.kernel32.GetLastError());
             }
             if (exit_code != windows.exp.STILL_ACTIVE) {
+                // This branch is the one post-creation failure where the
+                // child exited on its own and its exit code is known. Log it
+                // rather than discarding it: the launch still fails, so the
+                // code never reaches the normal child-exit reporting path.
+                log.warn(
+                    "windows job object attach target already exited exit_code={d}",
+                    .{exit_code},
+                );
                 return error.WindowsJobObjectAttachExitedChild;
             }
         }

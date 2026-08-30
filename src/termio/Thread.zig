@@ -284,12 +284,14 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     cause,
                     "noctty failed to launch the requested command:",
                     \\The child process was created, but noctty could not
-                    \\finish setting it up, so it was terminated. It never ran
-                    \\to completion and has no meaningful exit code.
+                    \\finish launching it. Depending on the cause above, the
+                    \\child either exited on its own during launch setup or
+                    \\was stopped during cleanup, so no exit code is reported
+                    \\for it here.
                     \\
-                    \\Check the reported cause above. This happens during the
-                    \\post-creation launch steps, so a common cause is the
-                    \\optional Windows Job Object limits failing to apply.
+                    \\This happens during the post-creation launch steps, so a
+                    \\common cause is the optional Windows Job Object limits
+                    \\failing to apply.
                     ,
                 );
             },
