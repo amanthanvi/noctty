@@ -4762,6 +4762,32 @@ test "settings action bar pins normal conflict prompt and stacked actions" {
         try std.testing.expect(short.actions_top + short.actions.third_y + short.actions.button_height <= short.bar_height);
     }
 
+    // The real minimum client size is DPI-scaled: `WM_GETMINMAXINFO` sets
+    // `ptMinTrackSize` from `px(720)` / `px(520)`. Assert a *positive* form
+    // viewport at that actual floor for every DPI — `top <= bottom` alone is
+    // satisfied by an empty viewport, which would clip every control to an
+    // empty region.
+    for ([_]u32{ 96, 120, 144, 168, 192, 288 }) |dpi| {
+        var floor: SettingsWindow = .{
+            .handle = undefined,
+            .dpi = dpi,
+            .close_prompt_visible = true,
+        };
+        const enforced: RECT = .{
+            .left = 0,
+            .top = 0,
+            .right = scaleForDpi(720, dpi),
+            .bottom = scaleForDpi(520, dpi),
+        };
+        try std.testing.expect(
+            settingsContentViewportTop(&floor, enforced) <
+                settingsContentViewportBottom(&floor, enforced),
+        );
+    }
+
+    // Degenerate probe: a client smaller than the enforced minimum (only
+    // reachable if `cappedMinimum` clamps to a very short work area) must
+    // still not invert the viewport.
     var minimum: SettingsWindow = .{ .handle = undefined, .dpi = 288, .close_prompt_visible = true };
     const client: RECT = .{ .left = 0, .top = 0, .right = 720, .bottom = 520 };
     const pane = paneBounds(&minimum, client);
