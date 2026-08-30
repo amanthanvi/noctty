@@ -3442,7 +3442,7 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
     const cli_launch_layout = self.@"launch-layout";
     const replay_len_before = self._replay_steps.items.len;
     try self.loadIter(alloc, &iter);
-    if (dropFileLaunchLayoutSteps(self, replay_len_before)) |name| log.warn(
+    if (self.dropLaunchLayoutReplaySteps(replay_len_before)) |name| log.warn(
         "{s}: ignoring launch-layout={s}; it can only be set on the command line",
         .{ path, name },
     );
@@ -3451,11 +3451,17 @@ fn loadReader(self: *Config, alloc: Allocator, reader: *std.Io.Reader, path: []c
     try self.expandPaths(std.fs.path.dirname(path).?);
 }
 
-/// Remove the `--launch-layout` steps a configuration file appended to the
-/// replay log at or after `from`, returning the last value it set. Replay
-/// (`loadTheme`, `changeConditionalState`) feeds steps straight to `loadIter`,
-/// so a step left behind would restore a value the caller just discarded.
-fn dropFileLaunchLayoutSteps(self: *Config, from: usize) ?[]const u8 {
+/// Remove the `--launch-layout` steps at or after `from` in the replay log,
+/// returning the last value they set.
+///
+/// `launch-layout` is one-shot, but `loadTheme` and `changeConditionalState`
+/// feed `_replay_steps` straight to `loadIter`, which bypasses every guard
+/// that clears the parsed field. A step left behind therefore restores the
+/// value later. Two callers need this: `loadReader`, for a value a
+/// configuration file set (pass the length recorded before that file parsed),
+/// and the win32 runtime once it has consumed the command-line request (pass
+/// `0`, so the whole history is cleared).
+pub fn dropLaunchLayoutReplaySteps(self: *Config, from: usize) ?[]const u8 {
     const prefix = "--launch-layout";
     var found: ?[]const u8 = null;
     var i = self._replay_steps.items.len;
@@ -3531,6 +3537,36 @@ test "launch-layout is ignored in configuration files" {
 
         try testing.expectEqualStrings("Project Alpha", cfg.@"launch-layout".?);
     }
+}
+
+test "launch-layout does not survive in the replay log once consumed" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    const arena_alloc = cfg._arena.?.allocator();
+
+    // What `loadCliArgs` leaves behind for `noctty --launch-layout=<name>`.
+    try cfg._replay_steps.append(arena_alloc, .{
+        .arg = try arena_alloc.dupeZ(u8, "--launch-layout=Project Alpha"),
+    });
+    cfg.@"launch-layout" = "Project Alpha";
+
+    // Startup consumes the request. Clearing the field alone is not enough:
+    // `loadTheme` and `changeConditionalState` replay `_replay_steps` through
+    // `loadIter`, and a per-window clone inherits that history.
+    cfg.@"launch-layout" = null;
+    try testing.expectEqualStrings(
+        "Project Alpha",
+        cfg.dropLaunchLayoutReplaySteps(0).?,
+    );
+
+    var replayed = try Config.default(alloc);
+    defer replayed.deinit();
+    var replay_it = Replay.iterator(cfg._replay_steps.items, &replayed);
+    try replayed.loadIter(alloc, &replay_it);
+    try testing.expect(replayed.@"launch-layout" == null);
 }
 
 test "handle bom in config files" {

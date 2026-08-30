@@ -1393,6 +1393,13 @@ fn applyNewWindowArguments(
         return error.ForbiddenForwardedArgument;
     }
 
+    // This clone inherits the app config's replay history, and `+new-window`
+    // always forwards at least a working directory, so the `finalize` below
+    // always runs. `launch-layout` is one-shot: an inherited startup step
+    // replayed here would turn an ordinary new window into a layout launch.
+    _ = config.dropLaunchLayoutReplaySteps(0);
+    config.@"launch-layout" = null;
+
     var iter: ForwardedArgIterator = .{ .args = argv };
     try config.loadIter(alloc_gpa, &iter);
     try config.finalize();
@@ -2559,6 +2566,12 @@ pub const App = struct {
             // actions must not inherit and replay it from the app config.
             const launched = self.launchNamedLayout(name, null);
             self.config.@"launch-layout" = null;
+            // Clearing the field is not enough: `finalize` -> `loadTheme` and
+            // `changeConditionalState` replay `_replay_steps` through
+            // `loadIter`, and a per-window clone inherits that history, so a
+            // surviving startup step would turn a later ordinary new window
+            // into a layout launch.
+            _ = self.config.dropLaunchLayoutReplaySteps(0);
             if (!launched) {
                 try self.createWindow(default_title);
                 if (self.primarySurface()) |surface| if (surface.host) |host| {
@@ -4411,8 +4424,12 @@ pub const App = struct {
                             self.config.@"ssh-config-hosts" != config.@"ssh-config-hosts";
                         // CLI launch-layout is a one-shot startup/new-window
                         // request. Config reload reparses the original argv, so
-                        // strip it before installing the long-lived app config.
+                        // strip it before installing the long-lived app config
+                        // -- both the parsed field and the replay step, since
+                        // a later theme or conditional-state reload would
+                        // otherwise put it back.
                         config.@"launch-layout" = null;
+                        _ = config.dropLaunchLayoutReplaySteps(0);
                         // Palette theme preview owns a reversible baseline
                         // around the app-global config. An external/settings
                         // config change supersedes that transaction: dismiss
