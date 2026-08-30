@@ -4785,9 +4785,52 @@ test "settings action bar pins normal conflict prompt and stacked actions" {
         );
     }
 
-    // Degenerate probe: a client smaller than the enforced minimum (only
-    // reachable if `cappedMinimum` clamps to a very short work area) must
-    // still not invert the viewport.
+    // `cappedMinimum` clamps the DPI-scaled minimum down to the monitor work
+    // area, which is how a client shorter than the scaled fixed bands is
+    // actually reached -- a 1366x768 work area at 288 DPI used to produce a
+    // viewport of exactly zero height, blanking the whole form. Assert a form
+    // viewport of at least one control row for every work area a real display
+    // or Remote Desktop session can present, with the dirty-close prompt open,
+    // and assert the action bar still has room for its first button row.
+    for ([_]struct { w: i32, h: i32, dpi: u32 }{
+        .{ .w = 1920, .h = 1080, .dpi = 96 },
+        .{ .w = 2560, .h = 1440, .dpi = 144 },
+        .{ .w = 1366, .h = 768, .dpi = 192 },
+        .{ .w = 1920, .h = 1080, .dpi = 288 },
+        .{ .w = 1366, .h = 768, .dpi = 288 },
+        .{ .w = 1280, .h = 720, .dpi = 288 },
+        .{ .w = 1024, .h = 640, .dpi = 288 },
+        .{ .w = 800, .h = 600, .dpi = 288 },
+    }) |work| {
+        var capped: SettingsWindow = .{
+            .handle = undefined,
+            .dpi = work.dpi,
+            .close_prompt_visible = true,
+        };
+        const client: RECT = .{
+            .left = 0,
+            .top = 0,
+            .right = cappedMinimum(720, work.dpi, work.w),
+            .bottom = cappedMinimum(520, work.dpi, work.h),
+        };
+        const viewport_top = settingsContentViewportTop(&capped, client);
+        const viewport_bottom = settingsContentViewportBottom(&capped, client);
+        try std.testing.expect(
+            viewport_bottom - viewport_top >= capped.px(settings_control_height),
+        );
+
+        const bar = closePromptLayoutGeometry(
+            &capped,
+            paneBounds(&capped, client).width,
+            actionBarAvailableHeight(&capped, client),
+        );
+        try std.testing.expect(bar.bar_height > 0);
+        try std.testing.expect(bar.actions_top + bar.actions.button_height <= bar.bar_height);
+        try std.testing.expectEqual(client.bottom - bar.bar_height - capped.px(settings_pane_padding), viewport_bottom);
+    }
+
+    // Degenerate probe: a client smaller than anything `cappedMinimum` can
+    // produce must still not invert the viewport.
     var minimum: SettingsWindow = .{ .handle = undefined, .dpi = 288, .close_prompt_visible = true };
     const client: RECT = .{ .left = 0, .top = 0, .right = 720, .bottom = 520 };
     const pane = paneBounds(&minimum, client);
@@ -5011,6 +5054,25 @@ const ClosePromptLayoutGeometry = struct {
     actions_top: i32,
 };
 
+/// Height the fixed action bar is allowed to occupy, leaving at least one
+/// control row of form viewport above it.
+///
+/// `cappedMinimum` clamps the DPI-scaled minimum window size down to the
+/// monitor work area, so a short work area at a high scale can produce a
+/// client that the scaled header plus a stacked dirty-close bar would consume
+/// entirely: a 1366x768 work area at 288 DPI gives a viewport of exactly zero
+/// height, and `clipChildToViewport` then assigns an empty region to every
+/// control and label, i.e. a blank form. The viewport is reserved first and
+/// the action bar gives way, which it already handles because it clamps its
+/// own contents to whatever height it is given.
+fn actionBarAvailableHeight(self: *SettingsWindow, client_rect: RECT) i32 {
+    const client_height = @max(0, client_rect.bottom - client_rect.top);
+    const reserved = settingsContentViewportTop(self, client_rect) +
+        self.px(settings_control_height) +
+        self.px(settings_pane_padding);
+    return @max(0, client_height - reserved);
+}
+
 fn closePromptLayoutGeometry(self: *SettingsWindow, pane_width: i32, client_height: i32) ClosePromptLayoutGeometry {
     const available_height = @max(0, client_height);
     const desired_padding = self.px(settings_action_padding);
@@ -5102,7 +5164,7 @@ fn paneBounds(self: *const SettingsWindow, client_rect: RECT) PaneBounds {
 
 fn settingsContentViewportBottom(self: *SettingsWindow, client_rect: RECT) i32 {
     const pane = paneBounds(self, client_rect);
-    const action_bar = closePromptLayoutGeometry(self, pane.width, client_rect.bottom - client_rect.top);
+    const action_bar = closePromptLayoutGeometry(self, pane.width, actionBarAvailableHeight(self, client_rect));
     return @max(settingsContentViewportTop(self, client_rect), client_rect.bottom - action_bar.bar_height - self.px(settings_pane_padding));
 }
 
@@ -5150,7 +5212,7 @@ fn layoutChildren(self: *SettingsWindow) void {
     const pane_left = pane.left;
     const pane_width = pane.width;
     const pane_top = rail_geometry.top_pad;
-    const action_bar = closePromptLayoutGeometry(self, pane_width, rect.bottom - rect.top);
+    const action_bar = closePromptLayoutGeometry(self, pane_width, actionBarAvailableHeight(self, rect));
     const action_bar_top = rect.bottom - action_bar.bar_height;
     const viewport_top = pane_top + self.px(settings_form_viewport_top);
     const viewport_bottom = @max(viewport_top, action_bar_top - pane_padding);
@@ -6003,7 +6065,7 @@ fn paint(hwnd: HWND, owner: *SettingsWindow) void {
         .bottom = rail_geometry.top_pad + owner.px(settings_header_separator_y) + separator_width,
     };
     _ = FillRect(hdc, &header_separator, pane_separator_brush);
-    const action_bar = closePromptLayoutGeometry(owner, pane.width, rect.bottom - rect.top);
+    const action_bar = closePromptLayoutGeometry(owner, pane.width, actionBarAvailableHeight(owner, rect));
     const action_separator: RECT = .{
         .left = pane.left,
         .top = rect.bottom - action_bar.bar_height,
