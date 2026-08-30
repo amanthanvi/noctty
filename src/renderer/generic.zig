@@ -39,6 +39,53 @@ const DisplayLink = void;
 
 const log = std.log.scoped(.generic_renderer);
 
+/// Whether a config change invalidates every swap chain frame's render
+/// target, i.e. whether `target_config_modified` must be bumped.
+///
+/// Two independent inputs feed `GraphicsAPI.initTarget`:
+///
+///   * the blending mode, which picks the offscreen target's internal
+///     format (`.srgba` vs `.rgba`), and
+///   * whether custom shaders are present, which is a hard precondition
+///     of the Win32 direct default-framebuffer strategy — a target that
+///     renders straight to fbo 0 is only ever handed out when there are
+///     no custom shaders.
+///
+/// A change in either direction must therefore re-create the targets. If
+/// only `reinitialize_shaders` were set, `reload_config` enabling a custom
+/// shader without a resize would leave the existing fbo-0 target in place
+/// and run the shader straight against the default framebuffer, defeating
+/// the fail-closed gate; disabling one would strand an offscreen target and
+/// forfeit the optimization until the next resize.
+pub fn targetConfigChangeRequiresRecreate(opts: struct {
+    blending_changed: bool,
+    custom_shaders_changed: bool,
+}) bool {
+    return opts.blending_changed or opts.custom_shaders_changed;
+}
+
+test "renderer target recreation tracks custom shader presence" {
+    // Custom shaders gate the direct default-framebuffer strategy, so a
+    // change in either direction must invalidate the swap chain targets
+    // even when nothing else about the surface changed.
+    try std.testing.expect(targetConfigChangeRequiresRecreate(.{
+        .blending_changed = false,
+        .custom_shaders_changed = true,
+    }));
+    try std.testing.expect(targetConfigChangeRequiresRecreate(.{
+        .blending_changed = true,
+        .custom_shaders_changed = false,
+    }));
+    try std.testing.expect(targetConfigChangeRequiresRecreate(.{
+        .blending_changed = true,
+        .custom_shaders_changed = true,
+    }));
+    try std.testing.expect(!targetConfigChangeRequiresRecreate(.{
+        .blending_changed = false,
+        .custom_shaders_changed = false,
+    }));
+}
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -2053,18 +2100,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            if (blending_changed) {
-                // We update our API's blending mode.
-                self.api.blending = config.blending;
-                // And indicate that we need to reinitialize our shaders.
+            // We update our API's blending mode.
+            if (blending_changed) self.api.blending = config.blending;
+
+            // Either change means the shaders have to be rebuilt.
+            if (blending_changed or custom_shaders_changed) {
                 self.reinitialize_shaders = true;
-                // And indicate that our swap chain targets need to
-                // be re-created to account for the new blending mode.
-                self.target_config_modified +%= 1;
             }
 
-            if (custom_shaders_changed) {
-                self.reinitialize_shaders = true;
+            // And both feed target selection, so both have to invalidate
+            // every frame's target. See the doc comment on the helper for
+            // why custom shaders belong here and not just on the shader
+            // reinitialization path.
+            if (targetConfigChangeRequiresRecreate(.{
+                .blending_changed = blending_changed,
+                .custom_shaders_changed = custom_shaders_changed,
+            })) {
+                self.target_config_modified +%= 1;
             }
         }
 
