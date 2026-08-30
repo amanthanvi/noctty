@@ -134,11 +134,23 @@ pub fn processTokenElevationType() !TokenElevationType {
     return std.meta.intToEnum(TokenElevationType, raw_type) catch error.Unexpected;
 }
 
+/// Whether an elevated process must stay out of the ordinary user's session
+/// state. Only a genuine full split token does: a UAC-off machine and the
+/// built-in Administrator run elevated with the default elevation type and
+/// own the same session file the desktop uses, so they keep persistence.
+///
+/// A `null` elevation type means TokenElevationType could not be read, and
+/// that fails closed. `isProcessElevated` already assumes elevated when
+/// TokenElevation cannot be read, so the unknown case here must match: a
+/// split-token process that restored and later rewrote session-state.json
+/// would overwrite the unelevated user's windows with the elevated ones.
 pub fn excludesSessionState(
     elevated: bool,
-    elevation_type: TokenElevationType,
+    elevation_type: ?TokenElevationType,
 ) bool {
-    return elevated and elevation_type == .full;
+    if (!elevated) return false;
+    const known = elevation_type orelse return true;
+    return known == .full;
 }
 
 fn openProcessToken(process: windows.HANDLE) !windows.HANDLE {
@@ -486,11 +498,36 @@ pub const LaunchResult = enum {
     cancelled,
 };
 
-/// Relaunch the current executable with the Windows `runas` verb.
+/// Resolve the Windows-local directory for `ShellExecuteExW`'s `lpDirectory`.
+///
+/// The terminal cwd is not always a host path: a WSL-backed surface reports a
+/// live POSIX pwd such as `/home/user` (see `windows_shell.osc7PathToLocal`,
+/// which keeps WSL paths WSL-style on purpose), and the shell API rejects that
+/// outright. `SEE_MASK_FLAG_NO_UI` then turns the rejection into a silent
+/// failure, so the elevated window never appears. This applies the same
+/// translate-or-fall-back rule the ordinary `CreateProcessW` spawn uses in
+/// `termio.Exec`; the terminal path itself still travels untouched in
+/// `--working-directory`, where the child's own seam handles it.
+///
+/// `null` means "inherit this process's directory".
+pub fn resolveElevatedHostDirectory(
+    alloc: Allocator,
+    cwd: []const u8,
+) !?[]const u8 {
+    return try configpkg.windows_shell.safeCurrentDirectory(
+        alloc,
+        cwd,
+        false,
+        false,
+    );
+}
+
+/// Relaunch the current executable with the Windows `runas` verb. `cwd` must
+/// already be a Windows-local directory; see `resolveElevatedHostDirectory`.
 pub fn launchElevated(
     alloc: Allocator,
     parameters: [:0]const u8,
-    cwd: []const u8,
+    cwd: ?[]const u8,
 ) !LaunchResult {
     var exe_buffer: [windows.PATH_MAX_WIDE + 1]u16 = undefined;
     const exe = try windows.GetModuleFileNameW(
@@ -521,13 +558,16 @@ fn launchElevatedWithShellApi(
     alloc: Allocator,
     executable: [*:0]const u16,
     parameters: [:0]const u8,
-    cwd: []const u8,
+    cwd: ?[]const u8,
     api: anytype,
 ) !LaunchResult {
     const parameters_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, parameters);
     defer alloc.free(parameters_w);
-    const cwd_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, cwd);
-    defer alloc.free(cwd_w);
+    const cwd_w: ?[:0]u16 = if (cwd) |value|
+        try std.unicode.utf8ToUtf16LeAllocZ(alloc, value)
+    else
+        null;
+    defer if (cwd_w) |value| alloc.free(value);
 
     var info: ShellExecuteInfoW = .{
         .cb_size = @sizeOf(ShellExecuteInfoW),
@@ -536,7 +576,7 @@ fn launchElevatedWithShellApi(
         .verb = std.unicode.utf8ToUtf16LeStringLiteral("runas"),
         .file = executable,
         .parameters = parameters_w.ptr,
-        .directory = cwd_w.ptr,
+        .directory = if (cwd_w) |value| value.ptr else null,
         .show = sw_show_normal,
         .instance = null,
         .id_list = null,
@@ -715,6 +755,71 @@ test "elevation launch boundary maps non-cancellation Win32 failures to an error
     );
 }
 
+test "elevated host directory never forwards a WSL pwd to the shell API" {
+    const testing = std.testing;
+
+    // A WSL-backed surface reports a live POSIX pwd, which ShellExecuteExW
+    // rejects. The host directory falls back to a Windows-local one; the
+    // terminal path keeps travelling in `--working-directory`.
+    const wsl = try resolveElevatedHostDirectory(testing.allocator, "/home/user");
+    defer if (wsl) |value| testing.allocator.free(value);
+    if (wsl) |value| {
+        try testing.expect(!std.mem.eql(u8, value, "/home/user"));
+        try testing.expect(value.len >= 3 and value[1] == ':');
+    }
+
+    const wsl_unc = try resolveElevatedHostDirectory(
+        testing.allocator,
+        "\\\\wsl$\\Ubuntu\\home\\user",
+    );
+    defer if (wsl_unc) |value| testing.allocator.free(value);
+    if (wsl_unc) |value| {
+        try testing.expect(!std.mem.startsWith(u8, value, "\\\\wsl"));
+    }
+
+    // A drive-absolute pwd is already a host path and passes through.
+    const host = try resolveElevatedHostDirectory(testing.allocator, "C:\\work");
+    defer if (host) |value| testing.allocator.free(value);
+    try testing.expectEqualStrings("C:\\work", host.?);
+}
+
+test "elevation launch boundary omits lpDirectory when there is no host cwd" {
+    const testing = std.testing;
+
+    const FakeShellApi = struct {
+        saw_null_directory: bool = false,
+        saw_parameters: bool = false,
+
+        fn shellExecute(self: *@This(), info: *ShellExecuteInfoW) windows.BOOL {
+            self.saw_null_directory = info.directory == null;
+            self.saw_parameters = std.mem.eql(
+                u16,
+                std.mem.span(info.parameters.?),
+                std.unicode.utf8ToUtf16LeStringLiteral("--working-directory=/home/user"),
+            );
+            return windows.TRUE;
+        }
+
+        fn lastError(_: *@This()) windows.Win32Error {
+            return .SUCCESS;
+        }
+    };
+
+    var api: FakeShellApi = .{};
+    try testing.expectEqual(
+        LaunchResult.launched,
+        try launchElevatedWithShellApi(
+            testing.allocator,
+            std.unicode.utf8ToUtf16LeStringLiteral("C:\\Noctty\\noctty.exe"),
+            "--working-directory=/home/user",
+            null,
+            &api,
+        ),
+    );
+    try testing.expect(api.saw_null_directory);
+    try testing.expect(api.saw_parameters);
+}
+
 test "elevation title prefix handles elevated non-elevated null and prefixed titles" {
     const testing = std.testing;
 
@@ -782,6 +887,14 @@ test "elevation session state exclusion requires a full split token" {
     try std.testing.expect(!excludesSessionState(true, .default));
     try std.testing.expect(!excludesSessionState(true, .limited));
     try std.testing.expect(!excludesSessionState(false, .full));
+}
+
+test "elevation session state exclusion fails closed on an unknown type" {
+    // TokenElevationType could not be read. An elevated process may hold a
+    // full split token, so it stays out of the session file; an unelevated
+    // one never touches the exclusion at all.
+    try std.testing.expect(excludesSessionState(true, null));
+    try std.testing.expect(!excludesSessionState(false, null));
 }
 
 test "elevation relaunch parameters forward config class and cwd exactly" {

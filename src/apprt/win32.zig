@@ -3355,9 +3355,11 @@ pub const App = struct {
     /// Cached TokenElevation state. This scopes the title and IPC namespace
     /// consistently for the full lifetime of the process.
     is_elevated: bool = false,
-    /// Session persistence is excluded only for a genuine full split token.
-    /// UAC-off and built-in-Administrator tokens are elevated but default
-    /// elevation type, so they keep normal session persistence.
+    /// Session persistence is excluded for a genuine full split token, and
+    /// for an elevated process whose elevation type could not be queried
+    /// (unknown fails closed). UAC-off and built-in-Administrator tokens are
+    /// elevated but default elevation type, so they keep normal session
+    /// persistence.
     session_state_excluded_for_elevation: bool = false,
     config_revision: u64 = 1,
     resolved_theme: ThemeColors = darkTheme(),
@@ -3555,10 +3557,10 @@ pub const App = struct {
         const session_state_excluded_for_elevation = if (is_elevated) excluded: {
             const elevation_type = win32_elevation.processTokenElevationType() catch |err| {
                 log.warn(
-                    "failed to query TokenElevationType; leaving session state enabled because exclusion requires TokenElevationTypeFull err={}",
+                    "failed to query TokenElevationType; disabling session state because an elevated process with an unknown elevation type must fail closed err={}",
                     .{err},
                 );
-                break :excluded false;
+                break :excluded win32_elevation.excludesSessionState(is_elevated, null);
             };
             break :excluded win32_elevation.excludesSessionState(
                 is_elevated,
@@ -3593,7 +3595,7 @@ pub const App = struct {
             self.config.@"window-save-state" != .never)
         {
             log.info(
-                "win32 session state disabled: process token is TokenElevationTypeFull (split-token elevated)",
+                "win32 session state disabled: elevated process whose token is TokenElevationTypeFull (split-token elevated) or whose elevation type could not be queried",
                 .{},
             );
         }
@@ -6224,7 +6226,17 @@ pub const App = struct {
                 );
                 defer alloc.free(parameters);
 
-                switch (try win32_elevation.launchElevated(alloc, parameters, cwd)) {
+                // `--working-directory` above carries the terminal path
+                // verbatim; ShellExecuteExW needs a Windows-local directory
+                // instead, or a WSL-backed surface's POSIX pwd fails the
+                // launch before the child ever parses that argument.
+                const host_cwd = try win32_elevation.resolveElevatedHostDirectory(
+                    alloc,
+                    cwd,
+                );
+                defer if (host_cwd) |directory| alloc.free(directory);
+
+                switch (try win32_elevation.launchElevated(alloc, parameters, host_cwd)) {
                     .launched => {},
                     .cancelled => log.info("win32 elevated launch cancelled by user", .{}),
                 }
