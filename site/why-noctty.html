@@ -257,7 +257,7 @@
               <code>SHA256SUMS-windows-&lt;arch&gt;.txt</code>. Stop on any mismatch.
             </p>
           </div>
-          <pre class="nc-proof-code"><code>Get-FileHash `
+          <pre class="nc-proof-code" tabindex="0"><code>Get-FileHash `
   .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe `
   -Algorithm SHA256</code></pre>
         </li>
@@ -272,7 +272,7 @@
               attestation and have only the other two checks.
             </p>
           </div>
-          <pre class="nc-proof-code"><code>gh attestation verify `
+          <pre class="nc-proof-code" tabindex="0"><code>gh attestation verify `
   .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe `
   --repo amanthanvi/noctty</code></pre>
         </li>
@@ -286,7 +286,7 @@
               checksum.
             </p>
           </div>
-          <pre class="nc-proof-code"><code>Get-AuthenticodeSignature `
+          <pre class="nc-proof-code" tabindex="0"><code>Get-AuthenticodeSignature `
   .\noctty-&lt;version&gt;-windows-&lt;arch&gt;-setup.exe | `
   Format-List Status,StatusMessage,SignerCertificate</code></pre>
         </li>
@@ -302,7 +302,7 @@
               script fails closed.
             </p>
           </div>
-          <pre class="nc-proof-code"><code>git clone https://github.com/amanthanvi/noctty.git
+          <pre class="nc-proof-code" tabindex="0"><code>git clone https://github.com/amanthanvi/noctty.git
 Set-Location .\noctty
 $env:WINDOWS_CODESIGN_TRUST_SELF_SIGNED = "true"
 pwsh .\scripts\verify-published-release.ps1 `

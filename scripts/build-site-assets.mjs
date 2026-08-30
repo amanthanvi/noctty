@@ -149,6 +149,79 @@ export function getHeaderContract(directory = siteRoot) {
   };
 }
 
+// Local <script src> and <link rel="stylesheet"> targets a page actually
+// carries. The declared SITE_PAGES array must match this exactly: a reference
+// the registry does not know about would ship unversioned behind a
+// cache key check that still reported everything current.
+function referencedLocalAssets(html) {
+  const referenced = new Set();
+  const add = (raw) => {
+    // Cross-origin and protocol-relative references are not ours to version.
+    if (!raw || /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(raw)) return;
+    const normalized = raw.split(/[?#]/, 1)[0].replace(/^\.?\//, "");
+    if (normalized) referenced.add(normalized);
+  };
+  for (const [, attrs] of html.matchAll(/<script\b([^>]*)>/gi)) {
+    const src = /\ssrc\s*=\s*"([^"]*)"/i.exec(attrs);
+    if (src) add(src[1]);
+  }
+  for (const [, attrs] of html.matchAll(/<link\b([^>]*)>/gi)) {
+    if (!/\srel\s*=\s*"[^"]*\bstylesheet\b[^"]*"/i.test(attrs)) continue;
+    const href = /\shref\s*=\s*"([^"]*)"/i.exec(attrs);
+    if (href) add(href[1]);
+  }
+  return referenced;
+}
+
+// The filesystem, not either list, is the source of truth for what pages
+// exist. SITE_PAGES here and the deploy allowlist in
+// scripts/build-site-payload.ps1 are checked against it independently, so a
+// new page cannot be half-registered in one of them.
+function authoredPageNames(directory = siteRoot) {
+  return fs
+    .readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.html$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+function assertPageRegistryCoversSite() {
+  const authored = authoredPageNames();
+  const unregistered = authored.filter((name) => !SITE_PAGES.has(name));
+  const missing = [...SITE_PAGES.keys()].filter(
+    (name) => !authored.includes(name),
+  );
+  if (unregistered.length > 0 || missing.length > 0) {
+    throw new Error(
+      [
+        "SITE_PAGES does not match the authored pages in site/.",
+        unregistered.length > 0
+          ? `  Authored but unregistered: ${unregistered.join(", ")}`
+          : null,
+        missing.length > 0
+          ? `  Registered but absent from disk: ${missing.join(", ")}`
+          : null,
+        "Add the page to SITE_PAGES here and to the allowlist in scripts/build-site-payload.ps1.",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+}
+
+function assertDeclaredAssetsAreComplete(htmlName, html, assets) {
+  const declared = new Set(assets);
+  const undeclared = [...referencedLocalAssets(html)].filter(
+    (asset) => !declared.has(asset),
+  );
+  if (undeclared.length > 0) {
+    throw new Error(
+      `site/${htmlName} references local assets missing from its SITE_PAGES entry: ${undeclared.join(", ")}. ` +
+        "Undeclared references never receive a ?v= cache key.",
+    );
+  }
+}
+
 function withAssetCacheKeys(html, htmlPath, assets) {
   let result = html;
   for (const [asset, digest] of Object.entries(assets)) {
@@ -184,6 +257,7 @@ function main() {
     }
   }
 
+  assertPageRegistryCoversSite();
   const pages = new Map(
     [...SITE_PAGES.keys()].map((htmlName) => [
       htmlName,
@@ -199,6 +273,7 @@ function main() {
 
   const expectedPages = new Map();
   for (const [htmlName, assets] of SITE_PAGES) {
+    assertDeclaredAssetsAreComplete(htmlName, pages.get(htmlName), assets);
     expectedPages.set(
       htmlName,
       withAssetCacheKeys(

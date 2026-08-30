@@ -70,6 +70,22 @@ $allowlist = [string[]] @(
 )
 [Array]::Sort($allowlist, [StringComparer]::Ordinal)
 
+# The authored pages on disk are the source of truth, not this list and not the
+# SITE_PAGES registry in scripts/build-site-assets.mjs. Both are checked against
+# the filesystem independently, so a page added to one and forgotten in the
+# other fails loudly here instead of passing every check and 404ing in
+# production.
+$allowlistSet = [Collections.Generic.HashSet[string]]::new(
+    [string[]] $allowlist,
+    [StringComparer]::Ordinal
+)
+foreach ($authoredPage in (Get-ChildItem -LiteralPath $sourceRoot -File)) {
+    if ($authoredPage.Extension -notin @('.html', '.htm')) { continue }
+    if (-not $allowlistSet.Contains($authoredPage.Name)) {
+        throw "Authored site page is missing from the deploy payload allowlist: $($authoredPage.Name)"
+    }
+}
+
 $sourceFiles = [Collections.Generic.List[object]]::new()
 foreach ($relativePath in $allowlist) {
     if ($relativePath.Contains('\')) {

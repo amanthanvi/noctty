@@ -33,8 +33,17 @@ $forbiddenRules = @(
     @{ Pattern = "shared Ghostty terminal core · auto-detected: PowerShell, cmd, Git Bash'"; Reason = "Current profile-picker messaging should include opt-in WSL." },
     @{ Pattern = "src/terminal, src/font, src/renderer, src/input, src/config, and libghostty-vt are shared"; Reason = "The shared upstream surface is broader today and includes termio/crash/shell-integration/inspector." },
     @{ Pattern = "Built on libghostty by Mitchell Hashimoto"; Reason = "Prefer the repo-accurate Ghostty terminal-core wording." },
-    @{ Pattern = "(?i)fast(?:er|est) than"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
-    @{ Pattern = "(?i)fastest terminal"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    # Cross-terminal speed claims, site-wide coarse net. site/tests/trust.test.mjs
+    # is the authoritative and stricter guard for site/why-noctty.html and the two
+    # migration guides: it also bans hardcoded performance figures of any unit and
+    # comparisons keyed to a named competitor. Keep these two lists directionally
+    # consistent; when they disagree, the test wins.
+    @{ Pattern = "(?i)\bfast(?:er|est)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)\bslow(?:er|est)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)\b(?:snappier|snappiest|quicker|quickest)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)\boutperform"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
+    @{ Pattern = "(?i)\b(?:than|versus|vs\.?|compared to|compared with)\s+(?:windows terminal|conhost|alacritty|wezterm|mintty|conemu|cmder|putty|iterm)\b"; Regex = $true; Reason = "No terminal has been measured at the same causal endpoint on the same machine; no comparison may be published." },
+    @{ Pattern = "(?i)\b(?:twice|thrice|double|triple|\d+(?:\.\d+)?x)\s+the\s+(?:throughput|speed|performance|frame\s?rate)\b"; Regex = $true; Reason = "No cross-terminal performance result is published; see docs/windows-benchmark-methodology.md." },
     @{ Pattern = "(?i)blazing"; Regex = $true; Reason = "Performance copy must cite a measured figure, not an adjective." },
     @{ Pattern = "noctty.dev"; Reason = "The project domain is noctty.com; noctty.dev is not owned by this project." }
 )

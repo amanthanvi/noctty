@@ -16,6 +16,69 @@ const PENDING_DOCS = new Map([
   ["docs/accessibility-matrix.md", "#145 / PR #192"],
 ]);
 
+// This page publishes no performance figure of its own; every number lives in
+// docs/windows-benchmark-methodology.md, so a re-measurement can never strand
+// a stale one here. The contract is only worth as much as the units it covers,
+// so it covers the formulations a benchmark result is actually written in.
+// Case-sensitive where a unit is (MB, GB, KiB) so the lowercase SPKI pin and
+// the lowercase ?v= cache keys cannot collide with a byte-size unit.
+const PERFORMANCE_FIGURE_PATTERNS = [
+  // Durations.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:ms|milliseconds?|µs|μs|us|microseconds?|ns|nanoseconds?|seconds?|minutes?)\b/i,
+  /\b\d[\d,]*(?:\.\d+)?\s+s\b/,
+  // Rates.
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:fps|Hz|kHz|MHz|GHz)\b/i,
+  // Byte sizes and throughput, decimal or binary, with or without "per second".
+  /\b\d[\d,]*(?:\.\d+)?\s*[KMGT]i?B(?:\s*\/\s*s(?:ec)?)?\b/,
+  /\b\d[\d,]*(?:\.\d+)?\s*(?:kilo|mega|giga|tera)bytes?(?:\s+per\s+second)?\b/i,
+  // Percentages framed as a performance delta.
+  /\b\d+(?:\.\d+)?\s*(?:%|percent)\s*(?:\w+[\s-]+){0,3}(?:faster|slower|improvement|improved|reduction|reduced|speed-?up|overhead|gain|drop|regression|less|fewer|more)\b/i,
+  /\b(?:faster|slower|improvement|reduction|speed-?up|overhead|gain|regression)\b[^.]{0,24}?\b\d+(?:\.\d+)?\s*(?:%|percent)/i,
+  // "3x throughput", "2.5x faster", and bare multipliers such as "12x".
+  /\b\d+(?:\.\d+)?\s*(?:x|×)\s*(?:faster|slower|throughput|speed|performance)\b/i,
+  /\b\d+(?:\.\d+)?(?:x|×)\b(?!\d)/,
+];
+
+// The page positions the fork without ranking it against anybody. No
+// cross-terminal speed claim of any kind is permitted, so the guard has to
+// catch comparative performance language generally, not two known phrasings.
+const CROSS_TERMINAL_CLAIM_PATTERNS = [
+  /\bfast(?:er|est)\b/i,
+  /\bslow(?:er|est)\b/i,
+  /\b(?:quick|snapp|smooth|responsiv|light|lean)(?:er|est)\b/i,
+  /\bblazing(?:ly)?\b/i,
+  /\boutperform(?:s|ed|ing)?\b/i,
+  /\boutclass(?:es|ed|ing)?\b/i,
+  /\b(?:beats|outruns)\b/i,
+  /\b(?:best[-\s]performing|most\s+performant|leading\s+terminal)\b/i,
+  // "lower latency", "higher throughput", "less memory use than ...".
+  /\b(?:lower|higher|less|fewer|more|better|worse|reduced|improved|greater)\s+(?:\w+[\s-]+){0,3}(?:latency|throughput|frame\s?times?|start-?up|overhead|performance|speed|fps|memory\s+use)\b/i,
+  // Multipliers of a performance quantity.
+  /\b(?:twice|thrice|double|triple|\d+(?:\.\d+)?\s*(?:x|×|times))\s+(?:the\s+)?(?:\w+\s+){0,2}(?:throughput|speed|performance|latency|faster|slower|frame\s?rate|framerate)\b/i,
+  // Any measurement stated relative to a named competitor.
+  /\b(?:than|versus|vs\.?|compared\s+(?:to|with)|against)\s+(?:\w+\s+){0,2}(?:Windows\s+Terminal|conhost|cmd\.exe|Alacritty|WezTerm|kitty|mintty|ConEmu|Cmder|Hyper|iTerm2?|PuTTY)\b/i,
+];
+
+function findClaimViolations(text, patterns) {
+  return patterns
+    .map((pattern) => text.match(pattern))
+    .filter(Boolean)
+    .map((match) => match[0].replace(/\s+/g, " ").trim());
+}
+
+// A skip that outlives its reason is a hole. Once the document is on the
+// branch, the entry has to go, and the link checks below become enforcing.
+test("no pending-document exemption outlives the document landing", () => {
+  const landed = [...PENDING_DOCS.keys()].filter((relativePath) =>
+    existsSync(join(repoDir, relativePath)),
+  );
+  assert.deepEqual(
+    landed,
+    [],
+    `remove the PENDING_DOCS entries for ${landed.join(", ")}; the links are now checkable`,
+  );
+});
+
 test("trust page publishes exactly eleven standing non-goals", () => {
   assert.equal((trustHtml.match(/\sdata-no-goal(?:\s|>)/g) || []).length, 11);
   assert.doesNotMatch(
@@ -57,19 +120,31 @@ test("trust page hardcodes no performance figure", () => {
   // Benchmark numbers move with the machine state and the build they were
   // taken against. The page cites the methodology doc so a re-measurement
   // never leaves an unreproducible figure published here.
-  const figures = trustHtml.match(
-    /[0-9]+(?:\.[0-9]+)?\s?(?:MB\/s|MB|ms|GB)\b/g,
-  );
-  assert.equal(
+  const figures = findClaimViolations(trustHtml, PERFORMANCE_FIGURE_PATTERNS);
+  assert.deepEqual(
     figures,
-    null,
-    `cite docs/windows-benchmark-methodology.md instead of ${figures?.join(", ")}`,
+    [],
+    `cite docs/windows-benchmark-methodology.md instead of: ${figures.join(", ")}`,
   );
 });
 
 test("trust page makes no cross-terminal performance claim", () => {
-  assert.doesNotMatch(trustHtml, /fast(?:er|est) than/i);
-  assert.doesNotMatch(trustHtml, /blazing/i);
+  const claims = findClaimViolations(trustHtml, CROSS_TERMINAL_CLAIM_PATTERNS);
+  assert.deepEqual(
+    claims,
+    [],
+    `no cross-terminal result is published; remove: ${claims.join(", ")}`,
+  );
+});
+
+test("trust page keeps its scrollable code blocks keyboard-reachable", () => {
+  // The verification commands overflow horizontally on a narrow viewport and
+  // the hidden part is the argument the reader needs. A scroll container that
+  // is not focusable cannot be scrolled without a pointer (WCAG 2.1.1).
+  const blocks =
+    trustHtml.match(/<pre\b[^>]*class="nc-proof-code"[^>]*>/g) || [];
+  assert.ok(blocks.length > 0);
+  for (const block of blocks) assert.match(block, /\stabindex="0"/, block);
 });
 
 test("trust page routes to both migration guides", () => {
@@ -141,6 +216,11 @@ for (const relativePath of [
     const markdown = readFileSync(join(repoDir, relativePath), "utf8");
     assert.match(markdown, /## Honest gaps/);
     assert.match(markdown, /no screen reader has been\s+measured/i);
-    assert.doesNotMatch(markdown, /fast(?:er|est) than/i);
+    const claims = findClaimViolations(markdown, CROSS_TERMINAL_CLAIM_PATTERNS);
+    assert.deepEqual(
+      claims,
+      [],
+      `no cross-terminal result is published; remove: ${claims.join(", ")}`,
+    );
   });
 }
