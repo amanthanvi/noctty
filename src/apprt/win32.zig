@@ -2571,10 +2571,37 @@ const recovery_safe_mode_banner_w = blk: {
 };
 const recovery_safe_mode_caption_w = std.unicode.utf8ToUtf16LeStringLiteral("noctty safe mode");
 
+/// Filename infix for a startup-ledger record whose write already failed and
+/// whose diagnosis is waiting to be folded into the next startup's append.
+/// Deliberately disjoint from the `.tmp-` infix used for live atomic-replace
+/// sources so cross-instance cleanup can never delete an in-flight write.
+const recovery_pending_suffix = ".pending-";
+
 fn recoverySafeModeNotice(decision: win32_recovery.Decision) ?[]const u8 {
     return if (decision == .safe_mode) recovery_safe_mode_banner else null;
 }
 
+/// Ownerless by design; do not "fix" this to take the primary Host HWND.
+///
+/// The notice runs on a detached thread that nothing joins, so it can outlive
+/// any terminal window: the user may close the terminal, or safe mode's quit
+/// timer may fire, while the dialog is still up. Destroying an owner destroys
+/// its owned windows, which would pull this box's HWND out from under a modal
+/// loop running on a different thread.
+///
+/// An owner would also be cross-thread. `MB_APPLMODAL` disables the owner,
+/// and `EnableWindow`/foreground activation against a window belonging to the
+/// UI thread sends messages that thread must pump. `App.run` starts this
+/// notice at the `showRecoverySafeModeNotice` call site *before* it enters its
+/// `GetMessageW` loop, so there is a window where the UI thread is not
+/// pumping. (Calling `MessageBoxW` on the UI thread itself is worse still: its
+/// nested modal loop dispatches `WM_WINHOSTTY_WAKE` to a wndproc that returns
+/// 0 without ticking, stalling the app mailbox.)
+///
+/// Finally, `initial-window = false` means there is no host HWND at all, so an
+/// ownerless path has to exist regardless. Safe mode is a usable session; the
+/// notice is informational and must not hold the terminal hostage.
+/// `MB_SETFOREGROUND` plus the box's own taskbar button carry the visibility.
 fn recoverySafeModeNoticeThread() void {
     _ = sys.MessageBoxW(
         null,
@@ -2725,19 +2752,29 @@ fn beginRecoveryStartupAtPath(
             break :retained;
         };
         defer dir.close();
-        const temporary_prefix = std.fmt.allocPrint(
+        // Only `.pending-` records are folded and deleted here. They are
+        // written exclusively by `retainRecoveryPersistDiagnosis`, i.e. after
+        // a ledger write has already definitively failed, and are never used
+        // as the source of an atomic replacement. The `.tmp-` files that
+        // `persistRecoveryRecordAtPath` creates are live replacement sources
+        // for whichever process owns them; a concurrently starting instance
+        // that deleted one would make that process's ReplaceFileW fail and
+        // send it down the in-place fallback, clobbering the record this
+        // process just merged. Keeping the two namespaces disjoint removes
+        // that race without an interprocess lock.
+        const retained_prefix = std.fmt.allocPrint(
             alloc,
-            "{s}.tmp-",
+            "{s}" ++ recovery_pending_suffix,
             .{std.fs.path.basename(path)},
         ) catch break :retained;
-        defer alloc.free(temporary_prefix);
+        defer alloc.free(retained_prefix);
         var entries = dir.iterate();
         while (true) {
             const entry = entries.next() catch |err| {
                 log.warn("win32 recovery: retained history enumeration failed err={}", .{err});
                 break;
             } orelse break;
-            if (!std.mem.startsWith(u8, entry.name, temporary_prefix)) continue;
+            if (!std.mem.startsWith(u8, entry.name, retained_prefix)) continue;
             const retained_path = std.fs.path.join(alloc, &.{ dir_path, entry.name }) catch continue;
             const retained_file = std.fs.openFileAbsolute(retained_path, .{}) catch {
                 alloc.free(retained_path);
@@ -2807,12 +2844,22 @@ fn persistRecoveryRecordAtPath(
     const encoded = try win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts });
     defer alloc.free(encoded);
     const nonce = unixMillis();
+    // `.tmp-` is this process's private replacement source and is never read
+    // or deleted by another instance. `.pending-` is the post-failure
+    // diagnosis another instance folds in and cleans up. See the namespace
+    // note in `beginRecoveryStartupAtPath`.
     const temporary_path = try std.fmt.allocPrint(
         alloc,
         "{s}.tmp-{x}-{x}",
         .{ path, sys.GetCurrentProcessId(), nonce },
     );
     defer alloc.free(temporary_path);
+    const pending_path = try std.fmt.allocPrint(
+        alloc,
+        "{s}" ++ recovery_pending_suffix ++ "{x}-{x}",
+        .{ path, sys.GetCurrentProcessId(), nonce },
+    );
+    defer alloc.free(pending_path);
     var atomic_failure: ?win32_session_persistence.AtomicReplaceFailure = null;
     const disposition = win32_session_persistence.writeFileAtomicOrInPlace(
         path,
@@ -2825,6 +2872,7 @@ fn persistRecoveryRecordAtPath(
             retainRecoveryPersistDiagnosis(
                 alloc,
                 temporary_path,
+                pending_path,
                 attempts,
             );
         }
@@ -2841,6 +2889,7 @@ fn persistRecoveryRecordAtPath(
                 retainRecoveryPersistDiagnosis(
                     alloc,
                     temporary_path,
+                    pending_path,
                     attempts,
                 );
             };
@@ -2861,12 +2910,21 @@ fn recordRecoveryPersistFailure(
 fn retainRecoveryPersistDiagnosis(
     alloc: Allocator,
     temporary_path: []const u8,
+    pending_path: []const u8,
     attempts: []const win32_recovery.StartupAttempt,
 ) void {
     const diagnosed = win32_recovery.encodeAlloc(alloc, .{ .attempts = attempts }) catch return;
     defer alloc.free(diagnosed);
-    win32_session_persistence.writeFileInPlace(temporary_path, diagnosed) catch |err| {
+    // Publish under `.pending-`, not the replacement source. The write has
+    // already failed, so this record is inert: no process will ever hand it
+    // to ReplaceFileW, which makes it safe for a concurrent startup to fold
+    // and delete. Then drop the now-dead `.tmp-` source so it does not leak.
+    win32_session_persistence.writeFileInPlace(pending_path, diagnosed) catch |err| {
         log.warn("win32 recovery: retained diagnosis persist failed err={}", .{err});
+        return;
+    };
+    win32_session_persistence.deleteFileIfPresent(temporary_path) catch |err| {
+        log.warn("win32 recovery: dead replacement source cleanup failed err={}", .{err});
     };
 }
 
@@ -34809,7 +34867,7 @@ test "win32 recovery next startup folds retained diagnosis before append" {
     defer std.testing.allocator.free(root);
     const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
     defer std.testing.allocator.free(target);
-    const pending = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp-dead-beef" });
+    const pending = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".pending-dead-beef" });
     defer std.testing.allocator.free(pending);
 
     const disk_attempts = [_]win32_recovery.StartupAttempt{
@@ -34838,6 +34896,65 @@ test "win32 recovery next startup folds retained diagnosis before append" {
     try std.testing.expectEqual(@as(?u32, 32), startup.attempts[0].last_win32_error);
     try std.testing.expectEqual(win32_recovery.StartupPhase.init, startup.attempts[1].phase);
     try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+}
+
+test "win32 recovery startup leaves another instance's in-flight write temp alone" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const target = try std.fs.path.join(std.testing.allocator, &.{ root, "startup-attempts.json" });
+    defer std.testing.allocator.free(target);
+
+    // A concurrent instance has created and synced its atomic-replace source
+    // but has not called ReplaceFileW yet. Deleting it would fail that
+    // replacement and send the other writer down the in-place fallback, which
+    // would then clobber the record this startup is about to persist.
+    const in_flight = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".tmp-c0ffee-1" });
+    defer std.testing.allocator.free(in_flight);
+    const pending = try std.mem.concat(std.testing.allocator, u8, &.{ target, ".pending-c0ffee-1" });
+    defer std.testing.allocator.free(pending);
+
+    const disk_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .phase = .window_created },
+    };
+    const in_flight_attempts = [_]win32_recovery.StartupAttempt{
+        .{ .started_at_unix_ms = 100, .ready_at_unix_ms = 150, .phase = .ready },
+    };
+    const pending_attempts = [_]win32_recovery.StartupAttempt{
+        .{
+            .started_at_unix_ms = 100,
+            .phase = .ready_persist_failed,
+            .last_win32_error = 32,
+        },
+    };
+    const disk_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &disk_attempts });
+    defer std.testing.allocator.free(disk_json);
+    const in_flight_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &in_flight_attempts });
+    defer std.testing.allocator.free(in_flight_json);
+    const pending_json = try win32_recovery.encodeAlloc(std.testing.allocator, .{ .attempts = &pending_attempts });
+    defer std.testing.allocator.free(pending_json);
+    try win32_session_persistence.writeFileInPlace(target, disk_json);
+    try win32_session_persistence.writeFileInPlace(in_flight, in_flight_json);
+    try win32_session_persistence.writeFileInPlace(pending, pending_json);
+
+    const startup = beginRecoveryStartupAtPath(std.testing.allocator, target, 200);
+    try std.testing.expectEqual(@as(usize, 2), startup.count);
+
+    // The `.pending-` diagnosis is folded and cleaned up.
+    try std.testing.expectEqual(
+        win32_recovery.StartupPhase.ready_persist_failed,
+        startup.attempts[0].phase,
+    );
+    try std.testing.expectEqual(@as(?u32, 32), startup.attempts[0].last_win32_error);
+    try std.testing.expectError(error.FileNotFound, std.fs.openFileAbsolute(pending, .{}));
+
+    // The other instance's replacement source survives untouched and its
+    // uncommitted ready marker was not folded in.
+    try std.testing.expectEqual(@as(?u64, null), startup.attempts[0].ready_at_unix_ms);
+    const survivor = try std.fs.cwd().readFileAlloc(std.testing.allocator, in_flight, 64 * 1024);
+    defer std.testing.allocator.free(survivor);
+    try std.testing.expectEqualStrings(in_flight_json, survivor);
 }
 
 test "win32 recovery fallback failure is consumed by next startup" {
@@ -34890,6 +35007,16 @@ test "win32 recovery fallback failure is consumed by next startup" {
     try std.testing.expectEqual(@as(?u64, 150), startup.attempts[0].ready_at_unix_ms);
     try std.testing.expectEqual(win32_recovery.StartupPhase.ready_persist_failed, startup.attempts[0].phase);
     try std.testing.expect(startup.attempts[0].last_win32_error != null);
+
+    // The dead replacement source is dropped by the writer, and the folded
+    // `.pending-` diagnosis is dropped by the next startup: no leftovers.
+    var root_dir = try std.fs.openDirAbsolute(root, .{ .iterate = true });
+    defer root_dir.close();
+    var entries = root_dir.iterate();
+    while (try entries.next()) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.tmp-"));
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, "startup-attempts.json.pending-"));
+    }
 }
 
 test "win32 recovery safe mode always has a visible notice" {
