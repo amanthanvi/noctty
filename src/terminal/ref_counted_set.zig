@@ -317,6 +317,19 @@ pub fn RefCountedSet(
 
             if (id < self.next_id) {
                 if (items[id].meta.ref == 0) {
+                    // Requested ID is dead, but if the value exists not under
+                    // another ID then ref count that and increase the ID.
+                    if (self.lookupContext(base, value, ctx)) |existing_id| {
+                        // Notify the context that the value is "deleted"
+                        // because we're reusing the existing value in the
+                        // set. This allows callers to clean up any
+                        // resources associated with the value.
+                        if (comptime @hasDecl(Context, "deleted")) ctx.deleted(value);
+
+                        items[existing_id].meta.ref += 1;
+                        return existing_id;
+                    }
+
                     // See comment in `addContext` for details.
                     if (self.psl_stats[self.psl_stats.len - 1] > 0) {
                         @branchHint(.cold);
@@ -324,8 +337,7 @@ pub fn RefCountedSet(
                     }
 
                     self.deleteItem(base, id, ctx);
-
-                    const added_id = self.upsert(base, value, id, ctx);
+                    const added_id = self.insert(base, value, id, ctx);
 
                     items[added_id].meta.ref += 1;
 
@@ -589,24 +601,6 @@ pub fn RefCountedSet(
             return null;
         }
 
-        /// Find the provided value in the hash table, or add a new item
-        /// for it if not present. If a new item is added, `new_id` will
-        /// be used as the ID. If an existing item is found, the `new_id`
-        /// is ignored and the existing item's ID is returned.
-        fn upsert(self: *Self, base: anytype, value: T, new_id: Id, ctx: Context) Id {
-            // If the item already exists, return it.
-            if (self.lookupContext(base, value, ctx)) |id| {
-                // Notify the context that the value is "deleted" because
-                // we're reusing the existing value in the set. This allows
-                // callers to clean up any resources associated with the value.
-                if (comptime @hasDecl(Context, "deleted")) ctx.deleted(value);
-
-                return id;
-            }
-
-            return self.insert(base, value, new_id, ctx);
-        }
-
         /// Insert the given value into the hash table with the given ID.
         ///
         /// If runtime safety is enabled, asserts that
@@ -762,6 +756,65 @@ pub fn RefCountedSet(
             }
         }
     };
+}
+
+test "addWithId dead id resolving to an existing value" {
+    const alloc = testing.allocator;
+    const TestSet = RefCountedSet(
+        u32,
+        u16,
+        u16,
+        struct {
+            pub fn hash(_: *const @This(), value: u32) u64 {
+                return std.hash.int(value);
+            }
+
+            pub fn eql(_: *const @This(), a: u32, b: u32) bool {
+                return a == b;
+            }
+        },
+    );
+
+    const layout: TestSet.Layout = .init(8);
+    const buf = try alloc.alignedAlloc(
+        u8,
+        TestSet.base_align,
+        layout.total_size,
+    );
+    defer alloc.free(buf);
+
+    var set: TestSet = .init(.init(buf), layout, .{});
+
+    // Create a dead item between two live ones so that it can't
+    // be reaped by the trim loop in `add`, then release it. This
+    // mirrors a page style set after a styled run is erased.
+    const live = try set.add(buf, 11);
+    const released = try set.add(buf, 22);
+    const last = try set.add(buf, 33);
+    set.release(buf, released);
+    try testing.expectEqual(@as(usize, 2), set.count());
+
+    // Request the dead ID for a value that is already live under
+    // a different ID: we must resolve to the existing item and
+    // take a reference, without changing the living count.
+    const resolved = (try set.addWithId(buf, 11, released)).?;
+    try testing.expectEqual(live, resolved);
+    try testing.expectEqual(@as(u16, 2), set.refCount(buf, live));
+    try testing.expectEqual(@as(usize, 2), set.count());
+
+    // The living count must agree with the iterator.
+    var it = set.iterator(buf);
+    var iterated: usize = 0;
+    while (it.next()) |_| iterated += 1;
+    try testing.expectEqual(set.count(), iterated);
+
+    // The dead slot is still reusable for a value that is not
+    // in the set: the requested ID must be used (null return).
+    try testing.expectEqual(@as(?u16, null), try set.addWithId(buf, 44, released));
+    try testing.expectEqual(@as(u16, 1), set.refCount(buf, released));
+    try testing.expectEqual(@as(usize, 3), set.count());
+
+    _ = last;
 }
 
 test "iterator visits live entries in ID order" {
