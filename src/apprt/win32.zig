@@ -18170,6 +18170,20 @@ fn restoreTerminalScrollbackSnapshot(
     // so require the whole active area to be unpainted.
     if (!terminalScreenIsUnpainted(screen)) return error.PaneAlreadyPainted;
 
+    // A partial scrolling region (DECSTBM / DECSLRM) also leaves the cursor at
+    // the origin with every cell empty, but `linefeed` would then scroll
+    // *inside* the region instead of pushing rows into history, so a snapshot
+    // longer than the region would silently eat its own oldest lines as it
+    // printed and the final `scrollClear()` would move only what survived.
+    const region = terminal_state.scrolling_region;
+    if (region.top != 0 or
+        region.left != 0 or
+        region.bottom != terminal_state.rows - 1 or
+        region.right != terminal_state.cols - 1)
+    {
+        return error.SnapshotNeedsFullScreen;
+    }
+
     const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
     const first_line = snapshot.lines.len - @min(snapshot.lines.len, max_lines);
     var restored_lines: usize = 0;
@@ -35284,6 +35298,28 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
 
         try std.testing.expectError(
             error.PaneAlreadyPainted,
+            restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
+    }
+
+    // A partial scrolling region leaves the pane unpainted and the cursor at
+    // the origin, but printing into it would scroll within the region instead
+    // of building history, so the snapshot would eat its own oldest lines.
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 1024,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b[2;5r");
+        try std.testing.expect(terminalScreenIsUnpainted(terminal_state.screens.active));
+
+        try std.testing.expectError(
+            error.SnapshotNeedsFullScreen,
             restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
         );
     }
