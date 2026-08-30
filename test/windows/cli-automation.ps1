@@ -44,8 +44,28 @@ function Invoke-AutomationCli {
 
     $script:automationInvocation++
     $stderr = Join-Path $layout.Logs ("cli-{0}.stderr.log" -f $script:automationInvocation)
-    $output = @(& $cli @Arguments 2> $stderr)
-    $exitCode = $LASTEXITCODE
+
+    # Every automation verb is a native command whose nonzero exits and stderr
+    # are DATA here, not failures: the exit code is the contract under test, and
+    # `Wait-AutomationState` deliberately polls before the server is listening.
+    # Under Windows PowerShell 5.1 -- which `Invoke-InteractiveWin11Bootstrap`
+    # bootstraps into -- a native command writing to stderr raises a terminating
+    # NativeCommandError while `$ErrorActionPreference` is 'Stop', which would
+    # kill the script on the first poll before the tolerant retry could run.
+    # Under PowerShell 7.3+ the equivalent hazard is
+    # `$PSNativeCommandUseErrorActionPreference`, which also keys off 'Stop'.
+    # Relaxing the preference around just this call defuses both, and matches
+    # `interactive-win11-pr-smoke.ps1`.
+    $originalErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $cli @Arguments 2> $stderr)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $originalErrorActionPreference
+    }
+
     [pscustomobject]@{
         ExitCode = $exitCode
         Output = $output -join [Environment]::NewLine

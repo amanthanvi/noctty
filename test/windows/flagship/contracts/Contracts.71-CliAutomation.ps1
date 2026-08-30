@@ -35,7 +35,14 @@ foreach ($requiredText in @(
         'Description ''+send-text printable text'' -Result $result -Expected 0',
         'Description ''+list-windows unused class'' -Result $result -Expected 2',
         'blocked`nline',
-        'Stop-InteractiveWin11Process -Process $server -Contained'
+        'Stop-InteractiveWin11Process -Process $server -Contained',
+        # The harness bootstraps into Windows PowerShell 5.1, where a native
+        # command writing to stderr terminates the script while the preference
+        # is 'Stop'. The first `+list-windows` poll does exactly that before the
+        # server listens, so the CLI invocation must relax and restore the
+        # preference around itself or the harness cannot pass.
+        '$ErrorActionPreference = ''Continue''',
+        '$ErrorActionPreference = $originalErrorActionPreference'
     )) {
     if (-not $cliAutomationText.Contains($requiredText, [StringComparison]::Ordinal)) {
         throw "CLI automation harness contract is missing: $requiredText"

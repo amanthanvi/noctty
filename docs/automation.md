@@ -32,12 +32,20 @@ server's fixed 10-second wait or change connection and wire I/O limits.
 | `+perform-action` | Optional `--surface-id=<id>` and exactly one action string. Omission targets the focused surface for surface-scoped actions or the app for app-scoped actions. | 0, 1, 2, 3, 4, 5 |
 | `+new-tab` | Optional `--window-id=<id>` (default: focused window) and optional `--working-directory=<dir>`. | 0, 1, 2, 3, 4, 5 |
 | `+new-split` | Optional `--surface-id=<id>` (default: focused pane), optional `--direction=left\|right\|up\|down` (default: `right`), and optional `--working-directory=<dir>`. | 0, 1, 2, 3, 4, 5 |
-| `+focus` | Exactly one required `--surface-id=<id>` or `--window-id=<id>`. Foreground activation is best-effort under Windows foreground-lock rules. | 0, 1, 2, 3, 5 |
+| `+focus` | Exactly one required `--surface-id=<id>` or `--window-id=<id>`. Selects the target and requests foreground activation, including across another application's window. | 0, 1, 2, 3, 5 |
 | `+send-text` | Required `--surface-id=<id>` and exactly one text argument. | 0, 1, 2, 3, 4, 5 |
 
 Explicit IDs are opaque, nonzero decimal unsigned integers. Window IDs must
 fit `u32`; surface IDs must fit `u64`. An unknown ID in a live instance is a
 target-not-found failure, never a request to use the focused target.
+
+`+focus` exit 0 means the target was selected and foreground activation was
+requested. In practice the activation does cross application boundaries:
+validated against a live instance with an unrelated foreground window in
+front, `+focus` brought noctty forward and the pane reported `focused` and
+`active`. Selection is what exit 0 guarantees, because Windows
+foreground-lock rules can still refuse the activation half in situations
+where the requesting process holds no foreground rights.
 
 `--working-directory` is the only launch override. Accepted values are
 `home`, `inherit`, `~`, paths beginning `~/` or `~\`, and local drive-letter
@@ -144,6 +152,14 @@ controls, and also applies noctty's unsafe-paste inspection. Refused control
 text returns 4 and never reaches IPC; malformed or oversized input is a usage
 error. Printable shell metacharacters and mixed printable content remain
 allowed.
+
+NUL is refused by the same check as the other `Cc` code points, but it cannot
+actually be delivered through the command line to begin with: a Win32 command
+line is a NUL-terminated string, so an embedded NUL truncates the argument and
+the verb only ever receives the printable prefix. The rejection is therefore
+unreachable over argv by construction rather than untested — it still guards
+the app-thread check against a direct pipe client, which is not bound by that
+argv limitation.
 
 Delivery uses the protected paste path. Automation cannot transmit Enter,
 newline, or control input and never raises a paste-confirm prompt. This is a
