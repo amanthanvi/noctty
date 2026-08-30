@@ -349,22 +349,23 @@ deferred queue.
 
 ## Reproduce this analysis
 
-Every figure in this report is pinned to the fork head analyzed on 2026-08-22.
-Use that SHA rather than a moving `HEAD`, or the numbers will drift as the
-branch advances.
+Every figure in this report is pinned to the fork head and the upstream head
+analyzed on 2026-08-22. Use those two SHAs rather than a moving `HEAD` or a
+moving `upstream/main`, or the numbers will drift as either side advances.
 
 ```powershell
 $forkHead = 'd031dc474efc4811e662a3e387e560fb760f0e19'
-$base = git merge-base $forkHead upstream/main
+$upstreamHead = 'ca9e5b1301354018f92152c1282a922baacfa0e1'
+$base = git merge-base $forkHead $upstreamHead
 
 git show -s --format='%H%x09%cs%x09%s' $base
-git show -s --format='%H%x09%cs%x09%s' upstream/main
-git rev-list --left-right --count "$forkHead...upstream/main"
-Get-Content dist/windows/release-metadata.json
+git show -s --format='%H%x09%cs%x09%s' $upstreamHead
+git rev-list --left-right --count "$forkHead...$upstreamHead"
+git show "$forkHead`:dist/windows/release-metadata.json"
 
-git tag --merged upstream/main --list 'v[0-9]*' `
+git tag --merged $upstreamHead --list 'v[0-9]*' `
   --sort=-version:refname
-git for-each-ref --contains=$base --merged=upstream/main `
+git for-each-ref --contains=$base --merged=$upstreamHead `
   --format='%(refname:short) %(objectname) %(creatordate:short)' `
   'refs/tags/v*'
 ```
@@ -380,14 +381,14 @@ Its three inputs, if you want to recompute the pinned figures by hand:
 
 ```powershell
 git diff --name-only "$base..$forkHead"                  # 1221 fork paths
-git diff --name-only "$base..upstream/main"              # 880 upstream paths
+git diff --name-only "$base..$upstreamHead"              # 880 upstream paths
 git diff --diff-filter=D --name-only "$base..$forkHead"  # 696 fork deletions
 ```
 
 Area counts and targeted inspection:
 
 ```powershell
-$range = "$base..upstream/main"
+$range = "$base..$upstreamHead"
 
 git rev-list --count $range -- src/terminal
 git rev-list --count $range -- src/renderer

@@ -8,7 +8,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $upstreamRef = "$Remote/$Branch"
 
-$base = & git -C $repoRoot merge-base HEAD $upstreamRef
+$head = & git -C $repoRoot rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed for HEAD' }
+$head = "$head".Trim()
+
+$base = & git -C $repoRoot merge-base $head $upstreamRef
 if ($LASTEXITCODE -ne 0) { throw "git merge-base failed for $upstreamRef" }
 $base = "$base".Trim()
 
@@ -16,18 +20,21 @@ $baseDate = & git -C $repoRoot show -s --format='%cs' $base
 if ($LASTEXITCODE -ne 0) { throw 'git show failed for the merge base' }
 $baseDate = "$baseDate".Trim()
 
-$countText = & git -C $repoRoot rev-list --left-right --count "HEAD...$upstreamRef"
+$countText = & git -C $repoRoot rev-list --left-right --count "$head...$upstreamRef"
 if ($LASTEXITCODE -ne 0) { throw "git rev-list failed for $upstreamRef" }
 $counts = "$countText".Trim() -split '\s+'
 
-$metadataPath = Join-Path $repoRoot 'dist\windows\release-metadata.json'
-$metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+$metadataText = @(
+    & git -C $repoRoot show "${head}:dist/windows/release-metadata.json"
+) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'git show failed for release-metadata.json' }
+$metadata = $metadataText | ConvertFrom-Json
 
-$forkPaths = @(& git -C $repoRoot diff --name-only "$base..HEAD")
+$forkPaths = @(& git -C $repoRoot diff --name-only "$base..$head")
 if ($LASTEXITCODE -ne 0) { throw 'git diff failed for fork paths' }
 $upstreamPaths = @(& git -C $repoRoot diff --name-only "$base..$upstreamRef")
 if ($LASTEXITCODE -ne 0) { throw 'git diff failed for upstream paths' }
-$forkDeleted = @(& git -C $repoRoot diff --diff-filter=D --name-only "$base..HEAD")
+$forkDeleted = @(& git -C $repoRoot diff --diff-filter=D --name-only "$base..$head")
 if ($LASTEXITCODE -ne 0) { throw 'git diff failed for fork deletions' }
 
 $upstreamSet = [System.Collections.Generic.HashSet[string]]::new(
@@ -45,6 +52,7 @@ $liveOverlap = @(
         Sort-Object -Unique
 )
 
+Write-Output "Analyzed head: $head"
 Write-Output "Merge base: $base ($baseDate)"
 Write-Output "Ahead/behind: $($counts[0]) / $($counts[1])"
 Write-Output "Recorded upstreamBaseVersion: $($metadata.upstreamBaseVersion)"
