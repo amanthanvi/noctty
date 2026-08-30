@@ -18775,19 +18775,32 @@ fn clientTitlebarTheme(
     var result = theme.*;
     if (!integrated or high_contrast or config.@"window-theme" != .ghostty) return result;
 
-    if (config.@"window-titlebar-background" != null) {
+    if (config.@"window-titlebar-background") |background| {
         result.chrome_bg = titlebarCaptionColor(theme, config);
-        if (config.@"window-titlebar-foreground" == null) {
-            const background = config.@"window-titlebar-background".?;
-            result.is_dark = (terminal.color.RGB{
-                .r = background.r,
-                .g = background.g,
-                .b = background.b,
-            }).perceivedLuminance() < 0.5;
-            const derived_theme = if (result.is_dark) darkTheme() else lightTheme();
-            result.text_primary = derived_theme.text_primary;
-            result.button_chrome_fg = derived_theme.text_primary;
-        }
+
+        // The band's polarity is whatever the configured background says it
+        // is, not whatever the base theme was. Every polarity-dependent token
+        // the client-drawn band consumes has to move with it: leaving them
+        // behind is what puts dark borders, dark disabled glyphs and a dark
+        // focus ring on a light band. `chrome_bg` stays the explicit value,
+        // and `accent` stays the theme's own — `themeSurface` already adapts
+        // the accent through `is_dark`.
+        result.is_dark = (terminal.color.RGB{
+            .r = background.r,
+            .g = background.g,
+            .b = background.b,
+        }).perceivedLuminance() < 0.5;
+        const derived_theme = if (result.is_dark) darkTheme() else lightTheme();
+        result.text_primary = derived_theme.text_primary;
+        result.text_secondary = derived_theme.text_secondary;
+        result.text_disabled = derived_theme.text_disabled;
+        result.chrome_border = derived_theme.chrome_border;
+        result.button_chrome_fg = derived_theme.text_primary;
+        result.button_focus_ring = derived_theme.button_focus_ring;
+        result.button_active_focus_ring = derived_theme.button_active_focus_ring;
+        result.button_disabled_bg = derived_theme.button_disabled_bg;
+        result.button_disabled_border = derived_theme.button_disabled_border;
+        result.button_disabled_fg = derived_theme.button_disabled_fg;
     }
     if (config.@"window-titlebar-foreground" != null) {
         const foreground = titlebarTextColor(theme, config);
@@ -31745,6 +31758,20 @@ test "win32 titlebar colors honor ghostty overrides" {
     try std.testing.expect(!background_only.is_dark);
     try std.testing.expectEqual(lightTheme().text_primary, background_only.text_primary);
     try std.testing.expectEqual(lightTheme().text_primary, background_only.button_chrome_fg);
+    // Every other polarity-dependent token the band paints has to follow the
+    // derived polarity too, or a light band keeps dark borders, dark disabled
+    // glyphs and a dark focus ring.
+    try std.testing.expectEqual(lightTheme().chrome_border, background_only.chrome_border);
+    try std.testing.expectEqual(lightTheme().text_secondary, background_only.text_secondary);
+    try std.testing.expectEqual(lightTheme().text_disabled, background_only.text_disabled);
+    try std.testing.expectEqual(lightTheme().button_focus_ring, background_only.button_focus_ring);
+    try std.testing.expectEqual(lightTheme().button_active_focus_ring, background_only.button_active_focus_ring);
+    try std.testing.expectEqual(lightTheme().button_disabled_bg, background_only.button_disabled_bg);
+    try std.testing.expectEqual(lightTheme().button_disabled_border, background_only.button_disabled_border);
+    try std.testing.expectEqual(lightTheme().button_disabled_fg, background_only.button_disabled_fg);
+    // The accent is theme identity, not polarity: `themeSurface` adapts it
+    // through `is_dark`, so it must survive the override untouched.
+    try std.testing.expectEqual(theme.accent, background_only.accent);
 
     // Foreground only: keep the theme background and its darkness.
     config.@"window-titlebar-background" = null;
@@ -31764,6 +31791,19 @@ test "win32 titlebar colors honor ghostty overrides" {
     try std.testing.expectEqual(rgb(1, 2, 3), client_theme.chrome_bg);
     try std.testing.expectEqual(rgb(4, 5, 6), client_theme.text_primary);
     try std.testing.expectEqual(rgb(4, 5, 6), client_theme.button_chrome_fg);
+
+    // Both configured, with a light background under a dark base theme. The
+    // explicit foreground wins for text, but the band is still light, so the
+    // rest of the chrome must be light too rather than staying on the base
+    // theme's dark polarity.
+    config.@"window-titlebar-background" = .{ .r = 240, .g = 241, .b = 242 };
+    const both_configured = clientTitlebarTheme(&theme, &config, true, false);
+    try std.testing.expect(!both_configured.is_dark);
+    try std.testing.expectEqual(rgb(240, 241, 242), both_configured.chrome_bg);
+    try std.testing.expectEqual(rgb(4, 5, 6), both_configured.text_primary);
+    try std.testing.expectEqual(lightTheme().chrome_border, both_configured.chrome_border);
+    try std.testing.expectEqual(lightTheme().button_focus_ring, both_configured.button_focus_ring);
+    config.@"window-titlebar-background" = .{ .r = 1, .g = 2, .b = 3 };
 
     // Non-integrated and high contrast both bypass the overrides.
     try std.testing.expectEqualDeep(theme, clientTitlebarTheme(&theme, &config, false, false));
