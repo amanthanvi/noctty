@@ -420,6 +420,10 @@ pub const SECURITY_IDENTIFICATION = 0x00010000;
 /// medium integrity, so a label ACE is only worth adding above this.
 pub const SECURITY_MANDATORY_MEDIUM_RID = 0x2000;
 
+/// `S-1-16-4096`. The lowest level any interactive or service token
+/// carries, used only as a sanity floor in tests.
+pub const SECURITY_MANDATORY_LOW_RID = 0x1000;
+
 /// SDDL string revision accepted by
 /// `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
 /// `ConvertSecurityDescriptorToStringSecurityDescriptorW`.

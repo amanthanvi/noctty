@@ -837,6 +837,31 @@ fn tokenUserSidBytes(
     return buf[0..sid_len];
 }
 
+/// Mandatory integrity level of a token, as an `S-1-16-<rid>` RID.
+///
+/// Unlike `allocIpcPipeIntegritySid` this reports EVERY level including
+/// medium and below, because the comparison below needs the actual value
+/// rather than "is it above medium".
+fn tokenIntegrityRid(token: windows.HANDLE) ?u32 {
+    var label_buf: [256]u8 align(@alignOf(sys.TOKEN_MANDATORY_LABEL)) = undefined;
+    var label_len: u32 = 0;
+    if (sys.GetTokenInformation(
+        token,
+        c.TokenIntegrityLevel,
+        &label_buf,
+        label_buf.len,
+        &label_len,
+    ) == 0) return null;
+    const label: *const sys.TOKEN_MANDATORY_LABEL = @ptrCast(&label_buf);
+
+    var sid_string: ?[*:0]u16 = null;
+    if (sys.ConvertSidToStringSidW(label.Label.Sid, &sid_string) == 0) return null;
+    const sid = sid_string orelse return null;
+    defer _ = sys.LocalFree(@ptrCast(sid));
+
+    return integrityRidFromSidString(std.mem.span(sid));
+}
+
 /// Is the process serving this pipe running as the same user we are?
 ///
 /// The single-instance pipe name is derived only from `--class`, so it is
@@ -879,7 +904,32 @@ fn ipcPipeServerIsSameUser(pipe: windows.HANDLE) bool {
     const own_sid = currentUserSidBytes(&own_buf) catch return false;
 
     if (server_sid.len != own_sid.len) return false;
-    return sys.EqualSid(@ptrCast(server_sid.ptr), @ptrCast(own_sid.ptr)) != 0;
+    if (sys.EqualSid(@ptrCast(server_sid.ptr), @ptrCast(own_sid.ptr)) == 0) return false;
+
+    // The user SID is NOT sufficient on its own. Under the ordinary split
+    // UAC token, an elevated process and a medium-integrity process of the
+    // same account carry the SAME user SID, so `EqualSid` alone would let a
+    // medium-integrity squatter pre-create the predictable name and serve an
+    // ELEVATED client -- which would then hand its forwarded arguments
+    // downward and accept a forged ack. `SECURITY_IDENTIFICATION` prevents
+    // the squatter impersonating us; it says nothing about who it is.
+    //
+    // So require the server to be at least our own integrity level. Equal is
+    // fine (the normal case, and what the medium-to-medium path needs);
+    // higher is fine (a medium client talking to an elevated instance is
+    // already governed by the pipe's NO_WRITE_UP label); strictly lower is
+    // refused.
+    var own_token: windows.HANDLE = undefined;
+    if (sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &own_token,
+    ) == 0) return false;
+    defer _ = windows.CloseHandle(own_token);
+
+    const own_rid = tokenIntegrityRid(own_token) orelse return false;
+    const server_rid = tokenIntegrityRid(server_token) orelse return false;
+    return server_rid >= own_rid;
 }
 
 fn connectToIpcPipe(pipe_name: [:0]const u16) !windows.HANDLE {
@@ -29200,11 +29250,27 @@ test "win32 IPC client authenticates the pipe server as the same user" {
     try std.testing.expect(own_sid.len >= 8);
     try std.testing.expectEqual(@as(u8, 1), own_sid[0]); // SID revision
 
-    // NOTE: the REJECT direction cannot be exercised here. It needs a pipe
-    // server running under a different local account, which this suite
-    // cannot create. The negative case is argued from the fail-closed
-    // structure of `ipcPipeServerIsSameUser` (every error path returns
-    // false), not observed.
+    // The integrity half of the check reads a real level. A same-user SID
+    // is NOT sufficient on its own, because a split UAC token shares it
+    // across integrity levels.
+    var token: windows.HANDLE = undefined;
+    try std.testing.expect(sys.OpenProcessToken(
+        windows.kernel32.GetCurrentProcess(),
+        c.TOKEN_QUERY,
+        &token,
+    ) != 0);
+    defer _ = windows.CloseHandle(token);
+    const rid = tokenIntegrityRid(token).?;
+    // Any interactive or service token sits at low or above; a zero here
+    // would make the `>=` comparison vacuous.
+    try std.testing.expect(rid >= c.SECURITY_MANDATORY_LOW_RID);
+
+    // NOTE: the REJECT directions cannot be exercised here. A foreign-user
+    // server needs a second local account, and a lower-integrity server
+    // needs a medium process while this suite runs elevated; neither is
+    // creatable from a test. Both are argued from the fail-closed structure
+    // of `ipcPipeServerIsSameUser` (every error path returns false, and the
+    // final comparison is `server_rid >= own_rid`), not observed.
 }
 
 test "win32 IPC silent client read is bounded" {
