@@ -125,9 +125,13 @@ pwsh -NoProfile -File test/windows/interactive-win11-validate.ps1 -ResetState
 A pick in those areas is not certified until the relevant interactive result is
 recorded in the window's drift report.
 
-The full suite has a known pre-existing failure named
-`Command: custom env vars`. Record that result as the baseline and reject any
-new failure or change in its failure mode.
+**The baseline is zero failures, not a pass count.** Every branch adds its own
+tests, so the passing total legitimately differs between windows and proves
+nothing; a non-zero failure count is the signal. The suite previously carried
+one known failure, `Command: custom env vars`, which `main` has since fixed —
+do not treat it, or any other named test, as an allowed exception. A filtered
+`-Dtest-filter=` run does not satisfy this gate: narrowed runs have hidden real
+breakage before.
 
 ## Deferral
 

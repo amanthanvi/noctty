@@ -22,10 +22,16 @@ conflict surface**.
 Eight narrow upstream commits were candidate immediate picks. All eight apply
 without conflict, but one of them (`997a2aff2afc`) does not compile against the
 fork's older `PageList` API and was dropped. The remaining seven apply cleanly,
-build, and leave the full test suite at its known baseline (3770/3841 passing,
-the one pre-existing `Command: custom env vars` failure). The three
-terminal/SIMD picks are certified by those gates. The four renderer/input picks
-remain provisional until the required interactive Windows results are recorded.
+build, and leave the full test suite green (3779 passed, 70 skipped, 0 failed).
+The three terminal/SIMD picks are certified by those gates. The four
+renderer/input picks remain provisional until the required interactive Windows
+results are recorded.
+
+**Those seven commits are not on this branch, and none of the certification
+above describes it.** They live on `issues/141-upstream-sync-2026-08` (PR #175),
+which is stacked on this branch and is not an ancestor of it. This branch
+carries the policy, this report, and `scripts/upstream-drift.ps1` — no upstream
+source change at all. Merging it publishes the analysis and none of the fixes.
 
 ## Snapshot identity
 
