@@ -10379,8 +10379,20 @@ const Host = struct {
     }
 
     fn refreshSurfaceVisibility(self: *Host) void {
+        self.refreshSurfaceVisibilityObserving(null);
+    }
+
+    /// `observed_cloaked` is the transition a DWM cloak WinEvent just
+    /// reported, or `null` for message-driven refreshes that observed no
+    /// transition. Passing it through is what lets an uncloak recover when
+    /// `DwmGetWindowAttribute` fails; see `win32_power.resolveCloaked`.
+    fn refreshSurfaceVisibilityObserving(self: *Host, observed_cloaked: ?bool) void {
         const hwnd = self.hwnd orelse return;
-        const state = win32_power.queryHostVisibility(hwnd, self.dwm_cloaked);
+        const state = win32_power.queryHostVisibility(
+            hwnd,
+            self.dwm_cloaked,
+            observed_cloaked,
+        );
         self.dwm_cloaked = state.cloaked;
         if (self.surfaces_visible == state.visible) return;
         self.surfaces_visible = state.visible;
@@ -17641,12 +17653,17 @@ var cloak_event_app: ?*App = null;
 /// switch that uncloaks a background window would leave `surfaces_visible`
 /// false; hidden surfaces skip rendering entirely, so nothing would repair it
 /// until an unrelated message arrived.
-fn onHostCloakEvent(hwnd: HWND) void {
+///
+/// `cloaked` is the transition the event carried. It must reach the refresh:
+/// if it were dropped and the refresh's `DwmGetWindowAttribute` query then
+/// failed, the previous `cloaked = true` would be preserved and this very
+/// recovery path would be the thing that fails to recover.
+fn onHostCloakEvent(hwnd: HWND, cloaked: bool) void {
     const app = cloak_event_app orelse return;
     for (app.hosts.items) |host| {
         const host_hwnd = host.hwnd orelse continue;
         if (host_hwnd != hwnd) continue;
-        host.refreshSurfaceVisibility();
+        host.refreshSurfaceVisibilityObserving(cloaked);
         return;
     }
 }

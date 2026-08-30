@@ -117,8 +117,13 @@ subscribes to Windows power-setting notifications for the power source
 It additionally registers for Windows 11 Energy Saver
 (`GUID_ENERGY_SAVER_STATUS`), which can engage while plugged in; Microsoft
 currently documents that GUID as prerelease, so registration is best-effort
-and simply does not take effect on Windows builds that lack it. A fallback
-query runs at most once every 30 seconds. This has not yet been verified on
+and simply does not take effect on Windows builds that lack it. Battery
+Saver and Energy Saver are tracked as two independent flags and combined
+with OR only when pacing is decided, so one turning off cannot cancel
+pacing that the other still requires. `GetSystemPowerStatus` reports only
+Battery Saver, so the fallback query carries the last notified Energy Saver
+value forward instead of clearing it. A fallback query runs at most once
+every 30 seconds. This has not yet been verified on
 a machine with a battery -- see the status caveat below.
 
 `unfocused-render-fps` caps presentation for visible, unfocused surfaces
@@ -144,10 +149,15 @@ virtual-desktop switch that uncloaks a background window need not send
 surfaces skip rendering entirely there would be no self-healing path back
 to visible. The window messages above remain as a fallback for a missed
 event or a failed hook registration, which degrades to the previous
-behaviour rather than failing window creation. This hook path is argued
-from the Win32 contract and covered by unit tests over the pure event
-filter; it has not been observed on hardware -- see the status caveat
-below.
+behaviour rather than failing window creation. The callback forwards which
+of the two events fired: the refresh it triggers re-queries
+`DwmGetWindowAttribute(DWMWA_CLOAKED)`, and if that query fails the
+observed transition is used instead of the last known cloak state, because
+preserving a stale "cloaked" across an uncloak would leave the window
+hidden with nothing left to re-query it. This hook path is argued from the
+Win32 contract and covered by unit tests over the pure event filter and the
+pure cloak-resolution policy; it has not been observed on hardware -- see
+the status caveat below.
 
 Focus here is **per surface, not per window**. In a split, only the pane
 with keyboard focus presents at the full rate; the other panes are

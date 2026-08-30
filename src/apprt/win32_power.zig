@@ -109,7 +109,12 @@ extern "user32" fn SetWinEventHook(
 extern "user32" fn UnhookWinEvent(hook: HANDLE) callconv(.winapi) BOOL;
 
 const on_battery_bit: u8 = 1 << 0;
-const saver_bit: u8 = 1 << 1;
+/// Legacy "Battery Saver" (GUID_POWER_SAVING_STATUS and the
+/// `SYSTEM_POWER_STATUS.SystemStatusFlag` poll fallback).
+const battery_saver_bit: u8 = 1 << 1;
+/// Windows 11 "Energy Saver" (GUID_ENERGY_SAVER_STATUS). Independent of the
+/// bit above: either source alone means saver pacing applies.
+const energy_saver_bit: u8 = 1 << 2;
 
 var snapshot_bits = std.atomic.Value(u8).init(0);
 var last_poll_tick_ms = std.atomic.Value(u64).init(0);
@@ -121,7 +126,27 @@ var push_generation = std.atomic.Value(u32).init(0);
 /// threads read a coherent, lock-free snapshot.
 pub const Snapshot = struct {
     on_battery: bool = false,
-    is_saver: bool = false,
+    /// Legacy Battery Saver. Reported by GUID_POWER_SAVING_STATUS and by
+    /// `SYSTEM_POWER_STATUS.SystemStatusFlag`.
+    battery_saver: bool = false,
+    /// Windows 11 Energy Saver. Reported only by GUID_ENERGY_SAVER_STATUS;
+    /// there is no `GetSystemPowerStatus` field for it.
+    energy_saver: bool = false,
+
+    /// Effective saver state: the union of the two independent sources.
+    ///
+    /// They must stay separate in storage. Windows reports them through
+    /// different notifications that can disagree, so folding them into one
+    /// flag at write time lets whichever notification arrives last erase the
+    /// other -- e.g. Energy Saver turning OFF would clear saver pacing while
+    /// Battery Saver is still on.
+    ///
+    /// `on_battery` is deliberately NOT a source here: `auto` follows the
+    /// saver signals only, never plain battery power. See `Config.zig` and
+    /// `docs/windows.md`.
+    pub fn isSaver(self: Snapshot) bool {
+        return self.battery_saver or self.energy_saver;
+    }
 };
 
 pub const PolicyConfig = struct {
@@ -129,9 +154,12 @@ pub const PolicyConfig = struct {
     power_saver_rendering: configpkg.PowerSaverRendering,
 };
 
+/// A single-source update. Each variant writes only its own bit, so one
+/// source can never clear another.
 pub const SettingUpdate = union(enum) {
     on_battery: bool,
-    is_saver: bool,
+    battery_saver: bool,
+    energy_saver: bool,
 };
 
 pub const HostVisibility = struct {
@@ -142,7 +170,11 @@ pub const HostVisibility = struct {
 /// Called on the UI thread when DWM reports that one of our own top-level
 /// windows was cloaked or uncloaked. Installed by the apprt, which owns the
 /// HWND -> host mapping this module deliberately knows nothing about.
-pub const CloakEventHandler = *const fn (hwnd: HWND) void;
+///
+/// `cloaked` is the transition the event itself carried, and must be passed
+/// through rather than discarded: it is the only recovery path when the
+/// follow-up `DwmGetWindowAttribute` query fails. See `resolveCloaked`.
+pub const CloakEventHandler = *const fn (hwnd: HWND, cloaked: bool) void;
 
 /// All of the following are touched only from the UI/pump thread: hosts are
 /// created and destroyed there, and `WINEVENT_OUTOFCONTEXT` callbacks are
@@ -184,7 +216,10 @@ fn cloakWinEventProc(
     // thread, so Windows delivers this from inside our own message pump.
     // We are on the UI thread and may touch host state directly; nothing
     // here may be moved to another thread.
-    handler(target);
+    //
+    // Forward WHICH transition fired. `isHostCloakEvent` has already
+    // narrowed `event` to exactly one of the two.
+    handler(target, event == EVENT_OBJECT_CLOAKED);
 }
 
 /// Reference-counted because one thread-scoped hook already covers every host
@@ -314,7 +349,11 @@ pub fn parseSystemPowerStatus(raw: SYSTEM_POWER_STATUS, previous: Snapshot) Snap
             // payload, not here — see parsePowerSettingNotification.)
             else => previous.on_battery,
         },
-        .is_saver = raw.SystemStatusFlag == 1,
+        // SystemStatusFlag is the legacy Battery Saver indicator only.
+        .battery_saver = raw.SystemStatusFlag == 1,
+        // `GetSystemPowerStatus` has no Energy Saver field, so a poll must
+        // carry the last notified value forward instead of clearing it.
+        .energy_saver = previous.energy_saver,
     };
 }
 
@@ -338,7 +377,7 @@ pub fn parsePowerSettingNotification(payload: []const u8) ?SettingUpdate {
         } };
     }
     if (std.mem.eql(u8, guid_bytes, std.mem.asBytes(&GUID_POWER_SAVING_STATUS))) {
-        return .{ .is_saver = switch (value) {
+        return .{ .battery_saver = switch (value) {
             0 => false,
             1 => true,
             else => return null,
@@ -348,7 +387,7 @@ pub fn parsePowerSettingNotification(payload: []const u8) ?SettingUpdate {
         // Both saving modes throttle. STANDARD asks for savings where the
         // user-experience cost is minimal, which capping an unfocused or
         // idle terminal present rate satisfies.
-        return .{ .is_saver = switch (value) {
+        return .{ .energy_saver = switch (value) {
             ENERGY_SAVER_OFF => false,
             ENERGY_SAVER_STANDARD, ENERGY_SAVER_HIGH_SAVINGS => true,
             else => return null,
@@ -425,7 +464,8 @@ pub fn tickCountMs() u64 {
 /// Whether saver-specific pacing is active for the current configuration.
 pub fn saverRenderingActive(mode: configpkg.PowerSaverRendering, state: Snapshot) bool {
     return switch (mode) {
-        .auto => state.is_saver,
+        // `auto` follows Battery Saver OR Energy Saver, never plain battery.
+        .auto => state.isSaver(),
         .on => true,
         .off => false,
     };
@@ -460,9 +500,41 @@ pub fn hostVisible(window_visible: bool, minimized: bool, cloaked: bool) bool {
     return window_visible and !minimized and !cloaked;
 }
 
-/// Query host visibility while preserving the last cloak result if DWM cannot
-/// answer transiently.
-pub fn queryHostVisibility(hwnd: HWND, previous_cloaked: bool) HostVisibility {
+/// Pure cloak-resolution policy.
+///
+/// `query` is the `DwmGetWindowAttribute(DWMWA_CLOAKED)` result, or `null`
+/// when DWM could not answer. `observed` is the transition a WinEvent just
+/// reported, or `null` for a refresh not driven by a cloak event.
+///
+/// Precedence, and why:
+///
+///  1. A successful query wins. It is the current truth and may be newer
+///     than the event that triggered this refresh.
+///  2. Otherwise the observed transition wins. Windows documents
+///     EVENT_OBJECT_UNCLOAKED as being raised after the window has been
+///     uncloaked, so the event is a valid statement about cloak state on its
+///     own and does not need the query to succeed.
+///  3. Only with neither do we preserve the previous value.
+///
+/// Rule 2 exists because falling back to `previous` on an UNCLOAKED event is
+/// unrecoverable rather than merely stale: a preserved `cloaked = true`
+/// leaves the host's surfaces hidden, hidden surfaces do no renderer work,
+/// and no further cloak event is coming for a window that is already
+/// uncloaked -- so nothing would ever re-query and the terminal stays frozen
+/// until an unrelated window message happens to arrive. The failure mode of
+/// guessing wrong in the other direction is bounded: a spuriously visible
+/// host merely presents until the next refresh corrects it.
+///
+/// NOTE: this precedence is argued from the documented WinEvent contract and
+/// from the code paths above, not from an observed repro. No desktop session
+/// was available to this change; the covering test below exercises the
+/// policy, not DWM itself.
+pub fn resolveCloaked(query: ?bool, observed: ?bool, previous: bool) bool {
+    return query orelse observed orelse previous;
+}
+
+/// Raw DWM cloak query. `null` means DWM could not answer transiently.
+fn queryCloaked(hwnd: HWND) ?bool {
     var cloak_reason: DWORD = 0;
     const result = DwmGetWindowAttribute(
         hwnd,
@@ -470,7 +542,22 @@ pub fn queryHostVisibility(hwnd: HWND, previous_cloaked: bool) HostVisibility {
         &cloak_reason,
         @sizeOf(DWORD),
     );
-    const cloaked = if (result >= 0) cloak_reason != 0 else previous_cloaked;
+    return if (result >= 0) cloak_reason != 0 else null;
+}
+
+/// Query host visibility. `observed_cloaked` carries the transition from a
+/// cloak WinEvent when this refresh was triggered by one; see
+/// `resolveCloaked` for how a failed DWM query is resolved.
+pub fn queryHostVisibility(
+    hwnd: HWND,
+    previous_cloaked: bool,
+    observed_cloaked: ?bool,
+) HostVisibility {
+    const cloaked = resolveCloaked(
+        queryCloaked(hwnd),
+        observed_cloaked,
+        previous_cloaked,
+    );
     return .{
         .visible = hostVisible(
             sys.IsWindowVisible(hwnd) != 0,
@@ -491,13 +578,15 @@ fn fpsIntervalMs(fps: u32) u64 {
 
 fn packSnapshot(value: Snapshot) u8 {
     return @as(u8, @intFromBool(value.on_battery)) * on_battery_bit |
-        @as(u8, @intFromBool(value.is_saver)) * saver_bit;
+        @as(u8, @intFromBool(value.battery_saver)) * battery_saver_bit |
+        @as(u8, @intFromBool(value.energy_saver)) * energy_saver_bit;
 }
 
 fn unpackSnapshot(bits: u8) Snapshot {
     return .{
         .on_battery = bits & on_battery_bit != 0,
-        .is_saver = bits & saver_bit != 0,
+        .battery_saver = bits & battery_saver_bit != 0,
+        .energy_saver = bits & energy_saver_bit != 0,
     };
 }
 
@@ -535,8 +624,13 @@ fn publishSetting(update: SettingUpdate) void {
             .on_battery => |value| {
                 if (value) next |= on_battery_bit else next &= ~on_battery_bit;
             },
-            .is_saver => |value| {
-                if (value) next |= saver_bit else next &= ~saver_bit;
+            // Each source owns exactly one bit, so a read-modify-write here
+            // leaves the other source untouched.
+            .battery_saver => |value| {
+                if (value) next |= battery_saver_bit else next &= ~battery_saver_bit;
+            },
+            .energy_saver => |value| {
+                if (value) next |= energy_saver_bit else next &= ~energy_saver_bit;
             },
         }
         current = snapshot_bits.cmpxchgWeak(current, next, .acq_rel, .acquire) orelse return;
@@ -565,9 +659,9 @@ fn settingPayload(guid: GUID, value: DWORD) [@sizeOf(POWERBROADCAST_SETTING)]u8 
 }
 
 test "power status parsing preserves unknown AC state" {
-    const previous: Snapshot = .{ .on_battery = true, .is_saver = false };
+    const previous: Snapshot = .{ .on_battery = true, .battery_saver = false };
     try std.testing.expectEqual(
-        Snapshot{ .on_battery = false, .is_saver = true },
+        Snapshot{ .on_battery = false, .battery_saver = true },
         parseSystemPowerStatus(.{
             .ACLineStatus = 1,
             .BatteryFlag = 0,
@@ -578,7 +672,7 @@ test "power status parsing preserves unknown AC state" {
         }, previous),
     );
     try std.testing.expectEqual(
-        Snapshot{ .on_battery = true, .is_saver = false },
+        Snapshot{ .on_battery = true, .battery_saver = false },
         parseSystemPowerStatus(.{
             .ACLineStatus = 0xff,
             .BatteryFlag = 0xff,
@@ -587,6 +681,21 @@ test "power status parsing preserves unknown AC state" {
             .BatteryLifeTime = 0xffff_ffff,
             .BatteryFullLifeTime = 0xffff_ffff,
         }, previous),
+    );
+
+    // `GetSystemPowerStatus` cannot see Energy Saver, so a poll must carry
+    // the last notified value through rather than clearing it. Without this
+    // the 30 s fallback poll would silently cancel Energy Saver pacing.
+    try std.testing.expectEqual(
+        Snapshot{ .on_battery = false, .battery_saver = false, .energy_saver = true },
+        parseSystemPowerStatus(.{
+            .ACLineStatus = 1,
+            .BatteryFlag = 0,
+            .BatteryLifePercent = 80,
+            .SystemStatusFlag = 0,
+            .BatteryLifeTime = 0,
+            .BatteryFullLifeTime = 0,
+        }, .{ .energy_saver = true }),
     );
 }
 
@@ -599,31 +708,32 @@ test "power notification parsing accepts registered settings" {
 
     const saver = settingPayload(GUID_POWER_SAVING_STATUS, 0);
     try std.testing.expectEqual(
-        SettingUpdate{ .is_saver = false },
+        SettingUpdate{ .battery_saver = false },
         parsePowerSettingNotification(&saver).?,
     );
 
     const saver_on = settingPayload(GUID_POWER_SAVING_STATUS, 1);
     try std.testing.expectEqual(
-        SettingUpdate{ .is_saver = true },
+        SettingUpdate{ .battery_saver = true },
         parsePowerSettingNotification(&saver_on).?,
     );
 
-    // Energy Saver (prerelease GUID) maps its three-state enum onto the same
-    // saver flag: off is off, both savings modes throttle.
+    // Energy Saver (prerelease GUID) maps its three-state enum onto its OWN
+    // flag: off is off, both savings modes throttle. It must not share a
+    // field with Battery Saver above -- see the union test below.
     const energy_off = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_OFF);
     try std.testing.expectEqual(
-        SettingUpdate{ .is_saver = false },
+        SettingUpdate{ .energy_saver = false },
         parsePowerSettingNotification(&energy_off).?,
     );
     const energy_standard = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_STANDARD);
     try std.testing.expectEqual(
-        SettingUpdate{ .is_saver = true },
+        SettingUpdate{ .energy_saver = true },
         parsePowerSettingNotification(&energy_standard).?,
     );
     const energy_high = settingPayload(GUID_ENERGY_SAVER_STATUS, ENERGY_SAVER_HIGH_SAVINGS);
     try std.testing.expectEqual(
-        SettingUpdate{ .is_saver = true },
+        SettingUpdate{ .energy_saver = true },
         parsePowerSettingNotification(&energy_high).?,
     );
     const energy_bogus = settingPayload(GUID_ENERGY_SAVER_STATUS, 7);
@@ -647,7 +757,7 @@ test "power render policy preserves focused non-saver pacing" {
     try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
         true,
         true,
-        .{ .on_battery = false, .is_saver = false },
+        .{ .on_battery = false },
         config,
     ));
     // Battery alone is NOT a saver trigger. `auto` is documented in
@@ -657,7 +767,7 @@ test "power render policy preserves focused non-saver pacing" {
     try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
         true,
         true,
-        .{ .on_battery = true, .is_saver = false },
+        .{ .on_battery = true },
         config,
     ));
     // 60 fps here so the expected value distinguishes the unfocused cap (17)
@@ -667,15 +777,17 @@ test "power render policy preserves focused non-saver pacing" {
     try std.testing.expectEqual(@as(?u64, 17), minimumPresentIntervalMs(
         false,
         true,
-        .{ .on_battery = true, .is_saver = false },
+        .{ .on_battery = true },
         sixty,
     ));
-    try std.testing.expect(!saverRenderingActive(.auto, .{ .on_battery = true, .is_saver = false }));
-    try std.testing.expect(saverRenderingActive(.auto, .{ .on_battery = false, .is_saver = true }));
+    try std.testing.expect(!saverRenderingActive(.auto, .{ .on_battery = true }));
+    // Either saver source alone drives `auto`.
+    try std.testing.expect(saverRenderingActive(.auto, .{ .battery_saver = true }));
+    try std.testing.expect(saverRenderingActive(.auto, .{ .energy_saver = true }));
     try std.testing.expectEqual(@as(?u64, null), minimumPresentIntervalMs(
         true,
         false,
-        .{ .on_battery = true, .is_saver = true },
+        .{ .on_battery = true, .battery_saver = true },
         config,
     ));
 }
@@ -702,13 +814,21 @@ test "power render policy caps saver and unfocused surfaces" {
     try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
         true,
         true,
-        .{ .on_battery = true, .is_saver = true },
+        .{ .on_battery = true, .battery_saver = true },
         sixty_fps,
     ));
     try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
         false,
         true,
-        .{ .on_battery = true, .is_saver = true },
+        .{ .on_battery = true, .battery_saver = true },
+        sixty_fps,
+    ));
+    // Energy Saver on AC power paces identically; the source does not matter
+    // once either is set.
+    try std.testing.expectEqual(@as(?u64, 34), minimumPresentIntervalMs(
+        true,
+        true,
+        .{ .on_battery = false, .energy_saver = true },
         sixty_fps,
     ));
 
@@ -725,9 +845,52 @@ test "power render policy caps saver and unfocused surfaces" {
     try std.testing.expectEqual(@as(?u64, 8), minimumPresentIntervalMs(
         true,
         true,
-        .{ .is_saver = true },
+        .{ .battery_saver = true, .energy_saver = true },
         forced,
     ));
+}
+
+test "power saver sources do not erase each other in either order" {
+    resetPowerGlobalsForTest();
+    defer resetPowerGlobalsForTest();
+
+    // Battery Saver on, then Energy Saver reports OFF. Energy Saver was
+    // never on; its "off" must not cancel Battery Saver's pacing.
+    publishSetting(.{ .battery_saver = true });
+    publishSetting(.{ .energy_saver = false });
+    try std.testing.expectEqual(
+        Snapshot{ .battery_saver = true, .energy_saver = false },
+        snapshot(),
+    );
+    try std.testing.expect(snapshot().isSaver());
+    try std.testing.expect(saverRenderingActive(.auto, snapshot()));
+
+    // ...and the reverse ordering: Energy Saver on, then Battery Saver OFF.
+    resetPowerGlobalsForTest();
+    publishSetting(.{ .energy_saver = true });
+    publishSetting(.{ .battery_saver = false });
+    try std.testing.expectEqual(
+        Snapshot{ .battery_saver = false, .energy_saver = true },
+        snapshot(),
+    );
+    try std.testing.expect(snapshot().isSaver());
+    try std.testing.expect(saverRenderingActive(.auto, snapshot()));
+
+    // Both on, then only one clears: still saver.
+    resetPowerGlobalsForTest();
+    publishSetting(.{ .battery_saver = true });
+    publishSetting(.{ .energy_saver = true });
+    publishSetting(.{ .battery_saver = false });
+    try std.testing.expect(snapshot().isSaver());
+
+    // Only when the last remaining source clears does pacing release.
+    publishSetting(.{ .energy_saver = false });
+    try std.testing.expect(!snapshot().isSaver());
+
+    // `on_battery` is not a saver source and never contributes.
+    publishSetting(.{ .on_battery = true });
+    try std.testing.expect(!snapshot().isSaver());
+    try std.testing.expect(!saverRenderingActive(.auto, snapshot()));
 }
 
 fn resetPowerGlobalsForTest() void {
@@ -776,7 +939,7 @@ test "power poll claims the 30 s slot only on a successful read" {
     try std.testing.expectEqual(@as(usize, 1), readers.calls);
     try std.testing.expectEqual(@as(u64, 1_001), last_poll_tick_ms.load(.acquire));
     try std.testing.expectEqual(
-        Snapshot{ .on_battery = true, .is_saver = true },
+        Snapshot{ .on_battery = true, .battery_saver = true },
         snapshot(),
     );
 
@@ -795,20 +958,60 @@ test "power poll publication yields to a notification that raced it" {
     // The push lands while the poll is still inside the status syscall: it
     // bumps the generation and wins the byte, and the poll must not undo it.
     const raced = push_generation.load(.acquire);
-    publishSetting(.{ .is_saver = true });
-    publishPolledSnapshot(.{ .on_battery = true, .is_saver = false }, raced);
+    publishSetting(.{ .battery_saver = true });
+    publishPolledSnapshot(.{ .on_battery = true, .battery_saver = false }, raced);
     try std.testing.expectEqual(
-        Snapshot{ .on_battery = false, .is_saver = true },
+        Snapshot{ .on_battery = false, .battery_saver = true },
         snapshot(),
     );
 
     // With no racing push the poll publishes normally.
     const quiet = push_generation.load(.acquire);
-    publishPolledSnapshot(.{ .on_battery = true, .is_saver = false }, quiet);
+    publishPolledSnapshot(.{ .on_battery = true, .battery_saver = false }, quiet);
     try std.testing.expectEqual(
-        Snapshot{ .on_battery = true, .is_saver = false },
+        Snapshot{ .on_battery = true, .battery_saver = false },
         snapshot(),
     );
+
+    // Widening the snapshot to a third bit must not have broken the CAS: an
+    // Energy Saver push still wins the byte against a stale poll that only
+    // knows about the two GetSystemPowerStatus-visible fields.
+    const raced_energy = push_generation.load(.acquire);
+    publishSetting(.{ .energy_saver = true });
+    publishPolledSnapshot(.{ .on_battery = true, .battery_saver = true }, raced_energy);
+    try std.testing.expectEqual(
+        Snapshot{ .on_battery = true, .battery_saver = false, .energy_saver = true },
+        snapshot(),
+    );
+}
+
+test "power cloak resolution recovers from a failed query on uncloak" {
+    // The window was cloaked; DWM then raises EVENT_OBJECT_UNCLOAKED but the
+    // follow-up DwmGetWindowAttribute query fails. Preserving `previous`
+    // here is unrecoverable -- hidden surfaces do no renderer work and no
+    // second uncloak event is coming -- so the observed transition wins.
+    try std.testing.expectEqual(false, resolveCloaked(null, false, true));
+    try std.testing.expect(hostVisible(true, false, resolveCloaked(null, false, true)));
+
+    // The symmetric case: a failed query on CLOAKED adopts cloaked. This
+    // direction is safe either way (a stale visible host merely presents
+    // until the next refresh), but the event is still the better answer.
+    try std.testing.expectEqual(true, resolveCloaked(null, true, false));
+
+    // A successful query is the current truth and outranks the event that
+    // triggered the refresh, including when they disagree because the window
+    // was re-cloaked between the two.
+    try std.testing.expectEqual(true, resolveCloaked(true, false, false));
+    try std.testing.expectEqual(false, resolveCloaked(false, true, true));
+
+    // Message-driven refreshes observe no transition. With a working query
+    // they follow it; with a failed query they preserve the last known value,
+    // which is the pre-existing behaviour and stays correct because some
+    // other window message will drive the next refresh.
+    try std.testing.expectEqual(true, resolveCloaked(true, null, false));
+    try std.testing.expectEqual(false, resolveCloaked(false, null, true));
+    try std.testing.expectEqual(true, resolveCloaked(null, null, true));
+    try std.testing.expectEqual(false, resolveCloaked(null, null, false));
 }
 
 test "power cloak winevent filter accepts only window-level cloak transitions" {
