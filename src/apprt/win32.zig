@@ -4891,7 +4891,7 @@ pub const App = struct {
 
             .new_tab => {
                 const source = self.findSurfaceForTarget(target);
-                _ = try self.createNewTab(source, null);
+                _ = try self.createNewTab(source, null, false);
                 return true;
             },
 
@@ -5671,12 +5671,26 @@ pub const App = struct {
                 if (value.working_directory) |cwd| {
                     if (!automationWorkingDirectoryAllowed(cwd)) return error.AutomationPolicyRefused;
                 }
-                const source = switch (value.target) {
-                    .focused => self.focusedSurfaceForUndoRedo(),
-                    .window_id => |id| self.activeSurfaceForHost(id),
+                const resolved: struct {
+                    source: ?*Surface,
+                    explicit_window_target: bool,
+                } = switch (value.target) {
+                    .focused => .{
+                        .source = self.focusedSurfaceForUndoRedo(),
+                        .explicit_window_target = false,
+                    },
+                    .window_id => |id| .{
+                        .source = self.activeSurfaceForHost(id),
+                        .explicit_window_target = true,
+                    },
                     .surface_id => return error.InvalidAutomationTarget,
-                } orelse return error.AutomationTargetNotFound;
-                _ = try self.createNewTab(source, value.working_directory);
+                };
+                const source = resolved.source orelse return error.AutomationTargetNotFound;
+                _ = try self.createNewTab(
+                    source,
+                    value.working_directory,
+                    resolved.explicit_window_target,
+                );
             },
             .new_split => |value| {
                 if (value.working_directory) |cwd| {
@@ -6010,20 +6024,29 @@ pub const App = struct {
         return surface;
     }
 
-    fn createNewTab(self: *App, source: ?*Surface, working_directory: ?[]const u8) !*Surface {
+    fn createNewTab(
+        self: *App,
+        source: ?*Surface,
+        working_directory: ?[]const u8,
+        explicit_window_target: bool,
+    ) !*Surface {
         var config = try apprt.surface.newConfig(self.core_app, &self.config, .tab);
         defer config.deinit();
-        // `newConfig(.tab)` consults the globally focused surface. Reset and
-        // inherit from the exact requested host instead.
-        config.@"working-directory" = self.config.@"working-directory";
-        if (source) |surface| {
-            const split_inherit = config.@"split-inherit-working-directory";
-            {
-                defer config.@"split-inherit-working-directory" = split_inherit;
-                config.@"split-inherit-working-directory" = config.@"tab-inherit-working-directory";
-                _ = try applySplitWorkingDirectoryFromSource(self, &config, surface, self.startup_cwd);
+
+        if (explicit_window_target) {
+            // `newConfig(.tab)` consults the globally focused surface. Reset
+            // and inherit from the explicitly requested host instead.
+            config.@"working-directory" = self.config.@"working-directory";
+            if (source) |surface| {
+                const split_inherit = config.@"split-inherit-working-directory";
+                {
+                    defer config.@"split-inherit-working-directory" = split_inherit;
+                    config.@"split-inherit-working-directory" = config.@"tab-inherit-working-directory";
+                    _ = try applySplitWorkingDirectoryFromSource(self, &config, surface, self.startup_cwd);
+                }
             }
         }
+
         if (working_directory) |cwd| try applyAutomationWorkingDirectory(&config, cwd);
         const surface = try self.createWindowSurface(&config, default_title, .{
             .host_id = if (source) |value| value.host_id else null,
@@ -27559,6 +27582,166 @@ test "win32 structural redo invalidation clears affected tab redo only" {
     try std.testing.expectEqual(@as(usize, 0), surface_b.undo_stack.redoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.undoDepth());
     try std.testing.expectEqual(@as(usize, 1), surface_c.undo_stack.redoDepth());
+}
+
+test "automation in-app new_tab action does not query source pwd" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host: Host = undefined;
+    var source: Surface = undefined;
+    var created: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{.{ .storage = &host, .register = true, .next_tab_id = 2 }},
+        .surfaces = &.{
+            .{ .storage = &source, .host = &host, .register = true },
+            .{ .storage = &created, .host = &host, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{.{ .host = &host, .surface = &source, .id = 1 }},
+    });
+    defer session.deinit();
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_ref: *Surface = undefined;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(_: Allocator, _: *Surface) !?[]const u8 {
+            pwd_calls += 1;
+            return error.UnexpectedPwdQuery;
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            _: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            created_ref.app = hook_app;
+            created_ref.host = host_ref;
+            created_ref.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created_ref);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index.?,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created_ref),
+            );
+            return created_ref;
+        }
+    };
+
+    Hook.host_ref = &host;
+    Hook.created_ref = &created;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(try app.performAction(.app, .new_tab, {}));
+    try std.testing.expectEqual(@as(usize, 0), Hook.pwd_calls);
+}
+
+test "automation explicit-window new_tab reanchors inactive host cwd and override wins" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var core_app: CoreApp = undefined;
+    var app: App = undefined;
+    var host_a: Host = undefined;
+    var host_b: Host = undefined;
+    var surface_a: Surface = undefined;
+    var surface_b: Surface = undefined;
+    var inherited: Surface = undefined;
+    var overridden: Surface = undefined;
+    var session: TestSession = .{};
+    try session.init(.{
+        .core_app = &core_app,
+        .app = &app,
+        .hosts = &.{
+            .{ .storage = &host_a, .id = 11, .register = true, .next_tab_id = 2 },
+            .{ .storage = &host_b, .id = 12, .register = true, .next_tab_id = 2 },
+        },
+        .surfaces = &.{
+            .{ .storage = &surface_a, .host = &host_a, .register = true, .window_focused = true },
+            .{ .storage = &surface_b, .host = &host_b, .register = true, .host_active = false },
+            .{ .storage = &inherited, .host = &host_b, .window_visible = false, .host_active = false },
+            .{ .storage = &overridden, .host = &host_b, .window_visible = false, .host_active = false },
+        },
+        .tabs = &.{
+            .{ .host = &host_a, .surface = &surface_a, .id = 1 },
+            .{ .host = &host_b, .surface = &surface_b, .id = 1 },
+        },
+    });
+    defer session.deinit();
+
+    const Hook = struct {
+        var host_ref: *Host = undefined;
+        var created_refs: [2]*Surface = undefined;
+        var create_calls: usize = 0;
+        var pwd_calls: usize = 0;
+
+        fn queryPwd(alloc: Allocator, source: *Surface) !?[]const u8 {
+            try std.testing.expectEqual(@as(u32, 12), source.host_id);
+            pwd_calls += 1;
+            return try alloc.dupe(u8, "C:\\inactive-host");
+        }
+
+        fn createSurface(
+            hook_app: *App,
+            config: *const configpkg.Config,
+            _: LPCWSTR,
+            opts: SurfaceInitOptions,
+        ) anyerror!*Surface {
+            const call_index = create_calls;
+            create_calls += 1;
+            try std.testing.expect(call_index < created_refs.len);
+            try std.testing.expectEqual(@as(?u32, host_ref.id), opts.host_id);
+            try std.testing.expect(opts.clone_state_from != null);
+            try std.testing.expectEqual(host_ref.id, opts.clone_state_from.?.host_id);
+
+            const expected = if (call_index == 0) "C:\\inactive-host" else "D:\\explicit-override";
+            const working_directory = config.@"working-directory" orelse
+                return error.MissingWorkingDirectory;
+            switch (working_directory) {
+                .path => |path| try std.testing.expectEqualStrings(expected, path),
+                .home, .inherit => return error.UnexpectedWorkingDirectory,
+            }
+
+            const created = created_refs[call_index];
+            created.app = hook_app;
+            created.host = host_ref;
+            created.host_id = host_ref.id;
+            try hook_app.windows.append(hook_app.core_app.alloc, created);
+            try host_ref.tabs.insert(
+                hook_app.core_app.alloc,
+                opts.tab_insert_index.?,
+                try Tab.init(hook_app.core_app.alloc, host_ref.nextTabId(), created),
+            );
+            return created;
+        }
+    };
+
+    Hook.host_ref = &host_b;
+    Hook.created_refs = .{ &inherited, &overridden };
+    Hook.create_calls = 0;
+    Hook.pwd_calls = 0;
+    app.test_automation_pwd = &Hook.queryPwd;
+    app.test_create_window_surface = &Hook.createSurface;
+
+    try std.testing.expect(!surface_b.host_active);
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = null,
+    } });
+    try app.performAutomationCommand(.{ .new_tab = .{
+        .target = .{ .window_id = host_b.id },
+        .working_directory = "D:\\explicit-override",
+    } });
+
+    try std.testing.expectEqual(@as(usize, 2), Hook.create_calls);
+    try std.testing.expectEqual(@as(usize, 2), Hook.pwd_calls);
 }
 
 test "win32 new_tab action inserts after the active tab by default, clears current tab redo, and activates the created tab" {
