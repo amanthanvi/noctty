@@ -62,8 +62,6 @@ pub const State = struct {
     portable_apply_phase: ?portable_apply.Phase = null,
     portable_backup_path: ?[]u8 = null,
     portable_confirmation_token: ?[]u8 = null,
-    portable_watcher_pid: u32 = 0,
-    portable_watcher_started_at: u64 = 0,
 
     pub fn deinit(self: *State, alloc: Allocator) void {
         if (self.last_seen_version) |value| alloc.free(value);
@@ -201,18 +199,75 @@ fn openStateLock(path: []const u8) !std.fs.File {
     });
 }
 
-fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !std.fs.File {
+const StagingWorkLock = struct {
+    state_root: std.fs.File,
+    updates_root: std.fs.File,
+    work: std.fs.File,
+
+    fn close(self: *@This()) void {
+        self.work.close();
+        self.updates_root.close();
+        self.state_root.close();
+    }
+};
+
+fn openStagingWorkLock(alloc: Allocator, state_path: []const u8) !StagingWorkLock {
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    var state_root = try openLockedStageDirectory(state_dir);
+    errdefer state_root.close();
+    if (!try lockedHandleMatchesPath(alloc, state_dir, state_root.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
     const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
     defer alloc.free(updates_dir);
     try std.fs.cwd().makePath(updates_dir);
+    var updates_root = try openLockedStageDirectory(updates_dir);
+    errdefer updates_root.close();
+    if (!try lockedHandleMatchesPath(alloc, updates_dir, updates_root.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
     const lock_path = try std.fs.path.join(alloc, &.{ updates_dir, "staging-work.lock" });
     defer alloc.free(lock_path);
-    return std.fs.createFileAbsolute(lock_path, .{
+    const work = try std.fs.createFileAbsolute(lock_path, .{
         .read = true,
         .truncate = false,
         .lock = .exclusive,
     });
+    return .{ .state_root = state_root, .updates_root = updates_root, .work = work };
+}
+
+fn pruneObsoleteStageDirectories(
+    alloc: Allocator,
+    state_path: []const u8,
+    keep_version: ?[]const u8,
+) !void {
+    const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
+    const updates_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates" });
+    defer alloc.free(updates_dir);
+    var locked_updates = try openLockedStageDirectory(updates_dir);
+    defer locked_updates.close();
+    if (!try lockedHandleMatchesPath(alloc, updates_dir, locked_updates.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
+    var updates = std.fs.openDirAbsolute(updates_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer updates.close();
+
+    var iterator = updates.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .directory) continue;
+        if (keep_version) |keep| {
+            if (windowsPathEqual(entry.name, keep)) continue;
+        }
+        _ = std.SemanticVersion.parse(entry.name) catch continue;
+        {
+            const stage_path = try std.fs.path.join(alloc, &.{ updates_dir, entry.name });
+            defer alloc.free(stage_path);
+            try portable_apply.cleanupUpdatePath(stage_path);
+        }
+    }
 }
 
 pub fn loadState(alloc: Allocator, path: []const u8) !State {
@@ -334,23 +389,6 @@ pub fn loadState(alloc: Allocator, path: []const u8) !State {
             else => {},
         }
     }
-    if (root.get("portable_watcher_pid")) |value| {
-        switch (value) {
-            .integer => |integer| if (integer >= 0 and integer <= std.math.maxInt(u32)) {
-                state.portable_watcher_pid = @intCast(integer);
-            },
-            else => {},
-        }
-    }
-    if (root.get("portable_watcher_started_at")) |value| {
-        switch (value) {
-            .integer => |integer| if (integer >= 0) {
-                state.portable_watcher_started_at = @intCast(integer);
-            },
-            else => {},
-        }
-    }
-
     return state;
 }
 
@@ -403,10 +441,6 @@ pub fn saveState(path: []const u8, state: *const State) !void {
         try writeOptionalJsonString(writer, state.portable_backup_path);
         try writer.writeAll(",\"portable_confirmation_token\":");
         try writeOptionalJsonString(writer, state.portable_confirmation_token);
-        try writer.writeAll(",\"portable_watcher_pid\":");
-        try writer.print("{d}", .{state.portable_watcher_pid});
-        try writer.writeAll(",\"portable_watcher_started_at\":");
-        try writer.print("{d}", .{state.portable_watcher_started_at});
         try writer.writeAll("}");
         try writer.flush();
         try file.sync();
@@ -525,17 +559,31 @@ fn stageWindowsInstallWithDownloader(
         return error.PortablePayloadManifestUnavailable;
     }
 
-    const staging_lock = try openStagingWorkLock(alloc, state_path);
+    var staging_lock = try openStagingWorkLock(alloc, state_path);
     defer staging_lock.close();
     var baseline = try loadState(alloc, state_path);
     defer baseline.deinit(alloc);
     if (baseline.portable_apply_phase != null) return error.PortableUpdateTransactionActive;
+    try pruneObsoleteStageDirectories(alloc, state_path, baseline.staged_version);
 
     const state_dir = std.fs.path.dirname(state_path) orelse return error.InvalidStatePath;
     const stage_dir = try std.fs.path.join(alloc, &.{ state_dir, "updates", release.version_text });
     defer alloc.free(stage_dir);
     try std.fs.cwd().makePath(stage_dir);
-    if (kind == .portable) try validatePortableStageDirectory(alloc, stage_dir);
+    var cleanup_stage_on_error = if (baseline.staged_version) |version|
+        !windowsPathEqual(version, release.version_text)
+    else
+        true;
+    errdefer if (cleanup_stage_on_error) {
+        portable_apply.cleanupUpdatePath(stage_dir) catch |err| {
+            log.warn("failed update stage cleanup failed path={s} err={}", .{ stage_dir, err });
+        };
+    };
+    var locked_stage_dir = try openLockedStageDirectory(stage_dir);
+    defer locked_stage_dir.close();
+    if (!try lockedHandleMatchesPath(alloc, stage_dir, locked_stage_dir.handle)) {
+        return error.InvalidUpdateStageRoot;
+    }
 
     const artifact_path = try std.fs.path.join(alloc, &.{ stage_dir, asset_name });
     errdefer alloc.free(artifact_path);
@@ -620,10 +668,9 @@ fn stageWindowsInstallWithDownloader(
         fresh.portable_apply_phase = null;
         clearOptionalOwned(alloc, &fresh.portable_backup_path);
         clearOptionalOwned(alloc, &fresh.portable_confirmation_token);
-        fresh.portable_watcher_pid = 0;
-        fresh.portable_watcher_started_at = 0;
         try saveState(state_path, &fresh);
     }
+    cleanup_stage_on_error = false;
 
     return .{
         .kind = kind,
@@ -645,9 +692,7 @@ fn stagedTransactionEqual(a: *const State, b: *const State) bool {
         a.apply_requested_at == b.apply_requested_at and
         a.portable_apply_phase == b.portable_apply_phase and
         optionalStringEqual(a.portable_backup_path, b.portable_backup_path) and
-        optionalStringEqual(a.portable_confirmation_token, b.portable_confirmation_token) and
-        a.portable_watcher_pid == b.portable_watcher_pid and
-        a.portable_watcher_started_at == b.portable_watcher_started_at;
+        optionalStringEqual(a.portable_confirmation_token, b.portable_confirmation_token);
 }
 
 fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
@@ -912,8 +957,6 @@ pub fn recordPortableApplyPending(alloc: Allocator, state_path: []const u8, now:
     replaceOptionalOwned(alloc, &state.portable_confirmation_token, token);
     token_owned = false;
     state.portable_apply_phase = .pending;
-    state.portable_watcher_pid = 0;
-    state.portable_watcher_started_at = 0;
     state.apply_requested_at = if (now > 0) now else std.time.timestamp();
     try saveState(state_path, &state);
 }
@@ -932,8 +975,9 @@ pub fn maybeRunPortableUpdateHelper(alloc: Allocator) !?u8 {
     const parent_pid = std.fmt.parseInt(u32, args[5], 10) catch return 1;
     const mode = std.meta.stringToEnum(PortableHelperMode, args[4]) orelse return 1;
     const original_args = args[6..];
-    claimPortableHelperWatcher(alloc, args[2], args[3], mode) catch |err|
+    var launch_lock = claimPortableHelperLaunchLock(alloc, args[2], args[3], mode) catch |err|
         return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
+    defer launch_lock.close();
     waitForProcessExit(parent_pid, 30_000) catch |err|
         return try recoverPendingPortableFailure(alloc, args[2], args[3], original_args, err);
     return runPortableUpdateHelper(alloc, args[2], args[3], mode, original_args) catch |err|
@@ -969,6 +1013,8 @@ pub fn preflightPortableUpdateStartup(
         setPortableFailureEnvironment(alloc, error.StagedKindMismatch) catch {};
         return false;
     }
+    var layout = try portableStageLayout(alloc, state_path, &state);
+    defer layout.deinit(alloc);
 
     const env_token = std.process.getEnvVarOwned(alloc, portable_confirmation_env) catch null;
     defer if (env_token) |value| alloc.free(value);
@@ -980,23 +1026,26 @@ pub fn preflightPortableUpdateStartup(
         if (phase != .swapped or !std.mem.eql(u8, running_version, target_version)) {
             break :matches false;
         }
-        var layout = try portableStageLayout(alloc, state_path, &state);
-        defer layout.deinit(alloc);
         break :matches installedPortablePayloadMatches(
             alloc,
             portable_root,
             layout.manifest_path,
         );
     };
-    const watcher_active = portableStateWatcherIsActive(&state);
-    if (phase == .pending and state.portable_watcher_pid != 0 and !watcher_active) {
-        _ = abandonPendingPortableApply(alloc, state_path, portable_root) catch false;
-        setPortableFailureEnvironment(alloc, error.PortableUpdateHelperFailed) catch {};
-        return false;
-    }
-    if (shouldDeferPortableStartupToWatcher(
+    const helper_active = active: {
+        var probe = openPortableLaunchLock(layout.launch_lock_path, true) catch |err| switch (err) {
+            error.FileNotFound => break :active false,
+            else => return err,
+        };
+        if (probe) |*lock| {
+            lock.close();
+            break :active false;
+        }
+        break :active true;
+    };
+    if (shouldDeferPortableStartupToHelper(
         phase,
-        watcher_active,
+        helper_active,
         token_matches,
         installed_payload_matches,
     )) {
@@ -1034,13 +1083,13 @@ pub fn preflightPortableUpdateStartup(
     };
 }
 
-fn shouldDeferPortableStartupToWatcher(
+fn shouldDeferPortableStartupToHelper(
     phase: portable_apply.Phase,
-    watcher_active: bool,
+    helper_active: bool,
     confirmation_token_matches: bool,
     installed_payload_matches: bool,
 ) bool {
-    return watcher_active and
+    return helper_active and
         !(phase == .swapped and
             (confirmation_token_matches or installed_payload_matches));
 }
@@ -1148,7 +1197,6 @@ fn launchPortableHelper(
     defer state.deinit(alloc);
     var layout = try portableStageLayout(alloc, state_path, &state);
     defer layout.deinit(alloc);
-    if (portableStateWatcherIsActive(&state)) return true;
     const phase = state.portable_apply_phase orelse return false;
     switch (mode) {
         .swap => if (phase != .pending) return true,
@@ -1188,13 +1236,6 @@ fn launchPortableHelper(
         std.os.windows.CloseHandle(child.thread_handle);
         std.os.windows.CloseHandle(child.id);
     };
-    const child_pid = GetProcessId(child.id);
-    if (child_pid == 0) return error.PortableUpdateWatcherIdentityUnavailable;
-    const child_started_at = processCreationTime(child.id) orelse
-        return error.PortableUpdateWatcherIdentityUnavailable;
-    state.portable_watcher_pid = child_pid;
-    state.portable_watcher_started_at = child_started_at;
-    try saveState(state_path, &state);
     std.os.windows.CloseHandle(child.thread_handle);
     std.os.windows.CloseHandle(child.id);
     child_open = false;
@@ -1213,12 +1254,12 @@ fn openPortableLaunchLock(path: []const u8, nonblocking: bool) !?std.fs.File {
     };
 }
 
-fn claimPortableHelperWatcher(
+fn claimPortableHelperLaunchLock(
     alloc: Allocator,
     state_path: []const u8,
     install_root: []const u8,
     mode: PortableHelperMode,
-) !void {
+) !std.fs.File {
     var initial_state = try loadState(alloc, state_path);
     defer initial_state.deinit(alloc);
     var initial_layout = try portableStageLayout(alloc, state_path, &initial_state);
@@ -1226,8 +1267,9 @@ fn claimPortableHelperWatcher(
     try validatePortableInstallAndStateRoots(alloc, state_path, install_root);
     try validatePortableStageDirectory(alloc, initial_layout.stage_dir);
 
-    var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, false)).?;
-    defer launch_lock.close();
+    var launch_lock = (try openPortableLaunchLock(initial_layout.launch_lock_path, false)) orelse
+        return error.PortableUpdateTransactionOwned;
+    errdefer launch_lock.close();
 
     const state_lock = try openStateLock(state_path);
     defer state_lock.close();
@@ -1247,18 +1289,7 @@ fn claimPortableHelperWatcher(
     if (!windowsPathEqual(self_path, layout.helper_path)) {
         return error.InvalidPortableUpdateHelperPath;
     }
-    const self_pid = std.os.windows.GetCurrentProcessId();
-    const self_started_at = processCreationTime(std.os.windows.GetCurrentProcess()) orelse
-        return error.PortableUpdateWatcherIdentityUnavailable;
-    if (portableStateWatcherIsActive(&state) and
-        (state.portable_watcher_pid != self_pid or
-            state.portable_watcher_started_at != self_started_at))
-    {
-        return error.PortableUpdateTransactionOwned;
-    }
-    state.portable_watcher_pid = self_pid;
-    state.portable_watcher_started_at = self_started_at;
-    try saveState(state_path, &state);
+    return launch_lock;
 }
 
 fn runPortableUpdateHelper(
@@ -1279,13 +1310,6 @@ fn runPortableUpdateHelper(
     if (!windowsPathEqual(self_path, invocation_layout.helper_path)) {
         return error.InvalidPortableUpdateHelperPath;
     }
-    const watcher_started_at = invocation_state.portable_watcher_started_at;
-    if (!portableStateWatcherIsActive(&invocation_state) or
-        invocation_state.portable_watcher_pid != std.os.windows.GetCurrentProcessId())
-    {
-        return error.PortableUpdateTransactionOwned;
-    }
-
     return switch (mode) {
         .rollback => try rollbackPortableUpdateAndRelaunch(alloc, state_path, install_root, original_args),
         .swap => swap: {
@@ -1305,10 +1329,7 @@ fn runPortableUpdateHelper(
             const payload_path = staged.payload_path orelse return error.IncompletePortablePayload;
 
             try portable_apply.prepareBackup(alloc, install_root, backup_path);
-            _ = try portable_apply.decide(.portable, .pending, .backup_completed);
             state.portable_apply_phase = .swapped;
-            state.portable_watcher_pid = std.os.windows.GetCurrentProcessId();
-            state.portable_watcher_started_at = watcher_started_at;
             try saveState(state_path, &state);
             state_lock.close();
             state_locked = false;
@@ -1398,8 +1419,6 @@ fn abandonPendingPortableApply(
     if (state.staged_kind != .portable or state.portable_apply_phase != .pending) return false;
     state.portable_apply_phase = null;
     state.apply_requested_at = 0;
-    state.portable_watcher_pid = 0;
-    state.portable_watcher_started_at = 0;
     clearOptionalOwned(alloc, &state.portable_confirmation_token);
     try saveState(state_path, &state);
     return true;
@@ -1418,7 +1437,6 @@ fn abandonUnrecoverablePortableApply(
     if (state.staged_kind != .portable) return false;
     const phase = state.portable_apply_phase orelse return false;
     if (phase != .swapped and phase != .rollback) return false;
-    if (portableStateWatcherIsActive(&state)) return false;
 
     var layout = try portableStageLayout(alloc, state_path, &state);
     defer layout.deinit(alloc);
@@ -1485,7 +1503,6 @@ fn rollbackPortableUpdateAndRelaunch(
         layout.backup_path,
         layout.displaced_path,
     );
-    _ = try portable_apply.decide(.portable, .rollback, .rollback_completed);
     {
         const state_lock = try openStateLock(state_path);
         defer state_lock.close();
@@ -1494,8 +1511,6 @@ fn rollbackPortableUpdateAndRelaunch(
         if (state.portable_apply_phase != .rollback) return error.InvalidPortableApplyTransition;
         state.portable_apply_phase = null;
         state.apply_requested_at = 0;
-        state.portable_watcher_pid = 0;
-        state.portable_watcher_started_at = 0;
         clearOptionalOwned(alloc, &state.portable_confirmation_token);
         try saveState(state_path, &state);
     }
@@ -1558,37 +1573,6 @@ fn waitForProcessExit(pid: u32, timeout_ms: u32) !void {
     return std.os.windows.WaitForSingleObject(handle, timeout_ms);
 }
 
-fn portableWatcherIsRunning(pid: u32, expected_started_at: u64) bool {
-    const handle = OpenProcess(
-        std.os.windows.SYNCHRONIZE | process_query_limited_information,
-        0,
-        pid,
-    ) orelse return false;
-    defer std.os.windows.CloseHandle(handle);
-    const started_at = processCreationTime(handle) orelse return false;
-    if (started_at != expected_started_at) return false;
-    std.os.windows.WaitForSingleObject(handle, 0) catch |err| return err == error.WaitTimeOut;
-    return false;
-}
-
-fn portableStateWatcherIsActive(state: *const State) bool {
-    return state.portable_watcher_pid != 0 and
-        state.portable_watcher_started_at != 0 and
-        portableWatcherIsRunning(
-            state.portable_watcher_pid,
-            state.portable_watcher_started_at,
-        );
-}
-
-fn processCreationTime(handle: std.os.windows.HANDLE) ?u64 {
-    var creation: std.os.windows.FILETIME = undefined;
-    var exit_time: std.os.windows.FILETIME = undefined;
-    var kernel: std.os.windows.FILETIME = undefined;
-    var user: std.os.windows.FILETIME = undefined;
-    if (GetProcessTimes(handle, &creation, &exit_time, &kernel, &user) == 0) return null;
-    return @as(u64, creation.dwHighDateTime) << 32 | creation.dwLowDateTime;
-}
-
 fn clearStagedPortableState(alloc: Allocator, state: *State) void {
     clearOptionalOwned(alloc, &state.staged_version);
     state.staged_kind = null;
@@ -1598,8 +1582,6 @@ fn clearStagedPortableState(alloc: Allocator, state: *State) void {
     state.staged_at = 0;
     state.apply_requested_at = 0;
     state.portable_apply_phase = null;
-    state.portable_watcher_pid = 0;
-    state.portable_watcher_started_at = 0;
     clearOptionalOwned(alloc, &state.portable_backup_path);
     clearOptionalOwned(alloc, &state.portable_confirmation_token);
 }
@@ -1644,16 +1626,6 @@ extern "kernel32" fn OpenProcess(
     inherit_handle: i32,
     process_id: u32,
 ) callconv(.winapi) ?std.os.windows.HANDLE;
-extern "kernel32" fn GetProcessId(process: std.os.windows.HANDLE) callconv(.winapi) u32;
-extern "kernel32" fn GetProcessTimes(
-    process: std.os.windows.HANDLE,
-    creation_time: *std.os.windows.FILETIME,
-    exit_time: *std.os.windows.FILETIME,
-    kernel_time: *std.os.windows.FILETIME,
-    user_time: *std.os.windows.FILETIME,
-) callconv(.winapi) std.os.windows.BOOL;
-
-const process_query_limited_information: u32 = 0x1000;
 
 fn writeOptionalJsonString(writer: *std.Io.Writer, value: ?[]const u8) !void {
     if (value) |text| {
@@ -3075,8 +3047,6 @@ test "state persists staged windows install metadata with escaped path" {
         .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
         .staged_at = 456,
         .apply_requested_at = 789,
-        .portable_watcher_pid = 4242,
-        .portable_watcher_started_at = 123_456_789,
     };
     defer state.deinit(alloc);
 
@@ -3087,14 +3057,36 @@ test "state persists staged windows install metadata with escaped path" {
     try std.testing.expectEqual(@as(i64, 123), loaded.last_checked_at);
     try std.testing.expectEqual(@as(i64, 456), loaded.staged_at);
     try std.testing.expectEqual(@as(i64, 789), loaded.apply_requested_at);
-    try std.testing.expectEqual(@as(u32, 4242), loaded.portable_watcher_pid);
-    try std.testing.expectEqual(@as(u64, 123_456_789), loaded.portable_watcher_started_at);
     try std.testing.expectEqualStrings(state.release_feed_url.?, loaded.release_feed_url.?);
     try std.testing.expectEqualStrings(state.release_url.?, loaded.release_url.?);
     try std.testing.expectEqualStrings("1.3.101", loaded.staged_version.?);
     try std.testing.expectEqual(portable_apply.StagedKind.installer, loaded.staged_kind.?);
     try std.testing.expectEqualStrings(state.staged_installer_path.?, loaded.staged_installer_path.?);
     try std.testing.expectEqualStrings(state.staged_sha256.?, loaded.staged_sha256.?);
+}
+
+test "state loader ignores retired portable watcher fields" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    try tmp.dir.writeFile(.{
+        .sub_path = "update-state.json",
+        .data =
+        \\{"last_checked_at":123,"portable_watcher_pid":4242,"portable_watcher_started_at":123456789}
+        ,
+    });
+
+    var state = try loadState(alloc, state_path);
+    defer state.deinit(alloc);
+    try std.testing.expectEqual(@as(i64, 123), state.last_checked_at);
+    try saveState(state_path, &state);
+    const saved = try std.fs.cwd().readFileAlloc(alloc, state_path, 16 * 1024);
+    defer alloc.free(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved, "portable_watcher") == null);
 }
 
 test "record staged apply request requires staged installer metadata" {
@@ -3237,8 +3229,6 @@ test "portable pre-swap failure clears pending intent" {
         .staged_kind = .portable,
         .portable_apply_phase = .pending,
         .portable_confirmation_token = try alloc.dupe(u8, "token"),
-        .portable_watcher_pid = 4242,
-        .portable_watcher_started_at = 99,
         .apply_requested_at = 123,
     };
     defer state.deinit(alloc);
@@ -3249,8 +3239,6 @@ test "portable pre-swap failure clears pending intent" {
     defer loaded.deinit(alloc);
     try std.testing.expect(loaded.portable_apply_phase == null);
     try std.testing.expect(loaded.portable_confirmation_token == null);
-    try std.testing.expectEqual(@as(u32, 0), loaded.portable_watcher_pid);
-    try std.testing.expectEqual(@as(u64, 0), loaded.portable_watcher_started_at);
     try std.testing.expectEqual(@as(i64, 0), loaded.apply_requested_at);
 }
 
@@ -3339,16 +3327,6 @@ test "portable recovery abandons stranded swapped transaction" {
         defer loaded.deinit(alloc);
         try std.testing.expectEqual(portable_apply.Phase.swapped, loaded.portable_apply_phase.?);
     }
-
-    state.portable_watcher_pid = std.os.windows.GetCurrentProcessId();
-    state.portable_watcher_started_at = processCreationTime(std.os.windows.GetCurrentProcess()).?;
-    try saveState(state_path, &state);
-    try std.testing.expect(!(try abandonUnrecoverablePortableApply(alloc, state_path, install_root)));
-    var owned = try loadState(alloc, state_path);
-    defer owned.deinit(alloc);
-    try std.testing.expectEqual(portable_apply.Phase.swapped, owned.portable_apply_phase.?);
-    try std.testing.expectEqual(state.portable_watcher_pid, owned.portable_watcher_pid);
-    try std.testing.expectEqual(state.portable_watcher_started_at, owned.portable_watcher_started_at);
 }
 
 test "portable recovery preserves complete rollback" {
@@ -3410,8 +3388,6 @@ test "portable recovery preserves complete rollback" {
         try std.testing.expectEqual(phase, loaded.portable_apply_phase.?);
         try std.testing.expectEqualStrings(state.portable_backup_path.?, loaded.portable_backup_path.?);
         try std.testing.expectEqualStrings(state.portable_confirmation_token.?, loaded.portable_confirmation_token.?);
-        try std.testing.expectEqual(state.portable_watcher_pid, loaded.portable_watcher_pid);
-        try std.testing.expectEqual(state.portable_watcher_started_at, loaded.portable_watcher_started_at);
 
         try portable_apply.rollback(alloc, install_root, backup_path, displaced_path);
         const restored = try tmp.dir.readFileAlloc(alloc, "noctty.com", 32);
@@ -3568,14 +3544,14 @@ test "portable concurrent launch content identity verifies the installed managed
     );
 }
 
-test "portable concurrent launch inside watcher window uses content identity" {
-    try std.testing.expect(!shouldDeferPortableStartupToWatcher(
+test "portable concurrent launch inside helper window uses content identity" {
+    try std.testing.expect(!shouldDeferPortableStartupToHelper(
         .swapped,
         true,
         false,
         true,
     ));
-    try std.testing.expect(shouldDeferPortableStartupToWatcher(
+    try std.testing.expect(shouldDeferPortableStartupToHelper(
         .swapped,
         true,
         false,
@@ -3665,6 +3641,301 @@ test "update staging transaction comparison uses content" {
     fresh.apply_requested_at = baseline.apply_requested_at;
     fresh.staged_version.?[fresh.staged_version.?.len - 1] = '8';
     try std.testing.expect(!stagedTransactionEqual(&baseline, &fresh));
+}
+
+test "update staging prunes only obsolete semantic version directories" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/old.txt", .data = "old-198" });
+    try tmp.dir.makePath("updates/1.3.199");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.199/old.txt", .data = "old-199" });
+    try tmp.dir.makePath("updates/1.3.200-BETA");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.200-BETA/current.txt", .data = "current" });
+    try tmp.dir.makePath("updates/manual");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/manual/keep.txt", .data = "manual" });
+    try tmp.dir.makePath("updates/1.3");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3/keep.txt", .data = "not-semver" });
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.197", .data = "not-a-directory" });
+
+    try pruneObsoleteStageDirectories(alloc, state_path, "1.3.200-beta");
+
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.199", .{}));
+    const current = try tmp.dir.readFileAlloc(alloc, "updates/1.3.200-BETA/current.txt", 32);
+    defer alloc.free(current);
+    try std.testing.expectEqualStrings("current", current);
+    const manual = try tmp.dir.readFileAlloc(alloc, "updates/manual/keep.txt", 32);
+    defer alloc.free(manual);
+    try std.testing.expectEqualStrings("manual", manual);
+    const non_semver = try tmp.dir.readFileAlloc(alloc, "updates/1.3/keep.txt", 32);
+    defer alloc.free(non_semver);
+    try std.testing.expectEqualStrings("not-semver", non_semver);
+    const regular_file = try tmp.dir.readFileAlloc(alloc, "updates/1.3.197", 32);
+    defer alloc.free(regular_file);
+    try std.testing.expectEqualStrings("not-a-directory", regular_file);
+}
+
+test "update staging pruning rejects an updates directory reparse point" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("state");
+    try tmp.dir.makePath("outside/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "outside/1.3.198/keep.txt", .data = "outside" });
+    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    defer alloc.free(state_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const updates_path = try std.fs.path.join(alloc, &.{ state_root, "updates" });
+    defer alloc.free(updates_path);
+    std.fs.symLinkAbsolute(outside_root, updates_path, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/staging-work.lock", .{}));
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        pruneObsoleteStageDirectories(alloc, state_path, null),
+    );
+    const outside = try tmp.dir.readFileAlloc(alloc, "outside/1.3.198/keep.txt", 32);
+    defer alloc.free(outside);
+    try std.testing.expectEqualStrings("outside", outside);
+}
+
+test "update staging rejects a reparse-point state directory before creating updates" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("outside");
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const state_root = try std.fs.path.join(alloc, &.{ root, "state" });
+    defer alloc.free(state_root);
+    std.fs.symLinkAbsolute(outside_root, state_root, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/updates", .{}));
+}
+
+test "installer staging rejects a reparse-point target before download" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("state/updates");
+    try tmp.dir.makePath("outside");
+    try tmp.dir.writeFile(.{ .sub_path = "outside/keep.txt", .data = "outside-target" });
+    const state_root = try tmp.dir.realpathAlloc(alloc, "state");
+    defer alloc.free(state_root);
+    const outside_root = try tmp.dir.realpathAlloc(alloc, "outside");
+    defer alloc.free(outside_root);
+    const target_stage = try std.fs.path.join(alloc, &.{ state_root, "updates", "1.3.200" });
+    defer alloc.free(target_stage);
+    std.fs.symLinkAbsolute(outside_root, target_stage, .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    const state_path = try std.fs.path.join(alloc, &.{ state_root, "update-state.json" });
+    defer alloc.free(state_path);
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.200"),
+        .staged_kind = .installer,
+        .staged_installer_path = try std.fs.path.join(alloc, &.{ target_stage, "setup.exe" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+
+    try std.testing.expectError(
+        error.InvalidUpdateStageRoot,
+        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+    );
+    const outside = try tmp.dir.readFileAlloc(alloc, "outside/keep.txt", 32);
+    defer alloc.free(outside);
+    try std.testing.expectEqualStrings("outside-target", outside);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("outside/setup.exe", .{}));
+    const outside_checksums = try std.fs.path.join(alloc, &.{ "outside", windowsChecksumsAssetName() });
+    defer alloc.free(outside_checksums);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(outside_checksums, .{}));
+}
+
+test "failed update staging removes attempts and preserves the prior staged version" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    try tmp.dir.makePath("updates/1.3.100");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.100/keep.txt", .data = "prior-stage" });
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/orphan.txt", .data = "old-failure" });
+    var state: State = .{
+        .staged_version = try alloc.dupe(u8, "1.3.100"),
+        .staged_kind = .installer,
+        .staged_installer_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.100", "setup.exe" }),
+        .staged_sha256 = try alloc.dupe(u8, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"),
+    };
+    defer state.deinit(alloc);
+    try saveState(state_path, &state);
+
+    const Fail = struct {
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            return error.TestDownloadStopped;
+        }
+    };
+    for ([_][]const u8{ "1.3.199", "1.3.200" }) |version| {
+        var release: Release = .{
+            .version_text = try alloc.dupe(u8, version),
+            .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+            .windows_install = .{
+                .installer_name = try alloc.dupe(u8, "setup.exe"),
+                .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+                .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+            },
+        };
+        defer release.deinit(alloc);
+        try std.testing.expectError(
+            error.TestDownloadStopped,
+            stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Fail.download),
+        );
+        const failed_path = try std.fs.path.join(alloc, &.{ "updates", version });
+        defer alloc.free(failed_path);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(failed_path, .{}));
+    }
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.198", .{}));
+    const prior = try tmp.dir.readFileAlloc(alloc, "updates/1.3.100/keep.txt", 32);
+    defer alloc.free(prior);
+    try std.testing.expectEqualStrings("prior-stage", prior);
+}
+
+test "update staging refuses a new target when obsolete pruning is blocked" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("updates/1.3.198");
+    try tmp.dir.writeFile(.{ .sub_path = "updates/1.3.198/locked.txt", .data = "locked-old-stage" });
+    const root = try tmp.dir.realpathAlloc(alloc, ".");
+    defer alloc.free(root);
+    const state_path = try std.fs.path.join(alloc, &.{ root, "update-state.json" });
+    defer alloc.free(state_path);
+    const locked_path = try std.fs.path.join(alloc, &.{ root, "updates", "1.3.198", "locked.txt" });
+    defer alloc.free(locked_path);
+    const locked_path_w = try std.unicode.utf8ToUtf16LeAllocZ(alloc, locked_path);
+    defer alloc.free(locked_path_w);
+    const held = std.os.windows.kernel32.CreateFileW(
+        locked_path_w.ptr,
+        std.os.windows.GENERIC_READ,
+        0,
+        null,
+        std.os.windows.OPEN_EXISTING,
+        std.os.windows.FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (held == std.os.windows.INVALID_HANDLE_VALUE) {
+        return std.os.windows.unexpectedError(std.os.windows.kernel32.GetLastError());
+    }
+    defer std.os.windows.CloseHandle(held);
+
+    var release: Release = .{
+        .version_text = try alloc.dupe(u8, "1.3.200"),
+        .release_url = try alloc.dupe(u8, "https://example.invalid/release"),
+        .windows_install = .{
+            .installer_name = try alloc.dupe(u8, "setup.exe"),
+            .installer_url = try alloc.dupe(u8, "https://example.invalid/setup.exe"),
+            .checksums_url = try alloc.dupe(u8, "https://example.invalid/SHA256SUMS.txt"),
+        },
+    };
+    defer release.deinit(alloc);
+    const Guarded = struct {
+        var called = false;
+
+        fn download(_: Allocator, _: []const u8, _: []const u8) !void {
+            called = true;
+            return error.TestDownloadShouldNotRun;
+        }
+    };
+    Guarded.called = false;
+
+    try std.testing.expectError(
+        error.FileBusy,
+        stageWindowsInstallWithDownloader(alloc, state_path, &release, .installer, Guarded.download),
+    );
+    try std.testing.expect(!Guarded.called);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("updates/1.3.200", .{}));
 }
 
 test "state JSON writer escapes ASCII control characters" {
