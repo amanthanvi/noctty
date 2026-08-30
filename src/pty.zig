@@ -415,6 +415,57 @@ const WindowsConPty = struct {
         return selected.load(.acquire);
     }
 
+    /// Serializes backend selection, pseudo console creation, and the
+    /// demotion decision into one critical section. Without it a bundled
+    /// creation that already succeeded can be preempted before it records
+    /// `bundled_hpc_created`; a concurrent open whose bundled creation failed
+    /// then reads the stale `false`, demotes the process-wide selection, and
+    /// leaves a live bundled HPCON behind an in-box selection that
+    /// `conPtyInfo` and the fallback banner both misreport. Opens happen once
+    /// per surface and already spawn OpenConsole.exe, so the contention cost
+    /// is irrelevant.
+    var backend_lock: std.Thread.Mutex = .{};
+
+    /// Pick the backend that will own a new pseudo console.
+    ///
+    /// `context` performs the creation attempt via `context.attempt(functions)`
+    /// returning whether it succeeded; `WindowsPty.open` calls
+    /// `CreatePseudoConsole` there and the concurrency test injects a
+    /// deterministic outcome. Returns the backend that owns the pseudo
+    /// console, or `null` when the open must fail.
+    ///
+    /// A failed bundled creation demotes the whole process to the in-box
+    /// conhost and retries there, but only while no bundled HPCON is live:
+    /// demoting past a live one would split the process across two ConPTY
+    /// implementations, so such an open fails instead.
+    fn selectBackend(context: anytype) ?*const Functions {
+        backend_lock.lock();
+        defer backend_lock.unlock();
+
+        const initial = functions();
+        if (context.attempt(initial)) {
+            if (initial.source == .bundled) bundled_hpc_created.store(true, .release);
+            return initial;
+        }
+        if (initial.source != .bundled) return null;
+        if (bundled_hpc_created.load(.acquire)) return null;
+
+        if (selected.cmpxchgStrong(
+            initial,
+            &inbox_functions,
+            .acq_rel,
+            .acquire,
+        ) == null) {
+            log.warn(
+                "bundled ConPTY failed to create a pseudo console; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
+                .{},
+            );
+            signalFallbackBanner();
+        }
+        if (!context.attempt(&inbox_functions)) return null;
+        return &inbox_functions;
+    }
+
     fn initialize() void {
         selected.store(resolve(), .release);
     }
@@ -712,43 +763,37 @@ const WindowsPty = struct {
         errdefer pty.closePipes();
 
         var pseudo_console: windows.exp.HPCON = undefined;
-        var conpty = WindowsConPty.functions();
-        const source = conpty.source;
-        var result = conpty.create(
-            .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-            pty.in_pipe_pty.?,
-            pty.out_pipe_pty.?,
-            0,
-            &pseudo_console,
-        );
-        if (result == windows.S_OK and source == .bundled) {
-            WindowsConPty.bundled_hpc_created.store(true, .release);
-        } else if (result != windows.S_OK and
-            source == .bundled and
-            !WindowsConPty.bundled_hpc_created.load(.acquire))
-        {
-            if (WindowsConPty.selected.cmpxchgStrong(
-                conpty,
-                &WindowsConPty.inbox_functions,
-                .acq_rel,
-                .acquire,
-            ) == null) {
-                log.warn(
-                    "bundled ConPTY failed to create a pseudo console; using the in-box conhost — Kitty graphics (APC) and Sixel (DCS) passthrough may be silently stripped on this Windows build",
-                    .{},
-                );
-                WindowsConPty.signalFallbackBanner();
+
+        // Selection, creation, and the demotion decision are one critical
+        // section. See `WindowsConPty.backend_lock`.
+        const Creation = struct {
+            pty: *const Pty,
+            size: winsize,
+            pseudo_console: *windows.exp.HPCON,
+
+            fn attempt(
+                self: *const @This(),
+                conpty: *const WindowsConPty.Functions,
+            ) bool {
+                return conpty.create(
+                    .{
+                        .X = @intCast(self.size.ws_col),
+                        .Y = @intCast(self.size.ws_row),
+                    },
+                    self.pty.in_pipe_pty.?,
+                    self.pty.out_pipe_pty.?,
+                    0,
+                    self.pseudo_console,
+                ) == windows.S_OK;
             }
-            conpty = &WindowsConPty.inbox_functions;
-            result = conpty.create(
-                .{ .X = @intCast(size.ws_col), .Y = @intCast(size.ws_row) },
-                pty.in_pipe_pty.?,
-                pty.out_pipe_pty.?,
-                0,
-                &pseudo_console,
-            );
-        }
-        if (result != windows.S_OK) return error.Unexpected;
+        };
+        const creation: Creation = .{
+            .pty = &pty,
+            .size = size,
+            .pseudo_console = &pseudo_console,
+        };
+        const conpty = WindowsConPty.selectBackend(&creation) orelse
+            return error.Unexpected;
 
         pty.control = .{ .pseudo_console = .{
             .handle = pseudo_console,
@@ -968,6 +1013,129 @@ test "Windows ConPTY resolver selects inbox and default auto backends" {
         defer auto_pty.deinit();
         try auto_pty.setSize(.{ .ws_row = 50, .ws_col = 100 });
         try testing.expectEqual(@as(u16, 100), (try auto_pty.getSize()).ws_col);
+    }
+}
+
+/// Install a bundled-looking backend without loading conpty.dll, so the
+/// selection bookkeeping can be exercised without creating a pseudo console.
+/// The resolver `std.once` is burned first, otherwise the next `functions()`
+/// call would overwrite the fake selection with a real resolve.
+fn installFakeBundledBackendForTest() void {
+    std.debug.assert(builtin.is_test);
+
+    _ = internal_os.setenv("NOCTTY_CONPTY", "inbox");
+    _ = conPtyInfo();
+    _ = internal_os.unsetenv("NOCTTY_CONPTY");
+
+    WindowsConPty.bundled_functions = .{
+        .source = .bundled,
+        .create = WindowsConPty.inbox_functions.create,
+        .resize = WindowsConPty.inbox_functions.resize,
+        .close = WindowsConPty.inbox_functions.close,
+    };
+    WindowsConPty.selected.store(&WindowsConPty.bundled_functions, .release);
+}
+
+test "Windows ConPTY demotion never outruns a live bundled pseudo console" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const original_raw = std.process.getEnvVarOwned(
+        testing.allocator,
+        "NOCTTY_CONPTY",
+    ) catch null;
+    defer if (original_raw) |value| testing.allocator.free(value);
+    const original = if (original_raw) |value|
+        try testing.allocator.dupeZ(u8, value)
+    else
+        null;
+    defer if (original) |value| testing.allocator.free(value);
+    defer {
+        WindowsConPty.resetForTest();
+        if (original) |value| {
+            _ = internal_os.setenv("NOCTTY_CONPTY", value);
+        } else {
+            _ = internal_os.unsetenv("NOCTTY_CONPTY");
+        }
+    }
+
+    // A creation attempt with an injected outcome: the in-box backend always
+    // succeeds, the bundled backend succeeds only for the designated winner.
+    const Creation = struct {
+        succeeds_on_bundled: bool,
+        ready: ?*std.atomic.Value(u32) = null,
+        chosen: ?ConPtySource = null,
+
+        fn attempt(
+            self: *const @This(),
+            conpty: *const WindowsConPty.Functions,
+        ) bool {
+            // Widen the window the lock has to close.
+            std.Thread.yield() catch {};
+            return conpty.source == .inbox or self.succeeds_on_bundled;
+        }
+
+        fn run(self: *@This()) void {
+            if (self.ready) |ready| {
+                _ = ready.fetchAdd(1, .acq_rel);
+                while (ready.load(.acquire) < 2) std.atomic.spinLoopHint();
+            }
+            if (WindowsConPty.selectBackend(self)) |backend| {
+                self.chosen = backend.source;
+            }
+        }
+    };
+
+    // A bundled success claims the process: a later bundled failure must fail
+    // the open rather than demote past the live HPCON and split transports.
+    WindowsConPty.resetForTest();
+    installFakeBundledBackendForTest();
+    var winner: Creation = .{ .succeeds_on_bundled = true };
+    winner.run();
+    var late: Creation = .{ .succeeds_on_bundled = false };
+    late.run();
+    try testing.expectEqual(ConPtySource.bundled, winner.chosen.?);
+    try testing.expect(late.chosen == null);
+    try testing.expectEqual(
+        ConPtySource.bundled,
+        WindowsConPty.selected.load(.acquire).source,
+    );
+
+    // A bundled failure that gets there first demotes the process, and every
+    // later open — including one that would have succeeded on bundled — is
+    // resolved to the in-box conhost inside the same critical section.
+    WindowsConPty.resetForTest();
+    installFakeBundledBackendForTest();
+    var first_failure: Creation = .{ .succeeds_on_bundled = false };
+    first_failure.run();
+    var after_demotion: Creation = .{ .succeeds_on_bundled = true };
+    after_demotion.run();
+    try testing.expectEqual(ConPtySource.inbox, first_failure.chosen.?);
+    try testing.expectEqual(ConPtySource.inbox, after_demotion.chosen.?);
+    try testing.expect(!WindowsConPty.bundled_hpc_created.load(.acquire));
+
+    // Racing opens must land on one of those two consistent outcomes; a live
+    // bundled HPCON alongside an in-box selection is the state the lock
+    // exists to make unreachable.
+    WindowsConPty.resetForTest();
+    installFakeBundledBackendForTest();
+    var ready: std.atomic.Value(u32) = .init(0);
+    var racing_success: Creation = .{ .succeeds_on_bundled = true, .ready = &ready };
+    var racing_failure: Creation = .{ .succeeds_on_bundled = false, .ready = &ready };
+    const success_thread = try std.Thread.spawn(.{}, Creation.run, .{&racing_success});
+    const failure_thread = try std.Thread.spawn(.{}, Creation.run, .{&racing_failure});
+    success_thread.join();
+    failure_thread.join();
+
+    const selection = WindowsConPty.selected.load(.acquire).source;
+    if (WindowsConPty.bundled_hpc_created.load(.acquire)) {
+        try testing.expectEqual(ConPtySource.bundled, selection);
+        try testing.expectEqual(ConPtySource.bundled, racing_success.chosen.?);
+        try testing.expect(racing_failure.chosen == null);
+    } else {
+        try testing.expectEqual(ConPtySource.inbox, selection);
+        try testing.expectEqual(ConPtySource.inbox, racing_success.chosen.?);
+        try testing.expectEqual(ConPtySource.inbox, racing_failure.chosen.?);
     }
 }
 
