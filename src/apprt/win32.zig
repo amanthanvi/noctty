@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 
 const apprt = @import("../apprt.zig");
 const build_config = @import("../build_config.zig");
+const terminal_options = @import("terminal_options");
 const CoreApp = @import("../App.zig");
 const CoreSurface = @import("../Surface.zig");
 const cli_args = @import("../cli/args.zig");
@@ -18121,6 +18122,18 @@ fn formatSessionSnapshotMarker(
 /// startup output. A shell can return the cursor to the origin after printing
 /// (`ESC[H`), so cursor position is not on its own a usable test.
 fn terminalScreenIsUnpainted(screen: *terminal.Screen) bool {
+    // A child that only moved the cursor (`ESC[2;2H`) has painted nothing, but
+    // restoring would still `scrollClear()` the cursor out from under it while
+    // it believes it is at (2,2). Require the origin as well as empty cells.
+    if (screen.cursor.x != 0 or screen.cursor.y != 0) return false;
+
+    // A Kitty placement lives in `kitty_images`, not in the page cells, so a
+    // child that displayed an image with cursor movement suppressed leaves
+    // every cell empty while something is visibly on screen.
+    if (comptime terminal_options.kitty_graphics) {
+        if (screen.kitty_images.placements.count() > 0) return false;
+    }
+
     // `.screen` spans history plus the active area, so this also catches
     // output that has already scrolled off the top.
     var row_it = screen.pages.rowIterator(.right_down, .{ .screen = .{} }, null);
@@ -35253,6 +35266,26 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
         try std.testing.expect(std.mem.indexOf(u8, screen, "PS C:\\src>") != null);
         try std.testing.expect(std.mem.indexOf(u8, screen, "L01") == null);
         try std.testing.expect(std.mem.indexOf(u8, screen, "SNAPSHOT END") == null);
+    }
+
+    // The child only moved the cursor. Nothing is painted, but restoring would
+    // scroll the cursor out from under a shell that thinks it is at (2,2).
+    {
+        var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+            .cols = 80,
+            .rows = 8,
+            .max_scrollback = 1024,
+        });
+        defer terminal_state.deinit(std.testing.allocator);
+
+        var stream = terminal_state.vtStream();
+        defer stream.deinit();
+        stream.nextSlice("\x1b[2;2H");
+
+        try std.testing.expectError(
+            error.PaneAlreadyPainted,
+            restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+        );
     }
 
     // The child painted and then homed the cursor. Cursor position alone would
