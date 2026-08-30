@@ -18170,11 +18170,28 @@ fn restoreTerminalScrollbackSnapshot(
     // so require the whole active area to be unpainted.
     if (!terminalScreenIsUnpainted(screen)) return error.PaneAlreadyPainted;
 
-    // A partial scrolling region (DECSTBM / DECSLRM) also leaves the cursor at
-    // the origin with every cell empty, but `linefeed` would then scroll
-    // *inside* the region instead of pushing rows into history, so a snapshot
-    // longer than the region would silently eat its own oldest lines as it
-    // printed and the final `scrollClear()` would move only what survived.
+    // The checks above prove the pane is *empty*. They do not prove the
+    // terminal is in its *initial state*, and restore prints through the
+    // ordinary stateful `printString` / `linefeed` path, so any VT state the
+    // child set before restore ran changes what those do. Each of the
+    // following can be set without painting anything:
+    //
+    //   - a partial scrolling region (DECSTBM / DECSLRM) makes `linefeed`
+    //     scroll inside the region instead of pushing rows into history, so a
+    //     snapshot longer than the region eats its own oldest lines;
+    //   - a non-main status display makes `Terminal.print` return without
+    //     writing (`src/terminal/Terminal.zig:300-304`), so restore would
+    //     emit blank linefeeds and still report success;
+    //   - a non-default charset remaps the restored text, and a pending
+    //     single shift is consumed by the first restored character, so the
+    //     child's next shifted character is then misinterpreted.
+    //
+    // Enumerating these is the wrong long-term shape and the list has already
+    // grown twice under review. The structural fix is to write the snapshot
+    // rows straight into the page list instead of through the VT state
+    // machine, which makes every one of these irrelevant; that is a larger
+    // change than this PR should carry. Until then, refuse rather than
+    // corrupt.
     const region = terminal_state.scrolling_region;
     if (region.top != 0 or
         region.left != 0 or
@@ -18182,6 +18199,14 @@ fn restoreTerminalScrollbackSnapshot(
         region.right != terminal_state.cols - 1)
     {
         return error.SnapshotNeedsFullScreen;
+    }
+    if (terminal_state.status_display != .main) return error.SnapshotNeedsMainDisplay;
+    const charset = screen.charset;
+    if (charset.single_shift != null or
+        charset.gl != .G0 or
+        charset.gr != .G2)
+    {
+        return error.SnapshotNeedsDefaultCharset;
     }
 
     const max_lines = @min(max_lines_requested, win32_session_state.max_scrollback_lines);
@@ -35322,6 +35347,48 @@ test "win32 session scrollback restore refuses panes it cannot restore safely" {
             error.SnapshotNeedsFullScreen,
             restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
         );
+    }
+
+    // VT state the child can set without painting: each leaves the pane empty
+    // and the cursor at the origin, and each would corrupt the restore in a
+    // different way. Asserting `terminalScreenIsUnpainted` first in every case
+    // pins that these checks do work the painted-pane predicate cannot.
+    {
+        const Case = struct {
+            bytes: []const u8 = "",
+            status_line: bool = false,
+            want: anyerror,
+        };
+        for ([_]Case{
+            // SS2: a pending single shift is consumed by the first restored
+            // character, remapping it and desyncing the child's next one.
+            .{ .bytes = "\x1bN", .want = error.SnapshotNeedsDefaultCharset },
+            // SO: a locking shift remaps every restored character.
+            .{ .bytes = "\x0e", .want = error.SnapshotNeedsDefaultCharset },
+            // DECSASD. Set directly rather than through the stream: this fork
+            // does not parse the sequence, but `Terminal.print` still returns
+            // without writing whenever `status_display != .main`, so restore
+            // would emit blank linefeeds and report success.
+            .{ .status_line = true, .want = error.SnapshotNeedsMainDisplay },
+        }) |case| {
+            var terminal_state = try terminal.Terminal.init(std.testing.allocator, .{
+                .cols = 80,
+                .rows = 8,
+                .max_scrollback = 1024,
+            });
+            defer terminal_state.deinit(std.testing.allocator);
+
+            var stream = terminal_state.vtStream();
+            defer stream.deinit();
+            if (case.bytes.len > 0) stream.nextSlice(case.bytes);
+            if (case.status_line) terminal_state.status_display = .status_line;
+            try std.testing.expect(terminalScreenIsUnpainted(terminal_state.screens.active));
+
+            try std.testing.expectError(
+                case.want,
+                restoreTerminalScrollbackSnapshot(&terminal_state, snapshot, lines.len),
+            );
+        }
     }
 
     // The child painted and then homed the cursor. Cursor position alone would
