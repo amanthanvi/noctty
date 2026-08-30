@@ -327,6 +327,17 @@ Bind `save_layout:<name>` to save or atomically replace a layout, and bind
 appear in the command palette as `Launch layout: <name>`. From the command
 line, `noctty +new-window --launch-layout=<name>` forwards the request to a
 running instance or launches it cold when no instance is running.
+
+> **Known limitation once IPC argv hardening lands.** The forwarded
+> (warm-instance) half of that command is refused by the deny-by-default
+> forwarded-argv allowlist: `launch-layout` names a layout file that selects
+> profiles, and profiles carry commands, which is the code-selecting class the
+> allowlist exists to refuse. It is not being added to the allowlist. Until
+> named layouts get their own IPC request kind, `--launch-layout` is honoured
+> only on a **cold start** (no instance running); against a running instance
+> the flag is dropped and an ordinary new window opens, with
+> `not forwarding launch-layout to the running instance` logged. The keybind
+> and the command palette are unaffected — they do not go over IPC.
 `--launch-layout` is a command-line-only, one-shot option: setting
 `launch-layout` in `config.ghostty` is ignored with a warning, because a
 configuration file is read on every start and the layout would otherwise
